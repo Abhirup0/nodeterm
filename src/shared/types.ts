@@ -674,11 +674,46 @@ export interface SpeechSettings {
   shortcut: string
 }
 
+/** xterm cursor shapes, mirrored here so `Settings` doesn't depend on the xterm typings (which
+ *  are renderer-only — `src/shared` is imported by main and the server shell too). */
+export type TerminalCursorStyle = 'block' | 'bar' | 'underline'
+export type TerminalCursorInactiveStyle = TerminalCursorStyle | 'outline' | 'none'
+
 /** User-configurable application settings (settings.json). */
 export interface Settings {
   fontSize: number
   fontFamily: string
   cursorBlink: boolean
+  /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto` (the default)
+   *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
+   *  black window framing it; `dark`/`light` pin it. See renderer/lib/appTheme.ts. */
+  appTheme: 'auto' | 'dark' | 'light'
+  /** Terminal colour scheme — an id from `renderer/terminal/themes.ts`. Resolution is tolerant
+   *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
+   *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
+  terminalTheme: string
+  /** Weight for normal text. xterm's own default is `normal` (400). */
+  fontWeight: number
+  /** Weight for BOLD text. xterm's own default is `bold` (700). Lowering it is how you keep bold
+   *  legible in a thin font that renders 700 as a smear. */
+  fontWeightBold: number
+  /** Render bold text in the palette's BRIGHT colours (xterm's default, and the historical
+   *  terminal convention). Off keeps bold purely a weight, so colour still means what the program
+   *  said it meant. */
+  drawBoldTextInBrightColors: boolean
+  /** Minimum foreground/background contrast ratio, 1–21. 1 (xterm's default) disables the
+   *  adjustment entirely; 4.5 is WCAG AA, 7 is AAA, 21 forces black or white. Costs per-cell work
+   *  in the renderer, so it stays off unless asked for. */
+  terminalMinContrast: number
+  /** Cursor shape. */
+  cursorStyle: TerminalCursorStyle
+  /** Cursor shape while the terminal does NOT have focus. `outline` (xterm's own default) is what
+   *  tells you at a glance which of a canvas full of terminals is taking your keystrokes. */
+  cursorInactiveStyle: TerminalCursorInactiveStyle
+  /** Line height as a multiple of the font size (1 = xterm's default, i.e. no extra leading). */
+  terminalLineHeight: number
+  /** Extra horizontal space between cells, in CSS pixels (0 = xterm's default). */
+  terminalLetterSpacing: number
   /** Empty string = use the system default shell. */
   defaultShell: string
   gridSize: number
@@ -827,6 +862,21 @@ export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
   cursorBlink: true,
+  // Every appearance default below reproduces the pre-feature look bit-for-bit: the default theme
+  // carries the old hardcoded background/foreground, and block/outline/1/0 are xterm's own
+  // defaults. Picking a theme is opt-in — an update must not repaint anybody's terminals.
+  // Follows the terminal theme, whose own default is dark — so an install that never touches
+  // either setting keeps the dark chrome it has always had.
+  appTheme: 'auto',
+  terminalTheme: 'nodeterm-dark',
+  fontWeight: 400,
+  fontWeightBold: 700,
+  drawBoldTextInBrightColors: true,
+  terminalMinContrast: 1,
+  cursorStyle: 'block',
+  cursorInactiveStyle: 'outline',
+  terminalLineHeight: 1,
+  terminalLetterSpacing: 0,
   defaultShell: '',
   gridSize: 24,
   snapToGrid: false,
@@ -1465,17 +1515,31 @@ export interface ChatToolSummary {
   removed?: number
 }
 
+/**
+ * Result of a chat transcript read. `found` is the whole point of the wrapper: an empty
+ * `messages` means two very different things — the session exists and nobody has said anything
+ * yet (`found: true`), or no transcript could be resolved at all (`found: false`, e.g. Claude's
+ * 30-day cleanup removed it, or the id belongs to another machine). The ⌘M panel rendered both
+ * as "No conversation yet.", which is what made a resolution failure look like an empty session.
+ */
+export interface ChatTranscriptResult {
+  messages: ChatMessage[]
+  found: boolean
+}
+
 export interface ChatApi {
   /**
-   * Reads a Claude session transcript as structured chat messages ([] if unavailable).
+   * Reads a Claude session transcript as structured chat messages.
    * Resolves the transcript like `ClaudeApi.readTranscript` (sessionId → cwd), then
-   * reconstructs ordered bubbles + tool calls.
+   * reconstructs ordered bubbles + tool calls. `nodeId` lets an SSH-project node be resolved
+   * on its HOST even when no hook event has registered its transcript in this app run.
    */
   readTranscript(
     sessionId: string | undefined,
     cwd: string | undefined,
-    accountId?: string
-  ): Promise<ChatMessage[]>
+    accountId?: string,
+    nodeId?: string
+  ): Promise<ChatTranscriptResult>
 }
 
 /** Optional SSH context for account ops. When `projectId` names a connected SSH project, the
@@ -1540,11 +1604,14 @@ export interface ClaudeApi {
    * Resolves by `sessionId` when known (exact); otherwise falls back to `cwd` (durable —
    * the newest transcript under that project dir, no live hook event required).
    * `accountId` scopes resolution to a managed Claude account's transcript root (default `~/.claude`).
+   * `nodeId` (optional) lets an SSH-project node's transcript be located on its HOST when no hook
+   * event has registered it in this app run — without it the search silently reads nothing there.
    */
   readTranscript(
     sessionId: string | undefined,
     cwd: string | undefined,
-    accountId?: string
+    accountId?: string,
+    nodeId?: string
   ): Promise<TranscriptLine[]>
 }
 

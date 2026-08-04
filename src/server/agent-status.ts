@@ -40,8 +40,14 @@ export interface WireAgentStatusOptions {
  * the real `hookServer` singleton and real tails.
  *
  * Does NOT call `hookServer.start()` — the boot step owns starting the server.
+ *
+ * Returns its context tail so the boot step can give the transcript read channels the same
+ * hook-fed path authority the desktop gives them (`registerTranscriptIpc`).
  */
-export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusOptions = {}): void {
+export function wireAgentStatus(
+  platform: ServerPlatform,
+  opts: WireAgentStatusOptions = {}
+): { contextTail: ContextTail } {
   const hooks = opts.hooks ?? hookServer
   // nodeId → claude sessionId
   const nodeContextSession = new Map<string, string>()
@@ -200,4 +206,6 @@ export function wireAgentStatus(platform: ServerPlatform, opts: WireAgentStatusO
   }
   platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
+
+  return { contextTail }
 }

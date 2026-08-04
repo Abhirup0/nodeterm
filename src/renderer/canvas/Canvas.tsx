@@ -571,7 +571,9 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
       zoomable
       onClick={onMinimapClick}
       onNodeClick={onMinimapNodeClick}
-      maskColor="rgba(10,12,18,0.6)"
+      /* The mask dims what's OUTSIDE the viewport rectangle, so it has to be the app's own
+         darkness — a near-black wash over a white minimap would invert the reading. */
+      maskColor="var(--minimap-mask)"
       nodeColor={minimapNodeColor}
       nodeStrokeColor={nodeStrokeColor}
       nodeClassName={nodeClassName}
@@ -7549,7 +7551,9 @@ export function Canvas() {
             variant={BackgroundVariant.Dots}
             gap={settings.gridSize || GRID}
             size={2.5}
-            color="#4a4a4a"
+            /* React Flow paints the dots from a JS prop, so this can't be a rule — it reads the
+               token instead. On white the dark-mode grey reads as noise rather than as a grid. */
+            color="var(--canvas-dot)"
           />
           {/* The shared glyph canvas: a <ReactFlow> child (so it is a sibling of the background
               and of the node renderer) at z-index 0 — above the dot grid, below every node. Only
@@ -7602,6 +7606,7 @@ export function Canvas() {
             onReopen={reopenProject}
             onDeleteClosed={deleteProject}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
+            overBoard={kanbanOpen}
           />
         )}
 

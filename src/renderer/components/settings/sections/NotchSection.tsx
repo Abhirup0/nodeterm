@@ -61,7 +61,7 @@ export function NotchSection({ isActive }: { isActive: boolean }): React.JSX.Ele
 
       <div
         className={
-          'mt-3 space-y-3 border-l border-white/10 pl-4' +
+          'mt-3 space-y-3 border-l border-border pl-4' +
           (notchHud ? '' : ' pointer-events-none opacity-40')
         }
         aria-disabled={!notchHud}
@@ -82,7 +82,7 @@ export function NotchSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                   onChange={(e) => update({ notchWidth: Number(e.target.value) })}
                   className="w-40 accent-[var(--accent)]"
                 />
-                <span className="w-12 text-right text-[12px] text-white/50 tabular-nums">
+                <span className="w-12 text-right text-[12px] text-muted tabular-nums">
                   {notchWidth} px
                 </span>
               </div>

@@ -382,8 +382,8 @@ export function SpeechSection({
                           <span
                             className={
                               m.pro
-                                ? 'rounded-full bg-[#0a84ff]/15 px-2 py-0.5 text-[11px] font-medium text-[#0a84ff]'
-                                : 'rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-medium text-muted'
+                                ? 'rounded-full bg-[color:var(--accent)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--accent)]'
+                                : 'rounded-full bg-fill-weak px-2 py-0.5 text-[11px] font-medium text-muted'
                             }
                           >
                             {m.pro ? 'PRO' : 'FREE'}

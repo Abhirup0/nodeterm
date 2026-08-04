@@ -17,6 +17,12 @@ interface WelcomeScreenProps {
    * — adds a close button, Escape, and click-outside. Omitted for the permanent no-projects screen.
    */
   onClose?: () => void
+  /**
+   * Raise the screen above the kanban board overlay (z 25). Without this, opening "+" while a
+   * project is in kanban view left the (z 5) welcome screen painted BEHIND the opaque board, so
+   * nothing appeared. No effect on the canvas, where the welcome screen already sits on top.
+   */
+  overBoard?: boolean
 }
 
 /** Start screen with quick actions — shown when there are no projects, or on demand via "+". */
@@ -28,7 +34,8 @@ export function WelcomeScreen({
   closedProjects = [],
   onReopen,
   onDeleteClosed,
-  onClose
+  onClose,
+  overBoard
 }: WelcomeScreenProps) {
   useEffect(() => {
     if (!onClose) return
@@ -41,7 +48,7 @@ export function WelcomeScreen({
 
   return (
     <div
-      className="welcome"
+      className={overBoard ? 'welcome welcome--over-board' : 'welcome'}
       onClick={onClose ? (e) => e.target === e.currentTarget && onClose() : undefined}
     >
       {onClose && (

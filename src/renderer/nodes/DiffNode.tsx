@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react'
 import { monaco } from '../editor/monaco-setup'
+import { monacoTheme } from '../lib/appTheme'
+import { useAppTheme } from '../state/useAppTheme'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { sshFs } from '../terminal/ssh-fs'
@@ -23,6 +25,16 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const editorRef = useRef<monaco.editor.IStandaloneDiffEditor | null>(null)
   const originalRef = useRef<monaco.editor.ITextModel | null>(null)
   const modifiedRef = useRef<monaco.editor.ITextModel | null>(null)
+  // Monaco's theme is GLOBAL (see monacoTheme): applied at create from the ref, then re-asserted
+  // here whenever the app appearance changes. The ref exists because the create runs inside an
+  // async lazy-load continuation, where reading the reactive value would capture a stale one.
+  const appTheme = useAppTheme()
+  const appThemeRef = useRef(appTheme)
+  appThemeRef.current = appTheme
+  useEffect(() => {
+    if (editorRef.current) monaco.editor.setTheme(monacoTheme(appTheme))
+  }, [appTheme])
+
   const [loadError, setLoadError] = useState('')
   const cwd = (data.cwd as string) ?? ''
   const rel = (data.filePath as string) ?? ''
@@ -92,7 +104,7 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
       originalRef.current = original
       modifiedRef.current = modified
       editor = monaco.editor.createDiffEditor(el, {
-        theme: 'vs-dark',
+        theme: monacoTheme(appThemeRef.current),
         readOnly: true,
         originalEditable: false,
         automaticLayout: true,

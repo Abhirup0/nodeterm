@@ -213,7 +213,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
       <SearchableRow {...ROWS.accounts}>
         <div className="space-y-4">
           {versionWarning ? (
-            <div className="flex items-start justify-between gap-3 rounded-md border border-[#ff453a]/40 bg-[#ff453a]/10 px-3 py-2 text-[13px] leading-relaxed text-[#ff453a]">
+            <div className="flex items-start justify-between gap-3 rounded-md border border-[color:var(--danger)]/40 bg-[color:var(--danger)]/10 px-3 py-2 text-[13px] leading-relaxed text-[color:var(--danger)]">
               <span>
                 Your installed Claude CLI is older than the version that scopes credentials per
                 config dir. Accounts still isolate their config, but on macOS logins may collide in
@@ -241,7 +241,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   onChange={(e) => useSettings.getState().update({ systemAccountLabel: e.target.value })}
                 />
                 <span
-                  className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-medium text-muted"
+                  className="rounded-full bg-fill-weak px-2 py-0.5 text-[11px] font-medium text-muted"
                   title="The machine's default Claude login (~/.claude). Used when a node has no account."
                 >
                   system
@@ -266,13 +266,13 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                       onChange={(e) => setLabel(account.id, e.target.value)}
                     />
                     {account.pending ? (
-                      <span className="rounded-full bg-[#ff9f0a]/15 px-2 py-0.5 text-[11px] font-medium text-[#ff9f0a]">
+                      <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
                         pending
                       </span>
                     ) : null}
                     {account.host ? (
                       <span
-                        className="rounded-full bg-[#0a84ff]/15 px-2 py-0.5 text-[11px] font-medium text-[#0a84ff]"
+                        className="rounded-full bg-[color:var(--accent)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--accent)]"
                         title={`Remote account on ${account.host}`}
                       >
                         {account.host}
@@ -355,7 +355,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                     : `Creating the config dir on ${addingOn} and installing the status hook and agent skills over SSH — this takes a few seconds. The login terminal opens when it's ready.`}
                 </p>
               ) : null}
-              {addError ? <p className="text-[12px] text-[#ff453a]">{addError}</p> : null}
+              {addError ? <p className="text-[12px] text-[color:var(--danger)]">{addError}</p> : null}
             </div>
           ) : (
             <div className="space-y-2">
@@ -371,7 +371,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   Creating the config dir and installing the status hook…
                 </p>
               ) : null}
-              {addError ? <p className="text-[12px] text-[#ff453a]">{addError}</p> : null}
+              {addError ? <p className="text-[12px] text-[color:var(--danger)]">{addError}</p> : null}
             </div>
           )}
 

@@ -17,7 +17,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 // one-frame spinner in that slot reads as a glitch.
 const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.ChatPanel })))
 import { LocalTransport } from '../terminal/local-transport'
-import { droppedPaths, pastedFiles } from '../terminal/file-drop'
+import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../terminal/file-drop'
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
@@ -48,11 +48,13 @@ import {
   terminalKey,
   terminalKeyAction,
   toXtermText,
+  applyLiveOptions,
+  xtermOptionsFromSettings,
   SHIFT_ENTER_SEQ,
   CO_ATTACH_MOUSE_SEQ,
-  xtermScrollback,
   type SessionLife
 } from '../terminal/terminal-config'
+import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { attachGlyphGrid, type GlyphGridAttachment } from '../terminal/glyphgrid-attach'
 import type { GridHandle } from '../glyphgrid/engine'
@@ -516,10 +518,8 @@ export function TerminalNode({
   // Scoped selectors (not the whole settings object) so this node only re-renders when a
   // field it actually uses changes — not on every unrelated settings edit.
   const panHoverDelay = useSettings((s) => s.settings.panHoverDelay)
-  const fontSize = useSettings((s) => s.settings.fontSize)
-  const fontFamily = useSettings((s) => s.settings.fontFamily)
-  const cursorBlink = useSettings((s) => s.settings.cursorBlink)
-  const tmuxScrollback = useSettings((s) => s.settings.tmuxScrollback)
+  // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
+  const visual = useXtermVisualSettings()
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
@@ -538,6 +538,9 @@ export function TerminalNode({
   // The live session's "measure my grid, render it, report it" routine (set by the lifecycle
   // effect), so effects outside that closure (font/cursor changes) resize through the same path.
   const applyFitRef = useRef<(() => void) | null>(null)
+  // The lifecycle effect's guaranteed full-viewport repaint, reachable from the appearance effect
+  // outside that closure (a theme swap must not be left to a refresh that can be swallowed).
+  const fullRepaintRef = useRef<(() => void) | null>(null)
   // This project shows the KANBAN board (an opaque overlay over the canvas). While it does, this
   // canvas terminal is not visible — but it is still a co-attach subscriber, and its (often
   // zoomed-small) grid would clamp a CARD-MODAL viewer of the same session to a tiny size, pushing
@@ -845,22 +848,9 @@ export function TerminalNode({
     }
 
     const s = useSettings.getState().settings
-    const term =
-      parked?.term ??
-      new Terminal({
-        fontFamily: s.fontFamily,
-        fontSize: s.fontSize,
-        cursorBlink: s.cursorBlink,
-        theme: { background: '#1e1e1e', foreground: '#e6e6e6' },
-        allowProposedApi: true,
-        // NOT what the user scrolls in a tmux session — tmux's mouse is ON and the wheel scrolls
-        // tmux's own history (see pty-manager's tmuxConf). This buffer backs the plain-shell
-        // fallback (tmux unavailable) and the cold-snapshot replay. Capped: per node, many nodes.
-        scrollback: xtermScrollback(s.tmuxScrollback),
-        // Inside an app that requested mouse tracking (vim, htop) a plain drag goes to the app;
-        // Option/Alt forces a selection instead (Shift does the same via xterm's own bypass).
-        macOptionClickForcesSelection: true
-      })
+    // Appearance comes from ONE place, shared with the kanban card modal's viewer of this same
+    // session (`ModalTerminal`) — see `xtermOptionsFromSettings`.
+    const term = parked?.term ?? new Terminal(xtermOptionsFromSettings(s))
     const fit = parked ? parked.fit : new FitAddon()
     const searchAddon = parked ? parked.search : new SearchAddon()
     termRef.current = term
@@ -913,6 +903,9 @@ export function TerminalNode({
         }
       })
     }
+    // A palette swap repaints through exactly the path described above, so it is exposed to the
+    // same swallowed-refresh cases — and half a palette is the most visible way for one to fail.
+    fullRepaintRef.current = fullRepaint
     // --- renderer-swap safety net ---------------------------------------------------------
     // xterm treats a renderer swap as atomic; it is not. On macOS under GPU/canvas memory
     // pressure, canvas allocation THROWS mid-swap (`throwIfFalsy(getContext('2d'))` in the
@@ -2191,6 +2184,7 @@ export function TerminalNode({
       fitRef.current = null
       searchAddonRef.current = null
       if (applyFitRef.current === applyFit) applyFitRef.current = null
+      if (fullRepaintRef.current === fullRepaint) fullRepaintRef.current = null
       // Free the GPU context on unmount (park or teardown) either way, and unregister from the
       // budget coordinator (which releases any held grant + cancels its timers). The park path must
       // keep releasing it as it always has (contexts are capped ~16, and a parked terminal is
@@ -2280,23 +2274,26 @@ export function TerminalNode({
     // focus / visibilitychange listeners now provide.
   }, [positionAbsoluteX, positionAbsoluteY])
 
-  // Live-apply font/cursor/scrollback settings to the running terminal, so a Settings change
-  // reaches the terminals already on the canvas instead of only the next fresh one.
+  // Live-apply the appearance settings to the running terminal, so a Settings change reaches the
+  // terminals already on the canvas instead of only the next fresh one.
   //
-  // A new font size means new cell geometry, i.e. a different grid — route it through applyFit
-  // (not a bare fit.fit()) so the pty is told the new size like any other resize, instead of
-  // running at a grid nobody renders. Under co-attach applyFit is also what REPORTS our size, so
-  // a font change must go through it or this client would silently keep clamping the shared pty
-  // to its pre-change grid.
+  // This must stay ONE effect that also runs on mount: a terminal ADOPTED from the park cache
+  // carries the options it was built with, and this pass is what brings it up to date. Splitting
+  // the new options into a second effect would work by accident today and break the moment one of
+  // them skips the mount run.
+  //
+  // A cell-geometry change (font, line height, letter spacing) means a different grid — route it
+  // through applyFit (not a bare fit.fit()) so the pty is told the new size like any other resize,
+  // instead of running at a grid nobody renders. Under co-attach applyFit is also what REPORTS our
+  // size, so it must go through it or this client would silently keep clamping the shared pty to
+  // its pre-change grid. A palette change costs no resize — just a repaint we force ourselves.
   useEffect(() => {
     const term = termRef.current
     if (!term) return
-    term.options.fontSize = fontSize
-    term.options.fontFamily = fontFamily
-    term.options.cursorBlink = cursorBlink
-    term.options.scrollback = xtermScrollback(tmuxScrollback)
-    applyFitRef.current?.()
-  }, [fontSize, fontFamily, cursorBlink, tmuxScrollback])
+    const { metricsChanged, themeChanged } = applyLiveOptions(term, visual)
+    if (metricsChanged) applyFitRef.current?.()
+    if (themeChanged) fullRepaintRef.current?.()
+  }, [visual])
 
   // glyphgrid participation — whether this node should hold a grid RIGHT NOW.
   //
@@ -2332,7 +2329,13 @@ export function TerminalNode({
   // No-op (one ref null check) unless this node participates in the shared canvas.
   useEffect(() => {
     glyphSyncRef.current?.(!glyphOff)
-  }, [glyphOff, glyphEpoch, fontSize, fontFamily])
+    // `visual` stands in for what used to be the two font deps. It is the whole appearance bundle
+    // (family, size, line height, letter spacing, theme, cursor), so it changes on every setting
+    // that moves the character cell — and on a few that do not. A theme-only change therefore costs
+    // one grid re-register the old deps would have skipped; that is the safe direction, because the
+    // cost is a re-register on a rare user action while the miss would pin the grid to a stale cell
+    // size for the life of the context.
+  }, [glyphOff, glyphEpoch, visual])
 
   // Kanban board opened/closed: re-evaluate our size vote. Open → applyFit reports null (yield the
   // grid to a card-modal viewer); close → it re-reports the real fit. On the first run boardOpen
@@ -2482,10 +2485,21 @@ export function TerminalNode({
   // keep it from also pasting whatever text the clipboard happened to carry alongside the file.
   const onBodyPaste = (e: React.ClipboardEvent) => {
     const files = pastedFiles(e.clipboardData)
-    if (!files.length) return
-    e.preventDefault()
-    e.stopPropagation()
-    void insertFiles(files, { raiseWindow: false })
+    if (files.length) {
+      e.preventDefault()
+      e.stopPropagation()
+      void insertFiles(files, { raiseWindow: false })
+      return
+    }
+    // Neither files NOR text: an image-only clipboard that Chromium filtered down to nothing on
+    // its way to xterm's textarea (see clipboardImages). Ask the async API, which isn't filtered.
+    // Deliberately NOT prevented/stopped — there is no text for xterm to paste either way, so a
+    // clipboard that turns out to hold no image is left exactly as the no-op it already was, and
+    // an ordinary text paste never reaches this branch at all.
+    if (pasteHasText(e.clipboardData)) return
+    void clipboardImages().then((images) => {
+      if (images.length) void insertFiles(images, { raiseWindow: false })
+    })
   }
 
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into

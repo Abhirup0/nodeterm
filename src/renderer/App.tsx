@@ -9,7 +9,12 @@ import { useViewMode } from './state/viewMode'
 import { setWebglEnabled } from './terminal/webgl-budget'
 import { applyRendererMode } from './terminal/renderer-mode'
 import { useSharedGlyph } from './canvas/SharedGlyphLayer'
+// `resolveGpuRendering` is gone: 'shared' turned the setting into a renderer CHOICE rather than a
+// webgl on/off, so `resolveTerminalRenderer` answers it and `applyRendererMode` owns the ordering
+// between the two coordinators.
 import { resolveTerminalRenderer } from '../shared/webgl'
+import { resolveTerminalTheme } from './terminal/themes'
+import { useAppTheme } from './state/useAppTheme'
 import { isMacPlatform } from '../shared/platform-utils'
 
 export default function App() {
@@ -27,6 +32,25 @@ export default function App() {
       setSharedEnabled: (on) => useSharedGlyph.getState().setEnabled(on)
     })
   }, [gpu])
+
+  // Publish the active terminal theme's background as a CSS variable. xterm paints its own
+  // background, but the chrome AROUND it does not: the canvas node's body shows through the few px
+  // its xterm host is inset by (and through a co-attach letterbox), and the kanban card modal
+  // frames its terminal in an 8px pad. Without this both keep the app's colour and every
+  // non-default theme renders inside a mismatched frame.
+  const terminalTheme = useSettings((s) => s.settings.terminalTheme)
+  useEffect(() => {
+    const { background } = resolveTerminalTheme(terminalTheme).theme
+    if (background) document.documentElement.style.setProperty('--term-bg', background)
+  }, [terminalTheme])
+
+  // Publish the resolved appearance as `data-theme` on <html> — what the light palette in
+  // styles.css keys off. Absent, or 'dark', leaves every token at its original value, so this one
+  // attribute is all that stands between an existing install and the chrome it has always had.
+  const appTheme = useAppTheme()
+  useEffect(() => {
+    document.documentElement.dataset.theme = appTheme
+  }, [appTheme])
 
   // Keep the view-mode store's default in sync with the Settings choice, so projects the user
   // hasn't explicitly toggled follow it (and flip live when the setting changes).
