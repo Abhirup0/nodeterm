@@ -724,13 +724,16 @@ function glyphDebugOn(): boolean {
 
 function glyphDebugTap(): ((info: GlyphSlotAllocation) => void) | undefined {
   if (!glyphDebugOn()) return undefined
-  return ({ slot, code, bold, italic, x, y, fg, bg }): void => {
+  return ({ slot, code, bold, italic, x, y, fg, bg, half }): void => {
     console.warn(
       `[glyphgrid] slot ${slot} code 0x${code.toString(16)} ${JSON.stringify(
         String.fromCodePoint(code)
-      )}${bold ? ' bold' : ''}${italic ? ' italic' : ''} at ${x},${y} fg=${fg.toString(
-        16
-      )} bg=${bg.toString(16)}`
+      )}${bold ? ' bold' : ''}${italic ? ' italic' : ''}${
+        // Only the RIGHT half is called out. Every ordinary glyph is a left half, so printing that
+        // on every line would be noise on the one log a device round reads line by line — and a
+        // wide character not showing its pair here is exactly the failure worth spotting.
+        half === 1 ? ' right-half' : ''
+      } at ${x},${y} fg=${fg.toString(16)} bg=${bg.toString(16)}`
     )
   }
 }

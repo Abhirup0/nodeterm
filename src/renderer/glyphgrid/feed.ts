@@ -98,10 +98,11 @@ export interface BlankCellReport {
 
 /** Debug-only tap, off unless something installs it.
  *
- *  This exists because a blank cell has THREE possible authors — a wide glyph's follower, a column
- *  past the end of the line, and a code the crash guard refuses — and a screenshot cannot tell them
- *  apart. It fires only when the cell HAS content and we still drew nothing, which is the exact
- *  shape of the 2026-08-05 "a letter goes missing mid-word" report.
+ *  This exists because a blank cell has several possible authors — a column past the end of the
+ *  line, a code the crash guard refuses, a stray width-0 cell with no lead to be the second half of
+ *  — and a screenshot cannot tell them apart. It fires only when the cell HAS content and we still
+ *  drew nothing, which is the exact shape of the 2026-08-05 "a letter goes missing mid-word"
+ *  report.
  *
  *  Its SILENCE is a result too: if a cell renders blank on screen and this never fires, the feed
  *  asked for the right glyph and the loss happened downstream (lane upload or draw), which is a
@@ -222,18 +223,28 @@ function resolveBg(cell: CellView, theme: ThemeLanes): number {
  *
  *  WIDE / ZERO-WIDTH cells are one mechanism seen from two sides. A double-width glyph occupies
  *  two buffer cells: the lead reports width 2, and the cell right after it reports width 0. The
- *  lead carries the glyph (plus FLAG_WIDE); the follower is written as a BLANK cell carrying the
- *  LEAD's colors, so the background under a wide glyph — a selection, the cursor, a colored
- *  block — is one unbroken run instead of two halves that can disagree. The follower is never
- *  skipped: this row buffer is REUSED across frames, so "write nothing" would leave the previous
- *  frame's lanes standing at that column. Every column in [0, cols) is always written.
+ *  lead carries the glyph's LEFT half (plus FLAG_WIDE) and the follower its RIGHT half — the same
+ *  character, same style, same colors, asked of the atlas as `half: 1` (see `GlyphAtlas.glyphFor`).
+ *  Carrying the LEAD's colors into the follower is what keeps the background under a wide glyph —
+ *  a selection, the cursor, a colored block — one unbroken run instead of two halves that can
+ *  disagree. The follower is never skipped: this row buffer is REUSED across frames, so "write
+ *  nothing" would leave the previous frame's lanes standing at that column. Every column in
+ *  [0, cols) is always written.
+ *
+ *  THE FOLLOWER USED TO BE BLANK, and that was a real loss, not a simplification: a slot's ink box
+ *  is one cell and raster.ts cuts the overflow, so a character the terminal had already reserved
+ *  two cells for was rendered as its first cell only. The 2026-08-05 device round is that defect —
+ *  ⭐ arriving as a fragment. A stray width-0 cell with NO lead still writes a blank, because there
+ *  is no character for it to be the second half of.
  *
  *  THE BLOCK CURSOR REACHES THE FOLLOWER, and that is the fix for limitation L13. The cursor is one
  *  COLUMN and a wide glyph is two, so applying the override to the cursor's column alone painted the
  *  left half of 日 and left the right half un-inverted. A cursor sitting on a wide LEAD therefore
  *  carries into its follower (and nowhere else — not past it, and not into a stray zero-width cell
- *  that follows a narrow one). The follower's glyph lane stays 0, per the Phase 1c contract, so the
- *  shader paints its bg lane — which is now the cursor colour.
+ *  that follows a narrow one). The follower's slot is keyed on the colours it ends up with, so the
+ *  cursor colours reach the right half's PIXELS too — the whole character inverts, ink included.
+ *  (When the follower's lane was blank this only reached its background; the right half showed no
+ *  ink at all, because there was none anywhere.)
  *
  *  DECORATIONS (a search hit's highlight is one) sit between the cell's own colours and the
  *  selection: they OVERRIDE base/inverse/dim — a hit on coloured output has to be visible — and
@@ -287,6 +298,12 @@ export function packViewportRow(
   let carryPending = false
   let carryFg = 0
   let carryBg = 0
+  /** The lead's CHARACTER, carried so the follower can ask the atlas for its right half. Styling
+   *  rides along because the half is rasterized from the same face as the lead — a bold emoji's two
+   *  halves must come off the same glyph or they meet at a step. */
+  let carryCode = 0
+  let carryBold = false
+  let carryItalic = false
   /** Was the wide lead we are carrying from the one the BLOCK cursor covers? Separate from the
    *  colour carry because the colours are captured PRE-override and the cursor is applied post — the
    *  follower has to re-apply it, not inherit an already-overridden pair. */
@@ -301,11 +318,13 @@ export function packViewportRow(
     let bg = theme.bg
     let flags = 0
     // What this cell will ask the atlas for, decided here and REQUESTED after the overrides below.
-    // 0 is "nothing to draw" — it fails `isRenderableCode`, which is the same answer a blank cell,
-    // a control code and a wide glyph's follower all give.
+    // 0 is "nothing to draw" — it fails `isRenderableCode`, which is the answer a blank cell and a
+    // control code give. A wide glyph's follower does NOT: it adopts the lead's character below.
     let code = 0
     let bold = false
     let italic = false
+    /** Which cell-wide window of `code` this cell draws — 1 only on a wide glyph's follower. */
+    let half: 0 | 1 = 0
     // Debug-only witnesses, read at the bottom of the loop. -1 distinguishes "no cell" from a cell
     // that reported width 0; `getChars()` is only called when the probe is installed, because it
     // allocates a string per cell and this loop runs for every cell of every packed row.
@@ -328,15 +347,22 @@ export function packViewportRow(
         probeChars = cell.getChars()
       }
       if (width === 0) {
-        // Second half of the preceding wide glyph: no glyph of its own, and the lead's colors
-        // when we have them (a stray width-0 cell with no lead keeps its own — still never
-        // stale). Glyph-styling flags mean nothing on a blank; underline continuity across a
-        // wide glyph is Phase 2, since nothing renders underline yet.
+        // Second half of the preceding wide glyph: it draws the LEAD's character, right half, in
+        // the lead's colors (a stray width-0 cell with no lead has neither — it stays blank on its
+        // own colors, which is still never stale). Underline continuity across a wide glyph is
+        // Phase 2, since nothing renders underline yet.
         if (carryPending) {
           fg = carryFg
           bg = carryBg
           // The other half of the character the cursor is on — see the doc comment's L13 note.
           if (carryCursor) cursorHere = true
+          // The lane that used to be 0 here. A double-width character's ink is cut at one cell
+          // (raster.ts), so leaving this blank threw its right half away — the 2026-08-05 ⭐
+          // report. The two cells the terminal reserved for this character now hold its two halves.
+          code = carryCode
+          bold = carryBold
+          italic = carryItalic
+          half = 1
         }
         carryPending = false
         carryCursor = false
@@ -359,6 +385,9 @@ export function packViewportRow(
           carryFg = fg
           carryBg = bg
           carryCursor = cursorHere
+          carryCode = code
+          carryBold = bold
+          carryItalic = italic
         } else {
           carryPending = false
           carryCursor = false
@@ -390,7 +419,7 @@ export function packViewportRow(
     }
 
     // fg/bg are FINAL here — this is the only place the atlas may be asked, see the doc comment.
-    const glyph = isRenderableCode(code) ? atlas.glyphFor(code, bold, italic, fg, bg) : 0
+    const glyph = isRenderableCode(code) ? atlas.glyphFor(code, bold, italic, fg, bg, half) : 0
     // A cell that HOLDS something and still draws nothing is the defect under investigation. A
     // space is excluded because that is the correct answer for it, not a loss.
     if (blankProbe && glyph === 0 && probeChars !== '' && probeChars !== ' ') {

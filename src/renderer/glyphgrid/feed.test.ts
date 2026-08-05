@@ -26,15 +26,30 @@ const THEME: ThemeLanes = {
 function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & {
   calls: Array<[number, boolean, boolean]>
   colors: Array<[number, number]>
+  halves: number[]
 } {
   const calls: Array<[number, boolean, boolean]> = []
   const colors: Array<[number, number]> = []
+  // A THIRD parallel record, for the same reason as `colors`: which HALF of a double-width
+  // character a cell asks for is part of the key, and it is the difference between an emoji
+  // rendering whole and rendering as its left fragment. Kept out of `calls` so the many
+  // assertions that pin `calls` verbatim stay about what they were written for.
+  const halves: number[] = []
   return {
     calls,
     colors,
-    glyphFor(code: number, bold: boolean, italic: boolean, fg: number, bg: number): number {
+    halves,
+    glyphFor(
+      code: number,
+      bold: boolean,
+      italic: boolean,
+      fg: number,
+      bg: number,
+      half: 0 | 1 = 0
+    ): number {
       calls.push([code, bold, italic])
       colors.push([fg, bg])
+      halves.push(half)
       return 900 + calls.length
     }
   }
@@ -203,7 +218,7 @@ describe('packViewportRow — attributes', () => {
 })
 
 describe('packViewportRow — wide and zero-width cells', () => {
-  it('a wide char paints its glyph in the lead cell and a blank, bg-continuous continuation', () => {
+  it('a wide char paints its two halves into its two cells, on one unbroken background', () => {
     const wide = makeCell({ code: 0x4e2d, width: 2, bg: ['rgb', 0x223344] })
     const cont = makeCell({ code: 0, width: 0, bg: ['rgb', 0x223344] })
     const { out, atlas } = pack([wide, cont])
@@ -211,10 +226,30 @@ describe('packViewportRow — wide and zero-width cells', () => {
     const tail = readCell(out, 1)
     expect(lead.glyph).toBe(901)
     expect(lead.flags & FLAG_WIDE).toBe(FLAG_WIDE)
-    expect(tail.glyph).toBe(0) // blank slot — the lead's ink covers both columns
+    // A slot's ink box is ONE cell and the overflow is cut, so a blank follower here threw the
+    // character's right half away — the 2026-08-05 ⭐ report. It asks for that half instead, from
+    // its OWN slot: same character and style, `half: 1`.
+    expect(tail.glyph).toBe(902)
+    expect(tail.glyph).not.toBe(lead.glyph)
     expect(tail.bg).toBe(lead.bg) // unbroken background run under the glyph
     expect(tail.fg).toBe(lead.fg)
-    expect(atlas.calls).toEqual([[0x4e2d, false, false]]) // the continuation asks for no glyph
+    expect(atlas.calls).toEqual([
+      [0x4e2d, false, false],
+      [0x4e2d, false, false]
+    ])
+    expect(atlas.halves).toEqual([0, 1])
+  })
+
+  it('the follower inherits the LEAD’s style, not its own empty cell’s', () => {
+    // The two halves come off the same face or they meet at a step. The follower cell carries no
+    // attributes of its own, so reading them off it would draw a bold emoji's right half regular.
+    const lead = makeCell({ code: 0x4e2d, width: 2, bold: true, italic: true })
+    const cont = makeCell({ code: 0, width: 0 })
+    const { atlas } = pack([lead, cont])
+    expect(atlas.calls).toEqual([
+      [0x4e2d, true, true],
+      [0x4e2d, true, true]
+    ])
   })
 
   it('a zero-width cell with no wide lead before it still writes a blank cell (never stale)', () => {
@@ -369,8 +404,9 @@ describe('packViewportRow — cursor and selection', () => {
       expect(c.fg).toBe(THEME.cursorFg)
       expect(c.flags & FLAG_CURSOR).toBe(FLAG_CURSOR)
     }
-    // The follower still owns no glyph — the lead's ink covers both columns (Phase 1c contract).
-    expect(readCell(out, 1).glyph).toBe(0)
+    // …and the inversion reaches the right half's INK, not just its background: the follower's
+    // slot is keyed on the colours it ends up with, so it is rasterized in the cursor pair too.
+    expect(readCell(out, 1).glyph).not.toBe(0)
   })
 
   it('carries the cursor no further than the follower of the covered lead', () => {
@@ -628,16 +664,19 @@ describe('packViewportRow — the colours the atlas is asked for', () => {
     ])
   })
 
-  it('a wide lead under the cursor asks for the cursor pair, and its follower asks for nothing', () => {
+  it('BOTH halves of a wide glyph under the cursor ask for the cursor pair', () => {
     const wide = makeCell({ code: 0x4e2d, width: 2, bg: ['rgb', 0x223344] })
     const cont = makeCell({ code: 0, width: 0, bg: ['rgb', 0x223344] })
     const { out, atlas } = pack([wide, cont], { cursorCol: 0 })
-    expect(atlas.colors).toEqual([[THEME.cursorFg, THEME.cursorBg]])
-    // The follower asks for no slot of its own — it never has — but it now PAINTS in the cursor
-    // pair rather than in the lead's own colours: the block covers the whole character, which is
-    // what closes L13. Its glyph lane stays 0, so the shader paints exactly this bg lane.
+    // The block covers the whole character (L13), and now that the follower owns a real slot the
+    // override has to reach the request as well as the lane — a right half rasterized in the
+    // cell's ORIGINAL colours would sit un-inverted inside an inverted block.
+    expect(atlas.colors).toEqual([
+      [THEME.cursorFg, THEME.cursorBg],
+      [THEME.cursorFg, THEME.cursorBg]
+    ])
+    expect(atlas.halves).toEqual([0, 1])
     expect(readCell(out, 1).bg).toBe(THEME.cursorBg)
-    expect(readCell(out, 1).glyph).toBe(0)
   })
 })
 

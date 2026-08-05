@@ -252,6 +252,64 @@ describe('createCanvasRasterizer', () => {
     expect(Number.isInteger(ink.args[1])).toBe(true)
   })
 
+  describe('the right half of a double-width character (`half: 1`)', () => {
+    // A slot's ink box is one cell and step 2 CUTS the overflow, so a character the terminal gave
+    // two cells to was rendered as its first cell alone — the 2026-08-05 ⭐ report. The follower
+    // cell asks for the same character's other half, which is the same draw with the glyph's
+    // origin moved one cell left: the window this slot's clip keeps is then the second cell.
+    it('draws the glyph one cell LEFT of the ink origin', () => {
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 1)
+      const ink = stub.ops.find((o) => o.kind === 'fillText')!
+      expect(ink.args[0]).toBe(INK_X - FONT.cellW)
+      // The baseline does not move: only the horizontal window changes.
+      expect(ink.args[1]).toBe(INK_Y + 16)
+    })
+
+    it('leaves the CLIP on this slot’s own cell box', () => {
+      // This is the whole reason the fix costs nothing structurally. The clip is what holds the
+      // 2*GUTTER_PX separation MAX_SAFE_LOD is derived from; if it moved with the ink, the right
+      // half would spill into the neighbouring slot and show up as a ghost in its mip.
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 1)
+      expect(stub.ops.find((o) => o.kind === 'clip')).toEqual({
+        kind: 'clip',
+        args: [INK_X, INK_Y, FONT.cellW, FONT.cellH]
+      })
+    })
+
+    it('fills this slot’s own pitch rect with bg, exactly as the left half does', () => {
+      // The follower's background is what makes a selection or a block cursor one unbroken run
+      // across a wide glyph. The shift must not reach it.
+      const stub = stubCanvas()
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 1)
+      expect(stub.ops[0]).toEqual({
+        kind: 'fillRect',
+        fill: BG_CSS,
+        args: [INK_X - GUTTER_PX, INK_Y - GUTTER_PX, PITCH_W, PITCH_H]
+      })
+    })
+
+    it('defaults to the left half, so every existing call is unchanged', () => {
+      const withDefault = stubCanvas()
+      active = withDefault
+      createCanvasRasterizer(FONT, 256)!.draw(0x41, false, false, INK_X, INK_Y, FG, BG)
+      const explicit = stubCanvas()
+      active = explicit
+      createCanvasRasterizer(FONT, 256)!.draw(0x41, false, false, INK_X, INK_Y, FG, BG, 0)
+      expect(withDefault.ops).toEqual(explicit.ops)
+    })
+  })
+
   // The claim is about GEOMETRY, not about pixels: no glyph may generate NEW ink outside the slot's
   // own WHOLE-TEXEL CELL BOX, because the MAX_SAFE_LOD derivation counts on 2*GUTTER_PX texels
   // between two slots' inks. The gutter is not required to be BACKGROUND — the edge-extension

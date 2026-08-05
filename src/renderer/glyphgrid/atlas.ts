@@ -18,7 +18,10 @@ export interface GlyphRasterizer {
   cellH: number
   /** Paint one slot. `x, y` is the INK origin in page pixels (already one gutter inside the pitch
    *  cell — see GUTTER_PX); `fg`/`bg` are packColor lanes, the FINAL per-cell colours with
-   *  selection/cursor already applied by the caller. */
+   *  selection/cursor already applied by the caller.
+   *
+   *  `half` selects WHICH cell-wide window of a DOUBLE-WIDTH character this slot holds: 0 the left
+   *  (every ordinary glyph, and a wide glyph's lead), 1 the right. See `glyphFor`. */
   draw(
     code: number,
     bold: boolean,
@@ -26,7 +29,8 @@ export interface GlyphRasterizer {
     x: number,
     y: number,
     fg: number,
-    bg: number
+    bg: number,
+    half?: 0 | 1
   ): void
   /** Blank the whole page. Called by `GlyphAtlas.reset()` and by nothing else: the bookkeeping and
    *  the pixels have to be emptied in the same breath or a stale slot keeps its old ink. */
@@ -119,6 +123,9 @@ export interface GlyphSlotAllocation {
   /** The packed colour lanes the slot was rasterized in — part of its key. */
   fg: number
   bg: number
+  /** Which half of a double-width character this slot holds (see `GlyphRasterizer.draw`). 0 for
+   *  every ordinary glyph, so a dump that never shows a 1 means nothing wide was drawn. */
+  half: 0 | 1
 }
 
 /** What `onReset` hands back. A plain disposable rather than an unsubscribe function so the call
@@ -303,13 +310,47 @@ export class GlyphAtlas {
     }
   }
 
-  glyphFor(code: number, bold: boolean, italic: boolean, fg: number, bg: number): number {
+  /**
+   * The slot holding this glyph in this style and these colours, allocating and rasterizing it on
+   * first sight.
+   *
+   * `half` is what makes a DOUBLE-WIDTH character (an emoji, a CJK ideograph) whole. Such a
+   * character occupies two terminal cells, but a slot's ink box is exactly ONE cell and raster.ts
+   * CUTS whatever overflows it — so before this parameter existed the lead cell showed the left
+   * portion of the glyph and the follower showed nothing at all. The 2026-08-05 device round is
+   * that loss: ⭐ arriving as a fragment.
+   *
+   * The fix is to let the follower ask for the SAME character's other half. `half: 1` returns a
+   * SECOND slot, rasterized with the glyph shifted one cell left so the window this slot's clip
+   * keeps is the character's right half; the feed then writes that slot into the follower's lane
+   * instead of the blank it used to write. The two halves land in the two cells the terminal has
+   * already reserved for this character, so the composed result is the whole glyph.
+   *
+   * Note what this deliberately is NOT: the ink-sized-slot escalation raster.ts's header describes.
+   * That one is for glyphs whose ink exceeds the cell WITHOUT the terminal knowing (an ornate
+   * script face, real side bearings), and it reaches into the allocator, the slot-rect derivation
+   * and the shader's uv maths at once. This reaches none of them — every slot is still exactly one
+   * cell, still clipped to its own cell box, still 2*GUTTER_PX from its neighbour's ink, and the
+   * shader is untouched. It only spends a second slot on a character the BUFFER already says is
+   * two cells wide. A glyph wider than two cells is still cut, as before.
+   */
+  glyphFor(
+    code: number,
+    bold: boolean,
+    italic: boolean,
+    fg: number,
+    bg: number,
+    half: 0 | 1 = 0
+  ): number {
     if (code === 0x20 || code === 0) return 0
     // `>>> 0` on both lanes: `0xff << 24` is NEGATIVE in JS (packColor carries the same note), so
     // one colour can arrive as -16777216 from an arithmetic path and as 4278190080 off a cell
     // lane. Keying the two spellings separately would put identical pixels in two slots — wasted
     // page, and resets arriving twice as fast.
-    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg >>> 0}|${bg >>> 0}`
+    //
+    // `half` is IN the key: the two halves of one character are different pixels, and keying them
+    // together would hand the follower the lead's slot and paint the left half twice.
+    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg >>> 0}|${bg >>> 0}|${half}`
     const hit = this.slots.get(key)
     if (hit !== undefined) return hit
     if (this.nextSlot >= this.capacity) {
@@ -330,14 +371,14 @@ export class GlyphAtlas {
     }
     const slot = this.nextSlot++
     const { x, y } = this.cellXY(slot)
-    this.rasterizer.draw(code, bold, italic, x, y, fg, bg)
+    this.rasterizer.draw(code, bold, italic, x, y, fg, bg, half)
     this.slots.set(key, slot)
     this.dirtyFlag = true
     // LAST, and guarded: the tap is a debug aid, so a throwing callback must cost a log line, not
     // the glyph — everything above is already committed by the time it runs.
     if (this.onAllocate) {
       try {
-        this.onAllocate({ slot, code, bold, italic, x, y, fg, bg })
+        this.onAllocate({ slot, code, bold, italic, x, y, fg, bg, half })
       } catch {
         /* a debug tap never breaks a frame */
       }

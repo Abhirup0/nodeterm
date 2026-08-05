@@ -6,15 +6,24 @@ import { GUTTER_PX, GlyphAtlas, type GlyphRasterizer, type GlyphSlotAllocation }
 const FG = 11
 const BG = 22
 
-function fakeRasterizer(cellW = 10, cellH = 20): GlyphRasterizer & { calls: string[] } {
+function fakeRasterizer(
+  cellW = 10,
+  cellH = 20
+): GlyphRasterizer & { calls: string[]; halves: number[] } {
   const calls: string[] = []
+  // Which half of a double-width character each draw was for, at the same index as `calls` (the
+  // CLEAR entries aside). Its own array so the recorded call STRING — read verbatim by a dozen
+  // layout assertions below — keeps its shape.
+  const halves: number[] = []
   return {
     cellW,
     cellH,
     calls,
+    halves,
     source: null,
-    draw(code, bold, italic, x, y, fg, bg) {
+    draw(code, bold, italic, x, y, fg, bg, half = 0) {
       calls.push(`${code}|${bold ? 'b' : ''}${italic ? 'i' : ''}|${fg}|${bg}@${x},${y}`)
+      halves.push(half)
     },
     // Logged into the SAME array as the draws, so "the page was blanked BEFORE the triggering
     // glyph was drawn into it" is one ordering assertion rather than two independent counters.
@@ -66,7 +75,7 @@ describe('GlyphAtlas', () => {
       expect(atlas.glyphFor(0x41, false, false, FG, BG + 1)).not.toBe(a)
     })
 
-    it('every lane of the key participates — no two of the five collide', () => {
+    it('every lane of the key participates — no two of the six collide', () => {
       const atlas = new GlyphAtlas(fakeRasterizer(), 100)
       const slots = [
         atlas.glyphFor(0x41, false, false, FG, BG),
@@ -74,9 +83,41 @@ describe('GlyphAtlas', () => {
         atlas.glyphFor(0x41, true, false, FG, BG), // bold
         atlas.glyphFor(0x41, false, true, FG, BG), // italic
         atlas.glyphFor(0x41, false, false, FG + 1, BG), // fg
-        atlas.glyphFor(0x41, false, false, FG, BG + 1) // bg
+        atlas.glyphFor(0x41, false, false, FG, BG + 1), // bg
+        atlas.glyphFor(0x41, false, false, FG, BG, 1) // half
       ]
       expect(new Set(slots).size).toBe(slots.length)
+    })
+
+    describe('the two halves of a double-width character', () => {
+      // A slot's ink box is exactly one cell and raster.ts cuts the overflow, so an emoji or a CJK
+      // ideograph — which the terminal has already given TWO cells — lost its right half entirely.
+      // It gets a second slot instead: same character, same style, same colours, other half.
+      it('are separate slots, and the second is drawn shifted one cell left', () => {
+        const r = fakeRasterizer()
+        const atlas = new GlyphAtlas(r, 100)
+        const left = atlas.glyphFor(0x4e2d, false, false, FG, BG, 0)
+        const right = atlas.glyphFor(0x4e2d, false, false, FG, BG, 1)
+        expect(right).not.toBe(left)
+        // The atlas does NOT shift anything itself — it hands the rasterizer this slot's own ink
+        // origin and the half, and the shift is raster.ts's (see its `inkX`). Pinned here because
+        // a half that never reached the rasterizer would key two slots and paint them identically.
+        expect(r.halves).toEqual([0, 1])
+      })
+
+      it('cache independently — asking for one never returns the other', () => {
+        const atlas = new GlyphAtlas(fakeRasterizer(), 100)
+        const left = atlas.glyphFor(0x4e2d, false, false, FG, BG, 0)
+        const right = atlas.glyphFor(0x4e2d, false, false, FG, BG, 1)
+        expect(atlas.glyphFor(0x4e2d, false, false, FG, BG, 0)).toBe(left)
+        expect(atlas.glyphFor(0x4e2d, false, false, FG, BG, 1)).toBe(right)
+      })
+
+      it('default to the LEFT half, so every existing caller is unchanged', () => {
+        const atlas = new GlyphAtlas(fakeRasterizer(), 100)
+        const implicit = atlas.glyphFor(0x41, false, false, FG, BG)
+        expect(atlas.glyphFor(0x41, false, false, FG, BG, 0)).toBe(implicit)
+      })
     })
 
     // packColor's own `>>> 0` note applies one layer up: `0xff << 24` is NEGATIVE in JS, so the
@@ -487,10 +528,12 @@ describe('GlyphAtlas', () => {
       atlas.glyphFor(0x78, true, false, FG, BG) // a different style IS a different slot
       atlas.glyphFor(0x78, false, false, FG + 1, BG) // …and so is a different colour
       atlas.glyphFor(0x20, false, false, FG, BG) // the blank slot is never an allocation
+      atlas.glyphFor(0x78, false, false, FG, BG, 1) // …and so is the other half
       expect(seen).toEqual([
-        { slot: 1, code: 0x78, bold: false, italic: false, x: 16, y: 2, fg: FG, bg: BG },
-        { slot: 2, code: 0x78, bold: true, italic: false, x: 30, y: 2, fg: FG, bg: BG },
-        { slot: 3, code: 0x78, bold: false, italic: false, x: 44, y: 2, fg: FG + 1, bg: BG }
+        { slot: 1, code: 0x78, bold: false, italic: false, x: 16, y: 2, fg: FG, bg: BG, half: 0 },
+        { slot: 2, code: 0x78, bold: true, italic: false, x: 30, y: 2, fg: FG, bg: BG, half: 0 },
+        { slot: 3, code: 0x78, bold: false, italic: false, x: 44, y: 2, fg: FG + 1, bg: BG, half: 0 },
+        { slot: 4, code: 0x78, bold: false, italic: false, x: 58, y: 2, fg: FG, bg: BG, half: 1 }
       ])
     })
 

@@ -299,7 +299,22 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       leaves nothing behind. Repeat with **Cursor style = underline** (the rule runs the full width
       of the character, not half of it) and with the terminal **blurred** (the outline boxes the
       whole character). `bar` is the deliberate exception: it stays ONE hairline on the left edge,
-      because it marks the insertion point rather than the cell.
+      because it marks the insertion point rather than the cell. Since 2026-08-05 the right half
+      carries INK as well as background, so check that the inversion covers the **glyph**, not just
+      the block behind it — an un-inverted right half of 日 now means the follower's slot was keyed
+      on the wrong colours.
+
+- [ ] **2.16 A double-width character is WHOLE.** The 2026-08-05 report: ⭐ arrived as a fragment,
+      because a slot's ink box is one cell and the follower cell was written blank. Print a row of
+      wide characters — `printf '⭐ 👍 😄 日本語 中文\n'` — and compare against **GPU per terminal**
+      on the same line. Each character is complete, and its two halves **meet without a step**: no
+      seam of background down the middle, no visible offset between the halves, no doubled left
+      half. Then repeat with **bold** on (`printf '\033[1m⭐ 日本語\033[0m\n'`) — the two halves must
+      come off the same face, so a bold left half beside a regular right half is the failure.
+      Expected residual: the seam may show a hairline difference in antialiasing, because the two
+      halves are rasterized at different sub-texel phases (see `inkX` in `raster.ts`). A hairline is
+      the accepted cost; a visible break or a colour seam is not. Characters wider than two cells
+      are still cut — that is L16, unchanged.
 
 ## 3. Interactions
 
@@ -687,12 +702,21 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
      through. (The node's OWN flyout/pill is fine — selection elevation lifts them with it, which is
      what 3.9c tests.) Fixing this means feeding real chrome geometry into the rule — Phase 2, and
      the same question the "chrome on the canvas" answer settles for free.
-- **L16 — A font-drawn glyph whose INK EXCEEDS ITS CELL is clipped; the overflow is lost.** The
-  rasterizer clips every `fillText` to the slot's own cell (`raster.ts` step 2), because a glyph
-  that reached into the gutter would land in a neighbour's mip neighbourhood. xterm's own
+- **L16 — A font-drawn SINGLE-WIDTH glyph whose INK EXCEEDS ITS CELL is clipped; the overflow is
+  lost.** The rasterizer clips every `fillText` to the slot's own cell (`raster.ts` step 2), because
+  a glyph that reached into the gutter would land in a neighbour's mip neighbourhood. xterm's own
   `TextureAtlas` has no such limit — it MEASURES each glyph's real bounding box, sizes the slot to
   the ink and renders a quad of that size, so ink may overhang into the neighbouring cells. That is
   why GPU mode can show shapes shared mode truncates.
+
+  **DOUBLE-WIDTH characters left this limitation on 2026-08-05** (emoji, CJK). Their overflow was
+  never really overflow: the terminal has already reserved a second cell for them, and the feed was
+  writing it BLANK — so ⭐ arrived as a fragment (the 2026-08-05 device report). They need no
+  ink-sized slot, only a second cell-sized one holding the character's right half: `glyphFor(…,
+  half)` keys a second slot, `raster.ts` draws it with the glyph's origin one cell left, and the
+  feed writes it into the follower's lane instead of a blank. Nothing this limitation defends moved
+  — each half is still clipped to its own cell box, still 2*GUTTER_PX from its neighbour's ink, and
+  the shader is untouched. Verify by item **2.16**. A glyph wider than TWO cells is still cut.
 
   The 2026-08-04 device round measured one instance: **U+23BF ⎿**, Claude Code's tool-result
   connector, kept about a third of its horizontal foot (8 px against GPU mode's 28). The **escape

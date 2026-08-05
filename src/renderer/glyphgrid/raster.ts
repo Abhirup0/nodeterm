@@ -204,13 +204,21 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *     2026-08-04 device round measured one: U+23BF ⎿, Claude Code's tool-result connector, kept
  *     about a third of its horizontal foot (8 px against GPU mode's 28).
  *
+ *     ONE MEMBER OF THE CLASS IS NOW OUT OF IT: a DOUBLE-WIDTH character (emoji, CJK). Its overflow
+ *     was never really overflow — the terminal has already reserved a second cell for it — so it
+ *     needs no ink-sized slot, only a second cell-sized one holding the character's right half
+ *     (`half` above, and `GlyphAtlas.glyphFor`). Before that, ⭐ rendered as a fragment: the
+ *     2026-08-05 device round. Everything this clip defends is untouched by it, because each half
+ *     is still clipped to its own cell box.
+ *
  *     THE ESCAPE HATCH USED SO FAR is `box-glyphs.ts`: a glyph we DRAW is full-cell by construction,
  *     so the clip has nothing to cut. That covers line art — the box-drawing and block ranges, plus
  *     the handful of Misc-Technical aliases the ⎿ finding added — and it is the right answer for
  *     that class, since those characters are DEFINED as fractions of the cell.
  *
- *     THE REAL ESCALATION, if a NON-line-art glyph ever needs the overflow (an ornate script face, a
- *     symbol font with genuine side bearings), is to do what xterm does: measure a per-glyph
+ *     THE REAL ESCALATION, if a NON-line-art, SINGLE-WIDTH glyph ever needs the overflow (an ornate
+ *     script face, a symbol font with genuine side bearings), is to do what xterm does: measure a
+ *     per-glyph
  *     bounding box, allocate slots sized to the INK rather than to the cell, and emit quads sized to
  *     the glyph rather than to the cell. That reaches into the atlas allocator, the slot-rect
  *     derivation and the shader's uv maths all at once, and it changes what the LOD/gutter argument
@@ -280,7 +288,20 @@ export function createCanvasRasterizer(
     /** `x, y` is the INK origin the atlas hands us — already one gutter inside the pitch cell on
      *  each axis (`GlyphAtlas.cellXY`) — and `fg`/`bg` are the FINAL packed colour lanes for this
      *  slot. Two DIFFERENT rects are involved; see the header's invariants 3 and 4. */
-    draw(code, bold, italic, x, y, fg, bg) {
+    draw(code, bold, italic, x, y, fg, bg, half = 0) {
+      // The glyph's own origin inside this slot. `half: 1` is the RIGHT half of a double-width
+      // character (see `GlyphAtlas.glyphFor`): the character is drawn one cell FURTHER LEFT, so the
+      // window this slot's clip keeps is its second cell instead of its first. Everything else
+      // below is untouched — same clip, same pitch fill, same edge extension — because the fix is
+      // about WHICH part of the glyph a cell-sized slot holds, not about the slot's size.
+      //
+      // The shift is the FRACTIONAL cell, not a whole texel, so the two halves meet exactly where
+      // the two on-screen cells meet (cells are laid out on the fractional cell pitch too). The
+      // cost is that the right half is rasterized at a different sub-texel PHASE than the left —
+      // its antialiasing can differ by a fraction of a pixel along the seam. That is the honest
+      // trade: a phase difference is a hairline, a whole-texel shift would be a visible break in
+      // the character.
+      const inkX = half === 1 ? x - font.cellW : x
       // 1. THE BACKGROUND, over the whole PITCH rect — gutters included. The atlas passes the INK
       //    origin, so the pitch cell's corner is one gutter back on each axis; its extent is the
       //    pitch, which is `ceil(cell) + 2*GUTTER_PX`. Both are whole texels and consecutive pitch
@@ -368,11 +389,15 @@ export function createCanvasRasterizer(
           // and there is no partial texel to complete.
           const w = op.x + op.w >= font.cellW - FAR_EDGE_EPS ? colsW - op.x : op.w
           const h = op.y + op.h >= font.cellH - FAR_EDGE_EPS ? colsH - op.y : op.h
-          ctx.fillRect(x + op.x, y + op.y, w, h)
+          // `inkX`, not `x`: a geometric glyph is defined as a fraction of ONE cell, so on `half: 1`
+          // every op lands entirely left of the clip and the slot comes out blank — which is the
+          // right answer, since a cell-defined glyph has no second cell. (No wide character is
+          // claimed by box-glyphs.ts today, so this is a floor rather than a live path.)
+          ctx.fillRect(inkX + op.x, y + op.y, w, h)
         }
       } else {
         ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${font.sizePx}px ${font.family}`
-        ctx.fillText(String.fromCodePoint(code), x, y + baseline)
+        ctx.fillText(String.fromCodePoint(code), inkX, y + baseline)
       }
       ctx.restore()
       // 3. THE EDGE EXTENSION — clamp-to-edge padding, the standard atlas technique. Replicate the
