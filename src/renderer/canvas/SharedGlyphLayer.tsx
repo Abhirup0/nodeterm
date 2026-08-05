@@ -994,14 +994,93 @@ export interface PixelRatioContext {
  * disposed.
  */
 export function syncAtlasPixelRatio(current: number, ctx: PixelRatioContext): boolean {
-  // Re-entry guard. `pushViewport` runs from the ResizeObserver AND the window `resize` listener,
-  // and a display change fires both; `disposeContext()` flips this flag on the context the closure
-  // still holds, so the second call is a no-op instead of a second epoch bump — which would run
-  // teardown/setup twice on every terminal for one display change.
+  // Re-entry guard. `pushViewport` runs from the ResizeObserver, the window `resize` listener AND
+  // the resolution media query, and a display change can fire more than one of them;
+  // `disposeContext()` flips this flag on the context the closure still holds, so the second call
+  // is a no-op instead of a second epoch bump — which would run teardown/setup twice on every
+  // terminal for one display change.
   if (ctx.disposed) return false
   if (!pixelRatioChanged(ctx.dpr, current)) return false
   rebuildSharedContext()
   return true
+}
+
+/** The query xterm's own `CoreBrowserService` watches for a device-pixel-ratio change, verbatim.
+ *  Exported so the test can assert the form rather than only the behaviour: the ratio is embedded
+ *  in the STRING, which is the whole reason the watcher below has to re-arm. */
+export function pixelRatioQuery(dpr: number): string {
+  return `screen and (resolution: ${dpr}dppx)`
+}
+
+/** The two methods of a `MediaQueryList` the watcher uses, both optional: an environment can expose
+ *  only the deprecated `addListener` pair, and that degrades to "not watched" rather than a throw. */
+export interface PixelRatioMediaQuery {
+  addEventListener?(type: 'change', fn: () => void): void
+  removeEventListener?(type: 'change', fn: () => void): void
+}
+
+/** The browser surface the dpr watcher needs, injected — the component itself has no DOM under the
+ *  unit tests, and the re-arm is precisely what needs testing. */
+export interface PixelRatioWatchHost {
+  /** Read AFRESH at every arm: the query embeds the ratio, so it must be the ratio we are on now. */
+  dpr(): number
+  /** `window.matchMedia`, or null where the environment has none. */
+  match(query: string): PixelRatioMediaQuery | null
+}
+
+/**
+ * Watch for a device-pixel-ratio change and call back once per change.
+ *
+ * WHY THIS EXISTS ALONGSIDE `resize`. The move it answers — a window dragged between a retina and a
+ * 1x display at the same point size — leaves the host's CSS box identical, so the ResizeObserver is
+ * silent, and whether Blink dispatches `resize` for a scale-factor change with an unchanged CSS
+ * viewport is not something to bet the atlas on. xterm does not bet on it: `CoreBrowserService`
+ * watches exactly this media query. Both triggers run, funnelled through the same `pushViewport`,
+ * and `syncAtlasPixelRatio`'s re-entry guard makes the double fire free.
+ *
+ * THE RE-ARM IS THE WHOLE JOB. `screen and (resolution: 2dppx)` answers the move OFF 2dppx and then
+ * never again, so each change disarms the spent query and arms one at the ratio we have just landed
+ * on — otherwise the move BACK is silent and the canvas keeps an atlas rasterized for a display it
+ * is no longer on. Re-arming happens BEFORE the callback: `onChange` may dispose the context, and
+ * the next display change must be watched for either way.
+ *
+ * No `addListener` fallback: nothing else in this repo carries one, and a query list we cannot
+ * subscribe to leaves the `resize` trigger in place.
+ */
+export function createPixelRatioWatcher(
+  host: PixelRatioWatchHost,
+  onChange: () => void
+): { stop(): void } {
+  let mql: PixelRatioMediaQuery | null = null
+  let stopped = false
+
+  const disarm = (): void => {
+    mql?.removeEventListener?.('change', handler)
+    mql = null
+  }
+
+  const arm = (): void => {
+    disarm()
+    if (stopped) return
+    const next = host.match(pixelRatioQuery(host.dpr()))
+    if (!next || typeof next.addEventListener !== 'function') return
+    next.addEventListener('change', handler)
+    mql = next
+  }
+
+  function handler(): void {
+    if (stopped) return
+    arm()
+    onChange()
+  }
+
+  arm()
+  return {
+    stop(): void {
+      stopped = true
+      disarm()
+    }
+  }
 }
 
 /** Fires when a context has just been BUILT. The component listens so it can mount the fresh
@@ -1703,10 +1782,10 @@ export function SharedGlyphLayer(): JSX.Element {
     const pushViewport = (): void => {
       const dpr = currentDpr()
       // A display change (the window dragged onto a monitor with a different pixel ratio) arrives
-      // HERE — it fires `resize` with the CSS box unchanged — and it is the one viewport input the
-      // engine cannot absorb, because the ATLAS was rasterized for the old ratio. So it is checked
-      // before the push: on a rebuild the context this closure holds is already gone, and the fresh
-      // one gets its viewport from the re-run effect's own `pushViewport()`.
+      // HERE, from whichever of the triggers below sees it first, and it is the one viewport input
+      // the engine cannot absorb, because the ATLAS was rasterized for the old ratio. So it is
+      // checked before the push: on a rebuild the context this closure holds is already gone, and
+      // the fresh one gets its viewport from the re-run effect's own `pushViewport()`.
       if (syncAtlasPixelRatio(dpr, ctx) || ctx.disposed) return
       // The engine change-gates all three inputs, so calling this from every observer tick is
       // free when nothing actually moved.
@@ -1718,13 +1797,31 @@ export function SharedGlyphLayer(): JSX.Element {
     // sessions sidebar opens, and a stale viewport culls the wrong grids.
     const ro = new ResizeObserver(pushViewport)
     ro.observe(host)
-    // ...and window resize on top of it, because a DPR change (dragging the window to a second
-    // monitor) leaves the CSS box identical while the backing store must change.
+    // ...and window `resize` on top of it, for the ordinary window-size changes that move the CSS
+    // box without moving the host's (and as ONE of the two triggers for a dpr change).
     window.addEventListener('resize', pushViewport)
+    // THE OTHER dpr trigger, and DO NOT DELETE EITHER AS REDUNDANT. Dragging the window to a
+    // display with a different pixel ratio leaves the CSS box identical, so the ResizeObserver is
+    // silent and only `resize` — if Blink dispatches one for a scale-factor change with an
+    // unchanged CSS viewport — would carry it. xterm does not rely on that: its `CoreBrowserService`
+    // watches this media query, and this atlas latches xterm's own device cell, so it watches the
+    // same thing. Both land in `pushViewport`, whose `syncAtlasPixelRatio` re-entry guard makes a
+    // double fire free.
+    const dprWatch = createPixelRatioWatcher(
+      {
+        dpr: currentDpr,
+        match: (query) =>
+          typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+            ? window.matchMedia(query)
+            : null
+      },
+      pushViewport
+    )
 
     /**
-     * EVERYTHING THAT CAN DRAW OR SCHEDULE A FRAME, as one startable/stoppable unit. (The
-     * ResizeObserver above is the deliberate exception — it schedules nothing; see its comment.)
+     * EVERYTHING THAT CAN DRAW OR SCHEDULE A FRAME, as one startable/stoppable unit. (The three
+     * viewport triggers above are the deliberate exception — they schedule nothing; see their
+     * comments.)
      *
      * It is a unit because a lost context has to take ALL of it down at once and a restore has to
      * bring exactly it back: the rAF chain, the heartbeat timer, the blink clock's interval, the
@@ -1899,6 +1996,7 @@ export function SharedGlyphLayer(): JSX.Element {
       policy.stop()
       ro.disconnect()
       window.removeEventListener('resize', pushViewport)
+      dprWatch.stop()
       canvas.removeEventListener('webglcontextlost', onLost)
       canvas.removeEventListener('webglcontextrestored', onRestored)
       // The canvas leaves the DOM with the host div; the CONTEXT stays alive for the next mount

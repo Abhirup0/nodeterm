@@ -15,6 +15,7 @@ import {
   createBoardFrameGate,
   createContextLossPolicy,
   createCursorBlinkClock,
+  createPixelRatioWatcher,
   cursorBlinkTarget,
   setCursorBlinkTarget,
   subscribeCursorBlinkRestart,
@@ -50,6 +51,7 @@ import {
   type AtlasResetSource,
   type CursorBlinkClock,
   type CursorBlinkTarget,
+  type PixelRatioWatchHost,
   type StackedNode,
   type StackOrderNode
 } from './SharedGlyphLayer'
@@ -1060,9 +1062,10 @@ describe('syncAtlasPixelRatio', () => {
 
   it('a SECOND observer firing on the same display change does not bump again', () => {
     // The guard above only means something because of two facts this asserts together, and which a
-    // pre-disposed literal cannot show. (1) `pushViewport` runs from the ResizeObserver AND the
-    // window `resize` listener, and both close over the SAME context object — so the second call
-    // sees what the first one did. (2) `disposeContext()` flips `disposed` on that live object,
+    // pre-disposed literal cannot show. (1) `pushViewport` runs from the ResizeObserver, the window
+    // `resize` listener AND the resolution media query, and all three close over the SAME context
+    // object — so the second call sees what the first one did. (2) `disposeContext()` flips
+    // `disposed` on that live object,
     // which is what the guard reads; here that write is stood in for explicitly, since this
     // environment can build no real context to dispose.
     const same = ctx(2)
@@ -1076,6 +1079,151 @@ describe('syncAtlasPixelRatio', () => {
   it('does not rebuild on an unreadable ratio', () => {
     expect(syncAtlasPixelRatio(0, ctx(2))).toBe(false)
     expect(useSharedGlyph.getState().generation).toBe(0)
+  })
+})
+
+/**
+ * The dpr watcher — the TRIGGER the rebuild above depends on.
+ *
+ * `syncAtlasPixelRatio` is only ever reached from `pushViewport`, and the move it exists for (a
+ * window dragged between a retina and a 1x display at the SAME point size) leaves the host's CSS
+ * box identical, so the ResizeObserver stays silent and the whole fix rests on whatever else fires.
+ * xterm does not trust `resize` for this — `CoreBrowserService` watches
+ * `matchMedia('screen and (resolution: Xdppx)')` — and this suite is what makes the same watch
+ * testable here, since the component itself has no DOM in this environment.
+ *
+ * The part most likely to be got wrong is the RE-ARM: the query string embeds the ratio it was
+ * built at, so a query armed at 2dppx says nothing once the window is at 1dppx.
+ */
+describe('createPixelRatioWatcher', () => {
+  /** A media query list with the two methods we use, and a way to deliver a change. */
+  class FakeMql {
+    readonly listeners = new Set<() => void>()
+    constructor(readonly query: string) {}
+    addEventListener(_type: 'change', fn: () => void): void {
+      this.listeners.add(fn)
+    }
+    removeEventListener(_type: 'change', fn: () => void): void {
+      this.listeners.delete(fn)
+    }
+    fire(): void {
+      for (const fn of [...this.listeners]) fn()
+    }
+  }
+
+  /** A fake display whose ratio can be moved, recording every query the watcher arms. */
+  const fakeDisplay = (
+    startDpr: number
+  ): { host: PixelRatioWatchHost; built: FakeMql[]; move(to: number): void } => {
+    let dpr = startDpr
+    const built: FakeMql[] = []
+    return {
+      host: {
+        dpr: () => dpr,
+        match: (query) => {
+          const mql = new FakeMql(query)
+          built.push(mql)
+          return mql
+        }
+      },
+      built,
+      // The browser order: `devicePixelRatio` is ALREADY the new value when the query that no
+      // longer matches delivers its change.
+      move(to: number): void {
+        dpr = to
+      }
+    }
+  }
+
+  it('arms on the ratio it is constructed at, in xterm’s own query form', () => {
+    const display = fakeDisplay(2)
+    createPixelRatioWatcher(display.host, () => {})
+    expect(display.built).toHaveLength(1)
+    expect(display.built[0]?.query).toBe('screen and (resolution: 2dppx)')
+  })
+
+  it('calls back EXACTLY once for one display change', () => {
+    const display = fakeDisplay(2)
+    const onChange = vi.fn()
+    createPixelRatioWatcher(display.host, onChange)
+    display.move(1)
+    display.built[0]?.fire()
+    expect(onChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('RE-ARMS at the new ratio — a second change still fires', () => {
+    // The whole reason this is a watcher rather than one `addEventListener` call. The 2dppx query
+    // is answered once and then never again; without the re-arm the move BACK is silent, and the
+    // canvas keeps an atlas rasterized for the display it is no longer on.
+    const display = fakeDisplay(2)
+    const onChange = vi.fn()
+    createPixelRatioWatcher(display.host, onChange)
+
+    display.move(1)
+    display.built[0]?.fire()
+    expect(display.built).toHaveLength(2)
+    expect(display.built[1]?.query).toBe('screen and (resolution: 1dppx)')
+    // The spent query is released, so the move back cannot be answered twice.
+    expect(display.built[0]?.listeners.size).toBe(0)
+
+    display.move(2)
+    display.built[1]?.fire()
+    expect(onChange).toHaveBeenCalledTimes(2)
+    expect(display.built[2]?.query).toBe('screen and (resolution: 2dppx)')
+  })
+
+  it('bumps the generation exactly once per change, through the real rebuild funnel', () => {
+    // End to end for the thing the trigger exists to reach: the watcher's callback is
+    // `pushViewport`, whose first act is `syncAtlasPixelRatio`. One display change, ONE
+    // re-registration of every grid on the canvas — and the SECOND change gets its own.
+    const display = fakeDisplay(2)
+    let ctx = { dpr: 2, disposed: false }
+    createPixelRatioWatcher(display.host, () => {
+      if (syncAtlasPixelRatio(display.host.dpr(), ctx)) {
+        // What `disposeContext()` + the re-run effect do: the closure meets a FRESH context built
+        // at the ratio we are now on.
+        ctx.disposed = true
+        ctx = { dpr: display.host.dpr(), disposed: false }
+      }
+    })
+
+    display.move(1)
+    display.built[0]?.fire()
+    expect(useSharedGlyph.getState().generation).toBe(1)
+
+    display.move(2)
+    display.built[1]?.fire()
+    expect(useSharedGlyph.getState().generation).toBe(2)
+  })
+
+  it('stops: the listener is released and a later change reaches nobody', () => {
+    const display = fakeDisplay(2)
+    const onChange = vi.fn()
+    const watcher = createPixelRatioWatcher(display.host, onChange)
+    watcher.stop()
+    expect(display.built[0]?.listeners.size).toBe(0)
+    display.move(1)
+    display.built[0]?.fire()
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('is inert where the environment has no matchMedia at all', () => {
+    // The node test environment and any hardened shell. Nothing to watch is a correct outcome —
+    // the `resize` listener is still there — and it must not cost a throw at mount.
+    const watcher = createPixelRatioWatcher({ dpr: () => 2, match: () => null }, () => {
+      throw new Error('unreachable')
+    })
+    expect(() => watcher.stop()).not.toThrow()
+  })
+
+  it('is inert on a query list that cannot be listened to', () => {
+    // An ancient shim exposing only the deprecated `addListener` pair. We do not carry a fallback
+    // for it (nothing else in the repo does), so it degrades to the `resize` trigger alone rather
+    // than throwing on every mount.
+    const watcher = createPixelRatioWatcher({ dpr: () => 2, match: () => ({}) }, () => {
+      throw new Error('unreachable')
+    })
+    expect(() => watcher.stop()).not.toThrow()
   })
 })
 
