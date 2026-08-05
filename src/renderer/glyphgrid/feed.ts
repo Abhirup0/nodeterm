@@ -84,6 +84,34 @@ export interface RowFeedOpts {
 
 const MAX_CODE_POINT = 0x10ffff
 
+/** What a cell reported at the moment it packed to "draw nothing". */
+export interface BlankCellReport {
+  col: number
+  row: number
+  /** `cell.getWidth()`, or -1 when the buffer had no cell for this column at all. */
+  width: number
+  /** The code the feed derived — 0 when nothing was derived. */
+  code: number
+  /** `cell.getChars()`, i.e. what the buffer says is actually IN the cell. */
+  chars: string
+}
+
+/** Debug-only tap, off unless something installs it.
+ *
+ *  This exists because a blank cell has THREE possible authors — a wide glyph's follower, a column
+ *  past the end of the line, and a code the crash guard refuses — and a screenshot cannot tell them
+ *  apart. It fires only when the cell HAS content and we still drew nothing, which is the exact
+ *  shape of the 2026-08-05 "a letter goes missing mid-word" report.
+ *
+ *  Its SILENCE is a result too: if a cell renders blank on screen and this never fires, the feed
+ *  asked for the right glyph and the loss happened downstream (lane upload or draw), which is a
+ *  different hunt entirely. */
+let blankProbe: ((report: BlankCellReport) => void) | null = null
+
+export function setBlankCellProbe(fn: ((report: BlankCellReport) => void) | null): void {
+  blankProbe = fn
+}
+
 /** Whether a code point may reach the atlas — i.e. whether `String.fromCodePoint(code)` in the
  *  rasterizer is safe AND worth a slot.
  *
@@ -278,6 +306,11 @@ export function packViewportRow(
     let code = 0
     let bold = false
     let italic = false
+    // Debug-only witnesses, read at the bottom of the loop. -1 distinguishes "no cell" from a cell
+    // that reported width 0; `getChars()` is only called when the probe is installed, because it
+    // allocates a string per cell and this loop runs for every cell of every packed row.
+    let probeWidth = -1
+    let probeChars = ''
 
     if (cell) {
       fg = resolveFg(cell, theme)
@@ -290,6 +323,10 @@ export function packViewportRow(
       if (cell.isDim()) fg = dimLane(fg)
 
       const width = cell.getWidth()
+      if (blankProbe) {
+        probeWidth = width
+        probeChars = cell.getChars()
+      }
       if (width === 0) {
         // Second half of the preceding wide glyph: no glyph of its own, and the lead's colors
         // when we have them (a stray width-0 cell with no lead keeps its own — still never
@@ -354,6 +391,11 @@ export function packViewportRow(
 
     // fg/bg are FINAL here — this is the only place the atlas may be asked, see the doc comment.
     const glyph = isRenderableCode(code) ? atlas.glyphFor(code, bold, italic, fg, bg) : 0
+    // A cell that HOLDS something and still draws nothing is the defect under investigation. A
+    // space is excluded because that is the correct answer for it, not a loss.
+    if (blankProbe && glyph === 0 && probeChars !== '' && probeChars !== ' ') {
+      blankProbe({ col, row: bufferRow, width: probeWidth, code, chars: probeChars })
+    }
     writeCell(out, col, glyph, fg, bg, flags)
   }
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CELL_STRIDE, FLAG_BOLD, FLAG_CURSOR, FLAG_ITALIC, FLAG_SELECTED, FLAG_UNDERLINE, FLAG_WIDE, packColor, readCell } from './cells'
 import type { GlyphAtlas } from './atlas'
 import type { DecorationReader } from './decorations'
-import { packViewportRow, type CellView, type RowFeedOpts, type ThemeLanes } from './feed'
+import { packViewportRow, setBlankCellProbe, type BlankCellReport, type CellView, type RowFeedOpts, type ThemeLanes } from './feed'
 
 const THEME: ThemeLanes = {
   fg: packColor(0xd0, 0xd1, 0xd2, 0xff),
@@ -685,5 +685,35 @@ describe('packViewportRow — missing cells and buffer reuse', () => {
     )
     expect(seen).toEqual([work, work])
     expect(readCell(out, 0).glyph).toBe(901)
+  })
+})
+
+describe('the blank-cell probe', () => {
+  it('names the cell, what it holds and the width that produced the blank', () => {
+    const reports: BlankCellReport[] = []
+    setBlankCellProbe((r) => reports.push(r))
+    try {
+      // A cell that HOLDS a letter and still reports width 0 — the shape of the 2026-08-05 report,
+      // where a letter went missing mid-word. The probe must name the width, because that is the
+      // one fact that says whether the loss is ours or the buffer's.
+      const orphan = makeCell({ chars: 'L', code: 0x4c, width: 0 })
+      pack([orphan], { bufferRow: 7 })
+      expect(reports).toEqual([{ col: 0, row: 7, width: 0, code: 0, chars: 'L' }])
+    } finally {
+      setBlankCellProbe(null)
+    }
+  })
+
+  it('stays silent for a space and for a cell that did get a glyph', () => {
+    const reports: BlankCellReport[] = []
+    setBlankCellProbe((r) => reports.push(r))
+    try {
+      // A space packs to no glyph and that is CORRECT, not a loss — reporting it would bury the
+      // real finding under one line per blank column on the canvas.
+      pack([makeCell({ chars: ' ', code: 0x20 }), makeCell({ chars: 'A', code: 0x41 })])
+      expect(reports).toEqual([])
+    } finally {
+      setBlankCellProbe(null)
+    }
   })
 })
