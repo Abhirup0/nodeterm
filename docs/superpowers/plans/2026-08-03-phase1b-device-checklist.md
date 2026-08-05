@@ -304,17 +304,33 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       the block behind it — an un-inverted right half of 日 now means the follower's slot was keyed
       on the wrong colours.
 
-- [ ] **2.16 A double-width character is WHOLE.** The 2026-08-05 report: ⭐ arrived as a fragment,
-      because a slot's ink box is one cell and the follower cell was written blank. Print a row of
-      wide characters — `printf '⭐ 👍 😄 日本語 中文\n'` — and compare against **GPU per terminal**
-      on the same line. Each character is complete, and its two halves **meet without a step**: no
-      seam of background down the middle, no visible offset between the halves, no doubled left
-      half. Then repeat with **bold** on (`printf '\033[1m⭐ 日本語\033[0m\n'`) — the two halves must
-      come off the same face, so a bold left half beside a regular right half is the failure.
-      Expected residual: the seam may show a hairline difference in antialiasing, because the two
-      halves are rasterized at different sub-texel phases (see `inkX` in `raster.ts`). A hairline is
-      the accepted cost; a visible break or a colour seam is not. Characters wider than two cells
-      are still cut — that is L16, unchanged.
+- [ ] **2.16 A double-width character is WHOLE — in EVERY renderer.** The 2026-08-05 report had two
+      faces and one cause: shared showed ⭐ as a fragment, GPU/DOM showed 👍😄 overlapping the next
+      character. xterm was measuring on the **Unicode 6** table, where every emoji is ONE cell wide,
+      while tmux and the agent CLIs measure on a modern one where they are two (see
+      `terminal/unicode-width.ts`). A renderer cannot draw a two-cell character correctly while the
+      buffer insists it is one cell.
+
+      Print a row of wide characters — `printf '⭐ 👍 😄 🎉 日本語 中文\n'` — and look at it in
+      **all three** renderer settings (Shared, GPU per terminal, Off). In each: every character is
+      complete, nothing overlaps its neighbour, and the two halves **meet without a step** — no
+      background seam down the middle, no offset, no doubled left half. Repeat with **bold**
+      (`printf '\033[1m⭐ 日本語\033[0m\n'`); a bold left half beside a regular right half is the
+      failure. Expected residual in SHARED only: the seam may show a hairline antialiasing
+      difference, because the two halves are rasterized at different sub-texel phases (`inkX` in
+      `raster.ts`). A hairline is the accepted cost; a visible break or a colour seam is not.
+      Characters wider than two cells are still cut — that is L16, unchanged.
+
+- [ ] **2.17 Column alignment after an emoji — the reason 2.16 matters.** Widths are not a looks
+      question: tmux repaints by ABSOLUTE cursor position, so if it and xterm disagree about how
+      many columns a character spans, the two screen models drift apart for the rest of the line and
+      a partial repaint can leave a column blank or doubled well away from the emoji. Run
+      `printf '⭐x⭐x⭐x\n123456789\n'` and check the `x`s line up with the digits they should; then
+      resize the node and confirm nothing shifts. **The real test is an agent session** — run one
+      that prints emoji and watch for a letter going missing mid-word, which is the other
+      2026-08-05 report and a live candidate for the same cause. If misalignment appears **after**
+      this change, that host's tmux is the one on the old table (a build without utf8proc) — report
+      it as such; the fix is that tmux, not a return to Unicode 6.
 
 ## 3. Interactions
 

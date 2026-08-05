@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { useSettings } from '../../state/settings'
 import { applyLiveOptions, xtermOptionsFromSettings } from '../../terminal/terminal-config'
 import { useXtermVisualSettings } from '../../terminal/useXtermVisualSettings'
+import { activateUnicode11 } from '../../terminal/unicode-width'
 
 /** Fixed grid — the preview is a sample, not a fitted terminal, so there is no FitAddon and no
  *  ResizeObserver to keep in sync. Wide enough for the sample lines below without wrapping. */
@@ -56,6 +57,11 @@ export function TerminalPreview(): React.JSX.Element {
       rows: PREVIEW_ROWS,
       disableStdin: true
     })
+    // The sample happens to hold no wide character today, so this changes nothing on screen. It is
+    // here so the invariant stays "every Terminal in this app measures characters the same way" —
+    // cheaper to keep than "every Terminal except the preview", and the day someone puts an emoji
+    // in the sample it would otherwise preview at a width no real terminal uses.
+    activateUnicode11(term)
     termRef.current = term
     term.open(hostRef.current!)
     term.write(SAMPLE)

@@ -21,6 +21,7 @@ import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../ter
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
+import { activateUnicode11 } from '../terminal/unicode-width'
 import {
   createFileLinkProvider,
   createUrlLinkProvider,
@@ -870,6 +871,9 @@ export function TerminalNode({
     // Appearance comes from ONE place, shared with the kanban card modal's viewer of this same
     // session (`ModalTerminal`) — see `xtermOptionsFromSettings`.
     const term = parked?.term ?? new Terminal(xtermOptionsFromSettings(s))
+    // Only on a FRESH instance: a parked terminal already carries the table, and the buffer it kept
+    // alive was measured with it — re-registering under a live buffer buys nothing.
+    if (!parked) activateUnicode11(term)
     const fit = parked ? parked.fit : new FitAddon()
     const searchAddon = parked ? parked.search : new SearchAddon()
     termRef.current = term
