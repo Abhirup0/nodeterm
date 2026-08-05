@@ -81,6 +81,8 @@ const ROWS = {
       'graphics',
       'acceleration',
       'shared',
+      // Kept although Shared GPU is no longer labelled experimental: it was, for two releases, and
+      // a user who remembers the word must still land on the row that owns it.
       'experimental'
     ]
   },
@@ -337,11 +339,11 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
           label="Terminal rendering"
           description={
             (isMacPlatform()
-              ? 'Auto uses the DOM renderer on macOS (WebGL terminals can flicker or composite black there), so GPU per terminal is an explicit opt-in. '
+              ? 'Auto uses Shared GPU on macOS, so GPU per terminal is an explicit opt-in (one context per terminal can flicker or composite black there). '
               : 'Auto uses one GPU context per terminal; switch to Off if the window flickers. ') +
-            'Shared GPU is experimental — every terminal paints into a single canvas-wide context, ' +
-            'which lifts the per-terminal context limit but may render incorrectly; it falls back ' +
-            'to DOM on failure.'
+            'Shared GPU draws every terminal into a single canvas-wide context, which lifts the ' +
+            'per-terminal context limit; GPU per terminal gives each one its own context; Off uses ' +
+            'no GPU at all. Shared GPU falls back to DOM on failure.'
           }
           control={
             <Select
@@ -355,7 +357,7 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
             >
               <option value="auto">Auto (default)</option>
               <option value="on">GPU per terminal</option>
-              <option value="shared">Shared GPU (experimental)</option>
+              <option value="shared">Shared GPU</option>
               <option value="off">Off (DOM renderer)</option>
             </Select>
           }

@@ -57,9 +57,10 @@ export interface WorldRect {
  * a padding-less, border-less `.term-node__body`. If either changes, the caller must measure
  * `.term-node__body` instead or the plate silently under-covers again.
  *
- * This replaced a `padPx` scalar taken from the host's asymmetric CSS padding (`4px 2px 2px 6px`,
- * reduced to its 6px maximum). That covered the left/top insets and nothing else, which is exactly
- * why bands showed at the BOTTOM and RIGHT — the fit slack there routinely exceeds 6px, and a
+ * This replaced a `padPx` scalar taken from the host's asymmetric CSS padding (`4px 2px 2px 6px`
+ * as it stood then), reduced to its 6px maximum. That covered the left/top insets and nothing
+ * else, which is exactly why bands showed at the BOTTOM and RIGHT — the fit slack there routinely
+ * exceeds 6px, and a
  * letterboxed node's bands are tens of pixels. The padding does not need reading at all now: it
  * lies INSIDE the measured box (`clientWidth/Height` include padding), covered on all four sides.
  *

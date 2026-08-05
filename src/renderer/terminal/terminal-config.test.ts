@@ -4,6 +4,7 @@ import {
   closedByLabel,
   copyKeyAction,
   createDataGate,
+  cursorPlacementSeq,
   disposalAction,
   forgetNodeTermState,
   isCopyShortcut,
@@ -260,6 +261,34 @@ describe('stripTrailingNewline', () => {
     // of the captured visible screen lands in scrollback, and tmux's redraw repaints it again —
     // one duplicated line at the seam on every warm reattach.
     expect(toXtermText(stripTrailingNewline('one\ntwo\n'))).toBe('one\r\ntwo')
+  })
+})
+
+/**
+ * …and the row the seed leaves the cursor on is the LAST CAPTURED one, not the one the pane has it
+ * on. That was the 2026-08-05 report: refresh a terminal running an agent CLI and the block cursor
+ * sits at the end of the status line instead of in the input prompt, until the first keystroke
+ * makes the app repaint. `capture-pane` carries text and nothing else, so the position has to be
+ * asked of tmux separately and written after the paint.
+ */
+describe('cursorPlacementSeq', () => {
+  it('moves the cursor to the pane position, converting 0-based to CUP 1-based', () => {
+    // tmux says column 6, row 1 (0-based). CUP is `ESC [ row ; col H`, 1-based, ROW FIRST — getting
+    // that order backwards is the classic way to land the cursor on a transposed cell.
+    expect(cursorPlacementSeq({ x: 6, y: 1, visible: true })).toBe('\x1b[2;7H\x1b[?25h')
+    expect(cursorPlacementSeq({ x: 0, y: 0, visible: true })).toBe('\x1b[1;1H\x1b[?25h')
+  })
+
+  it('carries the visibility the capture also drops', () => {
+    // A full-screen TUI that hid its cursor would otherwise have one painted back over it — the
+    // same class of gap as the mouse modes (`CO_ATTACH_MOUSE_SEQ`).
+    expect(cursorPlacementSeq({ x: 3, y: 4, visible: false })).toBe('\x1b[5;4H\x1b[?25l')
+  })
+
+  it('writes NOTHING when tmux could not be asked', () => {
+    // The pre-fix behaviour: leave the cursor where the paint left it. A poor place, but a known
+    // one — better than a guessed coordinate the pane never had.
+    expect(cursorPlacementSeq(undefined)).toBe('')
   })
 })
 

@@ -1,4 +1,4 @@
-import { GUTTER_PX, slotPitch, type GlyphRasterizer } from './atlas'
+import { GUTTER_PX, partCells, slotPitch, type GlyphRasterizer } from './atlas'
 import { boxGlyphOps } from './box-glyphs'
 import { unpackColor } from './cells'
 
@@ -30,6 +30,52 @@ export interface RasterFont {
  * `GlyphAtlas.glyphFor` applies to its KEY, kept here so the two can never disagree about what
  * "the same colour" means.
  */
+/**
+ * How much a glyph's ink may exceed what its character is entitled to before it is shrunk.
+ *
+ * Not zero, and the direction matters. `actualBoundingBox*` reports the ANTIALIASED extent, so a
+ * perfectly cell-sized glyph routinely measures a fraction of a pixel over — and a zero tolerance
+ * would put every full-bleed box-drawing character through a 0.99 scale for nothing, which is both
+ * wasted work and a way to introduce a hairline gap in a run of `───` that is currently seamless.
+ * (The box-drawing ranges take the geometric path and never reach this, but the aliases and the
+ * faces that draw to the cell edge do.)
+ *
+ * 4% is comfortably above that fringe and far below a real overflow: the 2026-08-05 icon measured
+ * roughly a quarter over its cell, and the class this exists for — symbols drawn to a square box in
+ * a font whose advance is not square — is never marginal.
+ */
+const INK_FIT_TOLERANCE = 1.04
+
+/**
+ * The floor on shrinking. Below this a glyph has stopped being small and started being unreadable,
+ * and a legible fragment beats an illegible whole — so past the floor the clip takes over again and
+ * the old truncation is what happens, which is exactly what L16 already describes.
+ *
+ * Reached only by ink more than ~1.7 cells wide on a character entitled to one, which is not a
+ * symbol-in-a-monospace-face any more; it is a face being used at the wrong size.
+ */
+const MIN_INK_FIT_SCALE = 0.6
+
+/**
+ * The factor a glyph must be drawn at to fit its entitlement, or exactly 1 for "draw it unchanged".
+ *
+ * Returning the literal 1 is part of the contract, not an optimisation: the caller branches on it
+ * to take the untouched `fillText` path, so every glyph that was never oversized is rasterized by
+ * the same call it was before shrink-to-fit existed.
+ *
+ * A metrics object without `actualBoundingBox*` (or with nonsense in it) yields 1 as well. The
+ * fields are standard but this runs on whatever canvas the platform gives us, and the failure to
+ * avoid is a NaN scale silently blanking every glyph — declining to shrink just restores the older
+ * behaviour for that platform.
+ */
+export function shrinkToFit(metrics: TextMetrics, allowance: number): number {
+  const inkW = metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight
+  if (!Number.isFinite(inkW) || inkW <= 0) return 1
+  if (!Number.isFinite(allowance) || allowance <= 0) return 1
+  if (inkW <= allowance * INK_FIT_TOLERANCE) return 1
+  return Math.max(MIN_INK_FIT_SCALE, allowance / inkW)
+}
+
 function cssColor(packed: number): string {
   const { r, g, b } = unpackColor(packed >>> 0)
   return `rgb(${r},${g},${b})`
@@ -204,13 +250,21 @@ function baselineIn(ctx: OffscreenCanvasRenderingContext2D, font: RasterFont): n
  *     2026-08-04 device round measured one: U+23BF ⎿, Claude Code's tool-result connector, kept
  *     about a third of its horizontal foot (8 px against GPU mode's 28).
  *
+ *     ONE MEMBER OF THE CLASS IS NOW OUT OF IT: a DOUBLE-WIDTH character (emoji, CJK). Its overflow
+ *     was never really overflow — the terminal has already reserved a second cell for it — so it
+ *     needs no ink-sized slot, only a second cell-sized one holding the character's right half
+ *     (`half` above, and `GlyphAtlas.glyphFor`). Before that, ⭐ rendered as a fragment: the
+ *     2026-08-05 device round. Everything this clip defends is untouched by it, because each half
+ *     is still clipped to its own cell box.
+ *
  *     THE ESCAPE HATCH USED SO FAR is `box-glyphs.ts`: a glyph we DRAW is full-cell by construction,
  *     so the clip has nothing to cut. That covers line art — the box-drawing and block ranges, plus
  *     the handful of Misc-Technical aliases the ⎿ finding added — and it is the right answer for
  *     that class, since those characters are DEFINED as fractions of the cell.
  *
- *     THE REAL ESCALATION, if a NON-line-art glyph ever needs the overflow (an ornate script face, a
- *     symbol font with genuine side bearings), is to do what xterm does: measure a per-glyph
+ *     THE REAL ESCALATION, if a NON-line-art, SINGLE-WIDTH glyph ever needs the overflow (an ornate
+ *     script face, a symbol font with genuine side bearings), is to do what xterm does: measure a
+ *     per-glyph
  *     bounding box, allocate slots sized to the INK rather than to the cell, and emit quads sized to
  *     the glyph rather than to the cell. That reaches into the atlas allocator, the slot-rect
  *     derivation and the shader's uv maths all at once, and it changes what the LOD/gutter argument
@@ -280,7 +334,25 @@ export function createCanvasRasterizer(
     /** `x, y` is the INK origin the atlas hands us — already one gutter inside the pitch cell on
      *  each axis (`GlyphAtlas.cellXY`) — and `fg`/`bg` are the FINAL packed colour lanes for this
      *  slot. Two DIFFERENT rects are involved; see the header's invariants 3 and 4. */
-    draw(code, bold, italic, x, y, fg, bg) {
+    draw(code, bold, italic, x, y, fg, bg, part = 'whole') {
+      // The glyph's own origin inside this slot. 'wide-right' is the RIGHT half of a double-width
+      // character (see `GlyphAtlas.glyphFor`): the character is drawn one cell FURTHER LEFT, so the
+      // window this slot's clip keeps is its second cell instead of its first. Everything else
+      // below is untouched — same clip, same pitch fill, same edge extension — because that fix is
+      // about WHICH part of the glyph a cell-sized slot holds, not about the slot's size.
+      //
+      // The shift is the FRACTIONAL cell, not a whole texel, so the two halves meet exactly where
+      // the two on-screen cells meet (cells are laid out on the fractional cell pitch too). The
+      // cost is that the right half is rasterized at a different sub-texel PHASE than the left —
+      // its antialiasing can differ by a fraction of a pixel along the seam. That is the honest
+      // trade: a phase difference is a hairline, a whole-texel shift would be a visible break in
+      // the character.
+      const inkX = part === 'wide-right' ? x - font.cellW : x
+      // What this character is ENTITLED to, in px — one cell, or two for a double-width one. The
+      // shrink below measures against this, never against the slot: both halves of a wide glyph are
+      // the same drawing spread over two cells, so measuring either against ONE cell would squash
+      // it back into the fragment the two-slot mechanism exists to prevent.
+      const allowance = partCells(part) * font.cellW
       // 1. THE BACKGROUND, over the whole PITCH rect — gutters included. The atlas passes the INK
       //    origin, so the pitch cell's corner is one gutter back on each axis; its extent is the
       //    pitch, which is `ceil(cell) + 2*GUTTER_PX`. Both are whole texels and consecutive pitch
@@ -368,11 +440,56 @@ export function createCanvasRasterizer(
           // and there is no partial texel to complete.
           const w = op.x + op.w >= font.cellW - FAR_EDGE_EPS ? colsW - op.x : op.w
           const h = op.y + op.h >= font.cellH - FAR_EDGE_EPS ? colsH - op.y : op.h
-          ctx.fillRect(x + op.x, y + op.y, w, h)
+          // `inkX`, not `x`: a geometric glyph is defined as a fraction of ONE cell, so on `half: 1`
+          // every op lands entirely left of the clip and the slot comes out blank — which is the
+          // right answer, since a cell-defined glyph has no second cell. (No wide character is
+          // claimed by box-glyphs.ts today, so this is a floor rather than a live path.)
+          ctx.fillRect(inkX + op.x, y + op.y, w, h)
         }
       } else {
         ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${font.sizePx}px ${font.family}`
-        ctx.fillText(String.fromCodePoint(code), x, y + baseline)
+        const glyph = String.fromCodePoint(code)
+        // SHRINK-TO-FIT, the 2026-08-05 device finding (an agent CLI's task-list icon rendering
+        // with its right edge sliced off; GPU mode showed it whole).
+        //
+        // A symbol whose ink is wider than its cell used to be CUT by the clip above, and the clip
+        // cannot simply be relaxed — ink in the gutter is what the MAX_SAFE_LOD derivation forbids,
+        // and the result is a ghost of this glyph in a neighbour's minified texels. So the glyph is
+        // made to fit instead of being trimmed to fit.
+        //
+        // WHY THIS RATHER THAN WHAT XTERM DOES. xterm measures every glyph, sizes its atlas slot to
+        // the INK and emits a quad of that size, so ink legitimately overhangs into neighbouring
+        // cells. That is the honest answer and it is also the expensive one: it reaches the atlas
+        // allocator, the slot-rect derivation and the shader's uv maths at once, and it rewrites
+        // what the gutter argument defends. This is the cheap approximation of the same intent, and
+        // its cost is stated plainly: an oversized glyph renders slightly SMALLER here than in GPU
+        // mode. Smaller and whole beats full-size and severed — but it is not parity, and the
+        // ink-sized-slot escalation is still the thing that would deliver parity.
+        //
+        // Ordinary text is untouched, and that is load-bearing: a Latin glyph's ink never
+        // approaches its advance, the tolerance absorbs an antialiasing fringe, and a scale of
+        // exactly 1 takes the SAME `fillText` call the code took before this existed. So no
+        // rendering anyone has already looked at moves.
+        const metrics = ctx.measureText(glyph)
+        const scale = shrinkToFit(metrics, allowance)
+        if (scale === 1) {
+          ctx.fillText(glyph, inkX, y + baseline)
+        } else {
+          // Scaled about the BASELINE, so the glyph keeps sitting on the same line as its
+          // neighbours — a symbol that shrank AND rose would read as misaligned rather than small.
+          // Horizontally it is re-centred inside the allowance, because an oversized glyph is
+          // typically a symbol drawn to fill its box: left-anchoring the shrunk version would park
+          // it against the previous character with a gap on the right.
+          const inkW = metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight
+          ctx.save()
+          ctx.translate(
+            inkX + (allowance - scale * inkW) / 2 + scale * metrics.actualBoundingBoxLeft,
+            y + baseline
+          )
+          ctx.scale(scale, scale)
+          ctx.fillText(glyph, 0, 0)
+          ctx.restore()
+        }
       }
       ctx.restore()
       // 3. THE EDGE EXTENSION — clamp-to-edge padding, the standard atlas technique. Replicate the

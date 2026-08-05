@@ -55,6 +55,14 @@ export interface PtyCreateOptions {
   requireRemote?: boolean
 }
 
+/** A tmux pane's cursor, as tmux reports it: 0-based column/row within the pane, plus whether the
+ *  application currently wants it shown (`#{cursor_flag}`). */
+export interface PaneCursor {
+  x: number
+  y: number
+  visible: boolean
+}
+
 /**
  * Result of creating a PTY session. `fresh` distinguishes a tmux session that had to be
  * created anew (cold start — e.g. after a machine reboot killed the tmux server) from a
@@ -84,6 +92,25 @@ export interface PtyCreateResult {
    * — a plain-shell session has no tmux to capture and simply gets nothing).
    */
   screen?: string
+  /**
+   * Where the CURSOR sits in the session that `screen` was captured from, in 0-based pane
+   * coordinates, with tmux's cursor-visibility flag.
+   *
+   * The THIRD thing `capture-pane` does not carry, after the mouse modes below. Its output is the
+   * pane's TEXT, so painting it leaves the emulator's cursor wherever the last character landed —
+   * the end of the last non-blank row. That was visible as: refresh a terminal running an agent
+   * CLI, and the block cursor sits at the end of the status line instead of in the input prompt,
+   * until the first keystroke makes the app repaint and place it (reported 2026-08-05).
+   *
+   * Absent when tmux could not be asked, which the renderer treats as "leave the cursor alone" —
+   * the pre-fix behaviour, and better than guessing a position.
+   *
+   * The coordinates are absolute in the pane, and the paint preserves that frame: the capture
+   * starts at pane row 0, the renderer writes it into a terminal that is at least as tall (a
+   * SMALLER joiner resizes the pty, and a resizing join gets no `screen` at all), and tmux trims
+   * trailing blank rows — so nothing scrolls and pane row N is emulator row N.
+   */
+  cursor?: PaneCursor
   /**
    * This create JOINED a live TMUX-backed session (co-attach), so the fresh xterm must be told
    * tmux's mouse-tracking is on. tmux emits the mouse-enable DECSET sequences (`?1000h ?1002h
@@ -768,18 +795,19 @@ export interface Settings {
   accent: string
   tmuxEnabled: boolean
   /** GPU (WebGL) terminal rendering. 'off' routes every terminal to xterm's DOM renderer.
-   *  'auto' (default) = on everywhere EXCEPT macOS: repeated field reports there (whole-window
-   *  flicker; terminals compositing black after renderer swaps, with zero JS-visible errors)
-   *  point at the OS compositor mishandling live WebGL canvases — the only field-proven-clean
-   *  configuration on those machines is the DOM renderer, so macOS gets it by default and WebGL
-   *  stays a deliberate opt-in ('on'). Legacy boolean values are migrated on load: `false` (an
-   *  explicit escape-hatch choice) → 'off'; `true` (indistinguishable from the old merged-in
-   *  default) → 'auto'.
+   *  'auto' (default) = one WebGL context PER TERMINAL everywhere except macOS, where it is
+   *  'shared'. Repeated macOS field reports (whole-window flicker; terminals compositing black
+   *  after renderer swaps, with zero JS-visible errors) point at the OS compositor mishandling
+   *  many live WebGL canvases — which is why per-terminal WebGL stays a deliberate opt-in ('on')
+   *  there, and why the ONE-context renderer is what macOS defaults to instead. Legacy boolean
+   *  values are migrated on load: `false` (an explicit escape-hatch choice) → 'off'; `true`
+   *  (indistinguishable from the old merged-in default) → 'auto'.
    *
-   *  'shared' is the EXPERIMENTAL glyphgrid renderer: instead of one WebGL context per terminal
-   *  (which is what the ~16-context cap and the whole budget coordinator exist to ration), every
-   *  terminal on the canvas paints into ONE canvas-wide context. Opt-in only, it may render
-   *  incorrectly, and any failure drops the session back to xterm's DOM renderer. */
+   *  'shared' is the glyphgrid renderer: instead of one WebGL context per terminal (which is what
+   *  the ~16-context cap and the whole budget coordinator exist to ration), every terminal on the
+   *  canvas paints into ONE canvas-wide context. Promoted out of experimental on 2026-08-05 after
+   *  the device checklist + soak; any failure still drops the session back to xterm's DOM
+   *  renderer. See `resolveTerminalRenderer` (shared/webgl.ts) for the full history. */
   terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */

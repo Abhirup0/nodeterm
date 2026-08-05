@@ -21,6 +21,7 @@ import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../ter
 import type { TerminalTransport } from '../terminal/transport'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
+import { activateUnicode11 } from '../terminal/unicode-width'
 import {
   createFileLinkProvider,
   createUrlLinkProvider,
@@ -33,6 +34,7 @@ import {
   attachReplay,
   closedByLabel,
   createDataGate,
+  cursorPlacementSeq,
   disposalAction,
   forgetNodeTermState,
   letterboxFor,
@@ -934,6 +936,9 @@ export function TerminalNode({
     // Appearance comes from ONE place, shared with the kanban card modal's viewer of this same
     // session (`ModalTerminal`) — see `xtermOptionsFromSettings`.
     const term = parked?.term ?? new Terminal(xtermOptionsFromSettings(s))
+    // Only on a FRESH instance: a parked terminal already carries the table, and the buffer it kept
+    // alive was measured with it — re-registering under a live buffer buys nothing.
+    if (!parked) activateUnicode11(term)
     const fit = parked ? parked.fit : new FitAddon()
     const searchAddon = parked ? parked.search : new SearchAddon()
     termRef.current = term
@@ -1787,7 +1792,17 @@ export function TerminalNode({
           // which is core's other route into the local branch.
           requireRemote: sshRemoteTmux
         })
-        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen, coAttachMouse, unavailable }) => {
+        .then(
+        async ({
+          sessionId: sid,
+          fresh,
+          accountFallback: fellBack,
+          closed,
+          screen,
+          cursor,
+          coAttachMouse,
+          unavailable
+        }) => {
         // REFUSED: `requireRemote` and core could not spawn remotely (the master died inside our
         // round-trip, or `ssh` is missing). Nothing was spawned — land in the same offline state
         // the near-side guard above produces, retry included.
@@ -2003,6 +2018,9 @@ export function TerminalNode({
               // Start from a known-clean SGR state; the capture is LF-separated (`capture-pane -p`)
               // and xterm runs with convertEol:false, so the LFs have to become CRLFs.
               term.write('\x1b[0m' + toXtermText(stripTrailingNewline(screen as string)))
+              // …and put the cursor back where the PANE has it. The capture is text, so the paint
+              // above left the cursor after its last character — see `cursorPlacementSeq`.
+              term.write(cursorPlacementSeq(cursor))
             }
           }
           // A CO-ATTACH JOINER (a second window on this node — rare on the canvas, but possible)

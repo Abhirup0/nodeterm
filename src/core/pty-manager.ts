@@ -10,6 +10,7 @@ import { safeSessionProgram } from '../shared/node-exec'
 import { REF_MAX_LEN } from '../shared/presence'
 import {
   DEFAULT_SETTINGS,
+  type PaneCursor,
   type PtyCreateOptions,
   type PtyCreateResult,
   type Settings,
@@ -25,8 +26,10 @@ import {
   remoteTmuxPtyArgs,
   remoteTmuxSendKeysArgs,
   remoteCapturePaneArgs,
-  remotePaneCommandArgs
+  remotePaneCommandArgs,
+  remotePaneCursorArgs
 } from './remote-ssh/control-master'
+import { parsePaneCursor } from './pane-cursor'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { bracketedInjection } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
@@ -866,9 +869,17 @@ export class PtyManager {
     // as '': the renderer must not reset a terminal for nothing. A plain-shell joiner therefore
     // still lands on a blank-but-live screen — there is no source of truth for its past output,
     // which is exactly what "no tmux = no continuity" already means everywhere else here.
-    return this.captureForResync(existingId)
-      .catch(() => '')
-      .then((screen) => (screen ? { ...base, screen } : base))
+    // The cursor rides ALONGSIDE the screen, never appended to it: the renderer strips exactly one
+    // trailing newline off the capture before painting (`stripTrailingNewline`, which stops that
+    // last LF scrolling the top row into scrollback), and a control sequence tacked on the end
+    // would leave that regex nothing to match. Asked for in PARALLEL — it is a second tmux round
+    // trip on the create path, and serialising it would add its latency to every join.
+    return Promise.all([
+      this.captureForResync(existingId).catch(() => ''),
+      this.paneCursor(existingId).catch(() => undefined)
+    ]).then(([screen, cursor]) =>
+      screen ? { ...base, screen, ...(cursor ? { cursor } : {}) } : base
+    )
   }
 
   /** Spawn a brand-new session for this client (the non-co-attach path). */
@@ -1799,6 +1810,49 @@ export class PtyManager {
     if (!key) return ''
     if (session.sshRemote) return this.captureSession(key)
     return this.captureSnapshot(key)
+  }
+
+  /**
+   * Where the pane's cursor is, for a client about to PAINT a captured screen.
+   *
+   * `capture-pane` returns the pane's text and nothing else, so a client painted from it ends up
+   * with its cursor after the last character written rather than where the application put it —
+   * the 2026-08-05 report (refresh an agent CLI, and the block sits at the end of the status line
+   * until the first keystroke repaints). This is the missing half, asked of tmux directly.
+   *
+   * `undefined` on every failure — no tmux, no session, an unparseable reply, a dead ControlMaster.
+   * The renderer's answer to that is to leave the cursor alone, which is exactly the behaviour this
+   * fix replaces, so a failure here costs nothing that was not already lost.
+   */
+  async paneCursor(sessionId: string): Promise<PaneCursor | undefined> {
+    const session = this.sessions.get(sessionId)
+    const key = session?.persistKey ?? session?.indexKey
+    if (!session || !key) return undefined
+    const target = sessionName(key)
+    try {
+      if (session.sshRemote) {
+        const ssh = findSsh()
+        if (!ssh) return undefined
+        const { stdout } = await runAsync(
+          ssh,
+          remotePaneCursorArgs(session.sshRemote.conn, session.sshRemote.controlPath, target)
+        )
+        return parsePaneCursor(stdout)
+      }
+      if (!this.tmuxPath) return undefined
+      const { stdout } = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'display-message',
+        '-p',
+        '-t',
+        target,
+        '#{cursor_x} #{cursor_y} #{cursor_flag}'
+      ])
+      return parsePaneCursor(stdout)
+    } catch {
+      return undefined
+    }
   }
 
   /**

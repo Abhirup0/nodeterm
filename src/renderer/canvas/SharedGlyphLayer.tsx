@@ -42,6 +42,7 @@ import {
 } from '../glyphgrid/atlas'
 import type { Camera } from '../glyphgrid/camera'
 import { GlyphGridEngine } from '../glyphgrid/engine'
+import { setBlankCellProbe } from '../glyphgrid/feed'
 import { createFrameLoop, type FrameLoop } from '../glyphgrid/frame-driver'
 import type { GlyphGL } from '../glyphgrid/gl'
 import { createWebgl2GL } from '../glyphgrid/gl-webgl2'
@@ -723,15 +724,45 @@ function glyphDebugOn(): boolean {
 
 function glyphDebugTap(): ((info: GlyphSlotAllocation) => void) | undefined {
   if (!glyphDebugOn()) return undefined
-  return ({ slot, code, bold, italic, x, y, fg, bg }): void => {
+  return ({ slot, code, bold, italic, x, y, fg, bg, part }): void => {
     console.warn(
       `[glyphgrid] slot ${slot} code 0x${code.toString(16)} ${JSON.stringify(
         String.fromCodePoint(code)
-      )}${bold ? ' bold' : ''}${italic ? ' italic' : ''} at ${x},${y} fg=${fg.toString(
-        16
-      )} bg=${bg.toString(16)}`
+      )}${bold ? ' bold' : ''}${italic ? ' italic' : ''}${
+        // Only a WIDE part is called out. Every ordinary glyph is 'whole', so printing that on
+        // every line would be noise on the one log a device round reads line by line — and a wide
+        // character showing no PAIR here is exactly the failure worth spotting.
+        part === 'whole' ? '' : ` ${part}`
+      } at ${x},${y} fg=${fg.toString(16)} bg=${bg.toString(16)}`
     )
   }
+}
+
+/** Names the author of a cell that HOLDS a character and still packs to "draw nothing".
+ *
+ *  The three answers are not a list of suspects, they are the three code paths that can produce a
+ *  blank lane, so the first report ends the guessing:
+ *   - `width 0`   → the buffer says this column is a wide glyph's FOLLOWER. Then the bug is upstream
+ *                   of us (or in the lead's width handling), not in the atlas.
+ *   - `width -1`  → the buffer had no cell for the column at all, i.e. we packed past the end of a
+ *                   line we thought was longer.
+ *   - `width >=1` → the cell exists and holds text, and the crash guard still refused the derived
+ *                   code: read the reported `code` against `isRenderableCode`.
+ *
+ *  Throttled per (row, col) so a stuck cell on a repainting row cannot flood the console — the
+ *  interesting fact is WHICH cell and WHY, and it does not get truer the hundredth time. */
+function installBlankCellProbe(): void {
+  if (!glyphDebugOn()) return
+  const seen = new Set<string>()
+  setBlankCellProbe(({ col, row, width, code, chars }) => {
+    const key = `${row}:${col}`
+    if (seen.has(key)) return
+    seen.add(key)
+    console.warn(
+      `[glyphgrid] BLANK CELL row ${row} col ${col} holds ${JSON.stringify(chars)} ` +
+        `(code 0x${code.toString(16)}, width ${width}) but drew nothing`
+    )
+  })
 }
 
 /** Exposes `window.__glyphgridDump()` → `{ page, ...geometry }`, where `page` is a PNG data URL of
@@ -859,6 +890,7 @@ function createContext(cell: DeviceCell): LiveContext | null {
   if (!gl) return null
   const atlas = new GlyphAtlas(raster, ATLAS_PAGE_PX, glyphDebugTap())
   installGlyphDump(atlas, raster)
+  installBlankCellProbe()
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
   return {
