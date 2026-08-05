@@ -344,6 +344,20 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       this change, that host's tmux is the one on the old table (a build without utf8proc) — report
       it as such; the fix is that tmux, not a return to Unicode 6.
 
+- [ ] **2.18 A symbol wider than its cell is COMPLETE, not sliced.** The other half of the
+      2026-08-05 round: an agent CLI's task-list icon rendered with its right edge cut off in
+      Shared while GPU mode drew it whole. Ink overflowing a cell used to be clipped (and the clip
+      cannot be relaxed — see L16); it is now SHRUNK to fit. Run an agent CLI and look at its task
+      list, its tool-result connectors and any status glyphs, then compare the same line against
+      **GPU per terminal**: no glyph may have a straight vertical edge where its shape should
+      continue.
+      **Expected difference, not a defect:** an oversized symbol renders slightly SMALLER here than
+      in GPU mode, which overhangs into the neighbouring cell instead. Smaller-and-whole is the
+      trade. Report anything still SEVERED, and report a glyph that shrank so far it is hard to
+      read (that is `MIN_INK_FIT_SCALE` set wrong, not the mechanism failing). Ordinary text must
+      be untouched — if plain Latin text looks smaller or unevenly sized after this, the tolerance
+      is misfiring and that is a **release blocker**.
+
 ## 3. Interactions
 
 - [ ] **3.1 Wheel scrolls tmux history.** Wheel over a terminal scrolls tmux's own scrollback, the

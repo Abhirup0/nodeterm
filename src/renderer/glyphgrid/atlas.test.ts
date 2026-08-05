@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { GUTTER_PX, GlyphAtlas, type GlyphRasterizer, type GlyphSlotAllocation } from './atlas'
+import {
+  GUTTER_PX,
+  GlyphAtlas,
+  type GlyphPart,
+  type GlyphRasterizer,
+  type GlyphSlotAllocation
+} from './atlas'
 
 /** Colors reach the atlas as opaque packed lanes — it never decodes them, so small distinct
  *  numbers keep the recorded call strings readable. */
@@ -9,21 +15,21 @@ const BG = 22
 function fakeRasterizer(
   cellW = 10,
   cellH = 20
-): GlyphRasterizer & { calls: string[]; halves: number[] } {
+): GlyphRasterizer & { calls: string[]; parts: GlyphPart[] } {
   const calls: string[] = []
-  // Which half of a double-width character each draw was for, at the same index as `calls` (the
-  // CLEAR entries aside). Its own array so the recorded call STRING — read verbatim by a dozen
-  // layout assertions below — keeps its shape.
-  const halves: number[] = []
+  // Which PART of its character each draw was for, at the same index as `calls` (the CLEAR entries
+  // aside). Its own array so the recorded call STRING — read verbatim by a dozen layout assertions
+  // below — keeps its shape.
+  const parts: GlyphPart[] = []
   return {
     cellW,
     cellH,
     calls,
-    halves,
+    parts,
     source: null,
-    draw(code, bold, italic, x, y, fg, bg, half = 0) {
+    draw(code, bold, italic, x, y, fg, bg, part = 'whole') {
       calls.push(`${code}|${bold ? 'b' : ''}${italic ? 'i' : ''}|${fg}|${bg}@${x},${y}`)
-      halves.push(half)
+      parts.push(part)
     },
     // Logged into the SAME array as the draws, so "the page was blanked BEFORE the triggering
     // glyph was drawn into it" is one ordering assertion rather than two independent counters.
@@ -84,7 +90,7 @@ describe('GlyphAtlas', () => {
         atlas.glyphFor(0x41, false, true, FG, BG), // italic
         atlas.glyphFor(0x41, false, false, FG + 1, BG), // fg
         atlas.glyphFor(0x41, false, false, FG, BG + 1), // bg
-        atlas.glyphFor(0x41, false, false, FG, BG, 1) // half
+        atlas.glyphFor(0x41, false, false, FG, BG, 'wide-right') // half
       ]
       expect(new Set(slots).size).toBe(slots.length)
     })
@@ -96,27 +102,36 @@ describe('GlyphAtlas', () => {
       it('are separate slots, and the second is drawn shifted one cell left', () => {
         const r = fakeRasterizer()
         const atlas = new GlyphAtlas(r, 100)
-        const left = atlas.glyphFor(0x4e2d, false, false, FG, BG, 0)
-        const right = atlas.glyphFor(0x4e2d, false, false, FG, BG, 1)
+        const left = atlas.glyphFor(0x4e2d, false, false, FG, BG, 'wide-left')
+        const right = atlas.glyphFor(0x4e2d, false, false, FG, BG, 'wide-right')
         expect(right).not.toBe(left)
         // The atlas does NOT shift anything itself — it hands the rasterizer this slot's own ink
-        // origin and the half, and the shift is raster.ts's (see its `inkX`). Pinned here because
-        // a half that never reached the rasterizer would key two slots and paint them identically.
-        expect(r.halves).toEqual([0, 1])
+        // origin and the part, and the shift is raster.ts's (see its `inkX`). Pinned here because
+        // a part that never reached the rasterizer would key two slots and paint them identically.
+        expect(r.parts).toEqual(['wide-left', 'wide-right'])
       })
 
       it('cache independently — asking for one never returns the other', () => {
         const atlas = new GlyphAtlas(fakeRasterizer(), 100)
-        const left = atlas.glyphFor(0x4e2d, false, false, FG, BG, 0)
-        const right = atlas.glyphFor(0x4e2d, false, false, FG, BG, 1)
-        expect(atlas.glyphFor(0x4e2d, false, false, FG, BG, 0)).toBe(left)
-        expect(atlas.glyphFor(0x4e2d, false, false, FG, BG, 1)).toBe(right)
+        const left = atlas.glyphFor(0x4e2d, false, false, FG, BG, 'wide-left')
+        const right = atlas.glyphFor(0x4e2d, false, false, FG, BG, 'wide-right')
+        expect(atlas.glyphFor(0x4e2d, false, false, FG, BG, 'wide-left')).toBe(left)
+        expect(atlas.glyphFor(0x4e2d, false, false, FG, BG, 'wide-right')).toBe(right)
       })
 
-      it('default to the LEFT half, so every existing caller is unchanged', () => {
+      it("default to 'whole', so every existing caller is unchanged", () => {
         const atlas = new GlyphAtlas(fakeRasterizer(), 100)
         const implicit = atlas.glyphFor(0x41, false, false, FG, BG)
-        expect(atlas.glyphFor(0x41, false, false, FG, BG, 0)).toBe(implicit)
+        expect(atlas.glyphFor(0x41, false, false, FG, BG, 'whole')).toBe(implicit)
+      })
+
+      it("'wide-left' is NOT 'whole', even though both draw from the character's left edge", () => {
+        // They differ in ENTITLEMENT, which is what raster.ts's shrink measures against: a 'whole'
+        // glyph may spread over one cell, a 'wide-left' one over two. Sharing a slot would shrink
+        // an emoji's left half to fit a single cell — the fragment this all exists to prevent.
+        const atlas = new GlyphAtlas(fakeRasterizer(), 100)
+        const whole = atlas.glyphFor(0x4e2d, false, false, FG, BG, 'whole')
+        expect(atlas.glyphFor(0x4e2d, false, false, FG, BG, 'wide-left')).not.toBe(whole)
       })
     })
 
@@ -528,12 +543,12 @@ describe('GlyphAtlas', () => {
       atlas.glyphFor(0x78, true, false, FG, BG) // a different style IS a different slot
       atlas.glyphFor(0x78, false, false, FG + 1, BG) // …and so is a different colour
       atlas.glyphFor(0x20, false, false, FG, BG) // the blank slot is never an allocation
-      atlas.glyphFor(0x78, false, false, FG, BG, 1) // …and so is the other half
+      atlas.glyphFor(0x78, false, false, FG, BG, 'wide-right') // …and so is the other half
       expect(seen).toEqual([
-        { slot: 1, code: 0x78, bold: false, italic: false, x: 16, y: 2, fg: FG, bg: BG, half: 0 },
-        { slot: 2, code: 0x78, bold: true, italic: false, x: 30, y: 2, fg: FG, bg: BG, half: 0 },
-        { slot: 3, code: 0x78, bold: false, italic: false, x: 44, y: 2, fg: FG + 1, bg: BG, half: 0 },
-        { slot: 4, code: 0x78, bold: false, italic: false, x: 58, y: 2, fg: FG, bg: BG, half: 1 }
+        { slot: 1, code: 0x78, bold: false, italic: false, x: 16, y: 2, fg: FG, bg: BG, part: 'whole' as const },
+        { slot: 2, code: 0x78, bold: true, italic: false, x: 30, y: 2, fg: FG, bg: BG, part: 'whole' as const },
+        { slot: 3, code: 0x78, bold: false, italic: false, x: 44, y: 2, fg: FG + 1, bg: BG, part: 'whole' as const },
+        { slot: 4, code: 0x78, bold: false, italic: false, x: 58, y: 2, fg: FG, bg: BG, part: 'wide-right' as const }
       ])
     })
 

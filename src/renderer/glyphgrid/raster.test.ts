@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlyphAtlas, GUTTER_PX } from './atlas'
 import { packColor } from './cells'
-import { createCanvasRasterizer } from './raster'
+import { createCanvasRasterizer, shrinkToFit } from './raster'
 
 /**
  * These tests pin the three rects a colored draw uses, because the whole mip story rests on them:
@@ -20,7 +20,7 @@ import { createCanvasRasterizer } from './raster'
  */
 
 interface Op {
-  kind: 'fillRect' | 'fillText' | 'clip' | 'clearRect' | 'drawImage'
+  kind: 'fillRect' | 'fillText' | 'clip' | 'clearRect' | 'drawImage' | 'translate' | 'scale'
   fill?: string
   args: number[]
   text?: string
@@ -44,7 +44,13 @@ type Clip = { x0: number; y0: number; x1: number; y1: number } | null
  * these tests, it is the case they need — an ordinary letter is exactly a glyph whose ink stays
  * inside the cell, and the model then shows the replication copying background over background.
  */
-function stubCanvas(sizePx = 256): {
+function stubCanvas(
+  sizePx = 256,
+  /** The INK width `measureText` reports, in px, split evenly either side of the origin. The
+   *  default is comfortably inside the 10px cell, which is what every test that predates
+   *  shrink-to-fit assumes; a test about an oversized glyph passes its own. */
+  inkWidth = 8
+): {
   ops: Op[]
   pixelAt: (x: number, y: number) => string
   /** The page-wide `imageSmoothingEnabled` as it stands NOW — for asserting it was restored. */
@@ -116,6 +122,15 @@ function stubCanvas(sizePx = 256): {
     fillText(text: string, x: number, y: number) {
       ops.push({ kind: 'fillText', fill: ctx.fillStyle, args: [x, y], text })
     },
+    // Recorded, NOT applied to the pixel model — which costs these tests nothing, because the
+    // model's `fillText` paints no pixels either (there is no font engine here). What the shrink
+    // tests need is the TRANSFORM the rasterizer asked for, and that is exactly what this keeps.
+    translate(x: number, y: number) {
+      ops.push({ kind: 'translate', args: [x, y] })
+    },
+    scale(sx: number, sy: number) {
+      ops.push({ kind: 'scale', args: [sx, sy] })
+    },
     /** Only the 9-argument form, and only with WHOLE-texel destination rects — which is all the
      *  rasterizer's gutter replication uses. Nearest-neighbour sampling off a SNAPSHOT of the page,
      *  which is what the spec guarantees for a self-referencing drawImage.
@@ -151,8 +166,16 @@ function stubCanvas(sizePx = 256): {
         }
       }
     },
-    // A face whose line box exactly fills a 20px cell, so the baseline math is not the subject.
-    measureText: () => ({ fontBoundingBoxAscent: 16, fontBoundingBoxDescent: 4 })
+    // The ascent/descent pin the baseline (a face whose line box exactly fills the 20px cell), so
+    // the baseline math is not the subject here. The actualBoundingBox pair is the INK extent
+    // shrink-to-fit measures — `left: 0` puts the ink
+    // entirely to the right of the origin, which is where a normal glyph's ink sits.
+    measureText: () => ({
+      fontBoundingBoxAscent: 16,
+      fontBoundingBoxDescent: 4,
+      actualBoundingBoxLeft: 0,
+      actualBoundingBoxRight: inkWidth
+    })
   }
   const prev = (globalThis as Record<string, unknown>).OffscreenCanvas
   ;(globalThis as Record<string, unknown>).OffscreenCanvas = class {
@@ -252,7 +275,7 @@ describe('createCanvasRasterizer', () => {
     expect(Number.isInteger(ink.args[1])).toBe(true)
   })
 
-  describe('the right half of a double-width character (`half: 1`)', () => {
+  describe("the right half of a double-width character ('wide-right')", () => {
     // A slot's ink box is one cell and step 2 CUTS the overflow, so a character the terminal gave
     // two cells to was rendered as its first cell alone — the 2026-08-05 ⭐ report. The follower
     // cell asks for the same character's other half, which is the same draw with the glyph's
@@ -262,7 +285,7 @@ describe('createCanvasRasterizer', () => {
       active = stub
       const r = createCanvasRasterizer(FONT, 256)!
       stub.ops.length = 0
-      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 1)
+      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 'wide-right')
       const ink = stub.ops.find((o) => o.kind === 'fillText')!
       expect(ink.args[0]).toBe(INK_X - FONT.cellW)
       // The baseline does not move: only the horizontal window changes.
@@ -277,7 +300,7 @@ describe('createCanvasRasterizer', () => {
       active = stub
       const r = createCanvasRasterizer(FONT, 256)!
       stub.ops.length = 0
-      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 1)
+      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 'wide-right')
       expect(stub.ops.find((o) => o.kind === 'clip')).toEqual({
         kind: 'clip',
         args: [INK_X, INK_Y, FONT.cellW, FONT.cellH]
@@ -291,7 +314,7 @@ describe('createCanvasRasterizer', () => {
       active = stub
       const r = createCanvasRasterizer(FONT, 256)!
       stub.ops.length = 0
-      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 1)
+      r.draw(0x4e2d, false, false, INK_X, INK_Y, FG, BG, 'wide-right')
       expect(stub.ops[0]).toEqual({
         kind: 'fillRect',
         fill: BG_CSS,
@@ -305,8 +328,80 @@ describe('createCanvasRasterizer', () => {
       createCanvasRasterizer(FONT, 256)!.draw(0x41, false, false, INK_X, INK_Y, FG, BG)
       const explicit = stubCanvas()
       active = explicit
-      createCanvasRasterizer(FONT, 256)!.draw(0x41, false, false, INK_X, INK_Y, FG, BG, 0)
+      createCanvasRasterizer(FONT, 256)!.draw(0x41, false, false, INK_X, INK_Y, FG, BG, 'whole')
       expect(withDefault.ops).toEqual(explicit.ops)
+    })
+  })
+
+  /**
+   * The 2026-08-05 device finding: an agent CLI's task-list icon rendered with its right edge
+   * sliced off, while GPU mode showed it whole. A symbol whose ink is wider than its cell used to
+   * be CUT by the ink clip, and the clip cannot be relaxed — ink in the gutter is what the
+   * MAX_SAFE_LOD derivation forbids. So the glyph is made to fit instead of trimmed to fit.
+   */
+  describe('shrink-to-fit for a glyph whose ink exceeds its cell', () => {
+    /** The `fillText` op, and the transform (if any) that was in effect for it. */
+    function inkOp(ops: Op[]): { text: Op; scale?: Op; translate?: Op } {
+      return {
+        text: ops.find((o) => o.kind === 'fillText')!,
+        scale: ops.find((o) => o.kind === 'scale'),
+        translate: ops.find((o) => o.kind === 'translate')
+      }
+    }
+
+    it('an ordinary glyph is drawn by the SAME call as before — no transform at all', () => {
+      // Load-bearing: a scale of exactly 1 must take the untouched path, so nothing anyone has
+      // already looked at moves. 8px of ink in a 10px cell is an ordinary letter.
+      const stub = stubCanvas(256, 8)
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x41, false, false, INK_X, INK_Y, FG, BG)
+      const { text, scale, translate } = inkOp(stub.ops)
+      expect(scale).toBeUndefined()
+      expect(translate).toBeUndefined()
+      expect(text.args).toEqual([INK_X, INK_Y + 16])
+    })
+
+    it('an oversized glyph is SCALED to its cell instead of being clipped', () => {
+      // 14px of ink entitled to one 10px cell: without this it lost 4px off its right edge.
+      const stub = stubCanvas(256, 14)
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x29c9, false, false, INK_X, INK_Y, FG, BG)
+      const { text, scale, translate } = inkOp(stub.ops)
+      expect(scale!.args).toEqual([10 / 14, 10 / 14])
+      // Scaled about the BASELINE, so the glyph keeps sitting on its neighbours' line, and
+      // re-centred inside the cell — here the scaled ink is exactly the cell, so the centring term
+      // is zero and the ink starts at the ink origin.
+      expect(translate!.args).toEqual([INK_X, INK_Y + 16])
+      expect(text.args).toEqual([0, 0])
+    })
+
+    it('a slight overhang is left alone — the tolerance absorbs an antialiasing fringe', () => {
+      // 10.3px in a 10px cell is a full-bleed glyph measuring a fraction over, not an oversized
+      // symbol. Scaling it would buy nothing and could open a hairline in a run of `───`.
+      const stub = stubCanvas(256, 10.3)
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x41, false, false, INK_X, INK_Y, FG, BG)
+      expect(inkOp(stub.ops).scale).toBeUndefined()
+    })
+
+    it('a DOUBLE-WIDTH character is measured against TWO cells, not one', () => {
+      // The regression this guards is severe and silent: an emoji's ink is ~1.7 cells, so measuring
+      // either half against ONE cell would shrink every emoji back into the fragment the two-slot
+      // mechanism exists to prevent. 18px of ink is inside a 20px entitlement — leave it alone.
+      for (const part of ['wide-left', 'wide-right'] as const) {
+        const stub = stubCanvas(256, 18)
+        active = stub
+        const r = createCanvasRasterizer(FONT, 256)!
+        stub.ops.length = 0
+        r.draw(0x1f44d, false, false, INK_X, INK_Y, FG, BG, part)
+        expect(inkOp(stub.ops).scale, part).toBeUndefined()
+      }
     })
   })
 
@@ -861,5 +956,49 @@ describe('createCanvasRasterizer', () => {
       const inked = rects.reduce((sum, [, , w, h]) => sum + w * h, 0)
       expect(inked).toBeLessThan(0.4 * FRAC_COLS_W * FRAC_COLS_H)
     })
+  })
+})
+
+/**
+ * The shrink factor on its own — the arithmetic, without a canvas in the way.
+ *
+ * Separate from the draw tests because the interesting cases are the EDGES (the tolerance, the
+ * floor, a platform that reports no ink box), and each of those is one number rather than a
+ * rendering.
+ */
+describe('shrinkToFit', () => {
+  const metrics = (left: number, right: number): TextMetrics =>
+    ({ actualBoundingBoxLeft: left, actualBoundingBoxRight: right }) as TextMetrics
+
+  it('returns exactly 1 for ink that fits, so the caller takes the untouched path', () => {
+    expect(shrinkToFit(metrics(0, 8), 10)).toBe(1)
+    expect(shrinkToFit(metrics(2, 6), 10)).toBe(1)
+  })
+
+  it('scales an oversized glyph down to its allowance', () => {
+    expect(shrinkToFit(metrics(0, 14), 10)).toBeCloseTo(10 / 14)
+    // The ink box is measured either side of the ORIGIN — a glyph with a left side bearing that
+    // reaches back past it is just as oversized as one that runs long to the right.
+    expect(shrinkToFit(metrics(4, 10), 10)).toBeCloseTo(10 / 14)
+  })
+
+  it('tolerates a small overhang', () => {
+    expect(shrinkToFit(metrics(0, 10.4), 10)).toBe(1) // 4% — the fringe
+    expect(shrinkToFit(metrics(0, 10.5), 10)).toBeLessThan(1) // past it
+  })
+
+  it('stops shrinking at the floor — a legible fragment beats an illegible whole', () => {
+    // 25px in a 10px cell would be a 0.4 scale. Clamped, so the excess is clipped as it always was
+    // (L16) rather than rendering something too small to read.
+    expect(shrinkToFit(metrics(0, 25), 10)).toBe(0.6)
+  })
+
+  it('declines to shrink when the platform reports no usable ink box', () => {
+    // The failure to avoid is a NaN scale silently blanking every glyph. Declining restores the
+    // pre-2026-08-05 behaviour for that platform, which is a correct outcome, not a broken one.
+    expect(shrinkToFit({} as TextMetrics, 10)).toBe(1)
+    expect(shrinkToFit(metrics(NaN, NaN), 10)).toBe(1)
+    expect(shrinkToFit(metrics(0, 0), 10)).toBe(1)
+    expect(shrinkToFit(metrics(0, 14), 0)).toBe(1)
   })
 })

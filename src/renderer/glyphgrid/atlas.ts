@@ -20,8 +20,8 @@ export interface GlyphRasterizer {
    *  cell — see GUTTER_PX); `fg`/`bg` are packColor lanes, the FINAL per-cell colours with
    *  selection/cursor already applied by the caller.
    *
-   *  `half` selects WHICH cell-wide window of a DOUBLE-WIDTH character this slot holds: 0 the left
-   *  (every ordinary glyph, and a wide glyph's lead), 1 the right. See `glyphFor`. */
+   *  `part` says which cell-wide window of the character this slot holds, and how many cells the
+   *  character is entitled to. See `GlyphPart` and `glyphFor`. */
   draw(
     code: number,
     bold: boolean,
@@ -30,12 +30,31 @@ export interface GlyphRasterizer {
     y: number,
     fg: number,
     bg: number,
-    half?: 0 | 1
+    part?: GlyphPart
   ): void
   /** Blank the whole page. Called by `GlyphAtlas.reset()` and by nothing else: the bookkeeping and
    *  the pixels have to be emptied in the same breath or a stale slot keeps its old ink. */
   clearPage(): void
   readonly source: TexImageSource | null
+}
+
+/**
+ * Which part of a character a slot holds — and, the half that is easy to miss, how many CELLS that
+ * character is entitled to.
+ *
+ * Both numbers are needed downstream. `raster.ts` clips ink to one cell and, since 2026-08-05,
+ * SHRINKS a glyph whose ink exceeds what it is entitled to rather than cutting it. A double-width
+ * character is entitled to TWO cells, so measuring one against a single cell would squash every
+ * emoji back into the fragment the two-slot mechanism exists to prevent.
+ *
+ * That is why this is an enum rather than the `half: 0 | 1` it started as: a boolean cannot tell a
+ * NARROW glyph from the LEFT half of a wide one, and those two want opposite answers.
+ */
+export type GlyphPart = 'whole' | 'wide-left' | 'wide-right'
+
+/** How many cells a part's character occupies — the single copy of that mapping. */
+export function partCells(part: GlyphPart): 1 | 2 {
+  return part === 'whole' ? 1 : 2
 }
 
 /**
@@ -123,9 +142,9 @@ export interface GlyphSlotAllocation {
   /** The packed colour lanes the slot was rasterized in — part of its key. */
   fg: number
   bg: number
-  /** Which half of a double-width character this slot holds (see `GlyphRasterizer.draw`). 0 for
-   *  every ordinary glyph, so a dump that never shows a 1 means nothing wide was drawn. */
-  half: 0 | 1
+  /** Which part of its character this slot holds (see `GlyphPart`). 'whole' for every ordinary
+   *  glyph, so a dump that never shows a wide-* means nothing double-width was drawn. */
+  part: GlyphPart
 }
 
 /** What `onReset` hands back. A plain disposable rather than an unsubscribe function so the call
@@ -314,25 +333,26 @@ export class GlyphAtlas {
    * The slot holding this glyph in this style and these colours, allocating and rasterizing it on
    * first sight.
    *
-   * `half` is what makes a DOUBLE-WIDTH character (an emoji, a CJK ideograph) whole. Such a
-   * character occupies two terminal cells, but a slot's ink box is exactly ONE cell and raster.ts
-   * CUTS whatever overflows it — so before this parameter existed the lead cell showed the left
-   * portion of the glyph and the follower showed nothing at all. The 2026-08-05 device round is
-   * that loss: ⭐ arriving as a fragment.
+   * `part` is what makes a DOUBLE-WIDTH character (an emoji, a CJK ideograph) whole. Such a
+   * character occupies two terminal cells, but a slot's ink box is exactly ONE cell — so before
+   * this parameter existed the lead cell showed the left portion of the glyph and the follower
+   * showed nothing at all. The 2026-08-05 device round is that loss: ⭐ arriving as a fragment.
    *
-   * The fix is to let the follower ask for the SAME character's other half. `half: 1` returns a
+   * The fix is to let the follower ask for the SAME character's other part. 'wide-right' returns a
    * SECOND slot, rasterized with the glyph shifted one cell left so the window this slot's clip
    * keeps is the character's right half; the feed then writes that slot into the follower's lane
    * instead of the blank it used to write. The two halves land in the two cells the terminal has
    * already reserved for this character, so the composed result is the whole glyph.
    *
-   * Note what this deliberately is NOT: the ink-sized-slot escalation raster.ts's header describes.
-   * That one is for glyphs whose ink exceeds the cell WITHOUT the terminal knowing (an ornate
-   * script face, real side bearings), and it reaches into the allocator, the slot-rect derivation
-   * and the shader's uv maths at once. This reaches none of them — every slot is still exactly one
-   * cell, still clipped to its own cell box, still 2*GUTTER_PX from its neighbour's ink, and the
-   * shader is untouched. It only spends a second slot on a character the BUFFER already says is
-   * two cells wide. A glyph wider than two cells is still cut, as before.
+   * It also carries the character's ENTITLEMENT — one cell or two — which is what `raster.ts`
+   * measures its shrink-to-fit against. 'wide-left' is not the same request as 'whole' even though
+   * both draw from the character's left edge: one may spread over two cells, the other may not.
+   *
+   * Note what this deliberately is NOT: the ink-sized-slot escalation raster.ts's header describes,
+   * which reaches into the allocator, the slot-rect derivation and the shader's uv maths at once.
+   * This reaches none of them — every slot is still exactly one cell, still clipped to its own cell
+   * box, still 2*GUTTER_PX from its neighbour's ink, and the shader is untouched. It only spends a
+   * second slot on a character the BUFFER already says is two cells wide.
    */
   glyphFor(
     code: number,
@@ -340,7 +360,7 @@ export class GlyphAtlas {
     italic: boolean,
     fg: number,
     bg: number,
-    half: 0 | 1 = 0
+    part: GlyphPart = 'whole'
   ): number {
     if (code === 0x20 || code === 0) return 0
     // `>>> 0` on both lanes: `0xff << 24` is NEGATIVE in JS (packColor carries the same note), so
@@ -348,9 +368,10 @@ export class GlyphAtlas {
     // lane. Keying the two spellings separately would put identical pixels in two slots — wasted
     // page, and resets arriving twice as fast.
     //
-    // `half` is IN the key: the two halves of one character are different pixels, and keying them
-    // together would hand the follower the lead's slot and paint the left half twice.
-    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg >>> 0}|${bg >>> 0}|${half}`
+    // `part` is IN the key: the two halves of one character are different pixels, and keying them
+    // together would hand the follower the lead's slot and paint the left half twice. 'whole' and
+    // 'wide-left' differ too — same drawing, different entitlement, so a different shrink.
+    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg >>> 0}|${bg >>> 0}|${part}`
     const hit = this.slots.get(key)
     if (hit !== undefined) return hit
     if (this.nextSlot >= this.capacity) {
@@ -371,14 +392,14 @@ export class GlyphAtlas {
     }
     const slot = this.nextSlot++
     const { x, y } = this.cellXY(slot)
-    this.rasterizer.draw(code, bold, italic, x, y, fg, bg, half)
+    this.rasterizer.draw(code, bold, italic, x, y, fg, bg, part)
     this.slots.set(key, slot)
     this.dirtyFlag = true
     // LAST, and guarded: the tap is a debug aid, so a throwing callback must cost a log line, not
     // the glyph — everything above is already committed by the time it runs.
     if (this.onAllocate) {
       try {
-        this.onAllocate({ slot, code, bold, italic, x, y, fg, bg, half })
+        this.onAllocate({ slot, code, bold, italic, x, y, fg, bg, part })
       } catch {
         /* a debug tap never breaks a frame */
       }

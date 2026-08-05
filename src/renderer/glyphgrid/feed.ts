@@ -5,7 +5,7 @@
  *  color space). That is what keeps it pure, headless-testable and free of a dependency on
  *  xterm's internals, which are the part of that library most likely to move under us. */
 
-import type { GlyphAtlas } from './atlas'
+import type { GlyphAtlas, GlyphPart } from './atlas'
 import type { CursorShape } from './cursor'
 import { decorationAt, type DecorationReader } from './decorations'
 import {
@@ -224,7 +224,8 @@ function resolveBg(cell: CellView, theme: ThemeLanes): number {
  *  WIDE / ZERO-WIDTH cells are one mechanism seen from two sides. A double-width glyph occupies
  *  two buffer cells: the lead reports width 2, and the cell right after it reports width 0. The
  *  lead carries the glyph's LEFT half (plus FLAG_WIDE) and the follower its RIGHT half — the same
- *  character, same style, same colors, asked of the atlas as `half: 1` (see `GlyphAtlas.glyphFor`).
+ *  character, same style, same colors, asked of the atlas as 'wide-right' (see
+ *  `GlyphAtlas.glyphFor`).
  *  Carrying the LEAD's colors into the follower is what keeps the background under a wide glyph —
  *  a selection, the cursor, a colored block — one unbroken run instead of two halves that can
  *  disagree. The follower is never skipped: this row buffer is REUSED across frames, so "write
@@ -323,8 +324,9 @@ export function packViewportRow(
     let code = 0
     let bold = false
     let italic = false
-    /** Which cell-wide window of `code` this cell draws — 1 only on a wide glyph's follower. */
-    let half: 0 | 1 = 0
+    /** Which part of `code` this cell draws, and how many cells that character is entitled to.
+     *  'whole' unless we are inside a double-width character. */
+    let part: GlyphPart = 'whole'
     // Debug-only witnesses, read at the bottom of the loop. -1 distinguishes "no cell" from a cell
     // that reported width 0; `getChars()` is only called when the probe is installed, because it
     // allocates a string per cell and this loop runs for every cell of every packed row.
@@ -362,7 +364,7 @@ export function packViewportRow(
           code = carryCode
           bold = carryBold
           italic = carryItalic
-          half = 1
+          part = 'wide-right'
         }
         carryPending = false
         carryCursor = false
@@ -377,6 +379,10 @@ export function packViewportRow(
         if (cell.isUnderline() !== 0) flags |= FLAG_UNDERLINE
         if (width === 2) {
           flags |= FLAG_WIDE
+          // The LEFT half of a two-cell character, which is a different request from 'whole' even
+          // though both draw from the character's left edge: this one is allowed to spread over two
+          // cells, so the rasterizer must not shrink it to fit one.
+          part = 'wide-left'
           carryPending = true
           // The lead's RESOLVED colors, captured before the selection/decoration overrides on
           // purpose: those are decided per COLUMN, so the follower applies whichever ones cover IT.
@@ -419,7 +425,7 @@ export function packViewportRow(
     }
 
     // fg/bg are FINAL here — this is the only place the atlas may be asked, see the doc comment.
-    const glyph = isRenderableCode(code) ? atlas.glyphFor(code, bold, italic, fg, bg, half) : 0
+    const glyph = isRenderableCode(code) ? atlas.glyphFor(code, bold, italic, fg, bg, part) : 0
     // A cell that HOLDS something and still draws nothing is the defect under investigation. A
     // space is excluded because that is the correct answer for it, not a loss.
     if (blankProbe && glyph === 0 && probeChars !== '' && probeChars !== ' ') {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CELL_STRIDE, FLAG_BOLD, FLAG_CURSOR, FLAG_ITALIC, FLAG_SELECTED, FLAG_UNDERLINE, FLAG_WIDE, packColor, readCell } from './cells'
-import type { GlyphAtlas } from './atlas'
+import type { GlyphAtlas, GlyphPart } from './atlas'
 import type { DecorationReader } from './decorations'
 import { packViewportRow, setBlankCellProbe, type BlankCellReport, type CellView, type RowFeedOpts, type ThemeLanes } from './feed'
 
@@ -26,7 +26,7 @@ const THEME: ThemeLanes = {
 function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & {
   calls: Array<[number, boolean, boolean]>
   colors: Array<[number, number]>
-  halves: number[]
+  parts: GlyphPart[]
 } {
   const calls: Array<[number, boolean, boolean]> = []
   const colors: Array<[number, number]> = []
@@ -34,22 +34,22 @@ function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & {
   // character a cell asks for is part of the key, and it is the difference between an emoji
   // rendering whole and rendering as its left fragment. Kept out of `calls` so the many
   // assertions that pin `calls` verbatim stay about what they were written for.
-  const halves: number[] = []
+  const parts: GlyphPart[] = []
   return {
     calls,
     colors,
-    halves,
+    parts,
     glyphFor(
       code: number,
       bold: boolean,
       italic: boolean,
       fg: number,
       bg: number,
-      half: 0 | 1 = 0
+      part: GlyphPart = 'whole'
     ): number {
       calls.push([code, bold, italic])
       colors.push([fg, bg])
-      halves.push(half)
+      parts.push(part)
       return 900 + calls.length
     }
   }
@@ -228,7 +228,7 @@ describe('packViewportRow — wide and zero-width cells', () => {
     expect(lead.flags & FLAG_WIDE).toBe(FLAG_WIDE)
     // A slot's ink box is ONE cell and the overflow is cut, so a blank follower here threw the
     // character's right half away — the 2026-08-05 ⭐ report. It asks for that half instead, from
-    // its OWN slot: same character and style, `half: 1`.
+    // its OWN slot: same character and style, 'wide-right'.
     expect(tail.glyph).toBe(902)
     expect(tail.glyph).not.toBe(lead.glyph)
     expect(tail.bg).toBe(lead.bg) // unbroken background run under the glyph
@@ -237,7 +237,7 @@ describe('packViewportRow — wide and zero-width cells', () => {
       [0x4e2d, false, false],
       [0x4e2d, false, false]
     ])
-    expect(atlas.halves).toEqual([0, 1])
+    expect(atlas.parts).toEqual(['wide-left', 'wide-right'])
   })
 
   it('the follower inherits the LEAD’s style, not its own empty cell’s', () => {
@@ -675,7 +675,7 @@ describe('packViewportRow — the colours the atlas is asked for', () => {
       [THEME.cursorFg, THEME.cursorBg],
       [THEME.cursorFg, THEME.cursorBg]
     ])
-    expect(atlas.halves).toEqual([0, 1])
+    expect(atlas.parts).toEqual(['wide-left', 'wide-right'])
     expect(readCell(out, 1).bg).toBe(THEME.cursorBg)
   })
 })
