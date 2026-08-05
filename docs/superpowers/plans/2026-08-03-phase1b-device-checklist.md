@@ -1,17 +1,22 @@
-# GlyphGrid Phase 1b — device acceptance checklist
+# GlyphGrid — device acceptance checklist (the promotion gate, and the regression list after it)
 
-**This document is the acceptance gate for the experimental shared terminal renderer.** Phase 1b
-is code-complete and unit-tested, but the parts that matter most — WebGL2, xterm's internals,
-layout, fonts, IME, the macOS compositor — have no coverage in the (node-environment) test suite
-by design. Nothing here can be verified in CI; everything here has to be seen on a real machine.
+**This document was the acceptance gate for the shared terminal renderer, and it is now the
+regression checklist for the mode that is the DEFAULT on macOS.** It was written for Phase 1b,
+extended by every Phase 2 task that changed behaviour it describes, and run in full — together
+with the §5.6 soak — before `auto` was promoted to the shared renderer on macOS (2026-08-05).
+The parts that matter most — WebGL2, xterm's internals, layout, fonts, IME, the macOS compositor —
+have no coverage in the (node-environment) test suite by design. Nothing here can be verified in
+CI; everything here has to be seen on a real machine.
 
-Run it on the Mac, on a project with **at least a dozen terminals** (agent CLIs streaming output,
-not idle shells). Tick each box only when the stated observation is what actually happened; note
-anything else inline. Items marked **[1a]** re-run the Phase 1a acceptance so a regression in the
-engine is caught before the integration is judged.
+Re-run it on the Mac whenever the engine or the attach shell changes, on a project with **at least
+a dozen terminals** (agent CLIs streaming output, not idle shells). Tick each box only when the
+stated observation is what actually happened; note anything else inline. Items marked **[1a]**
+re-run the Phase 1a acceptance so a regression in the engine is caught before the integration is
+judged. Since macOS `Auto` now resolves to Shared GPU, a failure here is no longer confined to an
+opt-in mode: it reaches every Mac user who never touched the setting.
 
-Branch: `feat/glyphgrid-engine`. Setting: **Settings → Terminal → Terminal rendering**
-(`Auto (default)` / `GPU per terminal` / `Shared GPU (experimental)` / `Off (DOM renderer)`).
+Setting: **Settings → Terminal → Terminal rendering**
+(`Auto (default)` / `GPU per terminal` / `Shared GPU` / `Off (DOM renderer)`).
 
 **Before you start — the setting is one-way against older builds.** `"shared"` is a value only this
 branch knows: running an OLDER build against the same data dir (the released desktop app, or a
@@ -25,13 +30,20 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 
 ## 1. Setup and baseline
 
-- [ ] **1.1 Default is untouched.** Fresh launch on this branch with an existing `settings.json`:
-      the row reads **Auto (default)**, terminals look and behave exactly as they do on `main`.
-      (Auto is the only mode most users will ever be on; a difference here is a release blocker.)
+- [ ] **1.1 The default IS the shared renderer (macOS).** Fresh launch with an existing
+      `settings.json` that never set the row: it reads **Auto (default)**, and the canvas comes up
+      on the SHARED renderer — **exactly one** WebGL2 context for the whole page, terminals showing
+      text immediately, no per-terminal contexts. (Auto is the only mode most users will ever be
+      on. A Mac landing on the DOM renderer or on per-terminal WebGL means the promotion did not
+      take; a terminal that is blank, black or unreadable on Auto is a **release blocker** — revert
+      `resolveTerminalRenderer`'s macOS branch to `'dom'` rather than ship it.) Off macOS, Auto is
+      still per-terminal WebGL and must be unchanged from `main`.
 - [ ] **1.2 The row is a select, not a switch.** Four options in this order: Auto (default) /
-      GPU per terminal / Shared GPU (experimental) / Off (DOM renderer). The description mentions
-      that Shared GPU is experimental, "may render incorrectly", and "falls back to DOM on
-      failure". Settings search for "gpu", "webgl", "shared" and "experimental" all find the row.
+      GPU per terminal / Shared GPU / Off (DOM renderer). No option says "experimental". The
+      description says Auto uses Shared GPU on macOS, describes what the three modes do, and still
+      states that Shared GPU "falls back to DOM on failure". Settings search for "gpu", "webgl",
+      "shared" and "experimental" all find the row (the last is kept as a search word on purpose,
+      for users who remember the old label).
 - [ ] **1.3 Baseline screenshots on Auto.** One busy terminal (agent CLI mid-run, colors, a box-
       drawing TUI) and one `ls --color` / `htop` screen, at 100% canvas zoom. These are the
       side-by-side reference for §2.
@@ -597,26 +609,30 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       busy terminals: watch for whole-window flicker or black-composited nodes (the exact macOS
       compositor failure class that motivated `WEBGL_BUDGET_DESKTOP_MAC=10` and the `'auto'`→DOM
       rule — this run is what tests the branch's central platform hypothesis that ONE context
-      avoids it). Any occurrence = **do not promote beyond experimental**. Note the elapsed time,
+      avoids it). This run is what earned the promotion on 2026-08-05; any occurrence NOW is a
+      **release blocker** — the macOS `'auto'` branch goes back to `'dom'`. Note the elapsed time,
       the terminal count, and whether the machine was on an external display, since the earlier
       reports had no console error to correlate against.
 
 ## 6. Regressions (the modes everyone else is on)
 
-- [ ] **6.1 Auto.** Everything in §2/§3 that applies, on Auto: unchanged from `main`.
+- [ ] **6.1 Auto.** Everything in §2/§3 that applies, on Auto. On macOS that is now the SHARED
+      renderer, so §2/§3 apply verbatim; off macOS it is per-terminal WebGL and must be unchanged
+      from `main`.
 - [ ] **6.2 GPU per terminal.** Contexts are granted/reclaimed on pan and zoom exactly as before
       (zoom out past the suspend threshold → no contexts; zoom in → re-granted).
 - [ ] **6.3 Off.** Every terminal on the DOM renderer, no WebGL contexts at all.
 - [ ] **6.4 Settings round-trip.** Pick each of the four options, quit and relaunch: the choice is
       still there (`settings.json` holds `"terminalGpuRendering": "shared"` etc.).
 - [ ] **6.5 Hand-edited garbage.** Set `"terminalGpuRendering": "warp-speed"` in `settings.json`
-      and relaunch: the app comes up on **Auto**, not on an experimental mode.
+      and relaunch: the app comes up on **Auto**, i.e. on the platform default, not on some other
+      mode the garbage happened to resemble.
 - [ ] **6.6 Server Edition sanity.** (Optional, Linux/browser.) The Terminal rendering row exists
       and Auto/On/Off behave as before; Shared is expected to work but is not part of this gate.
 
 ---
 
-## Known limitations (accepted for Phase 1b — verify they are what you see, not that they are absent)
+## Known limitations (accepted — verify they are what you see, not that they are absent)
 
 - **L5 — FIXED in round 2 (bands at the bottom/right).** Kept here as the record, because it is the
   one item on this list whose expected observation INVERTED. It used to read: the plate covers the
@@ -761,7 +777,19 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
 
 ## Result
 
+Record one block per run, newest last.
+
+### 2026-08-05 — the promotion gate
+
+- Date / machine / OS / display setup: 2026-08-05, author's Mac, built-in **and** external display
+- Blocking findings: none — no whole-window flicker, no black-composited node over the §5.6 soak
+  (≥30 minutes, a dozen busy terminals)
+- Non-blocking findings (with the item number): (fill in from the run's notes)
+- Verdict: **promote** — `auto` resolves to the shared renderer on macOS
+
+### Template
+
 - Date / machine / OS / display setup:
 - Blocking findings:
 - Non-blocking findings (with the item number):
-- Verdict: ship experimental / hold
+- Verdict: keep the macOS default / revert it to the DOM renderer

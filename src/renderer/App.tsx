@@ -19,11 +19,12 @@ import { isMacPlatform } from '../shared/platform-utils'
 
 export default function App() {
   // Apply the terminal-rendering setting to the two GPU coordinators, live. 'auto' resolves per
-  // platform (macOS → DOM renderer: the compositor-level black/flicker failures have only ever
-  // been observed there, and a public default must be the field-proven-clean configuration; WebGL
-  // on a Mac is a deliberate 'on'). 'off' reclaims every context; the experimental 'shared' takes
-  // the per-terminal budget down entirely and brings up the one canvas-wide glyph context
-  // instead. `applyRendererMode` owns the ordering contract between the two (and its test).
+  // platform (macOS → the SHARED canvas: the compositor-level black/flicker failures have only
+  // ever been observed there and are a function of many per-terminal contexts, which one
+  // canvas-wide context does not create; WebGL per terminal on a Mac is a deliberate 'on' — see
+  // `resolveTerminalRenderer` for the evidence that moved this). 'off' reclaims every context;
+  // 'shared' takes the per-terminal budget down entirely and brings up the one canvas-wide glyph
+  // context instead. `applyRendererMode` owns the ordering contract between the two (and its test).
   // Subscribed at the root so it holds whatever view is showing.
   const gpu = useSettings((s) => s.settings.terminalGpuRendering)
   useEffect(() => {

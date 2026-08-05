@@ -743,18 +743,19 @@ export interface Settings {
   accent: string
   tmuxEnabled: boolean
   /** GPU (WebGL) terminal rendering. 'off' routes every terminal to xterm's DOM renderer.
-   *  'auto' (default) = on everywhere EXCEPT macOS: repeated field reports there (whole-window
-   *  flicker; terminals compositing black after renderer swaps, with zero JS-visible errors)
-   *  point at the OS compositor mishandling live WebGL canvases — the only field-proven-clean
-   *  configuration on those machines is the DOM renderer, so macOS gets it by default and WebGL
-   *  stays a deliberate opt-in ('on'). Legacy boolean values are migrated on load: `false` (an
-   *  explicit escape-hatch choice) → 'off'; `true` (indistinguishable from the old merged-in
-   *  default) → 'auto'.
+   *  'auto' (default) = one WebGL context PER TERMINAL everywhere except macOS, where it is
+   *  'shared'. Repeated macOS field reports (whole-window flicker; terminals compositing black
+   *  after renderer swaps, with zero JS-visible errors) point at the OS compositor mishandling
+   *  many live WebGL canvases — which is why per-terminal WebGL stays a deliberate opt-in ('on')
+   *  there, and why the ONE-context renderer is what macOS defaults to instead. Legacy boolean
+   *  values are migrated on load: `false` (an explicit escape-hatch choice) → 'off'; `true`
+   *  (indistinguishable from the old merged-in default) → 'auto'.
    *
-   *  'shared' is the EXPERIMENTAL glyphgrid renderer: instead of one WebGL context per terminal
-   *  (which is what the ~16-context cap and the whole budget coordinator exist to ration), every
-   *  terminal on the canvas paints into ONE canvas-wide context. Opt-in only, it may render
-   *  incorrectly, and any failure drops the session back to xterm's DOM renderer. */
+   *  'shared' is the glyphgrid renderer: instead of one WebGL context per terminal (which is what
+   *  the ~16-context cap and the whole budget coordinator exist to ration), every terminal on the
+   *  canvas paints into ONE canvas-wide context. Promoted out of experimental on 2026-08-05 after
+   *  the device checklist + soak; any failure still drops the session back to xterm's DOM
+   *  renderer. See `resolveTerminalRenderer` (shared/webgl.ts) for the full history. */
   terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */
