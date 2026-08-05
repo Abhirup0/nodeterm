@@ -873,6 +873,20 @@ export class PtyManager {
 
   /** Spawn a brand-new session for this client (the non-co-attach path). */
   private async spawnNew(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
+    // This node runs on a remote host and we cannot reach it: spawn NOTHING. Everything below
+    // (and `spawnSession`'s program resolution) falls through to the LOCAL tmux/plain branches
+    // when `sshRemote` is absent or `ssh` is missing — a silent local shell wearing a remote
+    // node's identity, which is the one outcome a remote node must never have (see
+    // `PtyCreateOptions.requireRemote`). Refuse instead; the renderer waits for the master.
+    //
+    // Deliberately here in `spawnNew` and not in `create`: a co-attach JOIN to a live session for
+    // this node id is still correct (that session already runs wherever it runs), so only the
+    // branch that would have created a new local session is refused. `findSsh()` is checked for
+    // the same reason `spawnSession` checks it — without the executable the remote branch there
+    // is skipped and the local one runs.
+    if (options.requireRemote && !(options.sshRemote && options.persistKey && findSsh())) {
+      return { sessionId: '', fresh: false, unavailable: 'ssh' }
+    }
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -2100,15 +2114,22 @@ export class PtyManager {
     // pre-move terminal into the new one.
     await deleteScrollback(persistKey)
     if (sshRemote) {
-      // Remote (ssh-project) node: there is no local tmux session — end the REMOTE one.
+      // Remote (ssh-project) node: end the REMOTE session.
       const ssh = findSsh()
-      if (!ssh) return
-      try {
-        await runAsync(ssh, remoteTmuxKillArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey)))
-      } catch {
-        // remote session may not exist / master down; ignore
+      if (ssh) {
+        try {
+          await runAsync(ssh, remoteTmuxKillArgs(sshRemote.conn, sshRemote.controlPath, sessionName(persistKey)))
+        } catch {
+          // remote session may not exist / master down; ignore
+        }
       }
-      return
+      // ...and then fall through to the LOCAL kill below rather than returning. A remote node
+      // normally has no local session — but it may have one from before `requireRemote`, when a
+      // create issued with the master down spawned a local shell under this exact name. That
+      // orphan outlived everything (this branch used to return here, so the delete never reached
+      // it) with whatever the node had launched still running in it. The node is being deleted:
+      // anything wearing its name goes with it. Costs one `kill-session` that usually says "no
+      // such session", which is already the ignored case below.
     }
     if (!this.tmuxPath) return
     try {

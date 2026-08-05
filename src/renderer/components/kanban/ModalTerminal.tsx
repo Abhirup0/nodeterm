@@ -24,7 +24,7 @@ import {
   CO_ATTACH_MOUSE_SEQ
 } from '../../terminal/terminal-config'
 import { useXtermVisualSettings } from '../../terminal/useXtermVisualSettings'
-import { resolveSshRemote } from '../../nodes/TerminalNode'
+import { resolveSshRemote, reportSshDrop } from '../../nodes/TerminalNode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
 /** The subset of a node's `data` a SECOND client needs to attach to its session the same way the
@@ -161,12 +161,26 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     })
 
     void (async () => {
+      // Read here, not at click time: a modal only ever opens over the ACTIVE project, and the
+      // reconnect coordinator is keyed by project (same assumption as resolveSshRemote's).
+      const projectId = useProjects.getState().activeProjectId
       // SSH-project node: resolve the live ControlMaster (may not be up yet on a cold load).
       const sshRemote =
         spawn.sshRemoteTmux && spawn.ssh
           ? await resolveSshRemote(spawn.ssh, spawn.cwd)
           : undefined
       if (dead) return
+      // The host is unreachable: spawn NOTHING. A create with no `sshRemote` falls through to
+      // core's LOCAL tmux branch, and opening a card for a remote session would silently start a
+      // local shell under that node's id — see PtyCreateOptions.requireRemote. The card says so
+      // and the node is queued for the reconnect coordinator, exactly like the canvas node.
+      if (spawn.sshRemoteTmux && !sshRemote) {
+        term.write(
+          `\r\n\x1b[90m[not connected — this session lives on ${spawn.ssh ? `${spawn.ssh.user}@${spawn.ssh.host}` : 'the remote host'}; nothing was started locally]\x1b[0m\r\n`
+        )
+        if (projectId) reportSshDrop(projectId, nodeId)
+        return
+      }
       // A local `ssh <host>` node runs ssh as its own pty program (shell:'ssh' + buildSshArgs); an
       // SSH-PROJECT node uses tmux on the remote host instead (sshRemote), so it is NOT localSsh.
       const localSsh = !!spawn.ssh && !spawn.sshRemoteTmux
@@ -175,13 +189,19 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
         rows: term.rows,
         shell: localSsh ? 'ssh' : spawn.shell,
         shellArgs: localSsh ? buildSshArgs(spawn.ssh!) : undefined,
-        // Don't spawn a LOCAL tmux in a non-existent remote cwd if the master never came up.
-        cwd: spawn.sshRemoteTmux && !sshRemote ? undefined : spawn.cwd,
+        cwd: spawn.cwd,
         persistKey: nodeId,
         agentId: spawn.agentId,
         accountId: spawn.accountId,
-        sshRemote
+        sshRemote,
+        requireRemote: spawn.sshRemoteTmux
       })
+      // Refused core-side (the master died inside our round-trip, or `ssh` is missing).
+      if (res.unavailable) {
+        term.write('\r\n\x1b[90m[not connected — nothing was started locally]\x1b[0m\r\n')
+        if (projectId) reportSshDrop(projectId, nodeId)
+        return
+      }
       // Another client permanently deleted this node's session — never resurrect it (no live session
       // to join, and the tombstone refused a fresh spawn). Show the state and stop.
       if (res.closed) {

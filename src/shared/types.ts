@@ -39,6 +39,20 @@ export interface PtyCreateOptions {
    * `remoteHome` is the connection's resolved `$HOME`, used to build an ABSOLUTE remote
    * `CLAUDE_CONFIG_DIR` for a managed remote account (tmux `-e` values are not shell-expanded). */
   sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }
+  /**
+   * This node BELONGS to a remote host: never spawn it locally.
+   *
+   * `sshRemote` says "here is the master to run over"; this says "and if there isn't one, spawn
+   * NOTHING". Without it, a create with no `sshRemote` falls straight through to the local
+   * tmux/plain-shell branches — which is how an SSH project's terminal, opened while the
+   * ControlMaster was down (no network, laptop asleep, host unreachable), quietly became a LOCAL
+   * shell in the local `$HOME`: same node id, same `SSH user@host` header chip, the remote
+   * session's own scrollback snapshot replayed into it, and — for an agent node — a cold-restore
+   * `claude --resume <remote session id>` running on the WRONG MACHINE, under the local account.
+   * The refusal (`PtyCreateResult.unavailable`) is the honest answer: the node shows a
+   * "not connected" overlay and re-spawns when the master is back.
+   */
+  requireRemote?: boolean
 }
 
 /**
@@ -95,6 +109,17 @@ export interface PtyCreateResult {
    * must still restore the node), so the single-user delete→undo path is unchanged.
    */
   closed?: { by: number | null }
+  /**
+   * REFUSED: `requireRemote` was set and no remote spawn was possible (no live ControlMaster, or
+   * no `ssh` executable), so nothing was spawned (`sessionId` is empty) — see
+   * `PtyCreateOptions.requireRemote` for what used to happen instead. The renderer shows the
+   * "not connected" overlay and re-spawns the node once the project's master is back.
+   *
+   * Only ever set for a create that would have SPAWNED: a co-attach to a live session for this
+   * node id still joins (the session is already running wherever it runs), so a second view of a
+   * healthy remote terminal is unaffected.
+   */
+  unavailable?: 'ssh'
 }
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
