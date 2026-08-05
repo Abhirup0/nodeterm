@@ -1868,6 +1868,22 @@ body,
   background: rgba(var(--tint-rgb), 0.12);
 }
 
+/* "Reconnect" in the SSH connection banner. The banner paints its own dark-red background, so this
+   sits on a light translucent fill rather than the card tint the node buttons use. */
+.ssh-banner__retry {
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ssh-banner__retry:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
 /* Markdown view overlay (Cmd/Ctrl+M) */
 .term-md {
   position: absolute;

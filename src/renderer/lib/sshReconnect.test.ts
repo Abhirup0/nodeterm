@@ -118,6 +118,51 @@ describe('SshReconnector', () => {
     expect(respawn).toHaveBeenCalledWith('p2', ['n2'])
   })
 
+  // retryNow: the connection banner's Reconnect button, and an offline node's own. A person is
+  // watching, so none of the automatic loop's patience applies to it.
+  it('retryNow connects immediately, skipping the backoff delay', async () => {
+    const { rec, connect, respawn } = make()
+    rec.retryNow('p1', ['n1'])
+    await vi.advanceTimersByTimeAsync(0) // no delay to wait out — just the connect's own promise
+    expect(connect).toHaveBeenCalledTimes(1)
+    expect(respawn).toHaveBeenCalledWith('p1', ['n1'])
+  })
+
+  it('retryNow revives an EXHAUSTED loop (giving up is for the automatic retries only)', async () => {
+    let ok = false
+    const { rec, connect, respawn } = make(async () => ok)
+    rec.reportDrop('p1', 'n1')
+    for (const d of RECONNECT_DELAYS_MS) await vi.advanceTimersByTimeAsync(d)
+    expect(connect).toHaveBeenCalledTimes(RECONNECT_DELAYS_MS.length) // gave up
+
+    ok = true // the user's network is back and they click Reconnect
+    rec.retryNow('p1')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(connect).toHaveBeenCalledTimes(RECONNECT_DELAYS_MS.length + 1)
+    // The node queued by the original drop is still pending, so it comes back with this connect.
+    expect(respawn).toHaveBeenCalledWith('p1', ['n1'])
+  })
+
+  it('retryNow clears the respawn-refuse window (a click is not a hot loop)', async () => {
+    const { rec, respawn } = make()
+    rec.reportDrop('p1', 'n1')
+    await vi.advanceTimersByTimeAsync(RECONNECT_DELAYS_MS[0])
+    expect(respawn).toHaveBeenCalledTimes(1)
+    // Well inside the window that refuses an AUTOMATIC re-drop of this node.
+    await vi.advanceTimersByTimeAsync(1000)
+    rec.retryNow('p1', ['n1'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(respawn).toHaveBeenCalledTimes(2)
+  })
+
+  it('retryNow on a project with nothing pending still connects (banner with no dead nodes)', async () => {
+    const { rec, connect, respawn } = make()
+    rec.retryNow('p1')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(connect).toHaveBeenCalledWith('p1')
+    expect(respawn).not.toHaveBeenCalled()
+  })
+
   it('dispose cancels pending loops (no connects or respawns afterwards)', async () => {
     const { rec, connect, respawn } = make()
     rec.reportDrop('p1', 'n1')

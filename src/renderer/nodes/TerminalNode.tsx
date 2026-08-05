@@ -110,13 +110,27 @@ import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
 
+/** How long a remote terminal waits for its project's ControlMaster before giving up and showing
+ *  the offline overlay. Sized for the SLOW-but-fine case (a cold app load whose connect is still
+ *  authenticating, a passphrase prompt, a distant host), not for the unreachable one — the
+ *  overlay it falls back to is cheap and self-healing, so waiting longer buys nothing. */
+export const SSH_REMOTE_WAIT_MS = 20000
+
+/** The active project's live ControlMaster path, if any. Lets the caller tell "we will resolve in
+ *  a microtask" from "we are about to sit in the wait below" without duplicating the lookup. */
+export function currentControlPath(): string | undefined {
+  return useSshConn.getState().getControlPath(useProjects.getState().activeProjectId)
+}
+
 /**
  * Resolve the `sshRemote` create option for an SSH-project terminal: the owning project's live
  * ControlMaster `controlPath` (set by Canvas's active-project effect on connect) plus the inline
  * connection and remote cwd. The controlPath may not be ready yet on a cold app load (child
  * effects run before the parent's connect resolves), so wait for it — briefly — before spawning.
- * Returns undefined if no master appears within the window (connection failed); the caller then
- * degrades gracefully instead of spawning a local tmux in a non-existent remote directory.
+ *
+ * Returns undefined if no master appears within the window (connection failed). The caller must
+ * then spawn NOTHING — see `PtyCreateOptions.requireRemote`: a create without `sshRemote` does
+ * not degrade to "no session", it degrades to a LOCAL one wearing the remote node's identity.
  */
 export async function resolveSshRemote(
   conn: SshConnection,
@@ -148,7 +162,10 @@ export async function resolveSshRemote(
         const v = s.byProject[projectId]?.controlPath
         if (v) finish(v)
       })
-      const timer = setTimeout(() => finish(useSshConn.getState().getControlPath(projectId)), 20000)
+      const timer = setTimeout(
+        () => finish(useSshConn.getState().getControlPath(projectId)),
+        SSH_REMOTE_WAIT_MS
+      )
     })
   }
   if (!controlPath) return undefined
@@ -186,6 +203,28 @@ export function setMoveIntoWorktreeHandler(fn: ((nodeId: string) => void) | null
 let sshDropHandler: ((projectId: string, nodeId: string) => void) | null = null
 export function setSshDropHandler(fn: ((projectId: string, nodeId: string) => void) | null): void {
   sshDropHandler = fn
+}
+
+/**
+ * Report a remote terminal that has no session to the reconnect coordinator. Also used by the
+ * kanban card modal, which spawns the same node through its own transport and hits the same
+ * "no master" refusal — both surfaces queue the node so ONE reconnect flushes them together.
+ */
+export function reportSshDrop(projectId: string, nodeId: string): void {
+  sshDropHandler?.(projectId, nodeId)
+}
+
+/**
+ * Manual "Reconnect" bridge (same pattern as the drop bridge above). Canvas registers the
+ * SshReconnector's `retryNow`; the offline overlay's button calls it with this node so the
+ * user's explicit ask jumps the backoff — and clears the node's respawn-refuse window, which
+ * exists to stop AUTOMATIC hot loops, not to make a person click twice.
+ */
+let sshRetryHandler: ((projectId: string, nodeIds: string[]) => void) | null = null
+export function setSshRetryHandler(
+  fn: ((projectId: string, nodeIds: string[]) => void) | null
+): void {
+  sshRetryHandler = fn
 }
 
 /**
@@ -449,8 +488,18 @@ interface CoState {
    * is recoverable and, unlike a silent stale-cwd respawn, honest. Cleared by that reopen.
    */
   ended: boolean
+  /**
+   * This is an SSH-project terminal and its host is UNREACHABLE, so no session was spawned —
+   * neither here nor, crucially, locally (see `PtyCreateOptions.requireRemote`).
+   *
+   * Unlike `closed`/`ended` this is not a respawn guard: it is the state the node sits in until
+   * the project's ControlMaster comes back, and the reconnect coordinator (or the overlay's
+   * Reconnect button) is expected to bump `respawnNonce` and try again. The node is reported to
+   * that coordinator the moment it lands here, so an idle canvas heals itself.
+   */
+  offline: boolean
 }
-const NO_CO: CoState = { letterbox: false, closed: null, ended: false }
+const NO_CO: CoState = { letterbox: false, closed: null, ended: false, offline: false }
 const coStates = new Map<string, CoState>()
 const coSubs = new Map<string, (s: CoState) => void>()
 
@@ -479,7 +528,12 @@ function setCo(key: string, patch: Partial<CoState>): void {
   const next = { ...prev, ...patch }
   // A no-op write must stay a no-op: applyFit clears the letterbox on every fit, and handing the
   // node a fresh object each time would re-render it for nothing (and, solo, on every resize tick).
-  if (next.letterbox === prev.letterbox && next.closed === prev.closed && next.ended === prev.ended)
+  if (
+    next.letterbox === prev.letterbox &&
+    next.closed === prev.closed &&
+    next.ended === prev.ended &&
+    next.offline === prev.offline
+  )
     return
   coStates.set(key, next)
   coSubs.get(key)?.(next)
@@ -795,6 +849,16 @@ export function TerminalNode({
     updateNodeData(id, (n) => ({
       respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
     }))
+  }
+
+  // "Not connected" (CoState.offline): the host was unreachable, so this node has no session
+  // anywhere. Ask the coordinator to re-establish the project's master NOW — it flushes the
+  // pending nodes (this one included) on success, which is what respawns them. We do NOT bump
+  // `respawnNonce` ourselves: a respawn before the master is back would just re-run the same
+  // 20s wait and land right back here.
+  const reconnectOffline = (): void => {
+    const projectId = useProjects.getState().activeProjectId
+    if (projectId) sshRetryHandler?.(projectId, [id])
   }
 
   // Stable fallback reader: serialize the live xterm buffer when tmux capture is unavailable.
@@ -1676,11 +1740,36 @@ export function TerminalNode({
       // Canvas's active-project effect. On a cold app load child effects run before that parent
       // connect, so wait for it (briefly) before spawning. In Phase 1 a node only exists in the
       // active project's React Flow, so the active project is its owner.
+      // Say so while we wait: the resolve below sits for up to SSH_REMOTE_WAIT_MS on a cold load
+      // or an unreachable host, and a terminal that is silently blank for that long reads as
+      // broken. Only when there is nothing to wait FOR is nothing printed (the common case: the
+      // master is already up and this resolves in a microtask).
+      if (sshRemoteTmux && ssh && !currentControlPath()) {
+        // Drop the overlay for the duration of the attempt (this respawn IS the retry the user or
+        // the coordinator asked for) so the line below is visible; it comes back if we fail.
+        setCo(termKey, { offline: false })
+        term.write(`\x1b[90m[connecting to ${ssh.user}@${ssh.host}…]\x1b[0m\r\n`)
+      }
       const sshRemote =
         sshRemoteTmux && ssh
           ? await resolveSshRemote(ssh, data.cwd as string | undefined)
           : undefined
       if (disposed) return
+      // The host is unreachable (no master within the window). SPAWN NOTHING: a create with no
+      // `sshRemote` lands in core's LOCAL tmux branch, and this node would come up as a local
+      // shell in the local $HOME wearing its `SSH user@host` chip — replaying the REMOTE session's
+      // scrollback snapshot, and (agent nodes) running the cold-restore `--resume` on the wrong
+      // machine. `requireRemote` below refuses the same thing core-side; this is the near half,
+      // which also saves the round-trip. Report the node so the reconnect coordinator retries.
+      if (sshRemoteTmux && !sshRemote) {
+        setCo(termKey, { offline: true })
+        term.write(
+          `\r\n\x1b[90m[not connected — this session lives on ${ssh ? `${ssh.user}@${ssh.host}` : 'the remote host'}; nothing was started locally]\x1b[0m\r\n`
+        )
+        if (sshProjectId) reportSshDrop(sshProjectId, id)
+        return
+      }
+      setCo(termKey, { offline: false })
       sentCols = term.cols
       sentRows = term.rows
       transport
@@ -1689,14 +1778,26 @@ export function TerminalNode({
           rows: term.rows,
           shell: localSsh ? 'ssh' : data.shell,
           shellArgs: localSsh ? buildSshArgs(ssh) : undefined,
-          // Don't spawn a LOCAL tmux in a non-existent remote cwd if the master never came up.
-          cwd: sshRemoteTmux && !sshRemote ? undefined : data.cwd,
+          cwd: data.cwd,
           persistKey: id,
           agentId: data.agentId,
           accountId: data.accountId,
-          sshRemote
+          sshRemote,
+          // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
+          // which is core's other route into the local branch.
+          requireRemote: sshRemoteTmux
         })
-        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen, coAttachMouse }) => {
+        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen, coAttachMouse, unavailable }) => {
+        // REFUSED: `requireRemote` and core could not spawn remotely (the master died inside our
+        // round-trip, or `ssh` is missing). Nothing was spawned — land in the same offline state
+        // the near-side guard above produces, retry included.
+        if (unavailable) {
+          setCo(termKey, { offline: true })
+          if (!disposed)
+            term.write('\r\n\x1b[90m[not connected — nothing was started locally]\x1b[0m\r\n')
+          if (sshProjectId) reportSshDrop(sshProjectId, id)
+          return
+        }
         // REFUSED: core's tombstone says another client deleted this node while we weren't
         // subscribed (our project was closed/inactive, so no `pty:closed` could reach us). Nothing
         // was spawned — land in the same "closed by <name>" state a subscribed co-viewer gets.
@@ -3074,6 +3175,17 @@ export function TerminalNode({
             <span>Session ended — the node was moved and never came back.</span>
             <button className="term-node__reopen" onClick={reopenEnded}>
               Reopen
+            </button>
+          </div>
+        )}
+        {!co.closed && !co.ended && co.offline && (
+          <div className="term-node__closed nodrag">
+            <span>
+              Not connected to {data.ssh ? `${(data.ssh as SshConnection).user}@${(data.ssh as SshConnection).host}` : 'the host'} — this session was not started
+              locally.
+            </span>
+            <button className="term-node__reopen" onClick={reconnectOffline}>
+              Reconnect
             </button>
           </div>
         )}

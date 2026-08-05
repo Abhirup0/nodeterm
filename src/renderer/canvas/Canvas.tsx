@@ -24,6 +24,7 @@ import {
   TerminalNode,
   setMoveIntoWorktreeHandler,
   setSshDropHandler,
+  setSshRetryHandler,
   disposeTerminalOnUnmount,
   disposeParkedTerminal
 } from '../nodes/TerminalNode'
@@ -6735,8 +6736,10 @@ export function Canvas() {
     })
     sshReconnectorRef.current = rec
     setSshDropHandler((projectId, nodeId) => rec.reportDrop(projectId, nodeId))
+    setSshRetryHandler((projectId, nodeIds) => rec.retryNow(projectId, nodeIds))
     return () => {
       setSshDropHandler(null)
+      setSshRetryHandler(null)
       rec.dispose()
       sshReconnectorRef.current = null
     }
@@ -7376,7 +7379,22 @@ export function Canvas() {
                   // reads as in-progress rather than hung.
                   <span className="ui-spinner" aria-hidden />
                 )}
-                {text}
+                <span style={{ flex: 1 }}>{text}</span>
+                {/* The banner used to be read-only: a failed connect left the user with a red strip
+                    and nowhere to click — the only ways back were switching tabs (which re-runs the
+                    active-project connect) or restarting the app. Reconnect runs the SAME attempt
+                    the auto-loop makes, jumping its backoff; on success the coordinator flushes the
+                    project's pending nodes, so terminals that refused to spawn locally come up
+                    remotely. Hidden while an attempt is already in flight (connecting/reconnecting)
+                    so it can't queue a second one on top. */}
+                {isError && (
+                  <button
+                    className="ssh-banner__retry"
+                    onClick={() => sshReconnectorRef.current?.retryNow(activeProjectId)}
+                  >
+                    Reconnect
+                  </button>
+                )}
               </div>
             )
           })()}

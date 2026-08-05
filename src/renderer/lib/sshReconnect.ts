@@ -60,6 +60,34 @@ export class SshReconnector {
     if (loop.timer === null && loop.attempt < RECONNECT_DELAYS_MS.length) this.schedule(projectId, loop)
   }
 
+  /**
+   * The user asked for it (the connection banner's Reconnect, or an offline node's own button):
+   * try NOW, whatever the backoff was doing.
+   *
+   * Three things separate this from `reportDrop`: it skips the first delay (a person is watching),
+   * it resets an EXHAUSTED loop's attempt counter (giving up is for the automatic loop, not for
+   * an explicit ask), and it clears the respawn-refuse window for the named nodes — that window
+   * exists to stop a broken spawn from hot-looping by itself, and a click is not a hot loop.
+   */
+  retryNow(projectId: string, nodeIds: string[] = []): void {
+    if (this.disposed) return
+    let loop = this.loops.get(projectId)
+    if (!loop) {
+      loop = { pending: new Set(), timer: null, attempt: 0 }
+      this.loops.set(projectId, loop)
+    }
+    for (const id of nodeIds) {
+      loop.pending.add(id)
+      this.lastRespawn.delete(id)
+    }
+    if (loop.timer !== null) {
+      clearTimeout(loop.timer)
+      loop.timer = null
+    }
+    loop.attempt = 0
+    void this.tryConnect(projectId, loop)
+  }
+
   /** The project's master is (re)connected — by our loop or anyone else's. Flush pending nodes. */
   onConnected(projectId: string): void {
     if (this.disposed) return
