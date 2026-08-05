@@ -94,9 +94,15 @@ export function plateRectDevice(
  * multiplication at the call site. The rounded-rect SDF works by shrinking the rect by the radius
  * on every side and measuring distance to that inner box; a radius past half the shorter side
  * makes the inner box's half-extent NEGATIVE, and the field it produces is no longer the
- * rectangle's — it paints a corner-shaped hole rather than a corner. A node being dragged shut
- * passes through every height between its body and zero, so this is a state the renderer reaches
- * in ordinary use, not a pathological input.
+ * rectangle's — it paints a corner-shaped hole rather than a corner.
+ *
+ * THE CLAMP IS DEFENSIVE, AND IS NOT REACHABLE THROUGH THE UI — do not go hunting for the case.
+ * A node's body bottoms out around ~120 world px (`NodeResizer minHeight={160}` in `TerminalNode`,
+ * and `terminalNodeSize()`'s own floor), while the clamp only engages below roughly twice the
+ * radius, ~18 world px. Zoom cannot reach it either: the caller passes `zoom * dpr` as the scale
+ * AND measures the shape at that same scale, so the radius-to-side ratio is zoom-invariant by
+ * construction. It is kept because the guarantee is a stylesheet value and two layout constants
+ * away from being false, and the failure it prevents is the terminal's background disappearing.
  *
  * Degenerate inputs answer 0 — a square plate, i.e. exactly the pre-Phase-2 rectangle — rather
  * than NaN or Infinity. The result is a uniform the SDF SUBTRACTS, so a NaN would not merely

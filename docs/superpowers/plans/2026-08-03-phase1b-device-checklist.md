@@ -245,7 +245,8 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       node overlapping another, which leaves the shared canvas for xterm's DOM renderer — L15): the
       two cursors must behave the same, both while typing and while idle. A shared cursor that keeps
       flashing while you type is the drift the matched 600 ms period exists to prevent.
-      **The cursor honours Settings → Terminal → Cursor style.** Walk all three: `block` INVERTS the
+      **The cursor honours Settings → Terminal → Cursor** (the row's segmented control, beside the
+      `blink` switch). Walk all three: `block` INVERTS the
       glyph under it (the letter goes dark on a bright cell — a block is drawn as a CELL, and that is
       the only path that can invert), `bar` is a hairline down the LEFT edge with the glyph still
       readable beside it, `underline` is one along the bottom. Change the setting while the terminal
@@ -261,7 +262,7 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       glyph inside it readable, which is exactly what xterm's DOM renderer draws for an unfocused
       terminal — and a selection made before the blur is **dimmer** than it was, in the same hue.
       Compare a focused and a blurred terminal side by side; the two selections must be
-      distinguishable at a glance. Then set Settings → Terminal → **Inactive cursor style** to
+      distinguishable at a glance. Then set Settings → Terminal → **When unfocused** to
       `none` (no cursor at all on blur), to `block` (a solid one, glyph inverted, on the blurred
       terminal) and back to `outline`. **The outline is the DEFAULT** — every terminal on the canvas
       except the focused one is drawing it, so judge it at normal zoom on a busy canvas, not only on
@@ -280,10 +281,11 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       corners stay square**, which is correct — they sit against the opaque header/labels row and
       are not corners on screen, so rounding them would carve a notch of canvas out of the body.
       Then **zoom out to ~0.3 and in to ~3**: the corner keeps its proportion at every zoom, and it
-      never inverts into a corner-shaped hole. Finally **drag a node's bottom edge up until the
-      body collapses to a few pixels tall** — the radius clamps at half the shorter side, so the
-      plate goes stadium-shaped and then to a sliver; what must not appear at any point is a
-      flash of missing background. Report any band you still see —
+      never inverts into a corner-shaped hole. The half-side radius clamp (`plateRadiusDevice`) is
+      **defensive and NOT reachable through the UI — do not try to produce it**: a node's body
+      bottoms out around ~120 world px (`NodeResizer minHeight={160}`) while the clamp engages below
+      ~18, and zoom cannot get there because the radius and the shape are measured at the same
+      scale. Report any band you still see —
       a band now means the plate rect is not tracking the body, not that it is undersized by
       design. **Judge bands only AFTER a resize gesture settles.** The plate is re-pushed on the
       ResizeObserver's coalesced tick (80 ms after the last resize event — the same settle the
@@ -446,7 +448,11 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       canvas at the moment of the move is expected, and a brief flash of DOM-rendered text is fine.
       A terminal left blank, transparent-but-empty, or stuck on the DOM renderer is not.
       **Report specifically:** any `[glyphgrid] atlas cell … does not match …` line in the console
-      after a move. The re-registration is expected to read the NEW display's cell (the epoch bump
+      after a move. If a move produces NOTHING AT ALL — no repaint, text simply left soft or
+      over-sharp — the trigger did not fire rather than the rebuild failing: two are wired, the
+      window `resize` event and a `screen and (resolution: Xdppx)` media query (the one xterm
+      itself relies on), so say which display pair and which direction. The re-registration is
+      expected to read the NEW display's cell (the epoch bump
       tears the grid down first, which restores a DomRenderer that recomputes its dimensions against
       the live dpr), so that line means the rebuild adopted the OLD one and the sharpness is only
       half fixed. Also report whether the SECOND move rebuilds again or the fix latches after the
@@ -526,7 +532,11 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       one naming the loss and one naming the restore; the Settings row still reads Shared and the
       mode is NOT failed. Note anything that comes back WRONG rather than blank (soft or garbled
       glyphs would mean the atlas page did not survive the GPU event, which the restore assumes it
-      does — the fix is a forced repack, and `GlyphAtlas` already has the machinery for it).
+      does — the fix is a forced repack, and `GlyphAtlas` already has the machinery for it). If the
+      terminals do NOT come back on the shared renderer — blank bodies, or a permanent fallback to
+      DOM after a loss the browser DID restore — that is a **BLOCKING** finding, for the same reason
+      5.2b's hang is: a canvas that never returns from a restore is as unusable as one that never
+      stops waiting.
       **Keep `x` — 5.2 needs the same object.**
 - [ ] **5.2 A second loss inside a minute falls back permanently, as designed.** Within 60 s of 5.1
       (`RESTORE_COOLDOWN_MS` — the cooldown is armed by 5.1's SUCCESSFUL restore, so 5.1 must have
@@ -699,6 +709,13 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
   bounding boxes, slots sized to the INK rather than to the cell, quads sized to the glyph. That
   touches the atlas allocator, the slot-rect derivation and the shader's uv maths at once, and it
   changes what the LOD/gutter argument defends. Phase 2.
+- **L17 — A TOP-layer decoration renders as NOTHING.** xterm resolves decorations twice per cell,
+  `bottom` before the selection and `top` after it; this engine resolves a cell once, with the
+  selection last, so only `bottom` is expressible. Nothing in `src/` registers a decoration at all
+  today, and `@xterm/addon-search` — the reason the module exists — registers its matches with no
+  layer, which is `bottom` by xterm's own default, so it costs nothing to observe. **Trigger:** a
+  top-layer decoration ever being shipped; `decorations.ts` (`decorationAt`) is where the second
+  override stage goes.
 
 ---
 
