@@ -249,6 +249,23 @@ export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, 
     `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`
   )
 }
+/**
+ * Ask the REMOTE tmux where a pane's cursor is — the remote counterpart of `PtyManager.paneCursor`,
+ * and the thing that makes a refreshed SSH terminal land its cursor in the right place. Same
+ * single-quoting rule as `remotePaneCommandArgs`: the `#{…}` fields have to reach the remote tmux
+ * verbatim rather than being eaten by the remote shell. Space-separated so one `split` parses it.
+ */
+export function remotePaneCursorArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string
+): string[] {
+  return childArgs(
+    conn,
+    controlPath,
+    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{cursor_x} #{cursor_y} #{cursor_flag}'`
+  )
+}
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {
   return childArgs(conn, controlPath, 'command -v tmux')
 }

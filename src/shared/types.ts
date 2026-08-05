@@ -41,6 +41,14 @@ export interface PtyCreateOptions {
   sshRemote?: { controlPath: string; conn: import('./ssh').SshConnection; remoteCwd: string; hookEndpointPath?: string; tmuxConfPath?: string; remoteHome?: string }
 }
 
+/** A tmux pane's cursor, as tmux reports it: 0-based column/row within the pane, plus whether the
+ *  application currently wants it shown (`#{cursor_flag}`). */
+export interface PaneCursor {
+  x: number
+  y: number
+  visible: boolean
+}
+
 /**
  * Result of creating a PTY session. `fresh` distinguishes a tmux session that had to be
  * created anew (cold start — e.g. after a machine reboot killed the tmux server) from a
@@ -70,6 +78,25 @@ export interface PtyCreateResult {
    * — a plain-shell session has no tmux to capture and simply gets nothing).
    */
   screen?: string
+  /**
+   * Where the CURSOR sits in the session that `screen` was captured from, in 0-based pane
+   * coordinates, with tmux's cursor-visibility flag.
+   *
+   * The THIRD thing `capture-pane` does not carry, after the mouse modes below. Its output is the
+   * pane's TEXT, so painting it leaves the emulator's cursor wherever the last character landed —
+   * the end of the last non-blank row. That was visible as: refresh a terminal running an agent
+   * CLI, and the block cursor sits at the end of the status line instead of in the input prompt,
+   * until the first keystroke makes the app repaint and place it (reported 2026-08-05).
+   *
+   * Absent when tmux could not be asked, which the renderer treats as "leave the cursor alone" —
+   * the pre-fix behaviour, and better than guessing a position.
+   *
+   * The coordinates are absolute in the pane, and the paint preserves that frame: the capture
+   * starts at pane row 0, the renderer writes it into a terminal that is at least as tall (a
+   * SMALLER joiner resizes the pty, and a resizing join gets no `screen` at all), and tmux trims
+   * trailing blank rows — so nothing scrolls and pane row N is emulator row N.
+   */
+  cursor?: PaneCursor
   /**
    * This create JOINED a live TMUX-backed session (co-attach), so the fresh xterm must be told
    * tmux's mouse-tracking is on. tmux emits the mouse-enable DECSET sequences (`?1000h ?1002h

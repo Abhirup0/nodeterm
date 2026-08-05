@@ -15,6 +15,7 @@ import { parseOsc52 } from '../../terminal/osc52'
 import { activateUnicode11 } from '../../terminal/unicode-width'
 import {
   attachReplay,
+  cursorPlacementSeq,
   seedPaint,
   stripTrailingNewline,
   terminalKeyAction,
@@ -240,6 +241,10 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
       } else if (paint === 'create-screen' && res.screen) {
         // Start from a known-clean SGR state, then convert the capture's LFs to CRLFs.
         term.write('\x1b[0m' + toXtermText(stripTrailingNewline(res.screen)))
+        // The capture is TEXT, so the paint above left the cursor after its last character rather
+        // than where the pane has it. The modal is a co-attach joiner by definition — it is the
+        // path this affects most, not an edge case (see `cursorPlacementSeq`).
+        term.write(cursorPlacementSeq(res.cursor))
       }
 
       // Co-attach joiners miss the mouse-tracking mode tmux only sends at its own attach, so the

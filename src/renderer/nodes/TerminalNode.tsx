@@ -34,6 +34,7 @@ import {
   attachReplay,
   closedByLabel,
   createDataGate,
+  cursorPlacementSeq,
   disposalAction,
   forgetNodeTermState,
   letterboxFor,
@@ -1700,7 +1701,16 @@ export function TerminalNode({
           accountId: data.accountId,
           sshRemote
         })
-        .then(async ({ sessionId: sid, fresh, accountFallback: fellBack, closed, screen, coAttachMouse }) => {
+        .then(
+        async ({
+          sessionId: sid,
+          fresh,
+          accountFallback: fellBack,
+          closed,
+          screen,
+          cursor,
+          coAttachMouse
+        }) => {
         // REFUSED: core's tombstone says another client deleted this node while we weren't
         // subscribed (our project was closed/inactive, so no `pty:closed` could reach us). Nothing
         // was spawned — land in the same "closed by <name>" state a subscribed co-viewer gets.
@@ -1906,6 +1916,9 @@ export function TerminalNode({
               // Start from a known-clean SGR state; the capture is LF-separated (`capture-pane -p`)
               // and xterm runs with convertEol:false, so the LFs have to become CRLFs.
               term.write('\x1b[0m' + toXtermText(stripTrailingNewline(screen as string)))
+              // …and put the cursor back where the PANE has it. The capture is text, so the paint
+              // above left the cursor after its last character — see `cursorPlacementSeq`.
+              term.write(cursorPlacementSeq(cursor))
             }
           }
           // A CO-ATTACH JOINER (a second window on this node — rare on the canvas, but possible)

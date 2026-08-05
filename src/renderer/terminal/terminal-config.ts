@@ -1,6 +1,11 @@
 import type { FontWeight, ITheme } from '@xterm/xterm'
 import type { ClientId } from '@shared/presence'
-import type { Settings, TerminalCursorInactiveStyle, TerminalCursorStyle } from '@shared/types'
+import type {
+  PaneCursor,
+  Settings,
+  TerminalCursorInactiveStyle,
+  TerminalCursorStyle
+} from '@shared/types'
 import { resolveTerminalTheme } from './themes'
 
 /**
@@ -498,6 +503,29 @@ export function repaintResync(term: ResyncTarget, screen: string, alive?: () => 
     term.write(toXtermText(screen))
     term.write(RESYNC_NOTICE)
   })
+}
+
+/**
+ * Put the cursor where the PANE has it, after a screen captured from tmux has been painted.
+ *
+ * `capture-pane` returns text, so painting it leaves the emulator's cursor after the last character
+ * written — the end of the last non-blank row. On an agent CLI that reads as the block cursor
+ * sitting in the status line instead of the input prompt, until the first keystroke makes the app
+ * repaint and move it (reported 2026-08-05, after a terminal Refresh).
+ *
+ * The visibility half matters as much as the position: a full-screen TUI that hid its cursor
+ * (`\x1b[?25l`) would otherwise have one painted back over it by the joiner, because the capture
+ * carries no private modes either — the same gap `CO_ATTACH_MOUSE_SEQ` covers for mouse tracking.
+ *
+ * `undefined` means tmux could not be asked, and the answer to that is the EMPTY string: leave the
+ * cursor exactly where the paint left it. That is the pre-fix behaviour, which is a poor place to
+ * be but a known one — far better than a guessed coordinate, which would move the cursor somewhere
+ * the pane never had it.
+ */
+export function cursorPlacementSeq(cursor: PaneCursor | undefined): string {
+  if (!cursor) return ''
+  // tmux reports 0-based pane coordinates; CUP is 1-based, row first.
+  return `\x1b[${cursor.y + 1};${cursor.x + 1}H` + (cursor.visible ? '\x1b[?25h' : '\x1b[?25l')
 }
 
 /**
