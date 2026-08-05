@@ -30,6 +30,11 @@ export interface RasterFont {
  * `GlyphAtlas.glyphFor` applies to its KEY, kept here so the two can never disagree about what
  * "the same colour" means.
  */
+function cssColor(packed: number): string {
+  const { r, g, b } = unpackColor(packed >>> 0)
+  return `rgb(${r},${g},${b})`
+}
+
 /**
  * How much a glyph's ink may exceed what its character is entitled to before it is shrunk.
  *
@@ -76,9 +81,18 @@ export function shrinkToFit(metrics: TextMetrics, allowance: number): number {
   return Math.max(MIN_INK_FIT_SCALE, allowance / inkW)
 }
 
-function cssColor(packed: number): string {
-  const { r, g, b } = unpackColor(packed >>> 0)
-  return `rgb(${r},${g},${b})`
+/**
+ * How thick an underline is, in device pixels, for a font of this size.
+ *
+ * xterm's own rule (`Math.max(1, floor(fontSize / 15))`), adopted rather than invented so an
+ * underline in shared mode is the same weight as the one beside it in GPU mode. The floor of 1 is
+ * the load-bearing half: the atlas is rasterized at the DEVICE cell, and a sub-pixel rule would
+ * round away to nothing at small sizes — an underline that is simply absent, which is the defect
+ * this whole path exists to fix.
+ */
+export function underlineThickness(fontSizePx: number): number {
+  if (!Number.isFinite(fontSizePx) || fontSizePx <= 0) return 1
+  return Math.max(1, Math.floor(fontSizePx / 15))
 }
 
 /**
@@ -334,7 +348,7 @@ export function createCanvasRasterizer(
     /** `x, y` is the INK origin the atlas hands us — already one gutter inside the pitch cell on
      *  each axis (`GlyphAtlas.cellXY`) — and `fg`/`bg` are the FINAL packed colour lanes for this
      *  slot. Two DIFFERENT rects are involved; see the header's invariants 3 and 4. */
-    draw(code, bold, italic, x, y, fg, bg, part = 'whole') {
+    draw(code, bold, italic, x, y, fg, bg, part = 'whole', underline = false) {
       // The glyph's own origin inside this slot. 'wide-right' is the RIGHT half of a double-width
       // character (see `GlyphAtlas.glyphFor`): the character is drawn one cell FURTHER LEFT, so the
       // window this slot's clip keeps is its second cell instead of its first. Everything else
@@ -492,6 +506,34 @@ export function createCanvasRasterizer(
         }
       }
       ctx.restore()
+      // 2b. THE UNDERLINE, if this cell carries one.
+      //
+      //    Drawn HERE, after the ink clip is dropped, and with its own WHOLE-TEXEL clip — the same
+      //    box the geometry branch uses. It is geometry WE generate, not something the face drew,
+      //    so it wants the box for the same reason box-drawing does: a fractional cell's outermost
+      //    texel is only partly covered, and a rule that stops inside it leaves a gap at every cell
+      //    boundary. Spanning the box makes consecutive underlined cells join into one continuous
+      //    line, which is the whole point of an underline under a run of text.
+      //
+      //    It is BAKED INTO THE SLOT rather than drawn as an overlay pass, because an underline is
+      //    part of how a cell looks: the atlas is already keyed by colour and style, `underline` is
+      //    one more key lane, and the shader needs no new concept at all. The cost is a second slot
+      //    for text that appears both underlined and not — which is what a hovered link is, and it
+      //    is bounded by the same reset the colour keys already live with.
+      //
+      //    Position and thickness follow xterm's own: a line at the BOTTOM of the cell (descenders
+      //    cross it, exactly as in every terminal), one device pixel scaled with the font so it
+      //    stays visible at large sizes and never disappears at small ones.
+      if (underline) {
+        ctx.save()
+        ctx.beginPath()
+        ctx.rect(x, y, colsW, colsH)
+        ctx.clip()
+        ctx.fillStyle = cssColor(fg)
+        const thickness = underlineThickness(font.sizePx)
+        ctx.fillRect(x, y + colsH - thickness, colsW, thickness)
+        ctx.restore()
+      }
       // 3. THE EDGE EXTENSION — clamp-to-edge padding, the standard atlas technique. Replicate the
       //    cell's outermost texel row/column outward into the gutter, so the gutter continues the
       //    cell instead of falling back to flat background.

@@ -27,6 +27,7 @@ function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & {
   calls: Array<[number, boolean, boolean]>
   colors: Array<[number, number]>
   parts: GlyphPart[]
+  underlines: boolean[]
 } {
   const calls: Array<[number, boolean, boolean]> = []
   const colors: Array<[number, number]> = []
@@ -35,21 +36,25 @@ function fakeAtlas(): Pick<GlyphAtlas, 'glyphFor'> & {
   // rendering whole and rendering as its left fragment. Kept out of `calls` so the many
   // assertions that pin `calls` verbatim stay about what they were written for.
   const parts: GlyphPart[] = []
+  const underlines: boolean[] = []
   return {
     calls,
     colors,
     parts,
+    underlines,
     glyphFor(
       code: number,
       bold: boolean,
       italic: boolean,
       fg: number,
       bg: number,
-      part: GlyphPart = 'whole'
+      part: GlyphPart = 'whole',
+      underline = false
     ): number {
       calls.push([code, bold, italic])
       colors.push([fg, bg])
       parts.push(part)
+      underlines.push(underline)
       return 900 + calls.length
     }
   }
@@ -128,6 +133,7 @@ function pack(
       | 'cursorShape'
       | 'focused'
       | 'atlas'
+      | 'linkUnderline'
       | 'decorations'
       | 'bufferRow'
     >
@@ -141,6 +147,7 @@ function pack(
     atlas,
     theme: THEME,
     selection: o.selection ?? null,
+    linkUnderline: o.linkUnderline ?? null,
     cursorCol: o.cursorCol ?? -1,
     cursorShape: o.cursorShape,
     focused: o.focused,
@@ -754,5 +761,41 @@ describe('the blank-cell probe', () => {
     } finally {
       setBlankCellProbe(null)
     }
+  })
+})
+
+/**
+ * The 2026-08-05 report was a hovered link with no underline. Its range reaches the feed the same
+ * way a selection does — a column span on this row — and sets the SAME flag a cell's own SGR 4
+ * attribute sets, so the two sources can never disagree about how an underline looks.
+ */
+describe('packViewportRow — the hovered link underline', () => {
+  it('underlines exactly the columns in the span', () => {
+    const cells = [makeCell({ code: 0x61 }), makeCell({ code: 0x62 }), makeCell({ code: 0x63 })]
+    const { out } = pack(cells, { linkUnderline: [1, 3] })
+    expect(readCell(out, 0).flags & FLAG_UNDERLINE).toBe(0)
+    expect(readCell(out, 1).flags & FLAG_UNDERLINE).toBe(FLAG_UNDERLINE)
+    expect(readCell(out, 2).flags & FLAG_UNDERLINE).toBe(FLAG_UNDERLINE)
+  })
+
+  it('asks the atlas for the UNDERLINED variant, not just the flag', () => {
+    // The flag alone changes nothing on screen: the underline is baked into the slot, so a lane
+    // that carries the flag while the slot was rasterized without one renders bare.
+    const { atlas } = pack([makeCell({ code: 0x61 })], { linkUnderline: [0, 1] })
+    expect(atlas.underlines).toEqual([true])
+  })
+
+  it('underlines a SPACE inside the span — a rule must not dash at word gaps', () => {
+    // A blank normally short-circuits to the blank slot; an underline is the one thing that makes
+    // it carry ink. A URL with a space, or any `\e[4m` run, breaks visibly without this.
+    const { out, atlas } = pack([makeCell({ code: 0x20 })], { linkUnderline: [0, 1] })
+    expect(readCell(out, 0).glyph).not.toBe(0)
+    expect(atlas.underlines).toEqual([true])
+  })
+
+  it('never turns an existing underline OFF', () => {
+    // Hovering a link over text that is already underlined must add, not replace.
+    const { out } = pack([makeCell({ code: 0x61, underline: true })], { linkUnderline: null })
+    expect(readCell(out, 0).flags & FLAG_UNDERLINE).toBe(FLAG_UNDERLINE)
   })
 })

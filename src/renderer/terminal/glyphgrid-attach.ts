@@ -20,6 +20,7 @@ import {
 import {
   GlyphGridRendererAddonCore,
   type DeviceMetrics,
+  type LinkUnderline,
   type TermInternals
 } from '../glyphgrid/addon'
 import type { GlyphAtlas } from '../glyphgrid/atlas'
@@ -66,6 +67,84 @@ interface XtermDecorationService {
   onDecorationRegistered(cb: () => void): { dispose(): void }
   onDecorationRemoved(cb: () => void): { dispose(): void }
 }
+/** xterm's `linkifier` — the source of the hovered-link underline. OPTIONAL, see `linkUnderlineOf`. */
+interface XtermLinkifier {
+  onShowLinkUnderline(cb: (e: LinkUnderlineEvent) => void): { dispose(): void }
+  onHideLinkUnderline(cb: (e: LinkUnderlineEvent) => void): { dispose(): void }
+}
+/** What xterm fires: the hovered range in VIEWPORT cell coordinates (`ydisp` already subtracted),
+ *  inclusive at both ends. */
+interface LinkUnderlineEvent {
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+}
+/**
+ * The hovered-link underline, read off xterm's own linkifier.
+ *
+ * xterm's DOM and WebGL renderers each carry a link render LAYER that subscribes to these two
+ * events and draws the underline under a hovered link. Replacing the renderer removes those layers
+ * with it, which is why a link in shared mode had no underline at all while GPU mode showed one
+ * (reported 2026-08-05, on the `claude /login` URL). This puts the same information back, and the
+ * addon renders it through the ordinary underline path rather than a special case.
+ *
+ * OPTIONAL exactly like `decorationsOf`: a build whose linkifier is missing or reshaped hands back
+ * null, `linkUnderline` stays undefined, and the terminal simply never underlines a hovered link —
+ * which is where shared mode already was, so the degrade costs nothing that was working.
+ *
+ * The range is kept HERE rather than in the addon because the addon must not hold xterm objects:
+ * this is the same thin-shell rule the decoration reader follows.
+ */
+function linkUnderlineOf(core: XtermCore): { linkUnderline: LinkUnderline } | null {
+  const lk = core.linkifier
+  if (!lk || typeof lk.onShowLinkUnderline !== 'function') return null
+  if (typeof lk.onHideLinkUnderline !== 'function') return null
+  const linkifier = lk as XtermLinkifier
+
+  let current: LinkUnderlineEvent | null = null
+  const listeners = new Set<() => void>()
+  const notify = (): void => {
+    for (const cb of [...listeners]) {
+      try {
+        cb()
+      } catch {
+        /* one bad listener must not cost the others their repaint */
+      }
+    }
+  }
+  // HIDE clears unconditionally rather than comparing ranges: xterm fires hide for the link that
+  // is leaving, and a stale range left standing would underline text the pointer is no longer on.
+  const subs = [
+    linkifier.onShowLinkUnderline((e) => {
+      current = { x1: e.x1, y1: e.y1, x2: e.x2, y2: e.y2 }
+      notify()
+    }),
+    linkifier.onHideLinkUnderline(() => {
+      if (!current) return
+      current = null
+      notify()
+    })
+  ]
+
+  return {
+    linkUnderline: {
+      current: () => current,
+      onChange: (cb: () => void) => {
+        listeners.add(cb)
+        return {
+          dispose: () => {
+            listeners.delete(cb)
+            // The xterm subscriptions themselves live for the terminal's life: they are cheap, and
+            // dropping them on the last listener would leave a re-attached renderer blind.
+            void subs
+          }
+        }
+      }
+    }
+  }
+}
+
 /** The private members of xterm 5.5 we depend on. Names verified against the shipped bundle. */
 interface XtermCore {
   _renderService: { setRenderer(r: unknown): void; handleResize(cols: number, rows: number): void }
@@ -82,6 +161,7 @@ interface XtermCore {
    *  so an xterm that dropped or reshaped this service must cost the user their highlights, not
    *  their renderer. `coreOf` never checks it; `decorationsOf` shape-checks it and answers null. */
   _decorationService?: Partial<XtermDecorationService>
+  linkifier?: Partial<XtermLinkifier>
 }
 
 /** Every internal read in this module starts here. Presence-checked rather than cast, so a bumped
@@ -340,7 +420,10 @@ export function attachGlyphGrid(
     },
     // Spread, so a terminal with no usable decoration service leaves all three members undefined —
     // the addon's "this terminal has no highlights" case.
-    ...(decorationsOf(core) ?? {})
+    ...(decorationsOf(core) ?? {}),
+    // Same shape for the linkifier: absent leaves `linkUnderline` undefined and the addon simply
+    // never underlines a hovered link, which is where shared mode already was.
+    ...(linkUnderlineOf(core) ?? {})
   }
 
   let addon: GlyphGridRendererAddonCore

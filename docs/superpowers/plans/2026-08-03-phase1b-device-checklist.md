@@ -358,6 +358,18 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       be untouched — if plain Latin text looks smaller or unevenly sized after this, the tolerance
       is misfiring and that is a **release blocker**.
 
+- [ ] **2.19 Underline — the attribute AND the hovered link.** Until 2026-08-05 shared mode drew no
+      underline at all: the feed wrote the flag and nothing read it. Two things to check, because
+      they are two sources of one mechanism.
+      **The attribute:** `printf '\033[4municn underlined text\033[0m\n'` — one continuous rule under
+      the whole run, spaces included (a rule that dashes at word gaps means the blank cells are
+      short-circuiting again), joining cleanly across cell boundaries with no gaps, and the same
+      weight as GPU mode's.
+      **The link:** hover a URL with ⌘ held (an agent CLI's login URL is the reported case) — the
+      underline appears under the WHOLE link, including its last character, and disappears when the
+      pointer leaves. Move the pointer between two links on one line and confirm the old one clears.
+      A link that wraps across rows is underlined on every row it covers.
+
 ## 3. Interactions
 
 - [ ] **3.1 Wheel scrolls tmux history.** Wheel over a terminal scrolls tmux's own scrollback, the

@@ -30,7 +30,8 @@ export interface GlyphRasterizer {
     y: number,
     fg: number,
     bg: number,
-    part?: GlyphPart
+    part?: GlyphPart,
+    underline?: boolean
   ): void
   /** Blank the whole page. Called by `GlyphAtlas.reset()` and by nothing else: the bookkeeping and
    *  the pixels have to be emptied in the same breath or a stale slot keeps its old ink. */
@@ -145,6 +146,8 @@ export interface GlyphSlotAllocation {
   /** Which part of its character this slot holds (see `GlyphPart`). 'whole' for every ordinary
    *  glyph, so a dump that never shows a wide-* means nothing double-width was drawn. */
   part: GlyphPart
+  /** Whether this slot carries an underline — a cell attribute, or a hovered link. */
+  underline: boolean
 }
 
 /** What `onReset` hands back. A plain disposable rather than an unsubscribe function so the call
@@ -360,9 +363,13 @@ export class GlyphAtlas {
     italic: boolean,
     fg: number,
     bg: number,
-    part: GlyphPart = 'whole'
+    part: GlyphPart = 'whole',
+    underline = false
   ): number {
-    if (code === 0x20 || code === 0) return 0
+    // A blank cell has nothing to rasterize — UNLESS it is underlined. An underlined run is text
+    // and spaces together (`\e[4munder line\e[0m`), and returning the blank slot for the spaces
+    // would break the rule into dashes at every word gap.
+    if ((code === 0x20 || code === 0) && !underline) return 0
     // `>>> 0` on both lanes: `0xff << 24` is NEGATIVE in JS (packColor carries the same note), so
     // one colour can arrive as -16777216 from an arithmetic path and as 4278190080 off a cell
     // lane. Keying the two spellings separately would put identical pixels in two slots — wasted
@@ -371,7 +378,7 @@ export class GlyphAtlas {
     // `part` is IN the key: the two halves of one character are different pixels, and keying them
     // together would hand the follower the lead's slot and paint the left half twice. 'whole' and
     // 'wide-left' differ too — same drawing, different entitlement, so a different shrink.
-    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}|${fg >>> 0}|${bg >>> 0}|${part}`
+    const key = `${code}|${bold ? 1 : 0}${italic ? 1 : 0}${underline ? 1 : 0}|${fg >>> 0}|${bg >>> 0}|${part}`
     const hit = this.slots.get(key)
     if (hit !== undefined) return hit
     if (this.nextSlot >= this.capacity) {
@@ -392,14 +399,14 @@ export class GlyphAtlas {
     }
     const slot = this.nextSlot++
     const { x, y } = this.cellXY(slot)
-    this.rasterizer.draw(code, bold, italic, x, y, fg, bg, part)
+    this.rasterizer.draw(code, bold, italic, x, y, fg, bg, part, underline)
     this.slots.set(key, slot)
     this.dirtyFlag = true
     // LAST, and guarded: the tap is a debug aid, so a throwing callback must cost a log line, not
     // the glyph — everything above is already committed by the time it runs.
     if (this.onAllocate) {
       try {
-        this.onAllocate({ slot, code, bold, italic, x, y, fg, bg, part })
+        this.onAllocate({ slot, code, bold, italic, x, y, fg, bg, part, underline })
       } catch {
         /* a debug tap never breaks a frame */
       }

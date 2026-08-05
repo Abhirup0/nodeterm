@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlyphAtlas, GUTTER_PX } from './atlas'
 import { packColor } from './cells'
-import { createCanvasRasterizer, shrinkToFit } from './raster'
+import { createCanvasRasterizer, shrinkToFit, underlineThickness } from './raster'
 
 /**
  * These tests pin the three rects a colored draw uses, because the whole mip story rests on them:
@@ -966,6 +966,53 @@ describe('createCanvasRasterizer', () => {
  * floor, a platform that reports no ink box), and each of those is one number rather than a
  * rendering.
  */
+describe('underline', () => {
+  /**
+   * Reported 2026-08-05: a hovered link showed no underline in shared mode while GPU mode drew one.
+   * The cause was broader than links — `FLAG_UNDERLINE` was written by the feed and read by nobody,
+   * so NO underline rendered at all, including a plain `\e[4m` run.
+   */
+  it('draws a rule at the bottom of the cell, spanning the WHOLE-TEXEL box', () => {
+    const stub = stubCanvas()
+    active = stub
+    const r = createCanvasRasterizer(FONT, 256)!
+    stub.ops.length = 0
+    r.draw(0x41, false, false, INK_X, INK_Y, FG, BG, 'whole', true)
+    const rule = stub.ops.filter((o) => o.kind === 'fillRect').at(-1)!
+    // Full box width, not the fractional cell: consecutive underlined cells have to JOIN, and a
+    // rule that stopped inside the partial edge texel would dash at every cell boundary.
+    expect(rule.args[0]).toBe(INK_X)
+    expect(rule.args[2]).toBe(COLS_W)
+    // Bottom of the cell, in the FOREGROUND colour.
+    expect(rule.args[1]).toBe(INK_Y + COLS_H - 1)
+    expect(rule.fill).toBe(FG_CSS)
+  })
+
+  it('draws NOTHING extra when the cell is not underlined', () => {
+    const plain = stubCanvas()
+    active = plain
+    createCanvasRasterizer(FONT, 256)!.draw(0x41, false, false, INK_X, INK_Y, FG, BG)
+    const underlined = stubCanvas()
+    active = underlined
+    createCanvasRasterizer(FONT, 256)!.draw(0x41, false, false, INK_X, INK_Y, FG, BG, 'whole', true)
+    expect(underlined.ops.length).toBeGreaterThan(plain.ops.length)
+  })
+})
+
+describe('underlineThickness', () => {
+  it("follows xterm's own rule, so the weight matches the renderer beside it", () => {
+    expect(underlineThickness(15)).toBe(1)
+    expect(underlineThickness(30)).toBe(2)
+    expect(underlineThickness(45)).toBe(3)
+  })
+
+  it('never rounds away to nothing — an absent underline IS the bug', () => {
+    expect(underlineThickness(8)).toBe(1)
+    expect(underlineThickness(0)).toBe(1)
+    expect(underlineThickness(NaN)).toBe(1)
+  })
+})
+
 describe('shrinkToFit', () => {
   const metrics = (left: number, right: number): TextMetrics =>
     ({ actualBoundingBoxLeft: left, actualBoundingBoxRight: right }) as TextMetrics

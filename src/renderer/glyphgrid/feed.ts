@@ -60,6 +60,19 @@ export interface RowFeedOpts {
   theme: ThemeLanes
   /** Selection span on THIS viewport row, in columns [startCol, endColExclusive), or null. */
   selection: readonly [number, number] | null
+  /**
+   * The HOVERED LINK's column span on THIS row, `[startCol, endColExclusive)`, or null.
+   *
+   * Separate from `decorations` because it is not a colour: xterm's linkifier reports a hovered
+   * link as a range and its own render layers answer by drawing an underline, which is the
+   * affordance that tells you ⌘-click will open it. A renderer that replaces xterm's own therefore
+   * has to draw it too, or the link is silently unclickable-looking (reported 2026-08-05 — the
+   * `claude /login` URL underlined in GPU mode and bare in shared).
+   *
+   * It sets the SAME `FLAG_UNDERLINE` a cell's own SGR 4 attribute sets, so the two are one
+   * mechanism with two sources and can never disagree about how an underline looks.
+   */
+  linkUnderline?: readonly [number, number] | null
   /** The cursor's column on THIS row, or -1. */
   cursorCol: number
   /** The shape the cursor at `cursorCol` takes. Only `block` is expressible as a cell rewrite —
@@ -131,6 +144,19 @@ function isRenderableCode(code: number): boolean {
     code <= MAX_CODE_POINT &&
     !(code >= 0xd800 && code <= 0xdfff)
   )
+}
+
+/**
+ * Is this a BLANK the atlas can still be asked to paint — i.e. a space, or the 0 an empty cell
+ * reports?
+ *
+ * Only reached for an UNDERLINED cell (see the request site). A blank normally short-circuits to
+ * the blank slot, and must keep doing so: it is the most common cell on the canvas, and a slot per
+ * space-with-these-colours would burn the page for pixels that are pure background. An underline is
+ * the one thing that makes a blank cell carry ink.
+ */
+function drawableBlank(code: number): boolean {
+  return code === 0x20 || code === 0
 }
 
 /** Which code point this cell should draw.
@@ -280,6 +306,8 @@ export function packViewportRow(
   const { cols, atlas, theme, selection, cursorCol } = opts
   const selStart = selection ? selection[0] : -1
   const selEnd = selection ? selection[1] : -1
+  const linkStart = opts.linkUnderline ? opts.linkUnderline[0] : -1
+  const linkEnd = opts.linkUnderline ? opts.linkUnderline[1] : -1
   // Only a block is a cell rewrite; every other shape is the overlay pass's business (cursor.ts).
   const blockCursor = (opts.cursorShape ?? 'block') === 'block'
   // Resolved ONCE per row, and only for a row that HAS a selection: the blend is four roundings, and
@@ -414,6 +442,9 @@ export function packViewportRow(
       }
     }
 
+    // The hovered link's underline, ORed in rather than assigned: a link drawn over text that is
+    // ALREADY underlined stays underlined, and hovering it must not be able to turn one off.
+    if (col >= linkStart && col < linkEnd) flags |= FLAG_UNDERLINE
     if (col >= selStart && col < selEnd) {
       bg = selectionBg
       flags |= FLAG_SELECTED
@@ -425,7 +456,16 @@ export function packViewportRow(
     }
 
     // fg/bg are FINAL here — this is the only place the atlas may be asked, see the doc comment.
-    const glyph = isRenderableCode(code) ? atlas.glyphFor(code, bold, italic, fg, bg, part) : 0
+    //
+    // An UNDERLINED cell is asked for even when its code is not renderable on its own. The rule is
+    // an underline runs UNDER THE WHOLE RUN, spaces included (`\e[4munder line\e[0m`, and every
+    // hovered URL with a space in it): skipping the blanks would break one rule into dashes at each
+    // word gap. `isRenderableCode` still guards the CRASH cases — a lone surrogate or a control
+    // code is refused whatever its underline says — so this only widens it to the blanks the atlas
+    // knows how to answer.
+    const underlined = (flags & FLAG_UNDERLINE) !== 0
+    const wantsSlot = isRenderableCode(code) || (underlined && drawableBlank(code))
+    const glyph = wantsSlot ? atlas.glyphFor(code, bold, italic, fg, bg, part, underlined) : 0
     // A cell that HOLDS something and still draws nothing is the defect under investigation. A
     // space is excluded because that is the correct answer for it, not a loss.
     if (blankProbe && glyph === 0 && probeChars !== '' && probeChars !== ' ') {

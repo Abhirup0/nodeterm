@@ -103,6 +103,28 @@ export interface TermInternals {
   decorations?: DecorationReader
   onDecorationRegistered?(cb: () => void): { dispose(): void }
   onDecorationRemoved?(cb: () => void): { dispose(): void }
+  /**
+   * The link the pointer is currently over, in VIEWPORT cell coordinates, or null.
+   *
+   * xterm reports a hovered link as a range and its own render layers answer by underlining it —
+   * the affordance that says ⌘-click will open this. Replacing xterm's renderer removes those
+   * layers, so this renderer has to draw it, or every link looks inert (reported 2026-08-05).
+   *
+   * OPTIONAL like the decorations, and for the same reason: a build whose linkifier is missing or
+   * reshaped degrades to "no link underlines", never to a refused attach.
+   */
+  linkUnderline?: LinkUnderline
+}
+
+/**
+ * A hovered link's extent, in VIEWPORT cell coordinates — the shape xterm's linkifier fires
+ * (`y` already has `ydisp` subtracted). Inclusive on both ends, as xterm reports it.
+ */
+export interface LinkUnderline {
+  /** The current range, or null when nothing is hovered. Read once per pack. */
+  current(): { x1: number; y1: number; x2: number; y2: number } | null
+  /** Fires when the hovered range changes, so the shell can repaint the rows it covers. */
+  onChange(cb: () => void): { dispose(): void }
 }
 
 /** The exact shape of xterm's `IRenderer.dimensions`. RenderService reads it straight off the
@@ -251,6 +273,16 @@ export class GlyphGridRendererAddonCore {
     const onRemoved = internals.onDecorationRemoved
     if (onRegistered) this.decorationSubs.push(onRegistered(() => this.handleDecorationChange()))
     if (onRemoved) this.decorationSubs.push(onRemoved(() => this.handleDecorationChange()))
+    // The hovered link changes with the POINTER, not with the buffer, so nothing else would ever
+    // repaint those rows: without this the underline appears only when some unrelated output
+    // happens to redraw the line under the cursor. Shares the decoration bag — same lifetime, same
+    // teardown, and one fewer thing for `dispose` to remember.
+    const onLink = internals.linkUnderline?.onChange
+    if (onLink) {
+      this.decorationSubs.push(
+        internals.linkUnderline!.onChange(() => this.handleDecorationChange())
+      )
+    }
     // LAST, and after the subscriptions, for the same reason they go last: this publishes the addon
     // into a CANVAS-LEVEL singleton, and a construction that threw afterwards would leave it there
     // with nobody holding an addon to release it. Seeded rather than waited for, because a mode
@@ -627,6 +659,9 @@ export class GlyphGridRendererAddonCore {
         atlas: this.atlas,
         theme,
         selection: this.selectionOnRow(this.absRow),
+        // VIEWPORT row, not the absolute one: xterm's linkifier already subtracted `ydisp` when it
+        // fired, so the range is in the coordinates the user is currently looking at.
+        linkUnderline: this.linkOnRow(row),
         cursorCol: row === cursorRow ? cursorCol : -1,
         cursorShape,
         // Only the SELECTION colour depends on this (an unfocused terminal's band is quieter — L3);
@@ -688,6 +723,23 @@ export class GlyphGridRendererAddonCore {
       endCol = absRow === bottom[1] ? bottom[0] : this.cols
     }
     return endCol > startCol ? [startCol, endCol] : null
+  }
+
+  /**
+   * The hovered link's column span on this VIEWPORT row, `[startCol, endColExclusive)`, or null.
+   *
+   * xterm's range is INCLUSIVE at both ends and can span rows; a middle row is covered edge to
+   * edge. The `+ 1` on the end column is that inclusive→exclusive conversion, and forgetting it
+   * leaves the link's last character un-underlined — a one-cell gap that reads as a rendering bug
+   * rather than as an off-by-one.
+   */
+  private linkOnRow(row: number): readonly [number, number] | null {
+    const link = this.internals.linkUnderline?.current()
+    if (!link) return null
+    if (row < link.y1 || row > link.y2) return null
+    const startCol = row === link.y1 ? link.x1 : 0
+    const endCol = row === link.y2 ? link.x2 + 1 : this.cols
+    return endCol > startCol ? [Math.max(0, startCol), Math.min(this.cols, endCol)] : null
   }
 
   /** Which VIEWPORT rows the current selection covers — the repaint unit, clamped to the grid. */

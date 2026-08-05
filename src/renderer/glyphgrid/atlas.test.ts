@@ -545,10 +545,10 @@ describe('GlyphAtlas', () => {
       atlas.glyphFor(0x20, false, false, FG, BG) // the blank slot is never an allocation
       atlas.glyphFor(0x78, false, false, FG, BG, 'wide-right') // …and so is the other half
       expect(seen).toEqual([
-        { slot: 1, code: 0x78, bold: false, italic: false, x: 16, y: 2, fg: FG, bg: BG, part: 'whole' as const },
-        { slot: 2, code: 0x78, bold: true, italic: false, x: 30, y: 2, fg: FG, bg: BG, part: 'whole' as const },
-        { slot: 3, code: 0x78, bold: false, italic: false, x: 44, y: 2, fg: FG + 1, bg: BG, part: 'whole' as const },
-        { slot: 4, code: 0x78, bold: false, italic: false, x: 58, y: 2, fg: FG, bg: BG, part: 'wide-right' as const }
+        { slot: 1, code: 0x78, bold: false, italic: false, x: 16, y: 2, fg: FG, bg: BG, part: 'whole' as const, underline: false },
+        { slot: 2, code: 0x78, bold: true, italic: false, x: 30, y: 2, fg: FG, bg: BG, part: 'whole' as const, underline: false },
+        { slot: 3, code: 0x78, bold: false, italic: false, x: 44, y: 2, fg: FG + 1, bg: BG, part: 'whole' as const, underline: false },
+        { slot: 4, code: 0x78, bold: false, italic: false, x: 58, y: 2, fg: FG, bg: BG, part: 'wide-right' as const, underline: false }
       ])
     })
 
