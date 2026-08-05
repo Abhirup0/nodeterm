@@ -1716,7 +1716,19 @@ body,
 .term-node__xterm {
   position: absolute;
   inset: 0;
-  padding: 4px 2px 2px 6px;
+  /* The BOTTOM inset is the one that has to be deliberate. FitAddon derives rows from this host's
+   * CONTENT height, so the space under the last line is `padding-bottom + fit slack` — and the
+   * slack swings between 0 and a full cell as the node is resized, which leaves padding-bottom as
+   * the only GUARANTEED gap there is. At 2px that guarantee sat under the selection ring, so a
+   * selected node's last line read as CLIPPED (reported 2026-08-05, with the ring drawn through
+   * the text). 6px matches the left inset and stays under the 8px the same terminal gets on the
+   * board (`.kanban-modal__termwrap`).
+   *
+   * Do NOT unify this with the modal by moving padding onto ITS host: that one is a flex item and
+   * padding there was measured to cost a whole row (see `.kanban-modal__term`). This host is
+   * `position: absolute; inset: 0` and has carried vertical padding all along without losing one.
+   * Two elements, two measured behaviours — re-measure before merging them. */
+  padding: 4px 2px 6px 6px;
 }
 
 .term-node__xterm .xterm {
