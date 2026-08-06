@@ -30,6 +30,7 @@ import {
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
 import { parsePaneCursor } from './pane-cursor'
+import { readSpawnResources, spawnResourceNote } from './spawn-resources'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { bracketedInjection } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
@@ -1269,8 +1270,14 @@ export class PtyManager {
       const openPtys = this.sessions.size
       const reason = err instanceof Error ? err.message : String(err)
       const archNote = spawnHelperArchMismatch()
+      // MEASURED, not guessed. node-pty discards the errno, so the old message ended every failure
+      // with the same advice — restart, or rebuild node-pty for the wrong architecture. Both are
+      // real causes and both are rare, and reading as authoritative sent at least one field report
+      // (2026-08-06) chasing an architecture that was fine. `spawnResourceNote` states what it
+      // actually counted and only names a remedy the numbers support.
+      const resources = spawnResourceNote(readSpawnResources(), openPtys)
       throw new Error(
-        `Failed to spawn terminal (${reason}). Program: ${file}, cwd: ${cwd}, live PTYs: ${openPtys}. ` +
+        `Failed to spawn terminal (${reason}). Program: ${file}, cwd: ${cwd}, ${resources} ` +
           (archNote ??
             `If this persists, restart the app (tmux sessions survive a restart) or run ` +
               `\`npm run rebuild\` in the repo — a release build may have rebuilt node-pty ` +

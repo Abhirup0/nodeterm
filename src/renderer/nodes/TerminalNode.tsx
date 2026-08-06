@@ -501,8 +501,29 @@ interface CoState {
    * that coordinator the moment it lands here, so an idle canvas heals itself.
    */
   offline: boolean
+  /**
+   * The spawn REJECTED — core could not start a process at all (node-pty's `posix_spawnp failed`,
+   * a missing program, a resource limit).
+   *
+   * Before this existed the create promise had no rejection handler: the failure surfaced as an
+   * unhandled rejection in the main process log and the node sat there as an EMPTY xterm — a black
+   * rectangle with no explanation and no way back short of deleting the node. That is the
+   * 2026-08-06 report ("some terminals are black after coming back to the app"), and the black is
+   * not a rendering fault at all; it is a terminal that was never started.
+   *
+   * Holds core's own message, which names the program, the cwd and what it measured — the user is
+   * the one who can act on "out of file descriptors" or "host unreachable", and hiding it helps
+   * nobody.
+   */
+  spawnError: string | null
 }
-const NO_CO: CoState = { letterbox: false, closed: null, ended: false, offline: false }
+const NO_CO: CoState = {
+  letterbox: false,
+  closed: null,
+  ended: false,
+  offline: false,
+  spawnError: null
+}
 const coStates = new Map<string, CoState>()
 const coSubs = new Map<string, (s: CoState) => void>()
 
@@ -860,6 +881,17 @@ export function TerminalNode({
   // a shell explicitly. Only now do we spawn, in THIS client's cwd — no silent stale-cwd respawn.
   const reopenEnded = (): void => {
     setCo(termKey, { ended: false })
+    updateNodeData(id, (n) => ({
+      respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+    }))
+  }
+
+  // A spawn that FAILED (CoState.spawnError): nothing was started, so there is nothing to detach
+  // from — just clear the message and re-run the lifecycle effect. Whether it works depends on
+  // whatever core reported (a freed file descriptor, a host that came back), which is exactly why
+  // the message is on screen rather than in a log.
+  const retrySpawn = (): void => {
+    setCo(termKey, { spawnError: null })
     updateNodeData(id, (n) => ({
       respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
     }))
@@ -2122,6 +2154,20 @@ export function TerminalNode({
           if (cmd) writeWhenShellReady(cmd) // same shell-startup race as initialCommand
         }
       })
+      .catch((err: unknown) => {
+        // THE missing handler, and the answer to "some terminals are black" (2026-08-06).
+        //
+        // A rejected create means core started NOTHING: no session to tear down, no data gate to
+        // open, nothing to unwire. The only thing owed is telling the user — and until now nobody
+        // did. The rejection went nowhere, the node kept the empty xterm it had mounted with, and
+        // the result was a black rectangle with no message and no way back short of deleting the
+        // node. The failure was in the main-process log the whole time.
+        //
+        // `life.dead` first: a node unmounted while its spawn was in flight has no state worth
+        // writing, and `setCo` would publish into a key the next mount reads.
+        if (life.dead) return
+        setCo(termKey, { spawnError: err instanceof Error ? err.message : String(err) })
+      })
     })()
 
     // In-place agent restart (Canvas node menu / bulk palette): ask the CLI to quit, wait until a
@@ -3208,7 +3254,15 @@ export function TerminalNode({
             </button>
           </div>
         )}
-        {!co.closed && !co.ended && co.offline && (
+        {!co.closed && !co.ended && co.spawnError && (
+          <div className="term-node__closed nodrag">
+            <span>This terminal could not be started. {co.spawnError}</span>
+            <button className="term-node__reopen" onClick={retrySpawn}>
+              Try again
+            </button>
+          </div>
+        )}
+        {!co.closed && !co.ended && !co.spawnError && co.offline && (
           <div className="term-node__closed nodrag">
             <span>
               Not connected to {data.ssh ? `${(data.ssh as SshConnection).user}@${(data.ssh as SshConnection).host}` : 'the host'} — this session was not started

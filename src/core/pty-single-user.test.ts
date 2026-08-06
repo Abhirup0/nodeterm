@@ -124,7 +124,13 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
   afterEach(() => {
     vi.useRealTimers()
     resetPlatformForTests()
-    fs.rmSync(userDataDir, { recursive: true, force: true })
+    // RETRIED, because this races a write it cannot wait for. The scrollback snapshot is fired and
+    // forgotten by design — `snapshotScrollback` is best-effort and nothing awaits it — so a test
+    // that triggered one can reach here while the file is still landing, and the rmdir then fails
+    // with ENOTEMPTY. Measured at roughly one full-suite run in six before this, always in this
+    // hook and never in an assertion; the name of the test it failed under ("still snapshots the
+    // scrollback") is the tell. `maxRetries` covers exactly this errno.
+    fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 })
   })
 
   /** A manager WITHOUT init(): no tmux (plain-shell fallback), as the co-attach suite runs it. */
