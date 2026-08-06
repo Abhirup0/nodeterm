@@ -305,6 +305,19 @@ const DUPLICATE_NUDGE = 28
 
 /** How long a successful worktree notice stays on screen before fading itself out. */
 const NOTICE_MS = 6000
+/** Ceiling for the reading time below: past this an 'info' message is really an 'error' in
+ *  disguise (it should stay until dismissed), and a strip that will not go away is its own bug. */
+const NOTICE_MAX_MS = 15000
+
+/**
+ * How long THIS message gets. A flat 6s was sized for "Merged feat into main." — the messages that
+ * wrap to three lines now (see .announce-banner__body) would time out while still being read, which
+ * is the same "you never get to the end" complaint as the old one-line clamp, just with a clock.
+ * ~25ms/char is a slow, unhurried reading pace; errors are unaffected (they never auto-dismiss).
+ */
+function noticeDwellMs(text: string): number {
+  return Math.min(NOTICE_MAX_MS, NOTICE_MS + text.length * 25)
+}
 
 /** The confirm dialogs, named so their setters can be wrapped in a synchronous open-guard (see
  *  `confirmFlags`): ONE confirm at a time, decided at call time rather than at the next render. */
@@ -618,7 +631,7 @@ export function Canvas() {
   const [notice, setNotice] = useState<{ kind: 'info' | 'error'; text: string } | null>(null)
   useEffect(() => {
     if (notice?.kind !== 'info') return
-    const t = setTimeout(() => setNotice(null), NOTICE_MS)
+    const t = setTimeout(() => setNotice(null), noticeDwellMs(notice.text))
     return () => clearTimeout(t)
   }, [notice])
   const [zoomPct, setZoomPct] = useState(100)

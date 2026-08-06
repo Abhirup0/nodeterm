@@ -3017,12 +3017,15 @@ body,
   background: rgba(var(--tint-rgb), 0.14);
 }
 
-/* In-app announcements strip (news from the website feed). */
+/* The top-banner strip: the website news feed, the tmux notice, and every in-app message the
+   canvas raises (worktree results, restart outcomes, sync/copy errors). Those messages are
+   SENTENCES, not headlines — several of them explain what to go and look at — so this must be
+   able to show more than one line (see __body). */
 .announce-banner {
   display: flex;
   align-items: center;
   gap: 10px;
-  max-width: 560px;
+  max-width: min(680px, calc(100vw - 40px));
   padding: 6px 8px 6px 14px;
   background: rgba(var(--menu-rgb), 0.96);
   border: 1px solid var(--border);
@@ -3066,16 +3069,40 @@ body,
 
 .announce-banner__title {
   font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Wraps rather than clipping: a headline is short, but it is not OUR text — it comes off the
+     website feed, and a long one used to end in an ellipsis with nowhere to read the rest. */
+  overflow-wrap: anywhere;
 }
 
+/* The message itself. It used to be `white-space: nowrap` + `text-overflow: ellipsis`, i.e. one
+   line and no more: "Restart skipped: this session is busy, already restarting, not attached
+   (closed, en…" — with no tooltip, no expand, and nothing to click, the rest was unreadable. The
+   sentence that names the failure is usually the half that got cut. So it wraps, and the height
+   cap (with its own scroll) is what keeps a long one from swallowing the canvas — the cap is a
+   scrollbar, never a truncation, so every message stays readable to the end.
+   `overflow-wrap: anywhere` is for the paths and session ids these messages carry: a single
+   unbreakable token would otherwise push the banner past its max-width. */
 .announce-banner__body {
   color: rgba(var(--tint-rgb), 0.6);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 7.4em;
+  overflow-y: auto;
+}
+
+/* Same thin thumb the menus use — the default one is a chunky light bar that reads as a foreign
+   control dropped into the banner. */
+.announce-banner__body::-webkit-scrollbar {
+  width: 8px;
+}
+.announce-banner__body::-webkit-scrollbar-thumb {
+  background: rgba(var(--tint-rgb), 0.18);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.announce-banner__body::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .announce-banner__btn {
