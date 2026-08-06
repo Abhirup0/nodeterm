@@ -11,6 +11,7 @@ import { useSettings } from '../../state/settings'
 import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../../terminal/file-drop'
+import { guardMiddleClickPaste } from '../../terminal/middle-click'
 import { parseOsc52 } from '../../terminal/osc52'
 import { activateUnicode11 } from '../../terminal/unicode-width'
 import {
@@ -63,6 +64,17 @@ interface ModalTerminalProps {
 export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: ModalTerminalProps) {
   const { api } = useSession()
   const hostRef = useRef<HTMLDivElement>(null)
+  const middleClickPaste = useSettings((st) => st.settings.terminalMiddleClickPaste)
+  // Chromium pastes the X PRIMARY selection into xterm's hidden textarea on middle click — a path
+  // this app never built and the user could not switch off (issue #84). Its own effect, keyed on
+  // the setting alone, so it applies to a PARKED terminal being re-adopted just as much as to a
+  // fresh one: the guard belongs to the host ELEMENT, not to the pty lifecycle.
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    return guardMiddleClickPaste(host, () => middleClickPaste)
+  }, [middleClickPaste])
+
   const termRef = useRef<Terminal | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
   // The live pty session + its fit addon, reachable from OUTSIDE the lifecycle effect's closure —

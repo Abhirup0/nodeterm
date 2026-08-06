@@ -59,6 +59,10 @@ const ROWS = {
     title: 'Cursor when unfocused',
     keywords: ['cursor', 'inactive', 'unfocused', 'blurred', 'outline']
   },
+  middleClickPaste: {
+    title: 'Middle-click paste',
+    keywords: ['middle', 'click', 'mouse', 'paste', 'primary', 'selection', 'x11', 'linux', 'wheel']
+  },
   boldBright: {
     title: 'Bold text uses bright colours',
     keywords: ['bold', 'bright', 'color', 'colour', 'intense']
@@ -298,9 +302,25 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
         />
       </SearchableRow>
 
-      <SearchableRow {...ROWS.boldBright}>
+      <SearchableRow {...ROWS.middleClickPaste}>
         <div className="space-y-3">
           <GroupHeading>Advanced</GroupHeading>
+          <FieldRow
+            label="Middle click pastes the selection"
+            description="Linux only. Off by default: the paste comes from the browser rather than from the terminal, so it ignores the desktop's own middle-click setting and can drop text into a running agent's prompt by accident. tmux's own middle-click paste is unaffected either way."
+            control={
+              <Switch
+                checked={settings.terminalMiddleClickPaste}
+                onChange={(v) => update({ terminalMiddleClickPaste: v })}
+                ariaLabel="Middle click pastes the selection"
+              />
+            }
+          />
+        </div>
+      </SearchableRow>
+
+      <SearchableRow {...ROWS.boldBright}>
+        <div className="space-y-3">
           <FieldRow
             label="Bold text uses bright colours"
             description="The historical terminal convention, and xterm's default. Turn it off to keep bold purely a weight, so a program's colour choice survives."

@@ -784,6 +784,21 @@ export interface Settings {
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
+  /**
+   * Let a MIDDLE CLICK inside a terminal paste the X PRIMARY selection (Linux only — macOS and
+   * Windows have no PRIMARY, so this changes nothing there).
+   *
+   * OFF by default, and that is a deliberate reversal of what the app shipped. The paste was never
+   * ours: Chromium performs it on the hidden textarea xterm keeps under the cursor, which means it
+   * ignored the desktop's own `gtk-enable-primary-paste` (Chromium applies that only to its Views
+   * widgets, not to web content) and the user had NO way to switch it off — issue #84. It fires
+   * hardest inside agent TUIs, whose input box sits exactly where the pointer is, so a stray click
+   * drops whatever was last selected anywhere on the machine into a live agent prompt.
+   *
+   * tmux's own middle-click paste is UNAFFECTED either way: that one is a tmux root binding pasting
+   * tmux's buffer, and it never reached the browser.
+   */
+  terminalMiddleClickPaste: boolean
   /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). Trades away scroll-to-pan,
    *  so it's opt-in — best for mouse users; trackpads keep two-finger pan when off. */
   wheelZoom: boolean
@@ -939,6 +954,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultProjectView: 'canvas',
   panHoverDelay: 600,
   doubleClickFocus: true,
+  terminalMiddleClickPaste: false,
   wheelZoom: false,
   canvasDragMode: 'select',
   accent: '#0a84ff',

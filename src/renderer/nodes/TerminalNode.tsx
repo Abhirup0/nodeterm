@@ -19,6 +19,7 @@ const ChatPanel = lazy(() => import('./ChatPanel').then((m) => ({ default: m.Cha
 import { LocalTransport } from '../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../terminal/file-drop'
 import type { TerminalTransport } from '../terminal/transport'
+import { guardMiddleClickPaste } from '../terminal/middle-click'
 import { patchTerminalScale } from '../terminal/scale-fix'
 import { parseOsc52 } from '../terminal/osc52'
 import { activateUnicode11 } from '../terminal/unicode-width'
@@ -602,6 +603,17 @@ export function TerminalNode({
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
   const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const middleClickPaste = useSettings((st) => st.settings.terminalMiddleClickPaste)
+  // Chromium pastes the X PRIMARY selection into xterm's hidden textarea on middle click — a path
+  // this app never built and the user could not switch off (issue #84). Its own effect, keyed on
+  // the setting alone, so it applies to a PARKED terminal being re-adopted just as much as to a
+  // fresh one: the guard belongs to the host ELEMENT, not to the pty lifecycle.
+  useEffect(() => {
+    const host = bodyRef.current
+    if (!host) return
+    return guardMiddleClickPaste(host, () => middleClickPaste)
+  }, [middleClickPaste])
+
   // OUR root (`.term-node`), not React Flow's wrapper — the element whose box changes when the
   // node's CHROME changes (header chips, the find bar). Observed alongside the terminal host so a
   // chrome change can never leave the glyph grid measured at its old offset; see the second
