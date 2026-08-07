@@ -253,6 +253,40 @@ export const TERMINAL_THEMES: readonly TerminalTheme[] = [
     }
   },
   {
+    id: 'nodeterm-light',
+    label: 'nodeterm Light',
+    dark: false,
+    theme: {
+      // The counterpart to `nodeterm-dark`: this background IS the light app palette's `--bg`, so
+      // picking it — which is also what flips the chrome light, via appTheme 'auto' — leaves the
+      // terminal and the window around it the same colour, instead of a pale rectangle sitting on
+      // cream. Deliberately not white; see the light block in styles.css for why.
+      background: '#fbf8f3',
+      foreground: '#3a3028',
+      cursor: '#5c4a38',
+      cursorAccent: '#fbf8f3',
+      selectionBackground: '#e6dcc9',
+      black: '#3a3028',
+      red: '#b03a2e',
+      green: '#4a7c2f',
+      yellow: '#9a6b00',
+      blue: '#2a6099',
+      magenta: '#8b4a8b',
+      cyan: '#1f7a7a',
+      // "white" on a pale field cannot BE white or it vanishes: it steps down to a warm grey, and
+      // brightWhite goes darker still so an agent CLI's emphasis text stays readable.
+      white: '#8a7d6b',
+      brightBlack: '#7a6d5c',
+      brightRed: '#c9503f',
+      brightGreen: '#5c9440',
+      brightYellow: '#b07d00',
+      brightBlue: '#3a7ab8',
+      brightMagenta: '#a05ca0',
+      brightCyan: '#2a9494',
+      brightWhite: '#3a3028'
+    }
+  },
+  {
     id: 'catppuccin-latte',
     label: 'Catppuccin Latte',
     dark: false,
