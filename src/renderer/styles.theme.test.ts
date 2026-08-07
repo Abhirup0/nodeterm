@@ -126,3 +126,83 @@ describe('the light theme overrides every themeable token', () => {
     expect(missing).toEqual([])
   })
 })
+
+/**
+ * Contrast floors for the LIGHT palette.
+ *
+ * The light theme was re-tuned warm because pure white surfaces with pure black ink read as glare.
+ * Warmth costs contrast — brown on cream is a shorter range than black on white — so the numbers
+ * that made the re-tune safe are asserted here rather than claimed in a comment. Nudging a surface
+ * a few points paler, or an ink alpha down, is exactly the kind of change that looks harmless and
+ * quietly drops body text under the floor.
+ */
+describe('light palette contrast', () => {
+  const LIGHT = CSS.slice(CSS.indexOf(":root[data-theme='light']"), TOKEN_BLOCK_END)
+
+  function token(name: string): string {
+    const m = new RegExp(`^\\s*${name}\\s*:\\s*([^;]+);`, 'm').exec(LIGHT)
+    if (!m) throw new Error(`light block has no ${name}`)
+    return m[1].trim()
+  }
+
+  const INK = token('--tint-rgb').split(',').map((n) => +n.trim()) as [number, number, number]
+
+  function hex(h: string): [number, number, number] {
+    const s = h.replace('#', '')
+    return [0, 2, 4].map((i) => parseInt(s.slice(i, i + 2), 16)) as [number, number, number]
+  }
+  /** The ink at alpha `a`, composited over an opaque surface. */
+  function inkOver(a: number, bg: [number, number, number]): [number, number, number] {
+    return bg.map((c, i) => INK[i] * a + c * (1 - a)) as [number, number, number]
+  }
+  function luminance([r, g, b]: [number, number, number]): number {
+    const f = (c: number): number => {
+      const v = c / 255
+      return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4
+    }
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+  }
+  function contrast(a: [number, number, number], b: [number, number, number]): number {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+    return (hi + 0.05) / (lo + 0.05)
+  }
+  /** The alpha out of `rgba(var(--tint-rgb), α)`. */
+  function inkAlpha(name: string): number {
+    const m = /rgba\(var\(--tint-rgb\),\s*([\d.]+)\)/.exec(token(name))
+    if (!m) throw new Error(`${name} is not mixed from --tint-rgb`)
+    return +m[1]
+  }
+
+  // The two surfaces body text actually sits on. `--surface-deep` is the deepest chrome (dock,
+  // modal shells) and carries labels rather than prose, so it is held to the 3:1 large-text floor.
+  const SURFACES: [string, [number, number, number]][] = [
+    ['--bg', hex(token('--bg'))],
+    ['--panel', hex(token('--panel'))],
+    ['--canvas-bg', hex(token('--canvas-bg'))]
+  ]
+
+  it.each(SURFACES)('body text clears WCAG AA on %s', (_name, bg) => {
+    expect(contrast(inkOver(inkAlpha('--text'), bg), bg)).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it.each(SURFACES)('secondary text clears WCAG AA on %s', (_name, bg) => {
+    // This is the one the warm re-tune nearly broke: the dark theme's 0.55 measured 3.2:1 here.
+    expect(contrast(inkOver(inkAlpha('--muted'), bg), bg)).toBeGreaterThanOrEqual(4.5)
+  })
+
+  it.each(SURFACES)('the status hues and link accent stay legible on %s', (_name, bg) => {
+    for (const t of ['--accent-text', '--danger', '--warn', '--caution', '--success']) {
+      expect(contrast(hex(token(t)), bg), `${t}`).toBeGreaterThanOrEqual(4.3)
+    }
+  })
+
+  it('no light surface is pure white — that brightness is the glare being avoided', () => {
+    for (const t of ['--bg', '--panel', '--surface-raised', '--surface-overlay', '--canvas-bg']) {
+      expect(luminance(hex(token(t))), t).toBeLessThan(0.97)
+    }
+  })
+
+  it('the canvas sits below the panels, so nodes keep their edges', () => {
+    expect(luminance(hex(token('--canvas-bg')))).toBeLessThan(luminance(hex(token('--bg'))))
+  })
+})

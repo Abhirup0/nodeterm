@@ -93,46 +93,69 @@
    is greyer and what comes forward goes white. */
 :root[data-theme='light'] {
   color-scheme: light;
-  --tint-rgb: 0, 0, 0;
-  --text-strong: #000;
 
-  --bg: #ffffff; /* content / canvas */
-  --panel: #f5f5f7; /* bars, panels, node chrome */
-  --panel-header: #ebebf0; /* elevated / hover */
-  --panel-2: #ebebf0;
-  --surface-black: #f7f7f9;
-  --surface-sunken: #f0f0f3; /* wells stay GREYER than the page */
-  --surface-deep: #e8e8ed;
-  --surface-raised: #ffffff; /* …while raised surfaces come up to white */
-  --surface-overlay: #ffffff;
+  /* WARM, not white. The first light palette was pure #fff surfaces with pure black ink — the
+     brightest thing a screen can do — which reads as glare in a full-window canvas app somebody
+     sits in front of all day. Two changes fix it TOGETHER, and neither works alone:
+       1. every surface carries a cream cast and none of them reaches 255; the brightest thing
+          here is #fdfbf7, and the canvas behind the nodes is darker still;
+       2. the INK is a warm near-black, not #000 — which is what stops the contrast reading like
+          print on paper.
+     `--tint-rgb` does the second job for the entire sheet at once: text, borders, hover fills and
+     gradient stops are all mixed from it (see the dark block's note). */
+  --tint-rgb: 58, 48, 38;
+  --text-strong: #2b241c;
+
+  /* Warmth costs contrast — brown on cream is a shorter range than black on white — so the
+     secondary alphas are raised to buy it back rather than left at the dark theme's values.
+     `--muted` at 0.55 measured 3.2:1 against `--bg`, under the 4.5:1 floor for body text; 0.7
+     puts it at 4.9:1, and `--text` at 0.85 is 7.7:1. These floors are asserted, not assumed —
+     see the contrast block in styles.theme.test.ts. */
+  --border: rgba(var(--tint-rgb), 0.14);
+  --muted: rgba(var(--tint-rgb), 0.7);
+  --muted-2: rgba(var(--tint-rgb), 0.4);
+
+  --bg: #fbf8f3; /* content / canvas */
+  --panel: #f3efe7; /* bars, panels, node chrome */
+  --panel-header: #eae5db; /* elevated / hover */
+  --panel-2: #eae5db;
+  --surface-black: #f5f1ea;
+  --surface-sunken: #efeae1; /* wells stay DARKER than the page */
+  --surface-deep: #e6e0d4;
+  --surface-raised: #fdfbf7; /* …while raised surfaces come up, but never to pure white */
+  --surface-overlay: #fdfbf7;
 
   /* systemBlue's light-mode value — the dark one is deliberately lighter for a dark field and
-     loses contrast against white. */
+     loses contrast against a pale one. Kept BLUE on a warm field: the accent is the product's
+     identity across both themes and is user-configurable (Settings → Appearance), so it is not
+     the palette's job to change it. */
   --accent: #007aff;
   --accent-hover: #0a6ed1;
-  /* Accent as text has to DARKEN on white, where the dark theme's lightened blue disappears. */
+  /* Accent as text has to DARKEN here, where the dark theme's lightened blue disappears. */
   --accent-text: #0060df;
 
-  /* Off-white, and slightly greyer than a node's own surface, so nodes keep their edges instead
-     of dissolving into the field. */
-  --canvas-bg: #f7f7fa;
-  /* Floating surfaces come UP to near-white in light (see the elevation note above). */
-  --menu-rgb: 252, 252, 254;
-  --popover-rgb: 255, 255, 255;
-  --card-rgb: 252, 252, 254;
-  /* macOS light-mode shadows are a third of the weight of its dark ones. */
+  /* The canvas sits BELOW every node, so it is the one surface that must be darker than the
+     panels — otherwise the nodes dissolve into the field and the layout loses its edges. */
+  --canvas-bg: #f4efe6;
+  /* Floating surfaces come UP the ramp (see the elevation note above) without going white. */
+  --menu-rgb: 253, 251, 247;
+  --popover-rgb: 253, 251, 247;
+  --card-rgb: 253, 251, 247;
+  /* macOS light-mode shadows are about a third of the weight of its dark ones. */
   --shadow-k: 0.35;
 
-  /* The status hues are tuned for a dark field: on white, yellow and orange fall under any
-     reasonable contrast floor. Darkened here rather than at each of their ~50 call sites. */
-  --danger: #d70015;
-  --warn: #b25000;
-  --caution: #8a6d00;
-  --success: #1c8b34;
+  /* The status hues are tuned for a dark field: on a pale one, yellow and orange fall under any
+     reasonable contrast floor. Darkened here rather than at each of their ~50 call sites, and
+     warmed a little so they belong to this palette. */
+  --danger: #c62a1f;
+  --warn: #a85c00;
+  --caution: #806100;
+  --success: #1f7a38;
 
-  /* Canvas dots read as grid, not as noise: on white the dark-mode grey is far too heavy. */
-  --canvas-dot: #d0d0d6;
-  --minimap-mask: rgba(255, 255, 255, 0.6);
+  /* Dots must read as a grid, not as noise: the dark-mode grey is far too heavy on a pale field,
+     and a neutral one would be the only cold thing on screen. */
+  --canvas-dot: #d8cdba;
+  --minimap-mask: rgba(251, 248, 243, 0.6);
 }
 
 * {
