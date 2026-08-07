@@ -62,6 +62,35 @@ const INK_FIT_TOLERANCE = 1.04
 const MIN_INK_FIT_SCALE = 0.6
 
 /**
+ * May this code point be SHRUNK to fit its cell at all?
+ *
+ * Only symbols. Never letters, digits or ASCII punctuation — and that exclusion is the whole point,
+ * because ink overhanging its cell is NORMAL for text rather than a defect. Measured across the
+ * monospace faces available here, at the worst glyph of each style:
+ *
+ *      regular 1.04   bold 1.04   ITALIC 1.19   BOLD ITALIC 1.25    (ink ÷ advance)
+ *
+ * So a rule that shrinks anything past a few percent shrinks italic text to ~84% and bold-italic to
+ * ~80% of the roman text beside it — and PER GLYPH, so inside one italic word the narrow letters
+ * stay full size while `K`, `X`, `w` do not. That was the 2026-08-07 report ("some characters are
+ * not right") and it was this file's own doing, introduced two days earlier with shrink-to-fit.
+ *
+ * Every terminal lets a face's overhang spill into the neighbouring cell, whose background is
+ * almost always empty. We cannot (the clip that protects the mip chain forbids it), so text keeps
+ * the behaviour it has always had here: the tip of the slant is clipped, which is L16 and which
+ * nobody has ever reported. Making text SMALLER is a worse answer than clipping it, because it
+ * changes the shape of every glyph rather than the last fraction of one.
+ *
+ * The cut is at U+2000 — below it is Latin, Greek, Cyrillic, Hebrew, Arabic and their punctuation,
+ * i.e. text; above it are the arrows, the technical and geometric shapes, the dingbats and the
+ * emoji, i.e. things drawn to a BOX whose author expected a square. A ratio cannot make this
+ * distinction: bold-italic `X` measures 1.25 and so does the icon the shrink was written for.
+ */
+export function shrinkEligible(code: number): boolean {
+  return code >= 0x2000
+}
+
+/**
  * The factor a glyph must be drawn at to fit its entitlement, or exactly 1 for "draw it unchanged".
  *
  * Returning the literal 1 is part of the contract, not an optimisation: the caller branches on it
@@ -485,7 +514,7 @@ export function createCanvasRasterizer(
         // exactly 1 takes the SAME `fillText` call the code took before this existed. So no
         // rendering anyone has already looked at moves.
         const metrics = ctx.measureText(glyph)
-        const scale = shrinkToFit(metrics, allowance)
+        const scale = shrinkEligible(code) ? shrinkToFit(metrics, allowance) : 1
         if (scale === 1) {
           ctx.fillText(glyph, inkX, y + baseline)
         } else {

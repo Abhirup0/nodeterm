@@ -356,7 +356,12 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       trade. Report anything still SEVERED, and report a glyph that shrank so far it is hard to
       read (that is `MIN_INK_FIT_SCALE` set wrong, not the mechanism failing). Ordinary text must
       be untouched — if plain Latin text looks smaller or unevenly sized after this, the tolerance
-      is misfiring and that is a **release blocker**.
+      is misfiring and that is a **release blocker**. That is not hypothetical: between 2026-08-05
+      and 2026-08-07 the shrink applied to LETTERS too, and since an italic face's worst glyph
+      measures ~1.19 of its advance (bold-italic ~1.25) it rendered italic text at ~84% of the
+      roman text beside it — per glyph, so narrow letters stayed full size and wide ones did not.
+      **Check a paragraph of italic and bold-italic markdown** (agent output is full of it): every
+      letter the same size as its neighbours, and the same size as the roman text around it.
 
 - [ ] **2.19 Underline — the attribute AND the hovered link.** Until 2026-08-05 shared mode drew no
       underline at all: the feed wrote the flag and nothing read it. Two things to check, because

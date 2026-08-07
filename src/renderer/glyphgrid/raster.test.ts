@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { GlyphAtlas, GUTTER_PX } from './atlas'
 import { packColor } from './cells'
-import { createCanvasRasterizer, shrinkToFit, underlineThickness } from './raster'
+import {
+  createCanvasRasterizer,
+  shrinkEligible,
+  shrinkToFit,
+  underlineThickness
+} from './raster'
 
 /**
  * These tests pin the three rects a colored draw uses, because the whole mip story rests on them:
@@ -363,7 +368,21 @@ describe('createCanvasRasterizer', () => {
       expect(text.args).toEqual([INK_X, INK_Y + 16])
     })
 
-    it('an oversized glyph is SCALED to its cell instead of being clipped', () => {
+    it('a LETTER is never scaled, however far its ink overhangs', () => {
+      // The 2026-08-07 regression. An italic face measures ~1.19 of the advance at its worst glyph
+      // and a bold-italic one ~1.25, so a rule that shrinks "anything oversized" renders italic
+      // text at ~84% of the roman text beside it — and per glyph, so the narrow letters in a word
+      // stay full size and the wide ones do not. Overhang is normal for text; clipping its tip is
+      // what this renderer has always done and what nobody has ever reported.
+      const stub = stubCanvas(256, 14) // 14px of ink in a 10px cell — 1.4×, far past the tolerance
+      active = stub
+      const r = createCanvasRasterizer(FONT, 256)!
+      stub.ops.length = 0
+      r.draw(0x58, false, true, INK_X, INK_Y, FG, BG) // italic 'X'
+      expect(inkOp(stub.ops).scale).toBeUndefined()
+    })
+
+    it('an oversized SYMBOL is SCALED to its cell instead of being clipped', () => {
       // 14px of ink entitled to one 10px cell: without this it lost 4px off its right edge.
       const stub = stubCanvas(256, 14)
       active = stub
@@ -1047,5 +1066,30 @@ describe('shrinkToFit', () => {
     expect(shrinkToFit(metrics(NaN, NaN), 10)).toBe(1)
     expect(shrinkToFit(metrics(0, 0), 10)).toBe(1)
     expect(shrinkToFit(metrics(0, 14), 0)).toBe(1)
+  })
+})
+
+/**
+ * The line between "this glyph may be shrunk" and "this glyph must be left alone" is not a ratio —
+ * bold-italic `X` measures 1.25 of its advance and so does the icon shrink-to-fit was written for.
+ * It is what the character IS.
+ */
+describe('shrinkEligible', () => {
+  it('refuses every letter, digit and ASCII punctuation', () => {
+    for (const ch of 'AZaz09.,;:!?-_/\\|()[]{}<>@#$%^&*+="\'`~') {
+      expect(shrinkEligible(ch.codePointAt(0) as number), ch).toBe(false)
+    }
+  })
+
+  it('refuses accented and non-Latin TEXT, which overhangs for the same reasons', () => {
+    for (const ch of 'çğışöüÇĞİŞÖÜéèñåøαβγдж') {
+      expect(shrinkEligible(ch.codePointAt(0) as number), ch).toBe(false)
+    }
+  })
+
+  it('allows the symbols drawn to a box — the class the shrink exists for', () => {
+    for (const ch of '⧉⎿★⭐▪◆➜✦☑⏺🎉👍') {
+      expect(shrinkEligible(ch.codePointAt(0) as number), ch).toBe(true)
+    }
   })
 })

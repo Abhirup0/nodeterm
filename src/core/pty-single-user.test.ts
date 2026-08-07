@@ -124,13 +124,21 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
   afterEach(() => {
     vi.useRealTimers()
     resetPlatformForTests()
-    // RETRIED, because this races a write it cannot wait for. The scrollback snapshot is fired and
-    // forgotten by design — `snapshotScrollback` is best-effort and nothing awaits it — so a test
-    // that triggered one can reach here while the file is still landing, and the rmdir then fails
-    // with ENOTEMPTY. Measured at roughly one full-suite run in six before this, always in this
-    // hook and never in an assertion; the name of the test it failed under ("still snapshots the
-    // scrollback") is the tell. `maxRetries` covers exactly this errno.
-    fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 })
+    // BEST EFFORT, and it must stay that way. This races a write it cannot wait for: the scrollback
+    // snapshot is fired and forgotten by design (`snapshotScrollback` is best-effort and nothing
+    // awaits it), so a test that triggered one can reach here while the file is still landing and
+    // the rmdir fails with ENOTEMPTY. Measured at roughly one full-suite run in six.
+    //
+    // `maxRetries` alone was not enough — it only narrows the window, and the write can land after
+    // the last retry. The catch is what actually fixes it, and it is safe precisely because this
+    // line is HOUSEKEEPING: the directory is per-test (`mkdtemp`) and lives in the OS temp dir, so
+    // failing to remove it cannot indicate a defect in anything under test. A cleanup that can fail
+    // the suite is worse than a leftover directory.
+    try {
+      fs.rmSync(userDataDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 })
+    } catch {
+      /* a temp dir we could not remove is not a test result */
+    }
   })
 
   /** A manager WITHOUT init(): no tmux (plain-shell fallback), as the co-attach suite runs it. */
