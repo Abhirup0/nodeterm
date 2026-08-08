@@ -196,9 +196,6 @@ detects your platform. Everything is also listed at
 - **iOS** — **nodeterm mobile** on the
   [App Store](https://apps.apple.com/app/nodeterm/id6790581233).
 
-> Until the macOS build is signed & notarized, Gatekeeper may warn on first launch —
-> right-click the app → **Open** to bypass it once.
-
 ## 🛠 Build from source
 
 Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
