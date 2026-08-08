@@ -2,7 +2,7 @@
 // Design: an open AgentId string, a declarative config record, and
 // capabilities expressed as const membership lists (not a capability object).
 
-export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode'
+export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'grok'
 // Open type — custom agents are any string ('custom:<uuid>'). Never restrict the set.
 export type AgentId = BuiltinAgentId | (string & {})
 
@@ -16,7 +16,13 @@ export interface AgentConfig {
   expectedProcess: string
 }
 
-export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = ['claude', 'codex', 'gemini', 'opencode']
+export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = [
+  'claude',
+  'codex',
+  'gemini',
+  'opencode',
+  'grok'
+]
 
 export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
   claude: {
@@ -48,13 +54,25 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     // through --prompt (see createAgentNode's flag-prompt branch).
     promptInjectionMode: 'flag-prompt',
     expectedProcess: 'opencode'
+  },
+  grok: {
+    label: 'Grok',
+    color: '#64748b',
+    launchCmd: 'grok',
+    // NOT `argv`, and this was checked against the binary rather than assumed: `grok "prompt"`
+    // is rejected outright ("error: unrecognized subcommand"), because the CLI's usage is
+    // `grok [OPTIONS] [COMMAND]` and a bare word is read as a subcommand. Its `-p/--single`
+    // prints one answer and EXITS, so it is not an interactive node either. That leaves typing
+    // the prompt into the TUI after it starts — the same shape gemini needs.
+    promptInjectionMode: 'stdin-after-start',
+    expectedProcess: 'grok'
   }
 }
 
 // Capabilities = const membership lists. A custom agent is in no list, so it
 // automatically gets only spawn + terminal-title + process status.
 export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode'] as const
-export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode'] as const
+export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
@@ -139,6 +157,7 @@ export function resumeCommand(id: AgentId, sessionId: string): string | null {
       return `opencode --session ${sid}`
     case 'claude':
     case 'gemini':
+    case 'grok':
       return `${id} --resume ${sid}`
     default:
       return null

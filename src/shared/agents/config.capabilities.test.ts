@@ -69,3 +69,33 @@ describe('createdAgentId', () => {
     expect(createdAgentId({ tags: 'claude' })).toBeUndefined()
   })
 })
+
+/**
+ * Grok arrives with spawn + resume and nothing else, which is the registry's own design for a new
+ * agent ("a custom agent is in no list, so it automatically gets only spawn + terminal-title +
+ * process status"). Hooks, context links and canvas control each need per-agent machinery that has
+ * not been written for it — an installer, a transcript parser, a discovery file — and claiming any
+ * of them here would light badges that never update and offer menu items that do nothing.
+ */
+describe('grok capabilities', () => {
+  it('is a builtin with a launch command and a colour', () => {
+    expect(BUILTIN_AGENT_IDS).toContain('grok')
+    expect(AGENT_CONFIG.grok.launchCmd).toBe('grok')
+    expect(AGENT_CONFIG.grok.label).toBe('Grok')
+  })
+
+  it('takes its prompt through stdin, because a bare positional is REJECTED by the CLI', () => {
+    // `grok "explain this"` → "error: unrecognized subcommand": its usage is
+    // `grok [OPTIONS] [COMMAND]`, so a bare word parses as a subcommand. `-p/--single` prints one
+    // answer and exits, so it is not an interactive session either. That leaves the TUI.
+    expect(AGENT_CONFIG.grok.promptInjectionMode).toBe('stdin-after-start')
+  })
+
+  it('claims resume and nothing beyond it', () => {
+    expect(canResume('grok')).toBe(true)
+    expect(hasHooks('grok')).toBe(false)
+    expect(canContextLink('grok')).toBe(false)
+    expect(canBranch('grok')).toBe(false)
+    expect(canControlCanvas('grok')).toBe(false)
+  })
+})
