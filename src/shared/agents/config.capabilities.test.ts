@@ -84,11 +84,22 @@ describe('grok capabilities', () => {
     expect(AGENT_CONFIG.grok.label).toBe('Grok')
   })
 
-  it('takes its prompt through stdin, because a bare positional is REJECTED by the CLI', () => {
-    // `grok "explain this"` → "error: unrecognized subcommand": its usage is
-    // `grok [OPTIONS] [COMMAND]`, so a bare word parses as a subcommand. `-p/--single` prints one
-    // answer and exits, so it is not an interactive session either. That leaves the TUI.
-    expect(AGENT_CONFIG.grok.promptInjectionMode).toBe('stdin-after-start')
+  it('takes its prompt as a positional, BEHIND a `--` separator', () => {
+    // Measured against the shipped 1.0.0 binary, whose usage is `grok [OPTIONS] [PROMPT] [COMMAND]`
+    // — the prompt shares its slot with the subcommand list. `grok version` prints the version and
+    // exits; `grok -- version` opens a session with "version" as the prompt. Without the separator
+    // a prompt of `help`, `version`, `login`, `models` or `export` is executed as a command and
+    // never reaches the model.
+    expect(AGENT_CONFIG.grok.promptInjectionMode).toBe('argv')
+    expect(AGENT_CONFIG.grok.argvPromptSeparator).toBe('--')
+  })
+
+  it('is the ONLY agent that asks for a separator', () => {
+    // claude takes a positional too, but has no subcommand a one-word prompt could shadow — and
+    // adding `--` there would change a command line that works today.
+    for (const id of BUILTIN_AGENT_IDS.filter((a) => a !== 'grok')) {
+      expect(AGENT_CONFIG[id].argvPromptSeparator, id).toBeUndefined()
+    }
   })
 
   it('claims resume and nothing beyond it', () => {

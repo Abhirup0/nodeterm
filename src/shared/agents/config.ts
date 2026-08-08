@@ -13,6 +13,20 @@ export interface AgentConfig {
   color: string // node color
   launchCmd: string // base launch command
   promptInjectionMode: PromptInjectionMode
+  /**
+   * Put this between the command and an `argv` prompt — in practice `'--'`, and only for a CLI
+   * whose grammar has BOTH a positional prompt and subcommands.
+   *
+   * grok is the case that needs it: its usage is `grok [OPTIONS] [PROMPT] [COMMAND]`, so a
+   * one-word prompt collides with a subcommand name. Measured against the shipped binary, `grok
+   * version` PRINTS THE VERSION AND EXITS while `grok -- version` opens a session with "version"
+   * as the prompt — so without the separator a prompt of `help`, `version`, `login`, `models` or
+   * `export` is silently executed as a command and never reaches the model.
+   *
+   * Omitted for every other agent: claude takes a positional and has no subcommand that could
+   * shadow one, and adding a `--` there would change a command line that works today.
+   */
+  argvPromptSeparator?: string
   expectedProcess: string
 }
 
@@ -59,12 +73,14 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     label: 'Grok',
     color: '#64748b',
     launchCmd: 'grok',
-    // NOT `argv`, and this was checked against the binary rather than assumed: `grok "prompt"`
-    // is rejected outright ("error: unrecognized subcommand"), because the CLI's usage is
-    // `grok [OPTIONS] [COMMAND]` and a bare word is read as a subcommand. Its `-p/--single`
-    // prints one answer and EXITS, so it is not an interactive node either. That leaves typing
-    // the prompt into the TUI after it starts — the same shape gemini needs.
-    promptInjectionMode: 'stdin-after-start',
+    // Verified against the SHIPPED 1.0.0 binary: usage is `grok [OPTIONS] [PROMPT] [COMMAND]`, so
+    // the prompt is a positional — but one that shares its slot with the subcommand list, which is
+    // what the separator is for (see `argvPromptSeparator`). An earlier reading of this file said
+    // `stdin-after-start`, taken from grok 0.1.220, which had no positional at all; npm's `latest`
+    // tag on the platform package still points at that old build, so the first binary a `npm pack`
+    // hands you is NOT the one `@xai-official/grok` installs.
+    promptInjectionMode: 'argv',
+    argvPromptSeparator: '--',
     expectedProcess: 'grok'
   }
 }

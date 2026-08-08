@@ -335,10 +335,15 @@ export function createAgentNode(
   const promptArg = initialPrompt
     ? shellSingleQuote(initialPrompt.replace(/\s+/g, ' ').trim())
     : null
+  // A CLI whose positional prompt shares its slot with subcommands needs a separator, or a
+  // one-word prompt runs as a command instead (grok: `grok version` prints the version, `grok --
+  // version` asks the model about "version"). Absent for everyone else, so their command line is
+  // byte-identical to what it was.
+  const sep = agentConfig(agentId)?.argvPromptSeparator
   const withPrompt = promptArg
     ? agentConfig(agentId)?.promptInjectionMode === 'flag-prompt'
       ? `${baseCmd} --prompt ${promptArg}`
-      : `${baseCmd} ${promptArg}`
+      : `${baseCmd} ${sep ? `${sep} ` : ''}${promptArg}`
     : baseCmd
   // Flag goes last: the prompt is claude's positional argv and must stay adjacent to the binary.
   // No mode passed (e.g. a legacy/test call site) = bare command, exactly as before this setting.
