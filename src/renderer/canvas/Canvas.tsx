@@ -110,6 +110,7 @@ import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunc
 import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
+import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
@@ -642,6 +643,47 @@ export function Canvas() {
   // Flow's own lock convention. Transient by design: a lock that survives restart reads as
   // "the app is frozen" to whoever opens it next.
   const [canvasLocked, setCanvasLocked] = useState(false)
+  /** SPACE is held: a left-drag pans instead of box-selecting, Figma-style (issue #86). */
+  const [spacePan, setSpacePan] = useState(false)
+
+  /**
+   * Hold SPACE to pan — the Figma/Miro gesture, requested in issue #86 (where a user pressed it,
+   * got nothing, and watched the spaces land in a sticky note instead).
+   *
+   * CAPTURE phase, because the answer has to be decided before anything else sees the key. What is
+   * NOT taken is the load-bearing half — `spacePanKeydown` refuses a modified space, the auto-repeat
+   * of a held key, and above all anything typed into a terminal, a note or a field. A space
+   * swallowed there is a wrong character in the user's text, which is a worse bug than the missing
+   * gesture this adds. (xterm needs no special case: it takes the keyboard through a hidden
+   * textarea, so a focused terminal reads as a typing target like any other.)
+   *
+   * `preventDefault` only while we actually engage: an untaken space must reach whoever it was for.
+   *
+   * The three RELEASE paths all matter, and only the first is obvious. A keyup ends the ordinary
+   * gesture; a window blur ends the one where the user switched apps mid-pan (⌘Tab with space held
+   * would otherwise never deliver a keyup, stranding the canvas in grab mode until the next tap);
+   * and the lock is honoured by the props rather than here, so locking mid-pan cannot leave a
+   * half-engaged state either.
+   */
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (spacePanKeydown(e, document.activeElement) !== 'engage') return
+      e.preventDefault()
+      setSpacePan(true)
+    }
+    const onKeyUp = (e: KeyboardEvent): void => {
+      if (isSpaceRelease(e)) setSpacePan(false)
+    }
+    const release = (): void => setSpacePan(false)
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('keyup', onKeyUp, true)
+    window.addEventListener('blur', release)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('keyup', onKeyUp, true)
+      window.removeEventListener('blur', release)
+    }
+  }, [])
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null)
   const [remotePicker, setRemotePicker] = useState<{ x: number; y: number } | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -7573,11 +7615,17 @@ export function Canvas() {
           // shows the grab cursor whenever panOnDrag includes button 0); box-select stays
           // reachable via Shift+drag (selectionKeyCode's default). 'select' keeps the
           // Figma-style default: left-drag rubber-band selects, pan is middle-drag/scroll.
-          selectionOnDrag={settings.canvasDragMode !== 'pan'}
+          selectionOnDrag={!spacePan && settings.canvasDragMode !== 'pan'}
           selectionMode={SelectionMode.Partial}
           // The lock freezes the CAMERA only (pan/zoom) — nodes stay draggable, resizable and
           // connectable: the point is "stop the map sliding under me", not "freeze my work".
-          panOnDrag={canvasLocked ? false : settings.canvasDragMode === 'pan' ? [0, 1] : [1]}
+          panOnDrag={
+            canvasLocked
+              ? false
+              : spacePan || settings.canvasDragMode === 'pan'
+                ? [0, 1]
+                : [1]
+          }
           panOnScroll={canvasLocked ? false : !wheelZoom}
           zoomOnScroll={false}
           zoomOnPinch={false}
