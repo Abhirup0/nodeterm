@@ -183,12 +183,14 @@ detects your platform. Everything is also listed at
 
   ```bash
   brew tap nodeterm/tap
-  brew trust nodeterm/tap        # Homebrew ≥6 asks once for a third-party tap
+  brew trust nodeterm/tap        # Homebrew ≥6 refuses to load an untrusted tap
   brew install --cask nodeterm
   ```
 
-  The cask tracks each promoted release. The app updates itself (electron-updater), so
-  `brew upgrade` is rarely needed for it.
+  Both first lines are required. On its own, `brew install --cask nodeterm` only searches
+  `homebrew/cask` and reports the cask as not found; without the trust grant, Homebrew ≥6
+  fails rather than prompting. The cask tracks each promoted release, and the app updates
+  itself (electron-updater), so `brew upgrade` is rarely needed for it.
 - **Linux (x64)** — self-updating **AppImage**, or a `.deb` for Debian/Ubuntu
   (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
 - **iOS** — **nodeterm mobile** on the [App Store](https://nodeterm.dev/mobile).
