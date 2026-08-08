@@ -10,6 +10,18 @@ import { ColumnPill } from '../components/kanban/ColumnPill'
 export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { updateNodeData, deleteElements, setNodes } = useReactFlow()
   const [showColors, setShowColors] = useState(false)
+  /**
+   * The title is a plain SPAN until it is clicked, exactly as on a terminal node.
+   *
+   * It used to be a permanent `<input class="term-node__title">`, and that class is `flex: 1` — so
+   * the input covered the whole header strip. Everything in that strip was therefore a text field:
+   * clicking to pick the note up put a caret in the title instead, and there was no bare header
+   * left to grab. Reported 2026-08-09 ("the click area is full width, it should only be the name").
+   * The terminal's `.term-node__title-text` is content-width, which is the behaviour being matched.
+   */
+  const [editingTitle, setEditingTitle] = useState(false)
+  /** The value editing started with, so Escape can put it back. */
+  const [titleBefore, setTitleBefore] = useState('')
   const collapsed = !!data.collapsed
 
   const toggleCollapse = () =>
@@ -79,12 +91,44 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
             ))}
           </div>
         )}
-        <input
-          className="term-node__title nodrag"
-          value={data.title}
-          spellCheck={false}
-          onChange={(e) => updateNodeData(id, { title: e.target.value })}
-        />
+        {editingTitle ? (
+          <input
+            className="term-node__title nodrag"
+            value={data.title}
+            spellCheck={false}
+            autoFocus
+            onChange={(e) => updateNodeData(id, { title: e.target.value })}
+            // Every exit commits what is on screen — the edits are live, so there is nothing to
+            // save — except Escape, which puts back the value editing started with.
+            onBlur={() => setEditingTitle(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                setEditingTitle(false)
+              } else if (e.key === 'Escape') {
+                e.preventDefault()
+                updateNodeData(id, { title: titleBefore })
+                setEditingTitle(false)
+              }
+            }}
+          />
+        ) : (
+          <span
+            className="term-node__title-text nodrag"
+            title="Click to rename"
+            onClick={() => {
+              setTitleBefore((data.title as string) ?? '')
+              setEditingTitle(true)
+            }}
+          >
+            {(data.title as string) || 'Note'}
+          </span>
+        )}
+        {/* Pushes the close button back to the right edge now that the title is content-width — and
+            it is deliberately NOT `nodrag`, so this is the bare strip of header the note is picked
+            up by. That grab area is what the permanent full-width input used to swallow. Absent
+            while editing, since the input takes the `flex: 1` role itself. */}
+        {!editingTitle && <span className="term-node__spacer" />}
         <button
           className="term-node__close"
           title="Close"
