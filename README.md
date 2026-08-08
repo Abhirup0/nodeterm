@@ -16,6 +16,12 @@ hidden tabs.
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/eneskirca/nodeterm?style=flat)](https://github.com/eneskirca/nodeterm/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/eneskirca/nodeterm?include_prereleases&sort=semver)](https://github.com/eneskirca/nodeterm/releases)
+<!-- Installer downloads: .dmg + .AppImage + .deb across every release, hand-written on purpose.
+     shields' github/downloads/…/total reads ~12× higher because electron-updater's own traffic
+     (latest-*.yml polls, mac .zip deltas, blockmaps) is counted as downloads there. Recount with:
+     gh api --paginate repos/eneskirca/nodeterm/releases --jq \
+       '[.[].assets[] | select(.name|test("\\.(dmg|AppImage|deb)$")) | .download_count] | add' -->
+[![Downloads](https://img.shields.io/badge/downloads-1.2k-brightgreen)](https://github.com/eneskirca/nodeterm/releases)
 
 [Download](#-download) · [Docs](https://nodeterm.dev/docs) · [Features](#-features) · [Build from source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
 
