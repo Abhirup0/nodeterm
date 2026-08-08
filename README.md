@@ -193,7 +193,8 @@ detects your platform. Everything is also listed at
   itself (electron-updater), so `brew upgrade` is rarely needed for it.
 - **Linux (x64)** — self-updating **AppImage**, or a `.deb` for Debian/Ubuntu
   (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
-- **iOS** — **nodeterm mobile** on the [App Store](https://nodeterm.dev/mobile).
+- **iOS** — **nodeterm mobile** on the
+  [App Store](https://apps.apple.com/app/nodeterm/id6790581233).
 
 > Until the macOS build is signed & notarized, Gatekeeper may warn on first launch —
 > right-click the app → **Open** to bypass it once.
