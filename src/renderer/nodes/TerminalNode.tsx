@@ -474,6 +474,17 @@ const CELL_SIZE_EPS = 0.01
  * can only make that respawn fresh, not impossible — it would resurrect a terminal its owner
  * deliberately killed. Cleared only on permanent deletion (disposeTerminalOnUnmount).
  */
+/**
+ * How far the pointer may travel between press and release and still count as a CLICK on the hover
+ * guard, in screen px. Above it the gesture moved the node and the terminal keeps waiting; below
+ * it, the click focuses immediately (issue #87).
+ *
+ * Generous rather than tight: a few pixels of travel is a hand, not an intent, and the cost of
+ * being wrong is asymmetric — a missed focus makes the user click again (and, before this, made
+ * that click count against them), while an over-eager focus costs one Escape.
+ */
+const GUARD_CLICK_SLOP = 4
+
 interface CoState {
   /** The pty runs at a SMALLER subscriber's grid than we could fit → center + letterbox. */
   letterbox: boolean
@@ -624,6 +635,8 @@ export function TerminalNode({
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
   const accountChip = accountChipLabel(data.accountId, claudeAccounts)
   const bodyRef = useRef<HTMLDivElement>(null)
+  /** Where a press on the hover guard started, for the click-vs-drag test in `onGuardUp`. */
+  const guardDownAt = useRef<{ x: number; y: number } | null>(null)
   const middleClickPaste = useSettings((st) => st.settings.terminalMiddleClickPaste)
   // Chromium pastes the X PRIMARY selection into xterm's hidden textarea on middle click — a path
   // this app never built and the user could not switch off (issue #84). Its own effect, keyed on
@@ -2611,6 +2624,19 @@ export function TerminalNode({
     )
 
   // ---- hover guard: dwell before entering the terminal ----
+  /**
+   * Take the keyboard: leave the guard, focus xterm, and report the node active.
+   *
+   * Split out of `onBodyEnter` so a deliberate CLICK can run it with no delay — see `onGuardUp`.
+   */
+  const enterNow = () => {
+    if (dwellRef.current) clearTimeout(dwellRef.current)
+    setArmed(false)
+    termRef.current?.focus()
+    useAgentStatus.getState().setActive(id, true)
+    useAgentStatus.getState().clearUnread(id)
+    presence.reportFocus(id)
+  }
   const onBodyEnter = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
     const enter = () => {
@@ -2639,9 +2665,34 @@ export function TerminalNode({
     presence.releaseFocus(id)
   }
   // While armed, a mousedown might start a node drag — pause the dwell timer so the
-  // terminal doesn't grab focus mid-drag; restart it on release.
-  const onGuardDown = () => {
+  // terminal doesn't grab focus mid-drag; the release decides what happens next (`onGuardUp`).
+  const onGuardDown = (e: React.MouseEvent) => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
+    guardDownAt.current = { x: e.clientX, y: e.clientY }
+  }
+  /**
+   * A release on the guard: focus NOW if it was a click, restart the dwell if it was a drag.
+   *
+   * Issue #87 — "selecting a terminal node doesn't reliably move keyboard focus; often I have to
+   * click several times". It was worse than unreliable, it was self-defeating: the release used to
+   * restart the full `panHoverDelay` (600 ms by default) and the next mousedown CANCELLED it, so
+   * clicking again — the natural response to "it didn't focus" — actively pushed focus further
+   * away. Only holding still for the whole dwell ever worked.
+   *
+   * The guard exists for a mouse PASSING OVER a terminal on its way somewhere (and for drags that
+   * start on one), which is why hovering has to wait. A click that did not move the node is not
+   * ambiguous at all, so it does not wait.
+   *
+   * The threshold is what separates the two, and it is generous on purpose: a few pixels of travel
+   * between press and release is a hand, not an intent to drag. Past it the node HAS moved, and
+   * focusing a terminal the user just repositioned would be the old bug in the other direction.
+   */
+  const onGuardUp = (e: React.MouseEvent) => {
+    const from = guardDownAt.current
+    guardDownAt.current = null
+    const moved = from ? Math.hypot(e.clientX - from.x, e.clientY - from.y) : Infinity
+    if (from && moved <= GUARD_CLICK_SLOP && !isZoomModifierHeld()) enterNow()
+    else onBodyEnter()
   }
 
   // ---- file drop: paste dropped file paths into the terminal (native-terminal behavior) ----
@@ -3277,8 +3328,8 @@ export function TerminalNode({
           <div
             className="term-hover-guard"
             onMouseDown={onGuardDown}
-            onMouseUp={onBodyEnter}
-            title="Drag to move · scroll to pan · hover to focus"
+            onMouseUp={onGuardUp}
+            title="Click to type · drag to move · scroll to pan"
           />
         )}
         {mdMode &&

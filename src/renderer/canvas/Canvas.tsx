@@ -109,6 +109,7 @@ import { CloneRepoDialog } from '../components/CloneRepoDialog'
 import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunch'
 import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
+import { shouldReleasePaneFocus } from '../lib/paneFocus'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
@@ -7550,7 +7551,16 @@ export function Canvas() {
             publisherRef.current?.flush()
             markDirty()
           }}
-          onPaneClick={() => useAgentNodes.getState().select(null)}
+          onPaneClick={() => {
+            useAgentNodes.getState().select(null)
+            // …and RELEASE THE KEYBOARD (issue #86). Clicking empty canvas used to leave a sticky
+            // note's textarea focused, so everything typed afterwards went into that note — and,
+            // because the canvas shortcuts all skip while an input has focus, the canvas looked
+            // dead as well. Only real editing surfaces are blurred; see `shouldReleasePaneFocus`.
+            if (shouldReleasePaneFocus(document.activeElement)) {
+              ;(document.activeElement as HTMLElement).blur()
+            }
+          }}
           onPaneContextMenu={onPaneContextMenu}
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
