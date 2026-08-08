@@ -179,7 +179,16 @@ Grab the latest build from **[nodeterm.dev](https://nodeterm.dev)** — the down
 detects your platform. Everything is also listed at
 [nodeterm.dev/releases](https://nodeterm.dev/releases):
 
-- **macOS** — `.dmg` for Apple Silicon and Intel (auto-updates).
+- **macOS** — `.dmg` for Apple Silicon and Intel (auto-updates), or **Homebrew**:
+
+  ```bash
+  brew tap nodeterm/tap
+  brew trust nodeterm/tap        # Homebrew ≥6 asks once for a third-party tap
+  brew install --cask nodeterm
+  ```
+
+  The cask tracks each promoted release. The app updates itself (electron-updater), so
+  `brew upgrade` is rarely needed for it.
 - **Linux (x64)** — self-updating **AppImage**, or a `.deb` for Debian/Ubuntu
   (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
 - **iOS** — **nodeterm mobile** on the [App Store](https://nodeterm.dev/mobile).
