@@ -22,6 +22,11 @@ export const DRAG_MIN_PX = 8
 export const OSC52_GRACE_MS = 600
 export const COPIED_DWELL_MS = 1600
 export const HINT_DWELL_MS = 5000
+/** How long a clipboard-failure toast keeps the `copied` pill from being raised at all. It only has
+ *  to cover a SYNCHRONOUS dispatch: over plain http the browser shim has no Clipboard API, so its
+ *  execCommand fallback runs — and dispatches its error toast — inside `writeText`, i.e. before the
+ *  OSC 52 handler calls `notifyCopy`. Retracting after the fact cannot catch that ordering. */
+export const ERROR_TOAST_SUPPRESS_MS = 50
 /** Once per installation — same convention as `seenShortcuts`. */
 export const HINT_STORAGE_KEY = 'nodeterm.seenSelectHint'
 

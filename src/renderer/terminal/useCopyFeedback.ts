@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { isMacPlatform } from '@shared/platform-utils'
 import {
   COPIED_DWELL_MS,
+  ERROR_TOAST_SUPPRESS_MS,
   HINT_DWELL_MS,
   HINT_STORAGE_KEY,
   OSC52_GRACE_MS,
@@ -52,6 +53,8 @@ export function useCopyFeedback(opts: {
   const decideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   /** When the last clipboard write landed — read by the drag decision. */
   const lastCopyAt = useRef(0)
+  /** When the last clipboard-failure toast was dispatched — read by `notifyCopy`. */
+  const lastErrorToastAt = useRef(0)
   // Read through a ref so the listener effect never re-runs when the caller passes a fresh closure.
   const hasSelectionRef = useRef(opts.hasSelection)
   hasSelectionRef.current = opts.hasSelection
@@ -64,7 +67,13 @@ export function useCopyFeedback(opts: {
 
   const notifyCopy = useCallback(
     (text: string): void => {
+      // The gesture itself succeeded (tmux copy-mode ran), so the drag decision is told either way:
+      // whatever the clipboard did, "hold ⌥ to select text" is not the advice this drag needs.
       lastCopyAt.current = Date.now()
+      // A failure toast that lands AFTER this call retracts the pill (the effect below); one
+      // dispatched SYNCHRONOUSLY just before it — the plain-http execCommand path, where the shim
+      // toasts inside `writeText` — can only be caught here, before any pill is raised.
+      if (Date.now() - lastErrorToastAt.current < ERROR_TOAST_SUPPRESS_MS) return
       const label = copiedLabel(text)
       if (label) show({ kind: 'copied', label }, COPIED_DWELL_MS)
     },
@@ -118,6 +127,7 @@ export function useCopyFeedback(opts: {
     const onToast = (e: Event): void => {
       const detail = (e as CustomEvent<{ kind?: string }>).detail
       if (detail?.kind !== 'error') return
+      lastErrorToastAt.current = Date.now()
       setFeedback((cur) => (cur?.kind === 'copied' ? null : cur))
     }
     window.addEventListener('nodeterm:toast', onToast)
