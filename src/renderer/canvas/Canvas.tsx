@@ -191,12 +191,12 @@ import {
   canControlCanvas,
   createdAgentId,
   resumeCommand,
-  withPermissionMode,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
   type AgentId,
   type AgentPermissionMode
 } from '@shared/agents/config'
+import { withPermissionMode } from '@shared/agents/approval-mode'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'

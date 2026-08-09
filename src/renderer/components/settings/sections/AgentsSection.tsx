@@ -16,6 +16,7 @@ import {
   type AgentId,
   type AgentPermissionMode
 } from '@shared/agents/config'
+import { permissionModeAgentsLabel, unsupportedModesNote } from '@shared/agents/approval-mode'
 import { AgentIcon } from '../../../lib/agentIcons'
 import { hintLabel } from '@shared/platform-utils'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
@@ -45,6 +46,9 @@ const ROWS = {
       'ask',
       'claude',
       'grok',
+      'gemini',
+      'codex',
+      'approval',
       'shift tab'
     ]
   },
@@ -54,6 +58,25 @@ const ROWS = {
   },
 }
 const ENTRIES = Object.values(ROWS)
+
+/**
+ * Every fact in this sentence is DERIVED from the per-agent mapping (`@shared/agents/approval-mode`):
+ * the agent list from `PERMISSION_MODE_CAPABLE`, and the admission of where a mode does NOT apply
+ * from `modeSupported`. Hardcoding either would leave a second list to keep in sync, and its failure
+ * mode is a settings page promising Plan on an agent that is quietly running in its own default.
+ *
+ * Assembled by joining the non-empty parts, so the middle sentence disappears cleanly (no double
+ * space) the day every capable agent expresses every mode.
+ */
+function permissionModeDescription(): string {
+  return [
+    `The mode ${permissionModeAgentsLabel()} terminal sessions start in; other agents ignore it.`,
+    unsupportedModesNote(),
+    'Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu.'
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
 
 export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const settings = useSettings((s) => s.settings)
@@ -81,7 +104,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
   // evidence of an old CLI, and guessing would be its own kind of wrong.
   const autoNote =
     settings.claudePermissionMode === 'auto' && cliCaps?.version && !cliCaps.autoPermissionMode
-      ? `Your Claude CLI (${cliCaps.version.split(/\s+/)[0]}) doesn't support Auto — Claude sessions start in "${PERMISSION_MODE_LABELS.manual}". Requires Claude Code ${AUTO_PERMISSION_MODE_MIN_VERSION} or newer. Grok is unaffected.`
+      ? `Your Claude CLI (${cliCaps.version.split(/\s+/)[0]}) doesn't support Auto — Claude sessions start in "${PERMISSION_MODE_LABELS.manual}". Requires Claude Code ${AUTO_PERMISSION_MODE_MIN_VERSION} or newer. ${permissionModeAgentsLabel({ exclude: ['claude'] })} are unaffected.`
       : undefined
 
   return (
@@ -128,7 +151,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
         <FieldRow
           label="Permission mode"
           note={autoNote}
-          description="The mode Claude and Grok terminal sessions start in; other agents ignore it. Shift+Tab still switches modes at any time. Projects can override this from the tab ⌄ menu."
+          description={permissionModeDescription()}
           control={
             <Select
               aria-label="Agent permission mode"

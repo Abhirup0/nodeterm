@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { resumeCommand, withPermissionMode } from '../../shared/agents/config'
+import { resumeCommand } from '../../shared/agents/config'
+import { withPermissionMode } from '../../shared/agents/approval-mode'
 import {
   __resetAgentRestartForTests,
   agentRestartFn,

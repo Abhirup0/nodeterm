@@ -17,6 +17,7 @@ import {
   PERMISSION_MODE_LABELS,
   type AgentPermissionMode
 } from '@shared/agents/config'
+import { permissionModeAgentsLabel } from '@shared/agents/approval-mode'
 
 interface TabBarProps {
   onSwitch: (id: string) => void
@@ -476,7 +477,11 @@ export function TabBar({
                     // and applies the moment the host's CLI qualifies.
                     title={
                       m === 'bypassPermissions'
-                        ? 'Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs their Claude and Grok sessions without permission checks too.'
+                        ? // The agent list is derived from the mapping (approval-mode.ts): it names
+                          // exactly the agents "Bypass all" actually reaches, so it cannot warn
+                          // about an agent the mode never applies to — or fall silent about one it
+                          // newly does.
+                          `Skips every permission prompt. This override is saved in the project file (.nodeterm/project.json), so if you commit it, everyone who clones the repo runs their ${permissionModeAgentsLabel({ mode: 'bypassPermissions' })} sessions without permission checks too.`
                         : m === 'auto'
                           ? (menuAutoHint ?? undefined)
                           : undefined

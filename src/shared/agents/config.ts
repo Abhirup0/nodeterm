@@ -147,13 +147,20 @@ export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
 // claude and grok share the flag SPELLING and the value vocabulary
 // (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own
-// `default`), which is the whole requirement for membership. codex (--ask-for-approval) and gemini
-// (--approval-mode) join by being added here with their own flag mapping.
+// `default`). gemini (`--approval-mode default|auto_edit|yolo|plan`) and codex
+// (`--ask-for-approval untrusted|on-request|never`) each spell it their own way, so membership here
+// is only half the story — the translation lives in ./approval-mode.ts.
+//
+// Membership does NOT mean every mode applies: codex's vocabulary is NARROWER than ours (no plan,
+// no edit-specific mode), and those modes emit NO flag rather than a substituted nearest match.
+// `modeSupported` is what the UI asks so the user is told, instead of being shown "Plan" while
+// codex runs in on-request.
 //
 // NOTE: the `auto` VERSION GATE is claude's alone — see activePermissionMode in
 // renderer/state/permissionMode.ts. grok has accepted every mode we emit since 1.0.0, its first
-// release, so it must never inherit a gate fed by a `claude --version` probe.
-export const PERMISSION_MODE_CAPABLE = ['claude', 'grok'] as const
+// release, and gemini/codex accept theirs on the versions we measured, so none of them may inherit
+// a gate fed by a `claude --version` probe.
+export const PERMISSION_MODE_CAPABLE = ['claude', 'grok', 'gemini', 'codex'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 
@@ -334,7 +341,10 @@ export const ALL_PERMISSION_MODES: readonly AgentPermissionMode[] = Object.keys(
 /** Fallback whenever a persisted mode is missing or unrecognized. */
 export const DEFAULT_PERMISSION_MODE: AgentPermissionMode = 'auto'
 
-const isPermissionMode = (v: unknown): v is AgentPermissionMode =>
+/** The ONE validator for a persisted mode. Exported so every interpolation site can re-validate
+ *  through it (see `permissionModeFlag` below and `approvalFlags` in ./approval-mode) rather than
+ *  growing a second copy that drifts from `ALL_PERMISSION_MODES`. */
+export const isPermissionMode = (v: unknown): v is AgentPermissionMode =>
   typeof v === 'string' && (ALL_PERMISSION_MODES as readonly string[]).includes(v)
 
 /** CLI flags for a mode. `manual` yields NO flags, so the command stays bare — the exact
@@ -350,13 +360,10 @@ export function permissionModeFlag(mode: AgentPermissionMode): string[] {
   return ['--permission-mode', mode]
 }
 
-/** Appends the permission-mode flag to a launch command, if the agent supports one. The single
- *  funnel for every CLI launch path (new node, cold-restore resume, branch). */
-export function withPermissionMode(cmd: string, id: AgentId, mode: AgentPermissionMode): string {
-  if (!hasPermissionMode(id)) return cmd
-  const flags = permissionModeFlag(mode)
-  return flags.length ? `${cmd} ${flags.join(' ')}` : cmd
-}
+// `withPermissionMode` — the single funnel every CLI launch path goes through — lives in
+// ./approval-mode.ts, one layer UP: since gemini and codex joined, appending the flag needs the
+// per-agent mapping, and that table has to import this file. Re-exporting it from here would close
+// the cycle, so the funnel moved to the layer that owns the translation instead.
 
 /**
  * The mode a new session starts in: the project override, else the global setting.

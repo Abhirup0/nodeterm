@@ -9,10 +9,10 @@ import {
   supportsAutoPermissionMode,
   supportsFullscreenTui,
   gatePermissionMode,
-  withPermissionMode,
   ALL_PERMISSION_MODES,
   type AgentPermissionMode
 } from './config'
+import { withPermissionMode } from './approval-mode'
 
 describe('supportsAutoPermissionMode', () => {
   it('accepts the first version that knows `auto` and everything above it', () => {

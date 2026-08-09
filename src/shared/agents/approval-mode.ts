@@ -1,0 +1,145 @@
+// Per-agent translation of nodeterm's permission mode into the agent's own approval flag.
+//
+// claude and grok share one spelling and one vocabulary, which is why they needed no mapping at all
+// until now. gemini and codex each have their own — and codex's is NARROWER than ours, which is the
+// interesting case: our five modes do not fit `untrusted|on-request|never`, so the modes codex
+// cannot express emit NO flag (its own default) rather than a nearest match. A silent substitution
+// would show the user "Plan" while codex ran in on-request.
+//
+// Measured: `gemini --help` (0.54.4) and `codex --help` (0.146.0). `--sandbox` is deliberately not
+// touched: it is a separate axis (read-only | workspace-write | danger-full-access), and folding
+// `danger-full-access` into `bypassPermissions` would widen filesystem access invisibly —
+// `--ask-for-approval never` on its own still sandboxes.
+import {
+  AGENT_CONFIG,
+  ALL_PERMISSION_MODES,
+  PERMISSION_MODE_CAPABLE,
+  PERMISSION_MODE_LABELS,
+  hasPermissionMode,
+  isPermissionMode,
+  permissionModeFlag,
+  type AgentId,
+  type AgentPermissionMode,
+  type BuiltinAgentId
+} from './config'
+
+const GEMINI_MODES: Partial<Record<AgentPermissionMode, string>> = {
+  plan: 'plan',
+  acceptEdits: 'auto_edit',
+  bypassPermissions: 'yolo',
+  // gemini has no "approve everything except the dangerous bits" mode; auto_edit is the nearest,
+  // and it is the same direction claude's acceptEdits points.
+  auto: 'auto_edit'
+  // `manual` → gemini's own `default`, i.e. NO flag, exactly as it is for claude.
+}
+
+const CODEX_MODES: Partial<Record<AgentPermissionMode, string>> = {
+  auto: 'on-request',
+  bypassPermissions: 'never'
+  // No `plan` and no edit-specific mode exist in codex 0.146.0, so `plan` and `acceptEdits` are
+  // absent ON PURPOSE — see modeSupported. `untrusted` is deliberately unused: it is stricter than
+  // codex's own default, and none of our five modes asks for that.
+}
+
+const tableFor = (agentId: AgentId): Partial<Record<AgentPermissionMode, string>> | null =>
+  agentId === 'gemini' ? GEMINI_MODES : agentId === 'codex' ? CODEX_MODES : null
+
+const flagFor = (agentId: AgentId): string =>
+  agentId === 'gemini' ? '--approval-mode' : '--ask-for-approval'
+
+/** Can this agent actually start in this mode? `false` means the launch omits the flag and the
+ *  agent uses its own default — surfaced in the UI so the user is not misled. */
+export function modeSupported(agentId: AgentId, mode: AgentPermissionMode): boolean {
+  if (!isPermissionMode(mode)) return false
+  if (mode === 'manual') return hasPermissionMode(agentId) // "ask each time" = the agent's own default
+  const table = tableFor(agentId)
+  if (table) return mode in table
+  return hasPermissionMode(agentId)
+}
+
+/**
+ * The flags to append for this agent + mode. Empty = the bare command.
+ *
+ * The mode is re-validated at the top for the same reason `permissionModeFlag` does it: the value
+ * comes from hand-editable, git-shared JSON (settings.json / project.json) and is interpolated into
+ * a shell command line, so its TYPE proves nothing. Without the guard, a forged `constructor`
+ * satisfies `mode in table` on a plain object and hands back a Function — one that would have been
+ * stringified onto a tmux `send-keys` line.
+ */
+export function approvalFlags(agentId: AgentId, mode: AgentPermissionMode): string[] {
+  if (!isPermissionMode(mode)) return []
+  const table = tableFor(agentId)
+  if (table) {
+    const value = table[mode]
+    return value ? [flagFor(agentId), value] : []
+  }
+  // claude + grok keep their exact historical spelling, validated at the interpolation site.
+  return hasPermissionMode(agentId) ? permissionModeFlag(mode) : []
+}
+
+/**
+ * Appends the agent's approval flag to a launch command, if it has one. The single funnel for every
+ * CLI launch path (new node, cold-restore resume, branch, handoff, canvas control).
+ *
+ * WHERE the flag lands is decided one layer up, by `createAgentNode`: with no `argvPromptSeparator`
+ * (claude, gemini, codex) it goes LAST, keeping those command lines byte-identical; with one
+ * (grok's `--`) it must go BEFORE the separator, because `--` is end-of-options.
+ */
+export function withPermissionMode(cmd: string, id: AgentId, mode: AgentPermissionMode): string {
+  const flags = approvalFlags(id, mode)
+  return flags.length ? `${cmd} ${flags.join(' ')}` : cmd
+}
+
+// ---------------------------------------------------------------------------------------------
+// UI copy, DERIVED from the mapping above.
+//
+// The settings description has to name the agents the mode applies to and admit where it does not
+// apply, and both facts live in the mapping. Spelling them out in a string literal is how a sentence
+// starts telling users that Plan works on an agent that has silently stopped supporting it — a
+// sentence that drifts from the mapping is worse than none. So they are computed.
+// ---------------------------------------------------------------------------------------------
+
+const agentLabel = (id: AgentId): string =>
+  AGENT_CONFIG[id as BuiltinAgentId]?.label ?? id
+
+const joinAnd = (parts: string[]): string =>
+  parts.length <= 1
+    ? (parts[0] ?? '')
+    : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+
+/**
+ * The agents whose start-up mode we can set, labelled for prose: "Claude Code, Grok, …".
+ *
+ * `mode` narrows to the agents that can actually express THAT mode (a warning about "Bypass all"
+ * must not name an agent the mode never reaches); `exclude` drops one the sentence is already about
+ * (claude's version-gate note, whose subject is claude).
+ */
+export function permissionModeAgentsLabel(opts?: {
+  mode?: AgentPermissionMode
+  exclude?: readonly AgentId[]
+}): string {
+  const ids = PERMISSION_MODE_CAPABLE.filter(
+    (id) =>
+      !opts?.exclude?.includes(id) && (opts?.mode === undefined || modeSupported(id, opts.mode))
+  )
+  return joinAnd(ids.map(agentLabel))
+}
+
+/**
+ * One sentence per capable agent that cannot express every mode, naming the modes and saying what
+ * happens instead. Empty string when there is nothing to admit — so the caller appends it blindly
+ * and the sentence disappears by itself the day a CLI grows the missing mode.
+ */
+export function unsupportedModesNote(): string {
+  return PERMISSION_MODE_CAPABLE.map((id) => ({
+    label: agentLabel(id),
+    gaps: ALL_PERMISSION_MODES.filter((m) => !modeSupported(id, m))
+  }))
+    .filter((a) => a.gaps.length > 0)
+    .map(({ label, gaps }) => {
+      const modes = joinAnd(gaps.map((m) => PERMISSION_MODE_LABELS[m]))
+      const verb = gaps.length > 1 ? 'have' : 'has'
+      return `${modes} ${verb} no ${label} equivalent, so ${label} sessions start in its own default.`
+    })
+    .join(' ')
+}
