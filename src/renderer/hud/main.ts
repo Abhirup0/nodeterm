@@ -127,7 +127,8 @@ function reltime(ts: number): string {
 // and the Codex pet at 26px; these are the sensible defaults — NAIL EXACTLY ON A MAC (the notch
 // bar height varies by model, and 26px overflows a short bar). Aspect ratios are preserved from
 // the sprite geometry, so only the height matters.
-const HUD_CLAUDE_H = 13
+/** Height of every quadrant-block sprite (claude, grok) — they share the frame aspect. */
+const HUD_QUADRANT_H = 13
 const HUD_CODEX_H = 17
 
 /** A quadrant-block sprite mascot (claude, grok) — the sizing math is shared so the notch strip
@@ -138,7 +139,7 @@ function quadrantMascot(
 ): HTMLElement {
   const el = document.createElement('span')
   el.className = `mascot mascot--${variant}`
-  const h = HUD_CLAUDE_H
+  const h = HUD_QUADRANT_H
   const w = Math.round((h * mascot.frameWidth) / mascot.frameHeight)
   el.style.setProperty('--mascot-w', `${w}px`)
   el.style.setProperty('--mascot-h', `${h}px`)

@@ -5,7 +5,8 @@ import codexPet from '../assets/pet-codex.webp'
 
 /**
  * The walking mascot shown inside the RUNNING badge (docs/mascot-sprites.md):
- * - claude → the runtime-drawn coral pixel critter (data-URI spritesheet, CSS `steps(2)` walk).
+ * - claude → the runtime-drawn coral pixel critter (data-URI spritesheet; the walk is CSS
+ *   `steps(1)` over three keyframes, NOT `steps(2)` — see .term-node__mascot--claude).
  * - grok   → its own slate critter, same quadrant machinery and walk geometry.
  * - codex  → pet-codex.webp, first-row walk cycle (CSS `steps(8)`).
  * - anything else (gemini/opencode/custom/plain) → the plain pulsing dot, unchanged.

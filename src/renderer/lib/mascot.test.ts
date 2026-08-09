@@ -99,9 +99,42 @@ describe('grok mascot', () => {
     }
   })
 
+  it('draws an actual critter in both frames (not a blank sheet)', () => {
+    // Without this, blanking the art to a single stray pixel passes every other assertion here.
+    for (const frame of GROK_FRAME_ART) {
+      expect(decodeFrame(frame).pixels.some(Boolean)).toBe(true)
+      expect(countOn(decodeFrame(frame))).toBeGreaterThan(20)
+    }
+  })
+
+  it('is written only from glyphs the decoder knows', () => {
+    // Hand-authored art's realistic regression: a typo'd or look-alike block (e.g. the half-block
+    // ▀, absent from QUADRANT_BITS) decodes SILENTLY to nothing, leaving holes no other test sees.
+    for (const frame of GROK_FRAME_ART) {
+      for (const ch of frame.join('')) {
+        expect(QUADRANT_BITS[ch]).toBeDefined()
+      }
+    }
+  })
+
   it('alternates the feet, so it walks instead of sliding', () => {
+    // "Walks" = the FEET move while the body stays put. Whole-bitmap inequality is not enough:
+    // grok's antennae already differ between frames, so it would pass with identical feet.
     const [a, b] = GROK_FRAME_ART.map(decodeFrame)
-    expect(a.pixels).not.toEqual(b.pixels)
+    const fa = footRegion(a)
+    const fb = footRegion(b)
+    expect(fa).not.toEqual(fb)
+    // The walk moves the feet, it does not remove them.
+    expect(fa.some(Boolean)).toBe(true)
+    expect(fb.some(Boolean)).toBe(true)
+    // The body (art row 1 → sub-pixel rows 2–3) is identical, so the critter does not slide.
+    expect(a.pixels.slice(2 * SUB_COLS, 4 * SUB_COLS)).toEqual(
+      b.pixels.slice(2 * SUB_COLS, 4 * SUB_COLS)
+    )
+    // The head row DOES differ, by design: the two antennae swap sides so it bobs as it walks.
+    // (This is why the body slice above stops at row 2 instead of covering rows 0–3 like
+    // claude's equivalent test.)
+    expect(a.pixels.slice(0, 2 * SUB_COLS)).not.toEqual(b.pixels.slice(0, 2 * SUB_COLS))
   })
 
   it("is a DIFFERENT critter from claude's, not a recolor", () => {

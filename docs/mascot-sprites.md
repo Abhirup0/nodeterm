@@ -39,8 +39,11 @@ frame 0:  "▘ ▐███▌ ▝" / " ▙█████▟ " / "  ▘▘ ▝�
 frame 1:  "▝ ▐███▌ ▘" / " ▙█████▟ " / "  ▝▝ ▘▘  "
 ```
 
-- Color: slate-300 `rgb(203, 213, 225)` — the node color (`#64748b`) is too dark to read at
-  16 px on the black canvas badge and on the notch strip.
+- Color: `#8494a8`, a mid-tone. The badge lives in the node HEADER (`--panel-header`), which is
+  `#323232` dark but `#eae5db` LIGHT, so the sprite must survive both themes plus the notch
+  capsule's black. Measured contrast (dark / light / notch): this `4.14 / 2.47 / 6.78` vs Claude
+  coral's `4.11 / 2.49 / 6.73` — same balance. A light slate-300 reads 8.64 dark but **1.18
+  light**, i.e. invisible in a shipped theme; the node color `#64748b` reads only 2.69 dark.
 - Both sprites go through `buildQuadrantSprite(frames, color)` in `src/renderer/lib/mascot.ts`
   and reuse `CLAUDE_FRAME_WIDTH/HEIGHT`, so they cannot drift on aspect ratio or smoothing.
 
