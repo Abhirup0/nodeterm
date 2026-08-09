@@ -12,9 +12,10 @@
 import path from 'path'
 import { homedir } from 'os'
 import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'fs'
+import type { ManagedHookEvent } from '@shared/agents/hook-events'
 import { buildManagedScript } from './managed-script'
 
-type HookDef = { hooks?: { type: string; command: string }[] }
+type HookDef = { matcher?: string; hooks?: { type: string; command: string }[] }
 type Settings = { hooks?: Record<string, HookDef[]>; [k: string]: unknown }
 
 /** Public alias for the hook settings shape, shared by local + remote merge callers. */
@@ -67,6 +68,12 @@ function managedMarkerFor(command: string): string {
   return m ? m[0].replace(/\\/g, '/') : 'agent-hooks'
 }
 
+/** A subscription's event name, whichever form it was declared in. */
+const eventNameOf = (e: ManagedHookEvent): string => (typeof e === 'string' ? e : e.event)
+/** The matcher to write for it — undefined for the plain string form, so nothing changes for the
+ *  agents that never needed one (grok's tool events are the only case; see ManagedHookEvent). */
+const matcherOf = (e: ManagedHookEvent): string | undefined => (typeof e === 'string' ? undefined : e.matcher)
+
 /** A managed entry: matches OUR script under `agent-hooks/` or the legacy `claude-signals` marker. */
 function isManaged(d: HookDef, marker: string): boolean {
   return !!d.hooks?.some(
@@ -85,15 +92,23 @@ function isManaged(d: HookDef, marker: string): boolean {
  * list lacked, and if the loser's script had since been deleted those events silently did nothing.
  * It also cleans up after ourselves when an event leaves the list between versions.
  */
-export function mergeManagedHook(config: HookSettings, command: string, events: readonly string[]): HookSettings {
+export function mergeManagedHook(
+  config: HookSettings,
+  command: string,
+  events: readonly ManagedHookEvent[]
+): HookSettings {
   const marker = managedMarkerFor(command)
   const next: HookSettings = { ...config, hooks: { ...(config.hooks ?? {}) } }
-  for (const ev of events) {
+  for (const e of events) {
+    const ev = eventNameOf(e)
+    const matcher = matcherOf(e)
     const existing = (next.hooks![ev] ?? []).filter((d) => !isManaged(d, marker))
-    existing.push({ hooks: [{ type: 'command', command }] })
+    // Spread the matcher CONDITIONALLY: an explicit `matcher: undefined` would serialize as a
+    // missing key here but still change the object shape snapshots compare.
+    existing.push({ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command }] })
     next.hooks![ev] = existing
   }
-  const managedEvents = new Set(events)
+  const managedEvents = new Set(events.map(eventNameOf))
   for (const ev of Object.keys(next.hooks!)) {
     if (managedEvents.has(ev)) continue
     const kept = next.hooks![ev].filter((d) => !isManaged(d, marker))
@@ -108,7 +123,7 @@ export interface InstallHooksOptions {
   agentId: string
   scriptFileName: string
   configPath: string
-  events: readonly string[]
+  events: readonly ManagedHookEvent[]
 }
 
 export function installHooksInto(opts: InstallHooksOptions): void {
@@ -146,7 +161,7 @@ export function installHooksInto(opts: InstallHooksOptions): void {
 
 export interface RemoveHooksOptions {
   configPath: string
-  events: readonly string[]
+  events: readonly ManagedHookEvent[]
   /** Our script's file name — narrows the match so foreign agent-hooks entries survive. */
   scriptFileName: string
 }
@@ -161,7 +176,8 @@ export function removeHooksFrom(opts: RemoveHooksOptions): void {
     return
   }
   if (!config.hooks) return
-  for (const ev of events) {
+  for (const e of events) {
+    const ev = eventNameOf(e)
     if (!config.hooks[ev]) continue
     config.hooks[ev] = config.hooks[ev].filter((d) => !d.hooks?.some((h) => h.command.includes(marker)))
     if (config.hooks[ev].length === 0) delete config.hooks[ev]

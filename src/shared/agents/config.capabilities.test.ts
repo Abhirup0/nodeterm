@@ -71,11 +71,10 @@ describe('createdAgentId', () => {
 })
 
 /**
- * Grok arrives with spawn + resume and nothing else, which is the registry's own design for a new
- * agent ("a custom agent is in no list, so it automatically gets only spawn + terminal-title +
- * process status"). Hooks, context links and canvas control each need per-agent machinery that has
- * not been written for it — an installer, a transcript parser, a discovery file — and claiming any
- * of them here would light badges that never update and offer menu items that do nothing.
+ * Grok claims a capability only once its per-agent machinery exists — an installer, a transcript
+ * parser, a discovery file — because claiming one early lights badges that never update and offers
+ * menu items that do nothing. Hooks arrived with the normalizer (normalizeGrok) plus the installer
+ * that writes $GROK_HOME/hooks/nodeterm-status.json; context links and canvas control have not.
  */
 describe('grok capabilities', () => {
   it('is a builtin with a launch command and a colour', () => {
@@ -102,11 +101,19 @@ describe('grok capabilities', () => {
     }
   })
 
-  it('claims resume and nothing beyond it', () => {
+  it('reports status through its own hooks', () => {
+    // What had to be true first: a normalizer for grok's dialect (normalizeGrok) and an installer
+    // that writes $GROK_HOME/hooks/nodeterm-status.json. Both exist now, so the badge, the unread
+    // dot, the completion notification, the notch capsule and the session-id capture all apply.
+    expect(hasHooks('grok')).toBe(true)
     expect(canResume('grok')).toBe(true)
-    expect(hasHooks('grok')).toBe(false)
+  })
+
+  it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
     expect(canContextLink('grok')).toBe(false)
-    expect(canBranch('grok')).toBe(false)
     expect(canControlCanvas('grok')).toBe(false)
+    expect(hasUsage('grok')).toBe(false)
+    expect(canBranch('grok')).toBe(false)
+    expect(canSubagent('grok')).toBe(false)
   })
 })

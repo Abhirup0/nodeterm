@@ -17,7 +17,7 @@ import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { setNodeTranscript } from '../core/context-link'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
-import { isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { IPC } from '../shared/ipc'
 import type { ServerPlatform } from './platform-server'
 
@@ -141,6 +141,16 @@ export function wireAgentStatus(
 
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hooks.setRawListener((agentId, nodeId, payload) => {
+    if (agentId === 'grok') {
+      // grok's envelope carries no transcript_path — its transcript is DERIVED from (cwd,
+      // sessionId), which Tasks 5/10 use. All this branch can do correctly is the association the
+      // phone's context ring and the ⌘K session lookup read, plus the activity line (through
+      // grokRawFields, so the two dialects are read in exactly one place).
+      const g = grokRawFields(payload)
+      recordRawToolEvent(nodeId, { tool_name: g.toolName, tool_input: g.toolInput })
+      if (nodeId && g.sessionId) nodeContextSession.set(nodeId, g.sessionId)
+      return
+    }
     if (agentId !== 'claude') return
     // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
     // Independent of the transcript-tailing below (no path needed), so it runs first.

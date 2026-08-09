@@ -72,7 +72,7 @@ import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
-import { isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import {
   readSessionName,
   setRemoteTranscriptReader,
@@ -1444,6 +1444,16 @@ app.whenReady().then(async () => {
   }
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hookServer.setRawListener((agentId, nodeId, payload) => {
+    if (agentId === 'grok') {
+      // grok's envelope carries no transcript_path — its transcript is DERIVED from (cwd,
+      // sessionId), which Tasks 5/10 use. All this branch can do correctly is the association the
+      // phone's context ring and the ⌘K session lookup read, plus the activity line (through
+      // grokRawFields, so the two dialects are read in exactly one place).
+      const g = grokRawFields(payload)
+      recordRawToolEvent(nodeId, { tool_name: g.toolName, tool_input: g.toolInput })
+      if (nodeId && g.sessionId) nodeContextSession.set(nodeId, g.sessionId)
+      return
+    }
     if (agentId !== 'claude') return
     // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
     // Runs BEFORE the local/remote split so it covers remote (SSH) nodes too — it needs only
