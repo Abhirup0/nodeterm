@@ -1,7 +1,7 @@
 import fs from 'fs'
 import { readAgentSessionName } from '../core/agent-session-name'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { canRename, type AgentId } from '@shared/agents/config'
+import { canReadTitle, type AgentId } from '@shared/agents/config'
 import path from 'path'
 import http from 'http'
 
@@ -260,9 +260,17 @@ export async function startServer(
     // The per-agent router (core/agent-session-name.ts), same as the desktop's sweep and its
     // ptyReadSessionName handler: a grok node's name is in its session metadata, and resolving it
     // through claude's reader would scan ~/.claude/projects once a minute for a guaranteed miss.
-    resolve: readAgentSessionName,
+    // Gemini's leg needs the transcript path its context tail tracks; that tail is created by
+    // `wireAgentStatus` below, so it is dereferenced lazily — the sweep's first pass is 5s after
+    // boot, long after wiring.
+    resolve: (sessionId, accountId, agentId) =>
+      readAgentSessionName(sessionId, accountId, agentId, {
+        geminiPathFor: (id) => geminiContextTail.pathFor(id)
+      }),
     publish: setNodeSessionName,
-    supports: (agentId) => !!agentId && canRename(agentId as AgentId)
+    // The READ list, not RENAME_CAPABLE: the sweep only reads names and publishes them into the
+    // mirror the phone reads, so gating it on the write leg would skip gemini's nodes.
+    supports: (agentId) => !!agentId && canReadTitle(agentId as AgentId)
   })
   // Advertise launch settings to the mobile companion through the mirror (same provider the
   // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local
@@ -293,7 +301,7 @@ export async function startServer(
   // missing/corrupt file simply yields no block.
   const installMeta = readInstallMeta(config.dataDir)
   setMirrorServerProvider(() => installMeta)
-  const { contextTail } = wireAgentStatus(platform)
+  const { contextTail, geminiContextTail } = wireAgentStatus(platform)
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is

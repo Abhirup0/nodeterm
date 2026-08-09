@@ -128,4 +128,64 @@ describe('pickGeminiTitle', () => {
     expect(pickGeminiTitle('nonsense')).toBeNull()
     expect(pickGeminiTitle('')).toBeNull()
   })
+
+  it("finds a title replayed inside a resumed session's `$set` history", () => {
+    // A RESUME writes its whole prior history into one `{"$set":{"messages":[…]}}` line, so a
+    // title set before the resume is NESTED there rather than sitting at the top level — and a
+    // top-level-only reader answers null for the entire resumed session (the case the node-title
+    // poll cares about most, since a resume is exactly when the OSC title is gone).
+    //
+    // Shape provenance: `$set.messages` being an array of ordinary message objects is measured
+    // (fixture line 2), and a `gemini` message carrying `toolCalls[].args.title` is measured
+    // (fixture line 22). The COMBINATION is composed from those two, not captured from a real
+    // resume — if gemini's resume turns out to nest differently, this degrades to the old
+    // behaviour (null → the node keeps its own title), never to a wrong name.
+    const line = JSON.stringify({
+      $set: {
+        messages: [
+          { id: 'a', type: 'user', content: [{ text: 'test' }] },
+          {
+            id: 'b',
+            type: 'gemini',
+            toolCalls: [{ id: 'update_topic__a', name: 'update_topic', args: { title: 'Resumed Topic' } }]
+          }
+        ],
+        lastUpdated: '2026-08-09T10:48:49.538Z'
+      }
+    })
+    expect(pickGeminiTitle(line)).toBe('Resumed Topic')
+  })
+
+  it('prefers a top-level title over one replayed in the same file', () => {
+    // The replay line is written when the session resumes, so anything top-level AFTER it is
+    // newer. The backward scan gives that for free; this pins it.
+    const replay = JSON.stringify({
+      $set: {
+        messages: [
+          {
+            id: 'b',
+            type: 'gemini',
+            toolCalls: [{ name: 'update_topic', args: { title: 'Old Topic' } }]
+          }
+        ]
+      }
+    })
+    const fresh = JSON.stringify({
+      id: 'c',
+      type: 'gemini',
+      toolCalls: [{ name: 'update_topic', args: { title: 'New Topic' } }]
+    })
+    expect(pickGeminiTitle(`${replay}\n${fresh}`)).toBe('New Topic')
+  })
+
+  it('ignores a nested title-shaped arg on some other tool', () => {
+    const line = JSON.stringify({
+      $set: {
+        messages: [
+          { id: 'b', type: 'gemini', toolCalls: [{ name: 'write_file', args: { title: 'not a name' } }] }
+        ]
+      }
+    })
+    expect(pickGeminiTitle(line)).toBeNull()
+  })
 })

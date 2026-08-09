@@ -106,7 +106,7 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, createdAgentId, resumeCommand, withPermissionMode, agentConfig } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, resumeCommand, withPermissionMode, agentConfig } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
@@ -804,7 +804,10 @@ export function TerminalNode({
   const claudeTranscript = readsClaudeTranscript(agentId)
   // The header 💬 now opens the board-log comments flyout (right side); ⌘M keeps the markdown/chat view.
   const [commentsOpen, setCommentsOpen] = useState(false)
-  const canRenameNode = !!agentId && canRename(agentId) // title ⇄ session-name two-way sync
+  const canRenameNode = !!agentId && canRename(agentId) // WRITE leg: push `/rename <name>` back
+  // READ leg: adopt the agent's own session name into the title. A superset of canRenameNode —
+  // gemini names its own sessions but has no rename command, so it polls and never pushes.
+  const canReadTitleNode = !!agentId && canReadTitle(agentId)
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
 
   // Keep the listener's mirrors current every render.
@@ -2857,11 +2860,13 @@ export function TerminalNode({
   // shows up after a resume. Resolved strictly by THIS node's sessionId — we do NOT sync until it's
   // known, otherwise same-folder nodes would adopt whichever session wrote last. Polls only while
   // the title still auto-tracks the session (titleAuto) and stops once the user renames by hand.
-  // Gated on canRenameNode (RENAME_CAPABLE). `agentId` rides along so main picks the right reader:
-  // claude's transcript .jsonl vs grok's summary.json. It is resolved at node creation and immutable
-  // thereafter — same as `data.accountId` beside it — so neither belongs in the dep array.
+  // Gated on canReadTitleNode (TITLE_READ_CAPABLE), NOT on canRenameNode: reading a session's name
+  // and being able to set one are different capabilities, and gemini has only the first. `agentId`
+  // rides along so main picks the right reader: claude's transcript .jsonl vs grok's summary.json vs
+  // gemini's update_topic tool call. It is resolved at node creation and immutable thereafter —
+  // same as `data.accountId` beside it — so neither belongs in the dep array.
   useEffect(() => {
-    if (!canRenameNode || data.titleAuto === false) return
+    if (!canReadTitleNode || data.titleAuto === false) return
     const sid = status?.sessionId ?? ''
     if (!sid) return
     let cancelled = false
@@ -2893,7 +2898,7 @@ export function TerminalNode({
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [id, canRenameNode, status?.sessionId, data.titleAuto, updateNodeData])
+  }, [id, canReadTitleNode, status?.sessionId, data.titleAuto, updateNodeData])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
   useEffect(() => {

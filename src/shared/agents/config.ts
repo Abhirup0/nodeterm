@@ -109,12 +109,28 @@ export const USAGE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 export const CHAT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
-// Agents that support naming the session in two directions: they emit a session title we adopt
-// into the node title, and accept `/rename <name>` to push a renamed node title back. Read legs are
-// per-agent (claude: the transcript .jsonl; grok: its session summary.json — see
-// core/grok-session.ts, routed at the readSessionName IPC handler); the write leg is the same
-// literal `/rename <name>` for both, which grok also accepts as `/title`.
+// Agents that accept a node title being PUSHED back into the session — the write leg only. The
+// write is the same literal `/rename <name>` for both, which grok also accepts as `/title`.
+// The READ leg is TITLE_READ_CAPABLE below, which is a superset: an agent can name its own session
+// without offering any way to rename it (gemini). Read legs are per-agent (claude: the transcript
+// .jsonl; grok: its session summary.json; gemini: its update_topic tool call), routed once in
+// core/agent-session-name.ts.
 export const RENAME_CAPABLE = ['claude', 'grok'] as const
+// Agents whose OWN session name we can READ and adopt into the node title.
+//
+// Separate from RENAME_CAPABLE because the two directions are separate facts, and gemini has only
+// this one: it writes a model-generated name into its transcript (the `update_topic` tool's
+// `args.title` — core/gemini-session.ts) but has no command to SET one. Its session commands are
+// `/chat list|save|resume|delete|share` (measured on 0.54.4), where `save <tag>` is a tagged
+// checkpoint, not a title — so one list for both legs would light the rename UI on a node where
+// the write silently does nothing.
+//
+// INVARIANT (pinned in config.capabilities.test.ts): every RENAME_CAPABLE agent is also here. The
+// write leg pushes a name and the read leg is what confirms it settled.
+//
+// codex is in NEITHER: its slash-command set could not be enumerated from the CLI, so neither leg
+// has a measured basis — and a guess here costs a wrong node title, not a missing one.
+export const TITLE_READ_CAPABLE = ['claude', 'grok', 'gemini'] as const
 // Agents allowed to drive the canvas via the `nodeterm` CLI (open/show/write/close).
 // Discovery differs per agent: claude gets the manage-nodeterm-canvas skill; codex/gemini/
 // opencode a marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md /
@@ -151,6 +167,7 @@ export const hasUsage = (id: AgentId): boolean => includes(USAGE_CAPABLE, id)
 export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
+export const canReadTitle = (id: AgentId): boolean => includes(TITLE_READ_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
 export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
 

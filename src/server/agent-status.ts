@@ -46,13 +46,14 @@ export interface WireAgentStatusOptions {
  *
  * Does NOT call `hookServer.start()` — the boot step owns starting the server.
  *
- * Returns its context tail so the boot step can give the transcript read channels the same
- * hook-fed path authority the desktop gives them (`registerTranscriptIpc`).
+ * Returns its context tails so the boot step can give the readers the same hook-fed path authority
+ * the desktop gives them: claude's for the transcript read channels (`registerTranscriptIpc`), and
+ * gemini's for the session-name router, whose gemini leg reads the transcript at that path.
  */
 export function wireAgentStatus(
   platform: ServerPlatform,
   opts: WireAgentStatusOptions = {}
-): { contextTail: ContextTail } {
+): { contextTail: ContextTail; geminiContextTail: ContextTail } {
   const hooks = opts.hooks ?? hookServer
   // nodeId → the agent session id of whichever hook-capable CLI runs in that node (claude's, and
   // since the grok branch below, grok's)
@@ -285,5 +286,5 @@ export function wireAgentStatus(
   platform.on(IPC.ptyDestroy, (nodeId: string) => releaseNodeTails(nodeId))
   platform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
 
-  return { contextTail }
+  return { contextTail, geminiContextTail }
 }

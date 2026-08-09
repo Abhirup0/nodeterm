@@ -30,14 +30,17 @@ export interface SessionNameSweepDeps {
    *  means the user named this node by hand, so its session name is not what should be shown. */
   node: (nodeId: string) => { accountId?: string; titleAuto?: boolean } | undefined
   /** Resolves the agent's own session name, local or remote — `core/agent-session-name.ts`, which
-   *  routes per agent (claude reads a transcript, grok its session metadata). `agentId` is trailing
-   *  and optional so a resolver that only knows claude still satisfies the type. It is not optional
-   *  in PRACTICE: without it a grok entry would be resolved by claude's reader, which scans
-   *  `~/.claude/projects` for an id that can never be there — once a minute, per node, forever. */
+   *  routes per agent (claude reads a transcript, grok its session metadata, gemini its own
+   *  transcript). `agentId` is trailing and optional so a resolver that only knows claude still
+   *  satisfies the type. It is not optional in PRACTICE: without it a grok entry would be resolved
+   *  by claude's reader, which scans `~/.claude/projects` for an id that can never be there — once a
+   *  minute, per node, forever. */
   resolve: (sessionId: string, accountId?: string, agentId?: string) => Promise<string | null>
   /** Publish a changed name into the mirror. */
   publish: (nodeId: string, name: string) => void
-  /** Which agents carry a resolvable session name (RENAME_CAPABLE — claude and grok). */
+  /** Which agents carry a READABLE session name — `TITLE_READ_CAPABLE` (claude, grok, gemini), not
+   *  `RENAME_CAPABLE`. This sweep only ever READS a name and publishes it; nothing here pushes one
+   *  back, so gating it on the write capability would silently skip gemini's nodes. */
   supports: (agentId?: string) => boolean
 }
 

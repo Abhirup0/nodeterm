@@ -1,7 +1,7 @@
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { readAgentSessionName } from '../core/agent-session-name'
-import { canRename, type AgentId } from '@shared/agents/config'
+import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
+import { canReadTitle, type AgentId } from '@shared/agents/config'
 import { readFile } from 'fs/promises'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
@@ -559,14 +559,24 @@ app.whenReady().then(async () => {
     ptyManager.captureSession(persistKey, full)
   )
 
+  // Gemini's title read needs the transcript path its own context tail already tracks (nothing
+  // scans for it). That tail is created further down with the rest of the hook plumbing, so the
+  // association is resolved LAZILY — the same pattern as the remote-file readers down there, and
+  // safe for the same reason: it is only ever dereferenced from an IPC call or the sweep's timer,
+  // long after init. `pathFor` answers undefined for a session no hook has been seen for, and for a
+  // remote (SSH) gemini node, which the tails deliberately never track — both mean "no name".
+  const agentSessionNameDeps: AgentSessionNameDeps = {
+    geminiPathFor: (sessionId) => geminiContextTail.pathFor(sessionId)
+  }
+
   // The reader is selected by the NODE's agent (core/agent-session-name.ts — the one copy of that
-  // rule, shared with the sweep below and with the Server Edition), so neither reader ever searches
-  // the other's tree. `agentId` is a TRAILING optional argument, so every pre-grok caller resolves
+  // rule, shared with the sweep below and with the Server Edition), so no reader ever searches
+  // another's tree. `agentId` is a TRAILING optional argument, so every pre-grok caller resolves
   // through the claude reader unchanged.
   corePlatform.handle(
     IPC.ptyReadSessionName,
     (sessionId: string, accountId?: string, agentId?: string) =>
-      readAgentSessionName(sessionId ?? '', accountId, agentId)
+      readAgentSessionName(sessionId ?? '', accountId, agentId, agentSessionNameDeps)
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
@@ -870,12 +880,15 @@ app.whenReady().then(async () => {
       const n = workspaceStore.getNode(nodeId)
       return n ? { accountId: n.accountId, titleAuto: n.titleAuto } : undefined
     },
-    // Same router the IPC handler above uses — the sweep sees every RENAME_CAPABLE agent, so
-    // resolving a grok node through claude's reader would scan ~/.claude/projects once a minute
-    // for an id that can never be there.
-    resolve: readAgentSessionName,
+    // Same router the IPC handler above uses — the sweep sees every TITLE_READ_CAPABLE agent, so
+    // resolving a grok or gemini node through claude's reader would scan ~/.claude/projects once a
+    // minute for an id that can never be there.
+    resolve: (sessionId, accountId, agentId) =>
+      readAgentSessionName(sessionId, accountId, agentId, agentSessionNameDeps),
     publish: setNodeSessionName,
-    supports: (agentId) => !!agentId && canRename(agentId as AgentId)
+    // The READ list, not RENAME_CAPABLE: this sweep only reads names and publishes them into the
+    // mirror (the phone's lists), so gating it on the write leg would skip gemini's nodes.
+    supports: (agentId) => !!agentId && canReadTitle(agentId as AgentId)
   })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.

@@ -94,30 +94,66 @@ export function pickGeminiTokens(transcript: string | string[]): AgentUsage | nu
   return r ? { usedTokens: r.used, windowTokens: r.window } : null
 }
 
+/** One transcript message, as far as the title reader cares: it may carry tool calls. */
+interface GeminiMessage {
+  toolCalls?: unknown
+}
+
+/** The newest `update_topic` title among a line's tool calls, or null. Last call wins within a
+ *  line: a line can hold several, and the newest is the name. Matched on the tool NAME so a
+ *  `title` argument belonging to some other tool can never be mistaken for the session's name. */
+function titleFromToolCalls(calls: unknown): string | null {
+  if (!Array.isArray(calls)) return null
+  for (let i = calls.length - 1; i >= 0; i--) {
+    const c = calls[i] as { name?: unknown; args?: { title?: unknown } } | null
+    if (!c || c.name !== 'update_topic') continue
+    const title = c.args?.title
+    if (typeof title === 'string' && title.trim()) return title.trim()
+  }
+  return null
+}
+
 /**
- * The latest session title gemini has given the conversation.
+ * The latest session title gemini has given the conversation — what the node title adopts
+ * (`TITLE_READ_CAPABLE`, routed in core/agent-session-name.ts).
  *
  * It is NOT a top-level transcript field — verified against the captured fixture, where no line
  * parses to an object with a `title`. Gemini names the conversation through its own `update_topic`
  * tool, so the name lives in that tool call's arguments:
  *   "toolCalls":[{"name":"update_topic","args":{"title":"Test Environment Verified", …}}]
- * (`__fixtures__/gemini/session.jsonl` line 22). Matched on the tool NAME so a `title` argument
- * belonging to some other tool can never be mistaken for the session's name.
+ * (`__fixtures__/gemini/session.jsonl` line 22).
  *
- * Read-only: gemini has no rename command, so nothing pushes a node title back the other way —
- * which is why gemini is in neither `RENAME_CAPABLE` nor any list yet. NOTHING CONSUMES THIS TODAY;
- * it lives here because both gemini readers share this file.
+ * TWO PLACES, because of RESUME. A resumed session replays its prior history into a single
+ * `{"$set":{"messages":[…]}}` line, so a title set before the resume is NESTED in that line's
+ * messages rather than appearing as a top-level tool call — and a top-level-only reader (this
+ * function's first version) answered null for the whole resumed session, which is exactly the case
+ * the read leg exists for (a resume is when the OSC title is gone). So the `$set.messages` history
+ * is searched as a fallback, newest message first.
+ *
+ * Shape provenance for that fallback: `$set.messages` being an array of ordinary message objects is
+ * MEASURED (fixture line 2) and a `gemini` message carrying `toolCalls[].args.title` is MEASURED
+ * (line 22); the COMBINATION is composed from the two, not captured from a real resume. If gemini's
+ * resume nests differently this degrades to null — the node then keeps its own title until gemini
+ * writes a new top-level `update_topic` — never to a wrong name.
+ *
+ * Ordering is right for free: the backward line scan takes the NEWEST matching line, and a replay
+ * line is written when the session resumes, so any top-level title after it wins.
+ *
+ * Read-only: gemini has no rename command (`/chat save <tag>` is a checkpoint, not a title), so
+ * nothing pushes a node title back the other way — gemini is in TITLE_READ_CAPABLE and deliberately
+ * NOT in RENAME_CAPABLE.
  */
 export function pickGeminiTitle(transcript: string | string[]): string | null {
   return latestJsonLineWhere(transcript, '"title"', (o) => {
-    const calls = o.toolCalls
-    if (!Array.isArray(calls)) return null
-    // Last call wins within a line: a line can hold several tool calls, and the newest is the name.
-    for (let i = calls.length - 1; i >= 0; i--) {
-      const c = calls[i] as { name?: unknown; args?: { title?: unknown } } | null
-      if (!c || c.name !== 'update_topic') continue
-      const title = c.args?.title
-      if (typeof title === 'string' && title.trim()) return title.trim()
+    const top = titleFromToolCalls(o.toolCalls)
+    if (top) return top
+    // The resume replay. `$set` also carries plain `{lastUpdated}` lines, which have no messages.
+    const set = o.$set as { messages?: unknown } | undefined
+    const messages = set && typeof set === 'object' ? set.messages : undefined
+    if (!Array.isArray(messages)) return null
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const hit = titleFromToolCalls((messages[i] as GeminiMessage | null)?.toolCalls)
+      if (hit) return hit
     }
     return null
   })
