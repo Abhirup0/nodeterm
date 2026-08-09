@@ -75,6 +75,8 @@ import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
+import { geminiContextParse } from '../core/gemini-session'
+import { codexContextParse } from '../core/codex-session'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
@@ -1129,7 +1131,9 @@ app.whenReady().then(async () => {
     remoteSubagentTail.untrack(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
   }
-  const contextTail = createContextTail((payload) => {
+  // Every context tail pushes through here, so an agent's meter reaches the renderer, the Notch HUD
+  // and the phone's context ring identically whichever CLI produced the numbers.
+  const pushContextUpdate = (payload: unknown): void => {
     if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, payload)
     // Feed the macOS Notch HUD the model name (keyed by sessionId; no-op off/non-darwin).
     notchHudOnContextUpdate(payload as { sessionId?: string; model?: string; usedPercent?: number })
@@ -1142,7 +1146,16 @@ app.whenReady().then(async () => {
         break
       }
     }
-  }, { onTaskNotification, onToolResult })
+  }
+  const contextTail = createContextTail(pushContextUpdate, { onTaskNotification, onToolResult })
+  // ONE TAIL PER AGENT, each with its own parser — not one tail switching on an agent id, which
+  // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
+  // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
+  // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
+  // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
+  // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
+  const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
+  const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -1510,6 +1523,32 @@ app.whenReady().then(async () => {
       if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
       return
     }
+    // gemini and codex both carry `transcript_path` in their hook envelope (gemini: the base input
+    // schema of its bundled `docs/hooks/reference.md:48-58`; codex: the same claude-shaped envelope,
+    // whose own hook wire structs name session_id/transcript_path/cwd/hook_event_name), so the
+    // meter needs no path DERIVATION the way grok's does — only its own token reader. The path is
+    // jailed by the same `safeTranscriptPath` claude uses (widened to those two agents' transcript
+    // roots), because a forged POST could otherwise aim a file read at an arbitrary local path.
+    if (agentId === 'gemini' || agentId === 'codex') {
+      const p = payload as { session_id?: string; transcript_path?: string; hook_event_name?: string }
+      // A REMOTE (SSH) node's transcript lives on the HOST, and these tails read the LOCAL disk —
+      // a host path like `~/.gemini/tmp/…` clears the local jail, so without this we would meter
+      // whatever same-named file happens to exist on THIS machine. Remote meters for these agents
+      // are out of scope (remote-context-tail.ts is that path), so skip rather than report the
+      // wrong machine's numbers. The Server Edition needs no counterpart: it has no SSH projects,
+      // which is why its copy of this branch is otherwise identical but lacks these two lines.
+      if (nodeId && ptyManager.sshRemoteForNode(nodeId)) return
+      const transcriptPath = safeTranscriptPath(p.transcript_path)
+      const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
+      if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)
+      if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
+      // gemini subscribes SessionEnd (GEMINI_HOOK_EVENTS); codex does NOT today (CODEX_EVENTS stops
+      // at Stop), so for codex the tail is released by `releaseNodeTails` on pty:destroy/recycle
+      // instead. Handling it here regardless costs nothing and is correct the day codex's event
+      // list grows.
+      if (p.hook_event_name === 'SessionEnd' && p.session_id) tail.untrack(p.session_id)
+      return
+    }
     if (agentId !== 'claude') return
     // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
     // Runs BEFORE the local/remote split so it covers remote (SSH) nodes too — it needs only
@@ -1629,7 +1668,12 @@ app.whenReady().then(async () => {
       // Untrack both tails — untracking a non-tracked session is a no-op, so this is safe
       // regardless of whether the closed node was local or remote (avoids an ordering race
       // with pty-manager's own ptyDestroy handler clearing the ssh-remote registration).
+      // Every agent's tail is untracked, not just claude's: `nodeContextSession` now holds gemini
+      // and codex sessions too, and a tail nobody releases keeps polling a dead session's file
+      // once a second forever. Only one of these can be tracking any given sessionId.
       contextTail.untrack(sessionId)
+      geminiContextTail.untrack(sessionId)
+      codexContextTail.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
       locatedTranscriptSessions.delete(sessionId)

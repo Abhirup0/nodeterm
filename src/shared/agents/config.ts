@@ -93,7 +93,18 @@ export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
 export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
-export const USAGE_CAPABLE = ['claude'] as const
+// Agents whose per-node context meter we can fill. Each needs BOTH numbers: a used count and a
+// TRUSTWORTHY window.
+//  - claude: used from its transcript's assistant usage, window INFERRED from the model family
+//    (core/model-window.ts).
+//  - codex: states its own denominator — `model_context_window`, right beside the usage in its
+//    rollout (core/codex-session.ts).
+//  - gemini: states none, so the window comes from its model id through `geminiWindowFor`, which
+//    mirrors the CLI's OWN `tokenLimit(model)` — a family rule with a 1M catch-all default, so a
+//    model we have never heard of still gets the right answer rather than a stale guess.
+// grok is absent: its `updates.jsonl` parser is unbuilt (see docs/grok-agent.md), so there is no
+// used count to divide.
+export const USAGE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
 export const CHAT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.

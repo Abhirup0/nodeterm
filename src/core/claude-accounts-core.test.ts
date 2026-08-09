@@ -160,6 +160,30 @@ describe('isSafeLocalTranscriptPath', () => {
     expect(isSafeLocalTranscriptPath(`${acctRoot}/a1/projects/-repo/s.jsonl`, home, ud)).toBe(true)
     expect(isSafeLocalTranscriptPath(`${acctRoot}/A1_b-2/projects/x.jsonl`, home, ud)).toBe(true)
   })
+  it("accepts gemini's chats root and paths under it", () => {
+    expect(isSafeLocalTranscriptPath(`${home}/.gemini/tmp`, home, ud)).toBe(true)
+    expect(
+      isSafeLocalTranscriptPath(`${home}/.gemini/tmp/nodeterm/chats/session-2026-08-09T10-48-fd01438b.jsonl`, home, ud)
+    ).toBe(true)
+  })
+  it("accepts codex's sessions root and paths under it", () => {
+    expect(isSafeLocalTranscriptPath(`${home}/.codex/sessions`, home, ud)).toBe(true)
+    expect(
+      isSafeLocalTranscriptPath(`${home}/.codex/sessions/2026/07/26/rollout-2026-07-26T00-48-38-019f9b40.jsonl`, home, ud)
+    ).toBe(true)
+  })
+  it('still refuses the rest of those agents\' config trees, and everything outside all roots', () => {
+    // The widening is per-ROOT, not per-agent-home: the credential and settings files that sit
+    // beside the transcripts stay out of reach.
+    expect(isSafeLocalTranscriptPath(`${home}/.gemini/settings.json`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${home}/.gemini`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${home}/.codex/auth.json`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${home}/.codex`, home, ud)).toBe(false)
+    // …and $HOME itself was never opened up.
+    expect(isSafeLocalTranscriptPath(home, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath(`${home}/.ssh/id_rsa`, home, ud)).toBe(false)
+    expect(isSafeLocalTranscriptPath('/etc/passwd', home, ud)).toBe(false)
+  })
   it('rejects a `..` escape out of the accounts root', () => {
     // Callers pass an already-resolved path; a resolved traversal lands elsewhere entirely.
     expect(isSafeLocalTranscriptPath('/Users/x/.ssh/id_rsa', home, ud)).toBe(false)

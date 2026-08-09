@@ -15,6 +15,8 @@ import { recordAgentEvent, recordRawToolEvent, recordContextUsage,
 } from '../core/agent-status-mirror'
 import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
+import { geminiContextParse } from '../core/gemini-session'
+import { codexContextParse } from '../core/codex-session'
 import { setNodeTranscript } from '../core/context-link'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
@@ -104,23 +106,30 @@ export function wireAgentStatus(
     recordAgentEvent(ev)
   }
 
+  // Every context tail pushes through here, so an agent's meter reaches the browser and the phone's
+  // context ring identically whichever CLI produced the numbers.
+  const pushContextUpdate = (payload: unknown): void => {
+    platform.broadcast(IPC.contextUpdate, payload)
+    // Feed the mirror's per-node context ring (mobile-usage-inbox). The context tail keys by
+    // sessionId; map it back to the node via the same association the raw listener records.
+    const cw = payload as { sessionId?: string; usedPercent?: number }
+    for (const [nid, sid] of nodeContextSession) {
+      if (sid === cw.sessionId && typeof cw.usedPercent === 'number') {
+        recordContextUsage(nid, cw.usedPercent)
+        break
+      }
+    }
+  }
   const contextTail =
-    opts.contextTail ??
-    createContextTail(
-      (payload) => {
-        platform.broadcast(IPC.contextUpdate, payload)
-        // Feed the mirror's per-node context ring (mobile-usage-inbox). The context tail keys by
-        // sessionId; map it back to the node via the same association the raw listener records.
-        const cw = payload as { sessionId?: string; usedPercent?: number }
-        for (const [nid, sid] of nodeContextSession) {
-          if (sid === cw.sessionId && typeof cw.usedPercent === 'number') {
-            recordContextUsage(nid, cw.usedPercent)
-            break
-          }
-        }
-      },
-      { onTaskNotification, onToolResult }
-    )
+    opts.contextTail ?? createContextTail(pushContextUpdate, { onTaskNotification, onToolResult })
+  // ONE TAIL PER AGENT, each with its own parser — not one tail switching on an agent id, which
+  // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
+  // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
+  // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
+  // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
+  // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
+  const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
+  const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
 
   hooks.setListener((e) => {
     // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
@@ -177,6 +186,29 @@ export function wireAgentStatus(
       if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
       return
     }
+    // gemini and codex both carry `transcript_path` in their hook envelope (gemini: the base input
+    // schema of its bundled `docs/hooks/reference.md:48-58`; codex: the same claude-shaped envelope,
+    // whose own hook wire structs name session_id/transcript_path/cwd/hook_event_name), so the
+    // meter needs no path DERIVATION the way grok's does — only its own token reader. The path is
+    // jailed by the same `safeTranscriptPath` claude uses (widened to those two agents' transcript
+    // roots), because a forged POST could otherwise aim a file read at an arbitrary local path.
+    //
+    // The desktop's copy of this branch additionally skips REMOTE (SSH) nodes, whose transcript is
+    // on the host; the server has no SSH-project manager (see the module header), so every node it
+    // serves is local and there is nothing to skip.
+    if (agentId === 'gemini' || agentId === 'codex') {
+      const p = payload as { session_id?: string; transcript_path?: string; hook_event_name?: string }
+      const transcriptPath = safeTranscriptPath(p.transcript_path)
+      const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
+      if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)
+      if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
+      // gemini subscribes SessionEnd (GEMINI_HOOK_EVENTS); codex does NOT today (CODEX_EVENTS stops
+      // at Stop), so for codex the tail is released by `releaseNodeTails` on pty:destroy/recycle
+      // instead. Handling it here regardless costs nothing and is correct the day codex's event
+      // list grows.
+      if (p.hook_event_name === 'SessionEnd' && p.session_id) tail.untrack(p.session_id)
+      return
+    }
     if (agentId !== 'claude') return
     // Mirror the per-node "what it's doing now" activity line for the phone (mobile-usage-inbox).
     // Independent of the transcript-tailing below (no path needed), so it runs first.
@@ -231,7 +263,12 @@ export function wireAgentStatus(
   const releaseNodeTails = (nodeId: string): void => {
     const sessionId = nodeContextSession.get(nodeId)
     if (sessionId) {
+      // Every agent's tail, not just claude's: `nodeContextSession` now holds gemini and codex
+      // sessions too, and a tail nobody releases keeps polling a dead session's file once a second
+      // forever. Only one of these can be tracking any given sessionId.
       contextTail.untrack(sessionId)
+      geminiContextTail.untrack(sessionId)
+      codexContextTail.untrack(sessionId)
       nodeContextSession.delete(nodeId)
     }
     const subs = nodeSubagents.get(nodeId)
