@@ -110,6 +110,7 @@ import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunc
 import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
+import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
@@ -955,6 +956,30 @@ export function Canvas() {
     // Nothing to fit, or chrome swallowing the viewport: let fitView use its own framing.
     void fitView({ duration: 300, padding: padding ?? 0.1 })
   }, [fitView, getNodes, getNodesBounds])
+
+  /**
+   * Back to 100%, keeping whatever is in the middle of the screen in the middle.
+   *
+   * Every canvas app has this and ours did not: `Fit view` was the only way to change zoom from a
+   * command, and it lands on whatever the content bounds imply — never on 1. That gap is not only
+   * an ergonomic one. Zoom 1 is the only ratio at which the shared renderer samples the atlas
+   * texel-for-texel, so "is this actually 1?" is a question both users and bug reports need to be
+   * able to answer, and until now the only way was to read the viewport transform in DevTools
+   * (which is exactly how the 2026-08-09 crispness report was finally pinned, at 0.976).
+   *
+   * The anchor is the viewport CENTRE rather than the origin: zooming about the corner throws the
+   * user's work off screen, which is what makes a reset feel like a jump rather than a correction.
+   */
+  const zoomTo100 = useCallback(() => {
+    const wrap = flowWrapRef.current
+    const current = getViewport()
+    const next = viewportAtZoom1(current, {
+      x: (wrap?.clientWidth ?? 0) / 2,
+      y: (wrap?.clientHeight ?? 0) / 2
+    })
+    if (next === current) return
+    void setViewport(next, { duration: 200 })
+  }, [getViewport, setViewport])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
   // The ACTIVE session + its presence — what the canvas-sync publisher and onMutation subscriber
@@ -7356,6 +7381,7 @@ export function Canvas() {
         run: () => void connectRemote()
       },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: fitAll },
+      { id: 'zoom-100', label: 'Zoom to 100%', icon: <IconFit />, run: zoomTo100 },
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() },
       // Hidden when the canvas has no restartable agent node — the row would have nothing to act
       // on. `hint` is searchable, so "new model" / "update" find it too.
@@ -7459,7 +7485,8 @@ export function Canvas() {
     connectRemote,
     addSshTerminal,
     hasRestartableAgents,
-    restartIdleAgents
+    restartIdleAgents,
+    zoomTo100
   ])
 
   // Build the palette's command list only when its inputs change — the inline `buildCommands()`
