@@ -62,7 +62,8 @@ import {
   setNodeSessionName,
   sessionNameSweepEntries,
   nodeState,
-  nodeSessionName
+  nodeSessionName,
+  workingNodes
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -133,6 +134,7 @@ import { connectRelayClient, type RelayClientSession } from './remote/relay-clie
 import { decodeOffer } from './remote/pairing'
 import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
 import { initSshProject } from './remote-ssh/ssh-project'
+import { resyncProjectAgents } from './remote-ssh/agent-resync'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
 import { SshFs, sshAppendArgs, sshTailArgs, sshSizeArgs, sshWriteArgs } from './ssh-fs'
 import { makeRemoteWorkspaceIO } from './remote-workspace-io'
@@ -1869,7 +1871,28 @@ app.whenReady().then(async () => {
         })
         .catch(() => {})
     },
-    askpassScriptPath
+    askpassScriptPath,
+    // The project's reverse hook tunnel is verified again on a freshly established master: every
+    // hook event fired while it was down is gone (the POSTs are fire-and-forget and nothing queues
+    // them on the host), so ask the host what is actually true for the nodes we still believe are
+    // working. Fire-and-forget — this must never delay or fail the connect that has already
+    // reported `connected`.
+    (_projectId, controlPath) => {
+      void resyncProjectAgents(controlPath, {
+        workingNodes,
+        remoteFor: (nodeId) => ptyManager.sshRemoteForNode(nodeId),
+        paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+        readTranscriptTail: async (nodeId, sessionId) => {
+          // cwd/accountId are unknown here; the locator falls back to its cross-root glob, and a
+          // hook-fed ref (the common case) is already cached by session id.
+          const ref = await remoteTranscriptRefFor(sessionId, undefined, undefined, nodeId)
+          return ref ? await readRemoteTranscript(sessionId, ref) : null
+        },
+        emit: emitAgentStatus
+      }).catch(() => {
+        // best-effort: a failed resync leaves the stale sweep as the backstop, exactly as today
+      })
+    }
   )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,

@@ -77,6 +77,11 @@ interface Runners {
   /** The last SSH connection just went away through a user-facing disconnect. Production schedules
    *  the app-private agent's shutdown, which is what "forget the key" actually means. */
   onIdle?: () => void
+  /** A project's reverse hook tunnel was just VERIFIED on a freshly established master. Production
+   *  resyncs that project's working agents: hook events lost while the tunnel was down are gone for
+   *  good, so a node can be stranded at `working` until the 20-minute stale sweep. Deliberately not
+   *  called on the reuse branch — a master that answered `-O check` never lost its tunnel. */
+  onTunnelVerified?: (projectId: string, controlPath: string) => void
   /** Synchronous one-shot ssh, for `disconnectAll()` only: `before-quit` is sync, so an awaited
    *  `-O exit` never lands and the daemonized ControlPersist master survives the app. */
   runSync?: (args: string[]) => void
@@ -517,6 +522,11 @@ export class SshProjectManager {
           continue
         }
         const hookEndpointPath = res?.endpointPath
+        // The tunnel is live again on a master we just established (the reuse branch returned long
+        // before this line), so this is exactly the moment the hook events lost while it was down
+        // can be reconstructed from the host. Fire-and-forget: the resync runs several remote round
+        // trips and must never delay (or fail) the connect that is already reporting `connected`.
+        if (hookEndpointPath) this.r.onTunnelVerified?.(projectId, controlPath)
         // Resolve the remote $HOME once and retain it (the hook setup above also learns it but
         // doesn't surface it). Phase 2b uses it to jail remote transcript reads. Fail-open: an
         // unresolved home just disables the remote context meter / subagent transcript / search.
@@ -1381,7 +1391,11 @@ export function resolvePassphrasePrompt(requestId: string, value: string | null)
 
 export function initSshProject(
   onConnected?: (projectId: string) => void,
-  askpassScriptPath?: string
+  askpassScriptPath?: string,
+  /** Passed straight through to the manager's `onTunnelVerified` (see Runners). It lives on the
+   *  caller because the resync it drives needs main's agent-status funnel and transcript readers,
+   *  none of which this module knows about. */
+  onTunnelVerified?: (projectId: string, controlPath: string) => void
 ): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()
@@ -1436,6 +1450,7 @@ export function initSshProject(
     // see scheduleStop — the connect dialog's throwaway browse master disconnects right before the
     // real project connects).
     onIdle: () => appSshAgent.scheduleStop(),
+    onTunnelVerified,
     askpassWasCancelled: (masterPid) => askpassServer.wasCancelledBy(masterPid),
     askpassIsPrompting: () => askpassServer.isPromptingAny(),
     askpassAsked: (masterPid) => askpassServer.askedBy(masterPid),
