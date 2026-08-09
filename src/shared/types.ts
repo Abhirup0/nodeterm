@@ -873,7 +873,7 @@ export interface Settings {
    *  HIDEABLE_HEADER_BUTTONS the same way. */
   hiddenHeaderButtons: string[]
   /** Whether usage percentages render as consumed ("32% used") or remaining ("68% left").
-   *  'remaining' is the historical default; orca users tend to expect 'used'. */
+   *  'remaining' is the historical default; users coming from other tools expect 'used'. */
   usagePercentMode: 'used' | 'remaining'
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId

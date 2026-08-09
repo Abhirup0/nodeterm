@@ -13,7 +13,7 @@ import {
 
 /**
  * NOTE: not captured from a live account — no Kimi credentials were available on the machine
- * this was written on. Follows the field contract orca's fetcher documents.
+ * this was written on. Follows the documented field contract.
  */
 const RESPONSE = {
   usage: { limit: '1000', used: '250', resetTime: '2026-07-26T00:00:00Z' },
@@ -87,7 +87,7 @@ describe('mapKimiLimits', () => {
   })
 
   it('keeps EVERY rolling window rather than picking the one nearest 5h', () => {
-    // Orca picks one because its shape has a single session slot; ours carries a list, so a plan
+    // A single-session-slot shape has to pick one; ours carries a list, so a plan
     // with both an hourly and a 5-hourly cap must show both.
     const limits = mapKimiLimits({
       limits: [

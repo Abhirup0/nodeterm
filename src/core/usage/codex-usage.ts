@@ -218,7 +218,7 @@ async function fetchViaAppServer(home: string): Promise<ProviderUsage | null> {
 /**
  * Codex usage, backend first and app-server second.
  *
- * No PTY tier. Orca has one — it drives the interactive CLI and scrapes the TUI — and it exists
+ * No PTY tier. One would drive the interactive CLI and scrape the TUI, and would exist
  * mainly to serve users whose auth the HTTP path cannot use. Adding it here means owning hidden
  * PTY lifecycle and screen-scraping regexes, and Claude needs the same machinery for the same
  * reason, so it belongs in one shared piece of work rather than being written twice.

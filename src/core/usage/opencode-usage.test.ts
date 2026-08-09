@@ -14,7 +14,7 @@ import { primaryLimit } from '../../shared/usage-limits'
 /**
  * A miniature of opencode.ai's React Flight wire data. NOTE: not captured from a live account —
  * no opencode session was available on the machine this was written on. It reproduces the
- * documented shape, including the two traps orca hit: a `$R[N]=` reference token between the
+ * documented shape, including the two known traps: a `$R[N]=` reference token between the
  * key and its object, and a null/decoy occurrence of the same key elsewhere on the page.
  */
 const PAGE = `

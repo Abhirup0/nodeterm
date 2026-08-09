@@ -94,7 +94,7 @@ export function mapKimiDetail(
  * The top-level `usage` block is the weekly quota; entries in `limits[]` are shorter rolling
  * windows.
  *
- * Orca picks the single `limits[]` entry closest to 5h because its shape has one `session` slot
+ * A one-`session`-slot shape has to pick the single `limits[]` entry closest to 5h
  * to fill. Ours carries a list, so every window is emitted — a plan with both an hourly and a
  * 5-hourly cap shows both instead of silently discarding one.
  */

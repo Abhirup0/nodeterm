@@ -17,7 +17,7 @@ import { limitLabel } from '../../shared/usage-limits'
 
 /**
  * NOTE: not captured from a live account — no Grok credentials were available on the machine
- * this was written on. Follows the field contract orca's fetcher documents; numbers illustrative.
+ * this was written on. Follows the documented field contract; numbers illustrative.
  */
 const PERIOD = {
   billingPeriodStart: '2026-07-13T00:00:00Z',

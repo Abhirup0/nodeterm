@@ -1,15 +1,15 @@
 // Gemini CLI subscription usage, via Google's internal Cloud Code quota API — the same endpoint
 // the Gemini CLI itself reads.
 //
-// Two deliberate limits, both narrower than orca's equivalent:
+// Two deliberate limits, both narrower than other implementations of the same idea:
 //
-//   * We read ONLY `~/.gemini/oauth_creds.json`. Orca additionally scans opencode's data
+//   * We read ONLY `~/.gemini/oauth_creds.json`. It is possible to also scan opencode's data
 //     directories (`~/.local/share/opencode/auth.json`, the macOS Application Support copy, …)
-//     for a Google token — and gates that behind an explicit opt-in precisely because it means
+//     for a Google token, behind an explicit opt-in, precisely because it means
 //     reading another application's credentials off disk. The simplest correct answer is not to.
 //
 //   * We never refresh the token. Same policy as the Claude and Codex providers: display-only,
-//     no credential writes. Orca refreshes using an OAuth client id/secret extracted from the
+//     no credential writes. Refreshing would mean an OAuth client id/secret extracted from the
 //     installed Gemini CLI's JS bundle, which is both fragile (a CLI update breaks it) and a
 //     step up in credential handling we have no need to take.
 //
@@ -188,8 +188,8 @@ export async function resolveProjectId(token: string): Promise<string | null> {
  * API are all "we don't know", which the UI renders as no data rather than an error the user
  * cannot act on.
  *
- * Note there is no synthesized "session" window here. Orca derives one from its most-constrained
- * bucket because its shape has fixed session/weekly slots to fill; ours carries a list, so the
+ * Note there is no synthesized "session" window here. A shape with fixed session/weekly slots
+ * has to derive one from its most-constrained bucket; ours carries a list, so the
  * buckets ARE the limits and `primaryLimit` already leads with the worst of them.
  */
 export async function fetchGeminiUsage(
