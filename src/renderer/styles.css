@@ -9638,7 +9638,11 @@ body,
   pointer-events: none;
   z-index: 3;
 }
-.kanban-modal__upload {
+/* The floating notices over the modal terminal: the upload spinner, and the copy receipt /
+   selection hint. One placement contract, one rule — the modal's header belongs to CardModal, so
+   transient per-terminal state stays inside the terminal. */
+.kanban-modal__upload,
+.kanban-modal__copied {
   position: absolute;
   left: 50%;
   bottom: 14px;
@@ -9650,6 +9654,10 @@ body,
   border: 1px solid rgba(var(--tint-rgb), 0.15);
   border-radius: 8px;
   padding: 6px 12px;
+}
+
+.kanban-modal__copied--copied {
+  color: var(--success);
 }
 
 /* Shared browser surface (canvas node + kanban card modal): toolbar on top, webview fills. */

@@ -14,6 +14,7 @@ import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../../
 import { guardMiddleClickPaste } from '../../terminal/middle-click'
 import { parseOsc52 } from '../../terminal/osc52'
 import { activateUnicode11 } from '../../terminal/unicode-width'
+import { useCopyFeedback } from '../../terminal/useCopyFeedback'
 import {
   attachReplay,
   cursorPlacementSeq,
@@ -88,6 +89,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   const visual = useXtermVisualSettings()
   const [dropping, setDropping] = useState(false)
   const [uploading, setUploading] = useState(false)
+  // Same copy feedback as the canvas node — a copy here is the same act as a copy there.
+  const copy = useCopyFeedback({
+    hostRef,
+    hasSelection: () => !!termRef.current?.hasSelection()
+  })
 
   // Same search machinery as the canvas node: capture-indexed matches + xterm highlight.
   const readBuffer = useCallback((): string => {
@@ -161,7 +167,10 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // can never read the local clipboard. Returning true swallows the sequence (also the read query).
     term.parser.registerOscHandler(52, (data) => {
       const text = parseOsc52(data)
-      if (text !== null) window.nodeTerminal.clipboard.writeText(text)
+      if (text !== null) {
+        window.nodeTerminal.clipboard.writeText(text)
+        copy.notifyCopy(text)
+      }
       return true
     })
 
@@ -409,6 +418,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
       onPasteCapture={onPaste}
     >
       {uploading && <div className="kanban-modal__upload">Uploading…</div>}
+      {copy.feedback && (
+        <div className={`kanban-modal__copied kanban-modal__copied--${copy.feedback.kind}`}>
+          {copy.feedback.label}
+        </div>
+      )}
       {searchOpen && (
         <FindBar
           query={search.query}
