@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { grokRawFields, normalizeClaude, normalizeGrok } from './normalize'
+import { grokRawFields, normalizeClaude, normalizeGrok, type RawHookEnvelope } from './normalize'
 
 /**
  * Grok's hook envelope is its own dialect: camelCase keys whose `hookEventName` VALUE is
@@ -7,7 +7,9 @@ import { grokRawFields, normalizeClaude, normalizeGrok } from './normalize'
  * Both spellings are therefore read, and the event name is canonicalized rather than matched
  * literally — measured against the shipped 1.0.0 docs, not inferred from claude's shape.
  */
-const env = (payload: Record<string, unknown>) => ({ nodeId: 'n1', agentId: 'grok', payload })
+function env(payload: Record<string, unknown>): RawHookEnvelope {
+  return { nodeId: 'n1', agentId: 'grok', payload }
+}
 
 describe('normalizeGrok — lifecycle', () => {
   it('maps session_start / session_end to the session phases', () => {
@@ -51,6 +53,19 @@ describe('normalizeGrok — Stop', () => {
     expect(normalizeGrok(env({ hookEventName: 'stop', sessionId: 's1' }))).toMatchObject({ state: 'done' })
   })
 
+  /**
+   * The two observe-only reasons are a DENYLIST, not 'end_turn' an allowlist: only grok's session
+   * close is observe-only, so any turn-end reason grok labels later must still report its badge and
+   * its completion alert. An allowlist would silently mark all of these `interrupted`.
+   */
+  it('an UNKNOWN reason is a real turn end too, alert and message intact', () => {
+    for (const reason of ['max_tokens', 'refusal', 'something_new']) {
+      const e = normalizeGrok(env({ hookEventName: 'stop', sessionId: 's1', reason, lastAssistantMessage: 'text' }))
+      expect(e, reason).toMatchObject({ state: 'done', lastMessage: 'text' })
+      expect(e?.interrupted, reason).toBeFalsy()
+    }
+  })
+
   it('the observe-only session-close Stop is marked interrupted, so no completion alert fires', () => {
     for (const reason of ['channel_closed', 'shutdown']) {
       const e = normalizeGrok(env({ hookEventName: 'stop', sessionId: 's1', reason, lastAssistantMessage: 'x' }))
@@ -88,6 +103,35 @@ describe('normalizeGrok — Notification', () => {
     expect(normalizeGrok(env({ hookEventName: 'notification', notificationType: 'auth_success' }))).toBeNull()
     expect(normalizeGrok(env({ hookEventName: 'notification' }))).toBeNull()
   })
+
+  /**
+   * The asking types are matched EXACTLY, not by substring: grok's vocabulary is claude-derived, and
+   * claude's `elicitation_complete` / `elicitation_response` fire when an elicitation ENDS. A
+   * substring test on 'elicit' would read those as a fresh ask and leave NEEDS YOU on a node that
+   * just finished — the exact bug normalizeClaude's closed set exists to avoid
+   * (normalize.test.ts, 'informational / unknown Notification types do not change state').
+   */
+  it('the elicitation END notifications are informational, NOT a new ask', () => {
+    for (const type of ['elicitation_complete', 'elicitation_response', 'agent_completed']) {
+      expect(normalizeGrok(env({ hookEventName: 'notification', notificationType: type })), type).toBeNull()
+    }
+    // The dialog OPENING is the one elicitation type that does ask.
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'elicitation_dialog' }))
+    ).toMatchObject({ state: 'waiting' })
+  })
+
+  it('reads the notification type in the SDK snake_case dialect too', () => {
+    expect(
+      normalizeGrok(env({ hook_event_name: 'notification', notification_type: 'permission_prompt' }))
+    ).toMatchObject({ state: 'blocked' })
+    expect(
+      normalizeGrok(env({ hook_event_name: 'notification', notification_type: 'agent_needs_input' }))
+    ).toMatchObject({ state: 'waiting' })
+    expect(
+      normalizeGrok(env({ hook_event_name: 'notification', notification_type: 'idle_prompt' }))
+    ).toMatchObject({ state: 'done', idle: true, interrupted: true })
+  })
 })
 
 describe('normalizeGrok — dialects', () => {
@@ -114,10 +158,27 @@ describe('normalizeGrok — dialects', () => {
  * this is the test that keeps it a property instead of a coincidence.
  */
 describe('the claude-compat cross-fire is inert', () => {
-  it('normalizeClaude returns null for every grok payload', () => {
-    for (const ev of ['session_start', 'user_prompt_submit', 'pre_tool_use', 'post_tool_use', 'stop', 'session_end']) {
+  const GROK_EVENTS = ['session_start', 'user_prompt_submit', 'pre_tool_use', 'post_tool_use', 'stop', 'session_end']
+
+  it('normalizeClaude returns null for every grok payload (camelCase dialect)', () => {
+    for (const ev of GROK_EVENTS) {
       expect(
         normalizeClaude({ nodeId: 'n1', agentId: 'claude', payload: { hookEventName: ev, sessionId: 's1' } }),
+        ev
+      ).toBeNull()
+    }
+  })
+
+  /**
+   * This is the leg that actually carries the property: in the SDK dialect grok writes the key
+   * claude DOES read (`hook_event_name`), so inertness rests entirely on claude's compare being
+   * case-sensitive and literal — 'stop' is not 'Stop'. Anyone who "helpfully" lowercases claude's
+   * event name breaks this and nothing else.
+   */
+  it('normalizeClaude returns null for every grok payload (SDK snake_case dialect)', () => {
+    for (const ev of GROK_EVENTS) {
+      expect(
+        normalizeClaude({ nodeId: 'n1', agentId: 'claude', payload: { hook_event_name: ev, session_id: 's1' } }),
         ev
       ).toBeNull()
     }
@@ -143,9 +204,24 @@ describe('grokRawFields', () => {
       toolUseId: 't1',
       toolInput: { subagent_type: 'explore' }
     })
-    expect(grokRawFields({ hook_event_name: 'session_end', session_id: 's2' })).toMatchObject({
-      event: 'sessionend',
-      sessionId: 's2'
+    // Every field the function reads, in the SDK dialect — dual-dialect reading is its whole reason
+    // to exist, so dropping any one `?? p.snake_case` fallback has to fail here.
+    expect(
+      grokRawFields({
+        hook_event_name: 'post_tool_use',
+        session_id: 's2',
+        cwd: '/w2',
+        tool_name: 'read_file',
+        tool_use_id: 't2',
+        tool_input: { path: '/w2/a.ts' }
+      })
+    ).toEqual({
+      event: 'posttooluse',
+      sessionId: 's2',
+      cwd: '/w2',
+      toolName: 'read_file',
+      toolUseId: 't2',
+      toolInput: { path: '/w2/a.ts' }
     })
   })
 })

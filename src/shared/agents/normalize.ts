@@ -414,27 +414,37 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
     return { ...base, kind: 'state', state: 'working' }
   }
   if (ev === 'stop') {
-    // grok fires a SECOND, observe-only Stop when the session itself closes (reason
-    // 'channel_closed' / 'shutdown'). Reporting that as a finished turn would pop a "your agent is
-    // done" notification every time a session ends, so it is marked `interrupted` — the flag the
-    // renderer already reads as "skip the completion alert and the unread dot" — and its
-    // lastAssistantMessage (an earlier turn's text) is dropped. A MISSING reason is treated as a
-    // genuine turn end: this is the one event the RUNNING badge depends on ending, so an unknown
-    // dialect must fail towards reporting it, not towards swallowing it.
-    const genuineTurnEnd = p.reason === undefined || p.reason === 'end_turn'
-    return genuineTurnEnd
+    // grok fires a SECOND, observe-only Stop when the session itself closes — and ONLY those two
+    // reasons, 'channel_closed' and 'shutdown', are that fire. Reporting them as a finished turn
+    // would pop a "your agent is done" notification every time a session ends, so they are marked
+    // `interrupted` — the flag the renderer already reads as "skip the completion alert and the
+    // unread dot" — and their lastAssistantMessage (an earlier turn's text) is dropped.
+    //
+    // The test is a DENYLIST of those two, not an allowlist of 'end_turn', so everything else —
+    // an absent reason, or a genuine turn end grok labels later ('max_tokens', 'refusal', …) —
+    // reports normally. Stop is the one event the RUNNING badge depends on ending, so an unknown
+    // dialect must fail towards reporting the badge-clearing event, never towards swallowing it.
+    const sessionClose = p.reason === 'channel_closed' || p.reason === 'shutdown'
+    return !sessionClose
       ? { ...base, kind: 'state', state: 'done', lastMessage }
       : { ...base, kind: 'state', state: 'done', interrupted: true }
   }
   // The turn died on an API error — grok skips Stop entirely here, exactly as Claude does.
   if (ev === 'stopfailure') return { ...base, kind: 'state', state: 'done', lastMessage }
   if (ev === 'notification') {
-    // grok's notification-type vocabulary is not documented as a closed set (its `matcher` tests
-    // the type as a regex), so we classify by substring and default to a NO-OP. Same discipline as
-    // normalizeClaude: an unrecognized future type must never stick a badge on a finished node.
+    // Everything unrecognized is a deliberate NO-OP: same discipline as normalizeClaude, where an
+    // unknown future type sticking a badge on a finished node is the failure that has actually
+    // happened before.
     const type = (p.notificationType ?? p.notification_type ?? '').toLowerCase()
+    // A permission ask is genuinely a FAMILY of names ('permission_prompt', 'permission_request',
+    // …), and its worst case is a `blocked` badge the agent's next hook clears — so substring is
+    // the right trade here.
     if (type.includes('permission')) return { ...base, kind: 'state', state: 'blocked', lastMessage }
-    if (type.includes('input') || type.includes('elicit')) {
+    // The asking types are a CLOSED set, exactly as in normalizeClaude, and for its reason: grok's
+    // vocabulary is claude-derived, and claude's `elicitation_complete` / `elicitation_response` are
+    // informational — they fire when an elicitation ENDS. A substring test on 'elicit' would match
+    // them and leave NEEDS YOU on a node that just finished, with no later hook to clear it.
+    if (type === 'elicitation_dialog' || type === 'agent_needs_input') {
       return { ...base, kind: 'state', state: 'waiting', lastMessage }
     }
     // Idle at the prompt: the RESCUE signal for a node stuck on `working`. grok fires no hook at
