@@ -23,6 +23,8 @@ export type ControlVerb =
   | 'rename'
   | 'write'
   | 'close'
+  | 'board'
+  | 'assign'
 
 export interface ControlCommand {
   verb: ControlVerb
@@ -49,7 +51,9 @@ const VERBS: ControlVerb[] = [
   'branch',
   'rename',
   'write',
-  'close'
+  'close',
+  'board',
+  'assign'
 ]
 
 const DESTRUCTIVE: ReadonlySet<ControlVerb> = new Set(['write', 'close'])
@@ -82,6 +86,7 @@ export function parseControlRequest(
   if (v === 'link' && !args.to) return { error: 'link requires --to <id,id>' }
   if (v === 'verify' && !args.node) return { error: 'verify requires --node <id>' }
   if (v === 'spawn-team' && !args.team) return { error: 'spawn-team requires --team <json>' }
+  if (v === 'assign' && !args.node) return { error: 'assign requires --node <id>' }
   if (v === 'open-worktree' && !args.branch) return { error: 'open-worktree requires --branch <name>' }
   if (v === 'close-worktree' && !args.group) return { error: 'close-worktree requires --group <id>' }
   if (v === 'branch' && !args.node) return { error: 'branch requires --node <id>' }
@@ -160,6 +165,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
     '  Both ask the user to confirm a dialog and may be denied.',
+    '- `board` — the project\'s kanban board: every column (id + title) and the session cards in each,',
+    '  plus the virtual Ungrouped column. Start here when you need a column id or want the board state.',
+    '- `assign --node <id> [--column <id|title>] [--before <nodeId>]` — move a session card to a column',
+    '  (match by column id or title). Omit `--column` (or pass `ungrouped`) to send it back to Ungrouped.',
+    '  `--before <nodeId>` drops it above that card within the column. This is board metadata only — it',
+    '  never moves the node on the canvas or changes its group. Use it to reflect progress: move a card',
+    '  to your "In Progress"/"Done" column as work advances.',
     '',
     'Orchestration ("Build with Nodeterm orchestration"): first decide what is genuinely',
     'independent — for every "and then", ask whether the next step READS the previous step\'s',
@@ -273,7 +285,7 @@ exit 1
 export function buildCanvasSkillBody(shimPath: string): string {
   return `---
 name: manage-nodeterm-canvas
-description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, create git worktrees as bound groups, wrap nodes in labeled groups, arrange/align/rename them, link nodes so you can read back what they produced, show an image/video/web page, write to or close a terminal. Use whenever the user says "Build with Nodeterm orchestration", asks to create or open nodes/sessions/terminals, split or parallelize work across subagents/agents/sessions/worktrees, delegate parts of a task to other agents, work on several things at once, build something using multiple Claude (or other agent) sessions, collect or synthesize the results of agents you opened, organize the canvas into groups by topic, or visualize code/output you produced. Only works inside a nodeterm Claude session.
+description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, create git worktrees as bound groups, wrap nodes in labeled groups, arrange/align/rename them, link nodes so you can read back what they produced, move session cards between kanban columns to track progress, show an image/video/web page, write to or close a terminal. Use whenever the user says "Build with Nodeterm orchestration", asks to create or open nodes/sessions/terminals, split or parallelize work across subagents/agents/sessions/worktrees, delegate parts of a task to other agents, work on several things at once, build something using multiple Claude (or other agent) sessions, collect or synthesize the results of agents you opened, organize the canvas into groups by topic, move tasks across a kanban board, or visualize code/output you produced. Only works inside a nodeterm Claude session.
 ---
 
 # Manage the nodeterm canvas
@@ -341,9 +353,20 @@ Verbs:
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).
 - \`write --node <id> --text "..."\` — type text into a terminal node. (Asks the user to confirm.)
 - \`close --node <id>\` — close a node. (Asks the user to confirm.)
+- \`board\` — read the project's kanban board: every column (id + title) and the session cards
+  filed in each, plus the virtual Ungrouped column (unfiled sessions). Start here when you need
+  a column id, or to see how the work is currently laid out.
+- \`assign --node <id> [--column <id|title>] [--before <nodeId>]\` — file a session card under a
+  column, matching \`--column\` by id or (case-insensitive) title. Omit \`--column\`, or pass
+  \`ungrouped\`, to send it back to Ungrouped; \`--before <nodeId>\` drops it just above that card
+  within the column. This is board metadata ONLY — it never moves the node on the canvas, changes
+  its group, or touches the running session. Use it to reflect progress: as a station finishes,
+  move its card into your "In Progress" / "Done" column so the board tells the real story.
 
 Notes:
 - \`write\` and \`close\` require the user to approve a confirmation dialog; they may be denied.
+- \`board\` and \`assign\` act on the CURRENTLY OPEN project's board — the same one you see when you
+  toggle the kanban view. They need no confirmation.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.
 
 To orchestrate a team: decide the roles + a concrete starting prompt for each, then one

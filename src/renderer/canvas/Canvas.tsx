@@ -238,7 +238,7 @@ import type {
   TranscriptHit
 } from '@shared/types'
 import type { KanbanCreateChoice, KanbanSession } from '../components/kanban/KanbanView'
-import { assignNode, defaultKanban, labelsForCard, migrateProjectTags } from '../lib/kanban'
+import { assignNode, assignedTo, defaultKanban, labelsForCard, migrateProjectTags, resolveColumnRef, unassigned } from '../lib/kanban'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
 import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
@@ -6310,6 +6310,111 @@ export function Canvas() {
                 reply({ ok: true, message: `closed ${args.node}` })
               },
               onCancel: () => reply({ ok: false, error: 'denied by user' })
+            })
+            return
+          }
+          case 'board': {
+            // Read-only snapshot of the CURRENTLY OPEN project's kanban board: columns + the
+            // session cards filed in each, plus the virtual Ungrouped column. The board's cards
+            // ARE the canvas session nodes (toKanbanSession), derived live — the board file only
+            // stores column assignments, so a session with no/dangling assignment sits Ungrouped.
+            const store = useProjects.getState()
+            const pid = store.activeProjectId
+            const board = store.getProject(pid ?? '')?.kanban
+            const sessions = nodesRef.current
+              .map(toKanbanSession)
+              .filter((s): s is KanbanSession => s !== null)
+            const titleOf = new Map(sessions.map((s) => [s.id, s.title || 'Untitled']))
+            const sessionIds = sessions.map((s) => s.id)
+            if (!board) {
+              // No board yet (lazy default not written) — every session is Ungrouped.
+              const lines = [
+                'Kanban board: (no columns yet — default To Do / In Progress / Done appears on first edit)',
+                `Ungrouped (${sessionIds.length}):`,
+                ...sessionIds.map((id) => `  - ${titleOf.get(id)} (id: ${id})`)
+              ]
+              reply({
+                ok: true,
+                message: lines.join('\n'),
+                result: { columns: [], ungrouped: sessionIds }
+              })
+              return
+            }
+            const columnsOut = board.columns.map((c) => {
+              const ids = assignedTo(board, c.id).filter((id) => titleOf.has(id))
+              return { id: c.id, title: c.title, cards: ids }
+            })
+            const ungroupedIds = unassigned(board, sessionIds)
+            const fmt = (ids: string[]) => ids.map((id) => `  - ${titleOf.get(id)} (id: ${id})`)
+            const lines = [
+              'Kanban board:',
+              ...columnsOut.flatMap((c) => [
+                `${c.title} (${c.cards.length}) [column id: ${c.id}]:`,
+                ...fmt(c.cards)
+              ]),
+              `Ungrouped (${ungroupedIds.length}):`,
+              ...fmt(ungroupedIds)
+            ]
+            reply({
+              ok: true,
+              message: lines.join('\n'),
+              result: { columns: columnsOut, ungrouped: ungroupedIds }
+            })
+            return
+          }
+          case 'assign': {
+            // Move a session card between kanban columns — the "agent-driven card movement" the
+            // board's own scope note called out as missing. Board metadata ONLY: assignNode writes
+            // an assignment, it never touches the canvas node, its group, or the running session.
+            const nodeId = (args.node ?? '').trim()
+            const target = nodesRef.current.find((n) => n.id === nodeId)
+            if (!target || toKanbanSession(target) === null) {
+              reply({ ok: false, error: `assign: --node names no session card (${nodeId || 'missing'})` })
+              return
+            }
+            const store = useProjects.getState()
+            const pid = store.activeProjectId
+            if (!pid) {
+              reply({ ok: false, error: 'assign: no active project' })
+              return
+            }
+            // Read prev fresh so the board-log diff below has the SAME base the write mutates —
+            // a lazy-default board is materialized here (as the first UI edit would) so the
+            // resolved column ids are stable across the write and the diff.
+            const prev = store.getProject(pid)?.kanban ?? defaultKanban()
+            // Resolve --column by id or (case-insensitive) title; empty / "ungrouped" → null
+            // (unassign). `undefined` = no such column, so report what IS available.
+            const rawCol = (args.column ?? '').trim()
+            const columnId = resolveColumnRef(prev, rawCol)
+            if (columnId === undefined) {
+              reply({
+                ok: false,
+                error: `assign: no column "${rawCol}" — columns: ${prev.columns.map((c) => c.title).join(', ') || '(none)'}`
+              })
+              return
+            }
+            const before = (args.before ?? '').trim() || null
+            const next = assignNode(prev, nodeId, columnId, before)
+            store.setProjectKanban(pid, next)
+            markDirty()
+            // Board-log the move through the same diff funnel the UI uses (card-moved), so the
+            // board feed reads identically whether a person or an agent moved the card. cardTitle
+            // returns '' ONLY for a dead node; a live card with no title maps to 'Untitled'.
+            const cardTitle = (id: string): string => {
+              const n = nodesRef.current.find((x) => x.id === id)
+              const card = n ? toKanbanSession(n) : null
+              return card ? card.title || 'Untitled' : ''
+            }
+            for (const { nodeId: nid, event } of boardLogEvents(prev, next, cardTitle)) {
+              useBoardLog.getState().append(api, pid, { kind: 'event', nodeId: nid, event })
+            }
+            const where = columnId
+              ? next.columns.find((c) => c.id === columnId)?.title ?? columnId
+              : 'Ungrouped'
+            reply({
+              ok: true,
+              message: `moved ${cardTitle(nodeId) || nodeId} to ${where}`,
+              result: { node: nodeId, column: columnId }
             })
             return
           }

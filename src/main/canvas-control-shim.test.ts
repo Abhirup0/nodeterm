@@ -105,6 +105,13 @@ describe('canvas-control shim', () => {
     expect(received.at(-1)?.args).toEqual({ node: 'n1', title: '' })
   })
 
+  it('carries the kanban verbs (board / assign) through', async () => {
+    await callShim(['board'])
+    expect(received.at(-1)).toMatchObject({ verb: 'board', args: {} })
+    await callShim(['assign', '--node', 'node-7', '--column', 'In Progress'])
+    expect(received.at(-1)).toMatchObject({ verb: 'assign', args: { node: 'node-7', column: 'In Progress' } })
+  })
+
   it('reports server-side failures on stderr with a non-zero exit', async () => {
     await expect(callShim(['boom'])).rejects.toMatchObject({
       code: 1,

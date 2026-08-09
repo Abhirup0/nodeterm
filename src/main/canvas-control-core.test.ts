@@ -130,6 +130,23 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('rename')).toBe(false)
   })
 
+  it('board takes no required args and is not destructive', () => {
+    expect(parseControlRequest('board', {})).toEqual({ verb: 'board', args: {} })
+    expect(isDestructiveVerb('board')).toBe(false)
+  })
+
+  it('assign requires --node; --column/--before are optional and it is not destructive', () => {
+    expect(parseControlRequest('assign', {})).toEqual({ error: 'assign requires --node <id>' })
+    // No --column is valid: it means "back to Ungrouped".
+    expect(parseControlRequest('assign', { node: 'n1' })).toEqual({ verb: 'assign', args: { node: 'n1' } })
+    expect(parseControlRequest('assign', { node: 'n1', column: 'In Progress' })).toEqual({
+      verb: 'assign',
+      args: { node: 'n1', column: 'In Progress' }
+    })
+    // Moving a card is board metadata only — no session is touched, so no confirm dialog.
+    expect(isDestructiveVerb('assign')).toBe(false)
+  })
+
   it('merges the canvas-control block idempotently, preserving other content', () => {
     const block = buildCanvasControlInstructions('/tmp/nodeterm.sh')
     const first = mergeCanvasControlBlock('# My own notes\n', block)
@@ -146,7 +163,7 @@ describe('parseControlRequest', () => {
 
   it('instructions cover the verb set and the confirm caveat', () => {
     const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
-    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'arrange', 'rename', 'write', 'close']) {
+    for (const verb of ['list', 'open-agent', 'spawn-team', 'group', 'arrange', 'rename', 'write', 'close', 'board', 'assign']) {
       expect(body).toContain(verb)
     }
     expect(body.toLowerCase()).toContain('confirm')
