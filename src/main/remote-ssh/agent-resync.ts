@@ -10,16 +10,23 @@
 // and every side effect is an injected dep.
 
 import { decideNode } from '../../core/remote-ssh/agent-resync-decide'
+import { sessionName } from '../../core/tmux-naming'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import type { AgentId } from '@shared/agents/config'
-import type { SshConnection } from '@shared/ssh'
 
 export interface AgentResyncDeps {
   /** Nodes the mirror still believes are working (agent-status-mirror.workingNodes). */
   workingNodes: () => { nodeId: string; agentId?: string; sessionId?: string }[]
-  /** The node's live remote handle, or undefined for a local session (PtyManager.sshRemoteForNode). */
-  remoteFor: (nodeId: string) => { controlPath: string; conn: SshConnection } | undefined
-  /** `#{pane_current_command}` for the node's tmux session (PtyManager.paneCommand). */
+  /**
+   * The nodeterm tmux session names the HOST is running, over this project's ControlMaster.
+   *
+   * This replaced a per-node lookup in our own live pty map. That map is emptied by
+   * `PtyManager.kill()` on detach, so a backgrounded project — the case this feature exists for —
+   * had no entries at all and every node was skipped. The host's session list survives detach,
+   * which is the whole point of running the agents inside tmux.
+   */
+  hostSessionNames: () => Promise<Set<string>>
+  /** `#{pane_current_command}` for the node's REMOTE tmux session, over the project's master. */
   paneCommand: (nodeId: string) => Promise<string | null>
   /** A bounded tail of the node's transcript on the host, or null when it can't be read. */
   readTranscriptTail: (nodeId: string, sessionId: string) => Promise<string | null>
@@ -28,7 +35,7 @@ export interface AgentResyncDeps {
 }
 
 /**
- * Resync every working node that belongs to the project owning `controlPath`.
+ * Resync every working node the project's host is actually running.
  *
  * Only nodes the mirror calls `working` are considered: that is the one state a lost hook event can
  * strand. The opposite error — a node we believe idle that is really working — corrects itself
@@ -37,16 +44,22 @@ export interface AgentResyncDeps {
  * Returns the node ids declared ended (for logging/tests). Never throws: a probe that fails is
  * `undecided`, and undecided changes nothing.
  */
-export async function resyncProjectAgents(
-  controlPath: string,
-  deps: AgentResyncDeps
-): Promise<string[]> {
+export async function resyncProjectAgents(deps: AgentResyncDeps): Promise<string[]> {
   const ended: string[] = []
   let working: { nodeId: string; agentId?: string; sessionId?: string }[]
   try {
     working = deps.workingNodes()
   } catch {
     return ended // no list ⇒ nothing to repair, and still not a rejection for the reconnect path
+  }
+
+  // ONE listing for the whole project, and a failed listing repairs nothing: an empty set matches
+  // no node, which is the same safe direction as every other failed probe here.
+  let hostSessions: Set<string>
+  try {
+    hostSessions = await deps.hostSessionNames()
+  } catch {
+    return ended
   }
 
   for (const node of working) {
@@ -57,7 +70,10 @@ export async function resyncProjectAgents(
       // A synthetic event carries an agentId by contract; without one we cannot emit a well-formed
       // event, and inventing an agent would misattribute the node on every surface.
       if (!node.agentId) continue
-      if (deps.remoteFor(node.nodeId)?.controlPath !== controlPath) continue
+      // FORWARD match only. `sessionName` is lossy (every non-[a-zA-Z0-9_-] char becomes `_`), so
+      // parsing a node id back out of a session name could attribute the host's session to the
+      // wrong node — and a rescue `done` on the wrong node is a false completion notification.
+      if (!hostSessions.has(sessionName(node.nodeId))) continue
 
       const pane = await probe(() => deps.paneCommand(node.nodeId))
       let tail: string | null = null

@@ -80,8 +80,11 @@ interface Runners {
   /** A project's reverse hook tunnel was just VERIFIED on a freshly established master. Production
    *  resyncs that project's working agents: hook events lost while the tunnel was down are gone for
    *  good, so a node can be stranded at `working` until the 20-minute stale sweep. Deliberately not
-   *  called on the reuse branch — a master that answered `-O check` never lost its tunnel. */
-  onTunnelVerified?: (projectId: string, controlPath: string) => void
+   *  called on the reuse branch — a master that answered `-O check` never lost its tunnel. The
+   *  `conn` rides along because the resync builds its own remote commands (the host's tmux session
+   *  list, a pane probe) and the alternative — looking the connection back up by control path —
+   *  would add a public accessor for a fact this call site already holds. */
+  onTunnelVerified?: (projectId: string, controlPath: string, conn: SshConnection) => void
   /** Synchronous one-shot ssh, for `disconnectAll()` only: `before-quit` is sync, so an awaited
    *  `-O exit` never lands and the daemonized ControlPersist master survives the app. */
   runSync?: (args: string[]) => void
@@ -533,7 +536,7 @@ export class SshProjectManager {
         // (`onStatus` above carries the same guard for the same hard-won reason.) Do not tidy away.
         if (hookEndpointPath) {
           try {
-            this.r.onTunnelVerified?.(projectId, controlPath)
+            this.r.onTunnelVerified?.(projectId, controlPath, conn)
           } catch {
             // undecided changes nothing: the stale sweep remains the backstop, as before this hook
           }
@@ -1406,7 +1409,7 @@ export function initSshProject(
   /** Passed straight through to the manager's `onTunnelVerified` (see Runners). It lives on the
    *  caller because the resync it drives needs main's agent-status funnel and transcript readers,
    *  none of which this module knows about. */
-  onTunnelVerified?: (projectId: string, controlPath: string) => void
+  onTunnelVerified?: (projectId: string, controlPath: string, conn: SshConnection) => void
 ): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()

@@ -7,8 +7,9 @@ import { SshProjectManager, lastSshErrorLine } from './ssh-project'
 import { AskpassServer } from './ssh-askpass'
 import { AppSshAgent } from './ssh-agent'
 import { controlPathFor } from '../../core/remote-ssh/control-master'
+import type { SshConnection } from '@shared/ssh'
 
-const conn = { host: 'h', user: 'u' }
+const conn: SshConnection = { host: 'h', user: 'u' }
 
 function makeMgr() {
   const statuses: string[] = []
@@ -774,7 +775,7 @@ describe('SshProjectManager', () => {
      *  so its tunnel never verifies and no endpoint path is ever produced). No leftover socket, so
      *  connect() takes the ordinary fresh-master path — a genuine establish. */
     function makeVerifiedMgr(
-      onTunnelVerified: (projectId: string, controlPath: string) => void,
+      onTunnelVerified: (projectId: string, controlPath: string, conn: SshConnection) => void,
       httpCode = '204'
     ) {
       vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined as never)
@@ -796,11 +797,12 @@ describe('SshProjectManager', () => {
       })
     }
 
-    it('fires after a genuine re-establish, naming the project and its control path', async () => {
+    it('fires after a genuine re-establish, naming the project, its control path and its connection', async () => {
       const onTunnelVerified = vi.fn()
       const mgr = makeVerifiedMgr(onTunnelVerified)
       await mgr.connect('p1', conn, '/remote/cwd')
-      expect(onTunnelVerified).toHaveBeenCalledWith('p1', controlPathFor('p1'))
+      // The connection rides along because the resync builds its own remote commands with it.
+      expect(onTunnelVerified).toHaveBeenCalledWith('p1', controlPathFor('p1'), conn)
     })
 
     it('does NOT fire on the reuse branch — a live master never lost its tunnel', async () => {

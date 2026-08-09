@@ -1,9 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { resyncProjectAgents, type AgentResyncDeps } from './agent-resync'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
-import type { SshConnection } from '@shared/ssh'
-
-const CONN: SshConnection = { host: 'h', user: 'u' }
 
 const assistantText = (text: string): string =>
   JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } })
@@ -16,7 +13,7 @@ function deps(over: Partial<AgentResyncDeps> = {}): AgentResyncDeps & { emitted:
   return {
     emitted,
     workingNodes: () => [{ nodeId: 'n1', agentId: 'claude', sessionId: 's1' }],
-    remoteFor: () => ({ controlPath: '/cm/p1', conn: CONN }),
+    hostSessionNames: async () => new Set(['nt-n1']),
     paneCommand: async () => 'claude',
     readTranscriptTail: async () => assistantText('Finished.'),
     emit: (e) => void emitted.push(e),
@@ -27,7 +24,7 @@ function deps(over: Partial<AgentResyncDeps> = {}): AgentResyncDeps & { emitted:
 describe('resyncProjectAgents', () => {
   it('emits a rescue done for a node whose turn demonstrably ended', async () => {
     const d = deps()
-    const ended = await resyncProjectAgents('/cm/p1', d)
+    const ended = await resyncProjectAgents(d)
 
     expect(ended).toEqual(['n1'])
     expect(d.emitted).toEqual([
@@ -37,7 +34,7 @@ describe('resyncProjectAgents', () => {
 
   it('emits nothing for a node that is still working', async () => {
     const d = deps({ readTranscriptTail: async () => assistantToolUse('t1') })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
+    expect(await resyncProjectAgents(d)).toEqual([])
     expect(d.emitted).toEqual([])
   })
 
@@ -46,25 +43,48 @@ describe('resyncProjectAgents', () => {
       paneCommand: async () => null,
       readTranscriptTail: async () => null
     })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
+    expect(await resyncProjectAgents(d)).toEqual([])
     expect(d.emitted).toEqual([])
   })
 
-  it('skips nodes belonging to another project', async () => {
-    const d = deps({ remoteFor: () => ({ controlPath: '/cm/OTHER', conn: CONN }) })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
+  it('skips a node the host is not running — its tmux session is not there', async () => {
+    const d = deps({ hostSessionNames: async () => new Set(['nt-someone-else']) })
+    expect(await resyncProjectAgents(d)).toEqual([])
     expect(d.emitted).toEqual([])
   })
 
-  it('skips local nodes', async () => {
-    const d = deps({ remoteFor: () => undefined })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
+  it('resyncs a node with no live pty — the host session is the only evidence needed', async () => {
+    // The regression this whole task exists for: a backgrounded project's terminals are killed,
+    // so nothing is registered locally, yet the node is exactly the one that needs repairing.
+    const d = deps({ hostSessionNames: async () => new Set(['nt-n1']) })
+    expect(await resyncProjectAgents(d)).toEqual(['n1'])
+  })
+
+  it('a failed session listing repairs nothing rather than guessing', async () => {
+    const d = deps({
+      hostSessionNames: async () => {
+        throw new Error('master died')
+      }
+    })
+    expect(await resyncProjectAgents(d)).toEqual([])
     expect(d.emitted).toEqual([])
+  })
+
+  it('matches forward by session name, never by parsing a node id back out of one', async () => {
+    // `sessionName` is lossy (every non-[a-zA-Z0-9_-] char becomes `_`), so two node ids can share
+    // one session name. Reversing would attribute a host session to the wrong node — and a rescue
+    // `done` on the wrong node is a false completion notification.
+    const d = deps({
+      workingNodes: () => [{ nodeId: 'a:b', agentId: 'claude', sessionId: 's1' }],
+      hostSessionNames: async () => new Set(['nt-a_b']),
+      paneCommand: async () => 'zsh'
+    })
+    expect(await resyncProjectAgents(d)).toEqual(['a:b'])
   })
 
   it('skips a node with no agentId — a synthetic event needs one to be well formed', async () => {
     const d = deps({ workingNodes: () => [{ nodeId: 'n1', sessionId: 's1' }] })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
+    expect(await resyncProjectAgents(d)).toEqual([])
     expect(d.emitted).toEqual([])
   })
 
@@ -77,7 +97,7 @@ describe('resyncProjectAgents', () => {
         throw new Error('master died again')
       }
     })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
+    expect(await resyncProjectAgents(d)).toEqual([])
     expect(d.emitted).toEqual([])
   })
 
@@ -85,7 +105,7 @@ describe('resyncProjectAgents', () => {
     const readTranscriptTail = vi.fn(async () => assistantText('x'))
     const d = deps({ paneCommand: async () => 'zsh', readTranscriptTail })
 
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual(['n1'])
+    expect(await resyncProjectAgents(d)).toEqual(['n1'])
     expect(readTranscriptTail).not.toHaveBeenCalled()
   })
 
@@ -95,18 +115,25 @@ describe('resyncProjectAgents', () => {
         throw new Error('mirror unreadable')
       }
     })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
+    expect(await resyncProjectAgents(d)).toEqual([])
     expect(d.emitted).toEqual([])
   })
 
-  it('a throwing remoteFor skips that node without rejecting', async () => {
+  it('lists the host sessions once, however many nodes are working', async () => {
+    // One ssh round trip for the whole project: the list is a project-level fact, and paying for it
+    // per node would multiply the reconnect's remote traffic by the size of the canvas.
+    const hostSessionNames = vi.fn(async () => new Set(['nt-n1', 'nt-n2']))
     const d = deps({
-      remoteFor: () => {
-        throw new Error('pty manager blew up')
-      }
+      workingNodes: () => [
+        { nodeId: 'n1', agentId: 'claude', sessionId: 'sa' },
+        { nodeId: 'n2', agentId: 'claude', sessionId: 'sb' }
+      ],
+      paneCommand: async () => 'zsh',
+      hostSessionNames
     })
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual([])
-    expect(d.emitted).toEqual([])
+
+    expect(await resyncProjectAgents(d)).toEqual(['n1', 'n2'])
+    expect(hostSessionNames).toHaveBeenCalledTimes(1)
   })
 
   it('a throwing emit costs only its own node — the next one is still rescued', async () => {
@@ -116,6 +143,7 @@ describe('resyncProjectAgents', () => {
         { nodeId: 'n1', agentId: 'claude', sessionId: 'sa' },
         { nodeId: 'n2', agentId: 'claude', sessionId: 'sb' }
       ],
+      hostSessionNames: async () => new Set(['nt-n1', 'nt-n2']),
       paneCommand: async () => 'zsh',
       emit: (e) => {
         if (e.nodeId === 'n1') throw new Error('mirror reducer blew up')
@@ -123,7 +151,7 @@ describe('resyncProjectAgents', () => {
       }
     })
 
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual(['n2'])
+    expect(await resyncProjectAgents(d)).toEqual(['n2'])
     expect(emitted.map((e) => e.nodeId)).toEqual(['n2'])
   })
 
@@ -136,7 +164,7 @@ describe('resyncProjectAgents', () => {
 
     // The transcript leg must still get its say: a synchronous throw is one failed probe, not the
     // end of this node's rescue.
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual(['n1'])
+    expect(await resyncProjectAgents(d)).toEqual(['n1'])
     expect(d.emitted.map((e) => e.nodeId)).toEqual(['n1'])
   })
 
@@ -146,11 +174,12 @@ describe('resyncProjectAgents', () => {
         { nodeId: 'done1', agentId: 'claude', sessionId: 'sa' },
         { nodeId: 'busy1', agentId: 'claude', sessionId: 'sb' }
       ],
+      hostSessionNames: async () => new Set(['nt-done1', 'nt-busy1']),
       paneCommand: async (nodeId) => (nodeId === 'done1' ? 'zsh' : 'claude'),
       readTranscriptTail: async () => assistantToolUse('t2')
     })
 
-    expect(await resyncProjectAgents('/cm/p1', d)).toEqual(['done1'])
+    expect(await resyncProjectAgents(d)).toEqual(['done1'])
     expect(d.emitted.map((e) => e.nodeId)).toEqual(['done1'])
   })
 })

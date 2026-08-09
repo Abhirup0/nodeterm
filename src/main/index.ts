@@ -93,7 +93,13 @@ import { registerTranscriptIpc, resolveTranscript } from '../core/transcript-ipc
 import { createRemoteContextTail } from './remote-context-tail'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
-import { childArgs } from '../core/remote-ssh/control-master'
+import {
+  childArgs,
+  parseRemoteSessionNames,
+  remoteListSessionsArgs,
+  remotePaneCommandArgs
+} from '../core/remote-ssh/control-master'
+import { sessionName } from '../core/tmux-naming'
 import { posixQuote } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
@@ -1221,18 +1227,24 @@ app.whenReady().then(async () => {
    * node id buys us; a hit is cached under the sessionId so the title poll and the next read get
    * it for free. Fail-open at every step: no node id / not an SSH session / no resolved home /
    * a failed ssh call all mean "not remote", which is the pre-existing local path.
+   *
+   * `remote` overrides the live-pty lookup for callers that already know which host the node runs
+   * on. `PtyManager.kill()` forgets a session on detach, so a backgrounded project's nodes are
+   * absent from that map — and the reconnect resync runs on exactly those nodes. Absent ⇒ the
+   * lookup, i.e. the pre-existing behavior byte for byte.
    */
   const remoteTranscriptRefFor = async (
     sessionId: string | undefined,
     cwd: string | undefined,
     accountId: string | undefined,
-    nodeId: string | undefined
+    nodeId: string | undefined,
+    remote?: { conn: import('../shared/ssh').SshConnection; controlPath: string }
   ): Promise<RemoteFileRef | undefined> => {
     if (!sessionId) return undefined
     const cached = remoteTranscriptBySession.get(sessionId)
     if (cached) return cached
     if (!nodeId) return undefined
-    const rt = ptyManager.sshRemoteForNode(nodeId)
+    const rt = remote ?? ptyManager.sshRemoteForNode(nodeId)
     if (!rt || !sshProjectManager) return undefined
     const remoteHome = sshProjectManager.remoteHomeForControlPath(rt.controlPath)
     if (!remoteHome) return undefined
@@ -1877,15 +1889,36 @@ app.whenReady().then(async () => {
     // them on the host), so ask the host what is actually true for the nodes we still believe are
     // working. Fire-and-forget — this must never delay or fail the connect that has already
     // reported `connected`.
-    (_projectId, controlPath) => {
-      void resyncProjectAgents(controlPath, {
+    (_projectId, controlPath, conn) => {
+      void resyncProjectAgents({
         workingNodes,
-        remoteFor: (nodeId) => ptyManager.sshRemoteForNode(nodeId),
-        paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+        hostSessionNames: async () => {
+          if (!sshProjectManager) return new Set<string>()
+          const { code, stdout } = await sshProjectManager.sshRun(
+            remoteListSessionsArgs(conn, controlPath)
+          )
+          // `list-sessions` exits non-zero when no tmux server is running — that is "no sessions",
+          // not a failed read, and either way an empty set repairs nothing.
+          return new Set(code === 0 ? parseRemoteSessionNames(stdout) : [])
+        },
+        paneCommand: async (nodeId) => {
+          // The node's REMOTE pane, over this project's master. `PtyManager.paneCommand` would
+          // read our live session map, which a backgrounded project has already been dropped from.
+          if (!sshProjectManager) return null
+          const { code, stdout } = await sshProjectManager.sshRun(
+            remotePaneCommandArgs(conn, controlPath, sessionName(nodeId))
+          )
+          return code === 0 ? stdout.trim() || null : null
+        },
         readTranscriptTail: async (nodeId, sessionId) => {
-          // cwd/accountId are unknown here; the locator falls back to its cross-root glob, and a
-          // hook-fed ref (the common case) is already cached by session id.
-          const ref = await remoteTranscriptRefFor(sessionId, undefined, undefined, nodeId)
+          // cwd/accountId are unknown here: with no accountId there is exactly ONE transcript root
+          // (the system one), so a managed-account node without a hook-fed ref simply stays
+          // undecided. A hook-fed ref (the common case) is already cached by session id. The
+          // explicit `remote` is what keeps this working for a node with no live pty session.
+          const ref = await remoteTranscriptRefFor(sessionId, undefined, undefined, nodeId, {
+            conn,
+            controlPath
+          })
           return ref ? await readRemoteTranscript(sessionId, ref) : null
         },
         emit: emitAgentStatus
