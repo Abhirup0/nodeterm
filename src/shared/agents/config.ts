@@ -108,7 +108,15 @@ export const RENAME_CAPABLE = ['claude', 'grok'] as const
 // Discovery differs per agent: claude gets the manage-nodeterm-canvas skill; codex/gemini/
 // opencode a marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md /
 // ~/.config/opencode/AGENTS.md (see canvas-control.ts).
-export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
+//
+// grok needs NO new installer: it scans `~/.claude/skills` by default for Claude Code
+// compatibility (its shipped docs, user-guide/08-skills.md; switched off only by
+// `[compat.claude] skills = false` or GROK_CLAUDE_SKILLS_ENABLED=false), and that is exactly
+// where the manage-nodeterm-canvas skill is already written — locally, and on an SSH host via
+// RemoteHooks.installCanvasControl. Membership here is what sets NODETERM_CANVAS_CONTROL in the
+// session env (hook-server's buildPtyEnv, remoteHookEnvArgs), i.e. what makes the shim anything
+// other than a no-op.
+export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
 // claude and grok share the flag SPELLING and the value vocabulary
 // (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own

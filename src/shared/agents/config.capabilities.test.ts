@@ -115,9 +115,15 @@ describe('grok capabilities', () => {
     expect(canRename('grok')).toBe(true)
   })
 
+  it('drives the canvas, on the skill that is already installed for claude', () => {
+    // The only capability grok gets with no per-agent leaf of its own: it scans `~/.claude/skills`
+    // by default (Claude Code compat, see its user-guide/08-skills.md), which is where
+    // manage-nodeterm-canvas is already written. See config.control.test.ts.
+    expect(canControlCanvas('grok')).toBe(true)
+  })
+
   it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
     expect(canContextLink('grok')).toBe(false)
-    expect(canControlCanvas('grok')).toBe(false)
     expect(hasUsage('grok')).toBe(false)
     expect(canBranch('grok')).toBe(false)
     expect(canSubagent('grok')).toBe(false)
