@@ -315,7 +315,7 @@ ai-name / comments).
 | Context links | **not implemented for grok** (§1) | not wired at all (`initContextLink` is never called from `src/server`) | N/A |
 | Context meter | **not implemented for grok** (§1) | idem | idem |
 | Managed accounts | **deliberately N/A** — accounts are a claude config-dir mechanism. `createAgentNode` never stamps an `accountId` onto a non-claude node, and `CLAUDE_CONFIG_DIR` is irrelevant to `~/.grok/hooks`. A grok node in a managed-account project must still report status (checklist 7) | idem | idem |
-| Brand logo | `AGENT_LOGO.grok` → `renderer/assets/grok.svg` — a **placeholder monogram** (§8) | same asset, for free | the phone draws its own icons — **follow-up owed** |
+| Brand logo | the **official** xAI mark, INLINED in `agentIcons.tsx` as `GrokMark` rather than shipped as an asset — it is a single monochrome path, so `fill="currentColor"` inherits the label colour and is correct in both themes. The other four marks are multi-colour and stay `<img src>` assets, where `currentColor` cannot inherit | same component, for free | the phone draws its own icons — **follow-up owed** |
 | Notch mascot | yes — its own mid-slate (`#8494a8`) critter through the shared `buildQuadrantSprite`; the CSS rule block is *shared* with claude's, so the geometry cannot drift | **N/A** — there is no notch there; the canvas badge mascot works | the phone has its own SwiftUI renderer |
 | Fullscreen TUI setting | **N/A** — grok runs full-screen by default, so `claude-tui.ts` has no grok analogue | idem | idem |
 | Deterministic hook-reply approvals (phone Approve/Deny) | **claude-only** — `pty-manager` arms `NODETERM_PERM_WAIT_SECS` only for claude, and grok does not subscribe `PermissionRequest` at all | idem | a grok node's approvals are not answerable from the phone |
@@ -364,11 +364,14 @@ ai-name / comments).
    while the skill is undiscoverable. **If grok does not list our skills, this changes shape** (a
    marker block into grok's own instruction file, as codex/gemini/opencode get) and should be
    re-planned, not forced.
-8. **`src/renderer/assets/grok.svg` is a placeholder monogram, not the official Grok/xAI mark.** It
-   is a neutral "G" in the app's own line-icon style, deliberately *not* a lookalike, and it carries
-   an XML comment saying so. Replace it with the official asset from an official press/brand page, at
-   that asset's published proportions. It uses an explicit `#64748b` rather than `currentColor`
-   because `agentIcons.tsx` renders these as `<img>` URLs, where `currentColor` cannot inherit.
+8. ~~The brand logo is a placeholder.~~ **CLOSED.** The official xAI mark now ships, inlined in
+   `agentIcons.tsx` as `GrokMark` (`fill="currentColor"`, the mark's own non-square 512×492 viewBox
+   so it is never stretched). Inlining is what makes it theme-correct: the mark is a single
+   monochrome path and the vendor's own usage is one ink that flips with the background, which
+   `currentColor` reproduces exactly. As an `<img src>` it could not — an SVG in an `<img>` is an
+   isolated document, so `currentColor` resolves against nothing and paints black, invisible on the
+   default dark theme. That is also why the other four marks, which are multi-colour and carry their
+   own fills, remain assets.
 9. **The local `$GROK_HOME` is read from an environment a GUI app does not have.** `grokHomeDir()`
    defaults from `process.env`, but a desktop app launched from Finder/Dock/a `.desktop` entry never
    sourced the user's shell rc — while the grok CLI, started by the shell inside a tmux pane, did. For
@@ -540,4 +543,11 @@ Two traps with no code fix — appended so the numbering above stays stable
     like codex, a grok node goes green while it is still waiting on you; if it does not, setting the
     flag would pin NEEDS YOU on a node that genuinely finished. Report which happens — a green node
     over an open question means grok joins the `awaitingInput` path, one line in `normalizeGrok`.
+34. **The Grok mark, at 16 px, in BOTH themes.** It is the official mark inlined with
+    `fill="currentColor"` (§8.8), so readability is guaranteed by construction — it takes the label
+    colour, black-on-light and white-on-dark, the way xAI uses it. What is *not* guaranteed is
+    legibility at that size: it is a fine diagonal glyph, and thin strokes can turn to mush where the
+    other four marks (heavier, multi-colour) do not. Look at the pane submenu, the Dock `+`, the
+    command palette and Settings → Agents, and flip the theme. If it reads as a smudge, the fix is a
+    size-specific viewBox nudge, not a colour change.
 ```
