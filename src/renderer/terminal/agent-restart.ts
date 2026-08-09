@@ -14,8 +14,12 @@ import {
 } from './command-delivery'
 
 /** In-band exit command per agent CLI. Only agents listed here can be restarted in place —
- *  an unknown CLI has no safe way to be asked to quit. */
-const EXIT_SEQUENCES: Record<string, string> = { claude: '/exit', codex: '/quit' }
+ *  an unknown CLI has no safe way to be asked to quit.
+ *
+ *  grok: `/quit` (its `/exit` is an alias — the documented primary is the one we type), and its
+ *  relaunch line comes from `resumeCommand` → `grok --resume <id>`, so one entry here turns on the
+ *  header button, the node-menu row and the bulk "restart idle agents" action at once. */
+const EXIT_SEQUENCES: Record<string, string> = { claude: '/exit', codex: '/quit', grok: '/quit' }
 
 export function exitSequence(agentId: string): string | null {
   return EXIT_SEQUENCES[agentId] ?? null
