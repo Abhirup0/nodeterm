@@ -398,6 +398,31 @@ function offsetInNode(el: HTMLElement | null): Vec2 | null {
  * Private API, fully guarded: null simply means "don't register", i.e. this terminal keeps the
  * renderer it already has.
  */
+/** Debug-only: what each node's grid was registered with, exposed on `window.__glyphgridCells`
+ *  under the same flag `__glyphgridDump` uses. Never read by product code. */
+const cellDebug = new Map<string, unknown>()
+
+function currentDprForDebug(): number {
+  return typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+}
+
+function publishCellDebug(id: string, info: Record<string, unknown>): void {
+  if (typeof window === 'undefined') return
+  if (localStorage.getItem('nodeterm.glyphgridDebug') !== '1') return
+  const css = info.css as { cellW: number; cellH: number } | null
+  const device = info.device as { cellW: number; cellH: number } | null
+  const dpr = info.dpr as number
+  cellDebug.set(id, {
+    ...info,
+    // The ratio that matters: 1 means the glyph is drawn at exactly the size it was rasterized
+    // for; anything else is the factor every glyph is stretched by.
+    stretchW: css && device ? (css.cellW * dpr) / device.cellW : null,
+    stretchH: css && device ? (css.cellH * dpr) / device.cellH : null
+  })
+  ;(window as unknown as Record<string, unknown>).__glyphgridCells = () =>
+    Object.fromEntries(cellDebug)
+}
+
 function cssCellOf(term: Terminal): { cellW: number; cellH: number } | null {
   return cellOf(term, 'css')
 }
