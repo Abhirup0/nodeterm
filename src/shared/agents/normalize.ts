@@ -338,9 +338,10 @@ export function normalizeOpencode(env: RawHookEnvelope): NormalizedAgentEvent | 
   return null
 }
 
-// grok hook payload. Its dialect differs from every other agent here in two ways, both measured
-// against the shipped 1.0.0 CLI: the keys are camelCase, and `hookEventName`'s VALUE is
-// snake_case ("pre_tool_use"). Hooks registered through the grok SDK convert the top-level keys to
+// grok hook payload. Its dialect differs from every other agent here in two ways, both taken from
+// the shipped 1.0.0 DOCS (no grok binary was available on the machine that wrote this, so nothing
+// here is a capture): the keys are camelCase, and `hookEventName`'s VALUE is snake_case
+// ("pre_tool_use"). Hooks registered through the grok SDK convert the top-level keys to
 // snake_case instead, so both spellings occur in the wild — hence every field is read twice and
 // the event name is CANONICALIZED (lowercased, letters only) rather than compared literally.
 // There is deliberately no `transcript_path` in this envelope: grok's transcript is DERIVED from
@@ -361,10 +362,37 @@ interface GrokPayload {
   last_assistant_message?: string
   notificationType?: string
   notification_type?: string
+  /** Notification only, THIRD spelling of the kind. Not from grok's docs — from orca
+   *  (`/root/orca-main`, MIT), a shipping grok integration whose reader is
+   *  `notificationType ?? notification_type ?? type` (`src/shared/agent-hook-listener.ts:2370-2376`).
+   *  Reading a key a shipped integration reads costs nothing and closes a whole dialect. */
+  type?: string
+  /** Notification only: the human-readable status line. Orca reads it as a bare `message`
+   *  (`agent-hook-listener.ts:3973`) — one spelling, so no dual read here — and grok's idle state is
+   *  detectable ONLY from it (see GROK_IDLE_MESSAGES). */
+  message?: string
+  /** Notification only: severity. Orca reads a bare `level` (`agent-hook-listener.ts:3975`) and uses
+   *  it to tell grok's routine per-tool permission prompt (`info`) from a louder one. */
+  level?: string
   /** Stop only: 'end_turn' for a genuine turn end; 'channel_closed'/'shutdown' at session close. */
   reason?: string
   prompt?: string
 }
+
+/**
+ * Fragments of a grok `Notification` MESSAGE that mean "sat at the prompt, nothing running".
+ *
+ * Provenance: orca's `isGrokIdleNotification` (`/root/orca-main/src/shared/agent-hook-listener.ts:2391-2402`,
+ * MIT), matched case-insensitively as substrings of the message — grok states its idle prompt in
+ * prose ("Type your message…", "shift-tab normal mode"), not with a notification TYPE. This list is
+ * therefore INFERRED from another integration's reader, not measured here: no grok binary was run.
+ */
+const GROK_IDLE_MESSAGES = [
+  'type your message',
+  'enter send',
+  'shift-tab normal',
+  'ask a side question'
+] as const
 
 /** Canonical form of a grok event name: 'pre_tool_use', 'PreToolUse' and 'preToolUse' all → 'pretooluse'. */
 const grokEventName = (p: GrokPayload): string =>
@@ -432,14 +460,46 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
   // The turn died on an API error — grok skips Stop entirely here, exactly as Claude does.
   if (ev === 'stopfailure') return { ...base, kind: 'state', state: 'done', lastMessage }
   if (ev === 'notification') {
-    // Everything unrecognized is a deliberate NO-OP: same discipline as normalizeClaude, where an
+    // grok's Notification is the one event whose vocabulary we could not measure, and the three
+    // sources that describe it do not agree, so this mapping is deliberately safe in BOTH
+    // directions. Every line below cites where its words come from; all of it is INFERENCE — no
+    // grok binary was run on the machine that wrote it.
+    //  - orca (`/root/orca-main`, MIT, a shipping grok integration) names `permission_prompt`
+    //    plus prose messages (`agent-hook-listener.ts:2378-2402`).
+    //  - grok's own shipped docs name a different set entirely:
+    //    `turn_complete | approval_required | session_ready | task_complete | agent_error`
+    //    (`~/.grok/docs/user-guide/05-configuration.md:414`).
+    // Everything unrecognized stays a deliberate NO-OP: same discipline as normalizeClaude, where an
     // unknown future type sticking a badge on a finished node is the failure that has actually
     // happened before.
-    const type = (p.notificationType ?? p.notification_type ?? '').toLowerCase()
-    // A permission ask is genuinely a FAMILY of names ('permission_prompt', 'permission_request',
-    // …), and its worst case is a `blocked` badge the agent's next hook clears — so substring is
-    // the right trade here.
-    if (type.includes('permission')) return { ...base, kind: 'state', state: 'blocked', lastMessage }
+    const type = (p.notificationType ?? p.notification_type ?? p.type ?? '').toLowerCase()
+    const message = (p.message ?? '').trim().toLowerCase()
+    const level = (p.level ?? '').trim().toLowerCase()
+    // THE ROUTINE PER-TOOL PROMPT IS NOT A NEEDS-YOU. Orca's
+    // `isGrokRoutinePermissionPromptNotification` (`agent-hook-listener.ts:2378-2389`) suppresses it,
+    // comment verbatim: "Grok emits this before each tool even under bypassPermissions; PreToolUse
+    // already covers progress." Its regression test is
+    // `src/renderer/src/hooks/agent-hook-completion-notifications.test.ts:654`.
+    // Left unsuppressed, EVERY grok tool call would raise `blocked` here, and downstream that edge
+    // has no de-duplication: markUnread with no cooldown, the needs-you chime, an OS notification
+    // whenever the window is unfocused, and one phone inbox card per working→blocked edge.
+    // Matched exactly as orca matches it — the precise type, the precise message, and a level that
+    // is `info` or absent — so a LOUDER prompt (a real ask reusing the same type) still gets through.
+    if (
+      type === 'permission_prompt' &&
+      message === 'tool permission requested' &&
+      (!level || level === 'info')
+    ) {
+      return null
+    }
+    // A genuine permission ask is a FAMILY of names ('permission_prompt', 'permission_request', …),
+    // and its worst case is a `blocked` badge the agent's next hook clears — so substring is the
+    // right trade. `approval_required` is grok's OWN word for it (05-configuration.md:414) and is
+    // matched exactly: it shares no substring with the orca spelling, and adding it is what keeps
+    // this mapping from firing for nothing if the docs' vocabulary is the real one.
+    if (type.includes('permission') || type === 'approval_required') {
+      return { ...base, kind: 'state', state: 'blocked', lastMessage }
+    }
     // The asking types are a CLOSED set, exactly as in normalizeClaude, and for its reason: grok's
     // vocabulary is claude-derived, and claude's `elicitation_complete` / `elicitation_response` are
     // informational — they fire when an elicitation ENDS. A substring test on 'elicit' would match
@@ -447,9 +507,17 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
     if (type === 'elicitation_dialog' || type === 'agent_needs_input') {
       return { ...base, kind: 'state', state: 'waiting', lastMessage }
     }
-    // Idle at the prompt: the RESCUE signal for a node stuck on `working`. grok fires no hook at
-    // all for an interrupted turn, so this is the only thing that can clear one.
-    if (type.includes('idle')) {
+    // Idle at the prompt: the RESCUE signal for a node stuck on `working`. grok fires no hook at all
+    // for an interrupted turn (Esc), so this is the only thing that can ever clear one — which is
+    // why it is keyed off the MESSAGE (GROK_IDLE_MESSAGES, per orca) and not off a type. A
+    // type-only test was dead code: neither source names an "idle" type.
+    // It is checked AFTER the ask branches on purpose, mirroring orca's own precedence
+    // (`agent-hook-listener.ts:3994-4012`: routine-suppress, then ask, then idle) — a payload that
+    // claims both an ask type and idle prose is asking, and a wrongly-cleared badge is the failure
+    // this whole branch exists to prevent. `type.includes('idle')` is kept as a belt-and-braces
+    // fallback for a message-less idle notification: unlike a substring test on an ASK word it can
+    // only ever CLEAR a badge, so a false positive costs a badge, never a stuck one.
+    if (GROK_IDLE_MESSAGES.some((m) => message.includes(m)) || type.includes('idle')) {
       return { ...base, kind: 'state', state: 'done', interrupted: true, idle: true }
     }
     return null

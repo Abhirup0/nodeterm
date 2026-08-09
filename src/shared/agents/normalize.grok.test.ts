@@ -81,22 +81,156 @@ describe('normalizeGrok — Stop', () => {
   })
 })
 
+/**
+ * Notification is the one grok event nobody here could measure, and the two sources that describe it
+ * disagree — so every expectation below cites the source it encodes, and ALL of it is inference:
+ *
+ *  - orca (`/root/orca-main`, MIT, a shipping grok integration) — `permission_prompt` plus prose
+ *    messages, `src/shared/agent-hook-listener.ts:2370-2402` (readers) and `:3994-4012` (precedence).
+ *  - grok's own shipped docs — `turn_complete | approval_required | session_ready | task_complete |
+ *    agent_error`, `~/.grok/docs/user-guide/05-configuration.md:414`.
+ *
+ * The mapping is therefore built to be safe under BOTH vocabularies: the routine per-tool prompt is
+ * suppressed, a genuine ask still reaches NEEDS YOU under either spelling, and anything unrecognized
+ * changes no state.
+ */
 describe('normalizeGrok — Notification', () => {
-  it('a permission notification is blocked; an input request is waiting', () => {
+  /**
+   * THE regression this branch's first mapping had backwards. Orca's
+   * `isGrokRoutinePermissionPromptNotification` (`agent-hook-listener.ts:2378-2389`) exists because
+   * "Grok emits this before each tool even under bypassPermissions; PreToolUse already covers
+   * progress" — its own named regression test is
+   * `src/renderer/src/hooks/agent-hook-completion-notifications.test.ts:654`. Mapping it to `blocked`
+   * fires markUnread (no cooldown), the needs-you chime, an OS notification while unfocused and a
+   * phone inbox card on EVERY tool call.
+   */
+  it('the routine per-tool permission prompt is suppressed, not a NEEDS YOU', () => {
     expect(
-      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'permission_prompt' }))
+      normalizeGrok(
+        env({
+          hookEventName: 'notification',
+          notificationType: 'permission_prompt',
+          message: 'Tool permission requested',
+          level: 'info'
+        })
+      )
+    ).toBeNull()
+    // Level absent is the same routine case (orca: `!level || level === 'info'`), and the message is
+    // compared trimmed + case-folded.
+    expect(
+      normalizeGrok(
+        env({
+          hookEventName: 'notification',
+          notificationType: 'permission_prompt',
+          message: '  tool permission requested  '
+        })
+      )
+    ).toBeNull()
+  })
+
+  it('a GENUINE ask still reaches NEEDS YOU — the suppression is narrow, not a mute', () => {
+    // Same type, a real message: this is the ask a human must answer.
+    expect(
+      normalizeGrok(
+        env({
+          hookEventName: 'notification',
+          notificationType: 'permission_prompt',
+          message: 'Bash wants to run `rm -rf build`'
+        })
+      )
+    ).toMatchObject({ state: 'blocked' })
+    // Same type and the routine message, but LOUDER than info — orca's level condition fails, so it
+    // is treated as a real ask rather than swallowed.
+    expect(
+      normalizeGrok(
+        env({
+          hookEventName: 'notification',
+          notificationType: 'permission_prompt',
+          message: 'tool permission requested',
+          level: 'warn'
+        })
+      )
     ).toMatchObject({ state: 'blocked' })
     expect(
       normalizeGrok(env({ hookEventName: 'notification', notificationType: 'agent_needs_input' }))
     ).toMatchObject({ state: 'waiting' })
   })
 
-  it('an idle notification is the rescue signal (done + idle), not a NEEDS YOU', () => {
+  /**
+   * grok's own docs name `approval_required` (05-configuration.md:414) where orca names
+   * `permission_prompt`; the two share no substring, so both are matched. Without this the mapping
+   * fires for NOTHING if the docs' vocabulary turns out to be the real one.
+   */
+  it("maps grok's own documented `approval_required` to NEEDS YOU as well", () => {
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'approval_required' }))
+    ).toMatchObject({ state: 'blocked' })
+  })
+
+  /**
+   * The rescue signal, and the reason it must key off the MESSAGE: grok states its idle prompt in
+   * prose (orca's `isGrokIdleNotification`, `agent-hook-listener.ts:2391-2402`) and neither source
+   * names an "idle" TYPE — so the type-only test this replaced could never fire. It is the only thing
+   * that can clear a node stuck on `working` after an Esc, because grok sends no hook for an
+   * interrupted turn at all.
+   */
+  it('detects idle from the MESSAGE — each of orca\'s four phrases clears the badge', () => {
+    for (const message of [
+      'Type your message or @path/to/file',
+      'enter send · shift-tab normal mode',
+      'shift-tab normal mode',
+      'Ask a side question without interrupting'
+    ]) {
+      expect(
+        normalizeGrok(env({ hookEventName: 'notification', notificationType: 'session_ready', message })),
+        message
+      ).toMatchObject({ state: 'done', idle: true, interrupted: true })
+    }
+    // No type at all is still enough — the message carries it.
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', message: 'TYPE YOUR MESSAGE' }))
+    ).toMatchObject({ state: 'done', idle: true, interrupted: true })
+  })
+
+  it('keeps a type-based idle fallback for a message-less notification', () => {
+    // Belt and braces: unlike a substring test on an ASK word, a false positive here can only CLEAR
+    // a badge — it can never leave one stuck.
     expect(normalizeGrok(env({ hookEventName: 'notification', notificationType: 'idle_prompt' }))).toMatchObject({
       state: 'done',
       idle: true,
       interrupted: true
     })
+  })
+
+  /**
+   * Precedence, mirroring orca's own order (`agent-hook-listener.ts:3994-4012`: routine-suppress,
+   * then ask, then idle): a payload claiming BOTH an ask type and idle prose is asking. A wrongly
+   * cleared NEEDS YOU is the failure this branch exists to prevent; a badge that lingers one hook
+   * longer is not.
+   */
+  it('an ask type wins over idle prose in the same payload', () => {
+    expect(
+      normalizeGrok(
+        env({
+          hookEventName: 'notification',
+          notificationType: 'permission_request',
+          message: 'Approve? (type your message to answer)'
+        })
+      )
+    ).toMatchObject({ state: 'blocked' })
+  })
+
+  /**
+   * Orca reads the kind from THREE keys (`notificationType ?? notification_type ?? type`,
+   * `agent-hook-listener.ts:2370-2376`); the third was missing here.
+   */
+  it('reads the notification kind from the bare `type` key too', () => {
+    expect(normalizeGrok(env({ hookEventName: 'notification', type: 'approval_required' }))).toMatchObject({
+      state: 'blocked'
+    })
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', type: 'agent_needs_input' }))
+    ).toMatchObject({ state: 'waiting' })
   })
 
   it('an UNKNOWN notification type is a no-op — a future type must not stick a badge', () => {
