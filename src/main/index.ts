@@ -77,6 +77,7 @@ import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
+import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
@@ -1477,7 +1478,11 @@ app.whenReady().then(async () => {
   const safeTranscriptPath = (tp: string | undefined): string | undefined => {
     if (!tp) return undefined
     const abs = resolve(tp)
-    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData')) ? abs : undefined
+    // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
+    // before) would otherwise fail the jail and its meter would silently never fill.
+    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData'), codexHome())
+      ? abs
+      : undefined
   }
   // Remote analogue of safeTranscriptPath: a remote node's transcript_path is a remote absolute
   // path arriving over the reverse tunnel — a forged POST must not read an arbitrary remote file.

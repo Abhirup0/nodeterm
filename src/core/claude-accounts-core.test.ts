@@ -172,6 +172,21 @@ describe('isSafeLocalTranscriptPath', () => {
       isSafeLocalTranscriptPath(`${home}/.codex/sessions/2026/07/26/rollout-2026-07-26T00-48-38-019f9b40.jsonl`, home, ud)
     ).toBe(true)
   })
+  it("honors a relocated codex home ($CODEX_HOME), and only that one", () => {
+    // The shells pass `codexHome()` (core/usage/codex-usage.ts), which honors $CODEX_HOME. Without
+    // this the jail fails CLOSED on a relocated codex — its meter would silently never fill, which
+    // is the quiet failure mode, not a leak.
+    const moved = '/opt/codex-home'
+    expect(isSafeLocalTranscriptPath(`${moved}/sessions/2026/07/26/rollout-x.jsonl`, home, ud, moved)).toBe(true)
+    expect(isSafeLocalTranscriptPath(`${moved}/sessions`, home, ud, moved)).toBe(true)
+    // The relocated home REPLACES the default; it does not add to it.
+    expect(isSafeLocalTranscriptPath(`${home}/.codex/sessions/x.jsonl`, home, ud, moved)).toBe(false)
+    // …and the rest of the relocated home is still out of reach.
+    expect(isSafeLocalTranscriptPath(`${moved}/auth.json`, home, ud, moved)).toBe(false)
+    // Omitted / empty ⇒ the `<home>/.codex` default, exactly as before this parameter existed.
+    expect(isSafeLocalTranscriptPath(`${home}/.codex/sessions/x.jsonl`, home, ud)).toBe(true)
+    expect(isSafeLocalTranscriptPath(`${home}/.codex/sessions/x.jsonl`, home, ud, '')).toBe(true)
+  })
   it('still refuses the rest of those agents\' config trees, and everything outside all roots', () => {
     // The widening is per-ROOT, not per-agent-home: the credential and settings files that sit
     // beside the transcripts stay out of reach.

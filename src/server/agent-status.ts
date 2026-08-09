@@ -17,6 +17,7 @@ import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
+import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
@@ -148,7 +149,11 @@ export function wireAgentStatus(
   const safeTranscriptPath = (tp: string | undefined): string | undefined => {
     if (!tp) return undefined
     const abs = resolve(tp)
-    return isSafeLocalTranscriptPath(abs, homedir(), platform.userDataDir) ? abs : undefined
+    // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
+    // before) would otherwise fail the jail and its meter would silently never fill.
+    return isSafeLocalTranscriptPath(abs, homedir(), platform.userDataDir, codexHome())
+      ? abs
+      : undefined
   }
 
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])

@@ -93,6 +93,7 @@ import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
+import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import type { ClientId } from '@shared/presence'
@@ -797,6 +798,10 @@ export function TerminalNode({
   const contextLinkCapable = !!agentId && canContextLink(agentId) // context-link tip wording only; handles render on all terminals
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const showChat = !!agentId && canChat(agentId) // Cmd+M opens a chat panel instead of markdown
+  // Everything that reads the conversation through CLAUDE's transcript readers (`context.ensure`'s
+  // mount-time meter rehydration, the find bar's transcript index) — deliberately NOT `showUsage`,
+  // which now spans three agents. See lib/transcriptGates.ts for what sharing that gate broke.
+  const claudeTranscript = readsClaudeTranscript(agentId)
   // The header 💬 now opens the board-log comments flyout (right side); ⌘M keeps the markdown/chat view.
   const [commentsOpen, setCommentsOpen] = useState(false)
   const canRenameNode = !!agentId && canRename(agentId) // title ⇄ session-name two-way sync
@@ -847,11 +852,19 @@ export function TerminalNode({
   // Feed the context meter without waiting for a live hook event: after an app restart the
   // continuing tmux session is idle and emits no event, so the main-process tailer is never
   // re-fed. Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
+  //
+  // CLAUDE ONLY (`claudeTranscript`, not `showUsage`). The handler resolves this sessionId through
+  // claude's `resolveTranscript`, whose cwd fallback answers *the newest claude transcript for that
+  // cwd* — for a codex/gemini node that is a stranger's session, tracked on the CLAUDE tail under
+  // this node's session id, so its meter would show another agent's fill and then flap against the
+  // correct tail. The cost of the gate: a codex/gemini meter fills on the first hook event after
+  // mount instead of instantly. Their tails need no resolver (the hook envelope carries the path),
+  // so nothing else is lost. Per-agent rehydration is a follow-up task — see transcriptGates.ts.
   useEffect(() => {
     const sid = status?.sessionId
-    if (showUsage && sid)
+    if (claudeTranscript && sid)
       window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined, data.accountId)
-  }, [showUsage, status?.sessionId, data.cwd, data.accountId])
+  }, [claudeTranscript, status?.sessionId, data.cwd, data.accountId])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)
@@ -936,7 +949,9 @@ export function TerminalNode({
     sessionId: status?.sessionId,
     cwd: data.cwd as string | undefined,
     accountId: data.accountId,
-    searchTranscript: showUsage,
+    // The transcript index reads claude's JSONL through the same resolver, so it is gated on the
+    // claude-transcript fact, NOT on the meter's `showUsage` — see lib/transcriptGates.ts.
+    searchTranscript: claudeTranscript,
     open: searchOpen,
     readBuffer
   })
