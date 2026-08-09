@@ -40,11 +40,14 @@ export const CLAUDE_HOOK_EVENTS = [
 export const GEMINI_HOOK_EVENTS = ['BeforeAgent', 'AfterAgent', 'AfterTool', 'BeforeTool'] as const
 
 /**
- * Grok hook events (→ normalizeGrok). Only the nine events VERIFIED against the shipped 1.0.0
- * binary are subscribed. The docs additionally list PermissionDenied, SubagentStart, SubagentStop,
- * PreCompact and PostCompact; grok skips hook event names it does not recognize (that is how a
- * shared Claude settings file loads at all), so adding one later is safe — but it is not measured,
- * so it is not here.
+ * Grok hook events (→ normalizeGrok). Grok's shipped 1.0.0 docs list fourteen
+ * (`~/.grok/docs/user-guide/10-hooks.md:84-101`); nine are subscribed — the ones `normalizeGrok` has
+ * a mapping for. The other five are left off deliberately: PermissionDenied is a post-decision event
+ * we would have nothing to do with, SubagentStart/SubagentStop drive subagent cards that are not
+ * built for grok, and PreCompact/PostCompact have no consumer. No event here was ever seen FIRING —
+ * that needs a logged-in session, which the branch never had — so subscribing one is a claim about
+ * the docs, not a measurement. Grok skips hook event names it does not recognize (that is how a shared Claude
+ * settings file loads at all), so adding one later is safe.
  */
 export const GROK_HOOK_EVENTS: readonly ManagedHookEvent[] = [
   'SessionStart',

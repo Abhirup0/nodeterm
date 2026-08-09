@@ -31,8 +31,10 @@ Quadrant char → (UL, UR, LL, LR) sub-pixel bits:
 ## Grok mascot (same machinery, original critter)
 
 An ORIGINAL pixel critter — not a brand mark, and deliberately a different silhouette from the
-Claude one (narrow head with two antenna pixels that swap sides, wider body, four alternating
-feet), on the same 9×3 quadrant grid so the geometry and the walk are shared verbatim:
+Claude one (narrow head with two antenna pixels that swap sides, wider body), on the same 9×3
+quadrant grid so the geometry and the walk are shared verbatim. The FEET row is byte-identical to
+Claude's in both frames — the shared walk is the point, and it is what keeps the two critters
+stepping in the same rhythm:
 
 ```
 frame 0:  "▘ ▐███▌ ▝" / " ▙█████▟ " / "  ▘▘ ▝▝  "

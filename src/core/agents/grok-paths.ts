@@ -57,7 +57,7 @@ type GrokEnv = { GROK_HOME?: string }
  *
  *  Deliberately NOT fixed here: resolving it means probing the user's login shell for `GROK_HOME`
  *  (a spawn, a cache, and a fail-open policy), which is its own change with its own failure modes —
- *  not a comment. It is item 2 in docs/grok-agent.md's device checklist ("is `GROK_HOME` set in your
+ *  not a comment. It is item 31 in docs/grok-agent.md's device checklist ("is `GROK_HOME` set in your
  *  shell?") because a device run is what tells us whether anyone actually sets it. */
 export function grokHomeDir(env: GrokEnv = process.env as GrokEnv, home: string = homedir()): string {
   const fromEnv = env.GROK_HOME?.trim()

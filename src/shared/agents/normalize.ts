@@ -339,9 +339,9 @@ export function normalizeOpencode(env: RawHookEnvelope): NormalizedAgentEvent | 
 }
 
 // grok hook payload. Its dialect differs from every other agent here in two ways, both taken from
-// the shipped 1.0.0 DOCS (no grok binary was available on the machine that wrote this, so nothing
-// here is a capture): the keys are camelCase, and `hookEventName`'s VALUE is snake_case
-// ("pre_tool_use"). Hooks registered through the grok SDK convert the top-level keys to
+// the shipped 1.0.0 DOCS: the keys are camelCase, and `hookEventName`'s VALUE is snake_case
+// ("pre_tool_use"). NO payload here was ever captured — a hook only fires inside a logged-in grok
+// session, and the branch never had one. Hooks registered through the grok SDK convert the top-level keys to
 // snake_case instead, so both spellings occur in the wild — hence every field is read twice and
 // the event name is CANONICALIZED (lowercased, letters only) rather than compared literally.
 // There is deliberately no `transcript_path` in this envelope: grok's transcript is DERIVED from

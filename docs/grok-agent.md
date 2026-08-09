@@ -27,9 +27,9 @@ is the cost of adding the next agent to the same list.
 
 | List | grok | What had to be true first |
 |---|---|---|
-| `AGENT_HOOK_TARGETS` | **joined** | Five things: a pure normalizer for grok's dialect (`normalizeGrok`, `src/shared/agents/normalize.ts`); a subscription list restricted to binary-verified events (`GROK_HOOK_EVENTS`, `src/shared/agents/hook-events.ts`); an installer able to write a **per-event matcher**, which meant widening the shared installer's event type to `ManagedHookEvent` (`core/agents/hooks/install-helper.ts`); one definition of grok's path algebra (`core/agents/grok-paths.ts`); and a raw-listener branch in **both** shells (`src/main/index.ts`, `src/server/agent-status.ts`) to derive the session directory, because grok's envelope carries no transcript path. |
+| `AGENT_HOOK_TARGETS` | **joined** | Five things: a pure normalizer for grok's dialect (`normalizeGrok`, `src/shared/agents/normalize.ts`); a subscription list restricted to the events `normalizeGrok` actually maps — nine of the fourteen grok documents (`GROK_HOOK_EVENTS`, `src/shared/agents/hook-events.ts`); an installer able to write a **per-event matcher**, which meant widening the shared installer's event type to `ManagedHookEvent` (`core/agents/hooks/install-helper.ts`); one definition of grok's path algebra (`core/agents/grok-paths.ts`); and a raw-listener branch in **both** shells (`src/main/index.ts`, `src/server/agent-status.ts`) to derive the session directory, because grok's envelope carries no transcript path. |
 | `RESUMABLE_AGENTS` | **joined** (pre-branch) | `resumeCommand('grok', id)` → `grok --resume <id>`, and a session id that reaches the renderer — which it does, off every hook payload. |
-| `RENAME_CAPABLE` | **joined** | A **read** leg that resolves a session's own name *without searching* (`core/grok-session.ts`, keyed off the hook-fed `sessionId → session dir` map), a **write** leg byte-identical to claude's (`/rename <name>` typed into the pane via `pty.sendText`; grok also accepts `/title`), and one routing rule for the two readers — `readAgentSessionName` in `core/agent-session-name.ts`, serving the desktop IPC handler *and* both shells' session-name sweeps. Routing is not cosmetic: claude's resolver scans `~/.claude/projects` on a cache miss, so an unrouted grok node paid that scan every 60 s for a guaranteed null. |
+| `RENAME_CAPABLE` | **joined** | A **read** leg that resolves a session's own name *without searching* (`core/grok-session.ts`, keyed off the hook-fed `sessionId → session dir` map), a **write** leg byte-identical to claude's (`/rename <name>` typed into the pane via `pty.sendText`; grok also accepts `/title`), and one routing rule for the two readers — `readAgentSessionName` in `core/agent-session-name.ts`, serving the desktop IPC handler *and* both shells' session-name sweeps. Routing is not cosmetic: claude's resolver scans `~/.claude/projects` on a cache miss, so an unrouted grok node paid that scan on every poll for a guaranteed null — a mounted node polls every **4 s** until the name first resolves and **15 s** after (`TerminalNode.tsx`), and the mirror's own `SESSION_NAME_SWEEP_MS` sweep adds one pass a minute. |
 | `PERMISSION_MODE_CAPABLE` | **joined** | Grok shares claude's flag **spelling** and value vocabulary (`--permission-mode auto\|plan\|acceptEdits\|bypassPermissions`; our `manual` = no flag = grok's own `default`) — that is the whole membership requirement. Two things had to change around it: claude's `auto` **version gate** had to become agent-scoped (`activePermissionMode(agentId)`, `renderer/state/permissionMode.ts`), and the flag had to be emitted **before** grok's `--`. See §6. |
 | `CANVAS_CONTROL_CAPABLE` | **joined** | Nothing new to install: grok scans `~/.claude/skills` by default for Claude Code compatibility, which is exactly where `manage-nodeterm-canvas` is already written (locally, and on an SSH host by `RemoteHooks.installCanvasControl`). Membership is what sets `NODETERM_CANVAS_CONTROL=1` in the session env — `hook-server.buildPtyEnv` locally, `remoteHookEnvArgs` remotely, both through the single `canControlCanvas` predicate — i.e. what makes the sh+curl shim anything other than a no-op. **Unverified:** `grok inspect --json` was never run (§8). |
 | `USAGE_CAPABLE` (the per-node context meter) | **not joined** | Needs a real `signals.json` yielding **both** a used-token count **and** the window total. A percentage against a guessed denominator is a wrong number presented as a fact, so no total ⇒ no meter. Task 5 of the plan stops at its capture step. Do not confuse this with grok *billing* usage — see the note below. |
@@ -53,7 +53,11 @@ two touch is `$GROK_HOME`: `grok-usage.ts`'s `grokHome()` now delegates to `grok
 
 ## 2. The hook dialect
 
-Grok's envelope is not claude's. Both dialect differences are *measured*, and both are load-bearing.
+Grok's envelope is not claude's. Both dialect differences come from grok's **shipped 1.0.0 docs**, and
+both are load-bearing. **No hook payload in this table was ever captured**: the branch had the binary
+(so its `--help` surface is measured) but never a logged-in session — `~/.grok/auth.json` was never
+written — and a hook only fires inside one. Rows marked † are weaker still: they are inferred from
+another integration's reader, not from grok's own documentation.
 
 | | claude | grok (file hooks) | grok (SDK-registered hooks) |
 |---|---|---|---|
@@ -65,9 +69,16 @@ Grok's envelope is not claude's. Both dialect differences are *measured*, and bo
 | tool **output** | `tool_response` | **`toolResult`** | `tool_result` |
 | transcript file | `transcript_path` | **absent** | **absent** |
 | last assistant text | `last_assistant_message` | `lastAssistantMessage` | `last_assistant_message` |
-| notification kind | `notification_type` | `notificationType` | `notification_type` |
+| notification kind † | `notification_type` | `notificationType`, `notification_type` or `type` | same |
 | turn-end reason | — | `reason` (`end_turn` \| `channel_closed` \| `shutdown`) | same |
 | also on every event | — | `timestamp`, `permissionMode` | same |
+
+† **The `Notification` payload is the one row with no documented source.** Grok's docs describe the
+event but not its body, so the three key spellings — plus the `message` and `level` fields the mapping
+in §5 reads — come from **orca** (`/root/orca-main`, MIT, a shipping grok integration):
+`notificationType ?? notification_type ?? type` at `src/shared/agent-hook-listener.ts:2370-2376`,
+`message`/`level` at `:3973-3975`. Treat every Notification claim in this document as inference from
+that reader until checklist **10** replaces it with a capture.
 
 Consequences, in the order they bite:
 
@@ -98,15 +109,19 @@ deliberate no-op:
 | `Stop` (`reason` anything but `channel_closed`/`shutdown`) | `done` + `lastMessage` | a **denylist**, not an allowlist of `end_turn`: `Stop` is the event the RUNNING badge depends on ending, so an unknown reason must fail towards reporting it |
 | `Stop` (`channel_closed` / `shutdown`) | `done`, `interrupted: true` | the observe-only second `Stop` at session close; `interrupted` suppresses the completion alert and unread dot, and the stale `lastAssistantMessage` is dropped |
 | `StopFailure` | `done` + `lastMessage` | fires **instead of** `Stop` when the turn dies on an API error — without it the badge sticks |
-| `Notification` `*permission*` | `blocked` | substring, because a permission ask is a family of names and its worst case is a badge the next hook clears |
+| `Notification` `permission_prompt` + message `tool permission requested` + level `info`/absent | **nothing** (`null`) | grok emits this before **every** tool call, even under `bypassPermissions` (orca's `isGrokRoutinePermissionPromptNotification`, `agent-hook-listener.ts:2378-2389`). Mapping it to `blocked` fired `markUnread` with no cooldown, the needs-you chime, an OS notification per tool call while unfocused, and a phone inbox card per `working→blocked` edge. Matched exactly, so a **louder** prompt with the same type still gets through |
+| `Notification` `*permission*` / `approval_required` | `blocked` | substring for the permission family (its worst case is a badge the next hook clears), plus grok's own documented word for the same thing (`05-configuration.md:414`) — the two spellings share no substring, and matching both is what keeps this mapping from firing for nothing under either vocabulary |
 | `Notification` `elicitation_dialog` / `agent_needs_input` | `waiting` | a **closed set**, exactly as in `normalizeClaude`: a substring test on `elicit` would also match claude's informational `elicitation_complete`/`_response` and leave NEEDS YOU on a node that just finished, with no later hook to clear it |
-| `Notification` `*idle*` | `done`, `interrupted`, `idle` | the **rescue** signal for a node stuck on `working` — see §8 |
+| `Notification` whose **message** reads idle (`type your message`, `enter send`, `shift-tab normal`, `ask a side question`; `*idle*` type as a fallback) | `done`, `interrupted`, `idle` | the **rescue** signal for a node stuck on `working` — see §8. Keyed on the MESSAGE because that is where grok states it (orca's `isGrokIdleNotification`, `:2391-2402`); a type-only test never fired, since no source names an "idle" type. Checked **after** the ask branches, mirroring orca's own precedence (`:3994-4012`) |
 
-`Stop` **fires twice per session** (once per genuine turn end, once observe-only at close), and
-interrupted / refused / max-turns turns **skip `Stop` hooks entirely**. Not subscribed in v1:
-`PermissionDenied`, `SubagentStart`, `SubagentStop`, `PreCompact`, `PostCompact` — documented but not
-binary-verified. Grok skips hook event names it does not recognize (that is how a shared Claude
-settings file loads at all), so adding one later is safe.
+`Stop` fires **once per turn plus once at close** — N+1 times in an N-turn session, the last one
+observe-only — and interrupted / refused / max-turns turns **skip `Stop` hooks entirely**.
+
+Not subscribed in v1: `PermissionDenied`, `SubagentStart`, `SubagentStop`, `PreCompact`,
+`PostCompact` — documented exactly as the nine are, but with nothing here to consume them (a
+post-decision event, subagent cards grok does not have, compaction nobody reads). Grok skips hook
+event names it does not recognize (that is how a shared Claude settings file loads at all), so adding
+one later is safe.
 
 ---
 
@@ -123,14 +138,16 @@ worth more than the twenty lines they cost: the **missing-script guard**
 (`buildManagedHookCommand` emits `if [ -r '<script>' ]; then sh '<script>'; else cat >/dev/null
 2>&1 || :; fi`, so a deleted script swallows stdin and exits 0 instead of failing the session), the
 **idempotent** re-install (a second install leaves exactly one entry per event), and the **sweep**
-that removes our entry from an event we no longer subscribe to. All four are pinned in
+that removes our entry from an event we no longer subscribe to. All three are pinned in
 `core/agents/hooks/grok.test.ts`.
 
-**The tool-event `matcher` is a REGEX, and a bare `*` silently kills tool events.** Measured on the
-shipped 1.0.0 binary: `*` is not a valid match-all there, and the effect is not an error — the tool
-lifecycle hooks simply never fire, so the badge clears mid-turn on a long tool call and nothing says
-why. `.*` is the value measured working. An omitted matcher is *documented* as matching everything
-too, but `.*` is what we write. This is the only reason `ManagedHookEvent` exists: it is
+**The tool-event `matcher` is a REGEX, so a bare `*` would silently kill tool events.** grok's docs
+call it "a regular expression" (`10-hooks.md:153`), and `*` is not a valid regex at all (nothing to
+repeat) — so the expected failure is not an error message: the tool lifecycle hooks simply never fire,
+the badge clears mid-turn on a long tool call, and nothing says why. We write `.*`. The same docs say
+an omitted matcher already matches everything, so the value is **not required** — it states the intent
+explicitly, and it keeps anyone from "fixing" it to `*`. Checklist **3** is what confirms tool events
+actually fire with it; nothing here was run against a binary. This is the only reason `ManagedHookEvent` exists: it is
 `string | { event, matcher }`, so claude/codex/gemini stay plain strings and their emitted config is
 byte-identical to what it has always been, and the installer spreads the matcher **conditionally on
 `!== undefined`** (the type permits `matcher: ''`, and silently dropping an empty matcher would emit
@@ -153,7 +170,8 @@ without status hooks.
 
 Grok also merges **`~/.claude/settings.json`** (and `settings.local.json`, `~/.cursor/hooks.json`,
 project `.grok/hooks/*.json`). nodeterm's **claude** managed hook already lives in that file. So
-every grok event **also** fires `claude.sh` and POSTs to `/hook/claude`. This is by design left
+**8 of grok's 9 events** also fire `claude.sh` and POST to `/hook/claude` — every one except
+`PostToolUseFailure`, which claude has no entry for (`CLAUDE_HOOK_EVENTS`). This is by design left
 alone — we do not disable grok's `[compat.claude]` scanning, because it is the user's config and it
 is what makes our skills discoverable (§1), and we do not add a cross-agent guard to the shared
 managed script, because `pty-manager` passes `options.agentId ?? 'claude'` — `NODETERM_AGENT_ID` is
@@ -270,13 +288,17 @@ it is handed. `createAgentNode` is where the two opposite conventions are decide
 an agent with no separator (claude, byte-identical to what nodeterm has always emitted), flag
 **before** the separator otherwise — so that is where a regression is visible. The resume shape
 (`grok --resume <id> --permission-mode X`) is composed outside `createAgentNode` and is pinned in
-`agent-restart.test.ts` against what `TerminalNode` actually emits.
+`agent-restart.test.ts` on the **composed string** — the test calls the same two functions
+`TerminalNode` calls (`resumeCommand` then `withPermissionMode`) and composes them itself, so it
+catches a change in either function but not a change in the component's call site.
 
 **In-place restart** ("Restart agent (resume)") works for grok: `EXIT_SEQUENCES.grok = '/quit'`
 (its `/exit` is an alias; the documented primary is what we type) plus `resumeCommand` is the whole
 entry. The refusal while a session is `working` or `blocked` is agent-agnostic (`BUSY_STATES`) and
-needs no grok branch — typing `/quit` into a permission prompt would *answer* it. The action lives
-in the node menu, the pane menu and the command palette; there is no header button for it.
+needs no grok branch — typing `/quit` into a permission prompt would *answer* it. The **single-node**
+action lives in the node context menu only; the pane menu and the command palette host the **bulk**
+"restart idle agents" action. Neither has a header button (`HIDEABLE_HEADER_BUTTONS` is refresh / mic /
+ai-name / comments).
 
 ---
 
@@ -305,13 +327,20 @@ in the node menu, the pane menu and the command palette; there is no header butt
 
 **Gaps in what shipped** — state these, do not paper over them:
 
-1. **NEEDS YOU may never light for grok.** Grok documents no hook for "a permission prompt is on
-   screen": claude's `PermissionRequest` has no counterpart, and `PermissionDenied` is a
-   post-decision event. The `Notification` mapping is written to catch such a type *if the vocabulary
-   contains one*, and no heuristic was invented. Checklist **10** captures the real vocabulary.
+1. **The `Notification` vocabulary is unverified, and it can fail in BOTH directions.** Grok documents
+   no hook for "a permission prompt is on screen" — claude's `PermissionRequest` has no counterpart, and
+   `PermissionDenied` is a post-decision event — so NEEDS YOU may never light. But the opposite is just
+   as live: orca (a shipping integration) reports that grok fires a `permission_prompt` Notification
+   before **every** tool call, even under `bypassPermissions`, and our first mapping turned each of
+   those into `blocked`, i.e. an unread dot + chime + OS notification + phone inbox card **per tool
+   call**. That routine case is now suppressed exactly as orca suppresses it, and both spellings of a
+   genuine ask (`*permission*` and grok's own `approval_required`) still light the badge. Which of the
+   two failures is real is unknown until checklist **10** records the vocabulary — so watch for
+   **over**-firing as carefully as for silence.
 2. **An interrupted turn (Esc) fires no hook at all**, by grok's design, so a node can sit on RUNNING
-   until the next `UserPromptSubmit` re-syncs it. The only thing that can rescue it early is an
-   `*idle*` `Notification`, if grok emits one. No watchdog was built; checklist **9** measures how
+   until the next `UserPromptSubmit` re-syncs it. The only thing that can rescue it early is an idle
+   `Notification`, if grok emits one — detected from its **message** text (orca's four phrases), since
+   nothing in either source names an idle *type*. No watchdog was built; checklist **9** measures how
    bad it feels, which is the input to deciding whether one is worth it.
 3. **The phone's per-node "what it's doing now" activity line does not work for grok.**
    `recordRawToolEvent` gates on `payload.hook_event_name === 'PreToolUse'`, which grok's file hooks
@@ -340,20 +369,34 @@ in the node menu, the pane menu and the command palette; there is no header butt
    an XML comment saying so. Replace it with the official asset from an official press/brand page, at
    that asset's published proportions. It uses an explicit `#64748b` rather than `currentColor`
    because `agentIcons.tsx` renders these as `<img>` URLs, where `currentColor` cannot inherit.
-9. **A code comment in both shells' grok branch says "grok never reuses an id"** as the reason for
-   forgetting a session directory at `SessionEnd`. Forgetting *is* right (the directory can only go
-   stale), but the stated reason is wrong: grok is resumable, and `grok --resume <id>` reuses both the
-   id and the directory. Correct the comment, not the behaviour.
+9. **The local `$GROK_HOME` is read from an environment a GUI app does not have.** `grokHomeDir()`
+   defaults from `process.env`, but a desktop app launched from Finder/Dock/a `.desktop` entry never
+   sourced the user's shell rc — while the grok CLI, started by the shell inside a tmux pane, did. For
+   a user whose `export GROK_HOME=…` lives in `.zshrc`, we write the hook file under `~/.grok` and grok
+   reads somewhere else: no badge, no unread dot, no notification, no session name, **ever**, and no
+   diagnostic. Same class as `findTmux()` resolving an absolute path "because GUI apps don't inherit the
+   shell PATH", and the same trap the SSH side already handles properly (checklist **26**). Fixing it
+   means probing the login shell — a change with its own failure modes, not a comment — so checklist
+   **31** asks first whether anyone sets the variable at all. The trap is documented at `grokHomeDir`.
 
 **Follow-ups owed elsewhere:**
 
-- **`~/projects/nodeterm-ios` — the permission-mode gate.** `MirrorSettings` ships
-  `claudePermissionMode` + `autoSupported` with **no agent dimension**, and the phone applies the
-  `auto` gate itself. A phone-launched **grok** session on a host with an old (or absent) claude
-  therefore reproduces exactly the bug §6 fixed on the desktop: it starts in `default`. The mirror's
-  own field doc (`agent-status-mirror.ts`) now warns about this; the fix is on the phone.
-- **`~/projects/nodeterm-ios` — a grok icon and a phone-side launcher entry.** The phone draws its own
-  icons and has its own agent launch list; grok status arrives for free, grok *launching* does not.
+- **`~/projects/nodeterm-ios` — nothing on the phone can launch grok yet, and the permission-mode
+  funnel is claude-only.** Two separate facts, both verified in that repo:
+  - `NewSession.builtinAgents` (`NodeTerm/Features/Projects/NewSession.swift:25`) lists claude, codex,
+    gemini and opencode — there is no grok entry, so the phone's own "new session" picker cannot create
+    one. Its `command(for:)` would happily return `"grok"` for a node that already carries that agent
+    id, which is the shape a launcher entry would build on.
+  - `AgentLaunch.command` (`NodeTerm/Services/AgentLaunch.swift:32`) appends the permission-mode flag
+    only `if agentId == "claude"`, so a grok launch gets **no flag at all** — not a wrongly gated one.
+    `resumableAgents` (`:12`) likewise omits grok, so a phone-side relaunch of an existing grok node
+    would emit a bare `grok` instead of `grok --resume <id>`. The desktop bug §6 fixed (one `auto` gate
+    applied to every agent) is therefore *not* reproduced on the phone; the gap is that grok is absent
+    from all three lists. `MirrorSettings.autoSupported` still has no agent dimension, and its field doc
+    in `agent-status-mirror.ts` warns any reader against generalizing it — that warning is what keeps a
+    future grok entry from inheriting claude's gate.
+- **`~/projects/nodeterm-ios` — a grok icon.** The phone draws its own agent icons; grok status arrives
+  for free (the mirror is agent-agnostic), the icon does not.
 - **A malformed remote `~/.claude/settings.json` or `~/.gemini/settings.json` is merged from `{}`,
   discarding the user's other hooks.** `setup()`'s `AGENT_TARGETS` loop in
   `src/main/remote-ssh/remote-hooks.ts` parses the host's file, falls back to `cfg = {}` on a parse
@@ -375,7 +418,8 @@ plan), so do that first and several unknowns collapse at once.
 ```
 Hooks — the whole feature hangs off these five
  1. Run `grok` in a nodeterm node, then `/hooks`: is `nodeterm-status.json` listed, ENABLED,
-    with all nine events? (If the file is missing: is GROK_HOME set to somewhere unexpected?)
+    with all nine events? (If the file is missing, or it is there and item 2 still shows no badge,
+    do item **31** before anything else — a `$GROK_HOME` split explains both.)
  2. Does the RUNNING badge appear on the first prompt and clear when the turn ends?
     (SessionStart / UserPromptSubmit / Stop reaching the hook server at all.)
  3. Do tool events fire? Watch the badge stay RUNNING through a long Bash call — this is the
@@ -404,7 +448,9 @@ State machine edges
 12. Quit with `/quit`. Does the session-close Stop stay silent (no "agent finished" notification)?
 
 Session identity + restore
-13. Does the session chip fill in? (Terminal-title OSC, or the summary.json poll.)
+13. Does the session chip fill in? The chip has exactly ONE source: the terminal-title OSC
+    (`term.onTitleChange`, path/prompt-looking titles ignored). The summary.json poll feeds the node
+    TITLE instead — that is item 14 — so a blank chip with a correct title is not a bug.
 14. `/rename Something` in grok, then check the node title adopts it — and record WHICH
     summary.json key held it. TITLE_KEYS[0] = 'title' is a GUESS; correct it if it differs, and
     replace __fixtures__/grok/summary.json with the real file while you are there.
@@ -455,4 +501,19 @@ Surfaces
 29. macOS notch: does the grok mascot walk while it works?
 30. Kanban board + card modal: badges and the 💬 comments panel on a grok card (the meter row has
     nothing to show).
+
+Two traps with no code fix — appended so the numbering above stays stable
+31. `echo $GROK_HOME` in a nodeterm terminal, then check where the hook file actually went. The app
+    resolves it from the APP's environment, and a GUI launch (Finder/Dock/`.desktop`) never sourced
+    your shell rc — so an `export GROK_HOME=…` in `.zshrc`/`.bashrc` splits the two sides and
+    EVERYTHING silently stops working: no badge, no unread, no notification, no session name, no
+    error (§8.9). Compare a shell launch (`npm start`) with a GUI launch (`open -a nodeterm`): a
+    difference between them IS the trap. Report whether you set the variable at all — that answer
+    decides whether a login-shell probe gets built.
+32. **Shift+Enter in a grok node.** nodeterm remaps it universally to `\x1b\r` (ESC+CR / M-Enter,
+    `terminalKeyAction` / `SHIFT_ENTER_SEQ`), which is what claude and codex want for "insert a
+    newline, don't submit". Grok's own key handling is unverified here — orca records a
+    `ctrlEnterEncoding: 'csi-u'` for it, i.e. a different encoding family — so check both: does
+    Shift+Enter insert a newline (not submit), and does plain Enter still submit? If the remap fights
+    grok, the fix is a per-agent encoding in `terminal-config.ts`, not a global change.
 ```

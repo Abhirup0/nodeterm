@@ -5,7 +5,8 @@ import { grokRawFields, normalizeClaude, normalizeGrok, type RawHookEnvelope } f
  * Grok's hook envelope is its own dialect: camelCase keys whose `hookEventName` VALUE is
  * snake_case ("pre_tool_use"), and the grok SDK path converts the top-level keys to snake_case.
  * Both spellings are therefore read, and the event name is canonicalized rather than matched
- * literally — measured against the shipped 1.0.0 docs, not inferred from claude's shape.
+ * literally — read out of the shipped 1.0.0 docs, not inferred from claude's shape. No payload was
+ * ever captured: a hook fires only inside a logged-in grok session, which was never available here.
  */
 function env(payload: Record<string, unknown>): RawHookEnvelope {
   return { nodeId: 'n1', agentId: 'grok', payload }
