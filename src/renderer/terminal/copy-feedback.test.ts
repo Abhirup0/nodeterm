@@ -14,8 +14,14 @@ describe('copiedLabel', () => {
   it('does not count a trailing newline as an extra line', () => {
     expect(copiedLabel('a\nb\n')).toBe('Copied 2 lines')
   })
+  it('does not count a trailing newline as an extra character', () => {
+    expect(copiedLabel('hello\n')).toBe('Copied 5 chars')
+  })
   it('returns null for empty text — nothing was copied, so no pill', () => {
     expect(copiedLabel('')).toBeNull()
+  })
+  it('returns null for a bare newline — the strip leaves nothing to claim', () => {
+    expect(copiedLabel('\n')).toBeNull()
   })
 })
 
@@ -38,6 +44,12 @@ describe('decideDragOutcome', () => {
   })
   it('stays silent below the drag threshold — a click is not a drag', () => {
     expect(decideDragOutcome({ ...base, movedPx: DRAG_MIN_PX - 1 })).toBeNull()
+  })
+  it('hints at exactly the threshold — the boundary counts as a drag', () => {
+    expect(decideDragOutcome({ ...base, movedPx: DRAG_MIN_PX })).toEqual({
+      kind: 'hint',
+      label: 'Hold ⌥ to select text'
+    })
   })
   it('stays silent when an OSC 52 landed — the handler already put its pill up', () => {
     expect(decideDragOutcome({ ...base, sawOsc52: true })).toBeNull()

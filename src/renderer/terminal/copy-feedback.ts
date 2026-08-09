@@ -27,19 +27,24 @@ export const HINT_DWELL_MS = 5000
  *  execCommand fallback runs — and dispatches its error toast — inside `writeText`, i.e. before the
  *  OSC 52 handler calls `notifyCopy`. Retracting after the fact cannot catch that ordering. */
 export const ERROR_TOAST_SUPPRESS_MS = 50
-/** Once per installation — same convention as `seenShortcuts`. */
+/** Once per installation, and personal rather than shared config — so it is a `localStorage` key,
+ *  like `nodeterm.sessionsPinned` and `nodeterm.explorerExpanded`, not a setting in `settings.json`. */
 export const HINT_STORAGE_KEY = 'nodeterm.seenSelectHint'
 
 /**
  * The `copied` pill's label. Lines for multi-line text, characters for one line — the two numbers
- * a user checks when unsure the right thing was copied. Empty text yields null: nothing was
- * copied, so nothing is claimed.
+ * a user checks when unsure the right thing was copied. ONE trailing newline is stripped before
+ * BOTH counts (a copy-mode selection of a whole line, and every `vim "+y` of one line, carries it;
+ * counting it as a character made the headline number off by one in the most common case). Text
+ * with nothing left after that strip — `''` or a bare `'\n'` — yields null: nothing worth naming
+ * was copied, so nothing is claimed.
  */
 export function copiedLabel(text: string): string | null {
-  if (!text) return null
-  const lines = text.replace(/\n$/, '').split('\n').length
+  const body = text.replace(/\n$/, '')
+  if (!body) return null
+  const lines = body.split('\n').length
   if (lines > 1) return `Copied ${lines} lines`
-  return `Copied ${text.length} char${text.length === 1 ? '' : 's'}`
+  return `Copied ${body.length} char${body.length === 1 ? '' : 's'}`
 }
 
 /**

@@ -666,6 +666,11 @@ export function TerminalNode({
   const termRef = useRef<Terminal | null>(null)
   // Copy feedback: the `Copied` pill (fed by the OSC 52 handler below, through `copySubs`) and the
   // one-time "hold ⌥ to select" hint for a pane whose app captured the mouse.
+  // The host is `bodyRef` (`.term-node__xterm`) and NOT the node body on purpose: the hover guard
+  // (`.term-hover-guard`) is a SIBLING of that element, so pre-dwell drags — the ones that MOVE the
+  // node — never reach this listener. Hosting it on `.term-node__body` would make every node-move
+  // drag a hint candidate and burn the once-per-installation hint on a gesture that has nothing to
+  // do with copying.
   const copy = useCopyFeedback({
     hostRef: bodyRef,
     hasSelection: () => !!termRef.current?.hasSelection()
