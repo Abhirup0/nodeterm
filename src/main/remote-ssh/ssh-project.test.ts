@@ -818,6 +818,20 @@ describe('SshProjectManager', () => {
       await mgr.connect('p1', conn, '/remote/cwd')
       expect(onTunnelVerified).not.toHaveBeenCalled()
     })
+
+    it('a THROWING hook still leaves the connect successful — the resync is never load-bearing', async () => {
+      // The contract is structural, not a property of today's callback: what this hook drives will
+      // grow, and a throw inside it must never surface to the user as a dead SSH project. Same rule
+      // as `onStatus` above, which used to abort connect() mid-flight.
+      const mgr = makeVerifiedMgr(() => {
+        throw new Error('resync blew up')
+      })
+      const res = await mgr.connect('p1', conn, '/remote/cwd')
+      expect(res.controlPath).toBe(controlPathFor('p1'))
+      // Everything AFTER the hook still ran: the connect result is complete, not truncated.
+      expect(res.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+      expect(res.remoteHome).toBe('/home/u')
+    })
   })
 
   // --- concurrent connect for one project ---------------------------------------------------

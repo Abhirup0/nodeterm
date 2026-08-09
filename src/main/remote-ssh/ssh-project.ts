@@ -526,7 +526,18 @@ export class SshProjectManager {
         // before this line), so this is exactly the moment the hook events lost while it was down
         // can be reconstructed from the host. Fire-and-forget: the resync runs several remote round
         // trips and must never delay (or fail) the connect that is already reporting `connected`.
-        if (hookEndpointPath) this.r.onTunnelVerified?.(projectId, controlPath)
+        // The try/catch is the contract, not politeness: what this hook drives will grow, and a
+        // throw inside it would surface to the user as a dead SSH project — the connect fails, the
+        // entry is left half-built, and the reason is a repair job that was only ever best-effort.
+        // A resync must never cost the user the connection that is already reporting `connected`.
+        // (`onStatus` above carries the same guard for the same hard-won reason.) Do not tidy away.
+        if (hookEndpointPath) {
+          try {
+            this.r.onTunnelVerified?.(projectId, controlPath)
+          } catch {
+            // undecided changes nothing: the stale sweep remains the backstop, as before this hook
+          }
+        }
         // Resolve the remote $HOME once and retain it (the hook setup above also learns it but
         // doesn't surface it). Phase 2b uses it to jail remote transcript reads. Fail-open: an
         // unresolved home just disables the remote context meter / subagent transcript / search.
