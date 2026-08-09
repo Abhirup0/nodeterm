@@ -140,13 +140,35 @@ body {
   image-rendering: pixelated;
   will-change: background-position, transform;
 }
-/* Claude + Grok share the quadrant-sprite geometry (see lib/mascot.ts) — one rule block. */
-.mascot--claude,
-.mascot--grok {
+.mascot--claude {
   width: var(--mascot-w);
   height: var(--mascot-h);
   background-size: calc(var(--mascot-w) * 2) var(--mascot-h);
   animation: mascot-walk-claude 0.8s steps(1) infinite;
+}
+/* Grok is the brand mark breathing, not a sprite — same treatment as the canvas badge. The bloom is
+   a drop-shadow of `currentColor`, so it needs no ink of its own; on this strip that resolves
+   against --capsule-bg (#000), which is why it reads as a glow here. */
+.mascot--grok {
+  animation: mascot-pulse-grok 1.6s ease-in-out infinite;
+}
+@keyframes mascot-pulse-grok {
+  0%,
+  100% {
+    opacity: 0.55;
+    filter: none;
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 1px currentColor) drop-shadow(0 0 4px currentColor);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mascot--grok {
+    animation: none;
+    opacity: 1;
+    filter: drop-shadow(0 0 1px currentColor);
+  }
 }
 @keyframes mascot-walk-claude {
   0% {

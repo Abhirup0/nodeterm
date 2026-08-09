@@ -28,26 +28,24 @@ Quadrant char → (UL, UR, LL, LR) sub-pixel bits:
 - **Walk**: frame index = `floor(t × 2.5) % 2` (≈ 2.5 steps/s).
 - **Bob**: vertical offset alternates with the frame (±0.5–1.5 px scaled to render size).
 
-## Grok mascot (same machinery, original critter)
+## Grok — the brand mark, breathing (no critter)
 
-An ORIGINAL pixel critter — not a brand mark, and deliberately a different silhouette from the
-Claude one (narrow head with two antenna pixels that swap sides, wider body), on the same 9×3
-quadrant grid so the geometry and the walk are shared verbatim. The FEET row is byte-identical to
-Claude's in both frames — the shared walk is the point, and it is what keeps the two critters
-stepping in the same rhythm:
+Grok has **no sprite**. It had an original quadrant critter first; standing next to two real
+mascots it read as neither, so the working indicator became the glyph grok actually has — its
+official mark, pulsing with a bloom instead of walking.
 
-```
-frame 0:  "▘ ▐███▌ ▝" / " ▙█████▟ " / "  ▘▘ ▝▝  "
-frame 1:  "▝ ▐███▌ ▘" / " ▙█████▟ " / "  ▝▝ ▘▘  "
-```
-
-- Color: `#8494a8`, a mid-tone. The badge lives in the node HEADER (`--panel-header`), which is
-  `#323232` dark but `#eae5db` LIGHT, so the sprite must survive both themes plus the notch
-  capsule's black. Measured contrast (dark / light / notch): this `4.14 / 2.47 / 6.78` vs Claude
-  coral's `4.11 / 2.49 / 6.73` — same balance. A light slate-300 reads 8.64 dark but **1.18
-  light**, i.e. invisible in a shipped theme; the node color `#64748b` reads only 2.69 dark.
-- Both sprites go through `buildQuadrantSprite(frames, color)` in `src/renderer/lib/mascot.ts`
-  and reuse `CLAUDE_FRAME_WIDTH/HEIGHT`, so they cannot drift on aspect ratio or smoothing.
+- Geometry + path: `src/renderer/lib/grokMark.ts`, shared by the React badge (`AgentMascot` via
+  `GrokMark`) and the notch HUD, which builds DOM imperatively (`createGrokMarkSvg`). One source, so
+  the two surfaces cannot show different marks.
+- The mark is a single monochrome path painted in `currentColor`, and the **bloom is a drop-shadow of
+  that same colour**. That is what makes it theme-correct with no ink of its own: light-on-dark in
+  the dark theme and on the notch's black capsule, dark-on-light in the light theme. A fixed glow
+  colour would have vanished into one of the two backgrounds — the trap the retired sprite had to
+  solve with a measured mid-tone.
+- Two shadows, tight + wide (`0 0 1px` + `0 0 4px`): the tight one keeps the thin diagonal strokes
+  from washing out at 13–16 px, the wide one is the glow.
+- `prefers-reduced-motion` freezes it at the LIT end of the cycle, so a working node reads as awake
+  rather than dimmed.
 
 ## Codex pet (spritesheet asset)
 
