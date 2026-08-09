@@ -51,7 +51,8 @@ export function wireAgentStatus(
   opts: WireAgentStatusOptions = {}
 ): { contextTail: ContextTail } {
   const hooks = opts.hooks ?? hookServer
-  // nodeId → claude sessionId
+  // nodeId → the agent session id of whichever hook-capable CLI runs in that node (claude's, and
+  // since the grok branch below, grok's)
   const nodeContextSession = new Map<string, string>()
   // nodeId → active subagent tool_use_ids
   const nodeSubagents = new Map<string, Set<string>>()
@@ -168,8 +169,11 @@ export function wireAgentStatus(
         })
         if (dir) rememberGrokSessionDir(g.sessionId, dir)
       }
-      // The session is over: its directory can only go stale from here (grok never reuses an id),
-      // and the map is bounded — so drop it instead of waiting for eviction.
+      // The session is over, so nothing will read its directory again — and forgetting costs
+      // nothing even though grok IS resumable and `grok --resume <id>` reuses BOTH the id and the
+      // directory: a resumed session fires its own hooks, whose (cwd, sessionId) re-derive and
+      // re-remember the very same path. The map is bounded, so dropping now beats waiting for
+      // eviction to reach an entry nobody is asking about.
       if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
       return
     }

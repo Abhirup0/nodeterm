@@ -17,8 +17,10 @@ import {
  *  an unknown CLI has no safe way to be asked to quit.
  *
  *  grok: `/quit` (its `/exit` is an alias — the documented primary is the one we type), and its
- *  relaunch line comes from `resumeCommand` → `grok --resume <id>`, so one entry here turns on the
- *  header button, the node-menu row and the bulk "restart idle agents" action at once. */
+ *  relaunch line comes from `resumeCommand` → `grok --resume <id>`, so one entry here turns on both
+ *  surfaces at once: the single-node "Restart agent (resume)" row in the node context menu, and the
+ *  bulk "restart idle agents" action (pane menu + command palette). There is no header button for
+ *  either — `HIDEABLE_HEADER_BUTTONS` is refresh / mic / ai-name / comments. */
 const EXIT_SEQUENCES: Record<string, string> = { claude: '/exit', codex: '/quit', grok: '/quit' }
 
 export function exitSequence(agentId: string): string | null {

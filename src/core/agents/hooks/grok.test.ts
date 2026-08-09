@@ -45,8 +45,14 @@ describe('grok hook installer', () => {
     for (const ev of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
       expect(cfg.hooks[ev][0].matcher, ev).toBe('.*')
     }
-    // Non-tool events must carry NO matcher — grok warns and ignores one there. Every one of them
-    // is checked, so a matcher accidentally attached to an event in hook-events.ts cannot ship.
+    // Non-tool events must carry NO matcher, for two DIFFERENT reasons — both in
+    // ~/.grok/docs/user-guide/10-hooks.md:153. On `Stop` and `UserPromptSubmit` a matcher is
+    // "ignored with a warning (those events always fire)": harmless noise. On the other four it
+    // FILTERS, against something that is not a tool name at all — the start source on
+    // `SessionStart`, the end reason on `SessionEnd`, the notification type on `Notification`, the
+    // classified error type on `StopFailure` — so a stray `.*` there is not noise: anything it fails
+    // to match is an event we silently never receive. Every one of them is checked, so a matcher
+    // accidentally attached to an event in hook-events.ts cannot ship.
     for (const ev of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'Notification', 'SessionEnd']) {
       expect(cfg.hooks[ev][0].matcher, ev).toBeUndefined()
     }

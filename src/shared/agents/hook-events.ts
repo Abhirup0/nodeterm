@@ -54,8 +54,11 @@ export const GROK_HOOK_EVENTS: readonly ManagedHookEvent[] = [
   'StopFailure',
   'Notification',
   'SessionEnd',
-  // Tool events need the regex matcher. `.*` matches every tool name; an omitted matcher is
-  // documented as matching everything too, but `.*` is the form measured working here.
+  // The matcher is a REGEX, and an omitted one already matches everything
+  // (~/.grok/docs/user-guide/10-hooks.md:153) — so this is not a requirement, it is an explicit
+  // statement of "every tool". It is spelled `.*` and never `*`, because a bare `*` is not a
+  // valid regex at all (nothing to repeat) and the failure mode is silence: the tool lifecycle
+  // hooks simply never fire, so RUNNING clears mid-turn on a long tool call with nothing saying why.
   { event: 'PreToolUse', matcher: '.*' },
   { event: 'PostToolUse', matcher: '.*' },
   { event: 'PostToolUseFailure', matcher: '.*' }

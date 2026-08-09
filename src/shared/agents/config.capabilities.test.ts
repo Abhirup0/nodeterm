@@ -74,7 +74,9 @@ describe('createdAgentId', () => {
  * Grok claims a capability only once its per-agent machinery exists — an installer, a transcript
  * parser, a discovery file — because claiming one early lights badges that never update and offers
  * menu items that do nothing. Hooks arrived with the normalizer (normalizeGrok) plus the installer
- * that writes $GROK_HOME/hooks/nodeterm-status.json; context links and canvas control have not.
+ * that writes $GROK_HOME/hooks/nodeterm-status.json. Canvas control needed nothing new — grok scans
+ * `~/.claude/skills`, where manage-nodeterm-canvas already lives (asserted below). Context links did
+ * not arrive: they need a parser for grok's own transcript format.
  */
 describe('grok capabilities', () => {
   it('is a builtin with a launch command and a colour', () => {

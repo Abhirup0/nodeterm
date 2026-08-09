@@ -292,7 +292,9 @@ const browserGuests = new Map<number, string>()
 // Node → live tail bookkeeping, so closing a node (× → pty:destroy) releases its file tailers.
 // Without this, a node closed mid-run never emits SessionEnd/PostToolUse, so context-tail (1s
 // poll) and subagent-tail (400ms poll) would keep stat/read-ing forever. Keyed by node id.
-const nodeContextSession = new Map<string, string>() // nodeId → claude sessionId
+// nodeId → the agent session id of whichever hook-capable CLI runs in that node (claude's, and
+// since the grok branch in the raw listener, grok's).
+const nodeContextSession = new Map<string, string>()
 const nodeSubagents = new Map<string, Set<string>>() // nodeId → active subagent tool_use_ids
 
 // Enforce a single instance. A second instance would re-attach every node's tmux session
@@ -1476,8 +1478,11 @@ app.whenReady().then(async () => {
         })
         if (dir) rememberGrokSessionDir(g.sessionId, dir)
       }
-      // The session is over: its directory can only go stale from here (grok never reuses an id),
-      // and the map is bounded — so drop it instead of waiting for eviction.
+      // The session is over, so nothing will read its directory again — and forgetting costs
+      // nothing even though grok IS resumable and `grok --resume <id>` reuses BOTH the id and the
+      // directory: a resumed session fires its own hooks, whose (cwd, sessionId) re-derive and
+      // re-remember the very same path. The map is bounded, so dropping now beats waiting for
+      // eviction to reach an entry nobody is asking about.
       if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
       return
     }

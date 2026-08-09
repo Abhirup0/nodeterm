@@ -5,8 +5,8 @@
 // re-deriving `$GROK_HOME`.
 //
 // It lives in `src/core`, NOT `src/shared/agents`, even though its callers span three process
-// contexts: it reads `os.homedir()` and measures with `Buffer` at module scope, and `src/shared` is
-// renderer territory — the renderer imports `shared/agents/*`, and `tsconfig.web.json` carries node
+// contexts: it reads `os.homedir()` and measures with `Buffer` (per call — the point is that both
+// are node-only APIs, not when they run), and `src/shared` is renderer territory — the renderer imports `shared/agents/*`, and `tsconfig.web.json` carries node
 // types, so a renderer import of this file would typecheck cleanly and fail only at bundle or run
 // time. `src/core` is node-side by construction (no electron, no renderer), which is exactly this
 // file's contract. Should a renderer surface ever need one of these helpers, split the genuinely
@@ -41,7 +41,24 @@ const REMOTE_HOME_MAX = 4096
 // the error and take the typo check with it.
 type GrokEnv = { GROK_HOME?: string }
 
-/** grok's config directory: `$GROK_HOME`, else `~/.grok`. Hooks AND sessions live under it. */
+/** grok's config directory: `$GROK_HOME`, else `~/.grok`. Hooks AND sessions live under it.
+ *
+ *  KNOWN TRAP — the env this reads is the APP's, not the user's shell. A desktop app launched from
+ *  Finder/Dock/a `.desktop` entry inherits the launcher's environment, which never sourced
+ *  `.zshrc`/`.bashrc`; this repo already knows the class, which is why `findTmux()` resolves an
+ *  absolute path "because GUI apps don't inherit the shell PATH". So for a user whose only
+ *  `export GROK_HOME=…` lives in a shell rc file, the two sides disagree: nodeterm writes the hook
+ *  file (and looks for sessions) under `~/.grok`, while the grok CLI — started by the shell inside a
+ *  tmux pane, which DID source that rc — reads the exported path. Nothing errors. The hook file is
+ *  written successfully, grok never loads it, and the consequence is total and silent: no RUNNING /
+ *  NEEDS YOU badge, no unread dot, no completion notification, no session name, ever, with no
+ *  diagnostic anywhere. The REMOTE path does not have this problem (`RemoteHooks.installGrokRemote`
+ *  asks the host through a login shell and validates the answer with `isSafeRemoteGrokHome`).
+ *
+ *  Deliberately NOT fixed here: resolving it means probing the user's login shell for `GROK_HOME`
+ *  (a spawn, a cache, and a fail-open policy), which is its own change with its own failure modes —
+ *  not a comment. It is item 2 in docs/grok-agent.md's device checklist ("is `GROK_HOME` set in your
+ *  shell?") because a device run is what tells us whether anyone actually sets it. */
 export function grokHomeDir(env: GrokEnv = process.env as GrokEnv, home: string = homedir()): string {
   const fromEnv = env.GROK_HOME?.trim()
   return fromEnv || path.join(home, '.grok')

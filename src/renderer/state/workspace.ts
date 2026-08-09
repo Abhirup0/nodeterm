@@ -344,10 +344,14 @@ export function createAgentNode(
   // The separator only participates when there is actually a prompt to separate (no dangling `--`),
   // and never for a flag-prompt agent, whose prompt is not a positional at all.
   const usesSep = !!promptArg && !!sep && !isFlagPrompt
+  // `withPrompt` is the NO-separator shape, and only that: it is read at exactly one place below,
+  // in the `!usesSep` arm. Reaching it with a prompt and no flag-prompt mode means `sep` was falsy,
+  // so an inline `${sep ? … : ''}` here could only ever expand to '' — the separator's one home is
+  // the `usesSep` arm, which spells it out.
   const withPrompt = promptArg
     ? isFlagPrompt
       ? `${baseCmd} --prompt ${promptArg}`
-      : `${baseCmd} ${sep ? `${sep} ` : ''}${promptArg}`
+      : `${baseCmd} ${promptArg}`
     : baseCmd
   // No mode passed (e.g. a legacy/test call site) = bare command, exactly as before this setting.
   const flagged = (cmd: string): string =>

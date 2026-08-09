@@ -1,6 +1,7 @@
 // The ONE implementation of the per-agent settings.json hook merge. Each agent's thin
-// service (claude/codex/gemini) calls these with its own config path, script filename,
-// and event list. Behavior (ported from the original claude-hooks.ts):
+// service calls these with its own config path, script filename, and event list — claude,
+// gemini and grok do (grok also passing per-event matchers); codex writes its own hooks.json
+// (see its note) and opencode ships a plugin, so neither routes through here. Behavior (ported from the original claude-hooks.ts):
 //   - write the managed script for `agentId` to <userData>/agent-hooks/<scriptFileName>
 //     (chmod 0o755, best-effort), then reference it as `sh "<scriptPath>"` from each event;
 //   - idempotent re-install: drop any prior managed entry for that event (command includes
