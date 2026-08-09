@@ -109,6 +109,12 @@ describe('grok capabilities', () => {
     expect(canResume('grok')).toBe(true)
   })
 
+  it('syncs its session name in both directions', () => {
+    // Write leg: grok's own `/rename <title>` (alias `/title`), the same one-way push into the
+    // pane claude uses — so sessionRename.ts needs no change. Read leg: summary.json.
+    expect(canRename('grok')).toBe(true)
+  })
+
   it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
     expect(canContextLink('grok')).toBe(false)
     expect(canControlCanvas('grok')).toBe(false)

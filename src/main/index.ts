@@ -73,6 +73,12 @@ import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
+import {
+  forgetGrokSession,
+  readGrokSessionName,
+  rememberGrokSessionDir
+} from '../core/grok-session'
 import {
   readSessionName,
   setRemoteTranscriptReader,
@@ -546,8 +552,16 @@ app.whenReady().then(async () => {
     ptyManager.captureSession(persistKey, full)
   )
 
-  corePlatform.handle(IPC.ptyReadSessionName, (sessionId: string, accountId?: string) =>
-    readSessionName(sessionId ?? '', accountId)
+  // The reader is selected by the NODE's agent, so neither reader ever searches the other's tree:
+  // grok keeps its session name in its own metadata (summary.json, in a directory derived from the
+  // hook's cwd + sessionId), claude keeps it in a transcript .jsonl. `agentId` is a TRAILING
+  // optional argument, so every pre-grok caller resolves through the claude reader unchanged.
+  corePlatform.handle(
+    IPC.ptyReadSessionName,
+    (sessionId: string, accountId?: string, agentId?: string) =>
+      agentId === 'grok'
+        ? readGrokSessionName(sessionId ?? '')
+        : readSessionName(sessionId ?? '', accountId)
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
@@ -1445,16 +1459,30 @@ app.whenReady().then(async () => {
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hookServer.setRawListener((agentId, nodeId, payload) => {
     if (agentId === 'grok') {
-      // All this branch does is record the node↔session association, and it is deliberately the
-      // only thing: nothing reads the map for a grok node YET (the badge, the session chip and ⌘K
-      // all take their id from the NORMALIZED listener, and the phone's context ring only fires for
-      // a sessionId a context tail emits for). It is written now so the map is already populated
-      // when Tasks 4/5/10 add the readers — everything else the claude path does below hangs off
-      // `transcript_path`, and grok's envelope has none: its transcript is DERIVED from (cwd,
-      // sessionId). Read through `grokRawFields` so grok's two field dialects (camelCase and the
-      // SDK's snake_case) are decoded in exactly one place.
+      // This branch records two associations, neither of which grok's envelope states outright.
+      // Everything the claude path does below hangs off `transcript_path`, and grok has none.
+      // Read through `grokRawFields` so grok's two field dialects (camelCase and the SDK's
+      // snake_case) are decoded in exactly one place.
       const g = grokRawFields(payload)
+      // 1. node → session: read by the phone's context ring and the ⌘K session lookup.
       if (nodeId && g.sessionId) nodeContextSession.set(nodeId, g.sessionId)
+      // 2. session → its session DIRECTORY, derived from (cwd, sessionId) — the two fields every
+      // grok hook does carry — and remembered here, the one place they arrive together. That is
+      // what lets the session-name read (core/grok-session.ts) be a direct open rather than a scan
+      // of grok's sessions tree, which is how one node would end up adopting another's name.
+      // `grokSessionDir` returns null for a cwd grok stored under its slug+hash scheme instead, in
+      // which case we learn nothing about this session rather than build half a path.
+      if (g.sessionId && g.cwd) {
+        const dir = grokSessionDir({
+          sessionsDir: grokSessionsDir(),
+          cwd: g.cwd,
+          sessionId: g.sessionId
+        })
+        if (dir) rememberGrokSessionDir(g.sessionId, dir)
+      }
+      // The session is over: its directory can only go stale from here (grok never reuses an id),
+      // and the map is bounded — so drop it instead of waiting for eviction.
+      if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
       return
     }
     if (agentId !== 'claude') return

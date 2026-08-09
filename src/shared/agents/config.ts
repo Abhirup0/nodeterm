@@ -99,8 +99,11 @@ export const CHAT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 // Agents that support naming the session in two directions: they emit a session title we adopt
-// into the node title, and accept `/rename <name>` to push a renamed node title back. Claude-only.
-export const RENAME_CAPABLE = ['claude'] as const
+// into the node title, and accept `/rename <name>` to push a renamed node title back. Read legs are
+// per-agent (claude: the transcript .jsonl; grok: its session summary.json — see
+// core/grok-session.ts, routed at the readSessionName IPC handler); the write leg is the same
+// literal `/rename <name>` for both, which grok also accepts as `/title`.
+export const RENAME_CAPABLE = ['claude', 'grok'] as const
 // Agents allowed to drive the canvas via the `nodeterm` CLI (open/show/write/close).
 // Discovery differs per agent: claude gets the manage-nodeterm-canvas skill; codex/gemini/
 // opencode a marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md /

@@ -2834,12 +2834,14 @@ export function TerminalNode({
   }, [selected, id])
 
   // Keep the node title in sync with the agent session's display name — the name shown in
-  // `/resume`, read from the transcript (`/rename` name, else auto name). This is the authoritative
-  // source: `/rename` doesn't update the OSC terminal title, so reading the transcript is the only
-  // way the name shows up after a resume. Resolved strictly by THIS node's sessionId — we do NOT
-  // sync until it's known, otherwise same-folder nodes would adopt whichever session wrote last.
-  // Polls only while the title still auto-tracks the session (titleAuto) and stops once the user
-  // renames by hand. Claude-only via canRenameNode.
+  // `/resume` (`/rename` name, else auto name). This is the authoritative source: `/rename` doesn't
+  // update the OSC terminal title, so reading the agent's own session store is the only way the name
+  // shows up after a resume. Resolved strictly by THIS node's sessionId — we do NOT sync until it's
+  // known, otherwise same-folder nodes would adopt whichever session wrote last. Polls only while
+  // the title still auto-tracks the session (titleAuto) and stops once the user renames by hand.
+  // Gated on canRenameNode (RENAME_CAPABLE). `agentId` rides along so main picks the right reader:
+  // claude's transcript .jsonl vs grok's summary.json. It is resolved at node creation and immutable
+  // thereafter — same as `data.accountId` beside it — so neither belongs in the dep array.
   useEffect(() => {
     if (!canRenameNode || data.titleAuto === false) return
     const sid = status?.sessionId ?? ''
@@ -2852,7 +2854,7 @@ export function TerminalNode({
     let timer: ReturnType<typeof setTimeout> | undefined
     const sync = async () => {
       if (!titleAutoRef.current || editingTitleRef.current) return
-      const name = await api.pty.readSessionName(sid, data.accountId)
+      const name = await api.pty.readSessionName(sid, data.accountId, agentId)
       if (cancelled) return
       if (name) delayMs = 15000
       if (
