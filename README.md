@@ -16,6 +16,12 @@ hidden tabs.
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/eneskirca/nodeterm?style=flat)](https://github.com/eneskirca/nodeterm/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/eneskirca/nodeterm?include_prereleases&sort=semver)](https://github.com/eneskirca/nodeterm/releases)
+<!-- Installer downloads: .dmg + .AppImage + .deb across every release, hand-written on purpose.
+     shields' github/downloads/…/total reads ~12× higher because electron-updater's own traffic
+     (latest-*.yml polls, mac .zip deltas, blockmaps) is counted as downloads there. Recount with:
+     gh api --paginate repos/eneskirca/nodeterm/releases --jq \
+       '[.[].assets[] | select(.name|test("\\.(dmg|AppImage|deb)$")) | .download_count] | add' -->
+[![Downloads](https://img.shields.io/badge/downloads-1.2k-brightgreen)](https://github.com/eneskirca/nodeterm/releases)
 
 [Download](#-download) · [Docs](https://nodeterm.dev/docs) · [Features](#-features) · [Build from source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
 
@@ -133,6 +139,9 @@ opencode / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂
   git, and even the board run there while the canvas stays local.
 - **Source control** — VS Code-style stage/unstage, discard, branch switch/create,
   commit, push/sync/publish, **worktrees**, and `gh` sign-in — backed by system `git`.
+- **GitHub Issues on Kanban** – opt-in issue cards, exact label-to-column mapping,
+  All / GitHub / Sessions filtering, and two-way move, close, and reopen sync. See
+  [setup and security details](./docs/github-issues-kanban.md).
 - **AI commit messages & terminal names** — bring-your-own local agent CLI run read-only
   on the staged diff or captured output.
 - **Your sessions, in your pocket** — **nodeterm mobile** (iOS) attaches to the same live
@@ -195,9 +204,6 @@ detects your platform. Everything is also listed at
   (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
 - **iOS** — **nodeterm mobile** on the
   [App Store](https://apps.apple.com/app/nodeterm/id6790581233).
-
-> Until the macOS build is signed & notarized, Gatekeeper may warn on first launch —
-> right-click the app → **Open** to bypass it once.
 
 ## 🛠 Build from source
 

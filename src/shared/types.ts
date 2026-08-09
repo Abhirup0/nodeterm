@@ -6,6 +6,7 @@ import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
+import type { ProjectKanbanGitHub } from './github-issues'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -348,6 +349,8 @@ export interface ProjectKanban {
   /** Board-level label palette (Notion-style). Cards reference these by id in `meta[].labels`;
    *  tolerated as absent/malformed by every reader. */
   labels?: KanbanLabel[]
+  /** Shared, non-secret GitHub issue label mapping. Local approval and credentials live elsewhere. */
+  github?: ProjectKanbanGitHub
 }
 
 /** Who produced a board-log entry (a teammate on a shared board, or this user). */
@@ -872,7 +875,7 @@ export interface Settings {
    *  HIDEABLE_HEADER_BUTTONS the same way. */
   hiddenHeaderButtons: string[]
   /** Whether usage percentages render as consumed ("32% used") or remaining ("68% left").
-   *  'remaining' is the historical default; orca users tend to expect 'used'. */
+   *  'remaining' is the historical default; users coming from other tools expect 'used'. */
   usagePercentMode: 'used' | 'remaining'
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
@@ -1933,6 +1936,8 @@ export interface NodeTerminalApi {
   license: LicenseApi
   contextLink: ContextLinkApi
   boardLog: BoardLogApi
+  githubIssues: import('./github-issues').GitHubIssuesApi
+  githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
   context: ContextApi
   canvas: CanvasApi

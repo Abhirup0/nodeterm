@@ -90,7 +90,7 @@ export function mapMinimaxItem(item: unknown): UsageLimit | null {
 }
 
 /**
- * Every model's window, not just one. Orca selects a single preferred model because its shape
+ * Every model's window, not just one. A single preferred model is what you pick when the shape
  * has one session slot to fill; ours carries a list, so a plan covering several models shows
  * each of them.
  */

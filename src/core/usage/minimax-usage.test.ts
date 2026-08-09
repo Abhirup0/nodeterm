@@ -16,7 +16,7 @@ import { primaryLimit, limitLabel } from '../../shared/usage-limits'
 
 /**
  * NOTE: not captured from a live account — no MiniMax session was available on the machine this
- * was written on. Follows the field contract orca's fetcher documents.
+ * was written on. Follows the documented field contract.
  */
 const BODY = {
   base_resp: { status_code: 0, status_msg: 'success' },
@@ -100,7 +100,7 @@ describe('mapMinimaxItem', () => {
 
 describe('mapMinimaxLimits', () => {
   it('emits EVERY model, not one preferred pick', () => {
-    // Orca selects a single model because its shape has one session slot; ours carries a list.
+    // A one-session-slot shape has to select a single model; ours carries a list.
     const limits = mapMinimaxLimits(BODY)
     expect(limits.map((l) => l.scopeLabel)).toEqual(['MiniMax-M2', 'MiniMax-Text-01'])
   })

@@ -37,6 +37,17 @@ describe('columns', () => {
     expect(k.columns).toHaveLength(3)
     expect(k.columns[2].title).toBe('Review')
   })
+  it('addColumn suggests a unique GitHub mapping when sync is configured', () => {
+    const configured: ProjectKanban = {
+      ...board(),
+      github: { columnMappings: [{ columnId: 'a', label: 'status:review' }] }
+    }
+    const next = addColumn(configured, 'Review', '#fff')
+    expect(next.github?.columnMappings.at(-1)).toEqual({
+      columnId: next.columns.at(-1)?.id,
+      label: 'status:review-2'
+    })
+  })
   it('renameColumn / recolorColumn touch only the target', () => {
     const k = recolorColumn(renameColumn(board(), 'b', 'WIP'), 'b', '#fff')
     expect(k.columns[1]).toMatchObject({ id: 'b', title: 'WIP', color: '#fff' })
@@ -47,15 +58,40 @@ describe('columns', () => {
     expect(moveColumn(board(), 'a', null).columns.map((c) => c.id)).toEqual(['b', 'a'])
   })
   it('deleteColumn drops the column AND its assignments (cards return to Ungrouped); unknown id no-op', () => {
-    const k = deleteColumn(board(), 'a')
+    const configured: ProjectKanban = {
+      ...board(),
+      github: {
+        repository: 'nodeterm/nodeterm',
+        columnMappings: [{ columnId: 'b', label: 'status:doing' }]
+      }
+    }
+    const k = deleteColumn(configured, 'a')
     expect(k.columns.map((c) => c.id)).toEqual(['b'])
     expect(k.assignments).toEqual([{ nodeId: 'n2', columnId: 'b' }])
+    expect(k.github).toEqual(configured.github)
     expect(deleteColumn(board(), 'nope')).toEqual(board())
   })
   it('deleting every user column is allowed (Ungrouped always remains)', () => {
     const k = deleteColumn(deleteColumn(board(), 'a'), 'b')
     expect(k.columns).toEqual([])
     expect(k.assignments).toEqual([])
+  })
+  it('deleteColumn removes that column from GitHub mappings and clears it as completion', () => {
+    const configured: ProjectKanban = {
+      ...board(),
+      github: {
+        repository: 'nodeterm/nodeterm',
+        columnMappings: [
+          { columnId: 'a', label: 'status:todo' },
+          { columnId: 'b', label: 'status:doing' }
+        ],
+        completionColumnId: 'a'
+      }
+    }
+    expect(deleteColumn(configured, 'a').github).toEqual({
+      repository: 'nodeterm/nodeterm',
+      columnMappings: [{ columnId: 'b', label: 'status:doing' }]
+    })
   })
 })
 
