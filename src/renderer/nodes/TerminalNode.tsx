@@ -1595,6 +1595,10 @@ export function TerminalNode({
         ensureWebglClient()
         return
       }
+      // DEBUG-ONLY (see `publishCellDebug`): the CSS cell this grid is registered with, the DEVICE
+      // cell the atlas rasterizes into, and the ratio between them. At zoom 1 `css * dpr` must
+      // equal `device`; anything else is the factor every glyph is stretched by.
+      publishCellDebug(id, { css: cell, device: deviceCellOf(term), dpr: currentDprForDebug() })
       glyphBodyOffsetRef.current = offset
       const origin = bodyWorldRect(nodePosRef.current, offset)
       // The plate is the BODY rect, measured here so the grid is never registered with a
