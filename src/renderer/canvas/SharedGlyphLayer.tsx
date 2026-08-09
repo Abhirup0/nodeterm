@@ -674,8 +674,17 @@ let settingsUnsub: (() => void) | null = null
  *  first). Recording it is three number writes — cheaper than the null check it replaces. */
 let lastCamera: Camera = { x: 0, y: 0, zoom: 1 }
 
-function fontKeyOf(fontFamily: string, fontSize: number): string {
-  return `${fontFamily}|${fontSize}`
+function fontKeyOf(
+  fontFamily: string,
+  fontSize: number,
+  fontWeight: number,
+  fontWeightBold: number
+): string {
+  // The WEIGHTS are part of the key because the atlas bakes them into every slot: changing one
+  // must rebuild the context, exactly as changing the family or the size does. Left out, the
+  // picker would move and the canvas would keep drawing the old weight until something else
+  // happened to rebuild it.
+  return `${fontFamily}|${fontSize}|${fontWeight}|${fontWeightBold}`
 }
 
 /** The display's pixel ratio, guarded for the environments that have no `window` (the test suite)
@@ -861,7 +870,7 @@ export function installAtlasResetLog(
 
 function createContext(cell: DeviceCell): LiveContext | null {
   if (typeof document === 'undefined' || typeof OffscreenCanvas === 'undefined') return null
-  const { fontFamily, fontSize } = useSettings.getState().settings
+  const { fontFamily, fontSize, fontWeight, fontWeightBold } = useSettings.getState().settings
   const dpr = currentDpr()
   // The atlas is rasterized at DEVICE resolution: the addon reports device-pixel cells, and a
   // CSS-sized atlas would be visibly soft on every retina display. The dpr is read ONCE and LATCHED
@@ -877,7 +886,14 @@ function createContext(cell: DeviceCell): LiveContext | null {
   // context has been created (the harness learned this the expensive way — a context acquired
   // and then dropped unreferenced is exactly the leak this whole layer exists to avoid).
   const raster = createCanvasRasterizer(
-    { family: fontFamily, sizePx: devicePx, cellW, cellH },
+    {
+      family: fontFamily,
+      sizePx: devicePx,
+      cellW,
+      cellH,
+      weight: fontWeight,
+      weightBold: fontWeightBold
+    },
     ATLAS_PAGE_PX
   )
   if (!raster) return null
@@ -899,7 +915,7 @@ function createContext(cell: DeviceCell): LiveContext | null {
     canvas,
     gl,
     resetLog: installAtlasResetLog(atlas),
-    fontKey: fontKeyOf(fontFamily, fontSize),
+    fontKey: fontKeyOf(fontFamily, fontSize, fontWeight, fontWeightBold),
     dpr,
     disposed: false
   }
@@ -975,7 +991,16 @@ function ensureSettingsSubscription(): void {
   if (settingsUnsub) return
   settingsUnsub = useSettings.subscribe((s) => {
     if (!live) return
-    if (live.fontKey === fontKeyOf(s.settings.fontFamily, s.settings.fontSize)) return
+    if (
+      live.fontKey ===
+      fontKeyOf(
+        s.settings.fontFamily,
+        s.settings.fontSize,
+        s.settings.fontWeight,
+        s.settings.fontWeightBold
+      )
+    )
+      return
     rebuildSharedContext()
   })
 }
