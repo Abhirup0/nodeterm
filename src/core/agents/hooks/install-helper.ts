@@ -104,8 +104,10 @@ export function mergeManagedHook(
     const matcher = matcherOf(e)
     const existing = (next.hooks![ev] ?? []).filter((d) => !isManaged(d, marker))
     // Spread the matcher CONDITIONALLY: an explicit `matcher: undefined` would serialize as a
-    // missing key here but still change the object shape snapshots compare.
-    existing.push({ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command }] })
+    // missing key here but still change the object shape snapshots compare. The test is
+    // `!== undefined`, not truthiness — the type permits `matcher: ''`, and silently dropping an
+    // empty matcher would emit a subscription that does not say what its declaration said.
+    existing.push({ ...(matcher !== undefined ? { matcher } : {}), hooks: [{ type: 'command', command }] })
     next.hooks![ev] = existing
   }
   const managedEvents = new Set(events.map(eventNameOf))

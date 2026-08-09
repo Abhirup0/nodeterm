@@ -5,7 +5,7 @@
 // subscribe to" repair live.
 import path from 'path'
 import { GROK_HOOK_EVENTS } from '@shared/agents/hook-events'
-import { GROK_HOOK_FILE, grokHomeDir } from '@shared/agents/grok-paths'
+import { GROK_HOOK_FILE, grokHomeDir } from '../grok-paths'
 import { installHooksInto, removeHooksFrom } from './install-helper'
 
 const SCRIPT_FILE_NAME = 'grok.sh'

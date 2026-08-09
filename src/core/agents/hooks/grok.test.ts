@@ -45,9 +45,11 @@ describe('grok hook installer', () => {
     for (const ev of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
       expect(cfg.hooks[ev][0].matcher, ev).toBe('.*')
     }
-    // Non-tool events must carry NO matcher: on Stop/UserPromptSubmit grok warns and ignores one.
-    expect(cfg.hooks.Stop[0].matcher).toBeUndefined()
-    expect(cfg.hooks.UserPromptSubmit[0].matcher).toBeUndefined()
+    // Non-tool events must carry NO matcher — grok warns and ignores one there. Every one of them
+    // is checked, so a matcher accidentally attached to an event in hook-events.ts cannot ship.
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'Notification', 'SessionEnd']) {
+      expect(cfg.hooks[ev][0].matcher, ev).toBeUndefined()
+    }
   })
 
   it('points every event at the shared managed script, guarded so a missing script cannot brick a session', async () => {

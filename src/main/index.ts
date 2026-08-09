@@ -1445,11 +1445,13 @@ app.whenReady().then(async () => {
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hookServer.setRawListener((agentId, nodeId, payload) => {
     if (agentId === 'grok') {
-      // All this branch does is remember the node↔session association that the phone's context
-      // ring and the ⌘K session lookup read. Everything else the claude path does below hangs off
-      // `transcript_path`, and grok's envelope has none — its transcript is DERIVED from (cwd,
-      // sessionId), so the context tail, the subagent tails and the transcript readers arrive in
-      // Tasks 4/5/10. Read through `grokRawFields` so grok's two field dialects (camelCase and the
+      // All this branch does is record the node↔session association, and it is deliberately the
+      // only thing: nothing reads the map for a grok node YET (the badge, the session chip and ⌘K
+      // all take their id from the NORMALIZED listener, and the phone's context ring only fires for
+      // a sessionId a context tail emits for). It is written now so the map is already populated
+      // when Tasks 4/5/10 add the readers — everything else the claude path does below hangs off
+      // `transcript_path`, and grok's envelope has none: its transcript is DERIVED from (cwd,
+      // sessionId). Read through `grokRawFields` so grok's two field dialects (camelCase and the
       // SDK's snake_case) are decoded in exactly one place.
       const g = grokRawFields(payload)
       if (nodeId && g.sessionId) nodeContextSession.set(nodeId, g.sessionId)

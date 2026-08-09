@@ -1,13 +1,16 @@
-// Pure path algebra for grok's config + session layout. No `fs` and no `electron`, so `src/main`,
-// `src/core`, `src/server` and the SSH installer all share ONE definition — the drift between two
-// copies of a path rule is exactly what made the remote hook installer subscribe gemini to
-// claude's event names for months.
+// The ONE definition of grok's config + session path algebra: `src/main`, `src/core`, `src/server`
+// and the SSH installer all import it from here. Drift between two copies of a path rule is exactly
+// what made the remote hook installer subscribe gemini to claude's event names for months —
+// `core/usage/grok-usage.ts`'s `grokHome()` therefore delegates to `grokHomeDir()` rather than
+// re-deriving `$GROK_HOME`.
 //
-// NODE-SIDE shared code: it imports `path`/`os` and uses `Buffer`, so it is for `src/main`,
-// `src/core`, `src/server` and the SSH installer only — it has no renderer consumer today. A
-// renderer surface that needs one of these helpers must first split the pure half out (the
-// encoding/validation functions are pure; `grokHomeDir`/`grokSessionsDir` are not, they read
-// `homedir()`), not import this file into the browser bundle.
+// It lives in `src/core`, NOT `src/shared/agents`, even though its callers span three process
+// contexts: it reads `os.homedir()` and measures with `Buffer` at module scope, and `src/shared` is
+// renderer territory — the renderer imports `shared/agents/*`, and `tsconfig.web.json` carries node
+// types, so a renderer import of this file would typecheck cleanly and fail only at bundle or run
+// time. `src/core` is node-side by construction (no electron, no renderer), which is exactly this
+// file's contract. Should a renderer surface ever need one of these helpers, split the genuinely
+// pure half out (the encoding/validation functions) instead of moving the file back.
 //
 // Measured layout (shipped 1.0.0):
 //   $GROK_HOME/hooks/*.json                     — hook files, all merged; GROK_HOME defaults to ~/.grok
@@ -29,18 +32,22 @@ const GROK_SESSION_ID_MAX = 128
 /** Generous cap on a host-reported $GROK_HOME; longer than any real path, short enough to bound. */
 const REMOTE_HOME_MAX = 4096
 
-// The index signature is what lets `process.env` (NodeJS.ProcessEnv, i.e. Dict<string>) be the
-// default argument: without it GrokEnv is a WEAK type — all-optional — and TS rejects a source
-// whose declared properties do not overlap, index signature or not (TS2559).
-type GrokEnv = { GROK_HOME?: string | undefined; [k: string]: string | undefined }
+// Deliberately narrow — ONE known key, so a typo'd `{ GROK_HOM: … }` is a compile error instead of
+// a silent fall back to `~/.grok`. The cast on the default argument is what that costs: GrokEnv is a
+// WEAK type (every property optional), and `NodeJS.ProcessEnv extends Dict<string>` declares only an
+// index signature, which the weak-type check does not count as a property in common — so a bare
+// `env: GrokEnv = process.env` is TS2559 under tsconfig.node.json (it passes under
+// tsconfig.web.json, which has no node types). Widening GrokEnv with an index signature would fix
+// the error and take the typo check with it.
+type GrokEnv = { GROK_HOME?: string }
 
 /** grok's config directory: `$GROK_HOME`, else `~/.grok`. Hooks AND sessions live under it. */
-export function grokHomeDir(env: GrokEnv = process.env, home: string = homedir()): string {
+export function grokHomeDir(env: GrokEnv = process.env as GrokEnv, home: string = homedir()): string {
   const fromEnv = env.GROK_HOME?.trim()
   return fromEnv || path.join(home, '.grok')
 }
 
-export function grokSessionsDir(env: GrokEnv = process.env, home: string = homedir()): string {
+export function grokSessionsDir(env: GrokEnv = process.env as GrokEnv, home: string = homedir()): string {
   return path.join(grokHomeDir(env, home), 'sessions')
 }
 
@@ -76,10 +83,17 @@ export function grokSessionDir(a: { sessionsDir: string; cwd: string; sessionId:
 
 /** Validate a $GROK_HOME reported by a REMOTE host before it is used to build remote paths. The
  *  host's answer is data, not truth: only an absolute POSIX path with no backslash or control
- *  character is usable, and the caller falls back to `$HOME/.grok`. */
+ *  character is usable, and the caller falls back to `$HOME/.grok`.
+ *
+ *  It judges the EXACT string the caller holds — surrounding whitespace is a rejection, not
+ *  something this predicate quietly strips. Trimming here would return `true` about a value whose
+ *  embedded `\n` is a command separator on the remote command line the caller then builds, which is
+ *  the opposite of what the name promises (same rule as `isSafeRemoteTranscriptPath`). Remote reads
+ *  trim at the READ site — `ssh-project.ts`'s remote `$HOME` probe does — so the caller passes an
+ *  already-trimmed string and a leftover newline means the read went wrong, not that we should cope. */
 export function isSafeRemoteGrokHome(p: string | undefined): boolean {
   const v = p?.trim()
-  if (!v) return false
+  if (!v || v !== p) return false
   if (!v.startsWith('/') || v.includes('\\') || v.length > REMOTE_HOME_MAX) return false
   return !Array.from(v).some((ch) => {
     const c = ch.charCodeAt(0)

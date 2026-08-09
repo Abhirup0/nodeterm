@@ -61,10 +61,11 @@ describe('isSafeRemoteGrokHome', () => {
   it('accepts an absolute POSIX path from the host', () => {
     expect(isSafeRemoteGrokHome('/home/dev/.grok')).toBe(true)
   })
-  it('judges the TRIMMED path — a stray newline off an ssh read is not a rejection reason', () => {
-    // The predicate trims to decide, so it must not also pretend to reject what it trimmed: the
-    // earlier `v !== p?.trim()` guard compared the trimmed value with itself and never fired.
-    expect(isSafeRemoteGrokHome(' /home/dev/.grok\n')).toBe(true)
+  it('judges the EXACT string, so surrounding whitespace is a rejection', () => {
+    // The caller trims at the READ site (that is where an ssh probe's trailing newline belongs), so
+    // whitespace still attached here means the read went wrong. Answering `true` about a value whose
+    // `\n` is a command separator on the remote command line would be the predicate lying.
+    expect(isSafeRemoteGrokHome(' /home/dev/.grok\n')).toBe(false)
   })
   it('refuses relative paths, backslashes, control characters and absurd lengths', () => {
     expect(isSafeRemoteGrokHome('relative/grok')).toBe(false)
