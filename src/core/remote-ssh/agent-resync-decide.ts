@@ -50,9 +50,12 @@ export function decideFromTranscriptTail(tail: string): ResyncVerdict {
     if (rec?.type === 'assistant' && Array.isArray(content)) {
       let sawTool = false
       for (const c of content as { type?: string; id?: string }[]) {
-        if (c?.type === 'tool_use' && typeof c.id === 'string') {
-          pending.add(c.id)
+        if (c?.type === 'tool_use') {
+          // Seeing the call is what makes this a tool turn; tracking its id is a separate, weaker
+          // claim. An id we cannot read leaves the call untrackable, so the record must still read
+          // as 'assistant-tool' (⇒ undecided) rather than decaying into a finished turn.
           sawTool = true
+          if (typeof c.id === 'string') pending.add(c.id)
         }
       }
       last = sawTool ? 'assistant-tool' : 'assistant-text'

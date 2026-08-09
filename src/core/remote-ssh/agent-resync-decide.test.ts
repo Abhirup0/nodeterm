@@ -52,6 +52,22 @@ describe('decideFromTranscriptTail', () => {
     expect(decideFromTranscriptTail(tail)).toBe('undecided')
   })
 
+  it('a tool_use we cannot track decides nothing — never that the turn finished', () => {
+    const tail = [
+      assistantText('Let me check.'),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash' }] } })
+    ].join('\n')
+    expect(decideFromTranscriptTail(tail)).toBe('undecided')
+  })
+
+  it('a tool_use alongside text in the same message still counts as an open call', () => {
+    const tail = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Running it.' }, { type: 'tool_use', id: 't3', name: 'Bash' }] }
+    })
+    expect(decideFromTranscriptTail(tail)).toBe('working')
+  })
+
   it('an empty or unparseable tail decides nothing', () => {
     expect(decideFromTranscriptTail('')).toBe('undecided')
     expect(decideFromTranscriptTail('not json at all')).toBe('undecided')
@@ -61,6 +77,10 @@ describe('decideFromTranscriptTail', () => {
 describe('decideNode', () => {
   it('the pane wins when it is decisive — no transcript read needed', () => {
     expect(decideNode('zsh', null)).toBe('ended')
+  })
+
+  it('a shell in the pane beats a transcript that still looks busy — the CLI is gone either way', () => {
+    expect(decideNode('zsh', assistantToolUse('t1', 'Bash'))).toBe('ended')
   })
 
   it('falls through to the transcript when the CLI still owns the pane', () => {
