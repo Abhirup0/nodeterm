@@ -6814,9 +6814,15 @@ export function Canvas() {
             const m = e.task.match(/^\s*\/(loop|schedule|cron)\b/)
             if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', { task: e.task })
           }
-          if (e.state === 'done' && !e.interrupted) {
+          if (e.state === 'done' && !e.interrupted && !stuckRescueSkip) {
             // Interrupted turns (Esc/Ctrl-C) alert nobody: the user did it themselves, and
             // the turn didn't complete, so it isn't a loop iteration either.
+            // An IGNORED rescue is silent for the same reason it moves no badge: it claims a turn
+            // ended for a node this surface never saw running, so the "finished" is unfounded —
+            // and it arrives from a second source of truth (the main-process mirror drives the SSH
+            // reconnect resync, this store drives the alert), which can legitimately disagree after
+            // a renderer reload. Gating the badge but not the sound/notification would half-enforce
+            // the flag and leave the expensive error — a false completion — fully reachable.
             cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
             alert('finished', `${agentLabel} finished its turn.`, 'done')
           }
