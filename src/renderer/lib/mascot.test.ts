@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   CLAUDE_FRAMES,
   CLAUDE_FRAME_ART,
+  GROK_FRAME_ART,
+  GROK_MASCOT,
   SUB_COLS,
   SUB_ROWS,
   decodeQuadrant,
@@ -84,5 +86,31 @@ describe('walk frames', () => {
     const body0 = CLAUDE_FRAMES[0].pixels.slice(0, 4 * SUB_COLS)
     const body1 = CLAUDE_FRAMES[1].pixels.slice(0, 4 * SUB_COLS)
     expect(body0).toEqual(body1)
+  })
+})
+
+describe('grok mascot', () => {
+  it('has two walk frames on the same sub-pixel grid as the others', () => {
+    expect(GROK_FRAME_ART).toHaveLength(2)
+    for (const frame of GROK_FRAME_ART) {
+      const bmp = decodeFrame(frame)
+      expect(bmp.width).toBe(SUB_COLS)
+      expect(bmp.height).toBe(SUB_ROWS)
+    }
+  })
+
+  it('alternates the feet, so it walks instead of sliding', () => {
+    const [a, b] = GROK_FRAME_ART.map(decodeFrame)
+    expect(a.pixels).not.toEqual(b.pixels)
+  })
+
+  it("is a DIFFERENT critter from claude's, not a recolor", () => {
+    expect(GROK_FRAME_ART[0]).not.toEqual(CLAUDE_FRAME_ART[0])
+  })
+
+  it('exposes the geometry the CSS animation needs', () => {
+    expect(GROK_MASCOT.frameCount).toBe(2)
+    expect(GROK_MASCOT.frameWidth).toBeGreaterThan(0)
+    expect(GROK_MASCOT.frameHeight).toBeGreaterThan(0)
   })
 })

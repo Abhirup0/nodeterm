@@ -4,7 +4,7 @@
 // and row clicks to focus the node in nodeterm.
 
 import './hud.css'
-import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB } from '../lib/mascot'
+import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB, GROK_MASCOT } from '../lib/mascot'
 import { orderIndicatorAgents } from './indicator'
 import codexPet from '../assets/pet-codex.webp'
 
@@ -130,14 +130,19 @@ function reltime(ts: number): string {
 const HUD_CLAUDE_H = 13
 const HUD_CODEX_H = 17
 
-function claudeMascot(): HTMLElement {
+/** A quadrant-block sprite mascot (claude, grok) — the sizing math is shared so the notch strip
+ *  and the canvas badge can never disagree about the geometry in lib/mascot.ts. */
+function quadrantMascot(
+  mascot: { src: string; frameWidth: number; frameHeight: number },
+  variant: 'claude' | 'grok'
+): HTMLElement {
   const el = document.createElement('span')
-  el.className = 'mascot mascot--claude'
+  el.className = `mascot mascot--${variant}`
   const h = HUD_CLAUDE_H
-  const w = Math.round((h * CLAUDE_MASCOT.frameWidth) / CLAUDE_MASCOT.frameHeight)
+  const w = Math.round((h * mascot.frameWidth) / mascot.frameHeight)
   el.style.setProperty('--mascot-w', `${w}px`)
   el.style.setProperty('--mascot-h', `${h}px`)
-  el.style.backgroundImage = `url(${CLAUDE_MASCOT.src})`
+  el.style.backgroundImage = `url(${mascot.src})`
   return el
 }
 function codexMascot(): HTMLElement {
@@ -153,7 +158,8 @@ function codexMascot(): HTMLElement {
   return el
 }
 function workingMascot(agentId?: string): HTMLElement {
-  if (agentId === 'claude' && CLAUDE_MASCOT.src) return claudeMascot()
+  if (agentId === 'claude' && CLAUDE_MASCOT.src) return quadrantMascot(CLAUDE_MASCOT, 'claude')
+  if (agentId === 'grok' && GROK_MASCOT.src) return quadrantMascot(GROK_MASCOT, 'grok')
   if (agentId === 'codex') return codexMascot()
   const dot = document.createElement('span')
   dot.className = 'mascot mascot--dot'

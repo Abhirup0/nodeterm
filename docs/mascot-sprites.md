@@ -28,6 +28,22 @@ Quadrant char → (UL, UR, LL, LR) sub-pixel bits:
 - **Walk**: frame index = `floor(t × 2.5) % 2` (≈ 2.5 steps/s).
 - **Bob**: vertical offset alternates with the frame (±0.5–1.5 px scaled to render size).
 
+## Grok mascot (same machinery, original critter)
+
+An ORIGINAL pixel critter — not a brand mark, and deliberately a different silhouette from the
+Claude one (narrow head with two antenna pixels that swap sides, wider body, four alternating
+feet), on the same 9×3 quadrant grid so the geometry and the walk are shared verbatim:
+
+```
+frame 0:  "▘ ▐███▌ ▝" / " ▙█████▟ " / "  ▘▘ ▝▝  "
+frame 1:  "▝ ▐███▌ ▘" / " ▙█████▟ " / "  ▝▝ ▘▘  "
+```
+
+- Color: slate-300 `rgb(203, 213, 225)` — the node color (`#64748b`) is too dark to read at
+  16 px on the black canvas badge and on the notch strip.
+- Both sprites go through `buildQuadrantSprite(frames, color)` in `src/renderer/lib/mascot.ts`
+  and reuse `CLAUDE_FRAME_WIDTH/HEIGHT`, so they cannot drift on aspect ratio or smoothing.
+
 ## Codex pet (spritesheet asset)
 
 `pet-codex.webp` (checked into `resources/mascot/` here, `NodeTerm/Resources/Mascot/` on iOS):

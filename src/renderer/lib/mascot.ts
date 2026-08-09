@@ -6,6 +6,10 @@
 // load onto an offscreen canvas → a data-URI spritesheet the RUNNING badge steps through with a
 // pure CSS `steps()` animation (a canvas can hold dozens of terminals — zero per-node JS timers).
 //
+// The Grok critter is the same machinery with a different silhouette and color: its art goes
+// through the shared `buildQuadrantSprite` and it reuses Claude's display geometry, so the two
+// can never drift apart on aspect ratio or walk timing.
+//
 // Codex uses a real spritesheet asset (pet-codex.webp) imported by the component; here we only
 // export its frame geometry so the CSS animation and the component agree on the numbers.
 
@@ -87,20 +91,25 @@ export const CLAUDE_FRAME_HEIGHT = 16
 const RENDER_SUB_W = 4 // 4:8 = 1:2, and 3× the 1.333×2.667 display sub-pixel
 const RENDER_SUB_H = 8
 
-function buildClaudeSprite(): string {
+/**
+ * Paint a spritesheet from decoded quadrant frames (frames side by side, left to right).
+ * Extracted from the former `buildClaudeSprite` so a second mascot cannot drift on aspect ratio
+ * or smoothing — the two things that make a pixel critter look wrong.
+ */
+export function buildQuadrantSprite(frames: MascotBitmap[], color: string): string {
   // Guarded: the pure decode above is unit-tested under vitest's `node` environment, where
   // there is no DOM. The badge never renders there, so an empty src is harmless.
   if (typeof document === 'undefined') return ''
   const frameW = SUB_COLS * RENDER_SUB_W
   const frameH = SUB_ROWS * RENDER_SUB_H
   const canvas = document.createElement('canvas')
-  canvas.width = frameW * CLAUDE_FRAMES.length
+  canvas.width = frameW * frames.length
   canvas.height = frameH
   const ctx = canvas.getContext('2d')
   if (!ctx) return ''
   ctx.imageSmoothingEnabled = false
-  ctx.fillStyle = CORAL
-  CLAUDE_FRAMES.forEach((frame, f) => {
+  ctx.fillStyle = color
+  frames.forEach((frame, f) => {
     const ox = f * frameW
     for (let y = 0; y < frame.height; y++) {
       for (let x = 0; x < frame.width; x++) {
@@ -116,10 +125,39 @@ function buildClaudeSprite(): string {
 /** Claude walk spritesheet (2 frames side by side) + one-frame display dimensions. */
 export const CLAUDE_MASCOT = {
   /** data: URI PNG, or '' outside a DOM (tests). */
-  src: buildClaudeSprite(),
+  src: buildQuadrantSprite(CLAUDE_FRAMES, CORAL),
   frameWidth: CLAUDE_FRAME_WIDTH,
   frameHeight: CLAUDE_FRAME_HEIGHT,
   frameCount: CLAUDE_FRAMES.length
+}
+
+// --- Grok critter ---------------------------------------------------------------------------
+
+/** Slate-300. The node color (#64748b) is too dark to read at 16 px on the black canvas badge and
+ *  on the notch strip, which is the one thing this sprite has to do. */
+export const GROK_COLOR = 'rgb(203, 213, 225)'
+
+/**
+ * Grok's two walk frames. A different silhouette from Claude's rounded blob — narrower body with
+ * two raised antennae that swap sides between frames, so it bobs as it walks. Composed only from
+ * the quadrant characters in QUADRANT_BITS (there is no half-block ▀/▄ in that table).
+ */
+export const GROK_FRAME_ART: readonly string[][] = [
+  ['▘ ▐███▌ ▝', ' ▙█████▟ ', '  ▘▘ ▝▝  '],
+  ['▝ ▐███▌ ▘', ' ▙█████▟ ', '  ▝▝ ▘▘  ']
+]
+
+/** The two decoded grok walk frames. */
+export const GROK_FRAMES: MascotBitmap[] = GROK_FRAME_ART.map(decodeFrame)
+
+/** Grok walk spritesheet — same grid and display geometry as Claude's, so the CSS `steps(2)`
+ *  walk animation and the HUD sizing math are shared verbatim. */
+export const GROK_MASCOT = {
+  /** data: URI PNG, or '' outside a DOM (tests). */
+  src: buildQuadrantSprite(GROK_FRAMES, GROK_COLOR),
+  frameWidth: CLAUDE_FRAME_WIDTH,
+  frameHeight: CLAUDE_FRAME_HEIGHT,
+  frameCount: GROK_FRAMES.length
 }
 
 // --- "Done, unseen" pixel blob (Notch HUD) -------------------------------------------------
