@@ -71,11 +71,12 @@ describe('createdAgentId', () => {
 })
 
 /**
- * Grok arrives with spawn + resume and nothing else, which is the registry's own design for a new
- * agent ("a custom agent is in no list, so it automatically gets only spawn + terminal-title +
- * process status"). Hooks, context links and canvas control each need per-agent machinery that has
- * not been written for it — an installer, a transcript parser, a discovery file — and claiming any
- * of them here would light badges that never update and offer menu items that do nothing.
+ * Grok claims a capability only once its per-agent machinery exists — an installer, a transcript
+ * parser, a discovery file — because claiming one early lights badges that never update and offers
+ * menu items that do nothing. Hooks arrived with the normalizer (normalizeGrok) plus the installer
+ * that writes $GROK_HOME/hooks/nodeterm-status.json. Canvas control needed nothing new — grok scans
+ * `~/.claude/skills`, where manage-nodeterm-canvas already lives (asserted below). Context links did
+ * not arrive: they need a parser for grok's own transcript format.
  */
 describe('grok capabilities', () => {
   it('is a builtin with a launch command and a colour', () => {
@@ -102,11 +103,31 @@ describe('grok capabilities', () => {
     }
   })
 
-  it('claims resume and nothing beyond it', () => {
+  it('reports status through its own hooks', () => {
+    // What had to be true first: a normalizer for grok's dialect (normalizeGrok) and an installer
+    // that writes $GROK_HOME/hooks/nodeterm-status.json. Both exist now, so the badge, the unread
+    // dot, the completion notification, the notch capsule and the session-id capture all apply.
+    expect(hasHooks('grok')).toBe(true)
     expect(canResume('grok')).toBe(true)
-    expect(hasHooks('grok')).toBe(false)
+  })
+
+  it('syncs its session name in both directions', () => {
+    // Write leg: grok's own `/rename <title>` (alias `/title`), the same one-way push into the
+    // pane claude uses — so sessionRename.ts needs no change. Read leg: summary.json.
+    expect(canRename('grok')).toBe(true)
+  })
+
+  it('drives the canvas, on the skill that is already installed for claude', () => {
+    // The only capability grok gets with no per-agent leaf of its own: it scans `~/.claude/skills`
+    // by default (Claude Code compat, see its user-guide/08-skills.md), which is where
+    // manage-nodeterm-canvas is already written. See config.control.test.ts.
+    expect(canControlCanvas('grok')).toBe(true)
+  })
+
+  it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
     expect(canContextLink('grok')).toBe(false)
+    expect(hasUsage('grok')).toBe(false)
     expect(canBranch('grok')).toBe(false)
-    expect(canControlCanvas('grok')).toBe(false)
+    expect(canSubagent('grok')).toBe(false)
   })
 })

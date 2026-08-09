@@ -87,7 +87,7 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
 
 // Capabilities = const membership lists. A custom agent is in no list, so it
 // automatically gets only spawn + terminal-title + process status.
-export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode'] as const
+export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
@@ -99,17 +99,34 @@ export const CHAT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 // Agents that support naming the session in two directions: they emit a session title we adopt
-// into the node title, and accept `/rename <name>` to push a renamed node title back. Claude-only.
-export const RENAME_CAPABLE = ['claude'] as const
+// into the node title, and accept `/rename <name>` to push a renamed node title back. Read legs are
+// per-agent (claude: the transcript .jsonl; grok: its session summary.json — see
+// core/grok-session.ts, routed at the readSessionName IPC handler); the write leg is the same
+// literal `/rename <name>` for both, which grok also accepts as `/title`.
+export const RENAME_CAPABLE = ['claude', 'grok'] as const
 // Agents allowed to drive the canvas via the `nodeterm` CLI (open/show/write/close).
 // Discovery differs per agent: claude gets the manage-nodeterm-canvas skill; codex/gemini/
 // opencode a marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md /
 // ~/.config/opencode/AGENTS.md (see canvas-control.ts).
-export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
+//
+// grok needs NO new installer: it scans `~/.claude/skills` by default for Claude Code
+// compatibility (its shipped docs, user-guide/08-skills.md; switched off only by
+// `[compat.claude] skills = false` or GROK_CLAUDE_SKILLS_ENABLED=false), and that is exactly
+// where the manage-nodeterm-canvas skill is already written — locally, and on an SSH host via
+// RemoteHooks.installCanvasControl. Membership here is what sets NODETERM_CANVAS_CONTROL in the
+// session env (hook-server's buildPtyEnv, remoteHookEnvArgs), i.e. what makes the shim anything
+// other than a no-op.
+export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
-// Only claude's flag surface is verified. codex (--ask-for-approval) and gemini
+// claude and grok share the flag SPELLING and the value vocabulary
+// (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own
+// `default`), which is the whole requirement for membership. codex (--ask-for-approval) and gemini
 // (--approval-mode) join by being added here with their own flag mapping.
-export const PERMISSION_MODE_CAPABLE = ['claude'] as const
+//
+// NOTE: the `auto` VERSION GATE is claude's alone — see activePermissionMode in
+// renderer/state/permissionMode.ts. grok has accepted every mode we emit since 1.0.0, its first
+// release, so it must never inherit a gate fed by a `claude --version` probe.
+export const PERMISSION_MODE_CAPABLE = ['claude', 'grok'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 
