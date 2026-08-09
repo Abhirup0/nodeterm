@@ -304,13 +304,19 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
   return null
 }
 
-// Gemini hook payload. Event name is read defensively (some builds use
-// `hook_event_name`/`hookEventName`); a session id may be present under `session_id`.
+// Gemini hook payload. Its envelope is snake_case and claude-shaped — every event carries
+// `session_id`, `transcript_path`, `cwd`, `hook_event_name` and `timestamp` (gemini 0.54.4's own
+// `docs/hooks/reference.md:48-58`). The event name is still read defensively (`hookEventName` /
+// `event`) because older builds spelled it differently and those payloads cost nothing to accept.
 interface GeminiPayload {
   hook_event_name?: string
   hookEventName?: string
   event?: string
   session_id?: string
+  /** Notification only (reference.md:272-285). The documented type is `"ToolPermission"`. */
+  notification_type?: string
+  /** Notification only: the alert's summary — shown on the needs-you badge (reference.md:279). */
+  message?: string
 }
 
 export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | null {
@@ -327,7 +333,35 @@ export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | nu
     return { ...base, kind: 'state', state: 'working' }
   }
   if (ev === 'AfterAgent') return { ...base, kind: 'state', state: 'done' }
-  // Gemini has no waiting/blocked states.
+  // `source` is startup|resume|clear and `reason` is exit|clear|logout|prompt_input_exit|other
+  // (reference.md:250-251, 265-266). Neither changes what a session boundary MEANS to us, so both
+  // phases map unconditionally — a `/clear` really is one session ending and another beginning.
+  if (ev === 'SessionStart') return { ...base, kind: 'session', sessionPhase: 'start' }
+  if (ev === 'SessionEnd') return { ...base, kind: 'session', sessionPhase: 'end' }
+  if (ev === 'Notification') {
+    // Gemini's ONE ask-the-user signal (reference.md:272-285, "for example, Tool Permissions"), and
+    // the reason this event was worth subscribing to: without it a node waiting on a permission
+    // answer sat on RUNNING, because the last hook we heard was `BeforeTool`.
+    //
+    // `blocked` rather than `waiting` for two reasons: normalizeClaude already uses it for a
+    // permission ask (every consumer treats the two alike), and BUSY_STATES then refuses an
+    // in-place restart on this node — correct, since `/quit` typed into a permission prompt would
+    // ANSWER the prompt instead of quitting.
+    //
+    // A CLOSED match, not a substring: the docs name exactly ONE type (reference.md:278), and an
+    // unknown future one must stay a no-op — a badge that sticks on a finished node is a failure
+    // this codebase has shipped before. Grok is the cautionary tale: there
+    // `type.includes('permission')` turned a notification that fires before every tool call into a
+    // strobing NEEDS YOU. Widening this "to be safe" is the unsafe direction.
+    //
+    // Nothing here can be answered from our side: the hook is observability only and its
+    // flow-control fields are ignored (reference.md:284-285), so this reports state and no more —
+    // no `pendingId`, unlike claude's deterministic-approval path.
+    if (p.notification_type === 'ToolPermission') {
+      return { ...base, kind: 'state', state: 'blocked', lastMessage: p.message }
+    }
+    return null
+  }
   return null
 }
 

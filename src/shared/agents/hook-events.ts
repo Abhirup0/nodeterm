@@ -38,8 +38,33 @@ export const CLAUDE_HOOK_EVENTS = [
   'PostToolUse'
 ] as const
 
-/** Gemini CLI hook events — its own names, NOT Claude's (see normalizeGemini). */
-export const GEMINI_HOOK_EVENTS = ['BeforeAgent', 'AfterAgent', 'AfterTool', 'BeforeTool'] as const
+/**
+ * Gemini CLI hook events (→ normalizeGemini) — its own names, NOT Claude's.
+ *
+ * Gemini publishes ELEVEN events; these are the seven we can act on. The four left out are
+ * deliberate, all per gemini 0.54.4's bundled `docs/hooks/reference.md`:
+ *   - `AfterModel` / `BeforeModel` fire for EVERY streamed chunk (reference.md:236-237), so
+ *     subscribing would spawn a hook process per chunk. `AfterModel` is the one that carries
+ *     `llm_response.usageMetadata.totalTokenCount` — the one number worth having — which is why a
+ *     gemini context meter must read the transcript instead of subscribing here. (Not built yet;
+ *     that is a separate task. Do not "just add AfterModel" to get the tokens.)
+ *   - `BeforeToolSelection` (reference.md:204-219) and `PreCompress` (reference.md:287-297) have
+ *     no state we render today.
+ *
+ * `Notification` is the important addition: it is gemini's ONLY signal that the user is being
+ * asked something (`notification_type: "ToolPermission"`, reference.md:272-285). Without it a
+ * gemini node sat on RUNNING while it waited for a permission answer, because the last event we
+ * heard was `BeforeTool`.
+ */
+export const GEMINI_HOOK_EVENTS = [
+  'BeforeAgent',
+  'AfterAgent',
+  'AfterTool',
+  'BeforeTool',
+  'Notification',
+  'SessionStart',
+  'SessionEnd'
+] as const
 
 /**
  * Grok hook events (→ normalizeGrok). Grok's shipped 1.0.0 docs list fourteen
