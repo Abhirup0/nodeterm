@@ -153,13 +153,25 @@ describe("activePermissionMode — the auto gate is CLAUDE's, not every agent's"
     expect(activePermissionMode('grok')).toBe('plan')
   })
 
-  it('ensureActivePermissionMode does not wait on any probe for a non-claude agent', async () => {
+  it('ensureActivePermissionMode does not wait on EITHER probe for a non-claude agent', async () => {
     vi.useFakeTimers()
     try {
+      // BOTH halves of "does not wait" have to be enforced, and each needs its own trap:
+      //  - the LOCAL probe: pointed at the never-resolving stub, so awaiting `ensureClaudeCliCaps()`
+      //    can only be escaped by its 3s timeout — which the assertion below does not allow. A
+      //    resolving mock would let a wrongly-placed await pass, because it settles in microtasks
+      //    that `advanceTimersByTimeAsync(0)` flushes. In the Server Edition this await is a real
+      //    WS-RPC round trip on every launch, so "it resolves eventually" is not good enough.
+      //  - the REMOTE probe: an SSH project whose answer never arrives, so awaiting it costs
+      //    SSH_AUTO_PROBE_WAIT_MS.
+      // Neither timer may be needed: `advanceTimersByTimeAsync(0)` runs no timer at all.
+      ;(globalThis as { window?: unknown }).window = {
+        nodeTerminal: { claude: { cliCaps: () => new Promise<never>(() => {}) } }
+      }
+      resetClaudeCliCapsForTests()
       useSettings.setState((s) => ({ settings: { ...s.settings, claudePermissionMode: 'auto' } }))
       activeProject('remote', { server: SSH_SERVER, remoteCwd: '/srv/app' })
-      // No SSH remote-claude answer will ever arrive in this test, and no timer may be needed:
-      // a grok launch must not block on claude's probes at all.
+
       const pending = ensureActivePermissionMode('grok')
       await vi.advanceTimersByTimeAsync(0)
 

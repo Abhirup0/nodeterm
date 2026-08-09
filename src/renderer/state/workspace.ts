@@ -340,16 +340,31 @@ export function createAgentNode(
   // version` asks the model about "version"). Absent for everyone else, so their command line is
   // byte-identical to what it was.
   const sep = agentConfig(agentId)?.argvPromptSeparator
+  const isFlagPrompt = agentConfig(agentId)?.promptInjectionMode === 'flag-prompt'
+  // The separator only participates when there is actually a prompt to separate (no dangling `--`),
+  // and never for a flag-prompt agent, whose prompt is not a positional at all.
+  const usesSep = !!promptArg && !!sep && !isFlagPrompt
   const withPrompt = promptArg
-    ? agentConfig(agentId)?.promptInjectionMode === 'flag-prompt'
+    ? isFlagPrompt
       ? `${baseCmd} --prompt ${promptArg}`
       : `${baseCmd} ${sep ? `${sep} ` : ''}${promptArg}`
     : baseCmd
-  // Flag goes last: the prompt is claude's positional argv and must stay adjacent to the binary.
   // No mode passed (e.g. a legacy/test call site) = bare command, exactly as before this setting.
-  const initialCommand = permissionMode
-    ? withPermissionMode(withPrompt, agentId, permissionMode)
-    : withPrompt
+  const flagged = (cmd: string): string =>
+    permissionMode ? withPermissionMode(cmd, agentId, permissionMode) : cmd
+  // WHERE the mode flag goes is decided by the agent's prompt convention, and the two conventions
+  // are opposites:
+  //  - No separator (claude): the prompt is a positional that must stay adjacent to the binary, so
+  //    the flag goes LAST — `claude 'fix the bug' --permission-mode auto`, byte-identical to what
+  //    nodeterm has always emitted.
+  //  - With a separator (grok): `--` means END OF OPTIONS, which is the whole reason it is there
+  //    (`grok -- version` sends "version" to the model instead of running the subcommand). By that
+  //    same convention anything AFTER it is a positional, so a flag appended last would either be
+  //    swallowed into the prompt text or rejected by clap as an unexpected argument — the setting
+  //    would silently do nothing, or the launch would die on a usage message. It therefore goes
+  //    BEFORE the separator: `grok --permission-mode plan -- 'explain this repo'`, matching grok's
+  //    own usage line `grok [OPTIONS] [PROMPT] [COMMAND]`.
+  const initialCommand = usesSep ? `${flagged(baseCmd)} ${sep} ${promptArg}` : flagged(withPrompt)
   const size = terminalNodeSize()
   return {
     id: nextId('term'),
