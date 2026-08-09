@@ -1,0 +1,202 @@
+export interface ProjectKanbanGitHub {
+  repository?: string
+  columnMappings: Array<{
+    columnId: string
+    label: string
+  }>
+  completionColumnId?: string
+}
+
+export interface NormalisedProjectKanbanGitHub {
+  repository?: string
+  columnMappings: Array<{
+    columnId: string
+    label: string
+  }>
+  completionColumnId?: string
+  revision: string
+}
+
+export type GitHubConfigError =
+  | 'invalid-shape'
+  | 'invalid-repository'
+  | 'unknown-column'
+  | 'duplicate-column'
+  | 'empty-label'
+  | 'label-too-long'
+  | 'duplicate-label'
+  | 'invalid-completion-column'
+
+export type GitHubConfigResult =
+  | { ok: true; value: NormalisedProjectKanbanGitHub }
+  | { ok: false; reason: GitHubConfigError }
+
+export type GitHubAuthProvider = 'auto' | 'gh' | 'token'
+export type GitHubSecretAvailability = 'encrypted' | 'restricted-file' | 'unavailable'
+
+export interface GitHubProjectApproval {
+  localApprovalId: string
+  projectId: string
+  repository: string
+  enabled: true
+  approvedAt: number
+}
+
+export interface GitHubControlState {
+  version: 1
+  revision: number
+  authProvider: GitHubAuthProvider
+  approvals: GitHubProjectApproval[]
+}
+
+export interface GitHubAuthStatus {
+  selectedProvider: GitHubAuthProvider
+  activeProvider: Exclude<GitHubAuthProvider, 'auto'> | null
+  ghAuthenticated: boolean
+  tokenPresent: boolean
+  storage: GitHubSecretAvailability
+  login?: string
+}
+
+export interface GitHubIssueLabel {
+  id: number
+  name: string
+  color: string
+}
+
+export interface GitHubIssueUser {
+  id: number
+  login: string
+  avatarUrl: string
+}
+
+export interface GitHubIssue {
+  id: number
+  number: number
+  title: string
+  body: string
+  state: 'open' | 'closed'
+  stateReason: 'completed' | 'not_planned' | 'reopened' | null
+  htmlUrl: string
+  apiUrl: string
+  labels: GitHubIssueLabel[]
+  assignees: GitHubIssueUser[]
+  createdAt: string
+  updatedAt: string
+  locked: boolean
+}
+
+export interface ListIssueOptions {
+  state: 'open' | 'closed' | 'all'
+  page: number
+  perPage: number
+  since?: string
+  etag?: string
+}
+
+export interface IssuePageResult {
+  items: GitHubIssue[]
+  nextPage?: number
+  etag?: string
+  notModified?: boolean
+}
+
+export interface UpdateIssueInput {
+  state?: 'open' | 'closed'
+  labels?: string[]
+}
+
+export interface GitHubRepositoryLabel extends GitHubIssueLabel {
+  description: string | null
+}
+
+export interface LabelPageResult {
+  items: GitHubRepositoryLabel[]
+  nextPage?: number
+  etag?: string
+  notModified?: boolean
+}
+
+export type GitHubIssueConflict =
+  | 'multiple-mapped-labels'
+  | 'open-with-completion-label'
+  | null
+
+export interface GitHubIssueCardView extends GitHubIssue {
+  columnId: string | null
+  conflict: GitHubIssueConflict
+  avatarDataUrls?: Record<string, string>
+}
+
+export interface GitHubIssueQuery {
+  projectId: string
+  columnId: string | null
+  pageSize: number
+  cursor?: string
+  search?: string
+  labelFilter?: string[]
+}
+
+export interface GitHubIssuePage {
+  items: GitHubIssueCardView[]
+  counts: Record<string, number>
+  nextCursor?: string
+  partial: boolean
+  readOnly: boolean
+  lastSuccessfulRefreshAt?: number
+  lastFullReconciliationAt?: number
+}
+
+export type GitHubMutationResult =
+  | { status: 'confirmed'; issue: GitHubIssue }
+  | { status: 'refresh-pending'; issue: GitHubIssue }
+  | { status: 'stale'; issue: GitHubIssue }
+  | { status: 'configuration-changed' }
+  | { status: 'read-only' }
+  | { status: 'invalid-target' }
+  | { status: 'failed'; message: string }
+
+export interface CreateMappedLabelsResult {
+  status: 'confirmed' | 'configuration-changed' | 'read-only' | 'partial'
+  created: string[]
+  remaining: string[]
+}
+
+export interface GitHubControlView {
+  control: {
+    revision: number
+    authProvider: GitHubAuthProvider
+  }
+  auth: GitHubAuthStatus
+  project?: {
+    projectId: string
+    repository?: string
+    detectedRepository?: string
+    approved: boolean
+  }
+}
+
+export interface GitHubIssuesApi {
+  subscribe(projectId: string): Promise<GitHubIssuePage>
+  unsubscribe(projectId: string): Promise<void>
+  query(request: GitHubIssueQuery): Promise<GitHubIssuePage>
+  refresh(projectId: string, full?: boolean): Promise<void>
+  moveIssue(request: {
+    projectId: string
+    issueNumber: number
+    toColumnId: string | null
+    expectedUpdatedAt: string
+  }): Promise<GitHubMutationResult>
+  createMissingLabels(projectId: string): Promise<CreateMappedLabelsResult>
+  clearCache(projectId: string): Promise<void>
+  onChanged(projectId: string, listener: (changedIssueNumbers: number[]) => void): () => void
+}
+
+export interface GitHubControlApi {
+  status(projectId?: string): Promise<GitHubControlView>
+  approve(input: { projectId: string; repository: string; expectedRevision: number }): Promise<GitHubControlView>
+  revoke(input: { projectId: string; expectedRevision: number }): Promise<GitHubControlView>
+  selectProvider(input: { provider: GitHubAuthProvider; expectedRevision: number }): Promise<GitHubControlView>
+  saveToken(token: string): Promise<GitHubControlView>
+  clearToken(): Promise<GitHubControlView>
+}

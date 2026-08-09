@@ -28,7 +28,25 @@ export function nextColumnColor(k: ProjectKanban): string {
 }
 
 export function addColumn(k: ProjectKanban, title: string, color: string): ProjectKanban {
-  return { ...k, columns: [...k.columns, { id: kid('kcol'), title, color }] }
+  const column = { id: kid('kcol'), title, color }
+  if (!k.github) return { ...k, columns: [...k.columns, column] }
+  const base = `status:${title.trim().toLocaleLowerCase('en-US')
+    .normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'column'}`
+  const used = new Set(k.github.columnMappings.map((mapping) =>
+    mapping.label.normalize('NFKC').toLocaleLowerCase('en-US')))
+  let label = base.slice(0, 50)
+  for (let suffix = 2; used.has(label.toLocaleLowerCase('en-US')); suffix++) {
+    const ending = `-${suffix}`
+    label = `${base.slice(0, 50 - ending.length)}${ending}`
+  }
+  return {
+    ...k,
+    columns: [...k.columns, column],
+    github: {
+      ...k.github,
+      columnMappings: [...k.github.columnMappings, { columnId: column.id, label }]
+    }
+  }
 }
 
 export function renameColumn(k: ProjectKanban, columnId: string, title: string): ProjectKanban {
@@ -55,9 +73,20 @@ export function moveColumn(k: ProjectKanban, columnId: string, beforeId: string 
  *  last-column rule (the virtual Ungrouped column always remains). */
 export function deleteColumn(k: ProjectKanban, columnId: string): ProjectKanban {
   if (!k.columns.some((c) => c.id === columnId)) return k
+  const github = (() => {
+    if (!k.github) return undefined
+    const { completionColumnId, ...rest } = k.github
+    return {
+      ...rest,
+      columnMappings: k.github.columnMappings.filter((mapping) => mapping.columnId !== columnId),
+      ...(completionColumnId && completionColumnId !== columnId ? { completionColumnId } : {})
+    }
+  })()
   return {
+    ...k,
     columns: k.columns.filter((c) => c.id !== columnId),
-    assignments: k.assignments.filter((a) => a.columnId !== columnId)
+    assignments: k.assignments.filter((a) => a.columnId !== columnId),
+    ...(github ? { github } : {})
   }
 }
 

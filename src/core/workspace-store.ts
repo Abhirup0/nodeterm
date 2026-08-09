@@ -1,4 +1,5 @@
 import { promises as fs } from 'fs'
+import { randomUUID } from 'node:crypto'
 import path from 'path'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
@@ -110,6 +111,7 @@ export class WorkspaceStore {
   }
 
   private async loadV3(index: WorkspaceIndexV3, sideline: boolean): Promise<Workspace> {
+    for (const entry of index.entries) entry.localApprovalId ||= randomUUID()
     this.index = index
     const projects: Project[] = []
     for (const e of index.entries) {
@@ -214,6 +216,11 @@ export class WorkspaceStore {
   async save(workspace: Workspace): Promise<void> {
     const savedAt = new Date().toISOString()
     const { index, files } = splitWorkspace(workspace, (id) => this.revs.get(id) ?? 0, savedAt)
+
+    for (const entry of index.entries) {
+      const previous = this.index?.entries.find((candidate) => candidate.id === entry.id)
+      entry.localApprovalId = previous?.localApprovalId || randomUUID()
+    }
 
     // An unavailable placeholder carries no real data. splitWorkspace already dropped its file
     // and cache; here we restore the machine-local payload (ssh offline cache) from the previous
@@ -377,6 +384,18 @@ export class WorkspaceStore {
    *  projects. Sync (reads the in-memory index): the board-log router's local-vs-unsupported call. */
   localCwdForProject(projectId: string): string | undefined {
     return this.index?.entries.find((e) => e.id === projectId && e.cwd)?.cwd
+  }
+
+  /** Resolve the shared project together with its machine-local trust identity. The approval id
+   *  never enters the shared project object or project.json. */
+  async githubProject(projectId: string): Promise<{
+    project: Project
+    localApprovalId: string
+  } | null> {
+    const workspace = await this.load({ sideline: false })
+    const project = workspace.projects.find((candidate) => candidate.id === projectId)
+    const localApprovalId = this.index?.entries.find((entry) => entry.id === projectId)?.localApprovalId
+    return project && localApprovalId ? { project, localApprovalId } : null
   }
 
   /** The local ref cwds of the current index — the workspace half of the phone bridge's fs/git

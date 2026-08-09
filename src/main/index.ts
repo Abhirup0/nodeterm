@@ -5,7 +5,7 @@ import { canRename, type AgentId } from '@shared/agents/config'
 import { readFile } from 'fs/promises'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, shell, systemPreferences } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, safeStorage, shell, systemPreferences } from 'electron'
 import { IPC } from '../shared/ipc'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
@@ -18,6 +18,9 @@ import { SettingsStore } from '../core/settings-store'
 import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
+import { registerGitHubIntegration } from '../core/github/integration'
+import { runGitHubCliCommand } from '../core/github/credentials'
+import { ElectronGitHubSecretStore, registerElectronGitHubControl } from './github-control'
 import { generateCommitMessage, generateGroupName, generateTerminalName } from '../core/commit-message'
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
@@ -205,10 +208,14 @@ const speechService = new SpeechService({ models: whisperModels, isPremium })
 // viewer. Inert with zero peers: the registry holds no sink, so none of this ever runs.
 // Wired once here — do not double-wire (4b Task 4). A second wirePeerRegistry() call would silently
 // overwrite these deps (last write wins), so keep this the sole call site in src/main.
+let dropGitHubRelayClient: ((id: number) => void) | undefined
 wirePeerRegistry({
   setFlow: (id, sid, resume, owner) => ptyManager.setFlow(id, sid, resume, owner),
   captureForResync: (sid) => ptyManager.captureForResync(sid),
-  onPeerGone: (id) => ptyManager.dropClient(id)
+  onPeerGone: (id) => {
+    ptyManager.dropClient(id)
+    dropGitHubRelayClient?.(id)
+  }
 })
 
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters and
@@ -703,6 +710,23 @@ app.whenReady().then(async () => {
   // the Server Edition, over the same pure core/fs-ops — so local, browser and peer filesystem
   // behaviour cannot drift. Registered on the platform, so a remote tab's Explorer/editor works.
   registerFsHandlers(corePlatform)
+
+  const githubSecret = new ElectronGitHubSecretStore(app.getPath('userData'), safeStorage)
+  const github = registerGitHubIntegration({
+    platform: corePlatform,
+    userDataDir: app.getPath('userData'),
+    project: (projectId) => workspaceStore.githubProject(projectId),
+    detectRepository: (project) =>
+      gitService.originUrl(project.ssh?.remoteCwd ?? project.cwd ?? ''),
+    secret: githubSecret,
+    run: runGitHubCliCommand
+  })
+  dropGitHubRelayClient = (id) => github.service.dropClient(id)
+  registerElectronGitHubControl(
+    ipcMain,
+    () => getMainWindow()?.webContents.id,
+    github.controller
+  )
 
   // SSH-project Explorer/Editor fs: the remote analog of the fs:* handlers above, scoped to a
   // project's ControlMaster. One SshFs bound to the SSH-project manager's own ssh runner (the SAME
