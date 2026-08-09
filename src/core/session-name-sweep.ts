@@ -13,6 +13,17 @@
 //
 // Everything is injected: no fs, no electron, no timers of its own beyond the interval, so the
 // scheduling and the skip rules are unit-testable.
+import { canReadTitle, type AgentId } from '@shared/agents/config'
+
+/**
+ * The default `supports`: `TITLE_READ_CAPABLE` (claude, grok, gemini), NOT `RENAME_CAPABLE`.
+ *
+ * The sweep only ever READS a name and publishes it into the mirror; nothing here pushes one back,
+ * so the read list is the right gate — gating on the write leg would skip gemini, which names its
+ * own sessions but has no rename command.
+ */
+export const supportsTitleRead = (agentId?: string): boolean =>
+  !!agentId && canReadTitle(agentId as AgentId)
 
 /** One node the sweep may refresh. */
 export interface SweepEntry {
@@ -38,10 +49,19 @@ export interface SessionNameSweepDeps {
   resolve: (sessionId: string, accountId?: string, agentId?: string) => Promise<string | null>
   /** Publish a changed name into the mirror. */
   publish: (nodeId: string, name: string) => void
-  /** Which agents carry a READABLE session name — `TITLE_READ_CAPABLE` (claude, grok, gemini), not
-   *  `RENAME_CAPABLE`. This sweep only ever READS a name and publishes it; nothing here pushes one
-   *  back, so gating it on the write capability would silently skip gemini's nodes. */
-  supports: (agentId?: string) => boolean
+  /**
+   * Which agents carry a READABLE session name. **Optional, and you almost certainly want the
+   * default** (`supportsTitleRead` below) — it is the rule, not a shell's opinion of it.
+   *
+   * It lives here because the two shells were passing the same predicate and a wrong one is
+   * INVISIBLE: swap it for `canRename` and every gemini node is skipped, so the agent-status
+   * mirror (and the phone reading it) never sees a gemini session name — with a green test suite,
+   * since nothing exercises a shell's wiring. That is the same duplicated-gate drift this branch
+   * has already paid for three times (the remote installer's event lists, the grok raw-listener
+   * block, this). Still injectable: the unit tests narrow it, and a caller with a genuinely
+   * different set can pass its own.
+   */
+  supports?: (agentId?: string) => boolean
 }
 
 /**
@@ -51,8 +71,9 @@ export interface SessionNameSweepDeps {
  */
 export async function sweepSessionNames(deps: SessionNameSweepDeps): Promise<number> {
   let changed = 0
+  const supports = deps.supports ?? supportsTitleRead
   for (const e of deps.entries()) {
-    if (!e.sessionId || !deps.supports(e.agentId)) continue
+    if (!e.sessionId || !supports(e.agentId)) continue
     // A hand-renamed node keeps its name — the same rule the canvas poll applies (`titleAuto`).
     const node = deps.node(e.nodeId)
     if (node?.titleAuto === false) continue

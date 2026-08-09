@@ -1,7 +1,6 @@
 import fs from 'fs'
 import { readAgentSessionName } from '../core/agent-session-name'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { canReadTitle, type AgentId } from '@shared/agents/config'
 import path from 'path'
 import http from 'http'
 
@@ -267,10 +266,9 @@ export async function startServer(
       readAgentSessionName(sessionId, accountId, agentId, {
         geminiPathFor: (id) => geminiContextTail.pathFor(id)
       }),
-    publish: setNodeSessionName,
-    // The READ list, not RENAME_CAPABLE: the sweep only reads names and publishes them into the
-    // mirror the phone reads, so gating it on the write leg would skip gemini's nodes.
-    supports: (agentId) => !!agentId && canReadTitle(agentId as AgentId)
+    publish: setNodeSessionName
+    // No `supports`: core's `supportsTitleRead` (TITLE_READ_CAPABLE) is the rule, and duplicating
+    // it here is how the two shells drift — see the note in core/session-name-sweep.ts.
   })
   // Advertise launch settings to the mobile companion through the mirror (same provider the
   // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local

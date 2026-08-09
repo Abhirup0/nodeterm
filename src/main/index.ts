@@ -1,7 +1,6 @@
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
-import { canReadTitle, type AgentId } from '@shared/agents/config'
 import { readFile } from 'fs/promises'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
@@ -560,13 +559,20 @@ app.whenReady().then(async () => {
   )
 
   // Gemini's title read needs the transcript path its own context tail already tracks (nothing
-  // scans for it). That tail is created further down with the rest of the hook plumbing, so the
-  // association is resolved LAZILY — the same pattern as the remote-file readers down there, and
-  // safe for the same reason: it is only ever dereferenced from an IPC call or the sweep's timer,
-  // long after init. `pathFor` answers undefined for a session no hook has been seen for, and for a
-  // remote (SSH) gemini node, which the tails deliberately never track — both mean "no name".
+  // scans for it). That tail is created ~600 lines below with the rest of the hook plumbing, while
+  // this deps object is consumed by the ptyReadSessionName handler just under here and by the
+  // session-name sweep further down — so the association is held in a `let` that the tail's
+  // creation assigns, NOT closed over as a `const` declared later. The difference matters: closing
+  // over the later `const` makes an early call a TDZ **ReferenceError**, and `TerminalNode`'s poll
+  // does not catch its `readSessionName` rejection — one throw kills that node's poll chain for the
+  // whole mount. A poll CAN fire early: `sessionId` is persisted in localStorage, so a cold
+  // relaunch has one before any hook arrives. Undefined-until-assigned degrades instead: no path,
+  // no name, next tick tries again. `pathFor` likewise answers undefined for a session no hook has
+  // been seen for and for a remote (SSH) gemini node, which the tails deliberately never track —
+  // all of which mean "no name", never a throw.
+  let geminiTranscriptPathFor: ((sessionId: string) => string | undefined) | undefined
   const agentSessionNameDeps: AgentSessionNameDeps = {
-    geminiPathFor: (sessionId) => geminiContextTail.pathFor(sessionId)
+    geminiPathFor: (sessionId) => geminiTranscriptPathFor?.(sessionId)
   }
 
   // The reader is selected by the NODE's agent (core/agent-session-name.ts — the one copy of that
@@ -885,10 +891,11 @@ app.whenReady().then(async () => {
     // minute for an id that can never be there.
     resolve: (sessionId, accountId, agentId) =>
       readAgentSessionName(sessionId, accountId, agentId, agentSessionNameDeps),
-    publish: setNodeSessionName,
-    // The READ list, not RENAME_CAPABLE: this sweep only reads names and publishes them into the
-    // mirror (the phone's lists), so gating it on the write leg would skip gemini's nodes.
-    supports: (agentId) => !!agentId && canReadTitle(agentId as AgentId)
+    publish: setNodeSessionName
+    // `supports` is deliberately NOT passed: the rule (TITLE_READ_CAPABLE, since the sweep only
+    // READS a name) is core's default, `supportsTitleRead`. A copy here would be a second place to
+    // get it wrong, and getting it wrong is invisible — the wrong list silently skips an agent's
+    // nodes with every test still green.
   })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
@@ -1169,6 +1176,9 @@ app.whenReady().then(async () => {
   // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
   // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
+  // Hand the gemini session-name reader its path authority (declared above the handlers that use
+  // it, assigned here where the tail exists).
+  geminiTranscriptPathFor = (sessionId) => geminiContextTail.pathFor(sessionId)
   const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
