@@ -83,10 +83,13 @@ describe('normalizeGemini — what must not change', () => {
 
   it('does NOT subscribe to AfterModel — it fires per streamed chunk', () => {
     // reference.md:236-237. One hook process per chunk is a performance defect; the token numbers
-    // come off the transcript instead (Task 3).
+    // come off the transcript instead (Task 3). The other three are left out because they report
+    // no state we render — `BeforeModel` fires once per model request (reference.md:187-190), not
+    // per chunk. All four of gemini's unsubscribed events, spelled out.
     expect(GEMINI_HOOK_EVENTS).not.toContain('AfterModel')
     expect(GEMINI_HOOK_EVENTS).not.toContain('BeforeModel')
     expect(GEMINI_HOOK_EVENTS).not.toContain('BeforeToolSelection')
+    expect(GEMINI_HOOK_EVENTS).not.toContain('PreCompress')
   })
 
   it('subscribes to exactly the seven events we can act on', () => {

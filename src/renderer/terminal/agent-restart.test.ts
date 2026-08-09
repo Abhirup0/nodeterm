@@ -18,12 +18,17 @@ import {
 } from './agent-restart'
 
 describe('exitSequence', () => {
-  it('knows claude, codex and grok, refuses others', () => {
+  it('knows claude, codex, grok and gemini, refuses others', () => {
     expect(exitSequence('claude')).toBe('/exit')
     expect(exitSequence('codex')).toBe('/quit')
     // grok's documented primary is `/quit` (`/exit` is its alias).
     expect(exitSequence('grok')).toBe('/quit')
-    expect(exitSequence('gemini')).toBeNull()
+    // gemini's too (docs/reference/commands.md:325) — and BARE: `/quit --delete` would exit AND
+    // permanently delete the session history we are about to `--resume` into.
+    expect(exitSequence('gemini')).toBe('/quit')
+    expect(exitSequence('gemini')).not.toContain('--delete')
+    // opencode is resumable but we know no way to ask it to quit, so it is still not a target.
+    expect(exitSequence('opencode')).toBeNull()
     expect(exitSequence('my-custom')).toBeNull()
   })
 })
@@ -53,7 +58,12 @@ describe('restartEligibility', () => {
       ok: false,
       reason: 'no-session'
     })
-    expect(restartEligibility('gemini', 'waiting', 'abc')).toEqual({
+    // opencode: resumable, but no exit sequence — so still never a target.
+    expect(restartEligibility('opencode', 'waiting', 'abc')).toEqual({
+      ok: false,
+      reason: 'not-resumable'
+    })
+    expect(restartEligibility('my-custom', 'waiting', 'abc')).toEqual({
       ok: false,
       reason: 'not-resumable'
     })
@@ -285,9 +295,11 @@ describe('performRestartResume', () => {
 
   it('refuses an agent without an exit sequence', async () => {
     const { io } = fakeIo()
+    // opencode is in RESUMABLE_AGENTS but not in EXIT_SEQUENCES: the exit-line table is its own,
+    // independent half of the gate.
     expect(
       await performRestartResume({
-        agentId: 'gemini',
+        agentId: 'opencode',
         sessionId: 's',
         io,
         paneCommand: async () => 'zsh'
@@ -510,6 +522,83 @@ describe('restartEligibility — grok', () => {
   })
 })
 
+describe('performRestartResume — gemini', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('quits with /quit and resumes by session id', async () => {
+    const { written, io } = fakeIo()
+    let pane = 'gemini'
+    const p = performRestartResume({
+      agentId: 'gemini',
+      sessionId: 'abc-1',
+      io,
+      paneCommand: async () => pane,
+      timeoutMs: 6000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(250) // a few polls while the CLI is still up
+    pane = 'zsh'
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('restarted')
+    // `/quit` (alias `/exit`) measured in gemini's bundled docs/reference/commands.md:325.
+    // `\x15` is the kill-line that clears any half-typed prompt first.
+    expect(written.slice(0, 2)).toEqual(['\x15', '/quit\r'])
+    expect(written.join('')).toContain('gemini --resume abc-1')
+  })
+
+  it('never types the history-destroying --delete flag', async () => {
+    // `/quit --delete` exits AND permanently deletes the session's history and temporary files —
+    // the exact conversation the `--resume` on the next line is supposed to return to.
+    const { written, io } = fakeIo()
+    const p = performRestartResume({
+      agentId: 'gemini',
+      sessionId: 'abc-1',
+      io,
+      paneCommand: async () => 'zsh',
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('restarted')
+    expect(written.join('')).not.toContain('--delete')
+  })
+})
+
+describe('restartEligibility — gemini', () => {
+  it('is a target once it has a session id and is not busy', () => {
+    expect(restartEligibility('gemini', 'done', 'abc-1')).toEqual({ ok: true })
+    expect(restartEligibility('gemini', 'waiting', 'abc-1')).toEqual({ ok: true })
+    expect(restartEligibility('gemini', 'done', undefined)).toEqual({
+      ok: false,
+      reason: 'no-session'
+    })
+  })
+
+  it('is refused while the session is working or blocked', () => {
+    // A gemini node genuinely REACHES `blocked` now that its `Notification`/ToolPermission hook is
+    // subscribed, so this refusal is newly reachable rather than theoretical: `/quit` typed into a
+    // permission prompt would ANSWER the prompt instead of quitting the CLI. Before the
+    // EXIT_SEQUENCES entry landed, `not-resumable` short-circuited ahead of BUSY_STATES and this
+    // branch could never be observed for gemini.
+    for (const state of ['working', 'blocked'] as const)
+      expect(restartEligibility('gemini', state, 'abc-1'), state).toEqual({
+        ok: false,
+        reason: 'working'
+      })
+  })
+
+  it('keeps a busy gemini node out of the bulk run', () => {
+    const plan = planBulkRestart([
+      { id: 'idle', agentId: 'gemini', state: 'done', sessionId: 'sid-1', wired: true },
+      { id: 'busy', agentId: 'gemini', state: 'working', sessionId: 'sid-2', wired: true },
+      { id: 'prompt', agentId: 'gemini', state: 'blocked', sessionId: 'sid-3', wired: true }
+    ])
+    expect(plan.runnable).toEqual(['idle'])
+    expect(plan.skipped).toEqual({ working: 2, noSession: 0 })
+  })
+})
+
 describe('performRestartResume — the delivery await is bounded', () => {
   beforeEach(() => {
     vi.resetModules()
@@ -679,7 +768,8 @@ describe('planBulkRestart', () => {
   it('ignores nodes that were never restart targets, instead of counting them as skips', () => {
     const plan = planBulkRestart([
       cand({ id: 'shell', agentId: undefined }), // plain terminal
-      cand({ id: 'gem', agentId: 'gemini' }), // no exit sequence / no --resume
+      cand({ id: 'oc', agentId: 'opencode' }), // resumable, but no exit sequence
+      cand({ id: 'custom', agentId: 'my-custom' }), // neither
       cand({ id: 'a' })
     ])
     expect(plan.runnable).toEqual(['a'])

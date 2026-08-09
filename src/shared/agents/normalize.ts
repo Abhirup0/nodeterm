@@ -346,7 +346,10 @@ export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | nu
     // `blocked` rather than `waiting` for two reasons: normalizeClaude already uses it for a
     // permission ask (every consumer treats the two alike), and BUSY_STATES then refuses an
     // in-place restart on this node — correct, since `/quit` typed into a permission prompt would
-    // ANSWER the prompt instead of quitting.
+    // ANSWER the prompt instead of quitting. That refusal only became REACHABLE for gemini once
+    // gemini joined `EXIT_SEQUENCES` (agent-restart.ts): `restartEligibility` returns
+    // `not-resumable` before it ever consults BUSY_STATES, so until then no gemini node could be
+    // restarted at all, blocked or otherwise.
     //
     // A CLOSED match, not a substring: the docs name exactly ONE type (reference.md:278), and an
     // unknown future one must stay a no-op — a badge that sticks on a finished node is a failure

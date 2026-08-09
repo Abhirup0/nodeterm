@@ -20,8 +20,20 @@ import {
  *  relaunch line comes from `resumeCommand` → `grok --resume <id>`, so one entry here turns on both
  *  surfaces at once: the single-node "Restart agent (resume)" row in the node context menu, and the
  *  bulk "restart idle agents" action (pane menu + command palette). There is no header button for
- *  either — `HIDEABLE_HEADER_BUTTONS` is refresh / mic / ai-name / comments. */
-const EXIT_SEQUENCES: Record<string, string> = { claude: '/exit', codex: '/quit', grok: '/quit' }
+ *  either — `HIDEABLE_HEADER_BUTTONS` is refresh / mic / ai-name / comments.
+ *
+ *  gemini: `/quit` (alias `/exit`), measured in its own bundled
+ *  `docs/reference/commands.md:325`, and relaunched as `gemini --resume <id>`. The command must be
+ *  sent BARE: the same command also takes a `--delete` flag that exits AND *permanently deletes*
+ *  the session's history and temporary files. A restart that ever typed `/quit --delete` would
+ *  destroy the very conversation the `--resume` behind it is meant to return to, so nothing may
+ *  append arguments to a value in this table. */
+const EXIT_SEQUENCES: Record<string, string> = {
+  claude: '/exit',
+  codex: '/quit',
+  grok: '/quit',
+  gemini: '/quit'
+}
 
 export function exitSequence(agentId: string): string | null {
   return EXIT_SEQUENCES[agentId] ?? null
@@ -41,7 +53,8 @@ export type IneligibleReason = 'working' | 'no-session' | 'not-resumable'
 
 /** States in which the pane must be left alone. `blocked` is here for a sharper reason than
  *  politeness: it means a permission / question dialog owns the prompt (see normalize.ts —
- *  Claude's PermissionRequest, codex's permission.asked / question.asked), so writing `/exit`
+ *  Claude's PermissionRequest, codex's permission.asked / question.asked, gemini's
+ *  Notification/ToolPermission), so writing `/exit`
  *  would be typed AS THE ANSWER to that dialog instead of quitting the CLI. Both states report
  *  the reason `'working'`: to the user they are the same "busy, try again in a moment". */
 const BUSY_STATES = new Set(['working', 'blocked'])
