@@ -174,14 +174,32 @@ describe('RemoteHooks.setup', () => {
 })
 
 describe('RemoteHooks.setup — grok', () => {
+  // The host's $GROK_HOME is deliberately a path the `$HOME/.grok` fallback could NEVER produce.
+  // With the two byte-identical (`$HOME: /home/dev` + `GROK_HOME: /home/dev/.grok`) the whole
+  // resolution — probe, validation, override — can be deleted for `${home}/.grok` and every
+  // assertion still passes. The `/home/dev/.grok` negative assertions are what make that fail.
+  const GROK_EVENTS = [
+    'Notification',
+    'PostToolUse',
+    'PostToolUseFailure',
+    'PreToolUse',
+    'SessionEnd',
+    'SessionStart',
+    'Stop',
+    'StopFailure',
+    'UserPromptSubmit'
+  ]
+
   it('writes our hook file under the HOST\'s $GROK_HOME with the `.*` tool matcher', async () => {
     const { rh, conn, runs } = harness({
       // The host answers $HOME first (existing behavior), then its own $GROK_HOME.
-      responses: { '$HOME': '/home/dev', 'GROK_HOME': '/home/dev/.grok' }
+      responses: { '$HOME': '/home/dev', 'GROK_HOME': '/opt/grok-home' }
     })
     await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
-    const write = runs.find((r) => r.cmd.includes('/home/dev/.grok/hooks/nodeterm-status.json') && r.stdin)
+    const write = runs.find((r) => r.cmd.includes('/opt/grok-home/hooks/nodeterm-status.json') && r.stdin)
     expect(write).toBeTruthy()
+    // The HOST's answer wins outright: nothing may touch the $HOME/.grok default.
+    expect(runs.some((r) => r.cmd.includes('/home/dev/.grok'))).toBe(false)
     const cfg = JSON.parse(write!.stdin!)
     expect(cfg.hooks.PreToolUse[0].matcher).toBe('.*')
     expect(cfg.hooks.Stop[0].matcher).toBeUndefined()
@@ -191,6 +209,20 @@ describe('RemoteHooks.setup — grok', () => {
     expect(script!.stdin).toContain('/hook/grok')
   })
 
+  it('trims the probe answer, so a trailing newline still resolves to the host path', async () => {
+    // `printf %s` should emit no newline, but a shell wrapper or a login-shell banner can add one —
+    // and `isSafeRemoteGrokHome` REFUSES an untrimmed string by design (an embedded newline is a
+    // command separator). Without the trim at the read site every host silently gets the fallback.
+    const { rh, conn, runs } = harness({
+      responses: { '$HOME': '/home/dev', 'GROK_HOME': '/opt/grok-home\n' }
+    })
+    await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
+    expect(runs.some((r) => r.cmd.includes("'/opt/grok-home/hooks/nodeterm-status.json'"))).toBe(true)
+    expect(runs.some((r) => r.cmd.includes('/home/dev/.grok'))).toBe(false)
+    // and no raw newline survives into any remote command line.
+    expect(runs.some((r) => r.cmd.includes('/opt/grok-home\n'))).toBe(false)
+  })
+
   it('falls back to $HOME/.grok when the host reports an unusable GROK_HOME', async () => {
     const { rh, conn, runs } = harness({ responses: { '$HOME': '/home/dev', 'GROK_HOME': 'relative/oops' } })
     await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
@@ -198,13 +230,31 @@ describe('RemoteHooks.setup — grok', () => {
     expect(runs.some((r) => r.cmd.includes('relative/oops'))).toBe(false)
   })
 
-  it('never clobbers a present-but-malformed remote hook file', async () => {
+  it('HEALS a present-but-malformed remote hook file (the file is ours to rewrite)', async () => {
+    // The opposite of the codex/AGENT_TARGETS guard, on purpose: `nodeterm-status.json` is a file
+    // WE own by name and rewrite wholesale, so there is no user content to preserve — and skipping
+    // the write would leave that host's grok nodes dark forever with no in-app repair. The local
+    // installer (installHooksInto) already heals; this matches it.
     const { rh, conn, runs } = harness({
-      responses: { '$HOME': '/home/dev', 'GROK_HOME': '/home/dev/.grok', 'nodeterm-status.json': '{ oops' }
+      responses: { '$HOME': '/home/dev', 'GROK_HOME': '/opt/grok-home', 'nodeterm-status.json': '{ oops' }
     })
     await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
     const write = runs.find((r) => r.cmd.includes('cat > ') && r.cmd.includes('nodeterm-status.json'))
-    expect(write).toBeUndefined()
+    expect(write).toBeTruthy()
+    const cfg = JSON.parse(write!.stdin!)
+    expect(Object.keys(cfg.hooks).sort()).toEqual(GROK_EVENTS)
+  })
+
+  it('quotes the remote dirname, so a $GROK_HOME containing a space still installs', async () => {
+    // isSafeRemoteGrokHome deliberately permits spaces. An unquoted `mkdir -p $(dirname '…')`
+    // word-splits into two args, never creates the directory, and the correctly-quoted `cat >`
+    // then fails — fail-open, so the only symptom is a host with no hooks and no diagnostic.
+    const { rh, conn, runs } = harness({
+      responses: { '$HOME': '/home/dev', 'GROK_HOME': '/opt/my grok' }
+    })
+    await rh.setup('p1', conn, '/s.sock', { port: 1234, token: 't', version: '1' })
+    const write = runs.find((r) => r.cmd.includes('cat > ') && r.cmd.includes('nodeterm-status.json'))
+    expect(write!.cmd).toContain(`mkdir -p "$(dirname '/opt/my grok/hooks/nodeterm-status.json')"`)
   })
 
   it('a grok failure never breaks the connect (fail open)', async () => {

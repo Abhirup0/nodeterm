@@ -252,6 +252,11 @@ export class RemoteHooks {
    * $HOME-relative when the host sets GROK_HOME — which we therefore ASK THE HOST for, and
    * validate, because a host-reported string is data and not truth.
    *
+   * Because the file is ours outright, an unparseable one is HEALED (parse error → `{}` → write our
+   * fresh config), exactly as the local installer does (`installHooksInto`). Skipping the write
+   * instead — the guard codex and the AGENT_TARGETS loop need, because those write the USER's
+   * files — would leave a host's grok nodes permanently dark with no in-app repair.
+   *
    * Fail-open at every step: a remote grok session simply runs without status hooks.
    */
   private async installGrokRemote(
@@ -267,8 +272,12 @@ export class RemoteHooks {
       // Trim at the READ site: isSafeRemoteGrokHome judges the exact string we would go on to
       // interpolate into a remote command line, so it (correctly) refuses an untrimmed value.
       const reported = rawHome.trim()
-      const grokHome = isSafeRemoteGrokHome(reported) ? reported.replace(/\/+$/, '') : `${home}/.grok`
-      const config = `${grokHome}/hooks/${GROK_HOOK_FILE}`
+      // `|| '/'`: a host that genuinely reports `/` means `/`, and letting the strip leave `''`
+      // would make `grokHome` a value no host ever said.
+      const stripped = reported.replace(/\/+$/, '') || '/'
+      const grokHome = isSafeRemoteGrokHome(reported) ? stripped : `${home}/.grok`
+      // Joined so the separator is never doubled (`//hooks` is implementation-defined in POSIX).
+      const config = `${grokHome.replace(/\/$/, '')}/hooks/${GROK_HOOK_FILE}`
       const script = `${remoteDir}/agent-hooks/grok.sh`
 
       await this.r.run(
@@ -279,15 +288,23 @@ export class RemoteHooks {
         ),
         buildManagedScript('grok')
       )
-      // `|| echo '{}'` fires ONLY when the file is missing, so a present-but-malformed file reaches
-      // JSON.parse and throws → we skip the write and leave the host's file alone.
+      // `|| echo '{}'` fires ONLY when the file is missing — still the read that distinguishes a
+      // missing file from an unreadable one. An unreadable one is then HEALED, not preserved: this
+      // file is ours by name and we rewrite it wholesale, so there is no user content to lose.
       const { stdout: cfgRaw } = await this.r.run(
         childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
       )
-      const cfg = JSON.parse(cfgRaw || '{}') as HookSettings
+      let cfg: HookSettings = {}
+      try {
+        cfg = JSON.parse(cfgRaw || '{}') as HookSettings
+      } catch {
+        cfg = {}
+      }
       const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), GROK_HOOK_EVENTS)
+      // The `$(dirname …)` is QUOTED: a valid $GROK_HOME may contain spaces, which would otherwise
+      // word-split into two mkdir args, leave the directory absent, and fail the quoted `cat >`.
       await this.r.run(
-        childArgs(conn, controlPath, `mkdir -p $(dirname ${posixQuote(config)}) && cat > ${posixQuote(config)}`),
+        childArgs(conn, controlPath, `mkdir -p "$(dirname ${posixQuote(config)})" && cat > ${posixQuote(config)}`),
         JSON.stringify(merged, null, 2)
       )
     } catch {
