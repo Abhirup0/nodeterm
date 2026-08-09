@@ -4672,7 +4672,7 @@ export function Canvas() {
             const n = nodesRef.current.find((x) => x.id === ids[0])
             const st = useAgentStatus.getState().byId[ids[0]]
             const gate = restartEligibility(restartAgentIdOf(n), st?.state, st?.sessionId)
-            // 'not-resumable' is permanent (a plain shell, gemini, a custom CLI with no exit
+            // 'not-resumable' is permanent (a plain shell, opencode, a custom CLI with no exit
             // command) — no row at all. The other two are temporary, so the row stays and says
             // what to wait for instead of disappearing and teaching nothing.
             if (!gate.ok && gate.reason === 'not-resumable') return []
