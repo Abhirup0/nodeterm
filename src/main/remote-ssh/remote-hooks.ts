@@ -1,11 +1,13 @@
 // Connection-time remote hook setup for SSH projects: opens the reverse unix-socket tunnel
 // (local loopback hook server → remote socket), writes the owner-only remote endpoint file,
 // and installs the managed hook into the remote agent configs (claude + gemini JSON settings,
-// plus codex's hooks.json + config.toml trust). Every step fails open: any remote failure →
-// setup returns null (or, for codex, the agent simply runs without status). Takes an INJECTED
-// runner so the flow is unit-testable without real ssh/electron.
+// codex's hooks.json + config.toml trust, and grok's own file inside the host's hooks directory).
+// Every step fails open: any remote failure → setup returns null (or, for codex/grok, that agent
+// simply runs without status). Takes an INJECTED runner so the flow is unit-testable without real
+// ssh/electron.
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
-import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS } from '@shared/agents/hook-events'
+import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS, GROK_HOOK_EVENTS } from '@shared/agents/hook-events'
+import { GROK_HOOK_FILE, isSafeRemoteGrokHome } from '../../core/agents/grok-paths'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 import { buildManagedHookCommand, mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
 import {
@@ -43,7 +45,8 @@ export interface RemoteRunner {
 
 // Per-agent remote install targets (JSON-settings agents merged via mergeManagedHook). Codex
 // is installed separately (installCodexRemote) because it needs a hooks.json merge PLUS a
-// config.toml trust write — see that method.
+// config.toml trust write — see that method. Grok is separate too (installGrokRemote): its config
+// path is NOT $HOME-relative when the host sets GROK_HOME, which is exactly what this list assumes.
 // Paths are relative to the remote $HOME and are made absolute once it is resolved at setup
 // (a literal `~` is NOT expanded inside double quotes or when passed as data, so the merged
 // hook command / endpoint file / `-R` bind path would otherwise carry an unexpanded tilde).
@@ -145,6 +148,8 @@ export class RemoteHooks {
       }
       // 4. codex: hooks.json merge + config.toml trust (its own shape — not a JSON-settings agent).
       await this.installCodexRemote(conn, controlPath, home, remoteDir)
+      // 5. grok: our own file in its hooks DIRECTORY, under the HOST's $GROK_HOME.
+      await this.installGrokRemote(conn, controlPath, home, remoteDir)
       return { endpointPath: endpoint }
     } catch {
       return null // fail-open: agent runs without hooks
@@ -237,6 +242,56 @@ export class RemoteHooks {
       }
     } catch {
       /* fail-open: the remote codex session simply runs without status hooks */
+    }
+  }
+
+  /**
+   * Install the managed grok status hook on the REMOTE host. Grok differs from claude/gemini in two
+   * ways that keep it out of AGENT_TARGETS: its config lives in a hooks DIRECTORY (we own one file
+   * there outright, so nothing of the user's is at risk inside it), and its path is not
+   * $HOME-relative when the host sets GROK_HOME — which we therefore ASK THE HOST for, and
+   * validate, because a host-reported string is data and not truth.
+   *
+   * Fail-open at every step: a remote grok session simply runs without status hooks.
+   */
+  private async installGrokRemote(
+    conn: SshConnection,
+    controlPath: string,
+    home: string,
+    remoteDir: string
+  ): Promise<void> {
+    try {
+      const { stdout: rawHome } = await this.r.run(
+        childArgs(conn, controlPath, 'printf %s "${GROK_HOME:-}"')
+      )
+      // Trim at the READ site: isSafeRemoteGrokHome judges the exact string we would go on to
+      // interpolate into a remote command line, so it (correctly) refuses an untrimmed value.
+      const reported = rawHome.trim()
+      const grokHome = isSafeRemoteGrokHome(reported) ? reported.replace(/\/+$/, '') : `${home}/.grok`
+      const config = `${grokHome}/hooks/${GROK_HOOK_FILE}`
+      const script = `${remoteDir}/agent-hooks/grok.sh`
+
+      await this.r.run(
+        childArgs(
+          conn,
+          controlPath,
+          `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
+        ),
+        buildManagedScript('grok')
+      )
+      // `|| echo '{}'` fires ONLY when the file is missing, so a present-but-malformed file reaches
+      // JSON.parse and throws → we skip the write and leave the host's file alone.
+      const { stdout: cfgRaw } = await this.r.run(
+        childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
+      )
+      const cfg = JSON.parse(cfgRaw || '{}') as HookSettings
+      const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), GROK_HOOK_EVENTS)
+      await this.r.run(
+        childArgs(conn, controlPath, `mkdir -p $(dirname ${posixQuote(config)}) && cat > ${posixQuote(config)}`),
+        JSON.stringify(merged, null, 2)
+      )
+    } catch {
+      /* fail-open: the remote grok session simply runs without status hooks */
     }
   }
 
