@@ -7622,6 +7622,13 @@ body,
   display: flex;
   flex-direction: column;
 }
+/* Flipped up when the column sits near the window's bottom edge (see KanbanColumn's layout effect). */
+.kanban-col__newmenu--up {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: 4px;
+}
 .kanban-col__newmenu button {
   display: flex;
   align-items: center;
