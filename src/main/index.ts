@@ -1,6 +1,6 @@
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { readSessionName as readSessionNameForSweep } from '../core/transcript-reader'
+import { readAgentSessionName } from '../core/agent-session-name'
 import { canRename, type AgentId } from '@shared/agents/config'
 import { readFile } from 'fs/promises'
 import { homedir, hostname } from 'os'
@@ -74,13 +74,8 @@ import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
+import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
 import {
-  forgetGrokSession,
-  readGrokSessionName,
-  rememberGrokSessionDir
-} from '../core/grok-session'
-import {
-  readSessionName,
   setRemoteTranscriptReader,
   TITLE_TAIL_BYTES,
   SESSION_ID_RE
@@ -552,16 +547,14 @@ app.whenReady().then(async () => {
     ptyManager.captureSession(persistKey, full)
   )
 
-  // The reader is selected by the NODE's agent, so neither reader ever searches the other's tree:
-  // grok keeps its session name in its own metadata (summary.json, in a directory derived from the
-  // hook's cwd + sessionId), claude keeps it in a transcript .jsonl. `agentId` is a TRAILING
-  // optional argument, so every pre-grok caller resolves through the claude reader unchanged.
+  // The reader is selected by the NODE's agent (core/agent-session-name.ts — the one copy of that
+  // rule, shared with the sweep below and with the Server Edition), so neither reader ever searches
+  // the other's tree. `agentId` is a TRAILING optional argument, so every pre-grok caller resolves
+  // through the claude reader unchanged.
   corePlatform.handle(
     IPC.ptyReadSessionName,
     (sessionId: string, accountId?: string, agentId?: string) =>
-      agentId === 'grok'
-        ? readGrokSessionName(sessionId ?? '')
-        : readSessionName(sessionId ?? '', accountId)
+      readAgentSessionName(sessionId ?? '', accountId, agentId)
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
@@ -848,7 +841,10 @@ app.whenReady().then(async () => {
       const n = workspaceStore.getNode(nodeId)
       return n ? { accountId: n.accountId, titleAuto: n.titleAuto } : undefined
     },
-    resolve: (sessionId, accountId) => readSessionNameForSweep(sessionId, accountId),
+    // Same router the IPC handler above uses — the sweep sees every RENAME_CAPABLE agent, so
+    // resolving a grok node through claude's reader would scan ~/.claude/projects once a minute
+    // for an id that can never be there.
+    resolve: readAgentSessionName,
     publish: setNodeSessionName,
     supports: (agentId) => !!agentId && canRename(agentId as AgentId)
   })
