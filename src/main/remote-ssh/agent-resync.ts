@@ -9,7 +9,7 @@
 // orchestration only: the judgement is the pure `decideNode` (core/remote-ssh/agent-resync-decide),
 // and every side effect is an injected dep.
 
-import { decideNode } from '../../core/remote-ssh/agent-resync-decide'
+import { decideFromPane, decideNode } from '../../core/remote-ssh/agent-resync-decide'
 import { sessionName } from '../../core/tmux-naming'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import type { AgentId } from '@shared/agents/config'
@@ -66,6 +66,11 @@ export async function resyncProjectAgents(deps: AgentResyncDeps): Promise<string
   } catch {
     return ended // no list ⇒ nothing to repair, and still not a rejection for the reconnect path
   }
+
+  // Nothing believed working ⇒ nothing to repair, and the listing below is an ssh exec. "Nothing
+  // working" is the COMMON case on a reconnect, so asking the host first would spend a remote round
+  // trip per reconnect per SSH project to learn something we already knew.
+  if (working.length === 0) return ended
 
   // ONE listing for the whole project, and a failed listing repairs nothing: an empty set matches
   // no node, which is the same safe direction as every other failed probe here.
@@ -132,7 +137,11 @@ async function probe(run: () => Promise<string | null>): Promise<string | null> 
   }
 }
 
-/** Did the pane probe settle it by itself? Mirrors decideFromPane's 'ended' branch. */
+/**
+ * Did the pane probe settle it by itself? Asks `decideFromPane` directly — that IS the question,
+ * and going through `decideNode` would make the answer depend on an internal ordering (its
+ * pane-first short circuit) rather than on the pane verdict itself.
+ */
 function isDecisivePane(pane: string | null): boolean {
-  return decideNode(pane, null) === 'ended'
+  return decideFromPane(pane) === 'ended'
 }

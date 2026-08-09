@@ -123,6 +123,16 @@ describe('resyncProjectAgents', () => {
     expect(d.emitted).toEqual([])
   })
 
+  it('does not list the host sessions when nothing is working', async () => {
+    // "Nothing working" is the common case on a reconnect, and the listing is an ssh exec: paying
+    // for one per reconnect per SSH project would buy nothing at all.
+    const hostSessionNames = vi.fn(async () => new Set<string>())
+    const d = deps({ workingNodes: () => [], hostSessionNames })
+
+    expect(await resyncProjectAgents(d)).toEqual([])
+    expect(hostSessionNames).not.toHaveBeenCalled()
+  })
+
   it('lists the host sessions once, however many nodes are working', async () => {
     // One ssh round trip for the whole project: the list is a project-level fact, and paying for it
     // per node would multiply the reconnect's remote traffic by the size of the canvas.
