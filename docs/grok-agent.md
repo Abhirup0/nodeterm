@@ -316,7 +316,7 @@ ai-name / comments).
 | Context meter | **not implemented for grok** (§1) | idem | idem |
 | Managed accounts | **deliberately N/A** — accounts are a claude config-dir mechanism. `createAgentNode` never stamps an `accountId` onto a non-claude node, and `CLAUDE_CONFIG_DIR` is irrelevant to `~/.grok/hooks`. A grok node in a managed-account project must still report status (checklist 7) | idem | idem |
 | Brand logo | the **official** xAI mark, INLINED in `agentIcons.tsx` as `GrokMark` rather than shipped as an asset — it is a single monochrome path, so `fill="currentColor"` inherits the label colour and is correct in both themes. The other four marks are multi-colour and stay `<img src>` assets, where `currentColor` cannot inherit | same component, for free | the phone draws its own icons — **follow-up owed** |
-| Notch mascot | yes — its own mid-slate (`#8494a8`) critter through the shared `buildQuadrantSprite`; the CSS rule block is *shared* with claude's, so the geometry cannot drift | **N/A** — there is no notch there; the canvas badge mascot works | the phone has its own SwiftUI renderer |
+| Working indicator | the **brand mark, breathing** — no critter. `AgentMascot` renders the same `GrokMark` the menus use, pulsing with a `currentColor` drop-shadow bloom, and the notch strip builds the identical glyph from `lib/grokMark.ts` (`createGrokMarkSvg`), so one agent is never two things on two surfaces | **N/A** — no notch there; the canvas badge indicator works | the phone has its own SwiftUI renderer |
 | Fullscreen TUI setting | **N/A** — grok runs full-screen by default, so `claude-tui.ts` has no grok analogue | idem | idem |
 | Deterministic hook-reply approvals (phone Approve/Deny) | **claude-only** — `pty-manager` arms `NODETERM_PERM_WAIT_SECS` only for claude, and grok does not subscribe `PermissionRequest` at all | idem | a grok node's approvals are not answerable from the phone |
 | Kanban card + card modal | badges and the 💬 comments panel work (derived from the same nodes and the same status store); the meter row has nothing to show for grok | same | the iOS board is a separate read/move mirror |
@@ -516,7 +516,8 @@ Surfaces
     confirm the node title does NOT adopt grok's session name there (readSessionName is stubbed).
 28. Phone: does a grok node appear in the inbox with the right state? Its "what it's doing now"
     activity line will be absent (§8.3).
-29. macOS notch: does the grok mascot walk while it works?
+29. macOS notch: does the grok mark pulse and bloom while it works, on the black capsule, next to
+    claude's walking critter without looking out of place?
 30. Kanban board + card modal: badges and the 💬 comments panel on a grok card (the meter row has
     nothing to show).
 
@@ -547,7 +548,10 @@ Two traps with no code fix — appended so the numbering above stays stable
     `fill="currentColor"` (§8.8), so readability is guaranteed by construction — it takes the label
     colour, black-on-light and white-on-dark, the way xAI uses it. What is *not* guaranteed is
     legibility at that size: it is a fine diagonal glyph, and thin strokes can turn to mush where the
-    other four marks (heavier, multi-colour) do not. Look at the pane submenu, the Dock `+`, the
+    other four marks (heavier, multi-colour) do not. **The same glyph is also the RUNNING indicator**
+    (§7, pulsing with a bloom), so check it there too, in both themes — the badge sits on
+    `--panel-header`, which is the light surface where a `currentColor` bloom has the least to work
+    with. Look at the pane submenu, the Dock `+`, the
     command palette and Settings → Agents, and flip the theme. If it reads as a smudge, the fix is a
     size-specific viewBox nudge, not a colour change.
 ```

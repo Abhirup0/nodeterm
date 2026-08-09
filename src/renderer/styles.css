@@ -1313,14 +1313,44 @@ body,
 
 /* Claude: coral pixel critter, 2-frame walk (~2.5 steps/s ⇒ 0.8s/cycle) + an alternating bob.
    steps(1) holds each keyframe's value across its segment, giving two discrete frame+bob states. */
-/* Claude and Grok are both quadrant-block sprites from lib/mascot.ts: same 2-frame sheet, same
-   display geometry, so they share one rule block — the numbers must never be forked. */
-.term-node__mascot--claude,
-.term-node__mascot--grok {
+.term-node__mascot--claude {
   width: var(--mascot-w);
   height: var(--mascot-h);
   background-size: calc(var(--mascot-w) * 2) var(--mascot-h);
   animation: mascot-walk-claude 0.8s steps(1) infinite;
+}
+
+/* Grok has no critter: its RUNNING indicator is the brand mark itself, breathing. Deliberately NOT
+   a sprite — the glyph is an inline SVG painted in `currentColor`, so the bloom is a drop-shadow of
+   that same colour and needs no ink of its own. That is what makes it correct in both themes: the
+   halo is light-on-dark and dark-on-light, exactly like the mark. A fixed glow colour would have
+   vanished into one of the two backgrounds. */
+.term-node__mascot--grok {
+  animation: mascot-pulse-grok 1.6s ease-in-out infinite;
+}
+
+@keyframes mascot-pulse-grok {
+  0%,
+  100% {
+    opacity: 0.55;
+    filter: none;
+  }
+  50% {
+    opacity: 1;
+    /* Two shadows, tight + wide: the tight one keeps the thin diagonal strokes from washing out at
+       16px, the wide one is the actual bloom. */
+    filter: drop-shadow(0 0 1px currentColor) drop-shadow(0 0 4px currentColor);
+  }
+}
+
+/* Same contract the presence chip follows: motion is decoration, the state must still read without
+   it. Frozen at the lit end of the cycle, so a working grok node looks awake rather than dimmed. */
+@media (prefers-reduced-motion: reduce) {
+  .term-node__mascot--grok {
+    animation: none;
+    opacity: 1;
+    filter: drop-shadow(0 0 1px currentColor);
+  }
 }
 
 @keyframes mascot-walk-claude {

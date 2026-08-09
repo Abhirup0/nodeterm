@@ -131,46 +131,6 @@ export const CLAUDE_MASCOT = {
   frameCount: CLAUDE_FRAMES.length
 }
 
-// --- Grok critter ---------------------------------------------------------------------------
-
-/**
- * The sprite color — a MID-tone, deliberately not the node color and not a light slate.
- *
- * The badge is NOT on the canvas: `AgentMascot` renders inside `.term-node__status` in the node
- * HEADER, whose background is `--panel-header` — `#323232` in the dark theme but `#eae5db` in the
- * LIGHT one. So the sprite has to survive both, plus the notch capsule (`--capsule-bg: #000`).
- * One color, chosen to match Claude coral's balance across the two themes rather than to win on
- * either (measured contrast vs `--panel-header` dark / light / vs the notch black):
- *   coral #d97757 → 4.11 / 2.49 / 6.73      this #8494a8 → 4.14 / 2.47 / 6.78
- * A light slate-300 measures 8.64 dark but 1.18 LIGHT — a ghost in a shipped theme, which is why
- * it is not used here. Single color on purpose: the component sets `background-image` inline, so a
- * CSS `[data-theme]` override could not win, and two sprites is more machinery than this needs.
- */
-export const GROK_COLOR = '#8494a8'
-
-/**
- * Grok's two walk frames. A different silhouette from Claude's rounded blob — narrower body with
- * two raised antennae that swap sides between frames, so it bobs as it walks. Composed only from
- * the quadrant characters in QUADRANT_BITS (there is no half-block ▀/▄ in that table).
- */
-export const GROK_FRAME_ART: readonly string[][] = [
-  ['▘ ▐███▌ ▝', ' ▙█████▟ ', '  ▘▘ ▝▝  '],
-  ['▝ ▐███▌ ▘', ' ▙█████▟ ', '  ▝▝ ▘▘  ']
-]
-
-/** The two decoded grok walk frames. */
-export const GROK_FRAMES: MascotBitmap[] = GROK_FRAME_ART.map(decodeFrame)
-
-/** Grok walk spritesheet — same grid and display geometry as Claude's, so the CSS walk animation
- *  (`steps(1)` over three keyframes) and the HUD sizing math are shared verbatim. */
-export const GROK_MASCOT = {
-  /** data: URI PNG, or '' outside a DOM (tests). */
-  src: buildQuadrantSprite(GROK_FRAMES, GROK_COLOR),
-  frameWidth: CLAUDE_FRAME_WIDTH,
-  frameHeight: CLAUDE_FRAME_HEIGHT,
-  frameCount: GROK_FRAMES.length
-}
-
 // --- "Done, unseen" pixel blob (Notch HUD) -------------------------------------------------
 //
 // agent-notch draws a shimmering green blob on a 7×7 grid of crisp pixels for a finished-but-

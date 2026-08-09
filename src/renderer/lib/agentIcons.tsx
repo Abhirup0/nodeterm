@@ -4,6 +4,7 @@ import codexIcon from '../assets/codex-color.svg'
 import geminiIcon from '../assets/gemini-color.svg'
 import opencodeIcon from '../assets/opencode.svg'
 import { IconTerminal } from '../components/icons'
+import { GROK_MARK_PATH, GROK_MARK_VIEWBOX } from './grokMark'
 
 // Brand logo per builtin agent; custom/unknown agents fall back to the terminal glyph.
 //
@@ -19,35 +20,31 @@ const AGENT_LOGO: Partial<Record<string, string>> = {
 }
 
 /**
- * The official Grok mark (xAI), inlined rather than shipped as an asset.
+ * The official Grok mark (xAI), inlined rather than shipped as an asset — geometry from
+ * `lib/grokMark.ts`, which the notch HUD's imperative renderer shares.
  *
- * It is a SINGLE monochrome path, and the vendor's own usage is one ink that flips with the
- * background — black on light, white on dark. Inlining is what buys us that: `fill="currentColor"`
- * inherits the surrounding label colour, so the mark is correct in both themes with one copy and no
- * arbitrary recolour. As an `<img src>` it could not (an SVG in an `<img>` is an isolated document,
- * so `currentColor` resolves against nothing and paints black — invisible on the dark theme, which
- * is the default).
- *
- * `viewBox` is the mark's own 512×492, NOT square: with the default `preserveAspectRatio` the glyph
- * scales to fit a `size`×`size` box and stays centred, so it is never stretched. Do not "tidy" the
- * viewBox to 512×512.
+ * `className` is how the RUNNING badge reuses this exact glyph as its "working" indicator (it
+ * pulses and blooms instead of walking — grok has no critter; see AgentMascot).
  */
-function GrokMark({ size }: { size: number }): React.JSX.Element {
+export function GrokMark({
+  size,
+  className
+}: {
+  size: number
+  className?: string
+}): React.JSX.Element {
   return (
     <svg
       width={size}
       height={size}
-      viewBox="0 0 512 492"
+      viewBox={GROK_MARK_VIEWBOX}
       fill="currentColor"
       xmlns="http://www.w3.org/2000/svg"
       aria-hidden
+      className={className}
       style={{ display: 'block' }}
     >
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M197.76 315.52l170.197-125.803c8.342-6.186 20.267-3.776 24.256 5.803 20.907 50.539 11.563 111.253-30.08 152.939-41.621 41.685-99.562 50.816-152.512 29.994l-57.834 26.816c82.965 56.768 183.701 42.731 246.656-20.33 49.941-50.006 65.408-118.166 50.944-179.627l.128.149c-20.971-90.282 5.162-126.378 58.666-200.17 1.28-1.75 2.56-3.499 3.819-5.291l-70.421 70.507v-.214l-243.883 245.27m-35.072 30.528c-59.563-56.96-49.28-145.088 1.515-195.926 37.568-37.61 99.136-52.97 152.874-30.4l57.707-26.666a166.554 166.554 0 00-39.019-21.334 191.467 191.467 0 00-208.042 41.942c-54.038 54.101-71.04 137.301-41.856 208.298 21.802 53.056-13.931 90.582-49.92 128.47C23.104 463.915 10.304 477.333 0 491.541l162.56-145.386"
-      />
+      <path fillRule="evenodd" clipRule="evenodd" d={GROK_MARK_PATH} />
     </svg>
   )
 }
