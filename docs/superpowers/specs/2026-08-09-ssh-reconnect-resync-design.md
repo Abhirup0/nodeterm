@@ -41,6 +41,13 @@ the user actually notices, which is when the banner says `connecting`.
   deliberately out of scope: it needs delivery ordering, idempotency, and a spool lifecycle in a
   shell script that runs in every remote agent session. Part A gets the user the answer they want
   (did it finish?) without any of that.
+- **No repair across an app restart.** The candidate list is `agentStatusMirror.workingNodes()`, and
+  the mirror's state map is in-memory only (`src/core/agent-status-mirror.ts`, the `state` Map), so
+  after a relaunch nothing is `working` and the resync is a no-op — an agent that finished while the
+  app was down is never rescued by it. That is consistent rather than wrong (the renderer's badge is
+  equally empty after a restart, so no surface is showing a stale `working` to contradict), and
+  fixing it would mean persisting believed-working nodes across restarts and then trusting that
+  file — a decision this part deliberately does not take.
 - **No change to the 20-minute stale sweep.** It stays as the last-resort safety net, unchanged.
 - **No new UI.** The existing badge / notch row / notification are the whole surface.
 
