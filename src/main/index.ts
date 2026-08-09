@@ -1445,12 +1445,13 @@ app.whenReady().then(async () => {
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
   hookServer.setRawListener((agentId, nodeId, payload) => {
     if (agentId === 'grok') {
-      // grok's envelope carries no transcript_path — its transcript is DERIVED from (cwd,
-      // sessionId), which Tasks 5/10 use. All this branch can do correctly is the association the
-      // phone's context ring and the ⌘K session lookup read, plus the activity line (through
-      // grokRawFields, so the two dialects are read in exactly one place).
+      // All this branch does is remember the node↔session association that the phone's context
+      // ring and the ⌘K session lookup read. Everything else the claude path does below hangs off
+      // `transcript_path`, and grok's envelope has none — its transcript is DERIVED from (cwd,
+      // sessionId), so the context tail, the subagent tails and the transcript readers arrive in
+      // Tasks 4/5/10. Read through `grokRawFields` so grok's two field dialects (camelCase and the
+      // SDK's snake_case) are decoded in exactly one place.
       const g = grokRawFields(payload)
-      recordRawToolEvent(nodeId, { tool_name: g.toolName, tool_input: g.toolInput })
       if (nodeId && g.sessionId) nodeContextSession.set(nodeId, g.sessionId)
       return
     }

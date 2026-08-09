@@ -3,6 +3,12 @@
 // copies of a path rule is exactly what made the remote hook installer subscribe gemini to
 // claude's event names for months.
 //
+// NODE-SIDE shared code: it imports `path`/`os` and uses `Buffer`, so it is for `src/main`,
+// `src/core`, `src/server` and the SSH installer only — it has no renderer consumer today. A
+// renderer surface that needs one of these helpers must first split the pure half out (the
+// encoding/validation functions are pure; `grokHomeDir`/`grokSessionsDir` are not, they read
+// `homedir()`), not import this file into the browser bundle.
+//
 // Measured layout (shipped 1.0.0):
 //   $GROK_HOME/hooks/*.json                     — hook files, all merged; GROK_HOME defaults to ~/.grok
 //   $GROK_HOME/sessions/<encoded cwd>/<id>/     — one directory per session, grouped by cwd
@@ -73,7 +79,7 @@ export function grokSessionDir(a: { sessionsDir: string; cwd: string; sessionId:
  *  character is usable, and the caller falls back to `$HOME/.grok`. */
 export function isSafeRemoteGrokHome(p: string | undefined): boolean {
   const v = p?.trim()
-  if (!v || v !== p?.trim()) return false
+  if (!v) return false
   if (!v.startsWith('/') || v.includes('\\') || v.length > REMOTE_HOME_MAX) return false
   return !Array.from(v).some((ch) => {
     const c = ch.charCodeAt(0)
