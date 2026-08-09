@@ -14,6 +14,20 @@ import { sessionName } from '../../core/tmux-naming'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import type { AgentId } from '@shared/agents/config'
 
+/**
+ * How much of a remote transcript the resync reads — a SMALL tail, deliberately.
+ *
+ * This is not a transcript to display, it is a verdict on the last few records, and
+ * `decideFromTranscriptTail` is built for exactly that: it only tracks tool calls opened INSIDE the
+ * window, so anything older cannot pin the verdict. Hand it the read path's 5 MB cap instead and
+ * that premise collapses — one stale unmatched `tool_use` from hours earlier in a long session
+ * reads as `working` forever, and the sessions with the biggest transcripts are precisely the ones
+ * whose badge the user most wants repaired. 64 KB comfortably holds the last few records (the
+ * title poll's TITLE_TAIL_BYTES is the same order of magnitude) while staying cheap enough to pull
+ * per working node, over a link that just proved flaky, on a watchdog that retries every 45s.
+ */
+export const RESYNC_TRANSCRIPT_TAIL_BYTES = 64 * 1024
+
 export interface AgentResyncDeps {
   /** Nodes the mirror still believes are working (agent-status-mirror.workingNodes). */
   workingNodes: () => { nodeId: string; agentId?: string; sessionId?: string }[]

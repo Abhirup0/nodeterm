@@ -140,7 +140,7 @@ import { connectRelayClient, type RelayClientSession } from './remote/relay-clie
 import { decodeOffer } from './remote/pairing'
 import { loadOrCreatePeerKeyPair } from './remote/peer-identity'
 import { initSshProject } from './remote-ssh/ssh-project'
-import { resyncProjectAgents } from './remote-ssh/agent-resync'
+import { resyncProjectAgents, RESYNC_TRANSCRIPT_TAIL_BYTES } from './remote-ssh/agent-resync'
 import { setGitRemoteResolver, type GitRemoteRef } from '../core/remote-ssh/remote-git'
 import { SshFs, sshAppendArgs, sshTailArgs, sshSizeArgs, sshWriteArgs } from './ssh-fs'
 import { makeRemoteWorkspaceIO } from './remote-workspace-io'
@@ -1283,13 +1283,22 @@ app.whenReady().then(async () => {
 
   /**
    * Read a remote transcript through a ref, forgetting refs WE located once they stop reading.
+   * `cap` is the tail window in bytes; it defaults to the full reader's cap, so every caller that
+   * wants a transcript to READ is unchanged. A caller that only wants to know how the last few
+   * records look (the reconnect resync) passes a much smaller one — see
+   * RESYNC_TRANSCRIPT_TAIL_BYTES.
+   *
    * Without this the panel's Retry replays a dead path forever (the transcript was deleted, or the
    * session moved) because the cache lookup comes first. A hook-fed ref is deliberately left in
    * place on an empty read — that is usually a transient master hiccup, and dropping it would send
    * the next read down the LOCAL resolver, i.e. to the wrong machine.
    */
-  const readRemoteTranscript = async (sessionId: string, ref: RemoteFileRef): Promise<string> => {
-    const text = await remoteFile.readTail(ref, REMOTE_TRANSCRIPT_CAP)
+  const readRemoteTranscript = async (
+    sessionId: string,
+    ref: RemoteFileRef,
+    cap: number = REMOTE_TRANSCRIPT_CAP
+  ): Promise<string> => {
+    const text = await remoteFile.readTail(ref, cap)
     if (!text && locatedTranscriptSessions.delete(sessionId)) {
       remoteTranscriptBySession.delete(sessionId)
     }
@@ -1919,7 +1928,11 @@ app.whenReady().then(async () => {
             conn,
             controlPath
           })
-          return ref ? await readRemoteTranscript(sessionId, ref) : null
+          // A small tail, NOT the read path's 5 MB cap: the verdict is about the last few records,
+          // and a wider window only lets an ancient unmatched tool_use pin the node at `working`.
+          return ref
+            ? await readRemoteTranscript(sessionId, ref, RESYNC_TRANSCRIPT_TAIL_BYTES)
+            : null
         },
         emit: emitAgentStatus
       }).catch(() => {

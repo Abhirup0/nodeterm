@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
-import { resyncProjectAgents, type AgentResyncDeps } from './agent-resync'
+import {
+  resyncProjectAgents,
+  RESYNC_TRANSCRIPT_TAIL_BYTES,
+  type AgentResyncDeps
+} from './agent-resync'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 
 const assistantText = (text: string): string =>
@@ -166,6 +170,14 @@ describe('resyncProjectAgents', () => {
     // end of this node's rescue.
     expect(await resyncProjectAgents(d)).toEqual(['n1'])
     expect(d.emitted.map((e) => e.nodeId)).toEqual(['n1'])
+  })
+
+  it('reads the transcript only through a small tail window', () => {
+    // The read path's cap is 5 MB. `decideFromTranscriptTail` only ever tracks tool calls opened
+    // INSIDE the window it is given, so a wide window lets one stale unmatched `tool_use` from
+    // hours earlier pin the node at `working` forever — measured against real transcripts, that
+    // silently loses the repair on the longest sessions.
+    expect(RESYNC_TRANSCRIPT_TAIL_BYTES).toBe(64 * 1024)
   })
 
   it('handles several nodes independently', async () => {
