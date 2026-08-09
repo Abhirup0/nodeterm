@@ -928,7 +928,6 @@ function disposeContext(): void {
   const ctx = live
   live = null
   creationAttempted = false
-  cellMismatchWarned = false
   if (!ctx) return
   // BEFORE any GL call: a rAF tick already scheduled with this context must skip its frame rather
   // than submit against deleted objects (see `LiveContext.disposed`).
@@ -1001,6 +1000,8 @@ function ensureSettingsSubscription(): void {
       )
     )
       return
+    cellRebuilds = 0
+    cellMismatchWarned = false
     rebuildSharedContext()
   })
 }
@@ -1159,16 +1160,74 @@ export function subscribeSharedGlyphContext(fn: () => void): () => void {
  *  supposed to agree (the font settings are global). A disagreement is a real defect — a dpr
  *  change under a live context, a per-terminal letterSpacing — and the symptom is soft text, so
  *  say so rather than silently rescaling. */
+/**
+ * How many times the atlas has been rebuilt for a cell DISAGREEMENT in this font epoch.
+ *
+ * Capped at one, and the cap is the whole point. The rebuild it guards disposes the context, and
+ * `disposeContext` deliberately clears the other creation state — so a guard that lived there
+ * would be wiped by the very rebuild it is supposed to bound. Two terminals with genuinely
+ * different cells would then rebuild for each other forever, one per registration, and the canvas
+ * would never paint.
+ *
+ * Reset only where a new cell is legitimately expected: a font change (see the settings
+ * subscription), which is also the only thing that makes the old measurement meaningless.
+ */
+let cellRebuilds = 0
+/** One-shot log for the give-up branch above. */
 let cellMismatchWarned = false
-function warnOnCellDrift(ctx: LiveContext, cell: DeviceCell | null): void {
-  if (!cell || cellMismatchWarned) return
-  if (Math.abs(ctx.atlas.cellW - cell.cellW) < 0.01 && Math.abs(ctx.atlas.cellH - cell.cellH) < 0.01)
+/**
+ * The atlas cell against a terminal's real one — and REBUILD when they disagree, rather than only
+ * saying so.
+ *
+ * `ensureLiveContext` fixes the atlas geometry from the FIRST terminal that registers, for the life
+ * of the context. That is fine when every terminal measures the same cell and wrong the moment one
+ * does not: the glyph is rasterized into the atlas's box and drawn into the terminal's, so the
+ * whole canvas is resampled by the ratio between them.
+ *
+ * That is the 2026-08-10 report, measured. Every node reported a device cell of 16.79998×36 while
+ * the atlas had latched to 16×36 — a horizontal ratio of 1.05, which is exactly the 4.9% wider
+ * advance measured off screenshots against xterm's own WebGL renderer, with the line spacing
+ * identical to the pixel because the heights agreed. A glyph stretched 5% is wider, heavier AND
+ * softer, which is why the report arrived as "not crisp" and survived four other explanations.
+ *
+ * The likely latch is a first terminal that measured before its webfont resolved, so the fallback
+ * face's metrics fixed the page. Nothing recovered from it: a font change rebuilds the context, a
+ * dpr change rebuilds it, but a cell that simply disagreed only logged — and a project switch
+ * deliberately does NOT rebuild, so the wrong page outlived everything short of a restart.
+ *
+ * A drift is therefore treated exactly like a font change, through the same funnel. It CANNOT
+ * loop: the cell is read raw from xterm (`deviceCellOf`) and came back identical across all 48
+ * nodes in the field dump, so one rebuild settles it — and the guard below makes even a
+ * pathological disagreement rebuild once per distinct cell rather than every frame.
+ */
+export function cellsDisagree(atlas: DeviceCell, cell: DeviceCell): boolean {
+  return Math.abs(atlas.cellW - cell.cellW) >= 0.01 || Math.abs(atlas.cellH - cell.cellH) >= 0.01
+}
+
+function reconcileAtlasCell(ctx: LiveContext, cell: DeviceCell | null): void {
+  if (!cell) return
+  if (!cellsDisagree({ cellW: ctx.atlas.cellW, cellH: ctx.atlas.cellH }, cell)) return
+  if (cellRebuilds >= 1) {
+    // Already spent this epoch's rebuild and a terminal STILL disagrees: two of them want
+    // different cells, and rebuilding again would just hand the atlas back and forth. Say so and
+    // leave it — one resampled terminal is a cosmetic loss, a rebuild loop is a dead canvas.
+    if (!cellMismatchWarned) {
+      cellMismatchWarned = true
+      console.warn(
+        `[glyphgrid] atlas cell ${ctx.atlas.cellW}×${ctx.atlas.cellH} still does not match a ` +
+          `terminal's device cell ${cell.cellW}×${cell.cellH} after a rebuild — terminals disagree ` +
+          `about their metrics, so this one's glyphs stay resampled`
+      )
+    }
     return
-  cellMismatchWarned = true
+  }
+  cellRebuilds++
   console.warn(
     `[glyphgrid] atlas cell ${ctx.atlas.cellW}×${ctx.atlas.cellH} does not match this terminal's ` +
-      `device cell ${cell.cellW}×${cell.cellH} — its glyphs will be resampled`
+      `device cell ${cell.cellW}×${cell.cellH} — rebuilding the atlas for it (every glyph was ` +
+      `being resampled by the ratio between them)`
   )
+  rebuildSharedContext()
 }
 
 /**
@@ -1183,7 +1242,7 @@ function warnOnCellDrift(ctx: LiveContext, cell: DeviceCell | null): void {
 function ensureLiveContext(cell?: DeviceCell): LiveContext | null {
   if (!sharedGlyphActive()) return null
   if (live) {
-    warnOnCellDrift(live, usableCell(cell))
+    reconcileAtlasCell(live, usableCell(cell))
     return live
   }
   const seed = usableCell(cell)

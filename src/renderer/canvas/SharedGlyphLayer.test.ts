@@ -33,6 +33,7 @@ import {
   nodeOrderSig,
   nodeStackZ,
   nodeZFor,
+  cellsDisagree,
   opaqueNodeIds,
   pixelRatioChanged,
   primeOpaqueNodeIds,
@@ -2218,5 +2219,41 @@ describe('createContextLossPolicy', () => {
     expect(h.failures()).toEqual([])
     policy.onRestored()
     expect(h.revives()).toBe(1)
+  })
+})
+
+/**
+ * The 2026-08-10 crispness report, and the one measurement that ended it.
+ *
+ * `ensureLiveContext` fixes the atlas geometry from the FIRST terminal that registers, for the life
+ * of the context. In the field every node reported a device cell of 16.79998×36 while the atlas had
+ * latched to 16×36 — so every glyph was rasterized into a 16px box and drawn into a 16.8px cell, a
+ * 5% horizontal stretch. That is exactly the 4.9% wider advance measured off screenshots against
+ * xterm's own WebGL renderer, with the line spacing identical to the pixel because the heights
+ * agreed. A stretched glyph is wider, heavier AND softer, which is why the report read as "not
+ * crisp" and survived four other explanations.
+ *
+ * Nothing recovered from it: a font change rebuilt the context and a dpr change rebuilt it, but a
+ * cell that simply disagreed only logged a warning — and a project switch deliberately does not
+ * rebuild, so the wrong page outlived everything short of an app restart.
+ */
+describe('atlas cell drift', () => {
+  it('is a rebuild, not a warning', () => {
+    // The heights agreeing while the widths do not is the exact field shape, and the reason the
+    // symptom looked like blur rather than like geometry.
+    expect(cellsDisagree({ cellW: 16, cellH: 36 }, { cellW: 16.79998779296875, cellH: 36 })).toBe(
+      true
+    )
+  })
+
+  it('ignores float noise, so an ordinary canvas never rebuilds', () => {
+    // Two terminals measuring the same cell must not fight over it; the field dump had per-node
+    // residuals in the fourth decimal.
+    expect(cellsDisagree({ cellW: 16.8, cellH: 36 }, { cellW: 16.800001, cellH: 36 })).toBe(false)
+    expect(cellsDisagree({ cellW: 16.8, cellH: 36 }, { cellW: 16.8, cellH: 36 })).toBe(false)
+  })
+
+  it('catches a HEIGHT-only disagreement too', () => {
+    expect(cellsDisagree({ cellW: 16.8, cellH: 36 }, { cellW: 16.8, cellH: 38 })).toBe(true)
   })
 })
