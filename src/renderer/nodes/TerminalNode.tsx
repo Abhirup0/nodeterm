@@ -398,29 +398,56 @@ function offsetInNode(el: HTMLElement | null): Vec2 | null {
  * Private API, fully guarded: null simply means "don't register", i.e. this terminal keeps the
  * renderer it already has.
  */
-/** Debug-only: what each node's grid was registered with, exposed on `window.__glyphgridCells`
- *  under the same flag `__glyphgridDump` uses. Never read by product code. */
+/**
+ * Debug-only: what each node's grid was registered with, on `window.__glyphgridCells()`.
+ *
+ * The accessor is installed EAGERLY and always answers, because its absence was ambiguous in
+ * exactly the way a bad error message is: "not a function" could equally mean the build is old,
+ * the debug flag is off, or the canvas is not in shared mode, and the reader cannot tell which. It
+ * now reports that instead of throwing.
+ */
 const cellDebug = new Map<string, unknown>()
+
+function glyphCellDebugOn(): boolean {
+  try {
+    return typeof window !== 'undefined' && localStorage.getItem('nodeterm.glyphgridDebug') === '1'
+  } catch {
+    return false
+  }
+}
 
 function currentDprForDebug(): number {
   return typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
 }
 
 function publishCellDebug(id: string, info: Record<string, unknown>): void {
-  if (typeof window === 'undefined') return
-  if (localStorage.getItem('nodeterm.glyphgridDebug') !== '1') return
+  if (!glyphCellDebugOn()) return
   const css = info.css as { cellW: number; cellH: number } | null
   const device = info.device as { cellW: number; cellH: number } | null
   const dpr = info.dpr as number
   cellDebug.set(id, {
     ...info,
-    // The ratio that matters: 1 means the glyph is drawn at exactly the size it was rasterized
-    // for; anything else is the factor every glyph is stretched by.
+    // The ratio that matters: at zoom 1 `css * dpr` must equal `device`, so 1.00 means the glyph
+    // is drawn at exactly the size it was rasterized for and anything else IS the stretch factor.
     stretchW: css && device ? (css.cellW * dpr) / device.cellW : null,
     stretchH: css && device ? (css.cellH * dpr) / device.cellH : null
   })
-  ;(window as unknown as Record<string, unknown>).__glyphgridCells = () =>
-    Object.fromEntries(cellDebug)
+}
+
+if (typeof window !== 'undefined') {
+  ;(window as unknown as Record<string, unknown>).__glyphgridCells = (): unknown => {
+    if (!glyphCellDebugOn()) {
+      return { status: "debug flag off — localStorage.setItem('nodeterm.glyphgridDebug','1') then reload" }
+    }
+    if (cellDebug.size === 0) {
+      return {
+        status:
+          'no grid has registered yet — this only records in SHARED renderer mode (Settings → Terminal → Terminal rendering), after a terminal has laid out',
+        dpr: currentDprForDebug()
+      }
+    }
+    return Object.fromEntries(cellDebug)
+  }
 }
 
 function cssCellOf(term: Terminal): { cellW: number; cellH: number } | null {
