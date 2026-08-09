@@ -805,6 +805,22 @@ describe('SshProjectManager', () => {
       expect(onTunnelVerified).toHaveBeenCalledWith('p1', controlPathFor('p1'), conn)
     })
 
+    it('fires only once the project entry is written — the resync needs the cached remote $HOME', async () => {
+      // Ordering, not decoration. The resync's transcript leg resolves the host's transcript root
+      // through `remoteHomeForControlPath`, and that reads the field off the project entry — which
+      // is created at master spawn WITHOUT it. Firing before the entry update therefore handed the
+      // locator `undefined` every single time, not occasionally. That leg is the only one that can
+      // tell "the CLI still owns the pane but the turn ended" (a finished Claude sitting at its
+      // prompt) from "still working"; without it the feature degrades to catching an exited CLI.
+      let mgr: SshProjectManager | undefined
+      let homeAtHookTime: string | undefined | 'hook-never-fired' = 'hook-never-fired'
+      mgr = makeVerifiedMgr((_projectId, controlPath) => {
+        homeAtHookTime = mgr?.remoteHomeForControlPath(controlPath)
+      })
+      await mgr.connect('p1', conn, '/remote/cwd')
+      expect(homeAtHookTime).toBe('/home/u')
+    })
+
     it('does NOT fire on the reuse branch — a live master never lost its tunnel', async () => {
       const onTunnelVerified = vi.fn()
       const mgr = makeVerifiedMgr(onTunnelVerified)
