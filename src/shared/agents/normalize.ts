@@ -338,10 +338,121 @@ export function normalizeOpencode(env: RawHookEnvelope): NormalizedAgentEvent | 
   return null
 }
 
+// grok hook payload. Its dialect differs from every other agent here in two ways, both measured
+// against the shipped 1.0.0 CLI: the keys are camelCase, and `hookEventName`'s VALUE is
+// snake_case ("pre_tool_use"). Hooks registered through the grok SDK convert the top-level keys to
+// snake_case instead, so both spellings occur in the wild — hence every field is read twice and
+// the event name is CANONICALIZED (lowercased, letters only) rather than compared literally.
+// There is deliberately no `transcript_path` in this envelope: grok's transcript is DERIVED from
+// (cwd, sessionId), which is why the shells' raw listeners need `grokRawFields` below.
+interface GrokPayload {
+  hookEventName?: string
+  hook_event_name?: string
+  sessionId?: string
+  session_id?: string
+  cwd?: string
+  toolName?: string
+  tool_name?: string
+  toolUseId?: string
+  tool_use_id?: string
+  toolInput?: Record<string, unknown>
+  tool_input?: Record<string, unknown>
+  lastAssistantMessage?: string
+  last_assistant_message?: string
+  notificationType?: string
+  notification_type?: string
+  /** Stop only: 'end_turn' for a genuine turn end; 'channel_closed'/'shutdown' at session close. */
+  reason?: string
+  prompt?: string
+}
+
+/** Canonical form of a grok event name: 'pre_tool_use', 'PreToolUse' and 'preToolUse' all → 'pretooluse'. */
+const grokEventName = (p: GrokPayload): string =>
+  (p.hookEventName ?? p.hook_event_name ?? '').toLowerCase().replace(/[^a-z]/g, '')
+
+/**
+ * The fields the SHELLS need from a raw grok payload, in nodeterm's own names — one definition
+ * shared by `src/main` and `src/server` so their raw listeners can never drift. Exported (and
+ * unit-tested) rather than re-read at each call site, because the two-dialect reading is exactly
+ * the kind of detail that gets half-copied.
+ */
+export function grokRawFields(payload: Record<string, unknown>): {
+  event: string
+  sessionId?: string
+  cwd?: string
+  toolName?: string
+  toolUseId?: string
+  toolInput?: Record<string, unknown>
+} {
+  const p = payload as GrokPayload
+  return {
+    event: grokEventName(p),
+    sessionId: p.sessionId ?? p.session_id,
+    cwd: p.cwd,
+    toolName: p.toolName ?? p.tool_name,
+    toolUseId: p.toolUseId ?? p.tool_use_id,
+    toolInput: p.toolInput ?? p.tool_input
+  }
+}
+
+export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null {
+  const p = env.payload as GrokPayload
+  const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.sessionId ?? p.session_id }
+  const ev = grokEventName(p)
+  const lastMessage = p.lastAssistantMessage ?? p.last_assistant_message
+
+  if (ev === 'sessionstart') return { ...base, kind: 'session', sessionPhase: 'start' }
+  if (ev === 'sessionend') return { ...base, kind: 'session', sessionPhase: 'end' }
+
+  // grok's turn start. Flagged newTurn so per-turn fan-out clears once per turn, not per tool event.
+  if (ev === 'userpromptsubmit') {
+    return { ...base, kind: 'state', state: 'working', task: p.prompt, newTurn: true }
+  }
+  // A FAILED tool is still mid-turn: grok fires PostToolUseFailure and carries on, so mapping it
+  // to anything but `working` would clear RUNNING while the agent is still going.
+  if (ev === 'pretooluse' || ev === 'posttooluse' || ev === 'posttoolusefailure') {
+    return { ...base, kind: 'state', state: 'working' }
+  }
+  if (ev === 'stop') {
+    // grok fires a SECOND, observe-only Stop when the session itself closes (reason
+    // 'channel_closed' / 'shutdown'). Reporting that as a finished turn would pop a "your agent is
+    // done" notification every time a session ends, so it is marked `interrupted` — the flag the
+    // renderer already reads as "skip the completion alert and the unread dot" — and its
+    // lastAssistantMessage (an earlier turn's text) is dropped. A MISSING reason is treated as a
+    // genuine turn end: this is the one event the RUNNING badge depends on ending, so an unknown
+    // dialect must fail towards reporting it, not towards swallowing it.
+    const genuineTurnEnd = p.reason === undefined || p.reason === 'end_turn'
+    return genuineTurnEnd
+      ? { ...base, kind: 'state', state: 'done', lastMessage }
+      : { ...base, kind: 'state', state: 'done', interrupted: true }
+  }
+  // The turn died on an API error — grok skips Stop entirely here, exactly as Claude does.
+  if (ev === 'stopfailure') return { ...base, kind: 'state', state: 'done', lastMessage }
+  if (ev === 'notification') {
+    // grok's notification-type vocabulary is not documented as a closed set (its `matcher` tests
+    // the type as a regex), so we classify by substring and default to a NO-OP. Same discipline as
+    // normalizeClaude: an unrecognized future type must never stick a badge on a finished node.
+    const type = (p.notificationType ?? p.notification_type ?? '').toLowerCase()
+    if (type.includes('permission')) return { ...base, kind: 'state', state: 'blocked', lastMessage }
+    if (type.includes('input') || type.includes('elicit')) {
+      return { ...base, kind: 'state', state: 'waiting', lastMessage }
+    }
+    // Idle at the prompt: the RESCUE signal for a node stuck on `working`. grok fires no hook at
+    // all for an interrupted turn, so this is the only thing that can clear one.
+    if (type.includes('idle')) {
+      return { ...base, kind: 'state', state: 'done', interrupted: true, idle: true }
+    }
+    return null
+  }
+  // Not subscribed in v1: PermissionDenied, SubagentStart/Stop, PreCompact/PostCompact.
+  return null
+}
+
 export function normalizeFor(agentId: AgentId, env: RawHookEnvelope): NormalizedAgentEvent | null {
   if (agentId === 'claude') return normalizeClaude(env)
   if (agentId === 'codex') return normalizeCodex(env)
   if (agentId === 'gemini') return normalizeGemini(env)
   if (agentId === 'opencode') return normalizeOpencode(env)
+  if (agentId === 'grok') return normalizeGrok(env)
   return null
 }

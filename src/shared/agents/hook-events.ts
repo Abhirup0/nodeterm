@@ -11,6 +11,15 @@
 // rewrites only the events IT knows, so a stale instance's command survived on every event the
 // other list lacked. Keeping the lists here is what makes an install a complete rewrite.
 
+/**
+ * One managed hook subscription: an event name, or an event name PLUS the matcher to write for it.
+ * Only grok needs the second form — its tool-event `matcher` is a real REGEX, and a bare `*` is
+ * invalid there and silently stops tool events from firing at all (measured on the shipped 1.0.0
+ * binary). `.*` is the value that works. claude/codex/gemini stay plain strings, so their emitted
+ * config is byte-identical to what it has always been.
+ */
+export type ManagedHookEvent = string | { event: string; matcher: string }
+
 /** Claude Code hook events. Each maps to a `NormalizedAgentEvent` in shared/agents/normalize.ts. */
 export const CLAUDE_HOOK_EVENTS = [
   'SessionStart',
@@ -29,3 +38,25 @@ export const CLAUDE_HOOK_EVENTS = [
 
 /** Gemini CLI hook events — its own names, NOT Claude's (see normalizeGemini). */
 export const GEMINI_HOOK_EVENTS = ['BeforeAgent', 'AfterAgent', 'AfterTool', 'BeforeTool'] as const
+
+/**
+ * Grok hook events (→ normalizeGrok). Only the nine events VERIFIED against the shipped 1.0.0
+ * binary are subscribed. The docs additionally list PermissionDenied, SubagentStart, SubagentStop,
+ * PreCompact and PostCompact; grok skips hook event names it does not recognize (that is how a
+ * shared Claude settings file loads at all), so adding one later is safe — but it is not measured,
+ * so it is not here.
+ */
+export const GROK_HOOK_EVENTS: readonly ManagedHookEvent[] = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'Stop',
+  // Fires INSTEAD of Stop when the turn dies on an API error — without it the badge sticks.
+  'StopFailure',
+  'Notification',
+  'SessionEnd',
+  // Tool events need the regex matcher. `.*` matches every tool name; an omitted matcher is
+  // documented as matching everything too, but `.*` is the form measured working here.
+  { event: 'PreToolUse', matcher: '.*' },
+  { event: 'PostToolUse', matcher: '.*' },
+  { event: 'PostToolUseFailure', matcher: '.*' }
+]
