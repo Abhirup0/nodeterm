@@ -110,9 +110,15 @@ export const RENAME_CAPABLE = ['claude', 'grok'] as const
 // ~/.config/opencode/AGENTS.md (see canvas-control.ts).
 export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
-// Only claude's flag surface is verified. codex (--ask-for-approval) and gemini
+// claude and grok share the flag SPELLING and the value vocabulary
+// (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own
+// `default`), which is the whole requirement for membership. codex (--ask-for-approval) and gemini
 // (--approval-mode) join by being added here with their own flag mapping.
-export const PERMISSION_MODE_CAPABLE = ['claude'] as const
+//
+// NOTE: the `auto` VERSION GATE is claude's alone — see activePermissionMode in
+// renderer/state/permissionMode.ts. grok has accepted every mode we emit since 1.0.0, its first
+// release, so it must never inherit a gate fed by a `claude --version` probe.
+export const PERMISSION_MODE_CAPABLE = ['claude', 'grok'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 

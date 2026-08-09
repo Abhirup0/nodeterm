@@ -2163,7 +2163,10 @@ export function TerminalNode({
           // it can never end up double-flagged. Awaited (not the sync `activePermissionMode`)
           // because this fires on mount: right after a machine reboot it can beat the CLI version
           // probe, and an unanswered probe would conservatively drop `auto`.
-          const cmd = base && withPermissionMode(base, agentId, await ensureActivePermissionMode())
+          // Gated on THIS node's agent: claude's `auto` version gate must not decide what a grok
+          // (or any other permission-mode-capable agent's) relaunch is flagged with.
+          const cmd =
+            base && withPermissionMode(base, agentId, await ensureActivePermissionMode(agentId))
           if (cmd) writeWhenShellReady(cmd) // same shell-startup race as initialCommand
         }
       })
@@ -2228,7 +2231,7 @@ export function TerminalNode({
         // session is launched, not of the node.
         const base = resumeCommand(agentId, agentSessionId)
         const command = base
-          ? withPermissionMode(base, agentId, await ensureActivePermissionMode())
+          ? withPermissionMode(base, agentId, await ensureActivePermissionMode(agentId))
           : undefined
         return performRestartResume({
           agentId,
