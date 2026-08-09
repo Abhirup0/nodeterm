@@ -130,6 +130,46 @@ describe('activePermissionMode — the `auto` version gate', () => {
   })
 })
 
+// The gate exists because Claude Code < 2.1.71 EXITS 1 on `--permission-mode auto`, and it is fed
+// by a `claude --version` probe. grok has accepted `auto` since 1.0.0, its first release, so gating
+// it on a claude probe would launch grok sessions in `default` (ask each time) on any machine whose
+// claude is old — or absent — silently, and for a reason that has nothing to do with grok.
+describe("activePermissionMode — the auto gate is CLAUDE's, not every agent's", () => {
+  it('keeps `auto` for grok even when the local claude CLI is old or missing', () => {
+    useSettings.setState((s) => ({ settings: { ...s.settings, claudePermissionMode: 'auto' } }))
+    activeProject()
+    resetClaudeCliCapsForTests(UNKNOWN_CLAUDE_CLI_CAPS) // no claude on this machine
+
+    expect(activePermissionMode('grok')).toBe('auto')
+    expect(activePermissionMode('claude')).toBe('manual')
+    expect(activePermissionMode()).toBe('manual') // default argument = claude = unchanged behavior
+  })
+
+  it('still honors the project override and the global setting for grok', () => {
+    useSettings.setState((s) => ({ settings: { ...s.settings, claudePermissionMode: 'auto' } }))
+    const p = activeProject()
+    useProjects.getState().setProjectDefaultPermissionMode(p.id, 'plan')
+
+    expect(activePermissionMode('grok')).toBe('plan')
+  })
+
+  it('ensureActivePermissionMode does not wait on any probe for a non-claude agent', async () => {
+    vi.useFakeTimers()
+    try {
+      useSettings.setState((s) => ({ settings: { ...s.settings, claudePermissionMode: 'auto' } }))
+      activeProject('remote', { server: SSH_SERVER, remoteCwd: '/srv/app' })
+      // No SSH remote-claude answer will ever arrive in this test, and no timer may be needed:
+      // a grok launch must not block on claude's probes at all.
+      const pending = ensureActivePermissionMode('grok')
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(pending).resolves.toBe('auto')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 // An SSH project's terminals run on the REMOTE host, whose claude CLI can be older than the local
 // one. The local probe's answer must never be applied to a remote launch.
 describe('activePermissionMode — SSH projects', () => {
