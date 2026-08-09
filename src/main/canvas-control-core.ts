@@ -12,6 +12,8 @@ export type ControlVerb =
   | 'show-web'
   | 'open-browser'
   | 'group'
+  | 'ungroup'
+  | 'move'
   | 'arrange'
   | 'align'
   | 'link'
@@ -41,6 +43,8 @@ const VERBS: ControlVerb[] = [
   'show-web',
   'open-browser',
   'group',
+  'ungroup',
+  'move',
   'arrange',
   'align',
   'link',
@@ -81,6 +85,8 @@ export function parseControlRequest(
   if (v === 'open-browser' && !args.url) return { error: 'open-browser requires --url' }
   if (v === 'open-agent' && !args.agent) return { error: 'open-agent requires --agent <id>' }
   if ((v === 'group' || v === 'arrange') && !args.nodes) return { error: `${v} requires --nodes <id,id>` }
+  if (v === 'ungroup' && !args.group) return { error: 'ungroup requires --group <id>' }
+  if (v === 'move' && !args.nodes) return { error: 'move requires --nodes <id,id>' }
   if (v === 'align' && !args.nodes) return { error: 'align requires --nodes <id,id>' }
   if (v === 'align' && !args.edge) return { error: 'align requires --edge' }
   if (v === 'link' && !args.to) return { error: 'link requires --to <id,id>' }
@@ -145,8 +151,15 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `show-image <path>` / `show-video <path>` — open a media file as a node.',
     '- `show-web (--url U | --file P.html | --html "<...>")` — open a web viewer.',
     '- `open-browser --url U` — open a navigable browser node.',
-    '- `group --nodes <id,id> [--label L]` / `arrange --nodes <id,id> [--layout grid|row|column] [--cols N]` /',
-    '  `align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter` — organize the canvas.',
+    '- `group --nodes <id,id> [--label L]` — wrap TOP-LEVEL nodes in a new labeled frame (nodes already',
+    '  inside another frame are skipped — use `move` for those). `ungroup --group <id>` dissolves a frame,',
+    '  freeing its nodes to the top level. `move --nodes <id,id> [--group <id>]` reparents nodes INTO an',
+    '  existing frame (omit `--group`, or pass `top`/`none`, to pull them out to the top level) — this is',
+    '  how you move a node from one frame to another.',
+    '- `arrange --nodes <id,id> [--layout grid|row|column] [--cols N]` /',
+    '  `align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter` — tidy a layout. Works on',
+    '  top-level nodes OR on the children of ONE frame (all ids must share a container — you cannot',
+    '  arrange across frames in one call); arranging a frame\'s children also shrinks the frame to fit.',
     '- `link --to <id,id> [--from <id>]` — context-link nodes so each can READ the other\'s transcript',
     '  on demand (nodeterm linked-context CLI). `--from` defaults to you; nothing is pushed into the',
     '  linked sessions. Agent sessions you open are linked to you automatically — use `link` for nodes',
@@ -322,9 +335,22 @@ Verbs:
   render on the DESKTOP: \`show-image\` and \`show-video\` still work with a host path (the
   file is read/fetched back over the connection), but \`show-web --file/--html\` is refused —
   use \`--url\`, or copy the file to the desktop first.
-- \`group --nodes <id,id> [--label "Frontend Team"]\` — wrap nodes in a labeled group frame.
-- \`arrange --nodes <id,id> [--layout grid|row|column] [--cols N]\` — tidy layout, no overlap.
-- \`align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter\` — align edges/centers.
+- \`group --nodes <id,id> [--label "Frontend Team"]\` — wrap TOP-LEVEL nodes in a new labeled
+  group frame. Nodes that are ALREADY inside another frame are skipped (the reply says how many) —
+  use \`move\` to pull those across, not \`group\`.
+- \`ungroup --group <id>\` — dissolve a group frame, freeing its nodes back to the top level (the
+  nodes stay put; only the frame is removed).
+- \`move --nodes <id,id> [--group <id>]\` — reparent nodes INTO an existing group frame, keeping
+  each where it sits on the canvas. Omit \`--group\` (or pass \`top\`/\`none\`) to pull them OUT to the
+  top level. This is how you move a node from one frame to another: \`move --nodes n1,n2 --group g2\`.
+  (\`group\` only wraps loose top-level nodes; it will not steal a node out of its current frame.)
+- \`arrange --nodes <id,id> [--layout grid|row|column] [--cols N]\` — tidy layout, no overlap. Works
+  on top-level nodes OR on the children of ONE frame — every id must share a container (you cannot
+  arrange nodes from two different frames, or mix framed + loose, in one call). When the ids are a
+  frame's children, the frame is also shrunk to hug the tidied layout. Since grouping preserves each
+  node's scattered position, a fresh frame is usually too wide: \`arrange\` its children to fix that.
+- \`align --nodes <id,id> --edge left|right|top|bottom|hcenter|vcenter\` — align edges/centers. Same
+  one-container rule as \`arrange\`.
 - \`link --to <id,id> [--from <id>]\` — context-link nodes, so each can READ the other's
   transcript on demand with the get-linked-context skill. \`--from\` defaults to you. Nothing is
   pushed into the linked sessions — reading is on demand, so linking never interrupts anyone.
@@ -378,7 +404,10 @@ Typical requests this skill covers:
   group), or \`open-claude\`/\`open-agent\` per node followed by \`group --nodes ... --label\`
   per subject and \`arrange\` inside each.
 - "Open a codex/gemini session" → \`open-agent --agent codex|gemini\`.
-- "Tidy up / group my terminals" → \`list\`, then \`group\` + \`arrange\` + \`align\`.
+- "Tidy up / group my terminals" → \`list\`, then \`group --nodes …\`, then \`arrange --nodes <those same ids>\`
+  to tidy the new frame's contents (grouping keeps each node's scattered spot, so arrange after grouping).
+- "Move this node into that group" → \`move --nodes <id> --group <targetGroupId>\` (not \`group\`, which only
+  wraps loose nodes). "Break up this group" → \`ungroup --group <id>\`.
 - "Rename this node/group" → \`rename\`.
 
 ## Nodeterm orchestration ("Build with Nodeterm orchestration")

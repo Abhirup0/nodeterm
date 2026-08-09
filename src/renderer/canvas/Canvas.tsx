@@ -262,6 +262,8 @@ import {
   COLLAPSED_HEIGHT,
   alignNodes,
   arrangeNodes,
+  commonParentId,
+  fitGroupToChildren,
   createAccountLoginNode,
   isAccountLoginNode,
   systemAccountDisplay,
@@ -5827,40 +5829,111 @@ export function Canvas() {
             }
             setNodes(grouped)
             markDirty()
-            reply({ ok: true, message: `grouped ${resolvable.length} node(s) into ${groupNode.id}`, result: { groupId: groupNode.id } })
+            // Nodes already inside another frame are skipped (group only wraps loose nodes) — say
+            // so, and point at `move`, so the agent isn't left wondering why a node stayed put.
+            const skippedGrouped = ids.length - resolvable.length
+            const groupNote = skippedGrouped > 0
+              ? ` (${skippedGrouped} already in a frame were skipped — use \`move --group ${groupNode.id}\` for those)`
+              : ''
+            reply({
+              ok: true,
+              message: `grouped ${resolvable.length} node(s) into ${groupNode.id}${groupNote}`,
+              result: { groupId: groupNode.id, grouped: resolvable, skipped: skippedGrouped }
+            })
             return
           }
-          case 'arrange': {
+          case 'ungroup': {
+            const gid = (args.group ?? '').trim()
+            const live = nodesRef.current as CanvasNode[]
+            const frame = live.find((nd) => nd.id === gid && nd.type === 'group')
+            if (!frame) {
+              reply({ ok: false, error: `ungroup: --group names no group frame (${gid || 'missing'})` })
+              return
+            }
+            const freed = live.filter((nd) => nd.parentId === gid).map((nd) => nd.id)
+            setNodes(ungroupNodes(live, gid))
+            markDirty()
+            reply({ ok: true, message: `ungrouped ${gid}, freed ${freed.length} node(s)`, result: { freed } })
+            return
+          }
+          case 'move': {
+            // Reparent nodes INTO an existing frame (or out to the top level) — the one way to
+            // move a node OUT of its current frame, which `group` deliberately won't do. `reparentNode`
+            // keeps each node fixed on the canvas via absolute↔relative conversion.
             const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
             const live = nodesRef.current as CanvasNode[]
-            const layout = (['grid', 'row', 'column'] as const).find((l) => l === args.layout) ?? 'grid'
-            const cols = args.cols ? parseInt(args.cols, 10) || undefined : undefined
-            const next = arrangeNodes(live, ids, { layout, cols })
-            if (next === live) {
-              reply({ ok: false, error: 'arrange: none of the given node ids are top-level nodes' })
+            const rawTarget = (args.group ?? '').trim().toLowerCase()
+            const toTop = !rawTarget || rawTarget === 'top' || rawTarget === 'none' || rawTarget === 'ungrouped'
+            const targetGroup = toTop ? null : args.group!.trim()
+            if (targetGroup && !live.some((nd) => nd.id === targetGroup && nd.type === 'group')) {
+              reply({ ok: false, error: `move: --group names no group frame (${targetGroup})` })
               return
+            }
+            let next = live
+            const moved: string[] = []
+            for (const id of ids) {
+              const before = next
+              const nd = next.find((n) => n.id === id)
+              // Skip a group id, an unknown id, or a node already in the requested container.
+              if (nd && nd.type !== 'group') next = reparentNode(next, id, targetGroup)
+              if (next !== before) moved.push(id)
+            }
+            if (moved.length === 0) {
+              reply({ ok: false, error: 'move: nothing moved (unknown ids, group ids, or already there)' })
+              return
+            }
+            // The source frame(s) the nodes LEFT, and the destination, may now be the wrong size —
+            // hug whatever each ends up holding so no oversized/updated box is left behind.
+            const affected = new Set<string>()
+            if (targetGroup) affected.add(targetGroup)
+            for (const id of moved) {
+              const was = live.find((n) => n.id === id)
+              if (was?.parentId) affected.add(was.parentId)
+            }
+            for (const g of affected) {
+              if (next.some((n) => n.parentId === g)) next = fitGroupToChildren(next, g)
             }
             setNodes(next)
             markDirty()
-            reply({ ok: true, message: `arranged ${ids.length} node(s) as ${layout}`, result: { count: ids.length } })
+            const where = targetGroup ? `into ${targetGroup}` : 'to the top level'
+            reply({ ok: true, message: `moved ${moved.length} node(s) ${where}`, result: { moved, group: targetGroup } })
             return
           }
+          case 'arrange':
           case 'align': {
             const ids = (args.nodes ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+            const live = nodesRef.current as CanvasNode[]
             const edge = (['left', 'right', 'top', 'bottom', 'hcenter', 'vcenter'] as const).find((e2) => e2 === args.edge)
-            if (!edge) {
+            if (verb === 'align' && !edge) {
               reply({ ok: false, error: 'align requires --edge left|right|top|bottom|hcenter|vcenter' })
               return
             }
-            const live = nodesRef.current as CanvasNode[]
-            const next = alignNodes(live, ids, edge)
-            if (next === live) {
-              reply({ ok: false, error: 'align: none of the given node ids are top-level nodes' })
+            // arrange/align run in ONE coordinate space: all top-level, or all children of one
+            // frame. A mixed set (framed + loose, or two frames) is refused with a clear reason
+            // rather than the old misleading "none are top-level".
+            const container = commonParentId(live, ids)
+            if (container === undefined) {
+              const known = ids.filter((id) => live.some((n) => n.id === id))
+              reply({
+                ok: false,
+                error: known.length === 0
+                  ? `${verb}: none of the given node ids exist`
+                  : `${verb}: the nodes are in different containers — arrange the children of one frame (or top-level nodes) at a time`
+              })
               return
             }
+            const layout = (['grid', 'row', 'column'] as const).find((l) => l === args.layout) ?? 'grid'
+            const cols = args.cols ? parseInt(args.cols, 10) || undefined : undefined
+            let next = verb === 'arrange'
+              ? arrangeNodes(live, ids, { layout, cols })
+              : alignNodes(live, ids, edge!)
+            // Tidying a frame's children usually leaves the frame oversized (it was sized to their
+            // old scattered spots) — shrink it to hug the new layout. Top-level sets have no frame.
+            if (container) next = fitGroupToChildren(next, container)
             setNodes(next)
             markDirty()
-            reply({ ok: true, message: `aligned ${ids.length} node(s) to ${edge}`, result: { count: ids.length } })
+            const how = verb === 'arrange' ? `as ${layout}` : `to ${edge}`
+            reply({ ok: true, message: `${verb === 'arrange' ? 'arranged' : 'aligned'} ${ids.length} node(s) ${how}`, result: { count: ids.length, container } })
             return
           }
           case 'link': {
