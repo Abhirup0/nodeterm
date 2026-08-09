@@ -1408,6 +1408,22 @@ body,
   gap: 4px;
 }
 
+/* Copy receipt (1.6 s) — green like the base chip, and deliberately quieter than RUNNING /
+   NEEDS YOU: this is a receipt, not an alert. */
+.term-node__status--copied {
+  color: var(--success);
+  letter-spacing: 0.04em;
+}
+
+/* The one-time "hold ⌥ to select text" hint. Sentence case, muted: it is instruction, not status,
+   and the header's other chips are SHOUTED status words. */
+.term-node__status--hint {
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .term-node__queued-run {
   background: none;
   border: none;

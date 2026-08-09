@@ -90,6 +90,7 @@ import { IconSearch, IconChat, IconMic, IconReload } from '../components/icons'
 import { NodeLabels } from '../components/kanban/NodeLabels'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
+import { useCopyFeedback } from '../terminal/useCopyFeedback'
 import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
@@ -554,6 +555,15 @@ const coSubs = new Map<string, (s: CoState) => void>()
  */
 const restartSubs = new Map<string, () => void>()
 
+/**
+ * The mounted instance publishes its copy-feedback sink here, for the same reason as
+ * `restartSubs`: the OSC 52 handler is registered ONCE per xterm instance and that instance
+ * SURVIVES A PARK (project switch → remount within TERM_PARK_MS), so a handler holding this
+ * component's `setState` would be feeding a component that unmounted two projects ago. Looked up
+ * at call time instead. No entry = nobody is mounted = nothing to show.
+ */
+const copySubs = new Map<string, (text: string) => void>()
+
 function getCo(key: string): CoState {
   return coStates.get(key) ?? NO_CO
 }
@@ -654,6 +664,18 @@ export function TerminalNode({
   // ResizeObserver in the lifecycle effect.
   const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  // Copy feedback: the `Copied` pill (fed by the OSC 52 handler below, through `copySubs`) and the
+  // one-time "hold ⌥ to select" hint for a pane whose app captured the mouse.
+  const copy = useCopyFeedback({
+    hostRef: bodyRef,
+    hasSelection: () => !!termRef.current?.hasSelection()
+  })
+  useEffect(() => {
+    copySubs.set(termKey, copy.notifyCopy)
+    return () => {
+      if (copySubs.get(termKey) === copy.notifyCopy) copySubs.delete(termKey)
+    }
+  }, [termKey, copy.notifyCopy])
   const fitRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
   // The live session's "measure my grid, render it, report it" routine (set by the lifecycle
@@ -1661,7 +1683,11 @@ export function TerminalNode({
       // read the local clipboard. Returning true swallows the sequence (also the read query).
       term.parser.registerOscHandler(52, (data) => {
         const text = parseOsc52(data)
-        if (text !== null) window.nodeTerminal.clipboard.writeText(text)
+        if (text !== null) {
+          window.nodeTerminal.clipboard.writeText(text)
+          // Through the registry, never a captured setState: this handler outlives a park.
+          copySubs.get(termKey)?.(text)
+        }
         return true
       })
       // Cmd (mac) / Ctrl+click link opening. URLs → default browser via createUrlLinkProvider
@@ -3089,6 +3115,11 @@ export function TerminalNode({
           <span className="term-node__status term-node__status--busy" title={`${agentLabel} is working`}>
             <AgentMascot agentId={agentId} />
             RUNNING
+          </span>
+        )}
+        {copy.feedback && (
+          <span className={`term-node__status term-node__status--${copy.feedback.kind}`}>
+            {copy.feedback.label}
           </span>
         )}
         {showLoop && status?.loop && (
