@@ -7,6 +7,7 @@ import {
   classifyLink,
   hiddenLinkIds,
   linkIdsCoveredByRopes,
+  pairKey,
   planBridges
 } from './noteLink'
 import type { CanvasNodeState } from '@shared/types'
@@ -325,5 +326,16 @@ describe('buildNotePushMessage per-agent wording', () => {
     const msg = buildNotePushMessage('T', 'x'.repeat(3000), 'codex')!
     expect(msg).toContain('[truncated')
     expect(msg).not.toContain('skill]')
+  })
+})
+
+describe('pairKey', () => {
+  it('joins the two ids with a NUL, ordered, so the key is direction-free', () => {
+    // Pinned deliberately: the separator is a real NUL because it cannot occur in a node id, so
+    // no pair of ids can collide by containing the separator themselves. This test exists so the
+    // separator can never be "tidied" into a printable character by accident.
+    expect(pairKey('b', 'a')).toBe('a\0b')
+    expect(pairKey('a', 'b')).toBe(pairKey('b', 'a'))
+    expect([...pairKey('a', 'b')].map((c) => c.charCodeAt(0))).toEqual([97, 0, 98])
   })
 })
