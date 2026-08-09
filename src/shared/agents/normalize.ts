@@ -556,6 +556,15 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
     // vocabulary is claude-derived, and claude's `elicitation_complete` / `elicitation_response` are
     // informational — they fire when an elicitation ENDS. A substring test on 'elicit' would match
     // them and leave NEEDS YOU on a node that just finished, with no later hook to clear it.
+    //
+    // DELIBERATELY NOT setting `awaitingInput` here, and the omission is a bet either way. Codex's
+    // `request_user_input` ends its turn with the question still open (the answer arrives as a fresh
+    // UserPromptSubmit), so `normalizeCodex` marks the ask `awaitingInput` and `reduceEntry` holds
+    // `waiting` through the turn-end `done` — without it the node goes green over a session that is
+    // still waiting on the user. Whether grok's elicitation behaves the same way is UNMEASURED: if it
+    // does, grok has that bug; if it does not, setting the flag would hold NEEDS YOU on a node that
+    // genuinely finished, which is the worse of the two. So it stays off until someone watches a real
+    // grok elicitation cross a turn boundary — device checklist item 33.
     if (type === 'elicitationdialog' || type === 'agentneedsinput') {
       return { ...base, kind: 'state', state: 'waiting', lastMessage }
     }

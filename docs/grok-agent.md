@@ -531,4 +531,13 @@ Two traps with no code fix — appended so the numbering above stays stable
     `ctrlEnterEncoding: 'csi-u'` for it, i.e. a different encoding family — so check both: does
     Shift+Enter insert a newline (not submit), and does plain Enter still submit? If the remap fights
     grok, the fix is a per-agent encoding in `terminal-config.ts`, not a global change.
+33. **Does a grok elicitation survive its turn end?** Open an ask (whatever produces
+    `elicitation_dialog` / `agent_needs_input`) and watch what the node does when the turn finishes.
+    Codex has exactly this shape — its `request_user_input` ends the turn with the question still
+    open, the answer arriving as a fresh `UserPromptSubmit` — so `normalizeCodex` marks the ask
+    `awaitingInput` and `reduceEntry` holds `waiting` through the turn-end `done` (main's `7a40aab`,
+    observed live on codex-cli 0.145.0). Grok does NOT set that flag, deliberately: if grok behaves
+    like codex, a grok node goes green while it is still waiting on you; if it does not, setting the
+    flag would pin NEEDS YOU on a node that genuinely finished. Report which happens — a green node
+    over an open question means grok joins the `awaitingInput` path, one line in `normalizeGrok`.
 ```
