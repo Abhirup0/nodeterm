@@ -129,6 +129,41 @@ describe('normalizeGrok — Notification', () => {
     ).toBeNull()
   })
 
+  /**
+   * The suppression must survive grok's OTHER dialect. grok's envelope is documented camelCase
+   * throughout, so `permissionPrompt` is a plausible spelling of the same type — and comparing the
+   * type raw would make it miss the suppression and fall through to `includes('permission')`, i.e.
+   * bring the per-tool-call strobe straight back. The type therefore goes through the same
+   * `grokCanonical` rule the event name uses (orca canonicalizes too, to snake_case:
+   * `normalizeHookEventName`, `agent-hook-listener.ts:2201-2210`).
+   */
+  it('suppresses the routine prompt in EVERY spelling of its type', () => {
+    for (const notificationType of ['permissionPrompt', 'permission_prompt', 'Permission-Prompt', 'PERMISSION_PROMPT']) {
+      expect(
+        normalizeGrok(
+          env({ hookEventName: 'notification', notificationType, message: 'tool permission requested' })
+        ),
+        notificationType
+      ).toBeNull()
+    }
+  })
+
+  it('reads the other ask + idle types in camelCase too (one canonicalization, not three)', () => {
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'agentNeedsInput' }))
+    ).toMatchObject({ state: 'waiting' })
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'elicitationDialog' }))
+    ).toMatchObject({ state: 'waiting' })
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'approvalRequired' }))
+    ).toMatchObject({ state: 'blocked' })
+    // And the closed set stays closed under canonicalization: an elicitation END is still inert.
+    expect(
+      normalizeGrok(env({ hookEventName: 'notification', notificationType: 'elicitationComplete' }))
+    ).toBeNull()
+  })
+
   it('a GENUINE ask still reaches NEEDS YOU — the suppression is narrow, not a mute', () => {
     // Same type, a real message: this is the ask a human must answer.
     expect(

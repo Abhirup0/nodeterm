@@ -38,7 +38,7 @@ describe('grok hook installer', () => {
     )
   })
 
-  it('writes the `.*` matcher on tool events — a bare `*` is invalid and kills them silently', async () => {
+  it('writes the `.*` matcher on tool events — the matcher is a REGEX, so a bare `*` would not compile', async () => {
     const { installGrokHooks, grokHookConfigPath } = await import('./grok')
     installGrokHooks()
     const cfg = read(grokHookConfigPath())

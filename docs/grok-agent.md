@@ -109,8 +109,8 @@ deliberate no-op:
 | `Stop` (`reason` anything but `channel_closed`/`shutdown`) | `done` + `lastMessage` | a **denylist**, not an allowlist of `end_turn`: `Stop` is the event the RUNNING badge depends on ending, so an unknown reason must fail towards reporting it |
 | `Stop` (`channel_closed` / `shutdown`) | `done`, `interrupted: true` | the observe-only second `Stop` at session close; `interrupted` suppresses the completion alert and unread dot, and the stale `lastAssistantMessage` is dropped |
 | `StopFailure` | `done` + `lastMessage` | fires **instead of** `Stop` when the turn dies on an API error — without it the badge sticks |
-| `Notification` `permission_prompt` + message `tool permission requested` + level `info`/absent | **nothing** (`null`) | grok emits this before **every** tool call, even under `bypassPermissions` (orca's `isGrokRoutinePermissionPromptNotification`, `agent-hook-listener.ts:2378-2389`). Mapping it to `blocked` fired `markUnread` with no cooldown, the needs-you chime, an OS notification per tool call while unfocused, and a phone inbox card per `working→blocked` edge. Matched exactly, so a **louder** prompt with the same type still gets through |
-| `Notification` `*permission*` / `approval_required` | `blocked` | substring for the permission family (its worst case is a badge the next hook clears), plus grok's own documented word for the same thing (`05-configuration.md:414`) — the two spellings share no substring, and matching both is what keeps this mapping from firing for nothing under either vocabulary |
+| `Notification` `permission_prompt` + message `tool permission requested` + level `info`/absent | **nothing** (`null`) | grok emits this before **every** tool call, even under `bypassPermissions` (orca's `isGrokRoutinePermissionPromptNotification`, `agent-hook-listener.ts:2378-2389`). The type is canonicalized first (`grokCanonical`, the same letters-only rule the event name uses), so the camelCase spelling grok's envelope would plausibly carry — `permissionPrompt` — is suppressed too; comparing raw would drop it into the ask row below and reinstate the strobe. Mapping it to `blocked` fired `markUnread` with no cooldown, the needs-you chime, an OS notification per tool call while unfocused, and a phone inbox card per `working→blocked` edge. Matched exactly, so a **louder** prompt with the same type still gets through |
+| `Notification` `*permission*` / `approval_required` | `blocked` | substring for the permission family (its worst case is a badge the next hook clears), plus `approval_required` — which is **inference on inference**: `05-configuration.md:414` names it as a notification *trigger*, not as a `notificationType` value, and the bridge is `10-hooks.md:153` ("the matcher tests … the notification type on `Notification`"). Matched exactly for that reason. The two spellings share no substring, and matching both is what keeps this mapping from firing for nothing under either vocabulary |
 | `Notification` `elicitation_dialog` / `agent_needs_input` | `waiting` | a **closed set**, exactly as in `normalizeClaude`: a substring test on `elicit` would also match claude's informational `elicitation_complete`/`_response` and leave NEEDS YOU on a node that just finished, with no later hook to clear it |
 | `Notification` whose **message** reads idle (`type your message`, `enter send`, `shift-tab normal`, `ask a side question`; `*idle*` type as a fallback) | `done`, `interrupted`, `idle` | the **rescue** signal for a node stuck on `working` — see §8. Keyed on the MESSAGE because that is where grok states it (orca's `isGrokIdleNotification`, `:2391-2402`); a type-only test never fired, since no source names an "idle" type. Checked **after** the ask branches, mirroring orca's own precedence (`:3994-4012`) |
 
@@ -375,7 +375,11 @@ ai-name / comments).
    a user whose `export GROK_HOME=…` lives in `.zshrc`, we write the hook file under `~/.grok` and grok
    reads somewhere else: no badge, no unread dot, no notification, no session name, **ever**, and no
    diagnostic. Same class as `findTmux()` resolving an absolute path "because GUI apps don't inherit the
-   shell PATH", and the same trap the SSH side already handles properly (checklist **26**). Fixing it
+   shell PATH". The SSH side is **better but not immune**, and the distinction matters: it at least asks
+   the host and validates the answer (`isSafeRemoteGrokHome`) before falling back deliberately — but the
+   probe runs over a **plain ssh exec channel**, so a host exporting `GROK_HOME` only from `.bashrc`
+   reports empty and silently gets `~/.grok`. That is checklist **26**, which exists because the remote
+   side shares the blind spot, not because it is solved there. Fixing it
    means probing the login shell — a change with its own failure modes, not a comment — so checklist
    **31** asks first whether anyone sets the variable at all. The trap is documented at `grokHomeDir`.
 
@@ -442,8 +446,19 @@ State machine edges
  9. Press Esc mid-turn. Expected (documented): NO hook fires and the badge stays RUNNING until
     the next prompt. Confirm, and record how bad it feels — this decides whether a watchdog is
     worth building.
-10. Trigger a permission prompt (a mode that asks). Does ANY Notification fire, and with what
-    `notificationType`? This is the only path to a NEEDS YOU badge; record the vocabulary.
+10. The `Notification` capture — the highest-value item on this list, because the mapping in §5 rests
+    entirely on another integration's reader. Record, VERBATIM and per notification, all THREE fields
+    the mapping reads: the kind (`notificationType` / `notification_type` / `type` — note which key,
+    and its exact casing), `message`, and `level`. Do it for BOTH cases, because they are handled
+    oppositely and only the exact strings can tell them apart:
+    (a) a **routine** run — one turn with several tool calls, under `auto` AND under
+    `bypassPermissions`, window in the BACKGROUND. If a notification fires per tool call, our
+    suppression must match its message/level exactly or the node strobes NEEDS YOU (chime + OS
+    notification + phone card per tool call). Count the notifications against the tool calls.
+    (b) a **genuine** ask that needs a human answer. That one must still reach `blocked`.
+    Also note whether an IDLE notification exists at all and its exact message (item 9's rescue
+    depends on the four phrases in `GROK_IDLE_MESSAGES`). This is the only path to a NEEDS YOU badge;
+    record the vocabulary.
 11. Force an API error (e.g. an invalid model). Does StopFailure clear the RUNNING badge?
 12. Quit with `/quit`. Does the session-close Stop stay silent (no "agent finished" notification)?
 

@@ -12,7 +12,9 @@
 // file's contract. Should a renderer surface ever need one of these helpers, split the genuinely
 // pure half out (the encoding/validation functions) instead of moving the file back.
 //
-// Measured layout (shipped 1.0.0):
+// Layout per grok's shipped 1.0.0 docs (`~/.grok/docs/user-guide/17-sessions.md:18,27`) — NOT observed:
+// the branch never had a logged-in session, so no `$GROK_HOME/sessions/` tree ever existed here to
+// look at. Every path rule below is therefore a claim about that document:
 //   $GROK_HOME/hooks/*.json                     — hook files, all merged; GROK_HOME defaults to ~/.grok
 //   $GROK_HOME/sessions/<encoded cwd>/<id>/     — one directory per session, grouped by cwd
 //     summary.json  updates.jsonl  chat_history.jsonl  signals.json  plan.json  subagents/
@@ -52,8 +54,14 @@ type GrokEnv = { GROK_HOME?: string }
  *  tmux pane, which DID source that rc — reads the exported path. Nothing errors. The hook file is
  *  written successfully, grok never loads it, and the consequence is total and silent: no RUNNING /
  *  NEEDS YOU badge, no unread dot, no completion notification, no session name, ever, with no
- *  diagnostic anywhere. The REMOTE path does not have this problem (`RemoteHooks.installGrokRemote`
- *  asks the host through a login shell and validates the answer with `isSafeRemoteGrokHome`).
+ *  diagnostic anywhere.
+ *
+ *  The REMOTE path is BETTER, not immune, and the difference is worth being precise about: it at least
+ *  ASKS the host (`RemoteHooks.installGrokRemote` runs `printf %s "${GROK_HOME:-}"`) and validates the
+ *  answer (`isSafeRemoteGrokHome`) before falling back to `$HOME/.grok` deliberately. But that probe
+ *  goes over a **plain ssh exec channel**, not a login shell, so it shares this exact blind spot: a
+ *  host that exports `GROK_HOME` only from `.bashrc` reports empty and silently gets `~/.grok`. That is
+ *  checklist item 26, which exists BECAUSE the remote side has the problem too.
  *
  *  Deliberately NOT fixed here: resolving it means probing the user's login shell for `GROK_HOME`
  *  (a spawn, a cache, and a fail-open policy), which is its own change with its own failure modes —

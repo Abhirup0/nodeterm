@@ -13,10 +13,12 @@
 
 /**
  * One managed hook subscription: an event name, or an event name PLUS the matcher to write for it.
- * Only grok needs the second form — its tool-event `matcher` is a real REGEX, and a bare `*` is
- * invalid there and silently stops tool events from firing at all (measured on the shipped 1.0.0
- * binary). `.*` is the value that works. claude/codex/gemini stay plain strings, so their emitted
- * config is byte-identical to what it has always been.
+ * Only grok needs the second form — its tool-event `matcher` is a real REGEX
+ * (`~/.grok/docs/user-guide/10-hooks.md:153`), so a bare `*` is not a valid match-all but an invalid
+ * pattern, and the expected failure is silence: the tool events simply never fire. We write `.*`.
+ * That is read off the docs, not observed — no hook was ever seen firing here (see GROK_HOOK_EVENTS).
+ * claude/codex/gemini stay plain strings, so their emitted config is byte-identical to what it has
+ * always been.
  */
 export type ManagedHookEvent = string | { event: string; matcher: string }
 

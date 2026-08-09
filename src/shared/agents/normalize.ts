@@ -394,9 +394,18 @@ const GROK_IDLE_MESSAGES = [
   'ask a side question'
 ] as const
 
+/**
+ * ONE canonicalization for every grok VALUE we compare — lowercase, letters only, so all of
+ * 'pre_tool_use', 'PreToolUse', 'preToolUse' and 'Pre-Tool-Use' land on 'pretooluse'. grok's envelope
+ * is documented camelCase while its event values are snake_case, and the SDK path flips the keys, so
+ * one dialect rule shared by every comparison in this file is the point: a second spelling rule is
+ * how a value gets normalized in one branch and matched raw in another.
+ */
+const grokCanonical = (v: string | undefined): string => (v ?? '').toLowerCase().replace(/[^a-z]/g, '')
+
 /** Canonical form of a grok event name: 'pre_tool_use', 'PreToolUse' and 'preToolUse' all → 'pretooluse'. */
 const grokEventName = (p: GrokPayload): string =>
-  (p.hookEventName ?? p.hook_event_name ?? '').toLowerCase().replace(/[^a-z]/g, '')
+  grokCanonical(p.hookEventName ?? p.hook_event_name)
 
 /**
  * The fields the SHELLS need from a raw grok payload, in nodeterm's own names — one definition
@@ -467,12 +476,24 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
     //  - orca (`/root/orca-main`, MIT, a shipping grok integration) names `permission_prompt`
     //    plus prose messages (`agent-hook-listener.ts:2378-2402`).
     //  - grok's own shipped docs name a different set entirely:
-    //    `turn_complete | approval_required | session_ready | task_complete | agent_error`
-    //    (`~/.grok/docs/user-guide/05-configuration.md:414`).
+    //    `turn_complete | approval_required | session_ready | task_complete | agent_error` — but see
+    //    the `approval_required` branch below: that list is the NOTIFICATION TRIGGER vocabulary
+    //    (`~/.grok/docs/user-guide/05-configuration.md:414`), not documented `notificationType` values.
     // Everything unrecognized stays a deliberate NO-OP: same discipline as normalizeClaude, where an
     // unknown future type sticking a badge on a finished node is the failure that has actually
     // happened before.
-    const type = (p.notificationType ?? p.notification_type ?? p.type ?? '').toLowerCase()
+    //
+    // The type goes through `grokCanonical`, the SAME rule the event name uses — so the literals
+    // below are letters-only ('permission_prompt', 'permissionPrompt' and 'Permission-Prompt' all
+    // become 'permissionprompt'). This is not decoration: grok's envelope is documented camelCase
+    // throughout, so `permissionPrompt` is a plausible spelling, and comparing it raw would let it
+    // MISS the suppression below and fall through to the `includes('permission')` ask branch — i.e.
+    // reinstate the per-tool-call strobe in the one direction that hurts. Orca canonicalizes too, to
+    // snake_case (`normalizeHookEventName`, `agent-hook-listener.ts:2201-2210`); we reuse OUR one rule
+    // rather than adopting a second spelling convention into this file.
+    const type = grokCanonical(p.notificationType ?? p.notification_type ?? p.type)
+    // message/level are prose, not identifiers: trim + lowercase only, field-for-field as orca reads
+    // them (`:3973-3975`). Canonicalizing THESE would strip the spaces the phrases are made of.
     const message = (p.message ?? '').trim().toLowerCase()
     const level = (p.level ?? '').trim().toLowerCase()
     // THE ROUTINE PER-TOOL PROMPT IS NOT A NEEDS-YOU. Orca's
@@ -486,7 +507,7 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
     // Matched exactly as orca matches it — the precise type, the precise message, and a level that
     // is `info` or absent — so a LOUDER prompt (a real ask reusing the same type) still gets through.
     if (
-      type === 'permission_prompt' &&
+      type === 'permissionprompt' &&
       message === 'tool permission requested' &&
       (!level || level === 'info')
     ) {
@@ -494,17 +515,21 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
     }
     // A genuine permission ask is a FAMILY of names ('permission_prompt', 'permission_request', …),
     // and its worst case is a `blocked` badge the agent's next hook clears — so substring is the
-    // right trade. `approval_required` is grok's OWN word for it (05-configuration.md:414) and is
-    // matched exactly: it shares no substring with the orca spelling, and adding it is what keeps
-    // this mapping from firing for nothing if the docs' vocabulary is the real one.
-    if (type.includes('permission') || type === 'approval_required') {
+    // right trade.
+    // `approval_required` is INFERENCE ON INFERENCE, and is labelled that way deliberately: grok's
+    // docs name it only as a `[ui.notifications].events` TRIGGER (05-configuration.md:414), never as a
+    // `notificationType` value. The bridge is `10-hooks.md:153`, "the matcher tests … the notification
+    // type on `Notification`", which implies the type vocabulary is drawn from that same set. Weaker
+    // than the orca spelling above, and matched exactly for that reason — it costs nothing if wrong
+    // (an unused literal) and is the only thing that fires at all if grok's own words are the real ones.
+    if (type.includes('permission') || type === 'approvalrequired') {
       return { ...base, kind: 'state', state: 'blocked', lastMessage }
     }
     // The asking types are a CLOSED set, exactly as in normalizeClaude, and for its reason: grok's
     // vocabulary is claude-derived, and claude's `elicitation_complete` / `elicitation_response` are
     // informational — they fire when an elicitation ENDS. A substring test on 'elicit' would match
     // them and leave NEEDS YOU on a node that just finished, with no later hook to clear it.
-    if (type === 'elicitation_dialog' || type === 'agent_needs_input') {
+    if (type === 'elicitationdialog' || type === 'agentneedsinput') {
       return { ...base, kind: 'state', state: 'waiting', lastMessage }
     }
     // Idle at the prompt: the RESCUE signal for a node stuck on `working`. grok fires no hook at all
