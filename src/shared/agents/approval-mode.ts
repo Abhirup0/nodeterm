@@ -34,11 +34,22 @@ const GEMINI_MODES: Partial<Record<AgentPermissionMode, string>> = {
 }
 
 const CODEX_MODES: Partial<Record<AgentPermissionMode, string>> = {
+  // codex is the FIRST agent where `manual` emits a flag, and it has to. For every other agent
+  // `manual` = no flag = a default that already prompts (gemini's own `default` is documented as
+  // "prompt for approval"), which is exactly what the label "Ask each time" promises. codex's
+  // built-in default is NOT that: measured on 0.146.0, `codex doctor` reports `approval policy
+  // OnRequest` with no `approval` key in ~/.codex/config.toml — the model decides when to ask. So
+  // leaving `manual` unflagged would deliver `on-request` under an "ask each time" label, and
+  // collapse two dropdown entries onto one behaviour — the same dishonesty this module exists to
+  // remove, just expressed as an unflagged claim instead of a substituted flag. `untrusted` is the
+  // real equivalent: "only run trusted commands without asking; escalate anything not in the trusted
+  // set". No codex launch has ever carried this flag (codex joined the list in the same change), so
+  // there is no historical command line to keep byte-identical here.
+  manual: 'untrusted',
   auto: 'on-request',
   bypassPermissions: 'never'
   // No `plan` and no edit-specific mode exist in codex 0.146.0, so `plan` and `acceptEdits` are
-  // absent ON PURPOSE — see modeSupported. `untrusted` is deliberately unused: it is stricter than
-  // codex's own default, and none of our five modes asks for that.
+  // absent ON PURPOSE — see modeSupported.
 }
 
 const tableFor = (agentId: AgentId): Partial<Record<AgentPermissionMode, string>> | null =>
@@ -51,7 +62,12 @@ const flagFor = (agentId: AgentId): string =>
  *  agent uses its own default — surfaced in the UI so the user is not misled. */
 export function modeSupported(agentId: AgentId, mode: AgentPermissionMode): boolean {
   if (!isPermissionMode(mode)) return false
-  if (mode === 'manual') return hasPermissionMode(agentId) // "ask each time" = the agent's own default
+  // `manual` — "ask each time" — is reachable on every capable agent, but for two different reasons,
+  // which is why the table is not its authority: claude/grok/gemini get there by emitting NO flag
+  // (their own default already prompts), and codex gets there through `untrusted`, because its
+  // default does not. Either way the promise holds; an agent whose CLI could offer neither would
+  // need this early return revisited.
+  if (mode === 'manual') return hasPermissionMode(agentId)
   const table = tableFor(agentId)
   if (table) return mode in table
   return hasPermissionMode(agentId)
@@ -114,15 +130,27 @@ const joinAnd = (parts: string[]): string =>
  * must not name an agent the mode never reaches); `exclude` drops one the sentence is already about
  * (claude's version-gate note, whose subject is claude).
  */
-export function permissionModeAgentsLabel(opts?: {
+export function permissionModeAgentsLabel(opts?: PermissionModeAgentFilter): string {
+  return joinAnd(permissionModeAgentIds(opts).map(agentLabel))
+}
+
+interface PermissionModeAgentFilter {
   mode?: AgentPermissionMode
   exclude?: readonly AgentId[]
-}): string {
-  const ids = PERMISSION_MODE_CAPABLE.filter(
+}
+
+/**
+ * The ids `permissionModeAgentsLabel` will name, under the same filter.
+ *
+ * Exported so a caller can AGREE with the label grammatically — one agent takes "is", several take
+ * "are" — instead of hardcoding a plural that reads as "Grok are unaffected" the day the capable list
+ * narrows. Same drift `permissionModeAgentsLabel` exists to prevent, one level down.
+ */
+export function permissionModeAgentIds(opts?: PermissionModeAgentFilter): AgentId[] {
+  return PERMISSION_MODE_CAPABLE.filter(
     (id) =>
       !opts?.exclude?.includes(id) && (opts?.mode === undefined || modeSupported(id, opts.mode))
   )
-  return joinAnd(ids.map(agentLabel))
 }
 
 /**
@@ -139,7 +167,26 @@ export function unsupportedModesNote(): string {
     .map(({ label, gaps }) => {
       const modes = joinAnd(gaps.map((m) => PERMISSION_MODE_LABELS[m]))
       const verb = gaps.length > 1 ? 'have' : 'has'
-      return `${modes} ${verb} no ${label} equivalent, so ${label} sessions start in its own default.`
+      return `${modes} ${verb} no ${label} equivalent, so ${label} sessions start in ${label}'s own default.`
     })
     .join(' ')
+}
+
+/**
+ * Agents where `bypassPermissions` bypasses APPROVALS only, because their sandbox is a separate axis
+ * this module deliberately does not touch — codex's `--sandbox`, where `--ask-for-approval never`
+ * still sandboxes. Kept beside the mapping that causes it rather than in the component, so the
+ * warning copy cannot drift from which agents it is true of.
+ */
+const SANDBOX_RETAINED: readonly AgentId[] = ['codex']
+
+/** The clause a "Bypass all" warning owes, so "no permission checks" is not read as "no sandbox
+ *  either". Empty string when it applies to nobody. */
+export function bypassSandboxCaveat(): string {
+  const ids = permissionModeAgentIds({ mode: 'bypassPermissions' }).filter((id) =>
+    SANDBOX_RETAINED.includes(id)
+  )
+  if (!ids.length) return ''
+  const label = joinAnd(ids.map(agentLabel))
+  return `${label} still ${ids.length > 1 ? 'run' : 'runs'} in its own sandbox — only the approval prompts are skipped.`
 }

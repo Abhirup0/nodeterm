@@ -16,7 +16,11 @@ import {
   type AgentId,
   type AgentPermissionMode
 } from '@shared/agents/config'
-import { permissionModeAgentsLabel, unsupportedModesNote } from '@shared/agents/approval-mode'
+import {
+  permissionModeAgentIds,
+  permissionModeAgentsLabel,
+  unsupportedModesNote
+} from '@shared/agents/approval-mode'
 import { AgentIcon } from '../../../lib/agentIcons'
 import { hintLabel } from '@shared/platform-utils'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
@@ -78,6 +82,10 @@ function permissionModeDescription(): string {
     .join(' ')
 }
 
+// The agents claude's version gate does NOT apply to — every other capable agent. Module level: the
+// capable list cannot change while the app runs.
+const otherModeAgents = permissionModeAgentIds({ exclude: ['claude'] })
+
 export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const settings = useSettings((s) => s.settings)
   const update = useSettings((s) => s.update)
@@ -104,7 +112,17 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
   // evidence of an old CLI, and guessing would be its own kind of wrong.
   const autoNote =
     settings.claudePermissionMode === 'auto' && cliCaps?.version && !cliCaps.autoPermissionMode
-      ? `Your Claude CLI (${cliCaps.version.split(/\s+/)[0]}) doesn't support Auto — Claude sessions start in "${PERMISSION_MODE_LABELS.manual}". Requires Claude Code ${AUTO_PERMISSION_MODE_MIN_VERSION} or newer. ${permissionModeAgentsLabel({ exclude: ['claude'] })} are unaffected.`
+      ? [
+          `Your Claude CLI (${cliCaps.version.split(/\s+/)[0]}) doesn't support Auto — Claude sessions start in "${PERMISSION_MODE_LABELS.manual}". Requires Claude Code ${AUTO_PERMISSION_MODE_MIN_VERSION} or newer.`,
+          // The bystanders are derived, AND so is the verb agreeing with them: a hardcoded "are"
+          // degrades to "Grok are unaffected." if the capable list ever narrows to two, and the
+          // sentence has to disappear entirely if claude is ever the only capable agent.
+          otherModeAgents.length
+            ? `${permissionModeAgentsLabel({ exclude: ['claude'] })} ${otherModeAgents.length === 1 ? 'is' : 'are'} unaffected.`
+            : ''
+        ]
+          .filter(Boolean)
+          .join(' ')
       : undefined
 
   return (

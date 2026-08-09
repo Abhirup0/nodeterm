@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import {
   approvalFlags,
+  bypassSandboxCaveat,
   modeSupported,
+  permissionModeAgentIds,
   permissionModeAgentsLabel,
   unsupportedModesNote
 } from './approval-mode'
-import { ALL_PERMISSION_MODES, type AgentPermissionMode } from './config'
+import {
+  ALL_PERMISSION_MODES,
+  PERMISSION_MODE_LABELS,
+  type AgentPermissionMode
+} from './config'
 
 /**
  * Measured flag vocabularies:
@@ -49,9 +55,33 @@ describe('approvalFlags — gemini', () => {
 
 describe('approvalFlags — codex REFUSES what it cannot express', () => {
   it('maps only the three modes that have a real counterpart', () => {
-    expect(approvalFlags('codex', 'manual')).toEqual([])
     expect(approvalFlags('codex', 'auto')).toEqual(['--ask-for-approval', 'on-request'])
     expect(approvalFlags('codex', 'bypassPermissions')).toEqual(['--ask-for-approval', 'never'])
+  })
+
+  /**
+   * codex is the only agent where `manual` emits a flag, and it MUST. Measured on 0.146.0:
+   * `codex doctor` reports `approval policy OnRequest` with no `approval` key in
+   * ~/.codex/config.toml, so codex's built-in default is "the model decides when to ask" — not "ask
+   * each time". Unflagged, `manual` and `auto` would be the SAME runtime policy: two dropdown
+   * entries collapsed onto one behaviour, under a label promising something else. `untrusted` is the
+   * documented equivalent ("only run trusted commands without asking; escalate anything else").
+   */
+  it('emits `untrusted` for manual, because codex’s own default is not "ask each time"', () => {
+    expect(approvalFlags('codex', 'manual')).toEqual(['--ask-for-approval', 'untrusted'])
+    // ...and it is therefore a DIFFERENT policy from auto, which is the whole point.
+    expect(approvalFlags('codex', 'manual')).not.toEqual(approvalFlags('codex', 'auto'))
+    // codex has an equivalent, so the derived copy must NOT claim otherwise.
+    expect(modeSupported('codex', 'manual')).toBe(true)
+    expect(unsupportedModesNote()).not.toContain(PERMISSION_MODE_LABELS.manual)
+  })
+
+  it('leaves every other agent’s manual unflagged — their own default already prompts', () => {
+    // gemini's `default` is documented as "prompt for approval", so no flag keeps the promise there.
+    for (const id of ['claude', 'grok', 'gemini']) {
+      expect(approvalFlags(id, 'manual'), id).toEqual([])
+      expect(modeSupported(id, 'manual'), id).toBe(true)
+    }
   })
 
   it('emits NO flag for a mode codex has no equivalent of', () => {
@@ -102,11 +132,34 @@ describe('UI copy derived from the mapping', () => {
     expect(label).not.toContain('opencode')
   })
 
+  it('agrees grammatically with the list it names, however long that list is', () => {
+    // A hardcoded plural reads as "Grok are unaffected." the day the capable list narrows, which is
+    // the same drift the label helper exists to prevent, one level down. The ids are exported so the
+    // caller can agree with them; this pins that they describe the SAME set the label does.
+    const ids = permissionModeAgentIds({ exclude: ['claude'] })
+    expect(ids).toEqual(['grok', 'gemini', 'codex'])
+    const label = permissionModeAgentsLabel({ exclude: ['claude'] })
+    for (const id of ids) expect(label.toLowerCase()).toContain(id === 'codex' ? 'codex' : id)
+    expect(label).not.toContain('Claude')
+  })
+
+  it('warns that Bypass all keeps codex’s sandbox, which is a separate axis', () => {
+    // `--ask-for-approval never` does not touch `--sandbox`, so "no permission checks" must not be
+    // read as "no sandbox either". Only codex has that second axis among the capable agents.
+    const caveat = bypassSandboxCaveat()
+    expect(caveat).toContain('Codex')
+    expect(caveat).toContain('sandbox')
+    expect(caveat).not.toContain('Gemini')
+    expect(caveat).not.toContain('Claude')
+  })
+
   it('admits codex’s two gaps, and names no agent that has none', () => {
     const note = unsupportedModesNote()
     expect(note).toContain('Plan')
     expect(note).toContain('Accept edits')
     expect(note).toContain('Codex')
+    // Number agreement: "Codex sessions start in Codex's own default", never "in its own default".
+    expect(note).toContain("Codex's own default")
     // gemini expresses all five, so it must never appear in a sentence about missing modes.
     expect(note).not.toContain('Gemini')
     expect(note).not.toContain('Claude Code')
