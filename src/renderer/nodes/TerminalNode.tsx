@@ -844,6 +844,17 @@ export function TerminalNode({
   const offscreenDownRef = useRef(false)
   const offscreenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [offscreenEpoch, setOffscreenEpoch] = useState(0)
+  /** The visibility observer's last verdict. Component-level (not per-lifecycle-run) because it
+   *  must survive an offscreen dispose and because a budget client registered by a later run needs
+   *  the CURRENT answer — see `ensureWebglClient`. */
+  const wasVisibleRef = useRef(false)
+  /** What the CURRENT lifecycle run wants done with a visibility verdict (budget report + the
+   *  hidden→visible repaint heal). Null exactly while this node has no terminal: between runs, and
+   *  for the whole time it is offscreen-disposed. The observer that calls it is mount-stable. */
+  const visibilityReportRef = useRef<((visible: boolean) => void) | null>(null)
+  /** Is there a live session here that could be given back? Published by the lifecycle run
+   *  (`restartTarget`), null between runs — the dispose timer refuses when it cannot ask. */
+  const offscreenLiveRef = useRef<(() => boolean) | null>(null)
   // Selection is a live veto (`mayDisposeOffscreen`): a selected node is one the user is working
   // with — it can be off-screen mid-drag or right after a ⌘K jump — so it is never taken down.
   const selectedRef = useRef(selected)
@@ -948,13 +959,20 @@ export function TerminalNode({
   // The affordance is absent, not merely refused on click.
   const sshProject = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
   const remoteSession = sshProject || isRemoteSessionNode(data)
-  // The SAME question the ↪ affordance asks, mirrored for the offscreen-dispose gate: a remote
-  // session's respawn runs the requireRemote/offline machinery, and a revive while the
-  // ControlMaster happens to be down would surface the offline overlay on a node the user never
-  // touched. Excluded in v1 (offscreen-policy.ts), read through a ref because a project can BECOME
-  // an SSH project long after the lifecycle effect captured its render.
-  const remoteSessionRef = useRef(remoteSession)
-  remoteSessionRef.current = remoteSession
+  // "Does this node's session live on another machine?" for the offscreen-dispose gate. It starts
+  // from the SAME question the ↪ affordance asks and then adds `data.remote` — a RELAY tab's
+  // terminals, whose session lives on the host at the other end of the relay tunnel. Both are
+  // excluded in v1 (offscreen-policy.ts): a revive re-runs the spawn path, and doing that while
+  // the ControlMaster or the relay link happens to be down surfaces the offline overlay / a spawn
+  // error on a node the user never touched.
+  //
+  // `isRemoteSessionNode` is deliberately NOT widened for this: it is the worktree gate, and
+  // worktrees exclude relay nodes on purpose (a relay node's repo is the host's, and that gate
+  // asks a different question). The union belongs here, at the one call site that means it.
+  // A ref because a project can BECOME an SSH project (or a tab a relay tab) long after the
+  // lifecycle run that would otherwise have captured the answer.
+  const offscreenRemoteRef = useRef(false)
+  offscreenRemoteRef.current = remoteSession || !!data.remote
   const canMoveIntoWorktree =
     !!parentWtPath &&
     !parentWtStale &&
@@ -1154,13 +1172,9 @@ export function TerminalNode({
     // "lost context" placeholder). The callbacks stay dumb and idempotent.
     let webgl: WebglAddon | null = null
     let webglHandle: WebglClientHandle | null = null
-    /** The IntersectionObserver's last verdict, re-stated to any budget client registered after
-     *  it (the observer will not fire again until visibility actually CHANGES, and a fresh client
-     *  starts out believing it is hidden). Declared up here with the handle it belongs to, not
-     *  next to the observer: `ensureWebglClient` can run from the glyph setup at mount, which is
-     *  BEFORE the observer is built — a `let` declared down there would be in its temporal dead
-     *  zone and throw. */
-    let wasVisible = false
+    // (The observer's last verdict lives in the component-level `wasVisibleRef`: it must survive an
+    // offscreen dispose, and a budget client registered by a LATER run — this one included — needs
+    // the current answer, not `false`. See `visibilityReportRef`.)
     // --- glyphgrid (experimental shared renderer) -----------------------------------------
     // Live only while this terminal paints into the shared canvas instead of its own renderer.
     // All four stay null for the default modes: `setupGlyph()` returns on its first gate without
@@ -1452,7 +1466,12 @@ export function TerminalNode({
       // and a fresh registration would be a leak into a coordinator nothing will unregister from.
       if (disposed || webglHandle) return
       webglHandle = registerWebglClient(id, { acquire: acquireWebgl, release: releaseWebgl })
-      webglHandle.setVisible(wasVisible)
+      // Re-state the observer's last verdict: it will not fire again until visibility actually
+      // CHANGES, and a fresh client starts out believing it is hidden. The ref (not a per-run
+      // `let`) is what makes this true for a client registered by a REVIVE as well — no new
+      // intersection change follows one, so `false` there would leave a visible terminal on the
+      // DOM renderer until it was panned out and back.
+      webglHandle.setVisible(wasVisibleRef.current)
     }
 
     // --- glyphgrid (experimental shared renderer) -------------------------------------------
@@ -2474,6 +2493,10 @@ export function TerminalNode({
     // view. The observer's initial callback (queued shortly after `observe()`) is what reports
     // visibility on mount/adopt — this replaces the old unconditional `loadWebgl()` calls in both
     // the parked and fresh paths above; the DOM renderer covers the gap until a grant lands.
+    // (That observer is MOUNT-STABLE and lives in its own effect below — it has to outlive an
+    // offscreen dispose. This run reaches it by publishing `visibilityReportRef` at the bottom of
+    // this effect, and a client registered without a fresh verdict seeds itself from
+    // `wasVisibleRef` in `ensureWebglClient`.)
     //
     // …unless this terminal paints into the SHARED canvas. Then xterm never draws its pixels, so
     // there is no per-terminal context to budget, nothing to acquire on approach and no DOM-strand
@@ -2548,80 +2571,43 @@ export function TerminalNode({
         console.warn(`[glyphgrid] generation handler failed for ${id} (continuing)`, err)
       }
     })
-    const visibilityObserver = new IntersectionObserver(
-      (entries) => {
-        // disconnect() does not flush already-QUEUED notifications (Blink delivers them after),
-        // so a mount that unmounts within the initial-delivery window could otherwise acquire a
-        // context onto a parked/disposed terminal — the very leak this feature exists to prevent.
-        if (disposed) return
-        const visible = entries[entries.length - 1]?.isIntersecting ?? false
-        webglHandle?.setVisible(visible)
-        // Hidden → visible: issue the one full repaint that cannot be swallowed (the element is
-        // attached and intersecting RIGHT NOW). This is the master heal for every "stuck blank /
-        // partial until manual refresh" strand accumulated while off-screen — whichever renderer
-        // is active, and whatever xterm's own deferred-refresh bookkeeping lost in the meantime.
-        // One-shot per transition (not per frame), so a zoom-out burst costs one repaint per node.
-        // The invariant check first: a stray black canvas left by a broken swap while hidden
-        // would otherwise cover everything the repaint draws (no-op when a webgl grant is live).
-        // Gated on everSwapped: a node that never swapped renderers has nothing to heal, and
-        // paying a full repaint per node entering the viewport is what made panning janky.
-        if (visible && !wasVisible && everSwapped) {
-          verifyCleanDomState('visible')
-          fullRepaint()
-        }
-        wasVisible = visible
-        // …and the offscreen-dispose state machine, riding the same verdict. Everything it decides
-        // is the pure `planOffscreenVisibility`; this block only executes the plan.
-        const disposeMs = offscreenDisposeMs(
-          useSettings.getState().settings.offscreenTerminalMinutes
-        )
-        const plan = planOffscreenVisibility({
-          visible,
-          down: offscreenDownRef.current,
-          timerArmed: !!offscreenTimerRef.current,
-          disposeMs
-        })
-        if (plan.cancelTimer && offscreenTimerRef.current) {
-          clearTimeout(offscreenTimerRef.current)
-          offscreenTimerRef.current = null
-        }
-        if (plan.revive) {
-          offscreenDownRef.current = false
-          setOffscreenDown(false)
-          setOffscreenEpoch((n) => n + 1) // re-run the lifecycle effect → fresh warm tmux attach
-        }
-        if (plan.armTimer && disposeMs !== null) {
-          offscreenTimerRef.current = setTimeout(() => {
-            offscreenTimerRef.current = null
-            // Re-asked at FIRE time, never at arm time: ten minutes is long enough for every input
-            // to have changed. `wasVisible` is the observer's own latest verdict.
-            if (
-              !mayDisposeOffscreen({
-                visible: wasVisible,
-                remote: remoteSessionRef.current,
-                selected: selectedRef.current
-              })
-            )
-              return
-            // Nothing to reclaim, and nothing safe to respawn: a spawn still in flight has no
-            // session yet, and a session another client closed (or one that ended with no
-            // replacement) must never be re-created — the overlays own those states, and a revive
-            // would land on `noSpawn` with an empty screen. Both are exactly the states the park
-            // branch below refuses to park.
-            const coNow = getCo(termKey)
-            if (!sessionId || coNow.closed || coNow.ended) return
-            offscreenDownRef.current = true
-            // The cleanup must DISPOSE, not park: parking keeps the very buffer this feature exists
-            // to give back. Set before the state flip, since that flip is what runs the cleanup.
-            noParkIds.add(termKey)
-            setOffscreenDown(true)
-            setOffscreenEpoch((n) => n + 1)
-          }, disposeMs)
-        }
-      },
-      { rootMargin: '256px' }
-    )
-    visibilityObserver.observe(container)
+    // What THIS session owes a visibility verdict. The IntersectionObserver itself is NOT ours: it
+    // lives in a mount-stable effect below, because an observer owned by this effect dies with the
+    // offscreen dispose it is supposed to reverse (the down transition runs this cleanup, and the
+    // re-run early-returns before ever constructing one — the node would then be blind, and the
+    // plate permanent). So this effect publishes a REPORT function instead, and the observer always
+    // calls the live one; `visibilityReportRef` is null exactly while there is no terminal here.
+    //
+    // `wasVisibleRef` is the observer's last verdict and is read as the PREVIOUS value here — the
+    // observer writes it after calling us, so the edge test below is intact.
+    const reportVisible = (visible: boolean): void => {
+      // A queued notification can still be delivered after this run's teardown (the observer is not
+      // disconnected by it, and Blink delivers already-queued entries anyway), and acquiring a
+      // context onto a parked/disposed terminal is the very leak the budget exists to prevent.
+      // Belt to the ref-clearing brace in the cleanup below.
+      if (disposed) return
+      webglHandle?.setVisible(visible)
+      // Hidden → visible: issue the one full repaint that cannot be swallowed (the element is
+      // attached and intersecting RIGHT NOW). This is the master heal for every "stuck blank /
+      // partial until manual refresh" strand accumulated while off-screen — whichever renderer
+      // is active, and whatever xterm's own deferred-refresh bookkeeping lost in the meantime.
+      // One-shot per transition (not per frame), so a zoom-out burst costs one repaint per node.
+      // The invariant check first: a stray black canvas left by a broken swap while hidden
+      // would otherwise cover everything the repaint draws (no-op when a webgl grant is live).
+      // Gated on everSwapped: a node that never swapped renderers has nothing to heal, and
+      // paying a full repaint per node entering the viewport is what made panning janky.
+      if (visible && !wasVisibleRef.current && everSwapped) {
+        verifyCleanDomState('visible')
+        fullRepaint()
+      }
+    }
+    visibilityReportRef.current = reportVisible
+    // Is there a live session here worth giving back? `restartTarget` asks exactly that question
+    // (spawn still in flight ⇒ no session id; a session another client closed, or one that ended
+    // with no replacement, must never be re-created — the overlays own those states and a revive
+    // would land on `noSpawn` with an empty screen), and they are the same states the park branch
+    // below refuses to park. Null while down / between runs ⇒ the timer refuses.
+    offscreenLiveRef.current = restartTarget
 
     return () => {
       disposed = true
@@ -2630,7 +2616,12 @@ export function TerminalNode({
       unregisterRestart()
       observer.disconnect()
       rootObserver.disconnect()
-      visibilityObserver.disconnect()
+      // The visibility observer is NOT disconnected here — it is mount-stable and must outlive an
+      // offscreen dispose (see the effect below). What dies with this run is what it feeds: clear
+      // both published functions, but only if they are still OURS (a respawn's new run has already
+      // published its own by the time this cleanup executes).
+      if (visibilityReportRef.current === reportVisible) visibilityReportRef.current = null
+      if (offscreenLiveRef.current === restartTarget) offscreenLiveRef.current = null
       // Torn down HERE, not through `cleanups`: that array is carried over by a park and only run
       // at a real teardown, so pushing onto it would stack one more focus listener (closing over a
       // dead effect's grid) on every park/adopt cycle. These belong to this effect run, exactly
@@ -2639,35 +2630,18 @@ export function TerminalNode({
       document.removeEventListener('visibilitychange', onVisibilityChange)
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
-      // The offscreen timer belongs to THIS effect's observer closure (it reads its `wasVisible`
-      // and `sessionId`), so it dies with it. A respawn's fresh observer re-arms from its own
-      // initial delivery; a down transition already fired and cleared it.
-      if (offscreenTimerRef.current) {
-        clearTimeout(offscreenTimerRef.current)
-        offscreenTimerRef.current = null
-      }
+      // The offscreen timer is deliberately NOT cleared here: it belongs to the mount-stable
+      // observer effect below, reads every input through a ref, and refuses on its own when
+      // `offscreenLiveRef` is null. Clearing it on a respawn would drop a window that has been
+      // counting down for minutes.
       useAgentStatus.getState().setActive(id, false)
       // Teammates stop seeing us in this node's header. releaseFocus, not reportFocus(null): on a
       // project switch every node unmounts, and an unconditional clear could undo the focus the
       // node we just moved into already published.
       presence.releaseFocus(id)
-      // Unmount happens on a project switch (a detach — the tmux session keeps running) as
-      // well as on real deletion, and we can't tell them apart here. Don't wipe the node's
-      // persisted status (that would drop the sessionId the context meter looks up on remount,
-      // making the meter vanish when you switch projects); only clear the live state. Real
-      // deletion drops the entry in Canvas.deleteNodes.
-      //
-      // …EXCEPT for an offscreen dispose, which is not an unmount at all: the node is still on this
-      // canvas, still in this project, still bound to the same running session — it merely gave its
-      // view back. Clearing the live state there would drop the RUNNING/NEEDS-YOU badge and the
-      // subagent fan-out off a node the user can still SEE (its kanban card most of all, which
-      // reads the same store), until the next hook event happened to re-fill them. The badge is
-      // node-id keyed and fed by Canvas's `agent:status` listener, which is entirely independent of
-      // this component's mount — so leaving it alone is both correct and free.
-      if (!offscreenDownRef.current) {
-        useAgentStatus.getState().setState(id, undefined)
-        useAgentNodes.getState().clearForParent(id)
-      }
+      // (The live agent state + subagent fan-out are cleared by the UNMOUNT-only effect below, not
+      // here: this cleanup also runs for a respawn and for an offscreen dispose, neither of which
+      // is a departure. See that effect for the whole argument.)
       termRef.current = null
       fitRef.current = null
       searchAddonRef.current = null
@@ -2761,6 +2735,124 @@ export function TerminalNode({
     setOffscreenDown(false)
     setOffscreenEpoch((n) => n + 1)
   }, [data.respawnNonce])
+
+  /**
+   * Viewport visibility — ONE observer for this node's whole life, deliberately not owned by the
+   * lifecycle effect above.
+   *
+   * It feeds two consumers: the WebGL budget coordinator (which grants/reclaims contexts by
+   * viewport visibility, plus the hidden→visible repaint heal) and the offscreen-dispose state
+   * machine. The second is why the ownership had to move. An observer built by the lifecycle effect
+   * is disconnected by that effect's cleanup — and the down transition IS that cleanup, after which
+   * the re-run early-returns before constructing a new one. The node would be blind from that
+   * moment on: the revive branch unreachable, the plate permanent (only a header Refresh or a
+   * project switch could recover it), and the policy's "switching the setting to 0 can never strand
+   * a disposed terminal" promise false. Same reasoning, same shape as `useDiscardWhenHidden`.
+   *
+   * Everything mutable therefore arrives through a ref, read at CALL time: what the current
+   * lifecycle run wants done with a verdict (`visibilityReportRef` — always the LIVE webgl handle,
+   * never a disposed one, and null while there is no terminal), whether a session exists to give
+   * back (`offscreenLiveRef`), whether this node is remote or selected, and the setting itself
+   * (re-read on every callback, so switching the feature off disarms a timer armed minutes ago).
+   *
+   * IntersectionObserver measures the rendered box, so React Flow's pan/zoom transform is accounted
+   * for natively — no coupling to its store, and identical behavior in the browser Server Edition.
+   * `rootMargin` pre-announces a node panning into view. The `observe()` call's initial delivery is
+   * what reports visibility at mount.
+   */
+  useEffect(() => {
+    const container = bodyRef.current
+    if (!container || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver(
+      (entries) => {
+        const visible = entries[entries.length - 1]?.isIntersecting ?? false
+        // The renderer half first: it reads `wasVisibleRef` as the PREVIOUS verdict for its
+        // hidden→visible edge test, so the write below must come after it.
+        visibilityReportRef.current?.(visible)
+        wasVisibleRef.current = visible
+        // …and the offscreen-dispose state machine. Every decision is the pure
+        // `planOffscreenVisibility`; this block only executes the plan.
+        const disposeMs = offscreenDisposeMs(
+          useSettings.getState().settings.offscreenTerminalMinutes
+        )
+        const plan = planOffscreenVisibility({
+          visible,
+          down: offscreenDownRef.current,
+          timerArmed: !!offscreenTimerRef.current,
+          disposeMs
+        })
+        if (plan.cancelTimer && offscreenTimerRef.current) {
+          clearTimeout(offscreenTimerRef.current)
+          offscreenTimerRef.current = null
+        }
+        if (plan.revive) {
+          offscreenDownRef.current = false
+          setOffscreenDown(false)
+          setOffscreenEpoch((n) => n + 1) // re-run the lifecycle effect → fresh warm tmux attach
+        }
+        if (plan.armTimer && disposeMs !== null) {
+          offscreenTimerRef.current = setTimeout(() => {
+            offscreenTimerRef.current = null
+            // Every input re-asked at FIRE time, never at arm time: ten minutes is long enough for
+            // all of them to have changed. `wasVisibleRef` is the observer's own latest verdict.
+            if (
+              !mayDisposeOffscreen({
+                visible: wasVisibleRef.current,
+                remote: offscreenRemoteRef.current,
+                selected: selectedRef.current
+              })
+            )
+              return
+            // Nothing to give back (no session yet, or one that was closed/ended under us) ⇒ no
+            // dispose. A null ref means no lifecycle run is live at all, which answers the same way.
+            if (!offscreenLiveRef.current?.()) return
+            offscreenDownRef.current = true
+            // The cleanup must DISPOSE, not park: parking keeps the very buffer this feature exists
+            // to give back. Set before the state flip, since that flip is what runs the cleanup.
+            noParkIds.add(termKey)
+            setOffscreenDown(true)
+            setOffscreenEpoch((n) => n + 1)
+          }, disposeMs)
+        }
+      },
+      { rootMargin: '256px' }
+    )
+    io.observe(container)
+    return () => {
+      io.disconnect()
+      if (offscreenTimerRef.current) {
+        clearTimeout(offscreenTimerRef.current)
+        offscreenTimerRef.current = null
+      }
+    }
+    // `termKey` is stable for this node's lifetime (see its declaration); listed so the effect is
+    // honestly keyed on what its closure captures.
+  }, [termKey])
+
+  /**
+   * DEPARTURE-only bookkeeping: the node is leaving the canvas (project switch, or deletion).
+   *
+   * This lives in its own unmount-scoped effect rather than in the lifecycle cleanup because that
+   * cleanup runs for three different events — a park, a respawn, and now an offscreen dispose — and
+   * only the first of those is a departure. Clearing the live state on an offscreen dispose drops
+   * the RUNNING / NEEDS-YOU badge and the subagent fan-out off a node the user can still SEE (its
+   * kanban card most of all, which reads the same store) for a node that never went anywhere. And
+   * guarding the clear inside that cleanup instead is worse still: a node that is DOWN registers no
+   * cleanup at all, so an unmount that follows a dispose would clear nothing, ever — a leaked store
+   * entry per node, in a branch about memory.
+   *
+   * What is NOT cleared here is as deliberate as it was before: the node's PERSISTED status
+   * (unread / session / sessionId) stays, because a project switch is a detach and the context
+   * meter looks that sessionId up on remount. Real deletion drops the whole entry in
+   * `Canvas.deleteNodes`.
+   */
+  useEffect(
+    () => () => {
+      useAgentStatus.getState().setState(id, undefined)
+      useAgentNodes.getState().clearForParent(id)
+    },
+    [id]
+  )
 
   // glyphgrid origin sync. React Flow rewrites these two props per frame while the node is
   // dragged; `setOrigin` is change-gated inside the engine, and a drag is exactly the gesture the

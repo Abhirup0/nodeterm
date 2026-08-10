@@ -56,6 +56,30 @@ describe('planOffscreenVisibility', () => {
       planOffscreenVisibility({ visible: true, down: true, timerArmed: false, disposeMs: null })
     ).toEqual({ cancelTimer: false, armTimer: false, revive: true })
   })
+  // The sequence a real node walks, driven the way the (mount-stable) observer drives it. Its
+  // point is the LAST step: the revive is decided from `down` + `visible` alone — no armed timer,
+  // no live setting, nothing that the down transition consumed. Which is also why the observer
+  // that delivers that last verdict may not be owned by the effect the dispose tears down.
+  it('walks hidden → armed → down → visible → revived', () => {
+    let down = false
+    let timerArmed = false
+    const step = (visible: boolean): void => {
+      const p = planOffscreenVisibility({ visible, down, timerArmed, disposeMs: ms })
+      if (p.cancelTimer) timerArmed = false
+      if (p.armTimer) timerArmed = true
+      if (p.revive) down = false
+    }
+    step(false)
+    expect(timerArmed).toBe(true)
+    step(false) // a pan keeps reporting hidden; the deadline must not move
+    expect(timerArmed).toBe(true)
+    // …the timer fires: the node goes down and the timer is spent.
+    timerArmed = false
+    down = true
+    step(true)
+    expect(down).toBe(false)
+    expect(timerArmed).toBe(false)
+  })
   it('a visible node with nothing pending owes nothing', () => {
     expect(
       planOffscreenVisibility({ visible: true, down: false, timerArmed: false, disposeMs: ms })
