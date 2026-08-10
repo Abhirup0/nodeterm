@@ -51,7 +51,7 @@ import { GlyphGridEngine } from '../glyphgrid/engine'
 import { setBlankCellProbe } from '../glyphgrid/feed'
 import { createFrameLoop, type FrameLoop } from '../glyphgrid/frame-driver'
 import type { GlyphGL } from '../glyphgrid/gl'
-import { createWebgl2GL } from '../glyphgrid/gl-webgl2'
+import { cellSnapEnabled, createWebgl2GL, setCellSnap } from '../glyphgrid/gl-webgl2'
 import { createCanvasRasterizer, type AtlasPageHealth } from '../glyphgrid/raster'
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
@@ -820,6 +820,30 @@ function installBlankCellProbe(): void {
  *  its pitch cell (so `strideX`-based arithmetic alone lands a couple of texels off), and a page
  *  that has reset is a page whose slot numbering has been reused — a dumped slot index only means
  *  something alongside the reset count it was taken at. */
+/**
+ * Exposes `window.__glyphgridSnap(on?)` → the live device-pixel snap state.
+ *
+ * NOT behind the debug flag, unlike the atlas dump. The question it answers — is snapped text
+ * crisper on THIS retina display? — can only be answered by the person looking at the screen, and
+ * making them set a localStorage key and relaunch first turns a five-second A/B into a session.
+ * Called with no argument it only reports.
+ *
+ * The two `setCamera` calls are the repaint: the engine is change-gated all the way down, so a
+ * flag it reads at frame time changes nothing until something dirties it. Nudging the zoom and
+ * putting it straight back dirties twice and draws once, with the real camera.
+ */
+function installSnapToggle(engine: GlyphGridEngine): void {
+  if (typeof window === 'undefined') return
+  ;(window as unknown as Record<string, unknown>).__glyphgridSnap = (on?: boolean): boolean => {
+    if (typeof on === 'boolean') {
+      setCellSnap(on)
+      engine.setCamera({ ...lastCamera, zoom: lastCamera.zoom * (1 + 1e-6) })
+      engine.setCamera(lastCamera)
+    }
+    return cellSnapEnabled()
+  }
+}
+
 function installGlyphDump(atlas: GlyphAtlas, raster: { cellW: number; cellH: number }): void {
   if (!glyphDebugOn() || typeof window === 'undefined') return
   ;(window as unknown as Record<string, unknown>).__glyphgridDump = async (): Promise<unknown> => {
@@ -939,6 +963,7 @@ function createContext(cell: DeviceCell): LiveContext | null {
   installBlankCellProbe()
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
+  installSnapToggle(engine)
   /**
    * The ATLAS PAGE's own loss policy — the 2D half of a GPU reset, which until now had none.
    *
