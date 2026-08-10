@@ -243,6 +243,18 @@ export function buildStubApi(): Omit<
       cookieProviders: () => Promise.resolve({}),
       onUpdate: noopUnsub
     },
+    sessionMemory: {
+      // Superseded by the real WS-backed namespace in ws-bridge (the core session-memory service
+      // runs in the server shell too), so nothing reaches these in a live browser session. Kept
+      // only to satisfy `satisfies NodeTerminalApi`.
+      //
+      // Where it DOES stay in force is the relay tab, which shares this stub surface: there the
+      // renderer runs on the guest while the sessions live on the host, so answering at all would
+      // describe the wrong machine. `ok:false` / `null` are the service's own words for "could not
+      // measure" — the one honest answer, and never mistakable for "nothing is using memory".
+      read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
+      host: () => Promise.resolve(null)
+    },
     claude: {
       // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the
       // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.

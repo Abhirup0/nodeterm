@@ -9,6 +9,7 @@ import type {
   RecycledInfo,
   RelayPeerPending,
   RemoteUsageQuery,
+  SessionMemoryQuery,
   UpdateInfo,
   UpdateProgress,
   Workspace,
@@ -377,6 +378,14 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.usageUpdate, handler)
       return () => ipcRenderer.removeListener(IPC.usageUpdate, handler)
     }
+  },
+  // The query is forwarded VERBATIM: `remote` is the renderer's own "this scope is an SSH host"
+  // claim, which the core service ORs with its own `isRemoteProject`. Normalizing it here (say,
+  // dropping a `false`, or defaulting the object) would silently re-open the misattribution this
+  // surface exists to prevent — one machine's sessions published under another's name.
+  sessionMemory: {
+    read: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemory, q),
+    host: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemoryHost, q)
   },
   context: {
     onUpdate: (listener) => {

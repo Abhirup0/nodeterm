@@ -1500,6 +1500,23 @@ export interface SessionMemoryQuery {
   remote?: boolean
 }
 
+/**
+ * Per-session memory for the machine the ACTIVE PROJECT runs on — the same scoping rule the usage
+ * indicator follows (`usageScope`), for the same reason: a number is meaningless without the
+ * machine it describes.
+ *
+ * Both members are on-demand only, never polled: a remote answer costs an ssh exec plus a `ps` of
+ * somebody else's whole process table. Pass the query through verbatim — `remote` is one of the two
+ * independent sources the service uses to decide which host answers.
+ */
+export interface SessionMemoryApi {
+  /** Per-session breakdown for the scoped machine. `ok:false` = the sweep could not run, which is
+   *  NOT an empty `rows` with `ok:true` ("we looked, there are none"). */
+  read(q?: SessionMemoryQuery): Promise<SessionMemoryReport>
+  /** The scoped machine's RAM. `null` = could not read (never "zero"). */
+  host(q?: SessionMemoryQuery): Promise<MemInfo | null>
+}
+
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
 export interface ClaudeUsage {
   /**
@@ -1989,6 +2006,7 @@ export interface NodeTerminalApi {
   githubIssues: import('./github-issues').GitHubIssuesApi
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
+  sessionMemory: SessionMemoryApi
   context: ContextApi
   canvas: CanvasApi
   claude: ClaudeApi
