@@ -45,12 +45,6 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
   const updateSettings = useSettings((s) => s.update)
 
-  const togglePhoneAccess = (next: boolean): void => {
-    updateSettings({ phoneAccessEnabled: next })
-    // Start/stop the standing relay host immediately.
-    window.nodeTerminal.remoteHost.setPhoneAccess(next)
-  }
-
   const refreshDevices = useCallback(async (): Promise<void> => {
     try {
       setDevices(await window.nodeTerminal.pairing.listDevices())
@@ -64,6 +58,17 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
   const { phase, qr, sshOpen, sshHealed, error, busy, start, stop, reset } = usePhonePairing(
     () => void refreshDevices()
   )
+
+  const togglePhoneAccess = (next: boolean): void => {
+    updateSettings({ phoneAccessEnabled: next })
+    // Start/stop the standing relay host immediately.
+    window.nodeTerminal.remoteHost.setPhoneAccess(next)
+    // The relay block is baked into the QR when the listener STARTS — a code already on
+    // screen doesn't know about this flip, and scanning it would still produce a LAN-only
+    // pairing (the field failure: works at home, dies on cellular). Regenerate; start()
+    // cancels the old listener silently.
+    if (phase === 'waiting') void start()
+  }
 
   // Load the paired-device list on mount.
   useEffect(() => {
@@ -168,6 +173,13 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                     className="rounded-lg bg-white p-2"
                   />
                   <p className="text-sm text-muted">Waiting for your phone… (10 min)</p>
+                  {!phoneAccessEnabled ? (
+                    <p className="text-sm" style={{ color: '#ff9f0a' }}>
+                      LAN-only code: the phone will reach this machine only on this network. Turn
+                      on <strong>Remote access from your phone</strong> above first to also
+                      connect from cellular — the QR refreshes by itself.
+                    </p>
+                  ) : null}
                   {sshHealed ? (
                     <p className="text-sm" style={{ color: '#30d158' }}>
                       ✓ Remote Login is on — scan away.
