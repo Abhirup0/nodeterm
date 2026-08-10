@@ -9,7 +9,24 @@
  * machinery and a re-spawn while the ControlMaster is down would surface the offline overlay for
  * a node the user never touched. Follow-up once demand exists.
  */
+import type { SessionSource } from '../session/session'
+
 export const OFFSCREEN_DISPOSE_MS_DEFAULT = 10 * 60_000
+
+/**
+ * Does this node's CORE live on another machine? That — not the node's own fields — is what decides
+ * whether a revive would run a spawn across a link that can be down.
+ *
+ * Asked of the session the node renders under, because that is where the answer actually is: a
+ * relay tab's terminals run on the paired desktop, a remote-server tab's on that server, and
+ * neither node carries a field saying so (`data.ssh`/`data.sshRemoteTmux` describe an SSH PROJECT,
+ * which is a different thing and is asked separately). `'local'` covers the Electron app AND the
+ * Server Edition's own browser session — the core is at the other end of a preload or a
+ * same-machine websocket, always up when the UI is, so those stay eligible.
+ */
+export function offscreenCoreIsRemote(source: SessionSource): boolean {
+  return source !== 'local'
+}
 
 /** Setting is in minutes; 0 or negative = feature off; undefined = default. */
 export function offscreenDisposeMs(settingMinutes: number | undefined): number | null {

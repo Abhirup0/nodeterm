@@ -3,6 +3,7 @@ import {
   OFFSCREEN_DISPOSE_MS_DEFAULT,
   offscreenDisposeMs,
   mayDisposeOffscreen,
+  offscreenCoreIsRemote,
   planOffscreenVisibility
 } from './offscreen-policy'
 
@@ -20,6 +21,17 @@ describe('offscreen dispose policy', () => {
     expect(mayDisposeOffscreen({ visible: true, remote: false, selected: false })).toBe(false)
     expect(mayDisposeOffscreen({ visible: false, remote: true, selected: false })).toBe(false)
     expect(mayDisposeOffscreen({ visible: false, remote: false, selected: true })).toBe(false)
+  })
+  // The second link in "a relay-sourced node never disposes": this predicate answers `true`, and
+  // the row above proves `remote: true` refuses. Pinned as a test rather than as a comment because
+  // the first attempt at this gate read a node field (`data.remote`) that is only ever set on a
+  // PROJECT — a constant `false` that no type could catch and no test then covered.
+  it('a session whose core is on another machine is remote; both local surfaces are not', () => {
+    expect(offscreenCoreIsRemote('relay')).toBe(true)
+    expect(offscreenCoreIsRemote('server')).toBe(true)
+    // Electron's own session AND the Server Edition's browser session: the core is at the other end
+    // of a preload / a same-machine socket, up whenever the UI is.
+    expect(offscreenCoreIsRemote('local')).toBe(false)
   })
 })
 

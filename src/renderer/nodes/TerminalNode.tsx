@@ -62,6 +62,7 @@ import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '
 import { PARK_MAX, planParkEviction } from '../terminal/park-budget'
 import {
   mayDisposeOffscreen,
+  offscreenCoreIsRemote,
   offscreenDisposeMs,
   planOffscreenVisibility
 } from '../terminal/offscreen-policy'
@@ -959,20 +960,26 @@ export function TerminalNode({
   // The affordance is absent, not merely refused on click.
   const sshProject = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
   const remoteSession = sshProject || isRemoteSessionNode(data)
-  // "Does this node's session live on another machine?" for the offscreen-dispose gate. It starts
-  // from the SAME question the ↪ affordance asks and then adds `data.remote` — a RELAY tab's
-  // terminals, whose session lives on the host at the other end of the relay tunnel. Both are
-  // excluded in v1 (offscreen-policy.ts): a revive re-runs the spawn path, and doing that while
-  // the ControlMaster or the relay link happens to be down surfaces the offline overlay / a spawn
-  // error on a node the user never touched.
+  // "Does this node's session live on another machine?" for the offscreen-dispose gate — asked in
+  // TWO halves, because the two ways of being remote are independent facts:
+  //  1. the PROJECT is an SSH project / this node is an SSH-project terminal (`remoteSession`, the
+  //     same question the ↪ affordance asks), and
+  //  2. the SESSION's core is elsewhere (`offscreenCoreIsRemote`): a RELAY tab's terminals run on
+  //     the paired desktop, a remote-server tab's on that server. Nothing on the node's `data` says
+  //     so — that is a property of the tab it renders under — which is why this half must be asked
+  //     of `session.source` and not of a node field. (The Server Edition's own browser session is
+  //     `'local'`: its core is the server it is served from, up whenever the UI is, so those nodes
+  //     stay eligible — the whole point of the feature on that surface.)
+  // Both are excluded in v1 (offscreen-policy.ts): a revive re-runs the spawn path, and doing that
+  // while the ControlMaster or the relay link happens to be down surfaces the offline overlay / a
+  // spawn error on a node the user never touched.
   //
   // `isRemoteSessionNode` is deliberately NOT widened for this: it is the worktree gate, and
-  // worktrees exclude relay nodes on purpose (a relay node's repo is the host's, and that gate
-  // asks a different question). The union belongs here, at the one call site that means it.
-  // A ref because a project can BECOME an SSH project (or a tab a relay tab) long after the
-  // lifecycle run that would otherwise have captured the answer.
+  // worktrees exclude relay nodes on purpose (that gate asks a different question). The union
+  // belongs here, at the one call site that means it. A ref because a project can BECOME an SSH
+  // project long after the lifecycle run that would otherwise have captured the answer.
   const offscreenRemoteRef = useRef(false)
-  offscreenRemoteRef.current = remoteSession || !!data.remote
+  offscreenRemoteRef.current = remoteSession || offscreenCoreIsRemote(session.source)
   const canMoveIntoWorktree =
     !!parentWtPath &&
     !parentWtStale &&
