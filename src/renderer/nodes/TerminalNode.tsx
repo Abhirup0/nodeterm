@@ -3231,7 +3231,12 @@ export function TerminalNode({
             </button>
           </Tooltip>
         )}
-        <Tooltip label={showUsage ? 'Search terminal + conversation' : 'Search this terminal'}>
+        {/* `claudeTranscript`, NOT `showUsage`: the transcript leg of the search is gated on the
+            claude-transcript fact (see the `useTerminalSearch` call above), so keying the label on
+            the meter promised a codex/gemini node a conversation search it does not run. */}
+        <Tooltip
+          label={claudeTranscript ? 'Search terminal + conversation' : 'Search this terminal'}
+        >
           <button
             className="term-node__search nodrag"
             onClick={() => setSearchOpen((v) => !v)}

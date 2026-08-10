@@ -1,3 +1,12 @@
+// Source-text guards over the gates in `TerminalNode.tsx` that no test can reach behaviourally.
+//
+// Two families live here, for the same reason: neither `TerminalNode.tsx` nor `Canvas.tsx` is
+// unit-rendered anywhere in this repo, so a wrong gate compiles, ships, and leaves the whole suite
+// green. Both were verified by MUTATION — revert a gate and the matching test below fails.
+//   1. the TWO TITLE gates (read vs write), below;
+//   2. the CLAUDE-TRANSCRIPT gates (meter rehydration, find-bar transcript index, and the search
+//      tooltip that describes them) at the bottom of this file.
+//
 // A guard over the TWO title gates, because the split is the whole point of the title lists.
 //
 // Reading a session's own name (`TITLE_READ_CAPABLE` — claude, grok, gemini) and PUSHING a name into
@@ -59,5 +68,70 @@ describe('session-name title gates', () => {
       const window = lines.slice(Math.max(0, i - 8), i + 1).join('\n')
       expect(window.includes('canRename('), `${i + 1}: ${line.trim()}`).toBe(true)
     }
+  })
+})
+
+/**
+ * The claude-transcript gates: `claudeTranscript` (`readsClaudeTranscript(agentId)`), NOT `showUsage`
+ * (`hasUsage(agentId)`).
+ *
+ * `USAGE_CAPABLE` grew to claude + codex + gemini, so `showUsage` is now true for three agents while
+ * only ONE of them has a claude transcript. Both readers behind these gates resolve a session id
+ * through claude's `resolveTranscript`, whose cwd fallback answers *the newest claude transcript for
+ * that cwd* — so on a codex or gemini node they resolve an UNRELATED claude session and then meter
+ * it, and search it, under this node's session id. That was this branch's own Critical fix, and
+ * reverting either gate to `showUsage` left the full suite green: nothing in this repo renders
+ * `TerminalNode`, so this file is the only thing standing between the bug and a re-landing.
+ *
+ * Asserted per LINE rather than with `toContain` over a 6000-line file: a whole-file `toContain`
+ * failure dumps the file as its diff, and a per-line assertion names the site instead.
+ */
+describe('claude-transcript gates', () => {
+  const lines = terminalNode.split('\n')
+  /** The lines mentioning `needle`, 1-indexed, as `[lineNo, text]`. */
+  const sites = (needle: string): [number, string][] =>
+    lines.map((l, i) => [i + 1, l] as [number, string]).filter(([, l]) => l.includes(needle))
+
+  it('is derived from the agent, not from the meter', () => {
+    // The fact itself, kept separate from `showUsage` one line above it.
+    expect(terminalNode).toContain('const claudeTranscript = readsClaudeTranscript(agentId)')
+    expect(terminalNode).toContain('const showUsage = !!agentId && hasUsage(agentId)')
+  })
+
+  it('gates the mount-time meter rehydration (`context.ensure`)', () => {
+    const found = sites('window.nodeTerminal.context.ensure(')
+    expect(found.length).toBe(1)
+    const [lineNo] = found[0]
+    // The `if (…) ensure(…)` guard is the line above the call.
+    const guard = lines.slice(Math.max(0, lineNo - 3), lineNo).join('\n')
+    expect(guard, `${lineNo}: context.ensure guard`).toContain('claudeTranscript')
+    expect(guard, `${lineNo}: context.ensure guard`).not.toContain('showUsage')
+  })
+
+  it('gates the find bar’s transcript index (`searchTranscript`)', () => {
+    const found = sites('searchTranscript:')
+    expect(found.length).toBe(1)
+    const [lineNo, text] = found[0]
+    expect(text, `${lineNo}: ${text.trim()}`).toContain('claudeTranscript')
+    expect(text, `${lineNo}: ${text.trim()}`).not.toContain('showUsage')
+  })
+
+  it('describes the search the node actually runs, in the button tooltip', () => {
+    // A tooltip keyed on `showUsage` promises a codex/gemini node "Search terminal + conversation"
+    // while its transcript leg is off — the copy has to follow the gate, not the meter.
+    const found = sites("'Search terminal + conversation'")
+    expect(found.length).toBe(1)
+    const [lineNo, text] = found[0]
+    expect(text, `${lineNo}: ${text.trim()}`).toContain('claudeTranscript ?')
+    expect(text, `${lineNo}: ${text.trim()}`).not.toContain('showUsage')
+  })
+
+  it('leaves the meter itself on the meter capability', () => {
+    // The inverse mistake: `USAGE_CAPABLE` is what decides whether a meter is shown at all, and
+    // narrowing THAT to claude would take codex's and gemini's meters away.
+    const found = sites('<ContextMeter')
+    expect(found.length).toBe(1)
+    const [lineNo, text] = found[0]
+    expect(text, `${lineNo}: ${text.trim()}`).toContain('showUsage &&')
   })
 })
