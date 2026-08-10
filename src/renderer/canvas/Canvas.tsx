@@ -241,7 +241,7 @@ import type {
 import type { KanbanCreateChoice, KanbanSession } from '../components/kanban/KanbanView'
 import { assignNode, assignedTo, defaultKanban, labelsForCard, migrateProjectTags, resolveColumnRef, unassigned } from '../lib/kanban'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
-import { canCommitCanvas } from '../state/persistGuards'
+import { canClearDirty, canCommitCanvas } from '../state/persistGuards'
 import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
@@ -618,6 +618,10 @@ export function Canvas() {
   const controlEdgesRef = useRef<Edge[]>([])
   controlEdgesRef.current = controlEdges
   const [dirty, setDirty] = useState(false)
+  // Bumped only when a save finished with `dirty` still set (an edit raced it). It exists purely to
+  // give the debounced-autosave effect a dependency that CHANGES in that case — `dirty` stays true
+  // throughout, so without it the effect would never re-arm. Rare, so a re-render costs nothing.
+  const [resaveTick, setResaveTick] = useState(0)
   // The active project's .nodeterm file changed on disk while we have unsaved local edits
   // (the user must pick a side). One-shot v2→v3 migration note (dismissible strip).
   const [conflict, setConflict] = useState<Project | null>(null)
@@ -1711,9 +1715,22 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId, reloadNonce, setNodes, setViewport])
 
-  const markDirty = useCallback(() => {
-    if (!loadingRef.current) setDirty(true)
+  /**
+   * Counts EDITS (not saves). `writeDisk` captures it before it builds the snapshot and clears
+   * `dirty` only if it is unchanged after the await — see canClearDirty and the field bug it cites.
+   *
+   * A ref, not state, deliberately: this bumps on every drag FRAME, and a state counter would
+   * re-render the whole canvas that often (`setDirty(true)` is free once already dirty).
+   */
+  const dirtyGenRef = useRef(0)
+  /** Records one edit: bump the generation, flag the workspace dirty. */
+  const bumpDirty = useCallback(() => {
+    dirtyGenRef.current += 1
+    setDirty(true)
   }, [])
+  const markDirty = useCallback(() => {
+    if (!loadingRef.current) bumpDirty()
+  }, [bumpDirty])
   // Expose markDirty to surfaces outside Canvas (a canvas node editing its kanban labels), so they
   // ride the same debounced whole-file save.
   useEffect(() => registerWorkspaceDirty(markDirty), [markDirty])
@@ -1786,8 +1803,20 @@ export function Canvas() {
   }, [])
 
   const writeDisk = useCallback(async () => {
+    // Captured BEFORE the snapshot is built (`toWorkspace()` runs synchronously on this line), so
+    // it names exactly the edits this save carries. A save is not instant — an SSH mirror write
+    // takes seconds — and clearing `dirty` unconditionally afterwards marked edits made DURING the
+    // await as saved, which let the watcher's not-dirty branch clobber them (field bug 2026-08-10).
+    const gen = dirtyGenRef.current
     await api.workspace.save(useProjects.getState().toWorkspace())
-    setDirty(false)
+    if (canClearDirty(gen, dirtyGenRef.current)) {
+      setDirty(false)
+      return
+    }
+    // An edit raced the save: leave `dirty` set so nothing believes the canvas is on disk. But the
+    // debounce effect only re-arms when one of its deps changes, and `dirty` never went false —
+    // nudge it explicitly, or the racing edit would wait for an unrelated later edit to be saved.
+    setResaveTick((v) => v + 1)
   }, [])
 
   const persist = useCallback(async () => {
@@ -1868,7 +1897,8 @@ export function Canvas() {
     if (!dirty || conflict) return
     const t = setTimeout(() => void persist(), 800)
     return () => clearTimeout(t)
-  }, [dirty, conflict, persist])
+    // `resaveTick` re-arms the timer after a save that could NOT clear dirty (an edit raced it).
+  }, [dirty, conflict, persist, resaveTick])
 
   // ---- remote canvas mirror (phone host side) ----
   // While phone access is on, push the serialized active-project canvas to main (debounced ~120ms)
@@ -2131,9 +2161,9 @@ export function Canvas() {
     committedRef.current = prev
     nodesRef.current = prev
     setNodes(prev)
-    setDirty(true)
+    bumpDirty() // an undo is an edit: it must count toward the in-flight-save generation too
     bumpHist((v) => v + 1)
-  }, [setNodes])
+  }, [setNodes, bumpDirty])
 
   const redo = useCallback(() => {
     if (!futureRef.current.length) return
@@ -2142,9 +2172,9 @@ export function Canvas() {
     committedRef.current = next
     nodesRef.current = next
     setNodes(next)
-    setDirty(true)
+    bumpDirty() // a redo is an edit: same reasoning as undo
     bumpHist((v) => v + 1)
-  }, [setNodes])
+  }, [setNodes, bumpDirty])
 
   // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y = redo (ignored while typing).
   useEffect(() => {

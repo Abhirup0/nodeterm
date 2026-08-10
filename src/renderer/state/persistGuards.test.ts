@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canCommitCanvas } from './persistGuards'
+import { canCommitCanvas, canClearDirty } from './persistGuards'
 
 describe('canCommitCanvas', () => {
   it('commits while the nodes in hand belong to the active project', () => {
@@ -24,5 +24,23 @@ describe('canCommitCanvas', () => {
     expect(canCommitCanvas('a', '')).toBe(false)
     expect(canCommitCanvas(null, '')).toBe(false)
     expect(canCommitCanvas('', '')).toBe(false)
+  })
+})
+
+describe('canClearDirty', () => {
+  it('clears dirty when nothing changed while the save was in flight', () => {
+    expect(canClearDirty(7, 7)).toBe(true)
+  })
+
+  // Field bug 2026-08-10: a save can take seconds (SSH mirror write). Edits made DURING the await
+  // are not in the snapshot handed to the store, so clearing dirty marks them saved — and the
+  // watcher's not-dirty branch then clobbers them with a replaceProject + reload. Keep dirty set;
+  // the debounce re-saves.
+  it('keeps dirty set when an edit landed during the save', () => {
+    expect(canClearDirty(7, 8)).toBe(false)
+  })
+
+  it('keeps dirty set for a burst of edits during one save', () => {
+    expect(canClearDirty(0, 12)).toBe(false)
   })
 })

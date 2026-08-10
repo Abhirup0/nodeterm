@@ -22,3 +22,20 @@ export function canCommitCanvas(nodesProjectId: string | null, activeProjectId: 
   if (!activeProjectId) return false
   return nodesProjectId === activeProjectId
 }
+
+/**
+ * May `dirty` be cleared now that a save has finished?
+ *
+ * Field bug 2026-08-10: `writeDisk` awaited the save and then cleared dirty unconditionally. A save
+ * is not instant (an SSH mirror write takes seconds), and every edit made DURING that await is
+ * absent from the snapshot that was handed over — yet it was marked clean. The watcher's
+ * not-dirty branch then treated the next external change as safe to adopt and clobbered those
+ * edits with a replaceProject + reload.
+ *
+ * `markDirty` bumps a generation counter. Capture it BEFORE building the snapshot and compare it
+ * after the await: unchanged means the snapshot is still the whole truth. Otherwise dirty stays
+ * set and the debounce re-saves.
+ */
+export function canClearDirty(capturedGeneration: number, currentGeneration: number): boolean {
+  return capturedGeneration === currentGeneration
+}
