@@ -11,6 +11,8 @@ import { findExecutableSync, shellPathNow } from '../../core/exec-path'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
 import { allowMediaPath } from '../media-protocol'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
+import type { PushGrant } from '../../core/push-grants'
+import { REMOTE_GRANT_SCAN_CMD, parseRemoteGrants } from '../../core/remote-push-grants'
 import { supportsAutoPermissionMode, supportsFullscreenTui } from '../../shared/agents/config'
 import {
   controlPathFor,
@@ -1064,6 +1066,37 @@ export class SshProjectManager {
         }
       } catch {
         // best-effort per host, a failed sweep just leaves the acks for the next tick
+      }
+    }
+    return out
+  }
+
+  /**
+   * Read the SSH-possession push grants the phone dropped on the connected hosts
+   * (`~/.nodeterm/push-grants/<deviceId>.grant`) — the remote counterpart of the local
+   * `push-grants` scan, and the reason an SSH-only user got no push notifications at all: in the
+   * phone→host→Mac topology the grant lands on the HOST, while the process with something to push
+   * (this one) only ever scanned its own `$HOME`. See core/remote-push-grants.ts.
+   *
+   * One command per connected HOST (deduped by host key — projects sharing a host share
+   * `$HOME/.nodeterm/push-grants`). The command is fully literal, and unlike the ack sweep it
+   * consumes nothing: a grant stays valid until the phone re-mints it. Best-effort per host; a
+   * disconnected/failed project simply contributes nothing (the cache keeps the last sweep).
+   */
+  async readRemoteGrants(): Promise<PushGrant[]> {
+    const seenHosts = new Set<string>()
+    const out: PushGrant[] = []
+    for (const c of this.conns.values()) {
+      const hk = sshHostKey(c.conn)
+      if (seenHosts.has(hk)) continue
+      seenHosts.add(hk)
+      try {
+        const { code, stdout } = await this.r.run(
+          childArgs(c.conn, c.controlPath, REMOTE_GRANT_SCAN_CMD)
+        )
+        if (code === 0 && stdout) out.push(...parseRemoteGrants(stdout))
+      } catch {
+        // best-effort per host — a failed read just keeps the previous sweep's grants
       }
     }
     return out

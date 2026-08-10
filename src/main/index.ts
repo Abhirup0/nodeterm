@@ -65,7 +65,8 @@ import {
   workingNodes
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
-import { createGrantsAccessor } from '../core/push-grants'
+import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
+import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
 import { getDeviceId } from '../core/device-id'
@@ -957,6 +958,19 @@ app.whenReady().then(async () => {
   // Mac-tracked sessions with NO QR pairing, and QR-pairing later flips `hasPairedPhone` true →
   // host-mode automatically (grants suppressed — no double-push to the same phone).
   const pushGrants = createGrantsAccessor()
+  // ...and the REMOTE half of the same idea. A Mac-driven SSH project's phone can only reach the
+  // HOST, so its grant is dropped there, not here — without this sweep an SSH-only user got no
+  // push at all (no paired phone, no local grant ⇒ `resolveTarget` silently returns null). Filled
+  // by a timer below; `get()` is sync so it can sit behind `getGrants`. See
+  // core/remote-push-grants.ts.
+  const remoteGrants = createRemoteGrantsCache()
+  /** Local grants first (this machine's own phone), then the hosts' — deduped per device inside. */
+  const allPushGrants = (): PushGrant[] => [...pushGrants.get(), ...remoteGrants.get()]
+  /** A 401/403 could be on either side's token; neither accessor knows the other's. */
+  const markPushGrantDead = (grant: string): void => {
+    pushGrants.markDead(grant)
+    remoteGrants.markDead(grant)
+  }
   let pushHostKeyB64: string | null = null
   let pushHasPairedPhone = false
   const refreshPushIdentity = async (): Promise<void> => {
@@ -1030,8 +1044,8 @@ app.whenReady().then(async () => {
         : null,
     // Granted-mode fallback (unpaired / no relay identity → push to SSH-dropped grants; see the
     // block comment above). resolveTarget keeps a single sender: host wins when paired.
-    getGrants: () => pushGrants.get(),
-    markGrantDead: (grant) => pushGrants.markDead(grant),
+    getGrants: allPushGrants,
+    markGrantDead: markPushGrantDead,
     hostLabel: () => hostname(),
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobilePushNeedsYou: () => settingsStore.get().mobilePushNeedsYou !== false,
@@ -1066,8 +1080,8 @@ app.whenReady().then(async () => {
             hasPairedPhone: pushHasPairedPhone
           }
         : null,
-    getGrants: () => pushGrants.get(),
-    markGrantDead: (grant) => pushGrants.markDead(grant),
+    getGrants: allPushGrants,
+    markGrantDead: markPushGrantDead,
     hostLabel: () => hostname(),
     mobilePushEnabled: () => settingsStore.get().mobilePushEnabled !== false,
     mobileLiveActivities: () => settingsStore.get().mobileLiveActivities !== false,
@@ -1509,6 +1523,23 @@ app.whenReady().then(async () => {
       })
   }, 15_000)
   ackSweepTimer.unref?.()
+  // Push grants on the connected SSH hosts (core/remote-push-grants.ts). Its own, slower cadence:
+  // unlike an ack — which the phone waits on — a grant only has to be fresh by the time something
+  // is actually pushed, and the phone re-drops it long before it expires. One ssh exec per
+  // connected host per minute, and none at all with no SSH project open.
+  let remoteGrantSweepBusy = false
+  const grantSweepTimer = setInterval(() => {
+    if (remoteGrantSweepBusy || !sshProjectManager) return
+    remoteGrantSweepBusy = true
+    void sshProjectManager
+      .readRemoteGrants()
+      .then((grants) => remoteGrants.set(grants))
+      .catch(() => {})
+      .finally(() => {
+        remoteGrantSweepBusy = false
+      })
+  }, 60_000)
+  grantSweepTimer.unref?.()
   // Sweep stale request/answer files (~/.nodeterm/pending) on boot + hourly — orphans from killed
   // sessions that never got an answer. Local only; a remote host runs its own sweep if it hosts
   // nodeterm, else the files age out harmlessly.
