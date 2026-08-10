@@ -59,6 +59,7 @@ import {
 } from '../terminal/terminal-config'
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
+import { PARK_MAX, planParkEviction } from '../terminal/park-budget'
 import { attachGlyphGrid, type GlyphGridAttachment } from '../terminal/glyphgrid-attach'
 import type { GridHandle } from '../glyphgrid/engine'
 import {
@@ -240,7 +241,10 @@ export function setSshRetryHandler(
  * project instant AND exact: the tmux client never detaches, so the full terminal state
  * (alternate screen, mouse-tracking modes, scrollback, cursor) carries over with no redraw and
  * no mode re-negotiation to get wrong. After the window the entry is disposed for real (the
- * PTY client detaches; the tmux session itself keeps running, as always).
+ * PTY client detaches; the tmux session itself keeps running, as always). The park is bounded in
+ * COUNT as well as time — beyond `PARK_MAX` the oldest entries are evicted early (see
+ * `terminal/park-budget.ts`), so a remount past the cap is the same warm reattach as one past the
+ * window.
  */
 interface ParkedTerminal {
   term: Terminal
@@ -2616,6 +2620,18 @@ export function TerminalNode({
         }
         disposeParkedTerminal(termKey) // defensive: never stack two entries for one node
         parkedTerminals.set(termKey, entry)
+        // Enforce the park count cap: evict the OLDEST parks (their next remount becomes a warm
+        // tmux reattach — the post-window behavior, just earlier). Never the entry just parked.
+        // Eviction MUST observe the POST-ADOPTION map: a project switch flushes every outgoing
+        // node's cleanup (parking each) BEFORE any incoming node's mount effect adopts its own
+        // park, so evicting inline would dispose the parks the incoming project is about to
+        // re-adopt. A microtask is what defers past the whole synchronous passive-effect flush
+        // (cleanups AND mounts); adoption has removed its entries from the map by then.
+        queueMicrotask(() => {
+          for (const k of planParkEviction([...parkedTerminals.keys()], PARK_MAX)) {
+            if (k !== termKey) disposeParkedTerminal(k)
+          }
+        })
         // A spawn continuation still awaiting its history seed reads this to know the session
         // survived this unmount (parked, or adopted by a remount) and must be finished, not killed.
         handedOff = entry
