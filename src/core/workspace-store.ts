@@ -27,8 +27,12 @@ export interface RemoteWorkspaceIO {
 
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
 
+let tmpSeq = 0
 async function writeAtomic(filePath: string, content: string): Promise<void> {
-  const tmp = `${filePath}.tmp`
+  // Unique per write: writers that bypass each other's queue (a second app instance, the SSH
+  // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
+  // published spliced JSON under the atomic rename.
+  const tmp = `${filePath}.${process.pid}.${++tmpSeq}.tmp`
   await fs.writeFile(tmp, content, 'utf-8')
   await fs.rename(tmp, filePath)
 }
@@ -100,6 +104,14 @@ export class WorkspaceStore {
     try {
       parsed = JSON.parse(raw)
     } catch {
+      // Same rule as a corrupt project.json: sideline the only copy so the boot flow's
+      // unconditional save cannot replace it with an empty index. Read-only callers must not
+      // mutate the disk (sideline: false).
+      if (sideline) {
+        try {
+          await fs.rename(this.indexPath, `${this.indexPath}.corrupt-${Date.now()}`)
+        } catch { /* best effort — never destroy data */ }
+      }
       return EMPTY_WORKSPACE
     }
     const anyParsed = parsed as { version?: number }
@@ -213,7 +225,47 @@ export class WorkspaceStore {
     return null
   }
 
-  async save(workspace: Workspace): Promise<void> {
+  /** True when writing an empty canvas to `file` destroys nothing: the file is absent (fresh
+   *  folder) or already an empty-nodes project file. Populated AND unparsable both answer false —
+   *  a corrupt file is left for readProjectFile's sideline instead of being overwritten. */
+  private async emptyOrAbsentOnDisk(file: string): Promise<boolean> {
+    let raw: string
+    try {
+      raw = await fs.readFile(file, 'utf-8')
+    } catch {
+      return true
+    }
+    try {
+      const parsed = JSON.parse(raw) as ProjectFileV1
+      return parsed?.version === 1 && Array.isArray(parsed.nodes) && parsed.nodes.length === 0
+    } catch {
+      return false
+    }
+  }
+
+  /** In-flight save chain: saves run FIFO (same idiom as SpeechService.queue). Overlapping saves
+   *  used to interleave their file writes and land their indexes out of call order — the "both
+   *  projects went blank after tab switching" wipe. */
+  private saveChain: Promise<unknown> = Promise.resolve()
+
+  save(workspace: Workspace): Promise<void> {
+    const run = this.saveChain.then(() => this.saveNow(workspace))
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  private async saveNow(workspace: Workspace): Promise<void> {
+    if (!workspace.projects.length && !this.index) {
+      // A store that never read the index may not replace a populated one with "no projects":
+      // that is the boot-save wipe — load() failed transiently, the renderer hydrated zero
+      // projects, and its unconditional boot save would atomically erase every ref. A fresh
+      // install has no readable index and falls through.
+      try {
+        const disk = JSON.parse(await fs.readFile(this.indexPath, 'utf-8')) as
+          { entries?: unknown[]; projects?: unknown[] }
+        if ((disk.entries?.length ?? 0) > 0 || (disk.projects?.length ?? 0) > 0) return
+      } catch { /* absent or unparsable (loadInner sidelines corruption) — an empty write is fresh */ }
+    }
     const savedAt = new Date().toISOString()
     const { index, files } = splitWorkspace(workspace, (id) => this.revs.get(id) ?? 0, savedAt)
 
@@ -251,6 +303,13 @@ export class WorkspaceStore {
       const prev = this.lastWritten.get(file)
       const prevParsed = prev ? (JSON.parse(prev) as ProjectFileV1) : null
       if (prevParsed && sameProjectContent(prevParsed, candidate)) continue
+      if (!prevParsed && candidate.nodes.length === 0 && !(await this.emptyOrAbsentOnDisk(file))) {
+        // The local twin of the SSH "never blind-write a file we have not read" rule: an empty
+        // canvas from a store that never read this file (setProjectFolder, migration, a hydrate
+        // race) must not overwrite the populated — or corrupt-but-recoverable — only copy. The
+        // disk stays authoritative; the next load returns its truth.
+        continue
+      }
       const next: ProjectFileV1 = { ...candidate, rev: (this.revs.get(candidate.id) ?? 0) + 1 }
       const content = serializeProjectFile(next)
       try {
