@@ -2265,9 +2265,19 @@ export function TerminalNode({
           updateNodeData(id, { initialCommand: undefined })
         } else if (fresh && agentId && canResume(agentId)) {
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
-          // prior conversation by its session id (known from hooks) when we have one; otherwise
-          // start the agent fresh. Plain terminals get nothing here — just the restored shell.
-          const priorId = useAgentStatus.getState().byId[id]?.sessionId
+          // prior conversation by its session id when we have one; otherwise start the agent
+          // fresh. Plain terminals get nothing here — just the restored shell.
+          //
+          // Two sources, in this order, and the order is the whole point:
+          //  1. the LIVE id from hooks, which tracks `/clear` and `--fork-session` minting a new
+          //     one mid-conversation, so it is the only one that can be current;
+          //  2. the id nodeterm MINTED at node creation and persisted (`data.agentSessionId`).
+          // Falling back to (2) is what stops a cold start from opening a blank conversation when
+          // no hook ever landed. That is not hypothetical: hook POSTs from an SSH node ride the
+          // reverse tunnel, and after one host reboot 18 of 40 agent nodes had no id at all and
+          // relaunched empty while their transcripts sat on disk, unreachable.
+          const st = useAgentStatus.getState().byId[id]
+          const priorId = st?.sessionId || data.agentSessionId
           const base = (priorId && resumeCommand(agentId, priorId)) || agentConfig(agentId)?.launchCmd
           // Re-resolve the mode at relaunch: it's a property of how a session is launched, not
           // a persisted property of the node, so the current setting wins after a reboot. `base`

@@ -216,6 +216,14 @@ export interface CanvasNodeState {
    * and immutable for the node's lifetime. Undefined = system default (~/.claude).
    */
   accountId?: string
+  /**
+   * Agents in `SESSION_ID_CAPABLE` (claude): the session id nodeterm minted and launched this
+   * node's CLI with (`--session-id`). Persisted so a cold restore can resume even when no hook
+   * ever delivered an id — the SSH reverse tunnel is the only path that carries one, and a node
+   * whose tunnel was down came back as a blank conversation with its transcript intact on disk.
+   * The hook-fed id still wins when known: `/clear` and `--fork-session` mint a new one in-CLI.
+   */
+  agentSessionId?: string
   /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
   ssh?: import('./ssh').SshConnection
   /** When true (SSH-project terminals), the node runs in REMOTE tmux on `ssh` rather than `ssh`-on-local-PTY. */
@@ -1660,6 +1668,14 @@ export interface ClaudeCliCaps {
   /** `"tui": "fullscreen"` in settings.json is only understood by Claude Code >= 2.1.89. Gates
    *  whether nodeterm writes that key (write-if-absent) so sessions render fullscreen in tmux. */
   fullscreenTui: boolean
+  /**
+   * Whether this CLI accepts `--session-id <uuid>`, which lets nodeterm MINT a node's session id
+   * instead of waiting to learn it from a hook. Detected by reading `claude --help`, not by
+   * comparing versions: the version this flag first shipped in is not documented anywhere we can
+   * check, and a guessed floor is the one mistake that would be fatal here — an unknown flag makes
+   * the CLI exit, so a wrong guess kills every claude launch rather than degrading.
+   */
+  sessionIdFlag: boolean
 }
 
 /** The answer whenever the CLI version can't be determined: no `auto` flag → bare command, and no
@@ -1667,7 +1683,8 @@ export interface ClaudeCliCaps {
 export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   version: null,
   autoPermissionMode: false,
-  fullscreenTui: false
+  fullscreenTui: false,
+  sessionIdFlag: false
 }
 
 export interface ClaudeApi {
