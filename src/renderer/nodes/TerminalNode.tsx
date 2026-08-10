@@ -3122,11 +3122,6 @@ export function TerminalNode({
             RUNNING
           </span>
         )}
-        {copy.feedback && (
-          <span className={`term-node__status term-node__status--${copy.feedback.kind}`}>
-            {copy.feedback.label}
-          </span>
-        )}
         {showLoop && status?.loop && (
           <span
             className="term-node__status term-node__status--loop"
@@ -3331,6 +3326,16 @@ export function TerminalNode({
           <div className={`term-node__upload${uploadNote.failed ? ' failed' : ''}`}>
             {!uploadNote.failed && <span className="term-node__upload-spin" />}
             {uploadNote.text}
+          </div>
+        )}
+        {/* Copy receipt / selection hint — floated over the terminal's bottom-right rather than
+            worn as a header chip. It belongs where the user's eyes just were (the drag they
+            finished), and the header cannot hold it: on a narrow node with the SSH chip and
+            RUNNING already there, one more chip pushes the × under `.term-node`'s overflow.
+            Bottom-RIGHT specifically — every agent CLI writes its input line bottom-LEFT. */}
+        {copy.feedback && (
+          <div className={`term-copy-pill term-copy-pill--${copy.feedback.kind}`}>
+            {copy.feedback.label}
           </div>
         )}
         {co.closed && (

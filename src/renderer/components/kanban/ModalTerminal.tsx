@@ -418,8 +418,10 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
       onPasteCapture={onPaste}
     >
       {uploading && <div className="kanban-modal__upload">Uploading…</div>}
+      {/* Same pill, same class, same corner as the canvas node — one session seen twice should
+          not speak in two different voices. */}
       {copy.feedback && (
-        <div className={`kanban-modal__copied kanban-modal__copied--${copy.feedback.kind}`}>
+        <div className={`term-copy-pill term-copy-pill--${copy.feedback.kind}`}>
           {copy.feedback.label}
         </div>
       )}
