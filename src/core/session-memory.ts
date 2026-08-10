@@ -136,7 +136,9 @@ export interface PaneRef {
   command: string
 }
 
-const PANE_FMT = '#{session_name}|#{pane_pid}|#{pane_current_command}'
+/** The `-F` format `parsePaneList` reads. Exported so the SSH leg's generated shell asks for the
+ *  exact same fields — a second copy of this string would drift from its own parser. */
+export const PANE_FMT = '#{session_name}|#{pane_pid}|#{pane_current_command}'
 
 /** Parse `list-panes -a -F '<PANE_FMT>'`. Tolerant: malformed lines are skipped. */
 export function parsePaneList(stdout: string): PaneRef[] {
