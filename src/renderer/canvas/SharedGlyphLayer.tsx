@@ -664,6 +664,17 @@ interface LiveContext extends SharedGlyphContext {
 }
 
 let live: LiveContext | null = null
+/** The context as it stands RIGHT NOW, typed honestly.
+ *
+ *  Exists to defeat TypeScript's narrowing, which is not a style point here: `live` is a module
+ *  `let` that several functions null out (`disposeContext`, and therefore every rebuild funnel),
+ *  and control-flow narrowing from an `if (live)` survives any call made inside the branch. Reading
+ *  it back through a function call is the one spelling the compiler cannot narrow, so a caller that
+ *  re-reads after doing something that MIGHT have disposed gets `LiveContext | null` and is forced
+ *  to handle the null the runtime can genuinely produce. */
+function currentLive(): LiveContext | null {
+  return live
+}
 /** One creation attempt per context lifetime (reset by `disposeContext`). Without it every
  *  terminal mount would re-probe a machine that has already said "no WebGL2", and each probe is a
  *  real `getContext` call. */
@@ -1242,8 +1253,17 @@ function reconcileAtlasCell(ctx: LiveContext, cell: DeviceCell | null): void {
 function ensureLiveContext(cell?: DeviceCell): LiveContext | null {
   if (!sharedGlyphActive()) return null
   if (live) {
+    // `reconcileAtlasCell` CAN DISPOSE THE VERY CONTEXT IT IS HANDED — a cell drift rebuilds, and
+    // `disposeContext()` nulls `live`. So the answer has to be re-read afterwards, and it is read
+    // through `currentLive()` rather than as `live` because TypeScript's narrowing from the `if`
+    // above survives the call: written `return live`, the value is correct at RUNTIME (it is a
+    // variable read, not a captured reference) while the compiler believes it is non-null, and the
+    // first edit that trusts that type — `live.engine`, a spread, an `!` — hands a caller an engine
+    // whose GL objects have been deleted. Null is the DESIGNED answer here: the caller drops to
+    // `ensureWebglClient` and the generation bump the rebuild raised brings it back on a fresh
+    // context.
     reconcileAtlasCell(live, usableCell(cell))
-    return live
+    return currentLive()
   }
   const seed = usableCell(cell)
   if (!seed) return null
