@@ -51,7 +51,10 @@ export function ContextMeter({ sessionId }: { sessionId: string | null }): JSX.E
             ~{formatTokens(usage.usedTokens)} / {formatTokens(usage.windowTokens)} tokens
           </div>
           <div className="ctx-popover__sub">
-            {usage.model ?? 'claude'} · Updated {formatTimeAgo(usage.updatedAt)}
+            {/* No model read ⇒ say nothing. This used to fall back to the literal 'claude', which
+                was harmless while the meter was claude-only and became a mislabel once codex and
+                gemini joined USAGE_CAPABLE — a codex popover would have claimed to be claude. */}
+            {usage.model ? `${usage.model} · ` : ''}Updated {formatTimeAgo(usage.updatedAt)}
           </div>
         </div>
       )}

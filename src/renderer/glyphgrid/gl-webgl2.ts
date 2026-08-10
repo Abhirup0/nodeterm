@@ -37,6 +37,46 @@ import { plateRadiusDevice, plateRectDevice, plateShapeDevice } from './plate'
  */
 const MAX_SAFE_LOD = Math.floor(Math.log2(2 * GUTTER_PX))
 
+/**
+ * How close to 1 a zoom may be and still be sampled from LEVEL 0 alone.
+ *
+ * The mip chain exists for GENUINE zoom-out — a canvas at 0.3 or 0.5, where many texels really do
+ * fall into one pixel and plain LINEAR undersamples into shimmer. It was being applied the instant
+ * zoom dropped below 1, which is where the 2026-08-09 "text isn't so crisp, might be retina"
+ * report came from: the reporting canvas sat at **0.976**. For a 2.4% minification the sampler was
+ * blending a half-resolution mip into every glyph — a lot of blur to pay for almost no scaling,
+ * and exactly the difference against GPU mode, where xterm draws 1:1 and the COMPOSITOR does the
+ * 0.976 in one high-quality pass.
+ *
+ * A canvas is very rarely at exactly 1. Any pinch, any fitView, any window resize lands on a
+ * number like this one, so the near-1 band is not an edge case — it is where most users sit.
+ *
+ * 0.9 is the floor because that is where dropped texels stop being negligible: at 0.976 roughly
+ * one column in forty is skipped, at 0.9 one in ten, and past that a stem starts losing a pixel
+ * often enough to read as raggedness rather than as sharpness.
+ */
+const NEAR_ONE_ZOOM = 0.9
+
+/** The atlas sampler's two filters for a zoom, as names rather than GL enums so the rule can be
+ *  tested without a GL context. */
+export function atlasFilterChoice(zoom: number): {
+  min: 'nearest' | 'linear' | 'trilinear'
+  mag: 'nearest' | 'linear'
+} {
+  // MAG is unchanged: 1 belongs on the crisp side, and above it LINEAR matches the bilinear
+  // upscale GPU mode gets from its CSS transform (the 2026-08-04 parity call).
+  const mag = zoom > 1 ? 'linear' : 'nearest'
+  // At or above 1 nothing is minified and NEAREST is bit-exact.
+  if (zoom >= 1) return { min: 'nearest', mag }
+  // Just below 1: minified, but barely. LEVEL 0 with LINEAR keeps the glyph's own texels and
+  // weights them almost entirely towards the nearest one — sharp, and without the mip blur.
+  if (zoom >= NEAR_ONE_ZOOM) return { min: 'linear', mag }
+  // Genuine zoom-out: several texels per pixel. Trilinear over the mip chain, which is what stops
+  // a zoomed-out canvas shimmering — safe only because the slots carry gutters and the sampler is
+  // clamped to MAX_SAFE_LOD, so a minified glyph never averages in its neighbour's ink.
+  return { min: 'trilinear', mag }
+}
+
 const VERT = `#version 300 es
 // One instance per CELL. Two triangles from gl_VertexID (0..5), no vertex buffer.
 uniform vec2 uPan;        // camera pan (screen px)
@@ -354,8 +394,14 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
    *    darkening towards the background.
    */
   const applyAtlasMinFilter = (zoom: number): void => {
-    const wantMin = zoom >= 1 ? gl.NEAREST : gl.LINEAR_MIPMAP_LINEAR
-    const wantMag = zoom > 1 ? gl.LINEAR : gl.NEAREST
+    const choice = atlasFilterChoice(zoom)
+    const wantMin =
+      choice.min === 'nearest'
+        ? gl.NEAREST
+        : choice.min === 'linear'
+          ? gl.LINEAR
+          : gl.LINEAR_MIPMAP_LINEAR
+    const wantMag = choice.mag === 'linear' ? gl.LINEAR : gl.NEAREST
     if (wantMin === atlasMinFilter && wantMag === atlasMagFilter) return
     gl.bindTexture(gl.TEXTURE_2D, atlasTex)
     if (wantMin !== atlasMinFilter) {

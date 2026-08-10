@@ -146,13 +146,22 @@ body {
   background-size: calc(var(--mascot-w) * 2) var(--mascot-h);
   animation: mascot-walk-claude 0.8s steps(1) infinite;
 }
-/* Grok is the brand mark breathing, not a sprite — same treatment as the canvas badge. The bloom is
-   a drop-shadow of `currentColor`, so it needs no ink of its own; on this strip that resolves
-   against --capsule-bg (#000), which is why it reads as a glow here. */
-.mascot--grok {
-  animation: mascot-pulse-grok 1.6s ease-in-out infinite;
+/* Grok, gemini and opencode are their brand mark breathing, not a sprite — same treatment as the
+   canvas badge. The bloom is a drop-shadow of `currentColor`, so it needs no ink of its own; on this
+   strip that resolves against --capsule-bg (#000), which is why it reads as a glow here. */
+.mascot--pulse {
+  animation: mascot-pulse-brand 1.6s ease-in-out infinite;
 }
-@keyframes mascot-pulse-grok {
+/* An asset-based mark (gemini/opencode) is painted as a background image, since those four brand
+   SVGs are multi-colour documents and cannot be inlined the way grok's monochrome path is.
+   `image-rendering: auto` undoes .mascot's `pixelated`, which is there for the pixel-art critters
+   and would harden a vector mark's curves at 13px. */
+.mascot--pulse-asset {
+  background-size: contain;
+  background-position: center;
+  image-rendering: auto;
+}
+@keyframes mascot-pulse-brand {
   0%,
   100% {
     opacity: 0.55;
@@ -164,7 +173,7 @@ body {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .mascot--grok {
+  .mascot--pulse {
     animation: none;
     opacity: 1;
     filter: drop-shadow(0 0 1px currentColor);
