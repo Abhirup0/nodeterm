@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import os from 'os'
 import path from 'path'
@@ -823,5 +823,108 @@ describe('ssh lineage safety', () => {
     })
     const adopted = await store.refreshSshProject('ps', { pushIfStanding: false })
     expect(adopted?.nodes.map((n) => n.id)).toContain('term-mobile-1')
+  })
+})
+
+// Field bug (2026-08-10): two projects + rapid tab switching → both canvases wiped. Every switch
+// fires an un-awaited full save; save() was unserialized and writeAtomic used one fixed tmp path,
+// so overlapping saves spliced each other's tmp bytes (corrupt JSON published by rename) and a slow
+// older save could land its stale index after a newer one. A corrupt index then silently became
+// EMPTY_WORKSPACE, which the renderer's unconditional boot save wrote back — zero entries, no backup.
+describe('save corruption hardening', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('overlapping saves land in call order — a slow earlier save cannot regress the index', async () => {
+    const store = new WorkspaceStore()
+    // Stall the FIRST project-file write so the first save is still in flight when the second lands.
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const realWrite = fs.writeFile.bind(fs)
+    let stalled = false
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (p, data, enc) => {
+      if (!stalled && String(p).includes('project.json')) {
+        stalled = true
+        await gate
+      }
+      return realWrite(p as string, data as string, enc as BufferEncoding)
+    })
+    const first = store.save(ws([project({ cwd: projRoot })]))
+    const second = store.save(ws([project({ cwd: projRoot, name: 'renamed' })]))
+    await new Promise((r) => setTimeout(r, 100)) // unserialized, the second save finishes here
+    release()
+    await Promise.all([first, second])
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].name).toBe('renamed')
+  })
+
+  it('no two atomic writes ever share a tmp path (concurrent writers cannot splice)', async () => {
+    const tmpPaths: string[] = []
+    const realWrite = fs.writeFile.bind(fs)
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (p, data, enc) => {
+      if (String(p).includes('.tmp')) tmpPaths.push(String(p))
+      return realWrite(p as string, data as string, enc as BufferEncoding)
+    })
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.save(ws([project({ cwd: projRoot, name: 'renamed' })]))
+    expect(tmpPaths.length).toBeGreaterThanOrEqual(2) // both saves really wrote
+    expect(new Set(tmpPaths).size).toBe(tmpPaths.length)
+  })
+
+  it('an empty canvas never blind-overwrites a populated project.json it has not read', async () => {
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot })])) // populated file on disk
+    // A different store (fresh boot, setProjectFolder, migration…) that never read that file:
+    const fresh = new WorkspaceStore()
+    await fresh.save(ws([project({ cwd: projRoot, nodes: [] })]))
+    const file = JSON.parse(await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8'))
+    expect(file.nodes.map((n: any) => n.id)).toEqual(['term-1'])
+    // The rest of the save still happened — only the destructive file write was skipped.
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].cwd).toBe(projRoot)
+  })
+
+  it('a legitimately cleared canvas still persists for a store that has read the file', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.save(ws([project({ cwd: projRoot, nodes: [] })])) // user deleted every node
+    const file = JSON.parse(await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8'))
+    expect(file.nodes).toEqual([])
+  })
+
+  it('an unparsable workspace.json is sidelined to .corrupt-<ts> on load, not silently emptied', async () => {
+    await fs.writeFile(path.join(userData, 'workspace.json'), '{"version":3,"entries":[{"id"')
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects).toEqual([])
+    const names = await fs.readdir(userData)
+    const sidelined = names.find((n) => /^workspace\.json\.corrupt-\d+$/.test(n))
+    expect(sidelined).toBeDefined()
+    expect(await fs.readFile(path.join(userData, sidelined!), 'utf-8')).toBe('{"version":3,"entries":[{"id"')
+    expect(names).not.toContain('workspace.json')
+  })
+
+  it('a read-only load (sideline: false) leaves an unparsable workspace.json in place', async () => {
+    await fs.writeFile(path.join(userData, 'workspace.json'), 'not json')
+    await new WorkspaceStore().load({ sideline: false })
+    expect(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')).toBe('not json')
+  })
+
+  it('a fresh store may not replace a populated index with an empty workspace', async () => {
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
+    const before = await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')
+    // Boot-order accident: save(empty) from a store that never managed to load the index
+    // (transient read failure, or a hydrate that raced the load).
+    await new WorkspaceStore().save(ws([]))
+    expect(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')).toBe(before)
+  })
+
+  it('closing every project after a successful load still persists the empty workspace', async () => {
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
+    const store = new WorkspaceStore()
+    await store.load()
+    await store.save(ws([])) // the user really closed/deleted the last project
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries).toEqual([])
   })
 })
