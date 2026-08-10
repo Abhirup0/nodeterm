@@ -123,21 +123,25 @@ function titleFromToolCalls(calls: unknown): string | null {
  *   "toolCalls":[{"name":"update_topic","args":{"title":"Test Environment Verified", …}}]
  * (`__fixtures__/gemini/session.jsonl` line 5).
  *
- * TWO PLACES, because of RESUME. A resumed session replays its prior history into a single
- * `{"$set":{"messages":[…]}}` line, so a title set before the resume is NESTED in that line's
- * messages rather than appearing as a top-level tool call — and a top-level-only reader (this
- * function's first version) answered null for the whole resumed session, which is exactly the case
- * the read leg exists for (a resume is when the OSC title is gone). So the `$set.messages` history
- * is searched as a fallback, newest message first.
+ * TWO PLACES, and NOT because of RESUME. `$set.messages` is also walked, but the reason first
+ * written here was wrong, and is corrected on the record rather than quietly deleted: a resume does
+ * not replay history. Measured in gemini 0.54.4's bundle, `--resume` APPENDS to the same file and
+ * writes exactly one record, `{"$set":{"sessionId":…}}` (`chunk-TYAF55F7.js:285453`); the only branch
+ * that re-writes messages is the legacy `.json` → `.jsonl` migration, and it appends each one as an
+ * ordinary line (`:285430-285450`). So a title set before a resume is still a top-level
+ * `update_topic` line, which the backward scan finds unaided.
  *
- * Shape provenance for that fallback: `$set.messages` being an array of ordinary message objects is
- * MEASURED (fixture line 2) and a `gemini` message carrying `toolCalls[].args.title` is MEASURED
- * (line 22); the COMBINATION is composed from the two, not captured from a real resume. If gemini's
- * resume nests differently this degrades to null — the node then keeps its own title until gemini
- * writes a new top-level `update_topic` — never to a wrong name.
+ * What `$set.messages` actually is: an in-session HISTORY SYNC, written whenever gemini rewrites the
+ * conversation it holds in memory (`:285852-285857`) and read by gemini itself as REPLACING the
+ * history (`:285303-285335`). The never-resumed fixture carries one at line 2. Since that record can
+ * be the newest line in the file and does carry messages, a title inside it is one the session
+ * currently believes in — so the walk stays, as DEFENCE rather than as a resume path. It is free (the
+ * `"title"` needle keeps every line without one out of it), it matches only `update_topic`, and it
+ * cannot invent a name. Both shapes it walks are measured in the fixture (`$set.messages` at line 2,
+ * `toolCalls[].args.title` at line 5).
  *
- * Ordering is right for free: the backward line scan takes the NEWEST matching line, and a replay
- * line is written when the session resumes, so any top-level title after it wins.
+ * Ordering is right for free: the backward line scan takes the NEWEST matching line, so a top-level
+ * title written after a history sync wins over one nested inside it.
  *
  * Read-only: gemini has no rename command (`/chat save <tag>` is a checkpoint, not a title), so
  * nothing pushes a node title back the other way — gemini is in TITLE_READ_CAPABLE and deliberately
@@ -147,7 +151,8 @@ export function pickGeminiTitle(transcript: string | string[]): string | null {
   return latestJsonLineWhere(transcript, '"title"', (o) => {
     const top = titleFromToolCalls(o.toolCalls)
     if (top) return top
-    // The resume replay. `$set` also carries plain `{lastUpdated}` lines, which have no messages.
+    // The in-session history sync (NOT a resume replay — see the docblock). `$set` also carries
+    // plain `{lastUpdated}` / `{sessionId}` records, which have no messages.
     const set = o.$set as { messages?: unknown } | undefined
     const messages = set && typeof set === 'object' ? set.messages : undefined
     if (!Array.isArray(messages)) return null

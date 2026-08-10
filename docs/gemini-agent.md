@@ -163,12 +163,26 @@ claude's `~/.claude/projects`, a managed account's `{userData}/claude-accounts/<
 predicate exists precisely so a forgery cannot reach `~/.ssh/id_rsa`, and a home-wide allowance
 hands that straight back.
 
-The transcript is **event-sourced**, which shapes both readers below: a line is an append, and a
-**resume replays the prior history into a single `{"$set":{"messages":[…]}}` line**. Both readers
-therefore scan **backwards** for the newest line that parses to something they accept
+The transcript is **event-sourced**: a line is an append, and metadata changes arrive as
+`{"$set":{…}}` records that a reader folds over the ones before them. One of those records is
+`{"$set":{"messages":[…]}}` — an in-session **history sync**: when gemini has to rewrite the
+conversation it holds in memory (a tool result patched onto an earlier call, say), it writes the whole
+array in one record, and its own reader CLEARS what it had and takes that array as the history
+(`chunk-TYAF55F7.js:285852-285857` writes it, `:285303-285335` reads it). It is routine and has
+nothing to do with resume — the never-resumed capture has one at line 2.
+
+Both readers therefore scan **backwards** for the newest line that parses to something they accept
 (`latestJsonLineWhere` in `core/gemini-session.ts`, shared with `codex-session.ts`), with the needle
 as a cheap pre-filter only — a line can mention a key deep inside without carrying it at the top
 level, and gemini's `$set` line is exactly that case.
+
+**What a resume actually does** (measured in the same bundle, 0.54.4): it **appends to the same
+file** and writes exactly one record, `{"$set":{"sessionId":…}}` (`:285453`). Nothing is replayed.
+The one branch that does re-write history is the legacy `.json` → `.jsonl` **migration**
+(`:285430-285450`), and even that appends each message as its own ordinary line, not as a
+`$set.messages` array. This matters because an earlier version of this document — and of
+`pickGeminiTitle`'s docblock — described the `$set.messages` walk as *the resume mechanism*; it is
+not. See §6.
 
 ---
 
@@ -310,15 +324,22 @@ never be mistaken for the session's name, and takes the **last** call within a l
 several; the newest is the name). Ordering across lines is right for free: the backward scan takes the
 newest matching line.
 
-**Two places, because of resume.** A resumed session replays its history into one
-`{"$set":{"messages":[…]}}` line, so a title set *before* the resume is nested in that line's messages
-rather than appearing as a top-level tool call — and the first, top-level-only version of this reader
-answered `null` for the whole resumed session, which is precisely the case the read leg exists for (a
-resume is when the OSC title is gone). So `$set.messages` is searched as a fallback, newest message
-first. **Provenance, stated honestly:** `$set.messages` being an array of ordinary message objects is
-measured (fixture line 2) and a message carrying `toolCalls[].args.title` is measured (line 22); the
-**combination** is composed from the two, not captured from a real resume. If gemini nests differently
-this degrades to `null` — the node keeps its own title — never to a wrong name.
+**Two places, and NOT because of resume.** The reader also walks `$set.messages`, and the reason
+recorded here originally was wrong: it said a resume replays the prior history into that record, so a
+pre-resume title would only be found nested inside it. Measured in gemini 0.54.4's bundle, a resume
+**appends to the same file** and writes only `{"$set":{"sessionId":…}}` (`:285453`) — §3. A title set
+before the resume is therefore still sitting in the file as a top-level `update_topic` line, and the
+backward scan finds it with no fallback at all.
+
+What `$set.messages` really is: an **in-session history sync** gemini writes whenever it rewrites the
+conversation it holds in memory (`:285852-285857`), which its own reader treats as replacing the
+history (`:285303-285335`). Since that record can be the newest thing in the file and does carry
+messages, a title inside it is a title the session currently believes in — so the walk is kept as
+**defence**, not as the resume path. It costs nothing (the needle pre-filter means non-`$set` lines
+never reach it) and it cannot invent a name: it matches only `update_topic`, and a top-level line
+after the sync still wins by the backward scan. Provenance is now plain — both shapes it walks are
+measured in the capture (`$set.messages` at fixture line 2, `toolCalls[].args.title` at line 5); what
+was composed was the *story*, not the shapes.
 
 The read is a **bounded tail** (`readSmallTail(p, TITLE_TAIL_BYTES)`, the same cap claude's title read
 uses) of the path **the context tail already tracks**. Nothing scans. That path authority is created
@@ -410,22 +431,37 @@ one stray keystroke.
    `modeSupported` is false and the derived copy says so — but the dropdown still offers two entries
    that do the same thing on gemini. Only a gemini-side "approve non-edit tools" value could
    separate them.
-3. **The resumed-transcript title path is composed, not captured** (§6). Fail-safe by construction:
-   wrong ⇒ `null`, never a wrong name. Closing it needs one real resumed transcript.
+3. **CLOSED, in the opposite direction** — the `$set.messages` walk was documented as *the resume
+   mechanism* and listed here as unverified. Measured in gemini 0.54.4's bundle: a resume **appends to
+   the same file** and writes only `{"$set":{"sessionId":…}}` (`chunk-TYAF55F7.js:285453`), so nothing
+   is replayed and a pre-resume title is still a top-level `update_topic` line. `$set.messages` is a
+   routine in-session history sync (`:285852-285857`), which is why the never-resumed capture has one
+   at line 2. The CODE is unchanged — the walk is harmless, free and defensive — but the story is
+   fixed in §3, §6 and `pickGeminiTitle`'s docblock, and the checklist item that told a tester to
+   capture "the resumed transcript's `$set` shape" is gone: there is no such shape to capture.
+4. **`gemini --resume <id>` is FATAL when the id does not resolve** — measured here: exit **42**,
+   `Error resuming session: Invalid session identifier "…"` (and, from a directory with no chats at
+   all, `No previous sessions found for this project`), so a cold-restore relaunch whose transcript
+   has been deleted, or whose node runs in a different cwd than the one gemini indexed, dies instead
+   of degrading to a bare `gemini`. Not fixed here (the resume command is shared with claude/codex and
+   the fallback belongs in the restore path, not in a docs pass).
 4. **A remote (SSH) gemini node has no meter and no title.** The tails deliberately never track a
    remote node's transcript — metering the local disk would report the wrong machine — and
    `geminiPathFor` then answers `undefined`, which reads as "no name". Honest, but a real asymmetry:
    claude's leg handles remote via `setRemoteTranscriptReader` and a remote-jailed path.
-5. **The search button's tooltip still keys on the meter.** `TerminalNode.tsx:3234` reads
-   `showUsage ? 'Search terminal + conversation' : 'Search this terminal'`, so a gemini/codex node
-   promises a conversation search whose transcript leg is now off. One word (`claudeTranscript`) fixes
-   it; recorded here rather than fixed in a docs commit.
+5. **FIXED** — the search button's tooltip keyed on `showUsage`, so a gemini/codex node offered
+   "Search terminal + conversation" while its transcript leg was gated off. It now keys on
+   `claudeTranscript`, and the guard below covers the label too.
 6. **Nothing tests the call sites of `readsClaudeTranscript`, behaviourally.** No test in this repo
    renders `TerminalNode` or `Canvas`, so the gates are pinned by a source-text guard
-   (`src/renderer/nodes/title-gate.test.ts`, in the style of `no-electron.test.ts`) — three of its six
-   mutations are caught by identifier matching, not behaviour. Its `toContain` on a 6000-line file also
-   dumps unrelated source as the failure diff, and its "Canvas.tsx must never mention `canReadTitle`"
-   clause would false-positive on a future legitimate read there.
+   (`src/renderer/nodes/title-gate.test.ts`, in the style of `no-electron.test.ts`), which now covers
+   the CLAUDE-TRANSCRIPT gates as well as the two title gates — `context.ensure`, the find bar's
+   `searchTranscript`, the tooltip, and the inverse mistake of narrowing the meter itself. Each was
+   verified by mutation. The residual weakness is the technique's: it matches identifiers, not
+   behaviour, so a rename that keeps the words satisfies it. The transcript assertions are scoped to
+   the matching LINE (so a failure names the site instead of dumping 6000 lines as its diff); the
+   older title assertions still `toContain` over the whole file, and the "Canvas.tsx must never
+   mention `canReadTitle`" clause would still false-positive on a future legitimate read there.
 7. **`codexHome()` returns `$CODEX_HOME` unresolved**, so a `~/…` or relative value still misses the
    jail — pre-existing, and identical to `codex-usage.ts`'s own behaviour. It fails **closed** (the
    meter silently never fills), which is the quieter and therefore worse failure.
@@ -476,9 +512,10 @@ Context meter
 Title
 10. Let gemini name the conversation (it calls update_topic on its own), then check the node title
     adopts it — and that a HAND rename stops the poll overwriting it (titleAuto=false).
-11. RESUME that session (`gemini --resume <id>`) and check the title survives. This is §8.3: if the
-    title goes blank until gemini renames again, capture the resumed transcript's first line and
-    fix pickGeminiTitle's $set shape against it.
+11. RESUME that session (`gemini --resume <id>`) and check the title survives. It should, with no
+    $set walk involved: a resume appends to the SAME file (§3, §8.3), so the pre-resume top-level
+    `update_topic` line is still the newest one. (The item that used to sit here — "capture the
+    resumed transcript's $set shape" — is gone: measured, there is no such shape.)
 12. Confirm there is no rename affordance offered on a gemini node.
 
 Modes + restart
@@ -487,8 +524,9 @@ Modes + restart
     started with the setting untouched must PROMPT before an edit, not auto-approve it),
     acceptEdits ⇒ auto_edit, plan ⇒ plan, bypassPermissions ⇒ yolo. Check a session really STARTS in
     it, not just that the flag parses.
-14. On a machine with NO claude installed, does an `auto` gemini launch still carry its flag?
-    (claude's version gate must not touch gemini.)
+14. On a machine with NO claude installed, launch gemini in `acceptEdits`: the `--approval-mode
+    auto_edit` flag must still be emitted (claude's version gate must not touch gemini). `auto` is
+    not the probe for this any more — it emits no flag on any machine (§5).
 15. "Restart agent (resume)" on an idle gemini node: does it /quit, wait for the shell, and resume
     the SAME conversation? Is it refused while the node is RUNNING or NEEDS YOU? Is the history
     still there afterwards (i.e. `--delete` was never typed)?

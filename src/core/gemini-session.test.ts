@@ -55,8 +55,8 @@ describe('pickGeminiTokens', () => {
   })
 
   it('ignores a line that merely CONTAINS "tokens" without a top-level tokens object', () => {
-    // The transcript's `$set` replay line (fixture line 2) is exactly this shape: it mentions the
-    // word but carries no top-level counts, so the scan must keep walking backwards.
+    // The transcript's `$set` history-sync line (fixture line 2) is exactly this shape: it mentions
+    // the word but carries no top-level counts, so the scan must keep walking backwards.
     const text = [
       JSON.stringify({ tokens: { input: 42, total: 42 }, model: 'gemini-2.5-pro' }),
       JSON.stringify({ $set: { messages: [{ note: 'mentions tokens but has none' }] } })
@@ -141,17 +141,16 @@ describe('pickGeminiTitle', () => {
     expect(pickGeminiTitle('')).toBeNull()
   })
 
-  it("finds a title replayed inside a resumed session's `$set` history", () => {
-    // A RESUME writes its whole prior history into one `{"$set":{"messages":[…]}}` line, so a
-    // title set before the resume is NESTED there rather than sitting at the top level — and a
-    // top-level-only reader answers null for the entire resumed session (the case the node-title
-    // poll cares about most, since a resume is exactly when the OSC title is gone).
+  it('finds a title carried inside a `$set.messages` history sync', () => {
+    // `$set.messages` is an IN-SESSION history sync: gemini writes the whole array when it rewrites
+    // the conversation it holds in memory (bundle chunk-TYAF55F7.js:285852-285857) and reads that
+    // array as REPLACING the history (:285303-285335). It is NOT a resume replay — measured on
+    // 0.54.4, `--resume` appends to the same file and writes only `{"$set":{"sessionId":…}}`
+    // (:285453). The walk is kept as defence: such a record can be the newest line in the file, and
+    // a title inside it is one the session currently believes in.
     //
-    // Shape provenance: `$set.messages` being an array of ordinary message objects is measured
-    // (fixture line 2), and a `gemini` message carrying `toolCalls[].args.title` is measured
-    // (fixture line 22). The COMBINATION is composed from those two, not captured from a real
-    // resume — if gemini's resume turns out to nest differently, this degrades to the old
-    // behaviour (null → the node keeps its own title), never to a wrong name.
+    // Both shapes are measured in the fixture: `$set.messages` as an array of ordinary message
+    // objects (line 2), and a `gemini` message carrying `toolCalls[].args.title` (line 5).
     const line = JSON.stringify({
       $set: {
         messages: [
@@ -159,19 +158,19 @@ describe('pickGeminiTitle', () => {
           {
             id: 'b',
             type: 'gemini',
-            toolCalls: [{ id: 'update_topic__a', name: 'update_topic', args: { title: 'Resumed Topic' } }]
+            toolCalls: [{ id: 'update_topic__a', name: 'update_topic', args: { title: 'Synced Topic' } }]
           }
         ],
         lastUpdated: '2026-08-09T10:48:49.538Z'
       }
     })
-    expect(pickGeminiTitle(line)).toBe('Resumed Topic')
+    expect(pickGeminiTitle(line)).toBe('Synced Topic')
   })
 
-  it('prefers a top-level title over one replayed in the same file', () => {
-    // The replay line is written when the session resumes, so anything top-level AFTER it is
-    // newer. The backward scan gives that for free; this pins it.
-    const replay = JSON.stringify({
+  it('prefers a top-level title over one carried in an earlier sync record', () => {
+    // A sync record states the history as of the moment it was written, so anything top-level AFTER
+    // it is newer. The backward scan gives that for free; this pins it.
+    const synced = JSON.stringify({
       $set: {
         messages: [
           {
@@ -187,7 +186,7 @@ describe('pickGeminiTitle', () => {
       type: 'gemini',
       toolCalls: [{ name: 'update_topic', args: { title: 'New Topic' } }]
     })
-    expect(pickGeminiTitle(`${replay}\n${fresh}`)).toBe('New Topic')
+    expect(pickGeminiTitle(`${synced}\n${fresh}`)).toBe('New Topic')
   })
 
   it('ignores a nested title-shaped arg on some other tool', () => {
