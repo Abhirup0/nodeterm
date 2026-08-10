@@ -151,10 +151,13 @@ export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 
 // (`--ask-for-approval untrusted|on-request|never`) each spell it their own way, so membership here
 // is only half the story — the translation lives in ./approval-mode.ts.
 //
-// Membership does NOT mean every mode applies: codex's vocabulary is NARROWER than ours (no plan,
-// no edit-specific mode), and those modes emit NO flag rather than a substituted nearest match.
+// Membership does NOT mean every mode applies: BOTH new vocabularies are narrower than ours — codex
+// has no plan and no edit-specific mode, and gemini has nothing meaning "approve most things but not
+// edits", i.e. no `auto`. Those modes emit NO flag rather than a substituted nearest match.
 // `modeSupported` is what the UI asks so the user is told, instead of being shown "Plan" while
-// codex runs in on-request.
+// codex runs in on-request, or "Auto" while gemini auto-approves every edit. That last one is not
+// hypothetical: `auto` is DEFAULT_PERMISSION_MODE, so mapping it to gemini's `auto_edit` would have
+// switched auto-approve-edits on for every existing gemini node at upgrade time, silently.
 //
 // NOTE: the `auto` VERSION GATE is claude's alone — see activePermissionMode in
 // renderer/state/permissionMode.ts. grok has accepted every mode we emit since 1.0.0, its first

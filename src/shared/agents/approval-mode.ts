@@ -1,10 +1,11 @@
 // Per-agent translation of nodeterm's permission mode into the agent's own approval flag.
 //
 // claude and grok share one spelling and one vocabulary, which is why they needed no mapping at all
-// until now. gemini and codex each have their own — and codex's is NARROWER than ours, which is the
-// interesting case: our five modes do not fit `untrusted|on-request|never`, so the modes codex
-// cannot express emit NO flag (its own default) rather than a nearest match. A silent substitution
-// would show the user "Plan" while codex ran in on-request.
+// until now. gemini and codex each have their own, and BOTH are narrower than ours — which is the
+// interesting case: our five modes fit neither `default|auto_edit|yolo|plan` nor
+// `untrusted|on-request|never`, so a mode the CLI cannot express emits NO flag (its own default)
+// rather than a nearest match. A silent substitution would show the user "Plan" while codex ran in
+// on-request, or "Auto" while gemini auto-approved every file edit.
 //
 // Measured: `gemini --help` (0.54.4) and `codex --help` (0.146.0). `--sandbox` is deliberately not
 // touched: it is a separate axis (read-only | workspace-write | danger-full-access), and folding
@@ -23,14 +24,30 @@ import {
   type BuiltinAgentId
 } from './config'
 
+/** One agent's approval dialect: the flag it spells, and the values it accepts. ONE fact per agent —
+ *  a flag and a table maintained separately is how a third agent added to the table silently emits
+ *  the second agent's flag. */
+interface ApprovalDialect {
+  flag: string
+  modes: Partial<Record<AgentPermissionMode, string>>
+}
+
 const GEMINI_MODES: Partial<Record<AgentPermissionMode, string>> = {
   plan: 'plan',
   acceptEdits: 'auto_edit',
-  bypassPermissions: 'yolo',
-  // gemini has no "approve everything except the dangerous bits" mode; auto_edit is the nearest,
-  // and it is the same direction claude's acceptEdits points.
-  auto: 'auto_edit'
+  bypassPermissions: 'yolo'
   // `manual` → gemini's own `default`, i.e. NO flag, exactly as it is for claude.
+  //
+  // `auto` is ABSENT ON PURPOSE, and it is the one absence worth explaining, because `auto` is
+  // `DEFAULT_PERMISSION_MODE` — so this decides what an untouched install launches gemini with.
+  // gemini's vocabulary is exactly `default|auto_edit|yolo|plan`; none of those means "approve most
+  // things but NOT edits", which is what our `auto` promises. The nearest value, `auto_edit`, is
+  // documented as "auto-approve edit tools" — the opposite end of the one axis the user cares
+  // about. Mapping `auto → auto_edit` would therefore have made every existing gemini node start
+  // auto-approving file edits on upgrade, silently: before gemini joined PERMISSION_MODE_CAPABLE it
+  // always launched bare (= `default` = prompt for approval), and `modeSupported` would have
+  // answered `true`, so the derived copy would not have admitted it either. No flag is the honest
+  // answer and reproduces the pre-branch launch exactly. See `unsupportedModesNote`.
 }
 
 const CODEX_MODES: Partial<Record<AgentPermissionMode, string>> = {
@@ -52,11 +69,24 @@ const CODEX_MODES: Partial<Record<AgentPermissionMode, string>> = {
   // absent ON PURPOSE — see modeSupported.
 }
 
-const tableFor = (agentId: AgentId): Partial<Record<AgentPermissionMode, string>> | null =>
-  agentId === 'gemini' ? GEMINI_MODES : agentId === 'codex' ? CODEX_MODES : null
+/**
+ * The agents that need a translation, flag and vocabulary together.
+ *
+ * These two used to be separate lookups — a `tableFor` ternary and a `flagFor` ternary whose `else`
+ * branch was codex's flag. A third agent added to the table and forgotten in the flag would then
+ * have emitted `--ask-for-approval <its own value>`: a wrong flag carrying a right value, i.e. a
+ * failed launch, from an edit that looks complete. One record makes that impossible to express.
+ *
+ * Looked up through `Object.hasOwn`, not `[agentId]`: `AgentId` is OPEN (custom agents carry
+ * user-typed ids), so a plain-object index answers `'constructor'` with a Function.
+ */
+const APPROVAL_DIALECTS: Partial<Record<AgentId, ApprovalDialect>> = {
+  gemini: { flag: '--approval-mode', modes: GEMINI_MODES },
+  codex: { flag: '--ask-for-approval', modes: CODEX_MODES }
+}
 
-const flagFor = (agentId: AgentId): string =>
-  agentId === 'gemini' ? '--approval-mode' : '--ask-for-approval'
+const dialectFor = (agentId: AgentId): ApprovalDialect | null =>
+  Object.hasOwn(APPROVAL_DIALECTS, agentId) ? APPROVAL_DIALECTS[agentId] ?? null : null
 
 /** Can this agent actually start in this mode? `false` means the launch omits the flag and the
  *  agent uses its own default — surfaced in the UI so the user is not misled. */
@@ -68,8 +98,8 @@ export function modeSupported(agentId: AgentId, mode: AgentPermissionMode): bool
   // default does not. Either way the promise holds; an agent whose CLI could offer neither would
   // need this early return revisited.
   if (mode === 'manual') return hasPermissionMode(agentId)
-  const table = tableFor(agentId)
-  if (table) return mode in table
+  const dialect = dialectFor(agentId)
+  if (dialect) return Object.hasOwn(dialect.modes, mode)
   return hasPermissionMode(agentId)
 }
 
@@ -79,15 +109,15 @@ export function modeSupported(agentId: AgentId, mode: AgentPermissionMode): bool
  * The mode is re-validated at the top for the same reason `permissionModeFlag` does it: the value
  * comes from hand-editable, git-shared JSON (settings.json / project.json) and is interpolated into
  * a shell command line, so its TYPE proves nothing. Without the guard, a forged `constructor`
- * satisfies `mode in table` on a plain object and hands back a Function — one that would have been
- * stringified onto a tmux `send-keys` line.
+ * indexes a plain-object table and hands back a Function — one that would have been stringified
+ * onto a tmux `send-keys` line. (`dialectFor` closes the same hole on the agent id.)
  */
 export function approvalFlags(agentId: AgentId, mode: AgentPermissionMode): string[] {
   if (!isPermissionMode(mode)) return []
-  const table = tableFor(agentId)
-  if (table) {
-    const value = table[mode]
-    return value ? [flagFor(agentId), value] : []
+  const dialect = dialectFor(agentId)
+  if (dialect) {
+    const value = dialect.modes[mode]
+    return value ? [dialect.flag, value] : []
   }
   // claude + grok keep their exact historical spelling, validated at the interpolation site.
   return hasPermissionMode(agentId) ? permissionModeFlag(mode) : []

@@ -5,7 +5,8 @@ import {
   modeSupported,
   permissionModeAgentIds,
   permissionModeAgentsLabel,
-  unsupportedModesNote
+  unsupportedModesNote,
+  withPermissionMode
 } from './approval-mode'
 import {
   ALL_PERMISSION_MODES,
@@ -33,12 +34,36 @@ describe('approvalFlags — gemini', () => {
     expect(approvalFlags('gemini', 'plan')).toEqual(['--approval-mode', 'plan'])
     expect(approvalFlags('gemini', 'acceptEdits')).toEqual(['--approval-mode', 'auto_edit'])
     expect(approvalFlags('gemini', 'bypassPermissions')).toEqual(['--approval-mode', 'yolo'])
-    // gemini has no all-tools-but-not-yolo mode; auto_edit is the nearest and is documented as such.
-    expect(approvalFlags('gemini', 'auto')).toEqual(['--approval-mode', 'auto_edit'])
   })
 
-  it('supports all five', () => {
-    for (const m of ALL_PERMISSION_MODES) expect(modeSupported('gemini', m), m).toBe(true)
+  /**
+   * The one that matters most, because `auto` is `DEFAULT_PERMISSION_MODE`: it decides what an
+   * UNTOUCHED install launches gemini with.
+   *
+   * gemini's vocabulary is `default|auto_edit|yolo|plan` and none of those means "approve most
+   * things but not edits". The nearest, `auto_edit`, is "auto-approve edit tools" — the opposite end
+   * of the axis our `auto` is about. Mapping it would have turned every existing gemini node into an
+   * auto-approve-edits session on upgrade, silently: gemini launched BARE before it joined
+   * PERMISSION_MODE_CAPABLE (bare = gemini's `default` = prompt for approval), and `modeSupported`
+   * would have said `true`, so the derived copy would not have admitted it either.
+   */
+  it('emits NO flag for `auto`, the default mode, rather than auto-approving edits', () => {
+    expect(approvalFlags('gemini', 'auto')).toEqual([])
+    expect(modeSupported('gemini', 'auto')).toBe(false)
+    // Same command line gemini launched with before it joined the capable list.
+    expect(withPermissionMode('gemini', 'gemini', 'auto')).toBe('gemini')
+    // ...and it must not quietly become the acceptEdits value.
+    expect(approvalFlags('gemini', 'auto')).not.toEqual(approvalFlags('gemini', 'acceptEdits'))
+    // The derived copy has to say so, naming gemini and the mode.
+    const note = unsupportedModesNote()
+    expect(note).toContain('Gemini')
+    expect(note).toContain(PERMISSION_MODE_LABELS.auto)
+    expect(note).toContain("Gemini sessions start in Gemini's own default")
+  })
+
+  it('supports the four gemini has a value for', () => {
+    for (const m of ALL_PERMISSION_MODES)
+      expect(modeSupported('gemini', m), m).toBe(m !== 'auto')
   })
 
   it('only ever emits a value gemini --help lists', () => {
@@ -153,15 +178,17 @@ describe('UI copy derived from the mapping', () => {
     expect(caveat).not.toContain('Claude')
   })
 
-  it('admits codex’s two gaps, and names no agent that has none', () => {
+  it('admits each gap once, with number agreement, and names no agent that has none', () => {
     const note = unsupportedModesNote()
-    expect(note).toContain('Plan')
-    expect(note).toContain('Accept edits')
-    expect(note).toContain('Codex')
-    // Number agreement: "Codex sessions start in Codex's own default", never "in its own default".
+    // codex: two gaps → plural verb.
+    expect(note).toContain('Accept edits and Plan have no Codex equivalent')
+    // gemini: one gap → singular verb. Both sentences in one string, one per agent.
+    expect(note).toContain('Auto has no Gemini equivalent')
+    // Number agreement on the possessive too: "Codex sessions start in Codex's own default",
+    // never "in its own default".
     expect(note).toContain("Codex's own default")
-    // gemini expresses all five, so it must never appear in a sentence about missing modes.
-    expect(note).not.toContain('Gemini')
+    expect(note).toContain("Gemini's own default")
+    // claude and grok express all five, so neither may appear in a sentence about missing modes.
     expect(note).not.toContain('Claude Code')
     expect(note).not.toContain('Grok')
   })

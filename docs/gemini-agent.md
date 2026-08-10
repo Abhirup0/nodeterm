@@ -32,7 +32,7 @@ is the price of adding the next agent to the same list.
 | `USAGE_CAPABLE` (the per-node context meter) | **joined this branch** | BOTH numbers, from gemini's own transcript: a used count and a **trustworthy** window. Used = the newest turn line's `tokens.input` (`core/gemini-session.ts`). The window is the harder half, and the reason gemini could join at all is that its CLI states a **family rule with a catch-all default**, not a per-model table — so `geminiWindowFor` mirrors `tokenLimit()` and an unheard-of model still gets the right answer (§4). Plus a *third* thing that is easy to miss: **joining this list turns on more than the meter** — see the warning under the table. |
 | `TITLE_READ_CAPABLE` | **joined this branch** (the list was created for it) | A read leg that resolves a session's own name **without searching another agent's tree** (`pickGeminiTitle` over the transcript path the context tail already tracks), and one routing rule for the readers: `readAgentSessionName` in `core/agent-session-name.ts`, serving the desktop IPC handler *and* both shells' session-name sweeps. This list exists **because of gemini**: it names its own sessions but cannot be told a name, so the read and write legs had to split (§6). |
 | `RENAME_CAPABLE` | **deliberately NOT joined** | There is no rename command to write to. Gemini's session commands are `/chat` (an alias for `/resume`) with `debug | delete | list | resume | save | share` (`bundle/docs/reference/commands.md:52-100`), where `save <tag>` is a tagged **checkpoint**, not a title. One list for both legs would light the rename UI on a node where the write silently does nothing. **Invariant** (pinned in `config.capabilities.test.ts`): every `RENAME_CAPABLE` agent is also `TITLE_READ_CAPABLE`, never the reverse. |
-| `PERMISSION_MODE_CAPABLE` | **joined this branch** | A per-agent **translation**, because gemini does not share claude's flag spelling: `--approval-mode default\|auto_edit\|yolo\|plan` (`gemini --help`, 0.54.4) against our `manual\|auto\|acceptEdits\|plan\|bypassPermissions`. The table is `GEMINI_MODES` in `src/shared/agents/approval-mode.ts`; §5 has the mapping and its one honest wart. |
+| `PERMISSION_MODE_CAPABLE` | **joined this branch** | A per-agent **translation**, because gemini does not share claude's flag spelling: `--approval-mode default\|auto_edit\|yolo\|plan` (`gemini --help`, 0.54.4) against our `manual\|auto\|acceptEdits\|plan\|bypassPermissions`. The table is `GEMINI_MODES` in `src/shared/agents/approval-mode.ts`; §5 has the mapping and the one mode — `auto`, which is also the DEFAULT — gemini has no word for. |
 | `CONTEXT_LINK_CAPABLE` | **joined** (pre-branch) | A parser for gemini's event-sourced chat format plus a locator by sessionId (`handoff/locate.ts`'s `locateGemini`), and a discovery route — the marker block merged into `~/.gemini/GEMINI.md`. |
 | `TRANSFER_SOURCE_CAPABLE` | **joined** (pre-branch) | The same native-transcript reader cross-agent transfer needs. |
 | `CANVAS_CONTROL_CAPABLE` | **joined** (pre-branch) | The marker block in `~/.gemini/GEMINI.md` (gemini gets no skill — that is claude's discovery mechanism, which grok borrows). Membership is what sets `NODETERM_CANVAS_CONTROL` in the session env. |
@@ -226,7 +226,7 @@ transcript is on the host, while the server has no SSH-project manager and so ha
 
 ---
 
-## 5. Permission mode: `--approval-mode`, and the collapse we cannot express
+## 5. Permission mode: `--approval-mode`, and the mode gemini has no word for
 
 `activePermissionMode(agentId)` resolves the project override, else `settings.claudePermissionMode`
 (the persisted key keeps its name — renaming it would silently reset every existing user's choice).
@@ -239,19 +239,32 @@ lands is decided one layer up by `createAgentNode`, and for gemini it goes **las
 | nodeterm mode | label | gemini flag | note |
 |---|---|---|---|
 | `manual` | Ask each time | *(none)* | gemini's own `default` is documented as "prompt for approval", which is exactly what the label promises — so no flag reproduces it, as it does for claude |
-| `auto` | Auto | `--approval-mode auto_edit` | **collapses** — see below |
+| `auto` | Auto | *(none)* | **no equivalent** — see below |
 | `acceptEdits` | Accept edits | `--approval-mode auto_edit` | the direct equivalent ("auto-approve edit tools") |
 | `plan` | Plan | `--approval-mode plan` | "read-only mode" |
 | `bypassPermissions` | Bypass all | `--approval-mode yolo` | "auto-approve all tools" |
 
-**The honest wart: `auto` and `acceptEdits` both emit `auto_edit`, and there is no third value to
-reach for.** Gemini's vocabulary is exactly those four, so unlike codex — where a mode that could not
-be expressed was given `untrusted` — there is no other flag that means "approve everything except the
-dangerous bits". `modeSupported('gemini', 'auto')` is therefore **true** and both dropdown entries
-land on one runtime policy. This is documented in the source comment and **deliberately not papered
-over**: `unsupportedModesNote()` can only say "cannot express", never "collapses onto another mode",
-so the derived copy has no vocabulary for this case yet. Giving it one is a mechanism change, not a
-mapping fix.
+**`auto` emits no flag, and that is the whole reason this section exists.** `auto` is
+`DEFAULT_PERMISSION_MODE`, so this row decides what an **untouched install** launches gemini with.
+Gemini's vocabulary is exactly those four values, and none of them means "approve most things but
+NOT edits" — the nearest, `auto_edit`, is "auto-approve edit tools", i.e. the opposite end of the one
+axis our `auto` is about. The first version of this table mapped `auto → auto_edit` anyway, and the
+consequence was concrete: **every existing gemini node would have started auto-approving file edits
+on upgrade, with no notice.** Before gemini joined `PERMISSION_MODE_CAPABLE` it always launched bare
+(= gemini's `default` = *prompt for approval*), and `modeSupported('gemini','auto')` would have
+answered `true`, so `unsupportedModesNote()` would not have admitted it either — a silent widening of
+permissions dressed as a translation. So `auto` is **absent from `GEMINI_MODES`**,
+`modeSupported('gemini','auto')` is **false**, and the launch is the bare pre-branch command. This is
+the branch's own rule applied to gemini instead of exempted from it: a mode the CLI cannot express
+emits no flag, never a substituted nearest match (the same reason codex's `plan` and `acceptEdits`
+emit nothing). The cost is that `auto` and `manual` land on the same gemini policy — but that policy
+is the *prompting* one, which is the safe direction, and the derived copy now says it out loud:
+
+> Auto has no Gemini equivalent, so Gemini sessions start in Gemini's own default.
+
+Pinned by `approval-mode.test.ts` ("emits NO flag for `auto`, the default mode, rather than
+auto-approving edits"), which asserts the flags, `modeSupported`, the composed command line, and that
+the note names gemini and the mode.
 
 **Gemini does NOT inherit claude's `auto` version gate.** That gate exists because Claude Code
 < 2.1.71 *exits 1* on `--permission-mode auto`, and it is fed by a `claude --version` probe (local, or
@@ -265,9 +278,14 @@ reason. **An agent needing its own gate adds one beside claude's.**
 JSON (`settings.json` / `project.json`) and end up interpolated into a shell command line (tmux
 `send-keys`), so the mode is **re-validated at the interpolation site** — `isPermissionMode` at the
 top of `approvalFlags`, mirroring `permissionModeFlag`. The type proves nothing. Without that guard a
-forged `constructor` satisfies `mode in table` on a plain object and hands back a **Function**, which
-would have been stringified onto the `send-keys` line. An unrecognized mode yields the bare, safe
-command.
+forged `constructor` indexes a plain-object table and hands back a **Function**, which would have been
+stringified onto the `send-keys` line. An unrecognized mode yields the bare, safe command. The same
+hole exists on the **agent id** (`AgentId` is open — custom agents carry user-typed ids), which is why
+`dialectFor` looks its record up through `Object.hasOwn` too, and why flag + vocabulary are ONE record
+per agent (`APPROVAL_DIALECTS`): the previous shape was a `tableFor` ternary plus a `flagFor` ternary
+whose `else` branch was codex's flag, so a third agent added to the table and forgotten in the flag
+would have emitted `--ask-for-approval <a gemini-style value>` — a failed launch from an edit that
+looks complete.
 
 `--sandbox` is deliberately untouched: it is a separate axis, and folding it in would widen
 filesystem access invisibly.
@@ -387,8 +405,11 @@ one stray keystroke.
    Self-healing, and still strictly better than the pre-branch stuck RUNNING, but gemini has no idle
    rescue notification the way grok might. Measure it: deny a tool live and watch whether the badge
    clears (§9 item 5).
-2. **`auto` and `acceptEdits` are indistinguishable at launch** (§5) and the derived UI copy cannot
-   say so. Not a mapping bug — a missing vocabulary in `unsupportedModesNote()`.
+2. **`auto` and `manual` are indistinguishable at launch** (§5): gemini has no value for `auto`, so
+   both emit no flag and land on gemini's own prompting `default`. Closed as far as honesty goes —
+   `modeSupported` is false and the derived copy says so — but the dropdown still offers two entries
+   that do the same thing on gemini. Only a gemini-side "approve non-edit tools" value could
+   separate them.
 3. **The resumed-transcript title path is composed, not captured** (§6). Fail-safe by construction:
    wrong ⇒ `null`, never a wrong name. Closing it needs one real resumed transcript.
 4. **A remote (SSH) gemini node has no meter and no title.** The tails deliberately never track a
@@ -462,8 +483,10 @@ Title
 
 Modes + restart
 13. Launch each mode from Settings → Agents and confirm the emitted flag: manual ⇒ NO flag,
-    auto and acceptEdits ⇒ auto_edit (both — this is the documented collapse), plan ⇒ plan,
-    bypassPermissions ⇒ yolo. Check a session really STARTS in it, not just that the flag parses.
+    **auto ⇒ NO flag** (§5 — the one that matters, since `auto` is the default: a gemini session
+    started with the setting untouched must PROMPT before an edit, not auto-approve it),
+    acceptEdits ⇒ auto_edit, plan ⇒ plan, bypassPermissions ⇒ yolo. Check a session really STARTS in
+    it, not just that the flag parses.
 14. On a machine with NO claude installed, does an `auto` gemini launch still carry its flag?
     (claude's version gate must not touch gemini.)
 15. "Restart agent (resume)" on an idle gemini node: does it /quit, wait for the shell, and resume
