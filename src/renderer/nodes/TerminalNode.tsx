@@ -59,6 +59,7 @@ import {
 } from '../terminal/terminal-config'
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
+import { PARK_MAX, planParkEviction } from '../terminal/park-budget'
 import { attachGlyphGrid, type GlyphGridAttachment } from '../terminal/glyphgrid-attach'
 import type { GridHandle } from '../glyphgrid/engine'
 import {
@@ -2606,6 +2607,11 @@ export function TerminalNode({
         }
         disposeParkedTerminal(termKey) // defensive: never stack two entries for one node
         parkedTerminals.set(termKey, entry)
+        // Enforce the park count cap: evict the OLDEST parks (their next remount becomes a warm
+        // tmux reattach — the post-window behavior, just earlier). Never the entry just parked.
+        for (const k of planParkEviction([...parkedTerminals.keys()], PARK_MAX)) {
+          if (k !== termKey) disposeParkedTerminal(k)
+        }
         // A spawn continuation still awaiting its history seed reads this to know the session
         // survived this unmount (parked, or adopted by a remount) and must be finished, not killed.
         handedOff = entry
