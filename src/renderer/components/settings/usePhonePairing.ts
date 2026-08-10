@@ -18,6 +18,10 @@ export function usePhonePairing(onPaired?: () => void): {
   qr: string
   sshOpen: boolean
   sshHealed: boolean
+  /** On phase 'paired': whether the pairing came with a relay leg ('off' = toggle disabled,
+   *  'failed' = mint failed → LAN-only). Surfaced so the silent degrade is visible at the one
+   *  moment the user is looking. */
+  relayResult: 'ok' | 'off' | 'failed' | null
   error: string
   busy: boolean
   start: () => Promise<void>
@@ -30,6 +34,7 @@ export function usePhonePairing(onPaired?: () => void): {
   // Went from unreachable → reachable while the warning was showing: show a green confirmation
   // instead of silently dropping the warning (the user just flipped a toggle; acknowledge it).
   const [sshHealed, setSshHealed] = useState(false)
+  const [relayResult, setRelayResult] = useState<'ok' | 'off' | 'failed' | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   // Track whether a pairing listener is currently running so unmount can stop it.
@@ -70,6 +75,7 @@ export function usePhonePairing(onPaired?: () => void): {
       setQr(dataUrl)
       setSshOpen(open)
       setSshHealed(false)
+      setRelayResult(null)
       setPhase('waiting')
       runningRef.current = true
     } catch (err) {
@@ -97,6 +103,7 @@ export function usePhonePairing(onPaired?: () => void): {
       runningRef.current = false
       setQr('')
       setPhase(result.ok ? 'paired' : 'timeout')
+      setRelayResult(result.ok ? (result.relay ?? null) : null)
       if (result.ok) onPairedRef.current?.()
     })
   }, [])
@@ -111,5 +118,5 @@ export function usePhonePairing(onPaired?: () => void): {
     }
   }, [])
 
-  return { phase, qr, sshOpen, sshHealed, error, busy, start, stop, reset: () => setPhase('idle') }
+  return { phase, qr, sshOpen, sshHealed, relayResult, error, busy, start, stop, reset: () => setPhase('idle') }
 }

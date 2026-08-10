@@ -139,7 +139,13 @@ export interface PairingStartResult {
 }
 
 /** Fired once when pairing finishes: ok=true → a key was installed, ok=false → timeout/cancel. */
-export type PairingDone = { ok: boolean }
+export type PairingDone = {
+  ok: boolean
+  /** Only on ok=true: did the pairing come with a relay leg? 'off' = toggle disabled,
+   *  'failed' = enabled but the mint failed (the SILENT LAN-only degrade that cost a
+   *  field debugging session — surface it, never swallow it). */
+  relay?: 'ok' | 'off' | 'failed'
+}
 
 export interface PairingService {
   /** Begin pairing; resolves once the listener is up. `onDone` fires exactly once later. */
@@ -491,7 +497,10 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         } else {
           send(res, 200, JSON.stringify(responseObj), 'application/json')
         }
-        finish({ ok: true })
+        finish({
+          ok: true,
+          relay: !relayCtx ? 'off' : relayFields.relayDeviceToken ? 'ok' : 'failed'
+        })
       } catch (err) {
         send(res, 500, 'pairing failed')
         console.warn('[pairing] request failed:', err)

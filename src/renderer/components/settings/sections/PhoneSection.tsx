@@ -55,7 +55,7 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
 
   // The shared pairing machine (also behind the top-right quick-pair popover); a completed
   // pairing refreshes the device list below.
-  const { phase, qr, sshOpen, sshHealed, error, busy, start, stop, reset } = usePhonePairing(
+  const { phase, qr, sshOpen, sshHealed, relayResult, error, busy, start, stop, reset } = usePhonePairing(
     () => void refreshDevices()
   )
 
@@ -196,6 +196,21 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
               <p className="text-sm font-medium" style={{ color: '#30d158' }}>
                 ✓ Paired. Your phone can now connect with its own key.
               </p>
+              {relayResult === 'ok' ? (
+                <p className="text-sm" style={{ color: '#30d158' }}>
+                  Remote access is set up — the phone can reach this machine from anywhere.
+                </p>
+              ) : relayResult === 'failed' ? (
+                <p className="text-sm" style={{ color: '#ff9f0a' }}>
+                  ⚠ Remote-access setup failed, so this pairing is LAN-only for now. Check this
+                  machine&apos;s internet connection and pair again to retry — or the phone will
+                  pick it up by itself next time it connects on this network.
+                </p>
+              ) : relayResult === 'off' ? (
+                <p className="text-sm text-muted">
+                  LAN-only pairing — remote access is switched off above.
+                </p>
+              ) : null}
               <Button onClick={reset}>Pair another phone</Button>
             </div>
           ) : null}
