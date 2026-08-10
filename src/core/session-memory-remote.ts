@@ -40,7 +40,7 @@ export function remoteSessionMemoryCommand(): string {
     `tmux -L ${socket} list-panes -a -F '${PANE_FMT}' 2>/dev/null`
   return [
     `echo '${MEM}'`,
-    `cat /proc/meminfo 2>/dev/null | grep -E '^(MemAvailable|MemTotal):' || true`,
+    `cat /proc/meminfo 2>/dev/null | grep -E '^(MemAvailable|MemTotal):' 2>/dev/null || true`,
     `echo '${PANES}'`,
     `{ ${listPanes(TMUX_SOCKET)}; ${listPanes(RMT_TMUX_SOCKET)}; } || true`,
     `echo '${PROCS}'`,
@@ -68,8 +68,18 @@ export function parseRemoteSessionMemory(stdout: string): SessionMemoryReport {
   const iMem = lines.indexOf(MEM)
   const iPanes = lines.indexOf(PANES)
   const iProcs = lines.indexOf(PROCS)
-  // A missing header means the stream was cut short — not evidence that the host has nothing.
+  // Two distinct failures, both of which must read as "we could not look", never as "nothing here":
+  //  - a MISSING header (a `-1`) means the stream was cut short — a master that died mid-read;
+  //  - headers OUT OF ORDER mean the stream is not ours to trust. An ssh exec channel is not a
+  //    clean pipe: a login shell's rc file writing to stdout is a documented hazard in this repo
+  //    (it is why the remote `claude --version` probe goes through a login shell deliberately), so
+  //    a `.profile` that echoes `##PROCS` is enough to put a marker ahead of `##MEM`. Unchecked,
+  //    the panes slice would come out empty while `ps` still parsed from the tail, and the report
+  //    would be a confident `{ok:true, rows:[]}` — "this host has nothing" over live sessions.
+  // The ordering test subsumes the `-1` check (a -1 can never sit below a found index), but both
+  // are spelled out because they are different diagnoses of a broken read.
   if (iMem < 0 || iPanes < 0 || iProcs < 0) return { ok: false, rows: [], mem: null }
+  if (!(iMem < iPanes && iPanes < iProcs)) return { ok: false, rows: [], mem: null }
 
   const mem = parseMem(lines.slice(iMem + 1, iPanes))
   const panes = parsePaneList(lines.slice(iPanes + 1, iProcs).join('\n'))
