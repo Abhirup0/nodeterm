@@ -5,17 +5,42 @@ import { BROWSER_DISCARD_MS, shouldDiscard } from './browser-discard-policy'
 /** Slack past the window so the reading at fire time is strictly PAST it (`shouldDiscard` is `>`). */
 export const DISCARD_SLACK_MS = 1000
 /**
- * Re-check interval when the ONLY thing blocking a discard was a load in flight. A load ends by
- * itself, so treating it as a decision for the whole hidden stretch would disarm the saver for a
- * page that finished a second later — the one blocker that deserves a retry rather than a wait for
- * the next hide→show cycle. Bounded (a fixed re-arm, never a poll loop): each retry only runs while
- * the element is still hidden, and any reveal clears the timer.
+ * Re-check interval when the only thing blocking a discard was TRANSIENT — a load in flight, or a
+ * page making sound. Both end by themselves, so treating either as a decision for the whole hidden
+ * stretch would disarm the saver for a page that finished (or went quiet) a second later. Bounded
+ * (a fixed re-arm, never a poll loop): each retry only runs while the element is still hidden, and
+ * any reveal clears the timer.
  */
 export const DISCARD_RETRY_MS = 60_000
+
+/** The slice of Electron's `WebviewTag` the audible check needs. */
+export type AudibleWebview = { isCurrentlyAudible?: () => boolean }
+
+/**
+ * Is this webview making sound right now?
+ *
+ * Asked by direct QUERY rather than by tracking `media-started-playing` / `media-paused` into a
+ * flag, and the choice is about which way each is wrong. The query cannot drift: it is the guest's
+ * own answer at the instant we ask. The event pair can — a missed or unpaired event leaves a flag
+ * stuck, and stuck-audible means that node's saver is silently dead forever (the worst failure
+ * here, because nothing surfaces it). The query's only weakness is that it throws before the guest
+ * attaches, and a guest that does not exist yet cannot be playing anything — so `false` there is
+ * the CORRECT answer, not merely a safe one.
+ */
+export function webviewAudible(el: AudibleWebview | null | undefined): boolean {
+  try {
+    return el?.isCurrentlyAudible?.() === true
+  } catch {
+    return false
+  }
+}
 
 export interface DiscardWhenHiddenOptions {
   /** Is a load in flight right now? A discard mid-load would replay a half-finished navigation. */
   isLoading: () => boolean
+  /** Is the page making sound right now? Omitted = this surface cannot tell (never treated as
+   *  audible — a surface with no webview has nothing playing). */
+  isAudible?: () => boolean
   /** Is there anything to release? (A start page / empty node has no guest process.) */
   hasContent: () => boolean
   /** Release the page: the caller unmounts its `<webview>` and shows its plate. */
@@ -87,8 +112,11 @@ export function useDiscardWhenHidden(
       if (!o.hasContent()) return
       const enabled = useSettings.getState().settings.browserMemorySaver
       const loading = o.isLoading()
-      if (!shouldDiscard({ hiddenMs: Date.now() - hiddenSince, loading, enabled })) {
-        if (enabled && loading) arm(DISCARD_RETRY_MS)
+      const audible = o.isAudible?.() ?? false
+      if (!shouldDiscard({ hiddenMs: Date.now() - hiddenSince, loading, enabled, audible })) {
+        // Both blockers END BY THEMSELVES, so they earn a retry rather than disarming the saver for
+        // the whole hidden stretch. A disabled setting does not: see the policy's doc comment.
+        if (enabled && (loading || audible)) arm(DISCARD_RETRY_MS)
         return
       }
       discarded = true

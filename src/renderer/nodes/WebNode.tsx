@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
 import { httpUrl } from './webUrl'
-import { useDiscardWhenHidden } from './useDiscardWhenHidden'
+import { useDiscardWhenHidden, webviewAudible, type AudibleWebview } from './useDiscardWhenHidden'
 import { DiscardedPlate } from './DiscardedPlate'
 
 /**
@@ -19,6 +19,8 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const filePath = (data.filePath as string) ?? ''
   const title = (data.title as string) || url || filePath.split('/').pop() || 'web'
   const rootRef = useRef<HTMLDivElement | null>(null)
+  /** The guest, for the audible check only — a local html page can hold a playing <video>. */
+  const wvRef = useRef<AudibleWebview | null>(null)
   // Memory saver — the same shared hook {@link BrowserSurface} uses: hidden long enough, the
   // <webview> is unmounted (its Chromium process exits) and rebuilt on reveal. `revive` is what
   // re-runs the source effect below, so the `nt-media://` grant is re-issued for a local file
@@ -76,6 +78,7 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   useDiscardWhenHidden(rootRef, {
     isLoading: () => grantingRef.current,
+    isAudible: () => webviewAudible(wvRef.current),
     hasContent: () => !!srcRef.current,
     onDiscard: () => {
       setDiscarded(true)
@@ -140,7 +143,13 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
             <DiscardedPlate restoring={restoring} />
           ) : src ? (
             // eslint-disable-next-line react/no-unknown-property
-            <webview src={src} style={{ width: '100%', height: '100%' }} />
+            <webview
+              ref={(el) => {
+                wvRef.current = el as unknown as AudibleWebview | null
+              }}
+              src={src}
+              style={{ width: '100%', height: '100%' }}
+            />
           ) : (
             <span className="editor-node__loading">{error || 'No source'}</span>
           )}

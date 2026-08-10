@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { searchOrUrl } from './browserUrl'
 import { BrowserStartPage } from './BrowserStartPage'
 import { useBrowserHistory } from '../state/browserHistory'
-import { useDiscardWhenHidden } from './useDiscardWhenHidden'
+import { useDiscardWhenHidden, webviewAudible } from './useDiscardWhenHidden'
 import { DiscardedPlate } from './DiscardedPlate'
 
 // Minimal typing for the Electron <webview> element methods/events we use.
@@ -15,6 +15,8 @@ type WebviewEl = HTMLElement & {
   canGoBack(): boolean
   canGoForward(): boolean
   getWebContentsId(): number
+  /** Throws before the guest attaches — always go through `webviewAudible`. */
+  isCurrentlyAudible?: () => boolean
 }
 
 interface BrowserSurfaceProps {
@@ -51,6 +53,10 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
   // a callback that must not force the observer to be re-created.
   const [discarded, setDiscarded] = useState(false)
   const loadingRef = useRef(false)
+  /** Set by a restore, cleared by the first did-navigate after it — that one is an echo. */
+  const restoringNavRef = useRef(false)
+  /** The last title we reported (null = the gate is open for the current page's first title). */
+  const lastTitleRef = useRef<string | null>(null)
   /** The page a discard would rebuild from — the last location we actually LOADED, never the
    *  address input (which holds whatever the user typed, submitted or not). */
   const locationRef = useRef(startUrl)
@@ -70,9 +76,20 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
     }
     const onNav = (e: Event): void => {
       const u = (e as unknown as { url: string }).url
+      // A memory-saver restore replays the URL we were already on, and its did-navigate is
+      // indistinguishable from a real one. Reporting it would make MERELY LOOKING at a node dirty
+      // the project (updateNodeData → dirty + rev bump + SSH mirror write) and bump an unchanged
+      // page to the top of Recent. One-shot and value-checked, so a user who navigates for real
+      // immediately after a reveal is still recorded.
+      const echo = restoringNavRef.current && u === locationRef.current
+      restoringNavRef.current = false
       setAddress(u)
       locationRef.current = u
       setFailed('')
+      if (echo) return
+      // A genuine navigation re-opens the title gate below: the first title of the NEW page always
+      // records, however it compares to the old page's.
+      lastTitleRef.current = null
       onUrlChange(u)
       lastUrlRef.current = u
       useBrowserHistory.getState().record(u, u)
@@ -84,6 +101,11 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
     }
     const onTitle = (e: Event): void => {
       const title = (e as unknown as { title: string }).title
+      // The restored page re-announces the title it already had, which would re-dirty the project
+      // and re-bump history through the other half of the same reveal. Suppressing it by VALUE
+      // rather than by a restore flag means a title that genuinely changed still lands.
+      if (title === lastTitleRef.current) return
+      lastTitleRef.current = title
       onTitleChange(title)
       if (lastUrlRef.current) useBrowserHistory.getState().record(lastUrlRef.current, title)
     }
@@ -135,6 +157,7 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
   // release and rebuild its page.
   useDiscardWhenHidden(rootRef, {
     isLoading: () => loadingRef.current,
+    isAudible: () => webviewAudible(ref.current),
     hasContent: () => !!locationRef.current,
     onDiscard: () => {
       setDiscarded(true)
@@ -145,6 +168,8 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
     },
     onRestore: () => {
       setDiscarded(false)
+      // The restore's own did-navigate is an ECHO of where we already were — see `onNav`.
+      restoringNavRef.current = true
       // Restore from the descriptor. Setting `src` and `address` to the SAME value preserves the
       // `url !== address` guard of the sync effect below, so the restore can't start a reload loop.
       const back = locationRef.current

@@ -9,6 +9,7 @@ import {
   DISCARD_RETRY_MS,
   DISCARD_SLACK_MS,
   useDiscardWhenHidden,
+  webviewAudible,
   type DiscardWhenHiddenOptions
 } from './useDiscardWhenHidden'
 
@@ -40,6 +41,7 @@ function Harness(props: Partial<DiscardWhenHiddenOptions> & { onEl?: (el: HTMLEl
   const ref = useRef<HTMLDivElement | null>(null)
   useDiscardWhenHidden(ref, {
     isLoading: props.isLoading ?? (() => false),
+    isAudible: props.isAudible,
     hasContent: props.hasContent ?? (() => true),
     onDiscard: props.onDiscard ?? (() => {}),
     onRestore: props.onRestore ?? (() => {})
@@ -173,6 +175,38 @@ describe('useDiscardWhenHidden', () => {
     loading = false
     advance(DISCARD_RETRY_MS)
     expect(onDiscard).toHaveBeenCalledTimes(1)
+  })
+
+  it('never discards a page making sound, and reclaims it once it goes quiet', () => {
+    const onDiscard = vi.fn()
+    let audible = true
+    let el!: HTMLElement
+    root = mount({ onDiscard, isAudible: () => audible, onEl: (e) => (el = e) })
+    hide(el)
+    advance(BROWSER_DISCARD_MS + DISCARD_SLACK_MS)
+    expect(onDiscard).not.toHaveBeenCalled()
+    // Still playing a minute later — still exempt, and still re-armed.
+    advance(DISCARD_RETRY_MS)
+    expect(onDiscard).not.toHaveBeenCalled()
+    audible = false
+    advance(DISCARD_RETRY_MS)
+    expect(onDiscard).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads audibility through a webview ref that can throw or be absent', () => {
+    // A guest that has not attached yet throws on the call, and a discarded surface has no element
+    // at all — neither is "audible", and neither may take the saver down with it.
+    expect(webviewAudible(null)).toBe(false)
+    expect(webviewAudible(undefined)).toBe(false)
+    expect(webviewAudible({})).toBe(false)
+    expect(
+      webviewAudible({
+        isCurrentlyAudible: () => {
+          throw new Error('The WebView must be attached to the DOM')
+        }
+      })
+    ).toBe(false)
+    expect(webviewAudible({ isCurrentlyAudible: () => true })).toBe(true)
   })
 
   it('honours the setting at FIRE time, not at arm time', () => {
