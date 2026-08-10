@@ -31,6 +31,7 @@ import {
 } from './remote-ssh/control-master'
 import { parsePaneCursor } from './pane-cursor'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
+import { primePtyCeiling, readPtyDevices, spawnFailureHint } from './pty-devices'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { bracketedInjection } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
@@ -557,6 +558,11 @@ export class PtyManager {
     // own, so a tmux living only on the user's shell PATH is invisible until this resolves.
     void resolveShellPath().then(() => this.ensureTmux())
     this.ensureTmux()
+    // Read the system pty-device ceiling now, while nothing is wrong. The spawn path that needs it
+    // is synchronous and already one failed spawn deep — it cannot await a `sysctl` there, and a
+    // machine at its device limit is exactly a machine where spawning one more process is a bad
+    // idea. See pty-devices.ts.
+    primePtyCeiling()
   }
 
   /** Probe tmux and write/push the generated config. Idempotent and safe to re-run: a later
@@ -1308,9 +1314,10 @@ export class PtyManager {
       })
     } catch (err) {
       // node-pty surfaces the underlying failure as a bare "posix_spawnp failed." with no errno.
-      // The recurring field cause is a cross-arch `electron-builder --x64` run clobbering
-      // node-pty's spawn-helper in node_modules (arm64 app can't exec an x86_64 helper), so
-      // check the helper's Mach-O arch first and name the exact remedy when it mismatches.
+      // Two different field causes wear that same message, so BOTH are measured before anything is
+      // said: a cross-arch `electron-builder --x64` run clobbering node-pty's spawn-helper (arm64
+      // app can't exec an x86_64 helper), and the machine being out of pty DEVICES
+      // (`kern.tty.ptmx_max`, 2026-08-11 — 515 `/dev/ttys*` against a ceiling of 511).
       const openPtys = this.sessions.size
       const reason = err instanceof Error ? err.message : String(err)
       const archNote = spawnHelperArchMismatch()
@@ -1320,12 +1327,17 @@ export class PtyManager {
       // (2026-08-06) chasing an architecture that was fine. `spawnResourceNote` states what it
       // actually counted and only names a remedy the numbers support.
       const resources = spawnResourceNote(readSpawnResources(), openPtys)
+      // ONE closing hint, picked by what was measured (`spawnFailureHint`): arch, else the system
+      // pty-device limit, else the generic guess of last resort.
+      const hint = spawnFailureHint(
+        archNote,
+        readPtyDevices(),
+        `If this persists, restart the app (tmux sessions survive a restart) or run ` +
+          `\`npm run rebuild\` in the repo — a release build may have rebuilt node-pty ` +
+          `for the wrong architecture.`
+      )
       throw new Error(
-        `Failed to spawn terminal (${reason}). Program: ${file}, cwd: ${cwd}, ${resources} ` +
-          (archNote ??
-            `If this persists, restart the app (tmux sessions survive a restart) or run ` +
-              `\`npm run rebuild\` in the repo — a release build may have rebuilt node-pty ` +
-              `for the wrong architecture.`)
+        `Failed to spawn terminal (${reason}). Program: ${file}, cwd: ${cwd}, ${resources} ${hint}`
       )
     }
 
