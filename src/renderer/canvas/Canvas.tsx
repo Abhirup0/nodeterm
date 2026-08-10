@@ -990,6 +990,9 @@ export function Canvas() {
   }, [getViewport, setViewport])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
+  // Bumped by `requestReload()`; a dependency of the project-load effect so an in-place reload of
+  // the ALREADY-active project actually re-runs it (see reloadActiveProject).
+  const reloadNonce = useProjects((s) => s.reloadNonce)
   // The ACTIVE session + its presence — what the canvas-sync publisher and onMutation subscriber
   // must follow (Task 4). `sessionForProject` / `presenceForProject` are plain, allocation-free
   // resolves of the memoized (per-core) session/presence — NOT reactive subscriptions to the peer
@@ -1572,7 +1575,8 @@ export function Canvas() {
     }
   }, [])
 
-  // 2) Whenever the active project changes, load its canvas into React Flow.
+  // 2) Whenever the active project changes — or an in-place reload is requested (`reloadNonce`,
+  //    which changes even when the SAME project is reloaded) — load its canvas into React Flow.
   useEffect(() => {
     // Team presence: tell the hub which canvas we are on (this effect fires on load AND on every
     // tab switch). Peers only draw each other's cursors and node chips when the project matches —
@@ -1705,7 +1709,7 @@ export function Canvas() {
     }, 0)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProjectId, setNodes, setViewport])
+  }, [activeProjectId, reloadNonce, setNodes, setViewport])
 
   const markDirty = useCallback(() => {
     if (!loadingRef.current) setDirty(true)
@@ -1798,8 +1802,13 @@ export function Canvas() {
     dirtyRef.current = dirty
   }, [dirty])
 
-  /** Re-runs the active-project load effect by nudging its dependency: flip the active id
-   *  to '' (the effect early-returns) then back to the same id on a microtask.
+  /** Re-runs the active-project load effect by bumping the store's `reloadNonce`.
+   *
+   *  This used to flip the active id to '' and back on a microtask. React coalesces both writes
+   *  into ONE render, so the effect's dependency never actually changed and the reload silently
+   *  never happened — the store held disk's version while React Flow still showed the old nodes,
+   *  and the next debounced persist wrote those old nodes straight back over disk (field bug
+   *  2026-08-10). A monotonic nonce always changes, so the reload always runs.
    *
    *  An in-place reload PRESERVES the current camera (preserveViewportRef): the incoming
    *  file's viewport is wherever ANOTHER machine/surface last left it, and SSH projects
@@ -1807,10 +1816,8 @@ export function Canvas() {
    *  the camera away mid-work, most visibly right after a cross-project focus (the sidebar
    *  click centered the node, then the connect-time reconcile teleported the view). */
   const reloadActiveProject = useCallback(() => {
-    const id = useProjects.getState().activeProjectId
     preserveViewportRef.current = true
-    useProjects.getState().setActive('')
-    queueMicrotask(() => useProjects.getState().setActive(id))
+    useProjects.getState().requestReload()
   }, [])
 
   // Outside edits to a project's .nodeterm file (git pull / sync / teammate / another machine).
