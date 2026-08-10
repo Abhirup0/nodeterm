@@ -23,7 +23,7 @@ export function PhonePairPopover({
   onClose: () => void
   onOpenSettings: () => void
 }): React.JSX.Element {
-  const { phase, qr, sshOpen, sshHealed, relayResult, error, busy, start } = usePhonePairing()
+  const { phase, qr, sshOpen, sshHealed, relayResult, relayPlan, error, busy, start } = usePhonePairing()
 
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
   const updateSettings = useSettings((s) => s.update)
@@ -90,7 +90,12 @@ export function PhonePairPopover({
             <>
               <img src={qr} width={208} height={208} alt="Pairing QR code" className="phone-pair__qr" />
               <div className="phone-pair__hint">Scan with the nodeterm iOS app · waiting (10 min)</div>
-              {!phoneAccessEnabled ? (
+              {relayPlan === 'dev' ? (
+                <div className="phone-pair__warn">
+                  Dev build: the relay is off regardless of the toggle, so this code pairs
+                  LAN-only. Run a packaged build — or set NODETERM_RELAY_URL — for remote access.
+                </div>
+              ) : !phoneAccessEnabled ? (
                 <div className="phone-pair__warn">
                   LAN-only code: the phone will reach this Mac only on this network. Flip the
                   toggle below first to also connect from anywhere — the QR refreshes by itself.
