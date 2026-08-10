@@ -1451,6 +1451,14 @@ export interface ProviderUsage {
   status: 'unavailable' | 'fetching' | 'ok' | 'error'
 }
 
+/** Host memory snapshot in MB. `null` from any reader means "could not read" — never "zero".
+ *  Shared because it crosses the wire for the system-resource pill; core reads it, the renderer
+ *  renders it. */
+export interface MemInfo {
+  availableMb: number
+  totalMb: number
+}
+
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
 export interface ClaudeUsage {
   /**

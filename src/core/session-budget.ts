@@ -21,26 +21,24 @@
 // Electron-free (src/core): all exec/mem/clock access is behind injectable seams (template:
 // ack-sweep.ts), so both shells boot it and tests drive it without touching tmux.
 
-import fs from 'fs'
 import os from 'os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { TMUX_SOCKET } from './tmux-naming'
 import { RMT_TMUX_SOCKET } from './remote-ssh/control-master'
+import { readMemInfo, type MemInfo } from './session-memory'
 
 const runAsync = promisify(execFile)
+
+// One definition, two consumers (the reaper's watermark and the system-resource pill): a copied
+// second reader would let them disagree about how much RAM is free.
+export { readMemInfo, type MemInfo } from './session-memory'
 
 /** One tmux session as reported by `list-sessions`. `activitySec` is epoch seconds. */
 export interface SessionInfo {
   name: string
   attached: boolean
   activitySec: number
-}
-
-/** Host memory snapshot in MB. `null` from a reader means "could not read" — see planReap. */
-export interface MemInfo {
-  availableMb: number
-  totalMb: number
 }
 
 export interface SessionBudgetConfig {
@@ -120,26 +118,6 @@ export function parseSessionList(stdout: string): SessionInfo[] {
     out.push({ name: parts[0], attached: attached > 0, activitySec: activity })
   }
   return out
-}
-
-/** Linux `/proc/meminfo` (MemAvailable is the honest number); `os.freemem()` fallback elsewhere.
- *  Returns null when nothing readable — the policy treats that as "no pressure signal". */
-export function readMemInfo(): MemInfo | null {
-  try {
-    const text = fs.readFileSync('/proc/meminfo', 'utf8')
-    const avail = /MemAvailable:\s+(\d+)\s*kB/.exec(text)
-    const total = /MemTotal:\s+(\d+)\s*kB/.exec(text)
-    if (avail && total) {
-      return { availableMb: Math.round(Number(avail[1]) / 1024), totalMb: Math.round(Number(total[1]) / 1024) }
-    }
-  } catch {
-    // fall through to the os fallback
-  }
-  try {
-    return { availableMb: Math.round(os.freemem() / 1048576), totalMb: Math.round(os.totalmem() / 1048576) }
-  } catch {
-    return null
-  }
 }
 
 export interface SessionReaperOpts {
