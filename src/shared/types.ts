@@ -850,6 +850,9 @@ export interface Settings {
    *  renderer. See `resolveTerminalRenderer` (shared/webgl.ts) for the full history. */
   terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
+  /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
+   *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
+  offscreenTerminalMinutes: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
   /** For commitAgent='custom': command template; {prompt} placeholder optional (else stdin). */
@@ -988,6 +991,7 @@ export const DEFAULT_SETTINGS: Settings = {
   tmuxEnabled: true,
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
+  offscreenTerminalMinutes: 10,
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
