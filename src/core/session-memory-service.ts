@@ -15,10 +15,17 @@ export interface SessionMemoryServiceOptions {
   tmuxBin: () => string | null
   /** Host RAM reader, injectable for tests. Defaults to the real `/proc/meminfo` read. */
   readMem?: () => MemInfo | null
-  /** Absent ⇒ SSH scopes answer `ok:false` — see the handler. */
+  /**
+   * The two remote facts, INDEPENDENTLY optional — a shell can know which projects are somebody
+   * else's machine without being able to read them:
+   *  - `isRemoteProject` absent ⇒ only the renderer's `remote` flag marks a scope as remote;
+   *  - `run` absent ⇒ a remote scope is REFUSED (`ok:false`), never swept locally.
+   * The Server Edition supplies the first and not the second: it has the workspace index, so it
+   * KNOWS a project is an SSH one, and it has no ControlMaster, so it cannot answer for that host.
+   */
   remote?: {
-    run: RemoteSessionMemoryRunner
-    isRemoteProject: (projectId: string) => boolean
+    run?: RemoteSessionMemoryRunner
+    isRemoteProject?: (projectId: string) => boolean
   }
 }
 
@@ -63,7 +70,7 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
    * claim of remoteness is trusted; only its ANSWER can fail.
    */
   const isRemote = (q: SessionMemoryQuery): boolean =>
-    q.remote === true || (!!q.projectId && !!opts.remote?.isRemoteProject(q.projectId))
+    q.remote === true || (!!q.projectId && !!opts.remote?.isRemoteProject?.(q.projectId))
 
   /**
    * One in-flight remote read per project, shared by both channels. A remote read is a `ps` of the
@@ -72,6 +79,11 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
    * Keyed by projectId (the only thing the command depends on) and cleared on settle, so this is a
    * concurrency guard, never a cache: a later read always re-runs.
    */
+  //
+  // The key is the projectId and nothing else: it is the ONLY thing that decides which host the
+  // command lands on, so a shared key across projects would hand one host's report to another
+  // host's caller — the same misattribution the refusal above exists to prevent, arriving by a
+  // different door.
   const inFlight = new Map<string, Promise<SessionMemoryReport>>()
   const readRemote = (projectId: string, run: RemoteSessionMemoryRunner): Promise<SessionMemoryReport> => {
     const pending = inFlight.get(projectId)
@@ -90,8 +102,9 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
         // No ControlMaster injected (Server Edition), or nothing to run against: answering with
         // the LOCAL machine's sessions would attribute one host's memory to another. Refuse — and
         // with a null `mem` too, since even the RAM number would describe the wrong machine.
-        if (!opts.remote || !q.projectId) return EMPTY()
-        return readRemote(q.projectId, opts.remote.run)
+        const run = opts.remote?.run
+        if (!run || !q.projectId) return EMPTY()
+        return readRemote(q.projectId, run)
       }
       return collectSessionMemory({ tmuxBin: opts.tmuxBin, readMem: opts.readMem })
     }
@@ -101,9 +114,10 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
     IPC.sessionMemoryHost,
     async (q: SessionMemoryQuery = {}): Promise<MemInfo | null> => {
       if (!isRemote(q)) return (opts.readMem ?? readMemInfo)()
-      if (!opts.remote || !q.projectId) return null
+      const run = opts.remote?.run
+      if (!run || !q.projectId) return null
       // One round trip serves both numbers; the pill uses only `mem`.
-      return (await readRemote(q.projectId, opts.remote.run)).mem
+      return (await readRemote(q.projectId, run)).mem
     }
   )
 

@@ -20,6 +20,19 @@ const host = (q: SessionMemoryQuery): Promise<MemInfo | null> =>
 /** A remote reply the parser accepts: all three markers, in order, with one process row. */
 const OK_REPLY = '##MEM\n##PANES\n##PROCS\n100 1 1024\n'
 
+/** The same, carrying the HOST's RAM — so an answer says positively which machine produced it.
+ *  `totalMb` comes back as `totalKb / 1024`, i.e. 4096 MB for the default. */
+const hostReply = (totalMb = 4096): string =>
+  [
+    '##MEM',
+    `MemAvailable: ${(totalMb / 2) * 1024} kB`,
+    `MemTotal: ${totalMb * 1024} kB`,
+    '##PANES',
+    '##PROCS',
+    '100 1 1024'
+  ].join('\n')
+const HOST_REPLY = hostReply()
+
 beforeEach(() => {
   resetPlatformForTests()
   platform = fakePlatform()
@@ -69,16 +82,17 @@ describe('startSessionMemoryService', () => {
     expect(readMem).not.toHaveBeenCalled()
   })
 
-  it('refuses a remote:true query the shell does not recognise as remote', async () => {
+  it('honours a remote:true query the shell does not recognise as remote', async () => {
     // The two sources disagree — the renderer says SSH, the manager has no such project (not yet
     // connected, or already gone). Trusting the manager here would sweep THIS machine and label
     // the rows as the host's. The claim of remoteness is what decides; only its ANSWER is doubted.
-    // `run` returns a VALID reply, so `ok:false` can no longer be true by accident: it would be
-    // `true` if the read were routed remotely and `true` (locally swept) if it were not — the only
-    // way to get a refusal here is the disagreement being resolved towards the remote host and the
-    // runner reporting it could not look. `readMem` catches a local sweep whatever tmux does.
+    //
+    // `run` returns a VALID reply carrying the HOST's RAM, so the result says positively which
+    // machine answered: 4096 MB total can only have come from the remote reply, and the injected
+    // local reader (22 MB) is never consulted. An `ok:false` assertion would have been decorative
+    // here — with a stub that reports "could not look", a refusal proves nothing about routing.
     const readMem = vi.fn(() => ({ availableMb: 11, totalMb: 22 }))
-    const run = vi.fn(async () => null)
+    const run = vi.fn(async () => HOST_REPLY)
     startSessionMemoryService({
       tmuxBin: () => '/usr/bin/tmux',
       readMem,
@@ -86,8 +100,29 @@ describe('startSessionMemoryService', () => {
     })
     const r = await read({ projectId: 'ssh1', remote: true })
     expect(run).toHaveBeenCalledOnce()
-    expect(r).toEqual({ ok: false, rows: [], mem: null })
+    expect(r.ok).toBe(true)
+    expect(r.mem).toEqual({ availableMb: 2048, totalMb: 4096 })
     expect(readMem).not.toHaveBeenCalled()
+  })
+
+  it('refuses an SSH scope when the shell knows it is remote but cannot read it', async () => {
+    // The SERVER EDITION's shape: `isRemoteProject` (it has the workspace index) and NO `run` (no
+    // ControlMaster). Booting with neither — as the server did before this round — let an SSH query
+    // WITHOUT the renderer's flag fall through to the local sweep and publish this machine's
+    // sessions under the remote host's name.
+    const readMem = vi.fn(() => ({ availableMb: 11, totalMb: 22 }))
+    startSessionMemoryService({
+      tmuxBin: () => '/usr/bin/tmux',
+      readMem,
+      remote: { isRemoteProject: (id) => id === 'ssh1' }
+    })
+    // No `remote: true` flag: the shell's knowledge is the only thing routing this.
+    expect(await read({ projectId: 'ssh1' })).toEqual({ ok: false, rows: [], mem: null })
+    expect(await host({ projectId: 'ssh1' })).toBeNull()
+    expect(readMem).not.toHaveBeenCalled()
+    // …while a local project on the same shell is still swept normally.
+    await read({ projectId: 'local1' })
+    expect(readMem).toHaveBeenCalled()
   })
 
   it('treats a DISCONNECTED ssh project as remote (identity, not liveness)', async () => {
@@ -123,6 +158,14 @@ describe('startSessionMemoryService', () => {
     expect(isRemoteProject('ssh2')).toBe(true)
   })
 
+  it('works with the index alone — the no-manager shape the Server Edition uses', async () => {
+    // `connectedProjectIds` is optional, and the shell that omits it is a production path (the
+    // Server Edition has a workspace index and no SSH-project manager), not a hypothetical.
+    const isRemoteProject = sshScopePredicate({ sshProjectIds: () => ['ssh1'] })
+    expect(isRemoteProject('ssh1')).toBe(true)
+    expect(isRemoteProject('local1')).toBe(false)
+  })
+
   it('coalesces the two channels onto ONE remote round trip', async () => {
     // A remote read is a whole-process-table `ps` on somebody else's machine, and the panel wants
     // both the rows and the RAM number. Firing them concurrently must not cost two ssh execs.
@@ -147,6 +190,32 @@ describe('startSessionMemoryService', () => {
     // Not a cache: once settled, the next read runs again.
     await read({ projectId: 'ssh1' })
     expect(run).toHaveBeenCalledTimes(2)
+  })
+
+  it('coalesces PER PROJECT — two hosts in flight never share a report', async () => {
+    // The coalescer is the one place in this service that can hand one scope's report to another
+    // host's caller, and the only thing preventing it is the key. A single-project test cannot see
+    // that: two concurrent reads for DIFFERENT hosts must stay two round trips with two answers.
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((res) => {
+      release = res
+    })
+    // Each host reports its own RAM, so the two answers are distinguishable by content, not just
+    // by call count — a shared key would give one caller the other machine's numbers.
+    const run = vi.fn(async (projectId: string) => {
+      await gate
+      return hostReply(projectId === 'ssh1' ? 4096 : 8192)
+    })
+    startSessionMemoryService({
+      tmuxBin: () => '/usr/bin/tmux',
+      remote: { run, isRemoteProject: () => true }
+    })
+    const both = Promise.all([read({ projectId: 'ssh1' }), read({ projectId: 'ssh2' })])
+    release?.()
+    const [a, b] = await both
+    expect(run).toHaveBeenCalledTimes(2)
+    expect(a.mem?.totalMb).toBe(4096)
+    expect(b.mem?.totalMb).toBe(8192)
   })
 
   it('never runs the local sweep for a remote scope with no projectId', async () => {

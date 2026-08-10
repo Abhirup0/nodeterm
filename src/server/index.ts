@@ -50,7 +50,7 @@ import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
-import { startSessionMemoryService } from '../core/session-memory-service'
+import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
@@ -444,12 +444,24 @@ export async function startServer(
   const sessionReaper = createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() })
   sessionReaper.start()
 
-  // Session memory: the pill's RAM read plus the on-demand per-session breakdown. No remote deps —
-  // the Server Edition runs ON the host whose sessions it reports and has no SSH-project manager.
-  // An SSH scope therefore answers ok:false rather than mis-attributing this machine's sessions to
-  // another host. Registered here (not in handlers/index.ts) because this is where `ptyManager`
-  // lives — the same call site as the reaper above, mirroring src/main/index.ts.
-  startSessionMemoryService({ tmuxBin: () => ptyManager.getTmuxBin() })
+  // Session memory: the pill's RAM read plus the on-demand per-session breakdown. The Server
+  // Edition runs ON the host whose sessions it reports and has no SSH-project manager, so it passes
+  // no `run` — an SSH scope is REFUSED (ok:false), never swept locally.
+  //
+  // It does supply `isRemoteProject`, because knowing which projects are somebody else's machine
+  // and being able to READ them are different capabilities: the workspace index answers the first
+  // right here (the same source as the SSH check in the agentAnswerPermission handler above).
+  // Without it, an SSH query arriving WITHOUT the renderer's `remote` flag would fall through to
+  // the local sweep and publish this server's own sessions under the remote host's name — the exact
+  // misattribution the refusal exists to prevent. Registered here (not in handlers/index.ts)
+  // because this is where `ptyManager` lives — the same call site as the reaper above, mirroring
+  // src/main/index.ts.
+  startSessionMemoryService({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    remote: {
+      isRemoteProject: sshScopePredicate({ sshProjectIds: () => workspaceStore.sshProjectIds() })
+    }
+  })
 
   // Headless notification host: every core service above (incl. the loopback hook server, which
   // is its own listener and MUST run) is booted, but we bind NO public HTTP/WS listener — no
