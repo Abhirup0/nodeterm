@@ -56,6 +56,9 @@ export class WorkspaceStore {
   private pendingExecNote = false
   /** Raw v2 file content, kept until the first save backs it up (migration). */
   private pendingV2Backup: string | null = null
+  /** The corrupt-index recovery note is a one-time-per-run banner: every later load in the same run
+   *  sees the same missing index next to the same backup and must stay quiet. */
+  private corruptNoteSent = false
   /** ssh project ids whose last mirror write was dropped (connection down). Retried on every
    *  save/connect until a write confirms — guarantees the server file lands regardless of node
    *  type or creation timing. Runtime-only, never persisted. */
@@ -98,6 +101,10 @@ export class WorkspaceStore {
     try {
       raw = await fs.readFile(this.indexPath, 'utf-8')
     } catch {
+      // No index. Usually a first run — but it is also what a crash BETWEEN the sideline rename
+      // below and the next index write leaves behind, and that case owes the user the note. Only
+      // this branch pays for the readdir, and only for a load that may touch disk anyway.
+      if (sideline) this.noteCorruptIndex(await this.newestSidelined())
       return EMPTY_WORKSPACE
     }
     let parsed: unknown
@@ -108,8 +115,11 @@ export class WorkspaceStore {
       // unconditional save cannot replace it with an empty index. Read-only callers must not
       // mutate the disk (sideline: false).
       if (sideline) {
+        const backup = `${path.basename(this.indexPath)}.corrupt-${Date.now()}`
         try {
-          await fs.rename(this.indexPath, `${this.indexPath}.corrupt-${Date.now()}`)
+          await fs.rename(this.indexPath, path.join(platform().userDataDir, backup))
+          // Only AFTER the rename succeeded: the note promises a backup exists.
+          this.noteCorruptIndex(backup)
         } catch { /* best effort — never destroy data */ }
       }
       return EMPTY_WORKSPACE
@@ -120,6 +130,28 @@ export class WorkspaceStore {
     const legacy = migrateLegacy(parsed)
     if (legacy.projects.length) this.pendingV2Backup = raw
     return legacy
+  }
+
+  /** Newest `workspace.json.corrupt-<ts>` sitting in userData, or null. */
+  private async newestSidelined(): Promise<string | null> {
+    const prefix = `${path.basename(this.indexPath)}.corrupt-`
+    let newest: { name: string; ts: number } | null = null
+    try {
+      for (const name of await fs.readdir(platform().userDataDir)) {
+        if (!name.startsWith(prefix)) continue
+        const ts = Number(name.slice(prefix.length))
+        if (!Number.isFinite(ts)) continue
+        if (!newest || ts > newest.ts) newest = { name, ts }
+      }
+    } catch { /* userData unreadable — nothing to report */ }
+    return newest?.name ?? null
+  }
+
+  /** One-time note: the index was lost but backed up, and no project data went with it. */
+  private noteCorruptIndex(backup: string | null): void {
+    if (!backup || this.corruptNoteSent) return
+    this.corruptNoteSent = true
+    platform().broadcast(IPC.workspaceCorruptRecovered, backup)
   }
 
   private async loadV3(index: WorkspaceIndexV3, sideline: boolean): Promise<Workspace> {

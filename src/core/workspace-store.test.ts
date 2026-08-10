@@ -910,6 +910,47 @@ describe('save corruption hardening', () => {
     expect(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')).toBe('not json')
   })
 
+  // Sidelining alone left the user in an empty workspace with no explanation ("my projects are
+  // gone") even though every .nodeterm/project.json is intact. The load path says so, once.
+  it('a sidelined index broadcasts the recovery note once, with the backup filename', async () => {
+    await fs.writeFile(path.join(userData, 'workspace.json'), 'not json')
+    const store = new WorkspaceStore()
+    await store.load()
+    const notes = fake.sent.filter((m) => m.channel === 'workspace:corrupt-recovered')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].args[0]).toMatch(/^workspace\.json\.corrupt-\d+$/)
+    expect(await fs.readdir(userData)).toContain(notes[0].args[0])
+    // Second load of the same run (the sidelined copy is still there, index gone) stays quiet.
+    await store.load()
+    expect(fake.sent.filter((m) => m.channel === 'workspace:corrupt-recovered')).toHaveLength(1)
+  })
+
+  it('a read-only load (sideline: false) never broadcasts the recovery note', async () => {
+    await fs.writeFile(path.join(userData, 'workspace.json'), 'not json')
+    await new WorkspaceStore().load({ sideline: false })
+    expect(fake.sent.some((m) => m.channel === 'workspace:corrupt-recovered')).toBe(false)
+  })
+
+  // Crash between the sideline rename and the next index write: workspace.json is simply MISSING
+  // next to the backup, which is indistinguishable from a first run unless we look.
+  it('a missing index next to an existing .corrupt- backup still broadcasts (newest backup)', async () => {
+    await fs.writeFile(path.join(userData, 'workspace.json.corrupt-100'), 'old')
+    await fs.writeFile(path.join(userData, 'workspace.json.corrupt-900'), 'newer')
+    await new WorkspaceStore().load()
+    const notes = fake.sent.filter((m) => m.channel === 'workspace:corrupt-recovered')
+    expect(notes).toHaveLength(1)
+    expect(notes[0].args[0]).toBe('workspace.json.corrupt-900')
+  })
+
+  it('a normal load (and a first run) broadcasts nothing', async () => {
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
+    await new WorkspaceStore().load() // healthy index
+    expect(fake.sent.some((m) => m.channel === 'workspace:corrupt-recovered')).toBe(false)
+    await fs.rm(path.join(userData, 'workspace.json'))
+    await new WorkspaceStore().load() // first run: nothing on disk at all
+    expect(fake.sent.some((m) => m.channel === 'workspace:corrupt-recovered')).toBe(false)
+  })
+
   it('a fresh store may not replace a populated index with an empty workspace', async () => {
     await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
     const before = await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')

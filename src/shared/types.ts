@@ -610,6 +610,10 @@ export interface WorkspaceApi {
    *  project folders; `exec` = the custom shell / advanced ssh args of already-open projects moved
    *  out of the shared project file into this machine's own workspace index (@shared/node-exec). */
   onMigrated(cb: (kind: WorkspaceMigrationKind) => void): () => void
+  /** Fired once per run when a load found the workspace index unreadable and preserved it as
+   *  `workspace.json.corrupt-<ts>` (the payload). The projects themselves are untouched — their
+   *  canvases live in each <cwd>/.nodeterm/project.json — so the note tells the user to re-add them. */
+  onCorruptRecovered(cb: (backupFile: string) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
 }
