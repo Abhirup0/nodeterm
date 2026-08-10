@@ -375,6 +375,17 @@ Auto after you switched builds, that is why: re-select Shared and carry on.
       pointer leaves. Move the pointer between two links on one line and confirm the old one clears.
       A link that wraps across rows is underlined on every row it covers.
 
+- [ ] **2.20 Crispness at a zoom that is NOT exactly 1.** The 2026-08-09 report ("text isn't so
+      crisp, might be related to retina") was taken at zoom **0.976** — and a canvas is very rarely
+      at exactly 1, since any pinch, fitView or window resize lands on a number like that. The
+      sampler used to jump to trilinear mip filtering the instant zoom fell below 1, blending a
+      half-resolution mip into every glyph to pay for a 2.4% minification.
+      Pinch to a hair under 1 (0.95–0.99) and compare against **GPU per terminal** at the same
+      zoom: the text must read as sharp, not softened. Then zoom OUT properly (0.5, 0.3) and check
+      the opposite failure — the mip chain is still what stops a zoomed-out canvas shimmering, so
+      speckle or crawling stems there means the band went too far. `atlasFilterChoice` is the rule;
+      0.9 is the boundary between the two.
+
 ## 3. Interactions
 
 - [ ] **3.1 Wheel scrolls tmux history.** Wheel over a terminal scrolls tmux's own scrollback, the
