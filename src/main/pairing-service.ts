@@ -143,8 +143,10 @@ export type PairingDone = {
   ok: boolean
   /** Only on ok=true: did the pairing come with a relay leg? 'off' = toggle disabled,
    *  'failed' = enabled but the mint failed (the SILENT LAN-only degrade that cost a
-   *  field debugging session — surface it, never swallow it). */
-  relay?: 'ok' | 'off' | 'failed'
+   *  field debugging session — surface it, never swallow it), 'dev' = unpackaged build,
+   *  where relayAllowed() disables the relay regardless of the toggle — a self-builder
+   *  running `npm run dev` would otherwise read 'off' while staring at an ON toggle. */
+  relay?: 'ok' | 'off' | 'failed' | 'dev'
 }
 
 export interface PairingService {
@@ -499,7 +501,13 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         }
         finish({
           ok: true,
-          relay: !relayCtx ? 'off' : relayFields.relayDeviceToken ? 'ok' : 'failed'
+          relay: relayCtx
+            ? relayFields.relayDeviceToken
+              ? 'ok'
+              : 'failed'
+            : relayDeps && !relayDeps.relayAllowed()
+              ? 'dev'
+              : 'off'
         })
       } catch (err) {
         send(res, 500, 'pairing failed')

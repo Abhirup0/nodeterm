@@ -210,6 +210,12 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                 <p className="text-sm text-muted">
                   LAN-only pairing — remote access is switched off above.
                 </p>
+              ) : relayResult === 'dev' ? (
+                <p className="text-sm text-muted">
+                  LAN-only pairing — this is an unpackaged (dev) build, where the relay is
+                  disabled regardless of the toggle. Set NODETERM_RELAY_URL to test remote
+                  access, or use a packaged build.
+                </p>
               ) : null}
               <Button onClick={reset}>Pair another phone</Button>
             </div>

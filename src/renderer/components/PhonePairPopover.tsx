@@ -111,6 +111,10 @@ export function PhonePairPopover({
               </div>
             ) : relayResult === 'off' ? (
               <div className="phone-pair__hint">LAN-only pairing — remote access is off.</div>
+            ) : relayResult === 'dev' ? (
+              <div className="phone-pair__hint">
+                LAN-only pairing — dev builds disable the relay (set NODETERM_RELAY_URL to test).
+              </div>
             ) : null}
           </>
         ) : phase === 'timeout' ? (
