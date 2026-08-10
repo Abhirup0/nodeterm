@@ -160,6 +160,19 @@ describe('collectSessionMemory', () => {
     // A socket dir we may not read says nothing about whether sessions exist there.
     expect(isNoServerError('error connecting to /tmp/x (Permission denied)')).toBe(false)
     expect(isNoServerError('killed: timeout')).toBe(false)
+    // The regression the anchor exists for: stderr that merely CONTAINS the errno phrase. A tmux
+    // client that cannot load a library fails this way on EVERY socket — same binary — so counting
+    // it as an answer would print "no sessions" while the already-running server holds live ones.
+    expect(
+      isNoServerError(
+        'Command failed: tmux -L node-terminal list-panes\ntmux: error while loading shared ' +
+          'libraries: libtinfo.so.6: cannot open shared object file: No such file or directory'
+      )
+    ).toBe(false)
+    // Same shape one layer out: a dead ssh ControlMaster, which this sweep may later run over.
+    expect(isNoServerError('Control socket connect(/tmp/cm.sock): No such file or directory')).toBe(
+      false
+    )
   })
 
   it('reports ok:false when NO socket answered', async () => {

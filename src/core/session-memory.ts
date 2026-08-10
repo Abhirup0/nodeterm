@@ -230,9 +230,18 @@ export function defaultProcessTableReader(): ProcEntry[] | null {
  * denied)") or a timeout against a hung server is a real failure, and laundering it into "no
  * sessions here" is exactly the mistake `ok:false` exists to prevent: it would print an empty
  * panel over 20 live sessions. Only the two phrasings that positively assert absence count.
+ *
+ * The second alternative is ANCHORED to tmux's own connect message rather than matching a bare
+ * `no such file or directory`. `promisify(execFile)` folds stderr into `err.message`, so an
+ * unanchored errno string matches any failure that merely contains it — a tmux client missing a
+ * shared library exits 127 with "cannot open shared object file: No such file or directory" on
+ * EVERY socket (same binary), which would report "no sessions" while the server started before the
+ * breakage still runs live ones. The same string is how a dead ssh ControlMaster fails
+ * ("Control socket connect(…): No such file or directory"), which matters the moment this sweep is
+ * routed over one. tmux ships no gettext (its messages are C literals), so anchoring is safe.
  */
 export function isNoServerError(message: string): boolean {
-  return /no server running|no such file or directory/i.test(message)
+  return /no server running|error connecting to [^\n]*\(no such file or directory\)/i.test(message)
 }
 
 /**
