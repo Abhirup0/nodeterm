@@ -40,7 +40,7 @@ import {
   type GlyphAtlasSubscription,
   type GlyphSlotAllocation
 } from '../glyphgrid/atlas'
-import type { Camera } from '../glyphgrid/camera'
+import { sanitizeCamera, type Camera } from '../glyphgrid/camera'
 import { GlyphGridEngine } from '../glyphgrid/engine'
 import { setBlankCellProbe } from '../glyphgrid/feed'
 import { createFrameLoop, type FrameLoop } from '../glyphgrid/frame-driver'
@@ -1284,9 +1284,15 @@ export function getSharedGlyphContext(deviceCell?: DeviceCell): SharedGlyphConte
 }
 
 /** Camera feed. Always records (so a context created later opens at the right place) and only
- *  reaches the engine — which change-gates it — when one exists. */
+ *  reaches the engine — which change-gates it — when one exists.
+ *
+ *  SANITIZED HERE, at the boundary, rather than at any one call site: the camera arrives from a live
+ *  React Flow gesture (already clamped) AND from a persisted project viewport (clamped by nothing),
+ *  and a zoom of 0 or NaN from the second blanks every terminal on the canvas at once. See
+ *  `sanitizeCamera` for why that is invisible everywhere else. One funnel means a future third
+ *  caller cannot reintroduce it. */
 export function setSharedGlyphCamera(cam: Camera): void {
-  lastCamera = { x: cam.x, y: cam.y, zoom: cam.zoom }
+  lastCamera = sanitizeCamera(cam)
   live?.engine.setCamera(lastCamera)
 }
 
