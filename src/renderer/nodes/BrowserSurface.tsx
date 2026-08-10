@@ -53,8 +53,10 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
   // a callback that must not force the observer to be re-created.
   const [discarded, setDiscarded] = useState(false)
   const loadingRef = useRef(false)
-  /** Set by a restore, cleared by the first did-navigate after it — that one is an echo. */
-  const restoringNavRef = useRef(false)
+  /** The URL a restore is replaying (null = no restore in flight); the first did-navigate carrying
+   *  exactly it is that echo. Cleared by that navigation, by any user-initiated one, and by a
+   *  failed load. */
+  const restoringNavRef = useRef<string | null>(null)
   /** The last title we reported (null = the gate is open for the current page's first title). */
   const lastTitleRef = useRef<string | null>(null)
   /** The page a discard would rebuild from — the last location we actually LOADED, never the
@@ -81,8 +83,13 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
       // the project (updateNodeData → dirty + rev bump + SSH mirror write) and bump an unchanged
       // page to the top of Recent. One-shot and value-checked, so a user who navigates for real
       // immediately after a reveal is still recorded.
-      const echo = restoringNavRef.current && u === locationRef.current
-      restoringNavRef.current = false
+      // The ref holds the restore's URL rather than a boolean because `locationRef` moves with
+      // every navigation INITIATOR: compared against it, a user's own same-URL navigation read as
+      // an echo, and after a FAILED restore (no did-navigate ever arrives) the stuck flag swallowed
+      // the next address-bar navigation to ANY url — leaving `data.url` stale and filing that
+      // page's title under the previous one.
+      const echo = restoringNavRef.current !== null && u === restoringNavRef.current
+      restoringNavRef.current = null
       setAddress(u)
       locationRef.current = u
       setFailed('')
@@ -111,7 +118,11 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
     }
     const onFail = (e: Event): void => {
       const ev = e as unknown as { isMainFrame: boolean; errorCode: number; errorDescription: string }
-      if (ev.isMainFrame && ev.errorCode !== -3) setFailed(ev.errorDescription || 'Failed to load')
+      if (ev.isMainFrame && ev.errorCode !== -3) {
+        // A restore that never landed has no echo to swallow — disarm, or the next navigation pays.
+        restoringNavRef.current = null
+        setFailed(ev.errorDescription || 'Failed to load')
+      }
     }
     wv.addEventListener('did-start-loading', onStart)
     wv.addEventListener('did-stop-loading', onStop)
@@ -168,11 +179,11 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
     },
     onRestore: () => {
       setDiscarded(false)
-      // The restore's own did-navigate is an ECHO of where we already were — see `onNav`.
-      restoringNavRef.current = true
       // Restore from the descriptor. Setting `src` and `address` to the SAME value preserves the
       // `url !== address` guard of the sync effect below, so the restore can't start a reload loop.
       const back = locationRef.current
+      // The restore's own did-navigate is an ECHO of this exact URL — see `onNav`.
+      restoringNavRef.current = back
       setSrc(back)
       setAddress(back)
     }
@@ -184,6 +195,8 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
   // no-op — no reload loop.
   useEffect(() => {
     if (url && url !== address) {
+      // A navigation with an initiator: whatever it navigates to is not a restore echo.
+      restoringNavRef.current = null
       setSrc(url)
       setAddress(url)
       // Keep the discard descriptor current even while discarded: a node released off-screen must
@@ -201,6 +214,8 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
     }
     setAddress(safe)
     setFailed('')
+    // A navigation with an initiator: whatever it navigates to is not a restore echo.
+    restoringNavRef.current = null
     locationRef.current = safe
     if (safe === src) ref.current?.reload()
     else setSrc(safe)
@@ -248,6 +263,8 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
         {!src && !discarded && (
           <BrowserStartPage
             onNavigate={(u) => {
+              // A navigation with an initiator: whatever it navigates to is not a restore echo.
+              restoringNavRef.current = null
               setSrc(u)
               setAddress(u)
               locationRef.current = u
