@@ -13,6 +13,7 @@ import type { GridHandle } from '../glyphgrid/engine'
 import { createFrameLoop, type FrameLoop, type FrameLoopHost } from '../glyphgrid/frame-driver'
 import {
   createBoardFrameGate,
+  createCellRebuildGuard,
   createContextLossPolicy,
   createCursorBlinkClock,
   createPixelRatioWatcher,
@@ -2255,5 +2256,56 @@ describe('atlas cell drift', () => {
 
   it('catches a HEIGHT-only disagreement too', () => {
     expect(cellsDisagree({ cellW: 16.8, cellH: 36 }, { cellW: 16.8, cellH: 38 })).toBe(true)
+  })
+})
+
+/**
+ * The drift rebuild's loop guard, and the half of it that was missing: it was reset ONLY by a font
+ * change, so the FIRST drift in a session spent the allowance for the rest of that session.
+ *
+ * The consequence is a terminal that stays resampled — soft, 5% wide — for as long as the app runs,
+ * even though the cause is long gone. The field shape: a webfont resolves after a dpr rebuild has
+ * latched a fallback face's cell, the drift is genuine, and it is answered with a console warning
+ * instead of the rebuild it deserves.
+ */
+describe('createCellRebuildGuard', () => {
+  it('allows one drift rebuild per epoch and refuses the second', () => {
+    const guard = createCellRebuildGuard()
+    expect(guard.allowRebuild()).toBe(true)
+    expect(guard.allowRebuild()).toBe(false)
+    expect(guard.allowRebuild()).toBe(false)
+  })
+
+  it('does NOT restore its own allowance — that is what stops a rebuild ping-pong', () => {
+    // The rebuild the guard permits goes through the same funnel a font change does, so if that
+    // funnel began a new epoch unconditionally the guard would re-arm itself and two terminals with
+    // genuinely different cells would hand the atlas back and forth forever, one rebuild per
+    // registration, with the canvas never painting.
+    const guard = createCellRebuildGuard()
+    guard.allowRebuild()
+    expect(guard.allowRebuild()).toBe(false)
+  })
+
+  it('re-arms on a new epoch, so a LATER genuine drift is still answered', () => {
+    const guard = createCellRebuildGuard()
+    expect(guard.allowRebuild()).toBe(true)
+    expect(guard.allowRebuild()).toBe(false)
+    // A font change, a dpr rebuild, the mode being switched back on: the old measurement is
+    // meaningless and the next terminal's cell is a fresh question.
+    guard.beginEpoch()
+    expect(guard.allowRebuild()).toBe(true)
+  })
+
+  it('logs the give-up once per epoch, not once per registration', () => {
+    const guard = createCellRebuildGuard()
+    guard.allowRebuild()
+    expect(guard.takeWarning()).toBe(true)
+    expect(guard.takeWarning()).toBe(false)
+    guard.beginEpoch()
+    expect(guard.takeWarning()).toBe(true)
+  })
+
+  it('starts an epoch armed, so the very first drift on a fresh context rebuilds', () => {
+    expect(createCellRebuildGuard().allowRebuild()).toBe(true)
   })
 })
