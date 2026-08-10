@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
-import { hasUsage } from '@shared/agents/config'
+import { readsClaudeTranscript } from '../../lib/transcriptGates'
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
@@ -102,7 +102,10 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     sessionId: agentSessionId,
     cwd: spawn.cwd,
     accountId: spawn.accountId,
-    searchTranscript: !!spawn.agentId && hasUsage(spawn.agentId),
+    // MIRROR TerminalNode: the transcript index reads claude's JSONL through claude's resolver, so
+    // it is gated on the claude-transcript fact, NOT on the context meter's `hasUsage` (which now
+    // spans codex and gemini too) — see lib/transcriptGates.ts.
+    searchTranscript: readsClaudeTranscript(spawn.agentId),
     open: searchOpen,
     readBuffer
   })

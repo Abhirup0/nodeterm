@@ -1,7 +1,6 @@
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { readAgentSessionName } from '../core/agent-session-name'
-import { canRename, type AgentId } from '@shared/agents/config'
+import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile } from 'fs/promises'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
@@ -76,6 +75,9 @@ import { retainUntilDismissed } from './notifications'
 import { installManagedAgentHooks } from '../core/agents/hooks'
 import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
+import { geminiContextParse } from '../core/gemini-session'
+import { codexContextParse } from '../core/codex-session'
+import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
@@ -564,14 +566,31 @@ app.whenReady().then(async () => {
     ptyManager.captureSession(persistKey, full)
   )
 
+  // Gemini's title read needs the transcript path its own context tail already tracks (nothing
+  // scans for it). That tail is created ~600 lines below with the rest of the hook plumbing, while
+  // this deps object is consumed by the ptyReadSessionName handler just under here and by the
+  // session-name sweep further down — so the association is held in a `let` that the tail's
+  // creation assigns, NOT closed over as a `const` declared later. The difference matters: closing
+  // over the later `const` makes an early call a TDZ **ReferenceError**, and `TerminalNode`'s poll
+  // does not catch its `readSessionName` rejection — one throw kills that node's poll chain for the
+  // whole mount. A poll CAN fire early: `sessionId` is persisted in localStorage, so a cold
+  // relaunch has one before any hook arrives. Undefined-until-assigned degrades instead: no path,
+  // no name, next tick tries again. `pathFor` likewise answers undefined for a session no hook has
+  // been seen for and for a remote (SSH) gemini node, which the tails deliberately never track —
+  // all of which mean "no name", never a throw.
+  let geminiTranscriptPathFor: ((sessionId: string) => string | undefined) | undefined
+  const agentSessionNameDeps: AgentSessionNameDeps = {
+    geminiPathFor: (sessionId) => geminiTranscriptPathFor?.(sessionId)
+  }
+
   // The reader is selected by the NODE's agent (core/agent-session-name.ts — the one copy of that
-  // rule, shared with the sweep below and with the Server Edition), so neither reader ever searches
-  // the other's tree. `agentId` is a TRAILING optional argument, so every pre-grok caller resolves
+  // rule, shared with the sweep below and with the Server Edition), so no reader ever searches
+  // another's tree. `agentId` is a TRAILING optional argument, so every pre-grok caller resolves
   // through the claude reader unchanged.
   corePlatform.handle(
     IPC.ptyReadSessionName,
     (sessionId: string, accountId?: string, agentId?: string) =>
-      readAgentSessionName(sessionId ?? '', accountId, agentId)
+      readAgentSessionName(sessionId ?? '', accountId, agentId, agentSessionNameDeps)
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
@@ -875,12 +894,16 @@ app.whenReady().then(async () => {
       const n = workspaceStore.getNode(nodeId)
       return n ? { accountId: n.accountId, titleAuto: n.titleAuto } : undefined
     },
-    // Same router the IPC handler above uses — the sweep sees every RENAME_CAPABLE agent, so
-    // resolving a grok node through claude's reader would scan ~/.claude/projects once a minute
-    // for an id that can never be there.
-    resolve: readAgentSessionName,
-    publish: setNodeSessionName,
-    supports: (agentId) => !!agentId && canRename(agentId as AgentId)
+    // Same router the IPC handler above uses — the sweep sees every TITLE_READ_CAPABLE agent, so
+    // resolving a grok or gemini node through claude's reader would scan ~/.claude/projects once a
+    // minute for an id that can never be there.
+    resolve: (sessionId, accountId, agentId) =>
+      readAgentSessionName(sessionId, accountId, agentId, agentSessionNameDeps),
+    publish: setNodeSessionName
+    // `supports` is deliberately NOT passed: the rule (TITLE_READ_CAPABLE, since the sweep only
+    // READS a name) is core's default, `supportsTitleRead`. A copy here would be a second place to
+    // get it wrong, and getting it wrong is invisible — the wrong list silently skips an agent's
+    // nodes with every test still green.
   })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
@@ -1137,7 +1160,9 @@ app.whenReady().then(async () => {
     remoteSubagentTail.untrack(n.toolUseId)
     nodeSubagents.get(nodeId)?.delete(n.toolUseId)
   }
-  const contextTail = createContextTail((payload) => {
+  // Every context tail pushes through here, so an agent's meter reaches the renderer, the Notch HUD
+  // and the phone's context ring identically whichever CLI produced the numbers.
+  const pushContextUpdate = (payload: unknown): void => {
     if (!win.isDestroyed()) win.webContents.send(IPC.contextUpdate, payload)
     // Feed the macOS Notch HUD the model name (keyed by sessionId; no-op off/non-darwin).
     notchHudOnContextUpdate(payload as { sessionId?: string; model?: string; usedPercent?: number })
@@ -1150,7 +1175,19 @@ app.whenReady().then(async () => {
         break
       }
     }
-  }, { onTaskNotification, onToolResult })
+  }
+  const contextTail = createContextTail(pushContextUpdate, { onTaskNotification, onToolResult })
+  // ONE TAIL PER AGENT, each with its own parser — not one tail switching on an agent id, which
+  // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
+  // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
+  // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
+  // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
+  // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
+  const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
+  // Hand the gemini session-name reader its path authority (declared above the handlers that use
+  // it, assigned here where the tail exists).
+  geminiTranscriptPathFor = (sessionId) => geminiContextTail.pathFor(sessionId)
+  const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
   // Remote (SSH-project) counterparts: a node whose pty runs on a remote host has its Claude
   // transcript on that host, so its meter / subagent transcript / search must read over the
   // project's ControlMaster. One RemoteFile bound to the SSH-project manager's own ssh runner
@@ -1487,7 +1524,11 @@ app.whenReady().then(async () => {
   const safeTranscriptPath = (tp: string | undefined): string | undefined => {
     if (!tp) return undefined
     const abs = resolve(tp)
-    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData')) ? abs : undefined
+    // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
+    // before) would otherwise fail the jail and its meter would silently never fill.
+    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData'), codexHome())
+      ? abs
+      : undefined
   }
   // Remote analogue of safeTranscriptPath: a remote node's transcript_path is a remote absolute
   // path arriving over the reverse tunnel — a forged POST must not read an arbitrary remote file.
@@ -1531,6 +1572,32 @@ app.whenReady().then(async () => {
       // re-remember the very same path. The map is bounded, so dropping now beats waiting for
       // eviction to reach an entry nobody is asking about.
       if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
+      return
+    }
+    // gemini and codex both carry `transcript_path` in their hook envelope (gemini: the base input
+    // schema of its bundled `docs/hooks/reference.md:48-58`; codex: the same claude-shaped envelope,
+    // whose own hook wire structs name session_id/transcript_path/cwd/hook_event_name), so the
+    // meter needs no path DERIVATION the way grok's does — only its own token reader. The path is
+    // jailed by the same `safeTranscriptPath` claude uses (widened to those two agents' transcript
+    // roots), because a forged POST could otherwise aim a file read at an arbitrary local path.
+    if (agentId === 'gemini' || agentId === 'codex') {
+      const p = payload as { session_id?: string; transcript_path?: string; hook_event_name?: string }
+      // A REMOTE (SSH) node's transcript lives on the HOST, and these tails read the LOCAL disk —
+      // a host path like `~/.gemini/tmp/…` clears the local jail, so without this we would meter
+      // whatever same-named file happens to exist on THIS machine. Remote meters for these agents
+      // are out of scope (remote-context-tail.ts is that path), so skip rather than report the
+      // wrong machine's numbers. The Server Edition needs no counterpart: it has no SSH projects,
+      // which is why its copy of this branch is otherwise identical but lacks these two lines.
+      if (nodeId && ptyManager.sshRemoteForNode(nodeId)) return
+      const transcriptPath = safeTranscriptPath(p.transcript_path)
+      const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
+      if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)
+      if (nodeId && p.session_id) nodeContextSession.set(nodeId, p.session_id)
+      // gemini subscribes SessionEnd (GEMINI_HOOK_EVENTS); codex does NOT today (CODEX_EVENTS stops
+      // at Stop), so for codex the tail is released by `releaseNodeTails` on pty:destroy/recycle
+      // instead. Handling it here regardless costs nothing and is correct the day codex's event
+      // list grows.
+      if (p.hook_event_name === 'SessionEnd' && p.session_id) tail.untrack(p.session_id)
       return
     }
     if (agentId !== 'claude') return
@@ -1652,7 +1719,12 @@ app.whenReady().then(async () => {
       // Untrack both tails — untracking a non-tracked session is a no-op, so this is safe
       // regardless of whether the closed node was local or remote (avoids an ordering race
       // with pty-manager's own ptyDestroy handler clearing the ssh-remote registration).
+      // Every agent's tail is untracked, not just claude's: `nodeContextSession` now holds gemini
+      // and codex sessions too, and a tail nobody releases keeps polling a dead session's file
+      // once a second forever. Only one of these can be tracking any given sessionId.
       contextTail.untrack(sessionId)
+      geminiContextTail.untrack(sessionId)
+      codexContextTail.untrack(sessionId)
       remoteContextTail.untrack(sessionId)
       remoteTranscriptBySession.delete(sessionId)
       locatedTranscriptSessions.delete(sessionId)

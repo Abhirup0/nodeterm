@@ -241,7 +241,11 @@ export async function resolveTranscriptPath(
 
 // Read only the last `cap` bytes of a file as UTF-8 (whole file if smaller). Drops the partial
 // leading line on a capped read. Cheaper than readCappedTail for tiny scans (session title).
-async function readSmallTail(filePath: string, cap: number): Promise<string | undefined> {
+//
+// Exported for the OTHER title readers routed by core/agent-session-name.ts (gemini's), which need
+// the identical bounded read of a different agent's transcript. It is a byte-level file helper and
+// knows nothing about claude's layout — the storage-specific parsing stays in each agent's module.
+export async function readSmallTail(filePath: string, cap: number): Promise<string | undefined> {
   try {
     const stat = await fs.promises.stat(filePath)
     if (stat.size <= cap) return await fs.promises.readFile(filePath, 'utf8')
