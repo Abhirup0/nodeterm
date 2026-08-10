@@ -6,6 +6,7 @@ import {
   canChat,
   canContextLink,
   canControlCanvas,
+  canReadTitle,
   canRecur,
   canRename,
   canResume,
@@ -14,7 +15,10 @@ import {
   createdAgentId,
   hasHooks,
   hasPermissionMode,
-  hasUsage, reportsOwnCopy } from './config'
+  hasUsage,
+  reportsOwnCopy,
+  RENAME_CAPABLE
+} from './config'
 
 describe('CONTEXT_LINK_CAPABLE', () => {
   it('all three builtin agents can context-link', () => {
@@ -43,7 +47,7 @@ describe('opencode capabilities', () => {
     expect(canControlCanvas('opencode')).toBe(true)
   })
   it('stays out of the claude-only capability lists', () => {
-    for (const can of [canSubagent, canRecur, canBranch, hasUsage, canChat, canTransferFrom, canRename, hasPermissionMode]) {
+    for (const can of [canSubagent, canRecur, canBranch, hasUsage, canChat, canTransferFrom, canRename, canReadTitle, hasPermissionMode]) {
       expect(can('opencode')).toBe(false)
     }
   })
@@ -147,5 +151,41 @@ describe('copy feedback', () => {
   it('speaks for a plain terminal and a custom agent (no agent id at all)', () => {
     expect(reportsOwnCopy(undefined)).toBe(false)
     expect(reportsOwnCopy('my-custom-agent')).toBe(false)
+  })
+})
+
+/**
+ * Reading a session name and PUSHING one back are different capabilities, and gemini has only the
+ * first: its transcript carries a model-generated name (the `update_topic` tool's `args.title`,
+ * measured in `core/__fixtures__/gemini/session.jsonl`), but its command set
+ * (`/chat list|save|resume|delete|share`, measured on 0.54.4) has no rename — `save <tag>` is a
+ * tagged checkpoint. One list for both would light the rename UI on a node where it does nothing.
+ */
+describe('title read vs rename write', () => {
+  it('gemini can be read but never written', () => {
+    expect(canReadTitle('gemini')).toBe(true)
+    expect(canRename('gemini')).toBe(false)
+  })
+
+  it('claude and grok do both', () => {
+    for (const id of ['claude', 'grok'] as const) {
+      expect(canReadTitle(id), id).toBe(true)
+      expect(canRename(id), id).toBe(true)
+    }
+  })
+
+  it('every rename-capable agent is also title-readable — the write leg needs the read leg to settle', () => {
+    for (const id of RENAME_CAPABLE) expect(canReadTitle(id), id).toBe(true)
+  })
+
+  it('codex claims neither, for want of evidence', () => {
+    // Its slash-command set was not enumerable from the CLI, so neither leg has a measured basis.
+    expect(canReadTitle('codex')).toBe(false)
+    expect(canRename('codex')).toBe(false)
+  })
+
+  it('a custom agent claims neither', () => {
+    expect(canReadTitle('custom:abc')).toBe(false)
+    expect(canRename('custom:abc')).toBe(false)
   })
 })

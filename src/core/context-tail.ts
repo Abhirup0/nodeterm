@@ -143,6 +143,20 @@ export interface ContextTailOptions {
   onTaskNotification?: (sessionId: string, n: TaskNotification) => void
   /** Fired when a tracked session's transcript records a tool RESULT — see `hasToolResult`. */
   onToolResult?: (sessionId: string) => void
+  /**
+   * How to read the used/window numbers out of this agent's transcript. Defaults to claude's
+   * `parseLatestUsage`. gemini and codex pass their own (`core/gemini-session.ts`
+   * `geminiContextParse`, `core/codex-session.ts` `codexContextParse`) because the numbers live
+   * under different keys — everything else about tailing (offset reads, the torn-line carry, the
+   * change-gated push) is identical, which is why this is a dep and not a second poller.
+   *
+   * `window` is what the TRANSCRIPT could state: codex states its own `model_context_window`, and
+   * gemini's follows from the model id its transcript carries. Claude's parser returns none (hence
+   * optional) and its window keeps coming from the model-family resolver.
+   */
+  parse?: (
+    text: string | string[]
+  ) => { used: number; window?: number | null; model: string | null } | null
 }
 
 interface Tracked {
@@ -163,6 +177,12 @@ interface Tracked {
    * line would be lost and its subagent card stuck on working forever. Reset on offset jumps.
    */
   carry: Buffer | null
+  /**
+   * The window the PARSER last read out of the transcript itself, if it can state one (codex, and
+   * gemini via its model id). `null` = never stated. Sticky like `used`/`model`: a chunk with no
+   * usage in it leaves the last known window alone.
+   */
+  parsedWindow: number | null
 }
 
 export interface ContextTail {
@@ -178,6 +198,12 @@ export function createContextTail(
 ): ContextTail {
   const sessions = new Map<string, Tracked>()
   let timer: ReturnType<typeof setInterval> | null = null
+  // A custom parser also OWNS the window (see the window reconcile in `read`), so keep the
+  // "is this claude's tail?" question to one place.
+  const customParse = opts?.parse
+  // Typed as the OPTION so claude's `parseLatestUsage` (which returns no `window` at all) satisfies
+  // it as the default — its `window` is simply always absent, which reads as "not stated".
+  const parse: NonNullable<ContextTailOptions['parse']> = customParse ?? parseLatestUsage
 
   const push = (sessionId: string, t: Tracked): void => {
     const usedPercent = Math.min(100, Math.max(0, (t.used / t.window) * 100))
@@ -239,10 +265,11 @@ export function createContextTail(
           t.carry = splitCompleteLines(combined).carry
           const lines = combined.toString('utf-8').split('\n')
           const completeLines = lines.slice(0, -1)
-          const latest = parseLatestUsage(lines)
+          const latest = parse(lines)
           if (latest) {
             t.used = latest.used
             t.model = latest.model ?? t.model
+            t.parsedWindow = latest.window ?? t.parsedWindow
           }
           if (opts?.onTaskNotification) {
             for (const n of parseTaskNotifications(completeLines))
@@ -255,11 +282,25 @@ export function createContextTail(
       // Reconcile the window every tick: kick off async API resolution once per model
       // (self-gating), and use the best cached/static value now.
       if (t.model) void resolveModelWindow(t.model)
-      const win = cachedWindowFor(t.model)
+      // Whose number is the denominator: the transcript's own when the agent states one, else
+      // claude's model-family inference.
+      //
+      // `cachedWindowFor` is CLAUDE's inference and is consulted only on claude's path (no custom
+      // parser). It always answers a number — DEFAULT_WINDOW (200k) for anything it doesn't
+      // recognize — so handing it "gpt-5.6-sol" or "gemini-3.5-flash" would not fail, it would
+      // confidently return the wrong denominator. A custom parser that could not state a window
+      // therefore yields `null`, and null pushes NOTHING (the guard below): a meter is a
+      // percentage, and a used count over a guessed denominator is worse than no meter at all.
+      //
+      // Claude's path is unchanged by construction: no custom parser ⇒ `cachedWindowFor(t.model)`
+      // exactly as before, always > 0, so the added guard can never fire for it.
+      const win = customParse ? t.parsedWindow : cachedWindowFor(t.model)
 
       if (!sessions.has(sessionId)) return // untracked while this async read was in flight
       if (
         t.used > 0 &&
+        win !== null &&
+        win > 0 &&
         (t.used !== t.lastUsed || t.model !== t.lastModel || win !== t.lastWindow)
       ) {
         t.window = win
@@ -303,7 +344,8 @@ export function createContextTail(
         lastModel: null,
         lastWindow: 0,
         reading: false,
-        carry: null
+        carry: null,
+        parsedWindow: null
       }
       sessions.set(sessionId, t)
       void read(sessionId, t) // immediate first value (resumed sessions already have content)

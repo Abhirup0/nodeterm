@@ -1320,16 +1320,19 @@ body,
   animation: mascot-walk-claude 0.8s steps(1) infinite;
 }
 
-/* Grok has no critter: its RUNNING indicator is the brand mark itself, breathing. Deliberately NOT
-   a sprite — the glyph is an inline SVG painted in `currentColor`, so the bloom is a drop-shadow of
-   that same colour and needs no ink of its own. That is what makes it correct in both themes: the
-   halo is light-on-dark and dark-on-light, exactly like the mark. A fixed glow colour would have
-   vanished into one of the two backgrounds. */
-.term-node__mascot--grok {
-  animation: mascot-pulse-grok 1.6s ease-in-out infinite;
+/* Grok, gemini and opencode have no critter: their RUNNING indicator is the brand mark itself,
+   breathing. Deliberately NOT a sprite. For grok the glyph is an inline SVG painted in
+   `currentColor`, so the bloom is a drop-shadow of that same colour and needs no ink of its own —
+   that is what makes it correct in both themes: the halo is light-on-dark and dark-on-light, exactly
+   like the mark. A fixed glow colour would have vanished into one of the two backgrounds. The other
+   two are multi-colour ASSETS wrapped in a span, so their bloom is the badge's label colour rather
+   than their own ink — approximate, accepted, and cheaper than an ink table (see lib/brandPulse.ts).
+   Agent-neutral by design: no rule below names an agent. */
+.term-node__mascot--pulse {
+  animation: mascot-pulse-brand 1.6s ease-in-out infinite;
 }
 
-@keyframes mascot-pulse-grok {
+@keyframes mascot-pulse-brand {
   0%,
   100% {
     opacity: 0.55;
@@ -1344,9 +1347,9 @@ body,
 }
 
 /* Same contract the presence chip follows: motion is decoration, the state must still read without
-   it. Frozen at the lit end of the cycle, so a working grok node looks awake rather than dimmed. */
+   it. Frozen at the lit end of the cycle, so a working node looks awake rather than dimmed. */
 @media (prefers-reduced-motion: reduce) {
-  .term-node__mascot--grok {
+  .term-node__mascot--pulse {
     animation: none;
     opacity: 1;
     filter: drop-shadow(0 0 1px currentColor);
@@ -7668,6 +7671,13 @@ body,
   z-index: 5;
   display: flex;
   flex-direction: column;
+}
+/* Flipped up when the column sits near the window's bottom edge (see KanbanColumn's layout effect). */
+.kanban-col__newmenu--up {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: 4px;
 }
 .kanban-col__newmenu button {
   display: flex;

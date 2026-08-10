@@ -502,9 +502,14 @@ describe('createAgentNode permission mode', () => {
     expect(node.data.initialCommand).toBe("claude 'fix the bug' --permission-mode auto")
   })
 
+  // opencode has no approval flag at all, and a custom agent is in no capability list. codex and
+  // gemini DO have one, each spelled its own way — those composed commands are pinned in
+  // workspace.agent-prompt.test.ts, next to grok's separator rule.
   it('never flags a non-capable agent', () => {
-    const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, undefined, 'auto')
-    expect(node.data.initialCommand).toBe('codex')
+    const node = createAgentNode('opencode', 0, undefined, undefined, undefined, undefined, undefined, 'auto')
+    expect(node.data.initialCommand).toBe('opencode')
+    const custom = createAgentNode('custom:x', 0, undefined, undefined, undefined, undefined, undefined, 'auto')
+    expect(custom.data.initialCommand).toBe('custom:x')
   })
 })
 

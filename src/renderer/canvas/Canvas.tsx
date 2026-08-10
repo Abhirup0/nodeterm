@@ -110,6 +110,7 @@ import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunc
 import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
+import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
@@ -191,12 +192,12 @@ import {
   canControlCanvas,
   createdAgentId,
   resumeCommand,
-  withPermissionMode,
   AGENT_CONFIG,
   BUILTIN_AGENT_IDS,
   type AgentId,
   type AgentPermissionMode
 } from '@shared/agents/config'
+import { withPermissionMode } from '@shared/agents/approval-mode'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
@@ -955,6 +956,30 @@ export function Canvas() {
     // Nothing to fit, or chrome swallowing the viewport: let fitView use its own framing.
     void fitView({ duration: 300, padding: padding ?? 0.1 })
   }, [fitView, getNodes, getNodesBounds])
+
+  /**
+   * Back to 100%, keeping whatever is in the middle of the screen in the middle.
+   *
+   * Every canvas app has this and ours did not: `Fit view` was the only way to change zoom from a
+   * command, and it lands on whatever the content bounds imply — never on 1. That gap is not only
+   * an ergonomic one. Zoom 1 is the only ratio at which the shared renderer samples the atlas
+   * texel-for-texel, so "is this actually 1?" is a question both users and bug reports need to be
+   * able to answer, and until now the only way was to read the viewport transform in DevTools
+   * (which is exactly how the 2026-08-09 crispness report was finally pinned, at 0.976).
+   *
+   * The anchor is the viewport CENTRE rather than the origin: zooming about the corner throws the
+   * user's work off screen, which is what makes a reset feel like a jump rather than a correction.
+   */
+  const zoomTo100 = useCallback(() => {
+    const wrap = flowWrapRef.current
+    const current = getViewport()
+    const next = viewportAtZoom1(current, {
+      x: (wrap?.clientWidth ?? 0) / 2,
+      y: (wrap?.clientHeight ?? 0) / 2
+    })
+    if (next === current) return
+    void setViewport(next, { duration: 200 })
+  }, [getViewport, setViewport])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
   // The ACTIVE session + its presence — what the canvas-sync publisher and onMutation subscriber
@@ -4672,7 +4697,7 @@ export function Canvas() {
             const n = nodesRef.current.find((x) => x.id === ids[0])
             const st = useAgentStatus.getState().byId[ids[0]]
             const gate = restartEligibility(restartAgentIdOf(n), st?.state, st?.sessionId)
-            // 'not-resumable' is permanent (a plain shell, gemini, a custom CLI with no exit
+            // 'not-resumable' is permanent (a plain shell, opencode, a custom CLI with no exit
             // command) — no row at all. The other two are temporary, so the row stays and says
             // what to wait for instead of disappearing and teaching nothing.
             if (!gate.ok && gate.reason === 'not-resumable') return []
@@ -6814,9 +6839,15 @@ export function Canvas() {
             const m = e.task.match(/^\s*\/(loop|schedule|cron)\b/)
             if (m) cs.setLoop(e.nodeId, true, m[1] as 'loop' | 'schedule' | 'cron', { task: e.task })
           }
-          if (e.state === 'done' && !e.interrupted) {
+          if (e.state === 'done' && !e.interrupted && !stuckRescueSkip) {
             // Interrupted turns (Esc/Ctrl-C) alert nobody: the user did it themselves, and
             // the turn didn't complete, so it isn't a loop iteration either.
+            // An IGNORED rescue is silent for the same reason it moves no badge: it claims a turn
+            // ended for a node this surface never saw running, so the "finished" is unfounded —
+            // and it arrives from a second source of truth (the main-process mirror drives the SSH
+            // reconnect resync, this store drives the alert), which can legitimately disagree after
+            // a renderer reload. Gating the badge but not the sound/notification would half-enforce
+            // the flag and leave the expensive error — a false completion — fully reachable.
             cs.bumpLoop(e.nodeId, e.lastMessage) // count loop iterations + summary (no-op if not looping)
             alert('finished', `${agentLabel} finished its turn.`, 'done')
           }
@@ -7356,6 +7387,7 @@ export function Canvas() {
         run: () => void connectRemote()
       },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: fitAll },
+      { id: 'zoom-100', label: 'Zoom to 100%', icon: <IconFit />, run: zoomTo100 },
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() },
       // Hidden when the canvas has no restartable agent node — the row would have nothing to act
       // on. `hint` is searchable, so "new model" / "update" find it too.
@@ -7459,7 +7491,8 @@ export function Canvas() {
     connectRemote,
     addSshTerminal,
     hasRestartableAgents,
-    restartIdleAgents
+    restartIdleAgents,
+    zoomTo100
   ])
 
   // Build the palette's command list only when its inputs change — the inline `buildCommands()`

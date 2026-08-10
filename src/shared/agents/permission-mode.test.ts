@@ -2,22 +2,24 @@ import { describe, it, expect } from 'vitest'
 import {
   hasPermissionMode,
   permissionModeFlag,
-  withPermissionMode,
   resolvePermissionMode,
   ALL_PERMISSION_MODES,
   PERMISSION_MODE_LABELS,
   type AgentPermissionMode
 } from './config'
+import { withPermissionMode } from './approval-mode'
 
 describe('hasPermissionMode', () => {
-  // claude and grok share the flag SPELLING and the value vocabulary, which is the whole
-  // requirement for membership. codex (--ask-for-approval) and gemini (--approval-mode) spell it
-  // differently, so they stay out until their own mapping exists.
-  it('covers claude and grok, and no one else', () => {
+  // claude and grok share the flag SPELLING and the value vocabulary; gemini
+  // (`--approval-mode`) and codex (`--ask-for-approval`) spell it their own way and join through the
+  // mapping in ./approval-mode.ts. opencode has no such flag at all, and a custom agent is in no
+  // capability list by definition.
+  it('covers the four agents whose start-up mode we can set, and no one else', () => {
     expect(hasPermissionMode('claude')).toBe(true)
     expect(hasPermissionMode('grok')).toBe(true)
-    expect(hasPermissionMode('codex')).toBe(false)
-    expect(hasPermissionMode('gemini')).toBe(false)
+    expect(hasPermissionMode('codex')).toBe(true)
+    expect(hasPermissionMode('gemini')).toBe(true)
+    expect(hasPermissionMode('opencode')).toBe(false)
     expect(hasPermissionMode('custom:abc')).toBe(false)
   })
 })
@@ -68,8 +70,19 @@ describe('withPermissionMode', () => {
   })
 
   it('never touches a non-capable agent', () => {
-    expect(withPermissionMode('codex', 'codex', 'auto')).toBe('codex')
+    expect(withPermissionMode('opencode', 'opencode', 'auto')).toBe('opencode')
     expect(withPermissionMode('my-agent', 'custom:x', 'bypassPermissions')).toBe('my-agent')
+  })
+
+  // codex and gemini are capable but spell it their own way; the full truth table lives in
+  // approval-mode.test.ts. Pinned here too so the funnel's own output is readable in one place —
+  // including codex in a mode it cannot express, which stays BARE rather than taking a nearest match.
+  it('emits each capable agent’s own spelling', () => {
+    expect(withPermissionMode('gemini', 'gemini', 'acceptEdits')).toBe(
+      'gemini --approval-mode auto_edit'
+    )
+    expect(withPermissionMode('codex', 'codex', 'auto')).toBe('codex --ask-for-approval on-request')
+    expect(withPermissionMode('codex', 'codex', 'plan')).toBe('codex')
   })
 
   it('leaves the command untouched for a forged mode', () => {

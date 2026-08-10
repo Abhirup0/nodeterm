@@ -11,6 +11,18 @@ export interface RasterFont {
    *  is what rescales every glyph against the quad it is drawn onto. */
   cellW: number
   cellH: number
+  /**
+   * The weights this terminal draws at — `settings.fontWeight` / `fontWeightBold`, the same two
+   * numbers xterm's own renderers are given.
+   *
+   * They were missing until 2026-08-09, and the omission was invisible at the defaults: with no
+   * weight token a canvas font string means `normal` (400) and the literal `bold` means 700, which
+   * is exactly the default pair. Anyone who moved the weight picker got a shared canvas that
+   * ignored them and drew LIGHTER than the GPU renderer beside it — the "text isn't so crisp"
+   * report, whose real content is "thinner".
+   */
+  weight: number
+  weightBold: number
 }
 
 /**
@@ -490,7 +502,9 @@ export function createCanvasRasterizer(
           ctx.fillRect(inkX + op.x, y + op.y, w, h)
         }
       } else {
-        ctx.font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${font.sizePx}px ${font.family}`
+        // NUMERIC weights, not the `bold` keyword: the keyword is 700 and nothing else, so it
+        // silently discarded a user's 600 or 800. `italic` stays a keyword because it is one.
+        ctx.font = `${italic ? 'italic ' : ''}${bold ? font.weightBold : font.weight} ${font.sizePx}px ${font.family}`
         const glyph = String.fromCodePoint(code)
         // SHRINK-TO-FIT, the 2026-08-05 device finding (an agent CLI's task-list icon rendering
         // with its right edge sliced off; GPU mode showed it whole).

@@ -34,6 +34,8 @@ interface Op {
   smoothing?: boolean
   /** Whether the drawImage source was the rasterizer's OWN canvas — the only source it ever uses. */
   self?: boolean
+  /** The canvas font string in effect for a `fillText` — family, size and WEIGHT. */
+  font?: string
 }
 
 /** The active clip as half-open texel bounds, or `null` for "no clip". */
@@ -125,7 +127,9 @@ function stubCanvas(
       paint(x, y, w, h, '')
     },
     fillText(text: string, x: number, y: number) {
-      ops.push({ kind: 'fillText', fill: ctx.fillStyle, args: [x, y], text })
+      // `font` rides along so a test can assert WHICH face/weight the ink was drawn with — the
+      // 2026-08-09 weight bug was invisible in the op geometry and lived entirely in this string.
+      ops.push({ kind: 'fillText', fill: ctx.fillStyle, args: [x, y], text, font: ctx.font })
     },
     // Recorded, NOT applied to the pixel model — which costs these tests nothing, because the
     // model's `fillText` paints no pixels either (there is no font engine here). What the shrink
@@ -208,7 +212,7 @@ function stubCanvas(
   }
 }
 
-const FONT = { family: 'monospace', sizePx: 16, cellW: 10, cellH: 20 }
+const FONT = { family: 'monospace', sizePx: 16, cellW: 10, cellH: 20, weight: 400, weightBold: 700 }
 /** The pitch this font lays out on: ceil(cell) + a gutter on each side. */
 const PITCH_W = 10 + 2 * GUTTER_PX
 const PITCH_H = 20 + 2 * GUTTER_PX
@@ -446,7 +450,7 @@ describe('createCanvasRasterizer', () => {
   ])('keeps every ink op inside the whole-texel CELL BOX on a %s cell', (_label, sizes) => {
     const stub = stubCanvas()
     active = stub
-    const font = { family: 'monospace', sizePx: 16, ...sizes }
+    const font = { family: 'monospace', sizePx: 16, weight: 400, weightBold: 700, ...sizes }
     const colsW = Math.max(1, Math.ceil(sizes.cellW))
     const colsH = Math.max(1, Math.ceil(sizes.cellH))
     const ink0 = 40
@@ -494,7 +498,7 @@ describe('createCanvasRasterizer', () => {
     active = stub
     const cellW = 10.5
     const cellH = 20.5
-    const font = { family: 'monospace', sizePx: 16, cellW, cellH }
+    const font = { family: 'monospace', sizePx: 16, cellW, cellH, weight: 400, weightBold: 700 }
     const colsW = Math.max(1, Math.ceil(cellW))
     const colsH = Math.max(1, Math.ceil(cellH))
     const ink0 = 40
@@ -729,7 +733,7 @@ describe('createCanvasRasterizer', () => {
     const at = (ink: number, sizes: { cellW: number; cellH: number }) => {
       const cols = (c: number): number => Math.max(1, Math.ceil(c))
       return {
-        font: { family: 'monospace', sizePx: 16, ...sizes },
+        font: { family: 'monospace', sizePx: 16, weight: 400, weightBold: 700, ...sizes },
         ink,
         colsW: cols(sizes.cellW),
         colsH: cols(sizes.cellH),
@@ -829,7 +833,7 @@ describe('createCanvasRasterizer', () => {
    */
   describe('geometric far-edge snapping', () => {
     /** A fractional cell on BOTH axes: 10.5 x 20.5, whole-texel box 11 x 21. */
-    const FRAC = { family: 'monospace', sizePx: 16, cellW: 10.5, cellH: 20.5 }
+    const FRAC = { family: 'monospace', sizePx: 16, cellW: 10.5, cellH: 20.5, weight: 400, weightBold: 700 }
     const FRAC_COLS_W = 11
     const FRAC_COLS_H = 21
     /** A whole-texel ink origin, as `GlyphAtlas.cellXY` always hands over. */
@@ -942,7 +946,7 @@ describe('createCanvasRasterizer', () => {
       const stub = stubCanvas()
       active = stub
       // 10.25 x 20.25: whole-texel box 11 x 21, last FULLY covered texel 9 / 19.
-      const r = createCanvasRasterizer({ family: 'monospace', sizePx: 16, cellW: 10.25, cellH: 20.25 }, 256)!
+      const r = createCanvasRasterizer({ family: 'monospace', sizePx: 16, cellW: 10.25, cellH: 20.25, weight: 400, weightBold: 700 }, 256)!
       r.draw(0x2588, false, false, IX, IX, FG, BG) // █
 
       // The partial far column and row — texel 10 / 20 — now carry FULL ink rather than a blend
@@ -1091,5 +1095,53 @@ describe('shrinkEligible', () => {
     for (const ch of '⧉⎿★⭐▪◆➜✦☑⏺🎉👍') {
       expect(shrinkEligible(ch.codePointAt(0) as number), ch).toBe(true)
     }
+  })
+})
+
+/**
+ * The 2026-08-09 report — external feedback that "the terminal text isn't so crisp", confirmed by
+ * the author comparing Shared against GPU per terminal on a Retina display.
+ *
+ * The atlas was already measured innocent on resolution (dumped `cellH` 36 at dpr 2, i.e. device
+ * pixels), the sampler is NEAREST at zoom >= 1, the pan is snapped to whole device pixels and the
+ * drawing buffer follows the dpr. What was left was WEIGHT: this file built its font string with no
+ * weight token at all for regular text and the literal `bold` for bold, so `settings.fontWeight` /
+ * `fontWeightBold` were silently discarded. Invisible at the defaults — no token means 400 and
+ * `bold` means 700, which is exactly the default pair — and LIGHTER than the GPU renderer beside it
+ * for anyone who had moved the picker.
+ */
+describe('font weight reaches the rasterized glyph', () => {
+  const fontAt = (weight: number, weightBold: number) => ({
+    family: 'monospace',
+    sizePx: 16,
+    cellW: 10,
+    cellH: 20,
+    weight,
+    weightBold
+  })
+
+  const fontStringFor = (weight: number, weightBold: number, bold: boolean): string => {
+    const stub = stubCanvas()
+    active = stub
+    const r = createCanvasRasterizer(fontAt(weight, weightBold), 256)!
+    stub.ops.length = 0
+    r.draw(0x41, bold, false, INK_X, INK_Y, FG, BG)
+    return stub.ops.find((o) => o.kind === 'fillText')?.font ?? ''
+  }
+
+  it('uses the configured regular weight, not the CSS default', () => {
+    expect(fontStringFor(500, 700, false)).toContain('500 16px')
+  })
+
+  it('uses the configured BOLD weight, not the `bold` keyword', () => {
+    // The keyword is 700 and nothing else, so it silently discarded a user's 600 or 800.
+    expect(fontStringFor(400, 600, true)).toContain('600 16px')
+    expect(fontStringFor(400, 600, true)).not.toContain('bold')
+  })
+
+  it('still produces the historical string at the DEFAULT weights', () => {
+    // 400/700 is what "no token" and "bold" already meant, so nobody on defaults sees a change.
+    expect(fontStringFor(400, 700, false)).toContain('400 16px')
+    expect(fontStringFor(400, 700, true)).toContain('700 16px')
   })
 })

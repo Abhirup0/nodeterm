@@ -93,17 +93,44 @@ export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
 export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
-export const USAGE_CAPABLE = ['claude'] as const
+// Agents whose per-node context meter we can fill. Each needs BOTH numbers: a used count and a
+// TRUSTWORTHY window.
+//  - claude: used from its transcript's assistant usage, window INFERRED from the model family
+//    (core/model-window.ts).
+//  - codex: states its own denominator — `model_context_window`, right beside the usage in its
+//    rollout (core/codex-session.ts).
+//  - gemini: states none, so the window comes from its model id through `geminiWindowFor`, which
+//    mirrors the CLI's OWN `tokenLimit(model)` — a family rule with a 1M catch-all default, so a
+//    model we have never heard of still gets the right answer rather than a stale guess.
+// grok is absent: its `updates.jsonl` parser is unbuilt (see docs/grok-agent.md), so there is no
+// used count to divide.
+export const USAGE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
 export const CHAT_CAPABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
 export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
-// Agents that support naming the session in two directions: they emit a session title we adopt
-// into the node title, and accept `/rename <name>` to push a renamed node title back. Read legs are
-// per-agent (claude: the transcript .jsonl; grok: its session summary.json — see
-// core/grok-session.ts, routed at the readSessionName IPC handler); the write leg is the same
-// literal `/rename <name>` for both, which grok also accepts as `/title`.
+// Agents that accept a node title being PUSHED back into the session — the write leg only. The
+// write is the same literal `/rename <name>` for both, which grok also accepts as `/title`.
+// The READ leg is TITLE_READ_CAPABLE below, which is a superset: an agent can name its own session
+// without offering any way to rename it (gemini). Read legs are per-agent (claude: the transcript
+// .jsonl; grok: its session summary.json; gemini: its update_topic tool call), routed once in
+// core/agent-session-name.ts.
 export const RENAME_CAPABLE = ['claude', 'grok'] as const
+// Agents whose OWN session name we can READ and adopt into the node title.
+//
+// Separate from RENAME_CAPABLE because the two directions are separate facts, and gemini has only
+// this one: it writes a model-generated name into its transcript (the `update_topic` tool's
+// `args.title` — core/gemini-session.ts) but has no command to SET one. Its session commands are
+// `/chat list|save|resume|delete|share` (measured on 0.54.4), where `save <tag>` is a tagged
+// checkpoint, not a title — so one list for both legs would light the rename UI on a node where
+// the write silently does nothing.
+//
+// INVARIANT (pinned in config.capabilities.test.ts): every RENAME_CAPABLE agent is also here. The
+// write leg pushes a name and the read leg is what confirms it settled.
+//
+// codex is in NEITHER: its slash-command set could not be enumerated from the CLI, so neither leg
+// has a measured basis — and a guess here costs a wrong node title, not a missing one.
+export const TITLE_READ_CAPABLE = ['claude', 'grok', 'gemini'] as const
 // Agents allowed to drive the canvas via the `nodeterm` CLI (open/show/write/close).
 // Discovery differs per agent: claude gets the manage-nodeterm-canvas skill; codex/gemini/
 // opencode a marker block in ~/.codex/AGENTS.md / ~/.gemini/GEMINI.md /
@@ -120,13 +147,23 @@ export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
 // claude and grok share the flag SPELLING and the value vocabulary
 // (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own
-// `default`), which is the whole requirement for membership. codex (--ask-for-approval) and gemini
-// (--approval-mode) join by being added here with their own flag mapping.
+// `default`). gemini (`--approval-mode default|auto_edit|yolo|plan`) and codex
+// (`--ask-for-approval untrusted|on-request|never`) each spell it their own way, so membership here
+// is only half the story — the translation lives in ./approval-mode.ts.
+//
+// Membership does NOT mean every mode applies: BOTH new vocabularies are narrower than ours — codex
+// has no plan and no edit-specific mode, and gemini has nothing meaning "approve most things but not
+// edits", i.e. no `auto`. Those modes emit NO flag rather than a substituted nearest match.
+// `modeSupported` is what the UI asks so the user is told, instead of being shown "Plan" while
+// codex runs in on-request, or "Auto" while gemini auto-approves every edit. That last one is not
+// hypothetical: `auto` is DEFAULT_PERMISSION_MODE, so mapping it to gemini's `auto_edit` would have
+// switched auto-approve-edits on for every existing gemini node at upgrade time, silently.
 //
 // NOTE: the `auto` VERSION GATE is claude's alone — see activePermissionMode in
 // renderer/state/permissionMode.ts. grok has accepted every mode we emit since 1.0.0, its first
-// release, so it must never inherit a gate fed by a `claude --version` probe.
-export const PERMISSION_MODE_CAPABLE = ['claude', 'grok'] as const
+// release, and gemini/codex accept theirs on the versions we measured, so none of them may inherit
+// a gate fed by a `claude --version` probe.
+export const PERMISSION_MODE_CAPABLE = ['claude', 'grok', 'gemini', 'codex'] as const
 // Agents whose own CLI already tells the user when it copies, so nodeterm must not say it again.
 // Claude Code captures the mouse itself and prints its own line — "copied N chars to tmux buffer ·
 // paste with prefix + ]" — which makes our copy pill a second message for one gesture. Membership
@@ -149,6 +186,7 @@ export const hasUsage = (id: AgentId): boolean => includes(USAGE_CAPABLE, id)
 export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
+export const canReadTitle = (id: AgentId): boolean => includes(TITLE_READ_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
 export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
 /** Does this agent's CLI report its own copies? Undefined (a plain terminal, a custom agent) is
@@ -319,7 +357,10 @@ export const ALL_PERMISSION_MODES: readonly AgentPermissionMode[] = Object.keys(
 /** Fallback whenever a persisted mode is missing or unrecognized. */
 export const DEFAULT_PERMISSION_MODE: AgentPermissionMode = 'auto'
 
-const isPermissionMode = (v: unknown): v is AgentPermissionMode =>
+/** The ONE validator for a persisted mode. Exported so every interpolation site can re-validate
+ *  through it (see `permissionModeFlag` below and `approvalFlags` in ./approval-mode) rather than
+ *  growing a second copy that drifts from `ALL_PERMISSION_MODES`. */
+export const isPermissionMode = (v: unknown): v is AgentPermissionMode =>
   typeof v === 'string' && (ALL_PERMISSION_MODES as readonly string[]).includes(v)
 
 /** CLI flags for a mode. `manual` yields NO flags, so the command stays bare — the exact
@@ -335,13 +376,10 @@ export function permissionModeFlag(mode: AgentPermissionMode): string[] {
   return ['--permission-mode', mode]
 }
 
-/** Appends the permission-mode flag to a launch command, if the agent supports one. The single
- *  funnel for every CLI launch path (new node, cold-restore resume, branch). */
-export function withPermissionMode(cmd: string, id: AgentId, mode: AgentPermissionMode): string {
-  if (!hasPermissionMode(id)) return cmd
-  const flags = permissionModeFlag(mode)
-  return flags.length ? `${cmd} ${flags.join(' ')}` : cmd
-}
+// `withPermissionMode` — the single funnel every CLI launch path goes through — lives in
+// ./approval-mode.ts, one layer UP: since gemini and codex joined, appending the flag needs the
+// per-agent mapping, and that table has to import this file. Re-exporting it from here would close
+// the cycle, so the funnel moved to the layer that owns the translation instead.
 
 /**
  * The mode a new session starts in: the project override, else the global setting.

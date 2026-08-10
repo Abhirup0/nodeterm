@@ -5,6 +5,7 @@
  * filter and the restart choreography can all share exactly one set of rules.
  */
 import { canResume, resumeCommand } from '../../shared/agents/config'
+import { isShellCommand } from '@shared/agents/pane'
 import {
   DELIVERY_ATTEMPTS,
   KILL_LINE,
@@ -14,36 +15,43 @@ import {
 } from './command-delivery'
 
 /** In-band exit command per agent CLI. Only agents listed here can be restarted in place —
- *  an unknown CLI has no safe way to be asked to quit.
+ *  an unknown CLI has no safe way to be asked to quit. One entry turns on both surfaces at once:
+ *  the single-node "Restart agent (resume)" row in the node context menu, and the bulk "restart
+ *  idle agents" action (pane menu + command palette). There is no header button for either —
+ *  `HIDEABLE_HEADER_BUTTONS` is refresh / mic / ai-name / comments. The matching relaunch line
+ *  always comes from `resumeCommand`.
  *
- *  grok: `/quit` (its `/exit` is an alias — the documented primary is the one we type), and its
- *  relaunch line comes from `resumeCommand` → `grok --resume <id>`, so one entry here turns on both
- *  surfaces at once: the single-node "Restart agent (resume)" row in the node context menu, and the
- *  bulk "restart idle agents" action (pane menu + command palette). There is no header button for
- *  either — `HIDEABLE_HEADER_BUTTONS` is refresh / mic / ai-name / comments. */
-const EXIT_SEQUENCES: Record<string, string> = { claude: '/exit', codex: '/quit', grok: '/quit' }
+ *  Each value is the CLI's own DOCUMENTED PRIMARY, and is sent BARE:
+ *    - grok:   `/quit` (its `/exit` is an alias).
+ *    - gemini: `/quit` (alias `/exit`), measured in its bundled `docs/reference/commands.md:325`.
+ *
+ *  Bare is a safety rule, not a style: gemini's `/quit` also takes a `--delete` flag that exits AND
+ *  *permanently deletes* the session's history and temporary files — the very conversation the
+ *  `--resume` behind it is meant to return to. Nothing may append arguments to a value here. */
+const EXIT_SEQUENCES: Record<string, string> = {
+  claude: '/exit',
+  codex: '/quit',
+  grok: '/quit',
+  gemini: '/quit'
+}
 
 export function exitSequence(agentId: string): string | null {
   return EXIT_SEQUENCES[agentId] ?? null
 }
 
-/** Foreground commands that mean "the CLI is gone, a shell owns the pane". Login shells
- *  report as '-zsh'; tmux may report a full path. */
-const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash', 'ksh', 'tcsh'])
-
-export function isShellCommand(cmd: string | null | undefined): boolean {
-  if (!cmd) return false
-  const base = cmd.replace(/^-/, '').split('/').pop() ?? ''
-  return SHELLS.has(base)
-}
+/** Re-exported, not redefined: it lives in `@shared/agents/pane` so the main process can ask the
+ *  same question, and `lib/sessionRename.ts` (plus this module's own tests) import it from here. */
+export { isShellCommand }
 
 export type IneligibleReason = 'working' | 'no-session' | 'not-resumable'
 
 /** States in which the pane must be left alone. `blocked` is here for a sharper reason than
  *  politeness: it means a permission / question dialog owns the prompt (see normalize.ts —
- *  Claude's PermissionRequest, codex's permission.asked / question.asked), so writing `/exit`
- *  would be typed AS THE ANSWER to that dialog instead of quitting the CLI. Both states report
- *  the reason `'working'`: to the user they are the same "busy, try again in a moment". */
+ *  Claude's PermissionRequest, codex's permission.asked / question.asked, gemini's
+ *  Notification/ToolPermission), so writing the exit line would be typed AS THE ANSWER to that
+ *  dialog instead of quitting the CLI — whichever line it is (`/exit` for claude, `/quit` for the
+ *  rest). Both states report the reason `'working'`: to the user they are the same "busy, try
+ *  again in a moment". */
 const BUSY_STATES = new Set(['working', 'blocked'])
 
 /** Single gate shared by the node menu, the bulk filter and the choreography itself.
@@ -174,10 +182,12 @@ export async function performRestartResume(d: {
   // draft lost and a real turn started (tokens, possibly edits) — and the CLI, still running,
   // would then be reported as an exit timeout.
   //
-  // ASSUMPTION, unverified on a real build: Ctrl-U is "clear line" inside the Claude and codex
-  // TUIs (it is in every readline/ZLE prompt, and it is what command-delivery.ts already relies on
-  // for its rewrites). If a TUI binds it to something else this becomes one stray keystroke before
-  // the exit command — no worse than today's blind write. Belongs in the manual test matrix.
+  // ASSUMPTION, unverified on a real build: Ctrl-U is "clear line" inside every TUI in
+  // EXIT_SEQUENCES (claude, codex, grok, gemini) — it is in every readline/ZLE prompt, and it is
+  // what command-delivery.ts already relies on for its rewrites. Each agent added to that table
+  // inherits this assumption; only a device check retires it, per agent. If a TUI binds Ctrl-U to
+  // something else this becomes one stray keystroke before the exit command — no worse than
+  // today's blind write. Belongs in the manual test matrix.
   d.io.write(KILL_LINE)
   d.io.write(exit + '\r')
   const deadline = Date.now() + timeoutMs
