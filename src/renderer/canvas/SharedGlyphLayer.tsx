@@ -131,6 +131,11 @@ export const useSharedGlyph = create<SharedGlyphState>((set, get) => ({
       // project switch), and the setting would look broken. Safe for a node that has never
       // registered a grid: its teardown is a no-op and its re-setup is the same gated
       // `setupGlyph()` a fresh mount runs.
+      //
+      // A FRESH CELL EPOCH too: the next context is built from whichever terminal asks first, and
+      // whatever the last one measured — possibly before a webfont resolved — must not still be
+      // holding this epoch's one drift rebuild. See `CellRebuildGuard`.
+      cellGuard.beginEpoch()
       set({ enabled: true, generation: get().generation + 1 })
       return
     }
@@ -979,14 +984,26 @@ export function failSharedGlyph(reason: string, err?: unknown): void {
  * THE re-rasterize path: drop the context and tell every registered terminal to re-evaluate its
  * participation, which is how they end up re-registering their grids against a freshly built atlas.
  *
- * ONE function, because there is now more than one trigger — a font change and a display pixel
- * ratio change — and they must be the same event. The order is load-bearing and is the same
- * contract `setEnabled(false)` and `failSharedGlyph` honour: dispose FIRST, announce SECOND, never
- * dispose without announcing (every registered grid is holding an inert handle until the bump
- * arrives) and never announce before disposing (a terminal that re-asked for the context in
- * between would adopt the very context we are about to delete).
+ * ONE function, because there is now more than one trigger — a font change, a display pixel ratio
+ * change, an atlas page whose 2D context was lost, and a cell drift — and they must be the same
+ * event. The order is load-bearing and is the same contract `setEnabled(false)` and
+ * `failSharedGlyph` honour: dispose FIRST, announce SECOND, never dispose without announcing (every
+ * registered grid is holding an inert handle until the bump arrives) and never announce before
+ * disposing (a terminal that re-asked for the context in between would adopt the very context we
+ * are about to delete).
+ *
+ * `cellEpoch` is the ONE thing the triggers do not agree on, which is why it is a parameter rather
+ * than something this function could decide for itself. Everything that rebuilds because the world
+ * changed (a new font, a new display, a fresh atlas page) makes the previous cell measurement
+ * meaningless and starts a new epoch — the DEFAULT, so a future trigger gets the safe answer by
+ * omission. The drift rebuild alone passes 'same': it is spending that epoch's single allowance, and
+ * re-arming the guard from inside the rebuild the guard permitted is exactly the ping-pong loop
+ * `CellRebuildGuard` exists to prevent.
  */
-function rebuildSharedContext(): void {
+type CellEpoch = 'new' | 'same'
+
+function rebuildSharedContext(cellEpoch: CellEpoch = 'new'): void {
+  if (cellEpoch === 'new') cellGuard.beginEpoch()
   disposeContext()
   useSharedGlyph.getState().bumpGeneration()
 }
@@ -1011,8 +1028,8 @@ function ensureSettingsSubscription(): void {
       )
     )
       return
-    cellRebuilds = 0
-    cellMismatchWarned = false
+    // A new font is a new cell epoch, and `rebuildSharedContext` begins one by default — the reset
+    // no longer lives here, so every other epoch-establishing trigger gets it too.
     rebuildSharedContext()
   })
 }
@@ -1172,20 +1189,62 @@ export function subscribeSharedGlyphContext(fn: () => void): () => void {
  *  change under a live context, a per-terminal letterSpacing — and the symptom is soft text, so
  *  say so rather than silently rescaling. */
 /**
- * How many times the atlas has been rebuilt for a cell DISAGREEMENT in this font epoch.
+ * THE LOOP-GUARD INVARIANT for the drift rebuild, in one object because it was previously two
+ * module variables reset in one place and read in another.
  *
- * Capped at one, and the cap is the whole point. The rebuild it guards disposes the context, and
- * `disposeContext` deliberately clears the other creation state — so a guard that lived there
- * would be wiped by the very rebuild it is supposed to bound. Two terminals with genuinely
- * different cells would then rebuild for each other forever, one per registration, and the canvas
- * would never paint.
+ * **One drift rebuild per CELL EPOCH, and an epoch begins only where a new cell is legitimately
+ * expected.** Both halves are load-bearing and they fail in opposite directions:
  *
- * Reset only where a new cell is legitimately expected: a font change (see the settings
- * subscription), which is also the only thing that makes the old measurement meaningless.
+ *  - WITHOUT the cap: the rebuild disposes the context, and `disposeContext` deliberately clears
+ *    the other creation state — so a guard stored there would be wiped by the very rebuild it
+ *    bounds. Two terminals with genuinely different cells would rebuild for each other forever, one
+ *    per registration, and the canvas would never paint. This is why `allowRebuild()` does NOT
+ *    re-arm itself and why the funnel it calls must be told not to begin an epoch.
+ *  - WITHOUT the re-arm: the FIRST drift in a session spends the only allowance there will ever be.
+ *    That is the defect this replaces — the counter was reset in the settings subscription alone, so
+ *    a later, unrelated drift (a webfont resolving after a dpr rebuild latched a fallback face's
+ *    cell) only warned, and that terminal stayed resampled — soft and 5% wide — for the rest of the
+ *    session, with the cause long gone.
+ *
+ * AN EPOCH BEGINS at every rebuild cause that makes the previous measurement meaningless: a font
+ * change, a dpr rebuild, the atlas page being rebuilt after a 2D context loss, and the mode being
+ * switched back on. It does NOT begin at the drift rebuild itself — see `rebuildSharedContext`'s
+ * `cellEpoch` argument, which is where that distinction is spelled.
+ *
+ * Pure and injectable-free, so the rule is exercisable without a GPU (the singleton around it is
+ * not testable at all — see the header).
  */
-let cellRebuilds = 0
-/** One-shot log for the give-up branch above. */
-let cellMismatchWarned = false
+export interface CellRebuildGuard {
+  /** A fresh cell epoch: the old measurement is meaningless and the next drift may rebuild. */
+  beginEpoch(): void
+  /** Consume this epoch's rebuild allowance. False = already spent; leave the terminal resampled. */
+  allowRebuild(): boolean
+  /** True at most once per epoch — the give-up log, which must not repeat per registration. */
+  takeWarning(): boolean
+}
+
+export function createCellRebuildGuard(limit = 1): CellRebuildGuard {
+  let rebuilds = 0
+  let warned = false
+  return {
+    beginEpoch(): void {
+      rebuilds = 0
+      warned = false
+    },
+    allowRebuild(): boolean {
+      if (rebuilds >= limit) return false
+      rebuilds++
+      return true
+    },
+    takeWarning(): boolean {
+      if (warned) return false
+      warned = true
+      return true
+    }
+  }
+}
+
+const cellGuard = createCellRebuildGuard()
 /**
  * The atlas cell against a terminal's real one — and REBUILD when they disagree, rather than only
  * saying so.
@@ -1218,12 +1277,11 @@ export function cellsDisagree(atlas: DeviceCell, cell: DeviceCell): boolean {
 function reconcileAtlasCell(ctx: LiveContext, cell: DeviceCell | null): void {
   if (!cell) return
   if (!cellsDisagree({ cellW: ctx.atlas.cellW, cellH: ctx.atlas.cellH }, cell)) return
-  if (cellRebuilds >= 1) {
+  if (!cellGuard.allowRebuild()) {
     // Already spent this epoch's rebuild and a terminal STILL disagrees: two of them want
     // different cells, and rebuilding again would just hand the atlas back and forth. Say so and
     // leave it — one resampled terminal is a cosmetic loss, a rebuild loop is a dead canvas.
-    if (!cellMismatchWarned) {
-      cellMismatchWarned = true
+    if (cellGuard.takeWarning()) {
       console.warn(
         `[glyphgrid] atlas cell ${ctx.atlas.cellW}×${ctx.atlas.cellH} still does not match a ` +
           `terminal's device cell ${cell.cellW}×${cell.cellH} after a rebuild — terminals disagree ` +
@@ -1232,13 +1290,14 @@ function reconcileAtlasCell(ctx: LiveContext, cell: DeviceCell | null): void {
     }
     return
   }
-  cellRebuilds++
   console.warn(
     `[glyphgrid] atlas cell ${ctx.atlas.cellW}×${ctx.atlas.cellH} does not match this terminal's ` +
       `device cell ${cell.cellW}×${cell.cellH} — rebuilding the atlas for it (every glyph was ` +
       `being resampled by the ratio between them)`
   )
-  rebuildSharedContext()
+  // 'same' is the guard: this rebuild must NOT begin a new epoch, or it would restore the allowance
+  // it has just consumed and two disagreeing terminals would rebuild for each other forever.
+  rebuildSharedContext('same')
 }
 
 /**
