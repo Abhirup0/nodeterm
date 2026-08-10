@@ -27,9 +27,21 @@ export const AGENT_LOGO: Partial<Record<string, string>> = {
   opencode: opencodeIcon
 }
 
+/**
+ * This agent's brand asset, or undefined — the ONE way to read AGENT_LOGO.
+ *
+ * `Object.hasOwn`, never `agentId in AGENT_LOGO` and never a bare `AGENT_LOGO[agentId]`: `AgentId` is
+ * open and `data.agentId` comes from hand-editable `.nodeterm/project.json`, so a node carrying
+ * `"agentId": "constructor"` makes `in` answer true and the index hand back **`Function`** — which
+ * then reached an `<img src>` / a CSS `url()` as a stringified function body.
+ */
+export const brandLogoSrc = (agentId: AgentId): string | undefined =>
+  Object.hasOwn(AGENT_LOGO, agentId) ? AGENT_LOGO[agentId] : undefined
+
 /** Does this agent have a brand mark to draw? grok is inlined rather than an asset, so it is not in
  *  AGENT_LOGO — ask through here rather than testing that map directly. */
-export const hasBrandLogo = (agentId: AgentId): boolean => agentId === 'grok' || agentId in AGENT_LOGO
+export const hasBrandLogo = (agentId: AgentId): boolean =>
+  agentId === 'grok' || brandLogoSrc(agentId) !== undefined
 
 /** Canvas RUNNING-badge class (styles.css). */
 export const BRAND_PULSE_CLASS = 'term-node__mascot--pulse'
@@ -66,7 +78,7 @@ export type BrandPulsePlan =
 export function brandPulsePlan(agentId: AgentId | undefined, size: number): BrandPulsePlan | null {
   if (!agentId || !hasBrandLogo(agentId)) return null
   if (agentId === 'grok') return { kind: 'inline', size }
-  const src = AGENT_LOGO[agentId]
+  const src = brandLogoSrc(agentId)
   return src ? { kind: 'asset', src, size } : null
 }
 

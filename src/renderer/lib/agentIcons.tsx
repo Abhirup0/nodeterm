@@ -1,6 +1,6 @@
 import type { AgentId } from '@shared/agents/config'
 import { IconTerminal } from '../components/icons'
-import { AGENT_LOGO, BRAND_PULSE_CLASS, brandPulsePlan } from './brandPulse'
+import { BRAND_PULSE_CLASS, brandLogoSrc, brandPulsePlan } from './brandPulse'
 import { GROK_MARK_PATH, GROK_MARK_VIEWBOX } from './grokMark'
 
 // The logo map itself lives in the REACT-FREE lib/brandPulse.ts, because the notch HUD needs the
@@ -60,7 +60,9 @@ export function BrandPulse({ agentId, size }: { agentId?: AgentId; size: number 
 
 export function AgentIcon({ agentId, size = 16 }: { agentId: AgentId; size?: number }): React.JSX.Element {
   if (agentId === 'grok') return <GrokMark size={size} />
-  const src = AGENT_LOGO[agentId]
+  // `brandLogoSrc`, not `AGENT_LOGO[agentId]`: the id can be anything a hand-edited project.json
+  // says, and a prototype key ('constructor') would hand back a Function as the image source.
+  const src = brandLogoSrc(agentId)
   if (src) {
     return <img src={src} width={size} height={size} alt="" style={{ display: 'block' }} />
   }

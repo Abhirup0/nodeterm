@@ -53,13 +53,15 @@ export interface SessionNameSweepDeps {
    * Which agents carry a READABLE session name. **Optional, and you almost certainly want the
    * default** (`supportsTitleRead` below) — it is the rule, not a shell's opinion of it.
    *
-   * It lives here because the two shells were passing the same predicate and a wrong one is
-   * INVISIBLE: swap it for `canRename` and every gemini node is skipped, so the agent-status
-   * mirror (and the phone reading it) never sees a gemini session name — with a green test suite,
-   * since nothing exercises a shell's wiring. That is the same duplicated-gate drift this branch
-   * has already paid for three times (the remote installer's event lists, the grok raw-listener
-   * block, this). Still injectable: the unit tests narrow it, and a caller with a genuinely
-   * different set can pass its own.
+   * It lives here because the two shells were passing the same predicate and a wrong one is nearly
+   * invisible: swap it for `canRename` and every gemini node is skipped, so the agent-status mirror
+   * (and the phone reading it) never sees a gemini session name. Making it a DEFAULT here is what
+   * buys the guard — this file's own tests pin `supportsTitleRead` (reverting the default to
+   * `canRename` fails them), whereas the same mistake made independently in each shell's call site
+   * would have been caught by nothing, since no test exercises a shell's wiring. That is the same
+   * duplicated-gate drift this branch has already paid for three times (the remote installer's event
+   * lists, the grok raw-listener block, this). Still injectable: the unit tests narrow it, and a
+   * caller with a genuinely different set can pass its own.
    */
   supports?: (agentId?: string) => boolean
 }

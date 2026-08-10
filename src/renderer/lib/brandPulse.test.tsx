@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BRAND_PULSE_CLASS,
   HUD_BRAND_PULSE_CLASS,
+  brandLogoSrc,
   brandPulseBackground,
   brandPulsePlan,
   hasBrandLogo
@@ -88,6 +89,18 @@ describe('hasBrandLogo', () => {
       expect(hasBrandLogo(agentId), agentId).toBe(true)
     }
     expect(hasBrandLogo('custom:abc')).toBe(false)
+  })
+
+  it('does not answer for a prototype key, and never plans a Function as the image', () => {
+    // `data.agentId` is persisted in `.nodeterm/project.json` and hand-editable, and `AgentId` is
+    // open — so this is a reachable value, not a theoretical one. Under `agentId in AGENT_LOGO` the
+    // predicate said true and `AGENT_LOGO[agentId]` handed back Object.prototype's member, which
+    // then reached an `<img src>` / a CSS `url()` as a stringified function body.
+    for (const forged of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(hasBrandLogo(forged), forged).toBe(false)
+      expect(brandPulsePlan(forged, 16), forged).toBeNull()
+      expect(brandLogoSrc(forged), forged).toBeUndefined()
+    }
   })
 })
 
