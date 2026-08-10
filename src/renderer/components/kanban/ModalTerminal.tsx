@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
-import { hasUsage } from '@shared/agents/config'
+import { hasUsage, reportsOwnCopy } from '@shared/agents/config'
+import type { AgentId } from '@shared/agents/config'
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
@@ -89,10 +90,12 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   const visual = useXtermVisualSettings()
   const [dropping, setDropping] = useState(false)
   const [uploading, setUploading] = useState(false)
-  // Same copy feedback as the canvas node — a copy here is the same act as a copy there.
+  // Same copy feedback as the canvas node — a copy here is the same act as a copy there, including
+  // the agent gate: a claude card stays silent because claude prints its own copy line.
   const copy = useCopyFeedback({
     hostRef,
-    hasSelection: () => !!termRef.current?.hasSelection()
+    hasSelection: () => !!termRef.current?.hasSelection(),
+    enabled: !reportsOwnCopy(spawn.agentId as AgentId | undefined)
   })
 
   // Same search machinery as the canvas node: capture-indexed matches + xterm highlight.

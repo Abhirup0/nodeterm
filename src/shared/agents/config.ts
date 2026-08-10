@@ -127,6 +127,15 @@ export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 
 // renderer/state/permissionMode.ts. grok has accepted every mode we emit since 1.0.0, its first
 // release, so it must never inherit a gate fed by a `claude --version` probe.
 export const PERMISSION_MODE_CAPABLE = ['claude', 'grok'] as const
+// Agents whose own CLI already tells the user when it copies, so nodeterm must not say it again.
+// Claude Code captures the mouse itself and prints its own line — "copied N chars to tmux buffer ·
+// paste with prefix + ]" — which makes our copy pill a second message for one gesture. Membership
+// switches the WHOLE copy-feedback layer off for that agent's terminals: the receipt and the
+// one-time "Hold ⌥ to select text" hint alike, since a drag there is not swallowed at all.
+//
+// This is a list rather than a `=== 'claude'` for the usual reason: the next CLI to grow its own
+// copy notice joins by being added here, and nothing else changes.
+export const SELF_REPORTS_COPY = ['claude'] as const
 
 const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
 
@@ -142,6 +151,10 @@ export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURC
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
 export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
+/** Does this agent's CLI report its own copies? Undefined (a plain terminal, a custom agent) is
+ *  `false` — nobody speaks for those, so nodeterm's own feedback is the only feedback there is. */
+export const reportsOwnCopy = (id: AgentId | undefined): boolean =>
+  !!id && includes(SELF_REPORTS_COPY, id)
 
 // Returns the builtin config for an id, or undefined for custom/unknown agents.
 export const agentConfig = (id: AgentId): AgentConfig | undefined =>

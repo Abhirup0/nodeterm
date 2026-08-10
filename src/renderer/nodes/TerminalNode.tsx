@@ -106,7 +106,7 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, createdAgentId, resumeCommand, withPermissionMode, agentConfig } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, createdAgentId, reportsOwnCopy, resumeCommand, withPermissionMode, agentConfig } from '@shared/agents/config'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
@@ -671,9 +671,15 @@ export function TerminalNode({
   // node — never reach this listener. Hosting it on `.term-node__body` would make every node-move
   // drag a hint candidate and burn the once-per-installation hint on a gesture that has nothing to
   // do with copying.
+  // OFF for an agent whose own CLI reports its copies (`reportsOwnCopy` — claude prints "copied N
+  // chars to tmux buffer" itself), so that terminal is byte-identical to before the feature.
+  // `createdAgentId` is called again here rather than reusing the `agentId` const below: this hook
+  // sits above it, and duplicating a pure read of `data` is cheaper than reordering declarations
+  // in this file's lifecycle block.
   const copy = useCopyFeedback({
     hostRef: bodyRef,
-    hasSelection: () => !!termRef.current?.hasSelection()
+    hasSelection: () => !!termRef.current?.hasSelection(),
+    enabled: !reportsOwnCopy(createdAgentId(data))
   })
   useEffect(() => {
     copySubs.set(termKey, copy.notifyCopy)

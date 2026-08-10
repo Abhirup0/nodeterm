@@ -46,8 +46,12 @@ export function useCopyFeedback(opts: {
   hostRef: React.RefObject<HTMLElement | null>
   /** Does xterm hold a selection of its own right now? (⌥/Shift drag.) */
   hasSelection: () => boolean
+  /** Off for a terminal whose own CLI already reports its copies (`reportsOwnCopy`) — then this
+   *  hook binds no listeners, keeps no timers and never raises a pill, so that terminal behaves
+   *  exactly as it did before the feature existed. Defaults to on. */
+  enabled?: boolean
 }): CopyFeedbackApi {
-  const { hostRef } = opts
+  const { hostRef, enabled = true } = opts
   const [feedback, setFeedback] = useState<CopyFeedback>(null)
   const dwellTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const decideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -58,6 +62,10 @@ export function useCopyFeedback(opts: {
   // Read through a ref so the listener effect never re-runs when the caller passes a fresh closure.
   const hasSelectionRef = useRef(opts.hasSelection)
   hasSelectionRef.current = opts.hasSelection
+  // Also read through a ref, so `notifyCopy` keeps ONE identity for the component's lifetime:
+  // TerminalNode stores it in a module-level map and compares identity on cleanup.
+  const enabledRef = useRef(enabled)
+  enabledRef.current = enabled
 
   const show = useCallback((next: CopyFeedback, dwellMs: number): void => {
     if (dwellTimer.current) clearTimeout(dwellTimer.current)
@@ -67,6 +75,7 @@ export function useCopyFeedback(opts: {
 
   const notifyCopy = useCallback(
     (text: string): void => {
+      if (!enabledRef.current) return
       // The gesture itself succeeded (tmux copy-mode ran), so the drag decision is told either way:
       // whatever the clipboard did, "hold ⌥ to select text" is not the advice this drag needs.
       lastCopyAt.current = Date.now()
@@ -81,6 +90,7 @@ export function useCopyFeedback(opts: {
   )
 
   useEffect(() => {
+    if (!enabled) return
     const host = hostRef.current
     if (!host) return
     let downAt: { x: number; y: number; t: number } | null = null
@@ -118,7 +128,7 @@ export function useCopyFeedback(opts: {
       host.removeEventListener('mousedown', onDown)
       window.removeEventListener('mouseup', onUp)
     }
-  }, [hostRef, show])
+  }, [hostRef, show, enabled])
 
   // Browser honesty: on the Server Edition `clipboard.writeText` can fail (a non-secure context),
   // and the stub already raises a `nodeterm:toast` error banner. A green "Copied" pill beside that
