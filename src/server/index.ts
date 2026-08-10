@@ -456,6 +456,12 @@ export async function startServer(
   // misattribution the refusal exists to prevent. Registered here (not in handlers/index.ts)
   // because this is where `ptyManager` lives — the same call site as the reaper above, mirroring
   // src/main/index.ts.
+  //
+  // DEPENDENCY, and one that breaks silently: `sshProjectIds()` reads the IN-MEMORY index, which is
+  // populated only by the `await workspaceStore.load(...)` above — a line documented there as being
+  // for context-link. Move it below this point, or drop it, and every SSH project reads as local
+  // here: the refusal quietly degrades to renderer-flag-only routing, which is the misattribution
+  // bug itself. `test/server/session-memory-e2e.test.ts` exists to fail if that happens.
   startSessionMemoryService({
     tmuxBin: () => ptyManager.getTmuxBin(),
     remote: {

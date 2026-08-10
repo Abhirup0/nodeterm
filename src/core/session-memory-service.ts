@@ -16,16 +16,21 @@ export interface SessionMemoryServiceOptions {
   /** Host RAM reader, injectable for tests. Defaults to the real `/proc/meminfo` read. */
   readMem?: () => MemInfo | null
   /**
-   * The two remote facts, INDEPENDENTLY optional — a shell can know which projects are somebody
-   * else's machine without being able to read them:
-   *  - `isRemoteProject` absent ⇒ only the renderer's `remote` flag marks a scope as remote;
-   *  - `run` absent ⇒ a remote scope is REFUSED (`ok:false`), never swept locally.
-   * The Server Edition supplies the first and not the second: it has the workspace index, so it
-   * KNOWS a project is an SSH one, and it has no ControlMaster, so it cannot answer for that host.
+   * The two remote facts, in a deliberately ASYMMETRIC pair: knowing which projects are somebody
+   * else's machine is required, being able to read them is not.
+   *  - `run` absent ⇒ a remote scope is REFUSED (`ok:false`), never swept locally. This is the
+   *    Server Edition: it has the workspace index, so it KNOWS a project is an SSH one, and it has
+   *    no ControlMaster, so it cannot answer for that host. Knowing-without-reading is coherent.
+   *  - `isRemoteProject` is NOT optional, because reading-without-knowing is not coherent: a shell
+   *    that can run the command but cannot say which projects need it would route every UNFLAGGED
+   *    SSH query to the LOCAL sweep — the misattribution this whole surface exists to prevent. It
+   *    stays type-illegal rather than merely discouraged.
+   * Omit `remote` entirely and only the renderer's `remote` flag marks a scope as remote — which
+   * is why no shell should do that (both ship an `isRemoteProject`).
    */
   remote?: {
     run?: RemoteSessionMemoryRunner
-    isRemoteProject?: (projectId: string) => boolean
+    isRemoteProject: (projectId: string) => boolean
   }
 }
 
@@ -70,20 +75,19 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
    * claim of remoteness is trusted; only its ANSWER can fail.
    */
   const isRemote = (q: SessionMemoryQuery): boolean =>
-    q.remote === true || (!!q.projectId && !!opts.remote?.isRemoteProject?.(q.projectId))
+    q.remote === true || (!!q.projectId && !!opts.remote?.isRemoteProject(q.projectId))
 
   /**
    * One in-flight remote read per project, shared by both channels. A remote read is a `ps` of the
    * whole process table on somebody else's machine, and the panel legitimately wants both the RAM
    * number and the rows — which is two identical execs back to back unless they are coalesced.
-   * Keyed by projectId (the only thing the command depends on) and cleared on settle, so this is a
-   * concurrency guard, never a cache: a later read always re-runs.
+   * Cleared on settle, so this is a concurrency guard, never a cache: a later read always re-runs.
+   *
+   * The key is the projectId and NOTHING else, because that is the only thing deciding which host
+   * the command lands on. A key shared across projects would hand one host's report to another
+   * host's caller — the same misattribution the refusal below exists to prevent, arriving by a
+   * different door, and invisible to any test that uses a single project.
    */
-  //
-  // The key is the projectId and nothing else: it is the ONLY thing that decides which host the
-  // command lands on, so a shared key across projects would hand one host's report to another
-  // host's caller — the same misattribution the refusal above exists to prevent, arriving by a
-  // different door.
   const inFlight = new Map<string, Promise<SessionMemoryReport>>()
   const readRemote = (projectId: string, run: RemoteSessionMemoryRunner): Promise<SessionMemoryReport> => {
     const pending = inFlight.get(projectId)

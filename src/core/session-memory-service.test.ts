@@ -110,9 +110,12 @@ describe('startSessionMemoryService', () => {
     // ControlMaster). Booting with neither — as the server did before this round — let an SSH query
     // WITHOUT the renderer's flag fall through to the local sweep and publish this machine's
     // sessions under the remote host's name.
+    // `tmuxBin: () => null`, like the other local-routing test: a unit test must not shell out, and
+    // the local leg below only needs to be DISTINGUISHABLE from the refusal, not successful.
+    // (`collectSessionMemory` reads memory before it looks at tmux, so `readMem` still fires.)
     const readMem = vi.fn(() => ({ availableMb: 11, totalMb: 22 }))
     startSessionMemoryService({
-      tmuxBin: () => '/usr/bin/tmux',
+      tmuxBin: () => null,
       readMem,
       remote: { isRemoteProject: (id) => id === 'ssh1' }
     })
