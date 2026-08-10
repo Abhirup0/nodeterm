@@ -241,6 +241,7 @@ import type {
 import type { KanbanCreateChoice, KanbanSession } from '../components/kanban/KanbanView'
 import { assignNode, assignedTo, defaultKanban, labelsForCard, migrateProjectTags, resolveColumnRef, unassigned } from '../lib/kanban'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
+import { canCommitCanvas } from '../state/persistGuards'
 import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
@@ -904,6 +905,13 @@ export function Canvas() {
   const settings = useSettings((s) => s.settings)
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
+  /**
+   * WHICH project's nodes `nodesRef` currently holds — the epoch tag that pairs with
+   * `activeProjectId` (see canCommitCanvas). Written only where the load effect installs a
+   * project's nodes, and invalidated (null) on its bail-out paths; null until the first load, so
+   * the initial empty `useNodesState([])` can never be committed as some project's canvas.
+   */
+  const nodesProjectIdRef = useRef<string | null>(null)
   // focusNodeById, for callbacks declared ABOVE its definition (openFile's dedupe focuses the
   // already-open node). Assigned right after the definition, same render-mirror idiom as nodesRef.
   const focusNodeRef = useRef<(nodeId: string) => void>(() => {})
@@ -1578,9 +1586,17 @@ export function Canvas() {
     // (activeSessionApi() in scmDraft/worktrees) hit the active tab's core — the local session for
     // a local tab, the relay session for a remote tab. Resolution is by binding (never persisted).
     setActiveSession(sessionForProject(activeProjectId || '').id)
-    if (!activeProjectId) return
+    // Both bail-outs below leave the PREVIOUS project's nodes mounted in React Flow. Invalidate the
+    // epoch tag on the way out so nothing commits them under the new id (field bug 2026-08-10).
+    if (!activeProjectId) {
+      nodesProjectIdRef.current = null
+      return
+    }
     const project = useProjects.getState().getProject(activeProjectId)
-    if (!project) return
+    if (!project) {
+      nodesProjectIdRef.current = null
+      return
+    }
     // SSH project: (re)open its ControlMaster and record the controlPath so this project's
     // terminal nodes can run over it. Idempotent in main (a live master is reused), so a tab
     // switch back to a connected project is a no-op. Remote tmux is unaffected by the master.
@@ -1605,6 +1621,12 @@ export function Canvas() {
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
     setNodes(flow)
+    // React Flow now holds THIS project's canvas: the commit guard may pair it with the active id
+    // again. Both refs are assigned HERE, synchronously, because `setNodes` only lands on the next
+    // render — mirroring the nodes (same idiom as the peer-mutation path) keeps the array and its
+    // epoch tag atomic, so no timer firing in between can commit the previous project's nodes.
+    nodesRef.current = flow
+    nodesProjectIdRef.current = project.id
     // Worktree facts are per project: drop the previous project's (reset also clears its
     // statuses), then re-resolve from this project's cwd. SSH projects are skipped — local git
     // cannot reason about a remote path. Fire-and-forget: the store is epoch-guarded + fails open.
@@ -1743,7 +1765,11 @@ export function Canvas() {
   // ---- persistence helpers ----
   const commitActiveToStore = useCallback(() => {
     const id = useProjects.getState().activeProjectId
-    if (id)
+    // Epoch pairing: only commit while the nodes React Flow holds belong to the ACTIVE project.
+    // The normal switch flow still commits — every caller commits BEFORE `setActive`, while the two
+    // ids still agree — but an autosave timer armed under the previous project now skips instead of
+    // writing its nodes under the new project's id (field bug 2026-08-10).
+    if (canCommitCanvas(nodesProjectIdRef.current, id))
       useProjects
         .getState()
         .commitCanvas(
