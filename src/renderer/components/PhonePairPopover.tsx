@@ -32,6 +32,11 @@ export function PhonePairPopover({
     updateSettings({ phoneAccessEnabled: next })
     // Start/stop the standing relay host immediately.
     window.nodeTerminal.remoteHost.setPhoneAccess(next)
+    // The relay block is baked into the QR when the listener STARTS — a code already on
+    // screen doesn't know about this flip, and scanning it would still produce a LAN-only
+    // pairing (the field failure: works at home, dies on cellular). Regenerate; start()
+    // cancels the old listener silently.
+    if (phase === 'waiting') void start()
   }
 
   // Straight into the QR on open (local-network pairing is free — no gate here).
@@ -85,6 +90,12 @@ export function PhonePairPopover({
             <>
               <img src={qr} width={208} height={208} alt="Pairing QR code" className="phone-pair__qr" />
               <div className="phone-pair__hint">Scan with the nodeterm iOS app · waiting (10 min)</div>
+              {!phoneAccessEnabled ? (
+                <div className="phone-pair__warn">
+                  LAN-only code: the phone will reach this Mac only on this network. Flip the
+                  toggle below first to also connect from anywhere — the QR refreshes by itself.
+                </div>
+              ) : null}
               {sshHealed ? <div className="phone-pair__ok">✓ Remote Login is on.</div> : null}
             </>
           )
