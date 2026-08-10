@@ -69,6 +69,7 @@ import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
+import { startSessionMemoryService } from '../core/session-memory-service'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -1501,6 +1502,37 @@ app.whenReady().then(async () => {
   // Local sockets only — a remote SSH host's sessions are reaped by that host's own
   // nodeterm-server, never across the wire. Timer is unref'd; no explicit stop needed.
   createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() }).start()
+  // Session memory (docs/superpowers/specs/2026-08-10-session-memory-panel-design.md): the pill's
+  // cheap RAM read plus the on-demand per-session breakdown. An SSH project's sessions live on ITS
+  // host, so they are read THERE over the project's ControlMaster — the same injection Context Link
+  // and remote usage use (core owns the command + the parsing, main owns the master).
+  // `sshProjectManager` is assigned far below, so both closures resolve it lazily; they only ever
+  // run after a project has connected.
+  startSessionMemoryService({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    remote: {
+      isRemoteProject: (projectId) =>
+        (sshProjectManager?.connectedHosts() ?? []).some((h) => h.projectId === projectId),
+      run: async (projectId, command) => {
+        const mgr = sshProjectManager
+        const ref = mgr?.refForProject(projectId)
+        if (!mgr || !ref) return null
+        try {
+          const { code, stdout } = await mgr.sshRun(childArgs(ref.conn, ref.controlPath, command))
+          // Gated on the exit code, unlike the usage runner: every command in the generated script
+          // ends `|| true`, so a completed read exits 0 unconditionally. A non-zero code therefore
+          // means ssh itself could not run it — a dead ControlMaster reports exactly that, with an
+          // EMPTY stdout ("Control socket connect(…): No such file or directory" goes to stderr).
+          // Passing that empty string on would leave "the host answered nothing" to be inferred
+          // from a missing marker; `null` says "we could not look" outright.
+          if (code !== 0) return null
+          return stdout
+        } catch {
+          return null
+        }
+      }
+    }
+  })
   const ackSweeper = createAckSweeper({
     handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
   })

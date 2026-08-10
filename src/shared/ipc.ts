@@ -115,6 +115,13 @@ export const IPC = {
   usageSetProviderCookie: 'usage:set-provider-cookie',
   /** Which cookie providers have one stored — lets the UI show state without handling secrets. */
   usageCookieProviders: 'usage:cookie-providers',
+  /** Per-session memory breakdown for the scoped machine. On demand only — never polled: the
+   *  local sweep walks the whole process table, and the SSH one is an exec on someone else's
+   *  host. */
+  sessionMemory: 'session-memory:read',
+  /** The scoped machine's RAM (available/total) — the cheap read behind the system-resource
+   *  pill. Safe to poll locally; NOT polled for an SSH scope. */
+  sessionMemoryHost: 'session-memory:host',
   contextUpdate: 'context:update',
   contextEnsure: 'context:ensure',
   // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the

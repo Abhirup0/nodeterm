@@ -1488,6 +1488,18 @@ export interface SessionMemoryReport {
   mem: MemInfo | null
 }
 
+/**
+ * What the renderer asks for: the machine a project runs ON, never "this machine" implicitly.
+ * `remote: true` is the renderer saying it already knows (from `usageScope`) that the active
+ * project is an SSH one; the shell's own `isRemoteProject` is a second, independent confirmation,
+ * so a project the shell has not (yet) registered as connected still cannot be answered with the
+ * local machine's sessions.
+ */
+export interface SessionMemoryQuery {
+  projectId?: string
+  remote?: boolean
+}
+
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
 export interface ClaudeUsage {
   /**
