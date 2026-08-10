@@ -60,6 +60,11 @@ import {
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { PARK_MAX, planParkEviction } from '../terminal/park-budget'
+import {
+  mayDisposeOffscreen,
+  offscreenDisposeMs,
+  planOffscreenVisibility
+} from '../terminal/offscreen-policy'
 import { attachGlyphGrid, type GlyphGridAttachment } from '../terminal/glyphgrid-attach'
 import type { GridHandle } from '../glyphgrid/engine'
 import {
@@ -826,6 +831,23 @@ export function TerminalNode({
   // spawn fresh) from a plain unmount (nonce unchanged → park for quick re-adoption).
   const respawnNonceRef = useRef(data.respawnNonce)
   respawnNonceRef.current = data.respawnNonce
+  // --- offscreen dispose (see terminal/offscreen-policy.ts) ---
+  // A terminal nobody has looked at for `settings.offscreenTerminalMinutes` gives its xterm buffer
+  // and its PTY client back: the node STAYS MOUNTED on the canvas and its tmux session keeps
+  // running, so coming back into view is a warm reattach (tmux redraws — the same contract as the
+  // Refresh action and the post-park remount). `offscreenDown` renders the plate and makes the
+  // lifecycle effect spawn nothing; `offscreenEpoch` is what re-runs that effect on BOTH edges
+  // (down → its cleanup disposes, up → it spawns fresh). The ref mirror exists because the
+  // decision is taken inside the lifecycle effect's IntersectionObserver closure, which cannot
+  // see fresh state.
+  const [offscreenDown, setOffscreenDown] = useState(false)
+  const offscreenDownRef = useRef(false)
+  const offscreenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [offscreenEpoch, setOffscreenEpoch] = useState(0)
+  // Selection is a live veto (`mayDisposeOffscreen`): a selected node is one the user is working
+  // with — it can be off-screen mid-drag or right after a ⌘K jump — so it is never taken down.
+  const selectedRef = useRef(selected)
+  selectedRef.current = selected
   // --- glyphgrid (experimental shared renderer) ---
   // This node's registered grid, published by the lifecycle effect so the position effect can push
   // an origin without re-running (and therefore respawning) the terminal. Null for every terminal
@@ -926,6 +948,13 @@ export function TerminalNode({
   // The affordance is absent, not merely refused on click.
   const sshProject = useProjects((s) => !!s.projects.find((p) => p.id === s.activeProjectId)?.ssh)
   const remoteSession = sshProject || isRemoteSessionNode(data)
+  // The SAME question the ↪ affordance asks, mirrored for the offscreen-dispose gate: a remote
+  // session's respawn runs the requireRemote/offline machinery, and a revive while the
+  // ControlMaster happens to be down would surface the offline overlay on a node the user never
+  // touched. Excluded in v1 (offscreen-policy.ts), read through a ref because a project can BECOME
+  // an SSH project long after the lifecycle effect captured its render.
+  const remoteSessionRef = useRef(remoteSession)
+  remoteSessionRef.current = remoteSession
   const canMoveIntoWorktree =
     !!parentWtPath &&
     !parentWtStale &&
@@ -1083,6 +1112,11 @@ export function TerminalNode({
   // (kill the old session + dispose xterm), then recreates the session with the latest
   // `data.cwd`. The node `id` (= tmux persistKey) is unchanged, so it's the same target.
   useEffect(() => {
+    // Offscreen-disposed: this node gave its xterm + PTY client back and is showing the plate.
+    // Spawn NOTHING until it is approached again (the observer below clears the flag and bumps the
+    // epoch, which re-runs this effect). Returning no cleanup is deliberate: there is nothing of
+    // this effect's to tear down, and the down transition's own cleanup already ran.
+    if (offscreenDownRef.current) return
     const container = bodyRef.current
     if (!container) return
 
@@ -2536,6 +2570,54 @@ export function TerminalNode({
           fullRepaint()
         }
         wasVisible = visible
+        // …and the offscreen-dispose state machine, riding the same verdict. Everything it decides
+        // is the pure `planOffscreenVisibility`; this block only executes the plan.
+        const disposeMs = offscreenDisposeMs(
+          useSettings.getState().settings.offscreenTerminalMinutes
+        )
+        const plan = planOffscreenVisibility({
+          visible,
+          down: offscreenDownRef.current,
+          timerArmed: !!offscreenTimerRef.current,
+          disposeMs
+        })
+        if (plan.cancelTimer && offscreenTimerRef.current) {
+          clearTimeout(offscreenTimerRef.current)
+          offscreenTimerRef.current = null
+        }
+        if (plan.revive) {
+          offscreenDownRef.current = false
+          setOffscreenDown(false)
+          setOffscreenEpoch((n) => n + 1) // re-run the lifecycle effect → fresh warm tmux attach
+        }
+        if (plan.armTimer && disposeMs !== null) {
+          offscreenTimerRef.current = setTimeout(() => {
+            offscreenTimerRef.current = null
+            // Re-asked at FIRE time, never at arm time: ten minutes is long enough for every input
+            // to have changed. `wasVisible` is the observer's own latest verdict.
+            if (
+              !mayDisposeOffscreen({
+                visible: wasVisible,
+                remote: remoteSessionRef.current,
+                selected: selectedRef.current
+              })
+            )
+              return
+            // Nothing to reclaim, and nothing safe to respawn: a spawn still in flight has no
+            // session yet, and a session another client closed (or one that ended with no
+            // replacement) must never be re-created — the overlays own those states, and a revive
+            // would land on `noSpawn` with an empty screen. Both are exactly the states the park
+            // branch below refuses to park.
+            const coNow = getCo(termKey)
+            if (!sessionId || coNow.closed || coNow.ended) return
+            offscreenDownRef.current = true
+            // The cleanup must DISPOSE, not park: parking keeps the very buffer this feature exists
+            // to give back. Set before the state flip, since that flip is what runs the cleanup.
+            noParkIds.add(termKey)
+            setOffscreenDown(true)
+            setOffscreenEpoch((n) => n + 1)
+          }, disposeMs)
+        }
       },
       { rootMargin: '256px' }
     )
@@ -2557,6 +2639,13 @@ export function TerminalNode({
       document.removeEventListener('visibilitychange', onVisibilityChange)
       if (resizeTimer) clearTimeout(resizeTimer)
       if (dwellRef.current) clearTimeout(dwellRef.current)
+      // The offscreen timer belongs to THIS effect's observer closure (it reads its `wasVisible`
+      // and `sessionId`), so it dies with it. A respawn's fresh observer re-arms from its own
+      // initial delivery; a down transition already fired and cleared it.
+      if (offscreenTimerRef.current) {
+        clearTimeout(offscreenTimerRef.current)
+        offscreenTimerRef.current = null
+      }
       useAgentStatus.getState().setActive(id, false)
       // Teammates stop seeing us in this node's header. releaseFocus, not reportFocus(null): on a
       // project switch every node unmounts, and an unconditional clear could undo the focus the
@@ -2567,8 +2656,18 @@ export function TerminalNode({
       // persisted status (that would drop the sessionId the context meter looks up on remount,
       // making the meter vanish when you switch projects); only clear the live state. Real
       // deletion drops the entry in Canvas.deleteNodes.
-      useAgentStatus.getState().setState(id, undefined)
-      useAgentNodes.getState().clearForParent(id)
+      //
+      // …EXCEPT for an offscreen dispose, which is not an unmount at all: the node is still on this
+      // canvas, still in this project, still bound to the same running session — it merely gave its
+      // view back. Clearing the live state there would drop the RUNNING/NEEDS-YOU badge and the
+      // subagent fan-out off a node the user can still SEE (its kanban card most of all, which
+      // reads the same store), until the next hook event happened to re-fill them. The badge is
+      // node-id keyed and fed by Canvas's `agent:status` listener, which is entirely independent of
+      // this component's mount — so leaving it alone is both correct and free.
+      if (!offscreenDownRef.current) {
+        useAgentStatus.getState().setState(id, undefined)
+        useAgentNodes.getState().clearForParent(id)
+      }
       termRef.current = null
       fitRef.current = null
       searchAddonRef.current = null
@@ -2645,7 +2744,22 @@ export function TerminalNode({
       if (sessionId) killSession(sessionId)
       term.dispose()
     }
+    // `offscreenEpoch` is bumped on BOTH offscreen edges: going down runs this effect's cleanup
+    // (which disposes rather than parks — see `noParkIds` above), coming back up runs the body
+    // again for a fresh warm attach. It carries no information itself; it is the trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.respawnNonce, offscreenEpoch])
+
+  // A respawn asked for while this node is offscreen-disposed must not be swallowed. The effect
+  // above early-returns while down, so the bump alone would do nothing and the request (Refresh, a
+  // worktree move, a reconnect flush) would be lost until the user happened to pan back. Coming up
+  // here IS the respawn: the effect re-runs and creates the session with the node's current data.
+  // No-op on mount and on every bump of a node that is up, which is every node in the default case.
+  useEffect(() => {
+    if (!offscreenDownRef.current) return
+    offscreenDownRef.current = false
+    setOffscreenDown(false)
+    setOffscreenEpoch((n) => n + 1)
   }, [data.respawnNonce])
 
   // glyphgrid origin sync. React Flow rewrites these two props per frame while the node is
@@ -3450,6 +3564,16 @@ export function TerminalNode({
         {copy.feedback && (
           <div className={`term-copy-pill term-copy-pill--${copy.feedback.kind}`}>
             {copy.feedback.label}
+          </div>
+        )}
+        {/* Offscreen-disposed: the xterm and the PTY client are gone, the tmux session is not.
+            Deliberately above the overlays below it in the DOM but the least insistent of them —
+            it states a resting state, not a failure. Nobody is ever looking at it as it appears
+            (that is the precondition for appearing); it exists for the frame between coming into
+            view and the reattach redraw, and for a node parked at the edge of the viewport. */}
+        {offscreenDown && (
+          <div className="term-node__offscreen nodrag">
+            <span>Session running — reattaches on view</span>
           </div>
         )}
         {co.closed && (

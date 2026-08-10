@@ -25,3 +25,37 @@ export function mayDisposeOffscreen(i: {
 }): boolean {
   return !i.visible && !i.remote && !i.selected
 }
+
+/** What a visibility report owes the offscreen state machine. Pure so the node only has to run it. */
+export interface OffscreenPlan {
+  /** Drop the pending dispose timer (it is armed and no longer wanted). */
+  cancelTimer: boolean
+  /** Arm the dispose timer for `offscreenDisposeMs`. */
+  armTimer: boolean
+  /** Come back up: clear the down flag and re-run the lifecycle effect (fresh warm attach). */
+  revive: boolean
+}
+
+/**
+ * The whole down/up decision, given the observer's latest verdict.
+ *
+ * Visible always wins immediately — a node the user is looking at must never sit behind the plate
+ * waiting for a timer — and re-arming is refused while `down` (there is nothing left to dispose)
+ * or while a timer is already armed (the observer fires on every intersection change, and a
+ * re-arm per fire would push the deadline out forever on a canvas that is being panned).
+ * `disposeMs === null` is the feature switched off: nothing is ever armed, but a node that is
+ * ALREADY down still revives, so flipping the setting to 0 can never strand a disposed terminal.
+ */
+export function planOffscreenVisibility(i: {
+  visible: boolean
+  down: boolean
+  timerArmed: boolean
+  disposeMs: number | null
+}): OffscreenPlan {
+  if (i.visible) return { cancelTimer: i.timerArmed, armTimer: false, revive: i.down }
+  return {
+    cancelTimer: false,
+    armTimer: i.disposeMs !== null && !i.down && !i.timerArmed,
+    revive: false
+  }
+}
