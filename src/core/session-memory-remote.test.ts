@@ -96,6 +96,19 @@ describe('fetchRemoteSessionMemory', () => {
 // The command is generated shell that no compiler checks. Run it for real.
 describe('remoteSessionMemoryCommand under /bin/sh', () => {
   let dir: string
+  // Every temp dir is registered here and removed in afterAll, so a FAILING assertion cannot leak
+  // one into tmpdir (an inline rmSync after the expects never runs when an expect throws).
+  const temps: string[] = []
+
+  const fakeHost = (prefix: string, files: Record<string, string>): string => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+    temps.push(d)
+    for (const [name, body] of Object.entries(files)) {
+      fs.writeFileSync(path.join(d, name), body)
+      fs.chmodSync(path.join(d, name), 0o755)
+    }
+    return d
+  }
 
   // A fake tmux that answers list-panes and nothing else. It reports `$PPID` — the sh running our
   // generated command — NOT its own `$$`: the fake exits immediately, so a `$$` pid is already dead
@@ -106,12 +119,12 @@ describe('remoteSessionMemoryCommand under /bin/sh', () => {
     '#!/bin/sh\nfor a in "$@"; do [ "$a" = "list-panes" ] && { echo "nt-term-a|$PPID|claude"; exit 0; }; done\nexit 1\n'
 
   beforeAll(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sessmem-'))
-    fs.writeFileSync(path.join(dir, 'tmux'), FAKE_TMUX)
-    fs.chmodSync(path.join(dir, 'tmux'), 0o755)
+    dir = fakeHost('sessmem-', { tmux: FAKE_TMUX })
   })
 
-  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }))
+  afterAll(() => {
+    for (const d of temps) fs.rmSync(d, { recursive: true, force: true })
+  })
 
   it('produces a parseable report on a host with a tmux server', async () => {
     const { stdout } = await run('/bin/sh', ['-c', remoteSessionMemoryCommand()], {
@@ -123,18 +136,31 @@ describe('remoteSessionMemoryCommand under /bin/sh', () => {
     // The pane pid was resolved against the REAL process table: a live shell plus its children.
     // A 0 here would mean the rollup never found the pid, which is the failure worth catching.
     expect(r.rows[0].totalMb).toBeGreaterThan(0)
-    expect(r.mem).not.toBeNull()
+    // Never assert `mem` unconditionally: this repo is maintained from macOS, which has no
+    // /proc/meminfo, so a bare `not.toBeNull()` turns `npm test` red there — and contradicts the
+    // sibling test below, which asserts that exact absence is fine.
+    //
+    // The condition is what the SWEEP produced, not `fs.existsSync('/proc/meminfo')`: the test
+    // process's view of the kernel is not the shell's (a stubbed `cat` breaks the read while
+    // existsSync still says yes). So: IF the host emitted any MemAvailable/MemTotal lines, THEN we
+    // must have understood them. Not tautological — it is the only check that the generated
+    // `grep -E '^(MemAvailable|MemTotal):'` matches the kernel's own text, which the unit tests
+    // cannot catch because they feed that section by hand.
+    const memSection = stdout.slice(stdout.indexOf('##MEM'), stdout.indexOf('##PANES'))
+    if (/Mem(Available|Total):/.test(memSection)) expect(r.mem).not.toBeNull()
   })
 
   // A host with no /proc/meminfo (the macOS/BSD shape). Deliberately NO free/vm_stat/sysctl
   // fallback: the sweep still answers with rows, and `mem` is null = "no signal", never a zero.
+  //
+  // COVERAGE LIMIT: the `cat` stub is what creates that condition on Linux. On a host that has no
+  // /proc/meminfo to begin with (macOS) the stub changes nothing, so there the test observes the
+  // NATIVE shape rather than a simulated one — the end state asserted is identical on both, but
+  // only the Linux run proves the stub-induced failure path. Making it strictly meaningful on
+  // macOS would need a `mem`-producing fallback, which is deliberately not implemented.
   it('still reports rows with mem:null when /proc/meminfo is unreadable', async () => {
-    const noproc = fs.mkdtempSync(path.join(os.tmpdir(), 'sessmem-nomem-'))
-    fs.writeFileSync(path.join(noproc, 'tmux'), FAKE_TMUX)
-    fs.chmodSync(path.join(noproc, 'tmux'), 0o755)
     // Stub `cat` so reading /proc/meminfo fails the way it does off Linux.
-    fs.writeFileSync(path.join(noproc, 'cat'), '#!/bin/sh\nexit 1\n')
-    fs.chmodSync(path.join(noproc, 'cat'), 0o755)
+    const noproc = fakeHost('sessmem-nomem-', { tmux: FAKE_TMUX, cat: '#!/bin/sh\nexit 1\n' })
     const { stdout } = await run('/bin/sh', ['-c', remoteSessionMemoryCommand()], {
       env: { ...process.env, PATH: `${noproc}:${process.env.PATH ?? ''}` }
     })
@@ -142,13 +168,10 @@ describe('remoteSessionMemoryCommand under /bin/sh', () => {
     expect(r.ok).toBe(true)
     expect(r.mem).toBeNull()
     expect(r.rows.map((x) => x.nodeId)).toEqual(['term-a'])
-    fs.rmSync(noproc, { recursive: true, force: true })
   })
 
   it('exits 0 and reports no rows when no tmux server is running', async () => {
-    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'sessmem-notmux-'))
-    fs.writeFileSync(path.join(empty, 'tmux'), '#!/bin/sh\nexit 1\n')
-    fs.chmodSync(path.join(empty, 'tmux'), 0o755)
+    const empty = fakeHost('sessmem-notmux-', { tmux: '#!/bin/sh\nexit 1\n' })
     const { stdout } = await run('/bin/sh', ['-c', remoteSessionMemoryCommand()], {
       env: { ...process.env, PATH: `${empty}:${process.env.PATH ?? ''}` }
     })
@@ -156,6 +179,5 @@ describe('remoteSessionMemoryCommand under /bin/sh', () => {
     // A clean miss is an ANSWER: the sweep ran, the host simply has nothing.
     expect(r.ok).toBe(true)
     expect(r.rows).toEqual([])
-    fs.rmSync(empty, { recursive: true, force: true })
   })
 })
