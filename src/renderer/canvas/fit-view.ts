@@ -20,6 +20,7 @@ export const CANVAS_CHROME_SELECTOR = [
   '.minimap',
   '.react-flow__controls',
   '.usage-indicator',
+  '.sysres-indicator',
   '.controls-cluster',
   '.sessions-sidebar',
   '.sessions-icon-cluster',

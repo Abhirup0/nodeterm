@@ -1,0 +1,116 @@
+import { useEffect, useState } from 'react'
+import { formatBytes } from '@shared/fsLimits'
+import { useProjects } from '../state/projects'
+import { useSshConn } from '../state/sshConn'
+import { useSessionMemory } from '../state/sessionMemory'
+import { usageScopeKey } from '../lib/usageScope'
+
+/** `formatBytes` speaks bytes; every number in this feature is MB. */
+const MB = 1024 * 1024
+
+/** Used-RAM thresholds the bar changes colour at. Pressure, not quota — see the bar's comment. */
+const WARN_PERCENT = 75
+const DANGER_PERCENT = 90
+
+/**
+ * Bottom-left system-resource pill: how much RAM the machine the ACTIVE project runs on is using.
+ * Sits beside the usage pill in the same cluster and takes its scope from the same helper
+ * (`usageScopeKey`), so the two can never disagree about which machine they describe.
+ *
+ * Clicking toggles the session-memory panel (Task 9 renders it into the slot below); this pill is
+ * the panel's only entry point.
+ */
+export function SystemResourcePill({ overBoard = false }: { overBoard?: boolean }): JSX.Element | null {
+  const [open, setOpen] = useState(false)
+
+  const mem = useSessionMemory((s) => s.mem)
+  const startHostPoll = useSessionMemory((s) => s.startHostPoll)
+  const stopHostPoll = useSessionMemory((s) => s.stopHostPoll)
+
+  // The pill follows the ACTIVE project, exactly like UsageIndicator: on a local project this is
+  // this machine, on an SSH project it is that host. Selecting the scope KEY (one primitive) rather
+  // than the project object keeps this out of the re-render path of every canvas edit.
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const scopeKey = useProjects((s) =>
+    usageScopeKey(s.projects.find((p) => p.id === s.activeProjectId))
+  )
+  const sshUp = useSshConn((s) => !!s.byProject[activeProjectId])
+
+  // OWNERSHIP CONTRACT — do not add a second caller.
+  // `useSessionMemory`'s poll timer and its active-scope stamp are MODULE SINGLETONS, and this
+  // component is their single owner: only this effect may call `startHostPoll` / `stopHostPoll`.
+  // The panel must NOT call `stopHostPoll` on unmount — it would clear this pill's interval with
+  // nothing left to restart it, and the number would silently freeze until the next scope change.
+  //
+  // `sshUp` is in the deps for the same reason remote usage re-reads on connect (CLAUDE.md, Remote
+  // usage): an SSH project is opened before its ControlMaster is ready, and an SSH scope is read
+  // ONCE with no timer behind it — so a first read that landed on a dead master would leave the pill
+  // blank until the user opened the panel. A local project never appears in `byProject`, so this
+  // never disturbs the 30 s local cadence. A connection DROP re-reads too, which is right: the read
+  // fails and the pill returns to "unknown" instead of holding a stale number under a dead master.
+  useEffect(() => {
+    // No active project (welcome screen) = no machine to describe. Passing an empty project id
+    // would fall through the store's `activeSessionApi()` fallback, which is the one path that can
+    // address the wrong machine.
+    if (!activeProjectId) return
+    startHostPoll(scopeKey, activeProjectId)
+    return () => stopHostPoll()
+  }, [scopeKey, activeProjectId, sshUp, startHostPoll, stopHostPoll])
+
+  if (!activeProjectId) return null
+
+  let body: JSX.Element
+  // `null` = could not read — the normal answer on a non-Linux SSH host, and on any host whose
+  // first read has not landed yet. Pulse, NEVER "0 GB": a confident zero is the one thing this pill
+  // must never say, since the number is the whole reason anyone looks at it. A `totalMb` of zero is
+  // the same fact wearing a plausible shape (and would render the bar as NaN%).
+  if (mem === null || mem.totalMb <= 0) {
+    body = <span className="sysres-pill__dim sysres-pill__pulse">···</span>
+  } else {
+    const usedMb = Math.max(0, mem.totalMb - mem.availableMb)
+    const usedPercent = Math.min(100, (usedMb / mem.totalMb) * 100)
+    // The bar fills as memory is CONSUMED — the opposite direction to the usage pill's bar beside
+    // it, which drains as quota is spent. Deliberate: every system monitor draws RAM this way, and
+    // "the bar is nearly full" is the reading a user already has for memory pressure.
+    const color =
+      usedPercent >= DANGER_PERCENT
+        ? 'var(--danger)'
+        : usedPercent >= WARN_PERCENT
+          ? 'var(--warn)'
+          : 'var(--success)'
+    body = (
+      <>
+        <span className="sysres-pill__minibar" aria-hidden>
+          <span
+            className="sysres-pill__minibar-fill"
+            style={{ width: `${usedPercent}%`, background: color }}
+          />
+        </span>
+        <span className="sysres-pill__num">
+          {formatBytes(usedMb * MB)}
+          <span className="sysres-pill__sep"> / </span>
+          {formatBytes(mem.totalMb * MB)}
+        </span>
+      </>
+    )
+  }
+
+  return (
+    <div className={`sysres-indicator${overBoard ? ' sysres-indicator--board' : ''}`}>
+      {/* Task 9 renders <SessionMemoryPanel /> here while `open`. The pill owns the open state so
+          the panel can be unmounted entirely when closed — its sweep is expensive and must never
+          run behind a closed panel. */}
+      <button
+        className="sysres-pill"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        // The SSH pill is visually identical to the local one, so the title is what answers
+        // "whose memory is this?" without opening the panel.
+        title={scopeKey ? `Memory on ${scopeKey}` : 'Memory on this machine'}
+      >
+        <span className="sysres-pill__icon">RAM</span>
+        {body}
+      </button>
+    </div>
+  )
+}

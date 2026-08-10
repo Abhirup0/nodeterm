@@ -5453,11 +5453,28 @@ body,
   background: rgba(10, 132, 255, 0.14);
 }
 
-/* ---- Claude usage indicator (bottom-left, right of React Flow Controls) ---- */
-.usage-indicator {
+/* ---- Bottom-left pill cluster (usage + system resources) ----
+   ONE flex row, because neither pill can hard-code an offset for the other: the usage pill's width
+   changes with every number it prints, and it is absent altogether for a user with no agent
+   subscription at all.
+   Deliberately carries NO z-index: an absolutely positioned box with `z-index: auto` establishes no
+   stacking context, so each pill's own z-index (5 / 13 / 26 / 60) keeps competing with the sessions
+   sidebar and the kanban overlay exactly as it did when each was anchored on its own. Do not add
+   z-index, transform, filter or opacity here — any of them would trap both pills below the sidebar. */
+.canvas-pills {
   position: absolute;
   left: 60px; /* clear the React Flow Controls column */
   bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---- Claude usage indicator (in the bottom-left cluster) ---- */
+.usage-indicator {
+  /* Positioned — so the z-index rules below still apply and the popover anchors here — but PLACED
+     by the cluster above rather than by its own left/bottom. */
+  position: relative;
   z-index: 5;
   display: flex;
   align-items: center;
@@ -5480,7 +5497,10 @@ body,
 .usage-indicator--board:has(.usage-popover) {
   z-index: 60; /* over the board + banners, below ConfirmDialog/palette (70) */
 }
-.usage-pill {
+/* The two pills share one shell so they read as a single control rather than as two widgets that
+   happen to be adjacent. Grouped rather than duplicated, so tuning one can never drift the other. */
+.usage-pill,
+.sysres-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -5496,7 +5516,8 @@ body,
 }
 .usage-pill:hover { background: rgba(44, 44, 46, 0.95); }
 .usage-pill__icon { color: #d97757; font-size: 13px; }
-.usage-pill__minibar {
+.usage-pill__minibar,
+.sysres-pill__minibar {
   display: inline-block;
   width: 42px;
   height: 6px;
@@ -5504,15 +5525,52 @@ body,
   background: rgba(var(--tint-rgb), 0.14);
   overflow: hidden;
 }
-.usage-pill__minibar-fill { display: block; height: 100%; border-radius: 3px; }
-.usage-pill__num { color: var(--text-strong); }
-.usage-pill__sep { color: rgba(var(--tint-rgb), 0.4); }
+.usage-pill__minibar-fill,
+.sysres-pill__minibar-fill { display: block; height: 100%; border-radius: 3px; }
+.usage-pill__num,
+.sysres-pill__num { color: var(--text-strong); }
+.usage-pill__sep,
+.sysres-pill__sep { color: rgba(var(--tint-rgb), 0.4); }
 /* Non-Claude provider segments read one step quieter than the Claude numbers, so a long pill
    still scans as "Claude first, others after" without needing separate icons per provider. */
 .usage-pill__provider .usage-pill__num { color: rgba(var(--tint-rgb), 0.75); font-size: 11px; }
-.usage-pill__dim { color: rgba(var(--tint-rgb), 0.5); }
-.usage-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; }
+.usage-pill__dim,
+.sysres-pill__dim { color: rgba(var(--tint-rgb), 0.5); }
+.usage-pill__pulse,
+.sysres-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; }
 @keyframes usage-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+/* ---- System-resource pill (RAM of the machine the active project runs on) ----
+   Shares the usage pill's shell above; only the bits that differ live here. */
+.sysres-indicator {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+}
+/* Kanban board is an opaque overlay at z 25; while it's open this pill must sit ABOVE it (same
+   layer as the controls cluster), or the board's bottom-left corner swallows it. Mirrors
+   `.usage-indicator--board`. */
+.sysres-indicator--board {
+  z-index: 26;
+}
+/* Not a copy of `.usage-pill:hover`: that rule's literal is a dark-theme colour, which would read
+   as a black smear on the light theme. An ink overlay over the same card surface lifts it in BOTH
+   themes (the tint token flips with the theme). */
+.sysres-pill:hover {
+  background:
+    linear-gradient(rgba(var(--tint-rgb), 0.08), rgba(var(--tint-rgb), 0.08)),
+    rgba(var(--card-rgb), 0.92);
+}
+/* A word, not a glyph: "12.4 GB / 62.5 GB" beside a quota pill is ambiguous about what is being
+   measured, and every symbol for memory is either an emoji or a guess. Set quiet — it is a unit
+   label, not a value. */
+.sysres-pill__icon {
+  color: rgba(var(--tint-rgb), 0.5);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
 
 .usage-refresh {
   display: inline-flex;

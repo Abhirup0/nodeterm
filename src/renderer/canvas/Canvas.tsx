@@ -127,6 +127,7 @@ import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
+import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
@@ -7886,11 +7887,15 @@ export function Canvas() {
         {/* MUST stay OUTSIDE <ReactFlow>. The library's wrapper carries inline
             `position: relative; z-index: 0`, which makes the whole flow one stacking context
             painted at 0 among flow-wrap's siblings — so no z-index INSIDE it, however large,
-            can ever rise above the sessions sidebar (z 12). Mounted here, the indicator's own
+            can ever rise above the sessions sidebar (z 12). Mounted here, each pill's own
             z-index (5 collapsed, 13 with the popover open) competes in the same context as the
-            sidebar and the open popover wins. It uses no React Flow hooks, and .flow-wrap is
-            position:relative, so its absolute left/bottom anchors are unchanged. */}
-        <UsageIndicator overBoard={kanbanOpen} />
+            sidebar and the open popover wins. Neither uses React Flow hooks, and .flow-wrap is
+            position:relative, so the cluster's absolute left/bottom anchor is unchanged.
+            The cluster itself deliberately has NO z-index — see .canvas-pills in styles.css. */}
+        <div className="canvas-pills">
+          <UsageIndicator overBoard={kanbanOpen} />
+          <SystemResourcePill overBoard={kanbanOpen} />
+        </div>
 
         <PresenceNamePrompt />
 
