@@ -132,6 +132,12 @@ import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
 import {
+  routeControlSource,
+  needsLiveCanvas,
+  sourceIsControlCapable,
+  storedNodeListing
+} from '../lib/controlRouting'
+import {
   FIT_NODE_OPTIONS,
   absolutePosition,
   isMeasured,
@@ -189,7 +195,6 @@ import {
   canRename,
   canTransferFrom,
   canContextLink,
-  canControlCanvas,
   createdAgentId,
   resumeCommand,
   AGENT_CONFIG,
@@ -436,6 +441,24 @@ const offsetFrom = (
 // waiting for — so a refused delivery is retried a few times instead of vanishing.
 const LAUNCH_DELIVERY_ATTEMPTS = 5
 const LAUNCH_RETRY_MS = 400
+
+// A canvas-control request whose source node lives in another project switches that project in
+// first, and the active-project effect hydrates React Flow ASYNCHRONOUSLY — so the handler waits
+// for the node to appear instead of reading an empty canvas one tick too early. Bounded well under
+// the CLI's 120s timeout: a canvas that never arrives becomes a plain "not on an open canvas".
+const CONTROL_TRAVEL_TIMEOUT_MS = 8000
+const CONTROL_TRAVEL_POLL_MS = 60
+async function waitForCanvasNode(
+  find: () => CanvasNode | undefined,
+  timeoutMs = CONTROL_TRAVEL_TIMEOUT_MS
+): Promise<CanvasNode | undefined> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const hit = find()
+    if (hit || Date.now() >= deadline) return hit
+    await new Promise((r) => setTimeout(r, CONTROL_TRAVEL_POLL_MS))
+  }
+}
 
 // A "spawned by" rope: control-capable agent → node it opened (or browser popup → opener).
 // Display-only (never a context link) but persisted per project as `ropes`, so the lineage
@@ -3959,6 +3982,10 @@ export function Canvas() {
     return () => setWorktreeActionHandler(null)
   }, [onWorktreeAction])
 
+  // Same reason as worktreeControlRef below: the agent-control handler needs the CURRENT
+  // travelToProject (defined far below, after the project actions it composes).
+  const travelToProjectRef = useRef<(projectId: string) => void>(() => {})
+
   // Latest worktree callbacks for the agent-control handler. That effect mounts ONCE (empty
   // deps) and these callbacks' identities change with the active project (activeProjectId /
   // isSshProject in their deps) — calling the first-render closures would run against project
@@ -5444,14 +5471,47 @@ export function Canvas() {
       const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) =>
         api.sendAgentControlResult({ requestId, ...r })
 
-      // Authorization boundary: the source must be a live, control-capable agent node.
-      // The `?? 'claude'` MIRRORS pty-manager's spawn-time default (`options.agentId ?? 'claude'`):
+      // Which canvas answers? React Flow holds only the ACTIVE project's nodes, but every OTHER
+      // project's tmux sessions keep running and are re-adopted on the next app start — so after a
+      // restart the agents of every project the app did NOT come up on were answered by a canvas
+      // that had never heard of them, and got the capability rejection below. Resolve the OWNING
+      // project and travel to it first (lib/controlRouting); `list` changes nothing, so it is
+      // answered out of that project's serialized nodes rather than yanking the user's view.
+      let src = nodesRef.current.find((n) => n.id === sourceNodeId)
+      if (!src) {
+        const { projects, activeProjectId: activeId } = useProjects.getState()
+        const route = routeControlSource(projects, activeId, sourceNodeId)
+        if (route.kind === 'switch' || route.kind === 'reopen') {
+          if (!needsLiveCanvas(verb)) {
+            const rows = storedNodeListing(projects.find((p) => p.id === route.projectId)?.nodes ?? [])
+            reply({
+              ok: true,
+              result: rows,
+              message: rows.map((n) => `${n.id} [${n.kind}] ${n.title}`).join('\n')
+            })
+            return
+          }
+          travelToProjectRef.current(route.projectId)
+        }
+        // Wait for the node to show up on the canvas: after a travel, because the active-project
+        // effect hydrates React Flow a tick later; on `active`, because a control call can land
+        // while the BOOT load of the owning project is still in flight — the very moment a
+        // re-adopted agent starts talking again. `unknown`/`blocked` have no canvas to wait for.
+        if (route.kind !== 'unknown' && route.kind !== 'blocked') {
+          src = await waitForCanvasNode(() => nodesRef.current.find((n) => n.id === sourceNodeId))
+        }
+      }
+      if (!src) {
+        reply({ ok: false, error: 'source node is not on an open canvas' })
+        return
+      }
+      // Authorization boundary: the source must be a control-capable agent node. The default for a
+      // node with no agentId MIRRORS pty-manager's spawn-time default (`options.agentId ?? 'claude'`):
       // a PLAIN terminal node (no agentId — including the account "Claude login" node) received
       // the claude hook env at spawn, so a manual `claude` there holds NODETERM_CANVAS_CONTROL —
       // rejecting it here contradicted the env it was handed and surfaced as a baffling
       // "not a control-capable agent" from a session that plainly runs claude.
-      const src = nodesRef.current.find((n) => n.id === sourceNodeId)
-      if (!src || !canControlCanvas((src.data.agentId as AgentId | undefined) ?? 'claude')) {
+      if (!sourceIsControlCapable(src.data.agentId)) {
         reply({ ok: false, error: 'source node is not a control-capable agent' })
         return
       }
@@ -7233,6 +7293,11 @@ export function Canvas() {
     },
     [reopenProject, switchProject]
   )
+  // Latest project-travel callback for the agent-control handler: that effect mounts ONCE (empty
+  // deps), so it cannot close over this callback — same reason as worktreeControlRef.
+  useEffect(() => {
+    travelToProjectRef.current = travelToProject
+  })
 
   // Jump to the node a peer is focused on. focusNodeById already handles the same-project focus and
   // the switch to another OPEN project; the closed-project case has to reopen the tab first and let
