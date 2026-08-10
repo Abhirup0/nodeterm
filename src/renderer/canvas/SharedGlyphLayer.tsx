@@ -19,6 +19,12 @@
  *    (`createContextLossPolicy` → `engine.suspendGpu` / `reviveGpu`), because a GPU reset is what
  *    macOS does on sleep/wake and the shared renderer is meant to be the default. A second loss
  *    inside the cooldown, or a rebuild that throws, falls back through the same `failSharedGlyph`.
+ *    **A GPU reset has a SECOND half**: it also blanks the OffscreenCanvas the atlas rasterizes
+ *    into, and that one cannot be restored — its pixels are gone while `GlyphAtlas.slots` still
+ *    claims every key is cached, which is the "every terminal went blank at once" report. It is
+ *    answered by the same policy object driving `rebuildSharedContext` instead of a revive
+ *    (`createContext`'s `atlasLoss`), and by a pixel check on the revive path for the silent case
+ *    that fires no event at all (`reviveGpuOrRebuild`, `ATLAS_SENTINEL_RGBA`).
  * 3. **The seams the rest of the integration reads**: `useSharedGlyph` (mode + generation +
  *    failure), `setNodeZOrder`/`nodeZFor`/`subscribeNodeZOrder` (paint order),
  *    `setOpaqueNodeIds`/`nodeIsOpaque`/`subscribeOpaqueSet` (which terminals must leave the shared
@@ -46,7 +52,7 @@ import { setBlankCellProbe } from '../glyphgrid/feed'
 import { createFrameLoop, type FrameLoop } from '../glyphgrid/frame-driver'
 import type { GlyphGL } from '../glyphgrid/gl'
 import { createWebgl2GL } from '../glyphgrid/gl-webgl2'
-import { createCanvasRasterizer } from '../glyphgrid/raster'
+import { createCanvasRasterizer, type AtlasPageHealth } from '../glyphgrid/raster'
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useViewMode, viewFor } from '../state/viewMode'
@@ -651,6 +657,14 @@ export interface SharedGlyphContext {
 interface LiveContext extends SharedGlyphContext {
   canvas: HTMLCanvasElement
   gl: GlyphGL
+  /** The atlas PAGE, held for its health surface alone (`sourceIntact` on the revive path). The
+   *  atlas itself never exposes it — see `ATLAS_SENTINEL_RGBA` for why the page has to be asked. */
+  raster: AtlasPageHealth
+  /** The page's own contextlost/contextrestored subscription, and the policy behind it. Both die
+   *  with the context: a listener on a page we have thrown away would rebuild a context that no
+   *  longer exists, and the policy's watchdog would fail a session that has already recovered. */
+  sourceLoss: { dispose(): void }
+  atlasLoss: ContextLossPolicy
   /** The console reset gauge's subscription, held so teardown can drop it: the atlas dies with the
    *  context, but a subscription left on a rebuilt-and-then-disposed one would keep a closure alive
    *  per font change. */
@@ -925,11 +939,49 @@ function createContext(cell: DeviceCell): LiveContext | null {
   installBlankCellProbe()
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
+  /**
+   * The ATLAS PAGE's own loss policy — the 2D half of a GPU reset, which until now had none.
+   *
+   * It is the SAME policy object the WebGL side uses, and the four rules transfer intact: restore
+   * once, give up on a second loss inside the cooldown, give up if the rebuild throws, give up on a
+   * bounded watchdog rather than waiting forever. Two details differ and both are spelled here
+   * rather than in the policy, because they are properties of the 2D context and not of the rule:
+   *
+   *  - `onLost()`'s BOOLEAN IS MEANINGLESS HERE and is deliberately dropped. It means "call
+   *    preventDefault()", which on a WebGL canvas is how you ASK for a restore and on a 2D canvas is
+   *    how you REFUSE automatic restoration — the exact opposite. `onSourceLoss` never cancels.
+   *  - REVIVE IS A REBUILD, not a restore. A lost 2D page cannot be restored: its pixels are gone
+   *    while `GlyphAtlas.slots` still claims every key is present, so the only correct answer is to
+   *    throw the whole context away and let every terminal re-rasterize what it needs against a
+   *    fresh page. That is precisely `rebuildSharedContext`, the funnel a font change already uses,
+   *    and it begins a new cell epoch for the same reason a font change does.
+   *
+   * SUSPEND IS A NO-OP, and that is the useful behaviour rather than a gap: the GL texture still
+   * holds the LAST GOOD upload of the page, so leaving the canvas exactly as it is shows the user
+   * their text — frozen — for the fraction of a second until the restore lands. Parking frames would
+   * show the same thing; re-uploading, which is what the un-fixed code did, shows nothing at all.
+   */
+  const atlasLoss = createContextLossPolicy({
+    now: () => Date.now(),
+    suspend: () => undefined,
+    revive: () => rebuildSharedContext(),
+    fail: (reason, err) => failSharedGlyph(reason, err),
+    setTimer: (cb, ms) => window.setTimeout(cb, ms),
+    clearTimer: (h) => window.clearTimeout(h)
+  })
   return {
     engine,
     atlas,
     canvas,
     gl,
+    raster,
+    atlasLoss,
+    sourceLoss: raster.onSourceLoss({
+      lost: () => {
+        atlasLoss.onLost()
+      },
+      restored: () => atlasLoss.onRestored()
+    }),
     resetLog: installAtlasResetLog(atlas),
     fontKey: fontKeyOf(fontFamily, fontSize, fontWeight, fontWeightBold),
     dpr,
@@ -949,6 +1001,13 @@ function disposeContext(): void {
   // than submit against deleted objects (see `LiveContext.disposed`).
   ctx.disposed = true
   try {
+    // FIRST, and before anything that can throw: the atlas page's listeners and the watchdog behind
+    // them are the two things here that could outlive the context. A surviving listener would drive
+    // a rebuild off a page nobody is drawing from, and a surviving watchdog would fail a session
+    // whose context was merely handed back (this rebuild, the mode switched off) — which cannot then
+    // be re-enabled without a relaunch.
+    ctx.sourceLoss.dispose()
+    ctx.atlasLoss.stop()
     ctx.resetLog.dispose()
     ctx.engine.disposeAll()
     ctx.gl.dispose()
@@ -1167,6 +1226,37 @@ export function createPixelRatioWatcher(
       disarm()
     }
   }
+}
+
+/**
+ * Bring the engine's GPU objects back — UNLESS the atlas page did not survive whatever took them.
+ * Returns whether the caller may carry on with this context; false means it has been rebuilt and
+ * the generation bump is already on its way.
+ *
+ * THE CASE THIS CATCHES, and why the WebGL side's own policy cannot. A GPU reset takes the WebGL
+ * context AND blanks the OffscreenCanvas the atlas rasterizes into. The WebGL half announces itself
+ * and is answered by `engine.reviveGpu`, which re-uploads the atlas page — and `reviveGpu`'s comment
+ * says outright that this costs one upload rather than a re-rasterization "because the atlas SOURCE
+ * did not die with the context". When it did die, that upload is of an EMPTY page: `GlyphAtlas.slots`
+ * still holds every key, so nothing re-rasterizes, and every terminal on the canvas goes blank at
+ * once and stays blank until a font or dpr change happens to rebuild.
+ *
+ * The 2D context usually announces itself too (`onSourceLoss`), and when it does this check never
+ * fires. It exists for the case where it does NOT — a backing store that comes back wiped with no
+ * event — which is why the question is asked of the PIXELS (`ATLAS_SENTINEL_RGBA`) rather than of a
+ * flag. One 1px readback, on a path that runs at most once per context.
+ */
+function reviveGpuOrRebuild(ctx: LiveContext): boolean {
+  if (!ctx.raster.sourceIntact()) {
+    console.warn(
+      '[glyphgrid] the atlas page did not survive the GPU outage — every cached glyph now points ' +
+        'at a blank texel, so the context is being rebuilt rather than re-uploaded'
+    )
+    rebuildSharedContext()
+    return false
+  }
+  ctx.engine.reviveGpu()
+  return true
 }
 
 /** Fires when a context has just been BUILT. The component listens so it can mount the fresh
@@ -1965,7 +2055,9 @@ export function SharedGlyphLayer(): JSX.Element {
     // comment: nothing enforces that ordering, and a mount is the one moment we can still decide.
     if (ctx.engine.gpuIsSuspended()) {
       try {
-        ctx.engine.reviveGpu()
+        // Rebuilt instead of revived (a blanked atlas page) means this context is gone and the
+        // generation bump will re-run this effect against the fresh one.
+        if (!reviveGpuOrRebuild(ctx)) return
         console.warn('[glyphgrid] mounted onto a suspended engine — GPU objects rebuilt')
       } catch (err) {
         // The context is still gone (its programs will not compile), so there is nothing to mount
@@ -2171,7 +2263,11 @@ export function SharedGlyphLayer(): JSX.Element {
         ctx.engine.suspendGpu()
       },
       revive: () => {
-        ctx.engine.reviveGpu()
+        // A GPU reset takes the atlas page with the context. Reviving onto a blanked page would
+        // upload an empty atlas over every terminal on the canvas, so that case rebuilds instead —
+        // and there is no runtime to start here, because there is no longer a context to start it
+        // against.
+        if (!reviveGpuOrRebuild(ctx)) return
         runtime = startRuntime()
       },
       fail: (reason, err) => failSharedGlyph(reason, err),
