@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { IPC } from '../shared/ipc'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
-import { startSessionMemoryService } from './session-memory-service'
+import { startSessionMemoryService, sshScopePredicate } from './session-memory-service'
 import type { MemInfo, SessionMemoryReport, SessionMemoryQuery } from '../shared/types'
 
 // The repo's own platform fake (src/core/platform-fake.ts) — a plain recording object whose
@@ -73,15 +73,80 @@ describe('startSessionMemoryService', () => {
     // The two sources disagree — the renderer says SSH, the manager has no such project (not yet
     // connected, or already gone). Trusting the manager here would sweep THIS machine and label
     // the rows as the host's. The claim of remoteness is what decides; only its ANSWER is doubted.
+    // `run` returns a VALID reply, so `ok:false` can no longer be true by accident: it would be
+    // `true` if the read were routed remotely and `true` (locally swept) if it were not — the only
+    // way to get a refusal here is the disagreement being resolved towards the remote host and the
+    // runner reporting it could not look. `readMem` catches a local sweep whatever tmux does.
+    const readMem = vi.fn(() => ({ availableMb: 11, totalMb: 22 }))
     const run = vi.fn(async () => null)
     startSessionMemoryService({
       tmuxBin: () => '/usr/bin/tmux',
+      readMem,
       remote: { run, isRemoteProject: () => false }
     })
     const r = await read({ projectId: 'ssh1', remote: true })
     expect(run).toHaveBeenCalledOnce()
-    expect(r.ok).toBe(false)
-    expect(r.rows).toEqual([])
+    expect(r).toEqual({ ok: false, rows: [], mem: null })
+    expect(readMem).not.toHaveBeenCalled()
+  })
+
+  it('treats a DISCONNECTED ssh project as remote (identity, not liveness)', async () => {
+    // The desktop's `isRemoteProject`. `connectedHosts()` answers "is the master up right now",
+    // which is false for a project that is reconnecting, just dropped, or not opened yet — and a
+    // "no" there used to mean the LOCAL sweep answered under the remote host's name. The workspace
+    // index is the connection-independent source, so an SSH project counts while offline.
+    const isRemoteProject = sshScopePredicate({
+      sshProjectIds: () => ['ssh1'],
+      connectedProjectIds: () => [] // nothing connected: every master is down
+    })
+    expect(isRemoteProject('ssh1')).toBe(true)
+    expect(isRemoteProject('local1')).toBe(false)
+
+    // And end-to-end through the service, with the renderer's flag ABSENT — the shell's answer is
+    // the only thing standing between this query and a local sweep (the renderer flag is Task 5/7).
+    const readMem = vi.fn(() => ({ availableMb: 11, totalMb: 22 }))
+    const run = vi.fn(async () => null)
+    startSessionMemoryService({ tmuxBin: () => '/usr/bin/tmux', readMem, remote: { run, isRemoteProject } })
+    const r = await read({ projectId: 'ssh1' })
+    expect(run).toHaveBeenCalledOnce()
+    expect(r).toEqual({ ok: false, rows: [], mem: null })
+    expect(readMem).not.toHaveBeenCalled()
+  })
+
+  it('counts a connected project the index has not listed', async () => {
+    // The other direction: an index that has not loaded (or an entry added by another machine)
+    // must not make a project with a LIVE master read as local. Neither source can veto the other.
+    const isRemoteProject = sshScopePredicate({
+      sshProjectIds: () => [],
+      connectedProjectIds: () => ['ssh2']
+    })
+    expect(isRemoteProject('ssh2')).toBe(true)
+  })
+
+  it('coalesces the two channels onto ONE remote round trip', async () => {
+    // A remote read is a whole-process-table `ps` on somebody else's machine, and the panel wants
+    // both the rows and the RAM number. Firing them concurrently must not cost two ssh execs.
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((res) => {
+      release = res
+    })
+    const run = vi.fn(async () => {
+      await gate
+      return OK_REPLY
+    })
+    startSessionMemoryService({
+      tmuxBin: () => '/usr/bin/tmux',
+      remote: { run, isRemoteProject: () => true }
+    })
+    const both = Promise.all([read({ projectId: 'ssh1' }), host({ projectId: 'ssh1' })])
+    release?.()
+    const [report] = await both
+    expect(run).toHaveBeenCalledOnce()
+    expect(report.ok).toBe(true)
+
+    // Not a cache: once settled, the next read runs again.
+    await read({ projectId: 'ssh1' })
+    expect(run).toHaveBeenCalledTimes(2)
   })
 
   it('never runs the local sweep for a remote scope with no projectId', async () => {

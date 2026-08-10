@@ -69,7 +69,7 @@ import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
-import { startSessionMemoryService } from '../core/session-memory-service'
+import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -1511,8 +1511,15 @@ app.whenReady().then(async () => {
   startSessionMemoryService({
     tmuxBin: () => ptyManager.getTmuxBin(),
     remote: {
-      isRemoteProject: (projectId) =>
-        (sshProjectManager?.connectedHosts() ?? []).some((h) => h.projectId === projectId),
+      // Identity, not liveness: a DISCONNECTED SSH project is still someone else's machine, and
+      // `connectedHosts()` alone would answer "local" for it — exactly the window the service's
+      // refusal exists for. The workspace index is the connection-independent source; the live
+      // masters are OR-ed in for a project the index has not (yet) listed. See sshScopePredicate.
+      isRemoteProject: sshScopePredicate({
+        sshProjectIds: () => workspaceStore.sshProjectIds(),
+        connectedProjectIds: () =>
+          (sshProjectManager?.connectedHosts() ?? []).map((h) => h.projectId)
+      }),
       run: async (projectId, command) => {
         const mgr = sshProjectManager
         const ref = mgr?.refForProject(projectId)

@@ -22,21 +22,66 @@ export interface SessionMemoryServiceOptions {
   }
 }
 
-const EMPTY = (mem: MemInfo | null): SessionMemoryReport => ({ ok: false, rows: [], mem })
+/** The facts a shell can offer about which projects are somebody else's machine. */
+export interface SshScopeSources {
+  /** Every project the workspace index calls an SSH project — the IDENTITY question. */
+  sshProjectIds: () => string[]
+  /** Projects whose ControlMaster is up right now — a LIVENESS question, and only a supplement. */
+  connectedProjectIds?: () => string[]
+}
+
+/**
+ * Build the shell's `isRemoteProject`. This must answer "is this project someone else's machine?",
+ * which is a property of the PROJECT, not of its connection: a disconnected SSH project is still a
+ * remote scope. Asking `connectedHosts()` alone votes "local" for a project that is reconnecting,
+ * just dropped, or not connected yet — precisely the window the refusal below exists for, and the
+ * one where a local sweep would be published under the remote host's name.
+ *
+ * Connectedness is still OR-ed in as a second source: a project the index has not (yet) listed —
+ * a stale/unloaded index, an entry added by another machine — but which has a live master is
+ * unambiguously remote too. Neither source can veto the other; either one alone is enough.
+ *
+ * Both getters are called per query (projects connect and disconnect under us) and must not throw.
+ */
+export function sshScopePredicate(sources: SshScopeSources): (projectId: string) => boolean {
+  return (projectId: string): boolean =>
+    sources.sshProjectIds().includes(projectId) ||
+    (sources.connectedProjectIds?.() ?? []).includes(projectId)
+}
+
+const EMPTY = (): SessionMemoryReport => ({ ok: false, rows: [], mem: null })
 
 export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { dispose(): void } {
   /**
    * Two independent sources say "this scope is remote", and EITHER is enough:
    *  - the renderer's own `remote` flag (it already knows from `usageScope` which project is an
    *    SSH one), and
-   *  - the shell's project manager.
-   * They are OR-ed, not AND-ed, on purpose. A manager that has not (yet) registered a project as
-   * connected — reconnecting, just dropped — would otherwise turn a remote query into a LOCAL
-   * sweep, and the panel would label this machine's sessions as the host's. A claim of remoteness
-   * is trusted; only its answer can fail.
+   *  - the shell's `isRemoteProject` (see `sshScopePredicate`).
+   * They are OR-ed, not AND-ed, on purpose. A source that answers "no" because it is momentarily
+   * uninformed — an index not loaded, a master that just dropped — would otherwise turn a remote
+   * query into a LOCAL sweep, and the panel would label this machine's sessions as the host's. A
+   * claim of remoteness is trusted; only its ANSWER can fail.
    */
   const isRemote = (q: SessionMemoryQuery): boolean =>
     q.remote === true || (!!q.projectId && !!opts.remote?.isRemoteProject(q.projectId))
+
+  /**
+   * One in-flight remote read per project, shared by both channels. A remote read is a `ps` of the
+   * whole process table on somebody else's machine, and the panel legitimately wants both the RAM
+   * number and the rows — which is two identical execs back to back unless they are coalesced.
+   * Keyed by projectId (the only thing the command depends on) and cleared on settle, so this is a
+   * concurrency guard, never a cache: a later read always re-runs.
+   */
+  const inFlight = new Map<string, Promise<SessionMemoryReport>>()
+  const readRemote = (projectId: string, run: RemoteSessionMemoryRunner): Promise<SessionMemoryReport> => {
+    const pending = inFlight.get(projectId)
+    if (pending) return pending
+    const p = fetchRemoteSessionMemory(projectId, run).finally(() => {
+      inFlight.delete(projectId)
+    })
+    inFlight.set(projectId, p)
+    return p
+  }
 
   platform().handle(
     IPC.sessionMemory,
@@ -45,8 +90,8 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
         // No ControlMaster injected (Server Edition), or nothing to run against: answering with
         // the LOCAL machine's sessions would attribute one host's memory to another. Refuse — and
         // with a null `mem` too, since even the RAM number would describe the wrong machine.
-        if (!opts.remote || !q.projectId) return EMPTY(null)
-        return fetchRemoteSessionMemory(q.projectId, opts.remote.run)
+        if (!opts.remote || !q.projectId) return EMPTY()
+        return readRemote(q.projectId, opts.remote.run)
       }
       return collectSessionMemory({ tmuxBin: opts.tmuxBin, readMem: opts.readMem })
     }
@@ -58,11 +103,12 @@ export function startSessionMemoryService(opts: SessionMemoryServiceOptions): { 
       if (!isRemote(q)) return (opts.readMem ?? readMemInfo)()
       if (!opts.remote || !q.projectId) return null
       // One round trip serves both numbers; the pill uses only `mem`.
-      return (await fetchRemoteSessionMemory(q.projectId, opts.remote.run)).mem
+      return (await readRemote(q.projectId, opts.remote.run)).mem
     }
   )
 
-  // Nothing to tear down: both handlers are pull-only, with no timer and no cache. `dispose` exists
-  // so a shell can treat this like the other services it starts.
+  // Nothing to tear down: both handlers are pull-only, with no timer and no cache (`inFlight` holds
+  // only unsettled promises). `dispose` exists so a shell can treat this like the other services it
+  // starts.
   return { dispose: (): void => {} }
 }
