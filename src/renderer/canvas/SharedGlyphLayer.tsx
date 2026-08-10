@@ -1247,6 +1247,13 @@ export function createPixelRatioWatcher(
  * flag. One 1px readback, on a path that runs at most once per context.
  */
 function reviveGpuOrRebuild(ctx: LiveContext): boolean {
+  // ALREADY GONE. Both halves of a GPU reset land as events, in an order nobody controls, and the
+  // 2D half answers by DISPOSING this context — while the generation bump that tears the effect
+  // down is a React state update, i.e. not synchronous. So `webglcontextrestored` can arrive for a
+  // context that no longer exists, and reviving it would call into a disposed GL layer: a throw the
+  // policy reads as a failed rebuild, taking the whole session to the DOM renderer for a context
+  // that was merely replaced. Same guard, same reason, as `syncAtlasPixelRatio`'s.
+  if (ctx.disposed) return false
   if (!ctx.raster.sourceIntact()) {
     console.warn(
       '[glyphgrid] the atlas page did not survive the GPU outage — every cached glyph now points ' +
