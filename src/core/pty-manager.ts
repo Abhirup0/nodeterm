@@ -32,6 +32,7 @@ import {
 import { parsePaneCursor } from './pane-cursor'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
 import { primePtyCeiling, readPtyDevices, spawnFailureHint } from './pty-devices'
+import { REAP_SWEEP_MS, shouldReap } from './pty-reap'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { bracketedInjection } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
@@ -361,6 +362,14 @@ interface Session {
   sshRemote?: NonNullable<PtyCreateOptions['sshRemote']>
   /** Output arrived since the last scrollback snapshot — idle sessions skip the capture. */
   outputSinceSnapshot: boolean
+  /** A tmux session (local `nt-<id>`, or the remote one an SSH project attaches to) is holding this
+   *  session's work, so the pty client here is expendable: detaching it loses nothing and the next
+   *  create re-attaches with `new-session -A`. It is the precondition for the idle reap — see
+   *  pty-reap.ts — and it is exactly the condition `persisted` is computed from at spawn. */
+  tmuxBacked: boolean
+  /** When the reap sweep first saw this session with nobody attached (no live subscriber, no relay
+   *  sink); `null` while somebody is. See `reapTick`. */
+  unwatchedSince: number | null
   /**
    * The (client, owner) pairs that currently OWE us a resume — a ledger of FLOW TICKETS
    * (`flowTicket`), not of clients. The pty is paused while this set is non-empty and resumes only
@@ -525,6 +534,9 @@ export class PtyManager {
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
+  /** ONE shared sweep for the idle reap (see `reapTick` / pty-reap.ts), armed by the first
+   *  tmux-backed session and cleared once no session is left. */
+  private reapTimer: ReturnType<typeof setInterval> | null = null
 
   private ensureSnapshotTimer(): void {
     if (this.snapshotTimer) return
@@ -548,6 +560,66 @@ export class PtyManager {
       clearInterval(this.snapshotTimer)
       this.snapshotTimer = null
     }
+  }
+
+  private ensureReapTimer(): void {
+    if (this.reapTimer) return
+    this.reapTimer = setInterval(() => this.reapTick(), REAP_SWEEP_MS)
+    // Node keeps the process alive for a pending interval, and this one would otherwise outlive the
+    // work it sweeps (the snapshot timer clears itself the same way, in its own tick).
+    this.reapTimer.unref?.()
+  }
+
+  /**
+   * Release the client pty of every tmux-backed session nobody has been attached to for
+   * `REAP_IDLE_MS` — the safety net under the normal release paths. The tmux session, its processes
+   * and its scrollback are untouched: this is the SAME detach the last subscriber's departure does,
+   * and the next `pty:create` re-attaches to it. Read pty-reap.ts before changing any of it.
+   *
+   * "Attached" is decided against `platform().clientIds()`, not against the subscriber set: the
+   * whole point is the subscriber whose window/tab/peer is GONE and which therefore can never send
+   * the `pty:kill` that would release the pty. A client id is never reused (Electron webContents
+   * ids and the server's `nextUiId` both only go up), so a client that comes back comes back as a
+   * new id and creates its sessions afresh — there is no returning client to strand.
+   */
+  private reapTick(): void {
+    const live = new Set(platform().clientIds())
+    const now = Date.now()
+    for (const [sessionId, session] of [...this.sessions]) {
+      // A relay sink is a watcher (somebody's phone is mirroring this session); a parked terminal
+      // is still a subscriber, and its client is still attached.
+      const watched =
+        !!session.onData || [...session.subscribers].some((sub) => live.has(subClient(sub)))
+      if (watched) session.unwatchedSince = null
+      else session.unwatchedSince ??= now
+      const reap = shouldReap(
+        { tmuxBacked: session.tmuxBacked, watched, unwatchedSince: session.unwatchedSince },
+        now
+      )
+      if (reap) this.releaseClient(sessionId, session)
+    }
+    if (this.sessions.size === 0 && this.reapTimer) {
+      clearInterval(this.reapTimer)
+      this.reapTimer = null
+    }
+  }
+
+  /**
+   * Detach this process's pty CLIENT from a session and forget it: the final scrollback snapshot,
+   * `releasePty` (never a bare `proc.kill()` — a paused pty never reads EOF, so kill alone leaks
+   * the master fd; see pty-release.ts), and the index cleanup. Shared by the last subscriber's
+   * departure and the idle reap, which differ only in what made the session unwatched. A tmux
+   * session is NOT killed here, in either case — that is `destroySession`.
+   */
+  private releaseClient(sessionId: string, session: Session): void {
+    if (session.flushTimer) clearTimeout(session.flushTimer)
+    // Final snapshot on detach (node unmount / app quit) so the very latest scrollback survives
+    // a reboot. The tmux session itself keeps running, so this only races a same-instant capture.
+    // Skipped when nothing arrived since the last periodic capture (pane content is unchanged).
+    if (session.persistKey && session.outputSinceSnapshot)
+      void this.snapshotScrollback(session.persistKey, session.sshRemote)
+    releasePty(session.proc as ReleasablePty)
+    this.forget(sessionId, session)
   }
 
   /** Must run after app is ready (needs userData path). */
@@ -1381,10 +1453,21 @@ export class PtyManager {
       persistKey: persisted ? options.persistKey : undefined,
       sshRemote: remote,
       outputSinceSnapshot: true, // capture the initial screen on the first tick
+      // `persisted` IS "a tmux session (local or remote) is holding this work" — the same condition
+      // that gates the scrollback snapshots. Recorded under its own name because the reap decision
+      // asks a different question of it: not "is it worth snapshotting" but "would releasing this
+      // pty client destroy anything" (pty-reap.ts).
+      tmuxBacked: persisted,
+      unwatchedSince: null,
       pausedBy: new Set<string>(),
       accountFallback
     }
-    if (persisted) this.ensureSnapshotTimer()
+    // Both shared timers are armed by the first session that needs them: the scrollback snapshots
+    // and the idle reap are both about tmux-backed sessions and nothing else.
+    if (persisted) {
+      this.ensureSnapshotTimer()
+      this.ensureReapTimer()
+    }
     this.sessions.set(sessionId, session)
     // Index by node id even when the session is NOT tmux-persisted (`persisted` only governs
     // scrollback snapshots): co-attach must work for a plain-shell session too. Detached
@@ -1769,16 +1852,9 @@ export class PtyManager {
       this.applySize(sessionId, session)
       return
     }
-    if (session.flushTimer) clearTimeout(session.flushTimer)
-    // Final snapshot on detach (node unmount / app quit) so the very latest scrollback survives
-    // a reboot. The tmux session itself keeps running, so this only races a same-instant capture.
-    // Skipped when nothing arrived since the last periodic capture (pane content is unchanged).
-    if (session.persistKey && session.outputSinceSnapshot)
-      void this.snapshotScrollback(session.persistKey, session.sshRemote)
-    // releasePty (not proc.kill()): a paused pty never reads EOF, so kill() alone leaks the
-    // master fd on every detach until the process runs out of descriptors (see pty-release.ts).
-    releasePty(session.proc as ReleasablePty)
-    this.forget(sessionId, session)
+    // Nobody is left: detach this process's pty client (the tmux session keeps running, as always).
+    // Shared with the idle reap — see `releaseClient`.
+    this.releaseClient(sessionId, session)
   }
 
   /**
@@ -2267,6 +2343,10 @@ export class PtyManager {
     if (this.snapshotTimer) {
       clearInterval(this.snapshotTimer)
       this.snapshotTimer = null
+    }
+    if (this.reapTimer) {
+      clearInterval(this.reapTimer)
+      this.reapTimer = null
     }
     const finals: Promise<unknown>[] = []
     for (const session of this.sessions.values()) {
