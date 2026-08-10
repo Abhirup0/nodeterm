@@ -230,10 +230,13 @@ export function buildRealApi(
     paneCommand: (persistKey) =>
       client.request(IPC.ptyPaneCommand, persistKey).catch(() => null) as Promise<string | null>,
     // No server handler — the session-name poll degrades to no adopted name. A PRE-EXISTING gap,
-    // not a grok one: `IPC.ptyReadSessionName` has never been registered server-side, so claude's
-    // read leg is equally stubbed here (the write leg works on both surfaces — it goes through
-    // pty.sendText). Fixing it means moving the routing into core and registering it from both
-    // shells, exactly as `core/transcript-ipc.ts` did for the ⌘M transcript channels.
+    // and not any one agent's: `IPC.ptyReadSessionName` has never been registered server-side, so
+    // claude's, grok's and gemini's read legs are equally stubbed here (the write leg works on both
+    // surfaces — it goes through pty.sendText). The routing itself is already in core
+    // (`core/agent-session-name.ts`) and the server already threads gemini's path association into
+    // its session-name SWEEP, which is what keeps the phone's names correct; only this per-node poll
+    // is missing. Fixing it means registering the channel from both shells, exactly as
+    // `core/transcript-ipc.ts` did for the ⌘M transcript channels.
     readSessionName: () => Promise.resolve(''),
     onData: (sessionId, listener) =>
       client.subscribe(IPC.ptyData(sessionId), listener as Listener),

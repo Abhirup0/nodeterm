@@ -93,6 +93,7 @@ import { useTerminalSearch } from '../terminal/useTerminalSearch'
 import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
+import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import type { ClientId } from '@shared/presence'
@@ -105,7 +106,8 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, createdAgentId, resumeCommand, withPermissionMode, agentConfig } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, resumeCommand, agentConfig } from '@shared/agents/config'
+import { withPermissionMode } from '@shared/agents/approval-mode'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
@@ -797,9 +799,16 @@ export function TerminalNode({
   const contextLinkCapable = !!agentId && canContextLink(agentId) // context-link tip wording only; handles render on all terminals
   const showUsage = !!agentId && hasUsage(agentId) // per-node context-window meter
   const showChat = !!agentId && canChat(agentId) // Cmd+M opens a chat panel instead of markdown
+  // Everything that reads the conversation through CLAUDE's transcript readers (`context.ensure`'s
+  // mount-time meter rehydration, the find bar's transcript index) — deliberately NOT `showUsage`,
+  // which now spans three agents. See lib/transcriptGates.ts for what sharing that gate broke.
+  const claudeTranscript = readsClaudeTranscript(agentId)
   // The header 💬 now opens the board-log comments flyout (right side); ⌘M keeps the markdown/chat view.
   const [commentsOpen, setCommentsOpen] = useState(false)
-  const canRenameNode = !!agentId && canRename(agentId) // title ⇄ session-name two-way sync
+  const canRenameNode = !!agentId && canRename(agentId) // WRITE leg: push `/rename <name>` back
+  // READ leg: adopt the agent's own session name into the title. A superset of canRenameNode —
+  // gemini names its own sessions but has no rename command, so it polls and never pushes.
+  const canReadTitleNode = !!agentId && canReadTitle(agentId)
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
 
   // Keep the listener's mirrors current every render.
@@ -847,11 +856,19 @@ export function TerminalNode({
   // Feed the context meter without waiting for a live hook event: after an app restart the
   // continuing tmux session is idle and emits no event, so the main-process tailer is never
   // re-fed. Re-runs if the sessionId changes (track is idempotent). cwd is a path fallback.
+  //
+  // CLAUDE ONLY (`claudeTranscript`, not `showUsage`). The handler resolves this sessionId through
+  // claude's `resolveTranscript`, whose cwd fallback answers *the newest claude transcript for that
+  // cwd* — for a codex/gemini node that is a stranger's session, tracked on the CLAUDE tail under
+  // this node's session id, so its meter would show another agent's fill and then flap against the
+  // correct tail. The cost of the gate: a codex/gemini meter fills on the first hook event after
+  // mount instead of instantly. Their tails need no resolver (the hook envelope carries the path),
+  // so nothing else is lost. Per-agent rehydration is a follow-up task — see transcriptGates.ts.
   useEffect(() => {
     const sid = status?.sessionId
-    if (showUsage && sid)
+    if (claudeTranscript && sid)
       window.nodeTerminal.context.ensure(sid, (data.cwd as string) || undefined, data.accountId)
-  }, [showUsage, status?.sessionId, data.cwd, data.accountId])
+  }, [claudeTranscript, status?.sessionId, data.cwd, data.accountId])
   const updateNodeInternals = useUpdateNodeInternals()
 
   const [searchOpen, setSearchOpen] = useState(false)
@@ -936,7 +953,9 @@ export function TerminalNode({
     sessionId: status?.sessionId,
     cwd: data.cwd as string | undefined,
     accountId: data.accountId,
-    searchTranscript: showUsage,
+    // The transcript index reads claude's JSONL through the same resolver, so it is gated on the
+    // claude-transcript fact, NOT on the meter's `showUsage` — see lib/transcriptGates.ts.
+    searchTranscript: claudeTranscript,
     open: searchOpen,
     readBuffer
   })
@@ -2842,11 +2861,13 @@ export function TerminalNode({
   // shows up after a resume. Resolved strictly by THIS node's sessionId — we do NOT sync until it's
   // known, otherwise same-folder nodes would adopt whichever session wrote last. Polls only while
   // the title still auto-tracks the session (titleAuto) and stops once the user renames by hand.
-  // Gated on canRenameNode (RENAME_CAPABLE). `agentId` rides along so main picks the right reader:
-  // claude's transcript .jsonl vs grok's summary.json. It is resolved at node creation and immutable
-  // thereafter — same as `data.accountId` beside it — so neither belongs in the dep array.
+  // Gated on canReadTitleNode (TITLE_READ_CAPABLE), NOT on canRenameNode: reading a session's name
+  // and being able to set one are different capabilities, and gemini has only the first. `agentId`
+  // rides along so main picks the right reader: claude's transcript .jsonl vs grok's summary.json vs
+  // gemini's update_topic tool call. It is resolved at node creation and immutable thereafter —
+  // same as `data.accountId` beside it — so neither belongs in the dep array.
   useEffect(() => {
-    if (!canRenameNode || data.titleAuto === false) return
+    if (!canReadTitleNode || data.titleAuto === false) return
     const sid = status?.sessionId ?? ''
     if (!sid) return
     let cancelled = false
@@ -2878,7 +2899,7 @@ export function TerminalNode({
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [id, canRenameNode, status?.sessionId, data.titleAuto, updateNodeData])
+  }, [id, canReadTitleNode, status?.sessionId, data.titleAuto, updateNodeData])
 
   // Cmd/Ctrl+M toggles markdown view of this terminal's output (only when hovered).
   useEffect(() => {
@@ -3210,7 +3231,12 @@ export function TerminalNode({
             </button>
           </Tooltip>
         )}
-        <Tooltip label={showUsage ? 'Search terminal + conversation' : 'Search this terminal'}>
+        {/* `claudeTranscript`, NOT `showUsage`: the transcript leg of the search is gated on the
+            claude-transcript fact (see the `useTerminalSearch` call above), so keying the label on
+            the meter promised a codex/gemini node a conversation search it does not run. */}
+        <Tooltip
+          label={claudeTranscript ? 'Search terminal + conversation' : 'Search this terminal'}
+        >
           <button
             className="term-node__search nodrag"
             onClick={() => setSearchOpen((v) => !v)}

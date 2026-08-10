@@ -5,6 +5,7 @@
 
 import './hud.css'
 import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB } from '../lib/mascot'
+import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../lib/brandPulse'
 import { createGrokMarkSvg } from '../lib/grokMark'
 import { orderIndicatorAgents } from './indicator'
 import codexPet from '../assets/pet-codex.webp'
@@ -128,8 +129,8 @@ function reltime(ts: number): string {
 // and the Codex pet at 26px; these are the sensible defaults — NAIL EXACTLY ON A MAC (the notch
 // bar height varies by model, and 26px overflows a short bar). Aspect ratios are preserved from
 // the sprite geometry, so only the height matters.
-/** Height of the quadrant-block sprite (claude), and of grok's inline brand mark — one number so
- *  the two working indicators sit on the same baseline in the strip. */
+/** Height of the quadrant-block sprite (claude), and of the pulsing brand marks — one number so the
+ *  working indicators all sit on the same baseline in the strip. */
 const HUD_QUADRANT_H = 13
 const HUD_CODEX_H = 17
 
@@ -160,14 +161,33 @@ function codexMascot(): HTMLElement {
   el.style.backgroundImage = `url(${codexPet})`
   return el
 }
+/** An asset brand mark (gemini/opencode), breathing: a background-image span. These marks carry their
+ *  own fills, so unlike grok's they cannot be drawn as an inline `currentColor` path — the bloom is
+ *  the strip's label colour rather than their own ink (see lib/brandPulse.ts). */
+function brandPulseMascot(src: string, size: number): HTMLElement {
+  const el = document.createElement('span')
+  el.className = `${HUD_BRAND_PULSE_CLASS} mascot--pulse-asset`
+  el.style.width = `${size}px`
+  el.style.height = `${size}px`
+  // Quoted via brandPulseBackground: these marks are inlined data URIs containing `)` and `'`, and
+  // an unquoted url() is rejected outright — the mark would paint NOTHING.
+  el.style.backgroundImage = brandPulseBackground(src)
+  return el
+}
 // Returns an SVGSVGElement for grok (an inline brand mark) and HTMLElement for the sprite
 // mascots; every caller only appends it, so `Element` is the honest shared type.
 function workingMascot(agentId?: string): Element {
   if (agentId === 'claude' && CLAUDE_MASCOT.src) return quadrantMascot(CLAUDE_MASCOT, 'claude')
-  // grok breathes its own brand mark instead of walking a critter — the SAME treatment the canvas
-  // badge uses (AgentMascot), so one agent is never two different things on two surfaces.
-  if (agentId === 'grok') return createGrokMarkSvg(HUD_QUADRANT_H, 'mascot mascot--grok')
   if (agentId === 'codex') return codexMascot()
+  // grok, gemini and opencode breathe their own brand mark instead of walking a critter — the SAME
+  // decision the canvas badge makes (lib/brandPulse.ts, shared precisely so one agent is never two
+  // different things on two surfaces). This renderer stays React-free, so it draws the plan itself.
+  const plan = brandPulsePlan(agentId, HUD_QUADRANT_H)
+  if (plan) {
+    return plan.kind === 'inline'
+      ? createGrokMarkSvg(plan.size, HUD_BRAND_PULSE_CLASS)
+      : brandPulseMascot(plan.src, plan.size)
+  }
   const dot = document.createElement('span')
   dot.className = 'mascot mascot--dot'
   return dot

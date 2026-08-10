@@ -15,7 +15,12 @@ interface Args {
   cwd: string | undefined
   /** Managed Claude account whose transcript root the search resolves against (default system). */
   accountId: string | undefined
-  /** Whether this node has a readable Claude transcript (gated on hasUsage capability). */
+  /**
+   * Whether this node has a readable CLAUDE transcript. Callers gate this on
+   * `readsClaudeTranscript` (lib/transcriptGates.ts) — NOT on the context meter's `hasUsage`, which
+   * spans codex and gemini, whose transcripts this reader cannot parse and whose resolver fallback
+   * would hand it an unrelated claude session.
+   */
   searchTranscript: boolean
   open: boolean
   /** Fallback content source (live xterm buffer text) when tmux capture is unavailable. */

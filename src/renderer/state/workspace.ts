@@ -1,7 +1,8 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
 import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
-import { agentConfig, withPermissionMode } from '@shared/agents/config'
+import { agentConfig } from '@shared/agents/config'
+import { withPermissionMode } from '@shared/agents/approval-mode'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from './settings'
 
