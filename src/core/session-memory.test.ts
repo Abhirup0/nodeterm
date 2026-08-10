@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import fs from 'fs'
 import {
   indexProcesses,
   rollupTree,
@@ -6,6 +7,7 @@ import {
   parsePaneList,
   buildReport,
   collectSessionMemory,
+  isNoServerError,
   type ProcEntry
 } from './session-memory'
 
@@ -67,8 +69,10 @@ describe('parseProcessTable', () => {
 
 describe('parsePaneList', () => {
   it('parses the pipe-delimited pane list and skips malformed lines', () => {
+    // `nt-zero||sh` is the phantom case: an empty pid field parses as 0, which IS finite, so a
+    // finite-only guard would emit a 0 MB row for a pid that cannot exist.
     expect(
-      parsePaneList('nt-term-a|100|claude\nbroken\nnt-term-b|200|zsh\n|300|x\n')
+      parsePaneList('nt-term-a|100|claude\nbroken\nnt-term-b|200|zsh\n|300|x\nnt-zero||sh\n')
     ).toEqual([
       { session: 'nt-term-a', panePid: 100, command: 'claude' },
       { session: 'nt-term-b', panePid: 200, command: 'zsh' }
@@ -126,6 +130,8 @@ describe('collectSessionMemory', () => {
     // "could not look" must never render as "uses nothing".
     expect(r.ok).toBe(false)
     expect(r.rows).toEqual([])
+    // The host total is still a real reading — the failure path must not throw it away.
+    expect(r.mem).toEqual({ availableMb: 1, totalMb: 2 })
   })
 
   it('reports ok:true with no rows when tmux has no server (a real answer)', async () => {
@@ -145,17 +151,75 @@ describe('collectSessionMemory', () => {
   it('reports ok:false when tmux is unavailable entirely', async () => {
     const r = await collectSessionMemory({ tmuxBin: () => null, readTable: () => table })
     expect(r.ok).toBe(false)
+    expect(r.rows).toEqual([])
   })
 
-  it('merges panes from every socket and dedupes by session name', async () => {
+  it('counts "no server" as an answer but a permission failure as a failure', () => {
+    expect(isNoServerError('no server running on /tmp/tmux-0/node-terminal')).toBe(true)
+    expect(isNoServerError('error connecting to /tmp/x (No such file or directory)')).toBe(true)
+    // A socket dir we may not read says nothing about whether sessions exist there.
+    expect(isNoServerError('error connecting to /tmp/x (Permission denied)')).toBe(false)
+    expect(isNoServerError('killed: timeout')).toBe(false)
+  })
+
+  it('reports ok:false when NO socket answered', async () => {
+    // One socket erroring is normal (nobody used it). Every socket erroring means we never looked,
+    // and "we never looked" must not render as "there are no sessions".
+    const r = await collectSessionMemory({
+      tmuxBin: () => '/usr/bin/tmux',
+      sockets: ['s1', 's2'],
+      exec: async () => {
+        throw new Error('connect failed')
+      },
+      readTable: () => table,
+      readMem: () => null
+    })
+    expect(r.ok).toBe(false)
+    expect(r.rows).toEqual([])
+  })
+
+  it('merges panes from every socket and the first socket wins a duplicate session', async () => {
     const r = await collectSessionMemory({
       tmuxBin: () => '/usr/bin/tmux',
       sockets: ['s1', 's2'],
       exec: async (_bin, args) =>
-        args[1] === 's1' ? 'nt-a|100|zsh\n' : 'nt-b|200|claude\nnt-a|100|zsh\n',
+        args[1] === 's1' ? 'nt-a|100|zsh\n' : 'nt-b|200|claude\nnt-a|999|claude\n',
       readTable: () => table,
       readMem: () => null
     })
     expect(r.rows.map((x) => x.session).sort()).toEqual(['nt-a', 'nt-b'])
+    // s2 also reported nt-a, with a different pid and command: s1's entry must be the one kept.
+    expect(r.rows.find((x) => x.session === 'nt-a')).toMatchObject({
+      panePid: 100,
+      command: 'zsh'
+    })
+  })
+
+  it('routes the ps fallback through the injected exec seam', async () => {
+    // With no readTable injected the default /proc reader runs first; make it fail so the `ps`
+    // fallback is reached on every platform, including the Linux box this suite runs on.
+    const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(() => {
+      throw new Error('/proc unreadable')
+    })
+    try {
+      const calls: string[] = []
+      const r = await collectSessionMemory({
+        tmuxBin: () => '/usr/bin/tmux',
+        sockets: ['s1'],
+        exec: async (bin) => {
+          calls.push(bin)
+          if (bin === 'ps') return '  PID  PPID    RSS\n  100     1   1024\n'
+          return 'nt-a|100|zsh\n'
+        },
+        readMem: () => null
+      })
+      // The `ps` call must come THROUGH the seam, not around it — otherwise this path can never
+      // be driven by a test and the file's "every exec is injectable" promise is false.
+      expect(calls).toContain('ps')
+      expect(r.ok).toBe(true)
+      expect(r.rows[0]).toMatchObject({ session: 'nt-a', selfMb: 1 })
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

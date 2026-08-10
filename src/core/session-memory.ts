@@ -145,7 +145,9 @@ export function parsePaneList(stdout: string): PaneRef[] {
     const parts = line.trim().split('|')
     if (parts.length < 3) continue
     const panePid = Number(parts[1])
-    if (!parts[0] || !Number.isFinite(panePid)) continue
+    // `> 0`, not just finite: an empty pid field parses as 0, which would produce a phantom row
+    // rolled up from a pid that cannot exist.
+    if (!parts[0] || !Number.isFinite(panePid) || panePid <= 0) continue
     out.push({ session: parts[0], panePid, command: parts[2] })
   }
   return out
@@ -184,7 +186,16 @@ export interface SessionMemoryDeps {
   readMem?: () => MemInfo | null
 }
 
-/** Default reader: /proc on Linux (no subprocess), one `ps` call everywhere else. */
+/**
+ * Reads the whole table from `/proc` on Linux, with no subprocess. Returns null on every other
+ * platform (and when `/proc` itself is unreadable) — the caller falls back to one `ps` call.
+ *
+ * `/proc/<pid>/status` is deliberately read INSTEAD of `stat` + `statm`: it carries both facts we
+ * need in ONE file, and its `VmRSS` is already in kB. `statm` reports RSS in PAGES, which would
+ * force a page-size assumption — hard-coding 4096 under-reports 4× on a 16 KiB-page arm64 kernel
+ * and 16× on the 64 KiB-page enterprise arm64 builds, i.e. it would print 40 MB for a 640 MB
+ * session. Do not "optimise" this back to `statm`.
+ */
 export function defaultProcessTableReader(): ProcEntry[] | null {
   if (process.platform === 'linux') {
     try {
@@ -192,14 +203,12 @@ export function defaultProcessTableReader(): ProcEntry[] | null {
       for (const name of fs.readdirSync('/proc')) {
         if (!/^\d+$/.test(name)) continue
         try {
-          const stat = fs.readFileSync(`/proc/${name}/stat`, 'utf8')
-          // The comm field is parenthesized and may contain spaces: split AFTER the last ')'.
-          const after = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-          const ppid = Number(after[1])
-          const statm = fs.readFileSync(`/proc/${name}/statm`, 'utf8').split(' ')
-          const rssPages = Number(statm[1])
-          if (!Number.isFinite(ppid) || !Number.isFinite(rssPages)) continue
-          out.push({ pid: Number(name), ppid, rssKb: (rssPages * 4096) / 1024 })
+          const status = fs.readFileSync(`/proc/${name}/status`, 'utf8')
+          const ppid = Number(/^PPid:\s+(\d+)/m.exec(status)?.[1])
+          const rssKb = Number(/^VmRSS:\s+(\d+)/m.exec(status)?.[1])
+          // Kernel threads have no VmRSS and are dropped here — they are never pane descendants.
+          if (!Number.isFinite(ppid) || !Number.isFinite(rssKb)) continue
+          out.push({ pid: Number(name), ppid, rssKb })
         } catch {
           // The process exited between readdir and read — skip it, never fail the sweep.
         }
@@ -213,10 +222,27 @@ export function defaultProcessTableReader(): ProcEntry[] | null {
 }
 
 /**
+ * Does a failed `list-panes` mean "there is no tmux server on that socket" — which is an ANSWER,
+ * and the normal state of a socket nobody has used — rather than "the sweep could not run"?
+ * tmux exits non-zero for both, so its message is the only signal we get.
+ *
+ * Deliberately narrow. A permission-denied socket directory ("error connecting to … (Permission
+ * denied)") or a timeout against a hung server is a real failure, and laundering it into "no
+ * sessions here" is exactly the mistake `ok:false` exists to prevent: it would print an empty
+ * panel over 20 live sessions. Only the two phrasings that positively assert absence count.
+ */
+export function isNoServerError(message: string): boolean {
+  return /no server running|no such file or directory/i.test(message)
+}
+
+/**
  * One sweep. Failure rules (CLAUDE.md: a failed read is never evidence of absence):
  *  - no tmux binary, or an unreadable process table → `ok: false`, no rows;
- *  - a socket whose `list-panes` fails contributes NO panes but is NOT a failure — "no server
- *    running" is the normal answer for a socket nobody has used yet.
+ *  - a socket with no tmux server contributes NO panes but is NOT a failure — "no server running"
+ *    is the normal answer for a socket nobody has used yet (`isNoServerError`);
+ *  - but if NO socket answered — every one of them failed for some OTHER reason — the sweep never
+ *    ran → `ok: false`. "Every socket errored" and "we looked and found nothing" are different
+ *    facts and must not render the same.
  */
 export async function collectSessionMemory(
   deps: SessionMemoryDeps
@@ -233,20 +259,14 @@ export async function collectSessionMemory(
       return stdout
     })
 
-  const readTable =
-    deps.readTable ??
-    ((): ProcEntry[] | null => {
-      const viaProc = defaultProcessTableReader()
-      if (viaProc) return viaProc
-      return null
-    })
+  const readTable = deps.readTable ?? defaultProcessTableReader
 
   let table = readTable()
   if (table === null && !deps.readTable) {
-    // Non-Linux (or an unreadable /proc): one `ps` call for the whole table.
+    // Non-Linux (or an unreadable /proc): one `ps` call for the whole table, through the same
+    // injectable seam as tmux — nothing in this file may reach a subprocess around it.
     try {
-      const { stdout } = await runAsync('ps', ['-eo', 'pid,ppid,rss'], { timeout: 15_000 })
-      table = parseProcessTable(stdout)
+      table = parseProcessTable(await exec('ps', ['-eo', 'pid,ppid,rss']))
     } catch {
       table = null
     }
@@ -255,16 +275,22 @@ export async function collectSessionMemory(
 
   const sockets = deps.sockets ?? [TMUX_SOCKET, RMT_TMUX_SOCKET]
   const bySession = new Map<string, PaneRef>()
+  let answered = 0
   for (const s of sockets) {
     try {
       const stdout = await exec(bin, ['-L', s, 'list-panes', '-a', '-F', PANE_FMT])
+      answered++
       // First pane of a session wins: a session with several panes is still one row.
       for (const p of parsePaneList(stdout))
         if (!bySession.has(p.session)) bySession.set(p.session, p)
-    } catch {
-      // "no server running" and a real failure both land here; neither yields panes, and neither
-      // makes the whole sweep a failure — the other socket may well have answered.
+    } catch (err) {
+      // "No server on this socket" is an empty ANSWER, so it still counts as having looked. Any
+      // other failure yields neither panes nor an answer.
+      if (isNoServerError(err instanceof Error ? err.message : String(err))) answered++
     }
   }
+  // Nobody answered: broken tmux, an unreadable socket dir, a timeout against a hung server. We did
+  // not look, so we cannot claim there is nothing — that would print "no sessions" over 20 live ones.
+  if (answered === 0) return { ok: false, rows: [], mem }
   return buildReport([...bySession.values()], table, mem)
 }
