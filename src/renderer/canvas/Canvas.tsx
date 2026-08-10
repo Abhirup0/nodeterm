@@ -7891,8 +7891,11 @@ export function Canvas() {
             z-index (5 collapsed, 13 with the popover open) competes in the same context as the
             sidebar and the open popover wins. Neither uses React Flow hooks, and .flow-wrap is
             position:relative, so the cluster's absolute left/bottom anchor is unchanged.
-            The cluster itself deliberately has NO z-index — see .canvas-pills in styles.css. */}
-        <div className="canvas-pills">
+            The cluster itself deliberately has NO z-index — see .canvas-pills in styles.css.
+            `data-canvas-chrome` is fit-view's own documented opt-in: it makes the whole cluster ONE
+            obstacle rect (instead of one per pill, overlapping after inflation), so fitView never
+            parks a node underneath either pill. */}
+        <div className="canvas-pills" data-canvas-chrome>
           <UsageIndicator overBoard={kanbanOpen} />
           <SystemResourcePill overBoard={kanbanOpen} />
         </div>

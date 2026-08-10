@@ -33,12 +33,18 @@ let host: HTMLDivElement
 let root: Root
 let startHostPoll: Mock<(scopeKey: string, projectId?: string) => void>
 let stopHostPoll: Mock<() => void>
+let refreshFull: Mock<(scopeKey: string, projectId?: string) => Promise<void>>
 
-/** Mount with the store's poll actions stubbed — the real ones would talk to a session registry
- *  that does not exist in a jsdom test, and `refreshHost` would clear the `mem` fixture on the way
- *  through `enterScope`. */
+/** Mount with the store's actions stubbed — the real ones would talk to a session registry that
+ *  does not exist in a jsdom test, and `refreshHost` would clear the `mem` fixture on the way
+ *  through `enterScope`.
+ *
+ *  `refreshFull` is stubbed for a different reason: it must be OBSERVABLE. The real one swallows
+ *  every failure, so a future edit that put the full process-table sweep on this pill's 30 s timer
+ *  would leave the suite green and show no symptom — while costing an ssh exec plus a remote `ps`
+ *  every 30 seconds on an SSH scope. */
 function mount(mem: MemInfo | null, overBoard = false): void {
-  useSessionMemory.setState({ mem, startHostPoll, stopHostPoll })
+  useSessionMemory.setState({ mem, startHostPoll, stopHostPoll, refreshFull })
   host = document.createElement('div')
   root = createRoot(host)
   act(() => root.render(<SystemResourcePill overBoard={overBoard} />))
@@ -47,6 +53,7 @@ function mount(mem: MemInfo | null, overBoard = false): void {
 beforeEach(() => {
   startHostPoll = vi.fn<(scopeKey: string, projectId?: string) => void>()
   stopHostPoll = vi.fn<() => void>()
+  refreshFull = vi.fn<(scopeKey: string, projectId?: string) => Promise<void>>(async () => {})
   useProjects.setState({ projects: [project()], activeProjectId: 'p1' })
   useSshConn.setState({ byProject: {} })
 })
@@ -117,6 +124,20 @@ describe('SystemResourcePill', () => {
     })
     expect(startHostPoll).toHaveBeenCalledTimes(2)
     expect(startHostPoll).toHaveBeenLastCalledWith('enes@box', 'ssh1')
+    // The connect-up path is the likeliest place for someone to "just also refresh the rows".
+    expect(refreshFull).not.toHaveBeenCalled()
+  })
+
+  it('never runs the full sweep — the cheap read is the pill´s, the expensive one the panel´s', () => {
+    // `refreshFull` walks the whole process table, and on an SSH scope that is an ssh exec plus a
+    // remote `ps`. On this component's 30 s timer that would be a background cost nobody asked for,
+    // and the real action swallows its failures, so it would show no symptom at all.
+    mount(MEM)
+    expect(refreshFull).not.toHaveBeenCalled()
+    // Not even when the pill is clicked: opening the panel is what triggers the sweep, and the
+    // panel does it itself (Task 9).
+    act(() => host.querySelector<HTMLButtonElement>('.sysres-pill')!.click())
+    expect(refreshFull).not.toHaveBeenCalled()
   })
 
   it('renders nothing and polls nothing without an active project', () => {
