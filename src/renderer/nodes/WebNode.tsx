@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
 import { httpUrl } from './webUrl'
-import { useSettings } from '../state/settings'
-import { BROWSER_DISCARD_MS, shouldDiscard } from './browser-discard-policy'
+import { useDiscardWhenHidden } from './useDiscardWhenHidden'
+import { DiscardedPlate } from './DiscardedPlate'
 
 /**
  * A web view node. When `data.url` is set it loads that live URL; otherwise it serves the
@@ -19,14 +19,13 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const filePath = (data.filePath as string) ?? ''
   const title = (data.title as string) || url || filePath.split('/').pop() || 'web'
   const rootRef = useRef<HTMLDivElement | null>(null)
-  // Memory saver — same policy as {@link BrowserSurface}: hidden long enough, the <webview> is
-  // unmounted (its Chromium process exits) and rebuilt on reveal. `revive` is what re-runs the
-  // source effect below, so the `nt-media://` grant is re-issued for a local file exactly as it
-  // was at mount. Mutable inputs are refs because the observer is created once (see BrowserSurface).
+  // Memory saver — the same shared hook {@link BrowserSurface} uses: hidden long enough, the
+  // <webview> is unmounted (its Chromium process exits) and rebuilt on reveal. `revive` is what
+  // re-runs the source effect below, so the `nt-media://` grant is re-issued for a local file
+  // exactly as it was at mount. `srcRef` mirrors `src` for the hook's fire-time content check.
   const [discarded, setDiscarded] = useState(false)
+  const [restoring, setRestoring] = useState(false)
   const [revive, setRevive] = useState(0)
-  const discardedRef = useRef(false)
-  const hiddenSinceRef = useRef<number | null>(null)
   const srcRef = useRef('')
   /** "Loading" here is the media grant being in flight — the only await between mount and a
    *  usable src (a live URL is resolved synchronously). Discarding mid-grant would drop the
@@ -35,6 +34,12 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   useEffect(() => {
     let alive = true
+    // `settled` ends the restore plate (see `restoring`): the source effect has produced an
+    // outcome — a src, an error, or nothing to load at all. Without the last case a node whose
+    // url/filePath vanished while it was hidden would sit under the plate forever.
+    const settled = (): void => {
+      if (alive) setRestoring(false)
+    }
     if (url) {
       const safe = httpUrl(url)
       if (safe) {
@@ -43,6 +48,7 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
       } else {
         setError('Unsupported URL scheme — only http/https')
       }
+      settled()
     } else if (filePath) {
       grantingRef.current = true
       window.nodeTerminal.media
@@ -53,57 +59,38 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
             setSrc(mediaUrl)
             srcRef.current = mediaUrl
           }
+          settled()
         })
         .catch(() => {
           grantingRef.current = false
           if (alive) setError('Couldn’t load this page.')
+          settled()
         })
+    } else {
+      settled()
     }
     return () => {
       alive = false
     }
   }, [url, filePath, revive])
 
-  useEffect(() => {
-    const el = rootRef.current
-    if (!el || typeof IntersectionObserver === 'undefined') return
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const clear = (): void => {
-      if (timer) clearTimeout(timer)
-      timer = null
-    }
-    const fire = (): void => {
-      timer = null
-      const since = hiddenSinceRef.current
-      if (since == null || discardedRef.current || !srcRef.current) return
-      const enabled = useSettings.getState().settings.browserMemorySaver
-      if (!shouldDiscard({ hiddenMs: Date.now() - since, loading: grantingRef.current, enabled }))
-        return
-      discardedRef.current = true
+  useDiscardWhenHidden(rootRef, {
+    isLoading: () => grantingRef.current,
+    hasContent: () => !!srcRef.current,
+    onDiscard: () => {
       setDiscarded(true)
       setSrc('')
-    }
-    const obs = new IntersectionObserver((entries) => {
-      const visible = entries[entries.length - 1]?.isIntersecting ?? true
-      if (!visible) {
-        if (hiddenSinceRef.current == null) hiddenSinceRef.current = Date.now()
-        if (!timer) timer = setTimeout(fire, BROWSER_DISCARD_MS + 1000)
-        return
-      }
-      hiddenSinceRef.current = null
-      clear()
-      if (!discardedRef.current) return
-      discardedRef.current = false
+      srcRef.current = ''
+    },
+    onRestore: () => {
       setDiscarded(false)
+      // Hold the plate until the source effect has re-run to an outcome. A local file's grant is a
+      // round-trip to main, and without this the node flashes "No source" for the whole of it.
+      setRestoring(true)
       setError('')
       setRevive((n) => n + 1)
-    })
-    obs.observe(el)
-    return () => {
-      obs.disconnect()
-      clear()
     }
-  }, [])
+  })
 
   return (
     <div
@@ -149,10 +136,8 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
       <div className="editor-node__body">
         <div className="editor-node__image nodrag nowheel">
-          {discarded ? (
-            <div className="browser-node__discarded">
-              <span>Page released to save memory — reopens on view</span>
-            </div>
+          {discarded || restoring ? (
+            <DiscardedPlate restoring={restoring} />
           ) : src ? (
             // eslint-disable-next-line react/no-unknown-property
             <webview src={src} style={{ width: '100%', height: '100%' }} />

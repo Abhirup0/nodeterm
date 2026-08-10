@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { searchOrUrl } from './browserUrl'
 import { BrowserStartPage } from './BrowserStartPage'
 import { useBrowserHistory } from '../state/browserHistory'
-import { useSettings } from '../state/settings'
-import { BROWSER_DISCARD_MS, shouldDiscard } from './browser-discard-policy'
+import { useDiscardWhenHidden } from './useDiscardWhenHidden'
+import { DiscardedPlate } from './DiscardedPlate'
 
 // Minimal typing for the Electron <webview> element methods/events we use.
 type WebviewEl = HTMLElement & {
@@ -46,13 +46,11 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
   const [canBack, setCanBack] = useState(false)
   const [canFwd, setCanFwd] = useState(false)
   const [failed, setFailed] = useState('')
-  // Memory saver (see the discard effect): the page is released while hidden and rebuilt on
-  // reveal. These four are REFS, not state, because the observer below is created once and must
-  // read the CURRENT values without being torn down and re-armed on every state flip.
+  // Memory saver (see `useDiscardWhenHidden`): the page is released while hidden and rebuilt on
+  // reveal. `loadingRef` mirrors the `loading` state because the hook reads it at fire time, from
+  // a callback that must not force the observer to be re-created.
   const [discarded, setDiscarded] = useState(false)
-  const discardedRef = useRef(false)
   const loadingRef = useRef(false)
-  const hiddenSinceRef = useRef<number | null>(null)
   /** The page a discard would rebuild from — the last location we actually LOADED, never the
    *  address input (which holds whatever the user typed, submitted or not). */
   const locationRef = useRef(startUrl)
@@ -132,65 +130,28 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
 
   // ── Memory saver ────────────────────────────────────────────────────────────────────────────
   // A browser node parked off-screen is a whole Chromium renderer process doing nothing, and the
-  // canvas caps nothing. Hidden past the window (and not mid-load, and with the setting on) the
-  // page is released; entering the viewport rebuilds it from `locationRef`.
-  //
-  // The observer is created ONCE. Putting `discarded`/`loading` in the deps would re-create it —
-  // and IntersectionObserver re-reports on `observe()`, so the hidden timer would restart on every
-  // state flip and a page could sit hidden forever without reaching the window. Everything mutable
-  // is therefore read through a ref, and the SETTING is read at fire time (turning the saver off
-  // must disarm a timer armed minutes earlier).
-  useEffect(() => {
-    const el = rootRef.current
-    if (!el || typeof IntersectionObserver === 'undefined') return
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const clear = (): void => {
-      if (timer) clearTimeout(timer)
-      timer = null
-    }
-    const fire = (): void => {
-      timer = null
-      const since = hiddenSinceRef.current
-      if (since == null || discardedRef.current) return
-      const enabled = useSettings.getState().settings.browserMemorySaver
-      if (!shouldDiscard({ hiddenMs: Date.now() - since, loading: loadingRef.current, enabled }))
-        return
-      // A start page has no guest process to release, and discarding it would replace the one
-      // useful thing on screen with a plate. (A page still loading after the whole window is not
-      // re-checked either: v1 waits for the next hide, rather than polling.)
-      if (!locationRef.current) return
-      discardedRef.current = true
+  // canvas caps nothing. The state machine (observer, timer, fire-time re-checks) lives in the
+  // shared hook; this surface contributes only what "loading"/"content" mean for it and how to
+  // release and rebuild its page.
+  useDiscardWhenHidden(rootRef, {
+    isLoading: () => loadingRef.current,
+    hasContent: () => !!locationRef.current,
+    onDiscard: () => {
       setDiscarded(true)
       setSrc('')
       // A failure banner belongs to the page we just released; the restore re-navigates and will
       // raise its own if the load fails again.
       setFailed('')
-    }
-    const obs = new IntersectionObserver((entries) => {
-      const visible = entries[entries.length - 1]?.isIntersecting ?? true
-      if (!visible) {
-        if (hiddenSinceRef.current == null) hiddenSinceRef.current = Date.now()
-        // +1s slack so the reading at fire time is strictly PAST the window (`shouldDiscard` is >).
-        if (!timer) timer = setTimeout(fire, BROWSER_DISCARD_MS + 1000)
-        return
-      }
-      hiddenSinceRef.current = null
-      clear()
-      if (!discardedRef.current) return
-      discardedRef.current = false
+    },
+    onRestore: () => {
       setDiscarded(false)
       // Restore from the descriptor. Setting `src` and `address` to the SAME value preserves the
       // `url !== address` guard of the sync effect below, so the restore can't start a reload loop.
       const back = locationRef.current
       setSrc(back)
       setAddress(back)
-    })
-    obs.observe(el)
-    return () => {
-      obs.disconnect()
-      clear()
     }
-  }, [])
+  })
 
   // Keep the two webviews for one node (canvas + modal) in sync: when `url` changes from the
   // OUTSIDE (the other webview navigated → node.data.url updated) and differs from where we are,
@@ -269,11 +230,7 @@ export function BrowserSurface({ nodeId, url, onUrlChange, onTitleChange }: Brow
             }}
           />
         )}
-        {discarded && (
-          <div className="browser-node__discarded">
-            <span>Page released to save memory — reopens on view</span>
-          </div>
-        )}
+        {discarded && <DiscardedPlate />}
         {failed && <div className="browser-node__error">{failed}</div>}
       </div>
     </div>
