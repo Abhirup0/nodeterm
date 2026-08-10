@@ -1881,6 +1881,16 @@ export function Canvas() {
     })
   }, [])
 
+  // Same strip, same one-shot rule: the workspace list came up empty because the index file was
+  // unreadable. Nothing was lost — say where the backup is and how to get the projects back.
+  useEffect(() => {
+    return api.workspace.onCorruptRecovered((backupFile) => {
+      setMigrationNote(
+        `The workspace index was corrupted and has been backed up as ${backupFile}. No project data was lost — each project's canvas is still in its own folder. Use “Open folder…” to add them back.`
+      )
+    })
+  }, [])
+
   // A pending conflict is scoped to the project that was active when it fired. If the user
   // switches projects first, drop it: commitActiveToStore already preserved the local edits in
   // the store, so the next save keeps our version — resolving the stale bar against a different
