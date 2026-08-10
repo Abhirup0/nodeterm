@@ -69,7 +69,7 @@ interface GeminiTokens {
  * of `input` (cached input still occupies the window, and is already counted there), so adding it
  * would double-count.
  *
- * Measured shape (gemini 0.54.4, `__fixtures__/gemini/session.jsonl` line 29):
+ * Measured shape (gemini 0.54.4, `__fixtures__/gemini/session.jsonl` line 6):
  *   "tokens":{"input":17149,"output":29,"cached":7760,"thoughts":171,"tool":0,"total":17349},
  *   "model":"gemini-3.5-flash"
  *
@@ -121,7 +121,7 @@ function titleFromToolCalls(calls: unknown): string | null {
  * parses to an object with a `title`. Gemini names the conversation through its own `update_topic`
  * tool, so the name lives in that tool call's arguments:
  *   "toolCalls":[{"name":"update_topic","args":{"title":"Test Environment Verified", …}}]
- * (`__fixtures__/gemini/session.jsonl` line 22).
+ * (`__fixtures__/gemini/session.jsonl` line 5).
  *
  * TWO PLACES, because of RESUME. A resumed session replays its prior history into a single
  * `{"$set":{"messages":[…]}}` line, so a title set before the resume is NESTED in that line's

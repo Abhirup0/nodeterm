@@ -24,7 +24,7 @@ interface CodexTokenUsage {
  * The latest live context size plus the window codex reported.
  *
  * **`last_token_usage`, not `total_token_usage`.** Both sit side by side in the same `token_count`
- * event, and `total_token_usage` is CUMULATIVE over the session — measured across the seven
+ * event, and `total_token_usage` is CUMULATIVE over the session — measured across the
  * token_count events of `__fixtures__/codex/rollout.jsonl` it runs 17855 → 204277 while
  * `last_token_usage` runs 17855 → 34635, against a 258400 window. Using the cumulative field would
  * have shown that session at 79% when it was really at 13%, and would have sailed past 100% a

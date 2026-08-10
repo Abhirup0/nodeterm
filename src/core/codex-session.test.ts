@@ -3,22 +3,45 @@ import { readFileSync } from 'fs'
 import path from 'path'
 import { codexContextParse, pickCodexUsage } from './codex-session'
 
-// A REAL codex-cli 0.146.0 rollout, captured from
-// ~/.codex/sessions/2026/07/26/rollout-2026-07-26T00-48-38-019f9b40-….jsonl.
+// A REAL codex-cli rollout, captured from
+// ~/.codex/sessions/2026/07/25/rollout-2026-07-25T21-48-38-019f9b40-….jsonl. Its own `session_meta`
+// states the version: `cli_version: "0.145.0"` (the `--help` vocabulary this module was written
+// against was read off 0.146.0 — the two agree on every field used here).
 //
-// A MULTI-TURN rollout on purpose: it carries seven `token_count` events, and across them
-// `total_token_usage` runs 17855 → 204277 while `last_token_usage` runs 17855 → 34635. That
-// divergence is the whole point of the fixture — `total_token_usage` is CUMULATIVE over the
-// session (it would read 79% of a 258400 window on a session that is really 13% full, and would
-// cross 100% a couple of turns later), so only `last_token_usage` can be a context-window
-// numerator. The newest single-turn rollout could not tell the two apart: there they are equal.
+// A MULTI-TURN rollout on purpose: `total_token_usage` runs 17855 → 204277 while `last_token_usage`
+// runs 17855 → 34635. That divergence is the whole point of the fixture — `total_token_usage` is
+// CUMULATIVE over the session (it would read 79% of a 258400 window on a session that is really 13%
+// full, and would cross 100% a couple of turns later), so only `last_token_usage` can be a
+// context-window numerator. The newest single-turn rollout could not tell the two apart: there they
+// are equal.
 //
 // Numbers read out of the file:
 //   - last `token_count` → payload.info.last_token_usage:
-//       {"input_tokens":34635,"cached_input_tokens":33792,"cache_write_input_tokens":0,
-//        "output_tokens":…,"reasoning_output_tokens":…,"total_tokens":…}
+//       {"input_tokens":34635,"cached_input_tokens":33536,"cache_write_input_tokens":0,
+//        "output_tokens":169,"reasoning_output_tokens":109,"total_tokens":34804}
 //   - payload.info.model_context_window: 258400
 //   - the `turn_context` line's payload.model: "gpt-5.6-sol"
+//
+// ---------------------------------------------------------------------------------------------
+// PRUNED, DELIBERATELY — do not "restore the full capture".
+//
+// The rollout as captured was 132 KB of somebody's real working session, and this repository is
+// PUBLIC. What was removed, and why:
+//   - every `response_item`, `world_state`, `agent_message`, `reasoning` and
+//     `function_call{,_output}` line: six `encrypted_content` blobs, two `developer_instructions`
+//     blocks, ~21 KB of verbatim handoff notes (real product discussion, plus a third party's
+//     environment dump) and absolute `/Users/<name>/…` paths.
+//   - `session_meta.base_instructions`: OpenAI's ~15 KB shipped system prompt, verbatim.
+//   - `session_meta.git`: commit hash, branch and repository URL.
+//   - `turn_context.timezone`, `.permission_profile`, `.file_system_sandbox_policy` and
+//     `.collaboration_mode` (the last one carries another `developer_instructions` block).
+//   - `token_count.rate_limits`: the account's plan type, credit balance and reset timestamps.
+//   - four of the seven `token_count` events; the three kept are the FIRST (where the two totals
+//     are still equal), one middle, and the LAST.
+// Nothing removed is read by any test. Everything kept is byte-for-byte as codex wrote it — the
+// value of this fixture is that its numbers and field shapes are genuine, so if a test's expected
+// number ever changes when this file is edited, the edit is wrong, not the test.
+// ---------------------------------------------------------------------------------------------
 const rollout = readFileSync(path.join(__dirname, '__fixtures__/codex/rollout.jsonl'), 'utf8')
 
 describe('pickCodexUsage', () => {

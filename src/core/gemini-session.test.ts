@@ -7,10 +7,22 @@ import { geminiWindowFor } from './model-window'
 // A REAL gemini 0.54.4 transcript, captured from
 // ~/.gemini/tmp/nodeterm/chats/session-2026-08-09T10-48-fd01438b.jsonl.
 // Its numbers (read out of the file, not invented):
-//   - last line carrying `tokens` (line 29):
+//   - last line carrying `tokens` (line 6):
 //       {"input":17149,"output":29,"cached":7760,"thoughts":171,"tool":0,"total":17349}
 //   - `model` on that same line: "gemini-3.5-flash"
-//   - last `update_topic` tool call's `args.title` (line 22): "Test Environment Verified"
+//   - last `update_topic` tool call's `args.title` (line 5): "Test Environment Verified"
+//
+// PRUNED, DELIBERATELY — do not "restore the full capture". This repository is public, and the
+// capture's line 2 (gemini's own `<session_context>` preamble, replayed inside a `$set.messages`
+// history sync) carried a 200-entry listing of the working tree, naming untracked scratch files.
+// That listing is cut at "- **Directory Structure:**" and marked; nothing else inside the kept
+// records was altered. The 24 lines dropped were ordinary turns — assistant text, thoughts, tool
+// calls and the `$set.lastUpdated` records between them — that no test reads. What is kept is
+// exactly what the tests assert on plus the shapes they are about: the session header, one
+// `$set.messages` sync, one plain user turn, one `$set.lastUpdated`, the newest `update_topic`
+// call, and the newest line carrying `tokens` + `model`. Every number and field name in them is
+// byte-for-byte as gemini wrote it, so if an expected number changes when this file is edited,
+// the edit is wrong, not the test.
 const transcript = readFileSync(path.join(__dirname, '__fixtures__/gemini/session.jsonl'), 'utf8')
 
 describe('pickGeminiTokens', () => {
