@@ -1459,6 +1459,35 @@ export interface MemInfo {
   totalMb: number
 }
 
+/** One nt- session's memory, as the panel renders it. */
+export interface SessionMemoryRow {
+  /** tmux session name, `nt-<nodeId>`. */
+  session: string
+  /** The canvas node id — the session name minus the `nt-` prefix. */
+  nodeId: string
+  panePid: number
+  /** The pane's own process. */
+  selfMb: number
+  /** Everything below it (MCP servers, headless browsers, …). */
+  childrenMb: number
+  childCount: number
+  totalMb: number
+  /** `#{pane_current_command}` — the agent/shell label. */
+  command: string
+}
+
+/**
+ * `ok: false` means the sweep could not run (no tmux binary, unreadable process table). It is NOT
+ * the same as an empty `rows` with `ok: true`, which means "we looked and there are no sessions".
+ * Collapsing the two would make the panel report "nothing is using memory" at exactly the moment
+ * it failed to measure.
+ */
+export interface SessionMemoryReport {
+  ok: boolean
+  rows: SessionMemoryRow[]
+  mem: MemInfo | null
+}
+
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
 export interface ClaudeUsage {
   /**
