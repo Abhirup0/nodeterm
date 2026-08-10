@@ -23,7 +23,7 @@ export function PhonePairPopover({
   onClose: () => void
   onOpenSettings: () => void
 }): React.JSX.Element {
-  const { phase, qr, sshOpen, sshHealed, error, busy, start } = usePhonePairing()
+  const { phase, qr, sshOpen, sshHealed, relayResult, error, busy, start } = usePhonePairing()
 
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
   const updateSettings = useSettings((s) => s.update)
@@ -100,7 +100,19 @@ export function PhonePairPopover({
             </>
           )
         ) : phase === 'paired' ? (
-          <div className="phone-pair__ok">✓ Paired — your phone can now connect.</div>
+          <>
+            <div className="phone-pair__ok">✓ Paired — your phone can now connect.</div>
+            {relayResult === 'ok' ? (
+              <div className="phone-pair__ok">Remote access is set up — reachable from anywhere.</div>
+            ) : relayResult === 'failed' ? (
+              <div className="phone-pair__warn">
+                ⚠ Remote-access setup failed — this pairing is LAN-only for now. Check the
+                internet connection and pair again to retry.
+              </div>
+            ) : relayResult === 'off' ? (
+              <div className="phone-pair__hint">LAN-only pairing — remote access is off.</div>
+            ) : null}
+          </>
         ) : phase === 'timeout' ? (
           <>
             <div className="phone-pair__hint">Pairing timed out.</div>
