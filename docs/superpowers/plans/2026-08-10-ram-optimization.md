@@ -648,7 +648,7 @@ Run: `npm run typecheck && npx vitest run src/core src/renderer/terminal`. Commi
 
 ## Phase 4 — Browser/web node Memory Saver (one PR)
 
-Chrome's own "Memory Saver" semantics on canvas webviews: a `BrowserSurface`/`WebNode` webview hidden (offscreen or kanban-covered) for 5 minutes is **discarded** — the `<webview>` loses its `src` (guest renderer process dies), the descriptor `{url, address}` is kept, a plate renders — and restored on visibility. Back/forward stack is lost on restore (Electron webview cannot serialize it); PR body states this openly.
+Chrome's own "Memory Saver" semantics on canvas webviews: a `BrowserSurface`/`WebNode` webview hidden (**offscreen in the canvas viewport**) for 5 minutes is **discarded** — the `<webview>` element is unmounted, so the guest renderer process dies; the descriptor `{url, address}` is kept, a plate renders — and restored on visibility. Back/forward stack is lost on restore (Electron webview cannot serialize it); PR body states this openly.
 
 **Files:**
 - Create: `src/renderer/nodes/browser-discard-policy.ts`, `src/renderer/nodes/browser-discard-policy.test.ts`
@@ -756,9 +756,11 @@ Import `useSettings` (same store TerminalNode uses) and the policy module. Add `
 
 - [ ] **Step 6: WebNode.tsx** — same pattern, same policy module, on its root div; on restore re-run the existing `src` effect by re-setting state from `url`/`filePath` (the `media.allow` promise path already handles re-grant).
 
-- [ ] **Step 7: Verify + commit + PR** — `npm run typecheck && npx vitest run src/renderer/nodes`. Manual: open a browser node, cover it with kanban view for >5 min, verify in Activity Monitor / `ps` that the guest process exited; return to canvas, verify reload. Commit `feat(renderer): browser Memory Saver — discard hidden webviews, restore from URL`.
+- [ ] **Step 7: Verify + commit + PR** — `npm run typecheck && npx vitest run src/renderer/nodes`. Manual: open a browser node, **pan the node fully off-screen** for >5 min, verify in Activity Monitor / `ps` that the guest process exited; pan it back into view and verify the reload. Commit `feat(renderer): browser Memory Saver — discard hidden webviews, restore from URL`.
 
 **Surfaces:** Desktop only in practice (`<webview>` requires Electron; the Server Edition renders browser nodes via the same components but webview doesn't exist in a plain browser — verify how BrowserNode degrades there today and keep that behavior). Mobile: N/A.
+
+**Deferred by user decision (v1 = pan-only):** "hidden" means **geometrically offscreen**, as reported by an `IntersectionObserver`. Two other senses of hidden were considered and deliberately left out. (1) **Kanban-covered** — the board is an opaque overlay, but the canvas stays MOUNTED beneath it and every node still intersects the viewport, so occlusion is invisible to an IntersectionObserver; discarding on it would need an explicit signal from `KanbanView`. (2) **Window-hidden** (`document.visibilityState`) — a minimized or background window would discard every browser node at once, and every one of them would reload on return. Both are follow-ups, not gaps in v1. A page that is **making sound** is never discarded regardless (Chrome's own rule), and a load in flight blocks a discard until it finishes.
 
 ---
 

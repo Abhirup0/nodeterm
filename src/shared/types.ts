@@ -824,6 +824,14 @@ export interface Settings {
    *  directly (grab cursor), for mouse users who pan constantly; box-select then moves to
    *  Shift+drag (React Flow's selectionKeyCode). */
   canvasDragMode: 'select' | 'pan'
+  /**
+   * Browser memory saver: release a browser/web node's page after it has been hidden for
+   * `BROWSER_DISCARD_MS` (5 min), reloading it from its URL when it is shown again. Each
+   * `<webview>` is a whole Chromium renderer process and the canvas caps nothing, so an
+   * afternoon of opened pages is otherwise permanently resident. On by default — the cost is a
+   * reload (and the lost back/forward stack, which a webview cannot serialize), not lost work.
+   */
+  browserMemorySaver: boolean
   accent: string
   tmuxEnabled: boolean
   /** GPU (WebGL) terminal rendering. 'off' routes every terminal to xterm's DOM renderer.
@@ -975,6 +983,7 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalMiddleClickPaste: false,
   wheelZoom: false,
   canvasDragMode: 'select',
+  browserMemorySaver: true,
   accent: '#0a84ff',
   tmuxEnabled: true,
   terminalGpuRendering: 'auto',
