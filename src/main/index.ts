@@ -32,7 +32,7 @@ import {
   isValidPendingId,
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
-import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
+import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose, createCrashReloadPolicy } from './main-window'
 import {
   initNotchHud,
   applyNotchHudSettings,
@@ -409,7 +409,32 @@ function createWindow(): BrowserWindow {
   })
   // A crashed/killed renderer is the same story, minus the window: drop its subscriptions so the
   // reloaded renderer reattaches to live sessions instead of inheriting the dead one's state.
-  win.webContents.on('render-process-gone', () => ptyManager.dropClient(presenceId))
+  // And actually reload — a dead renderer otherwise leaves the window a permanent blank page
+  // (both projects, every terminal). Bounded by the policy so a boot-path crash can't loop;
+  // past the budget the user decides. The tmux sessions all live in this process, so a reload
+  // costs nothing but the canvas re-hydrating from the workspace store.
+  const crashReload = createCrashReloadPolicy()
+  win.webContents.on('render-process-gone', (_event, details) => {
+    ptyManager.dropClient(presenceId)
+    if (quitting || win.isDestroyed()) return
+    const action = crashReload(details.reason, Date.now())
+    if (action === 'reload') {
+      win.webContents.reload()
+    } else if (action === 'give-up') {
+      void dialog
+        .showMessageBox(win, {
+          type: 'error',
+          message: 'The window keeps crashing',
+          detail: `The interface process died repeatedly (${details.reason}). Your terminal sessions are still running.`,
+          buttons: ['Reload', 'Not Now'],
+          defaultId: 0,
+          cancelId: 1
+        })
+        .then(({ response }) => {
+          if (response === 0 && !win.isDestroyed()) win.webContents.reload()
+        })
+    }
+  })
 
   win.on('ready-to-show', () => win.show())
   // The main window is a regular app window; establishing its Dock presence explicitly means the
