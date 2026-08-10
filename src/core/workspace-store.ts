@@ -27,6 +27,13 @@ export interface RemoteWorkspaceIO {
 
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
 
+/** A parsed project file together with the exact bytes it was parsed from. `lastWritten` must
+ *  record `raw` — see the field it caches. */
+interface ProjectFileRead {
+  file: ProjectFileV1
+  raw: string
+}
+
 let tmpSeq = 0
 async function writeAtomic(filePath: string, content: string): Promise<void> {
   // Unique per write: writers that bypass each other's queue (a second app instance, the SSH
@@ -44,7 +51,11 @@ async function writeAtomic(filePath: string, content: string): Promise<void> {
  * v2-shaped Workspace.
  */
 export class WorkspaceStore {
-  /** file path -> exact content we last wrote (skip-unchanged + watcher self-write suppression). */
+  /** file path -> exact content of the file as we last WROTE or READ it (skip-unchanged + watcher
+   *  self-write suppression). Always the RAW bytes, never a re-serialization: a project.json whose
+   *  on-disk formatting differs from ours (a teammate's editor, a git checkout) would otherwise
+   *  never match isSelfWrite, so every fs event on it read as an external change forever — endless
+   *  spurious reloads and conflict bars (field bug 2026-08-10). */
   private lastWritten = new Map<string, string>()
   /** project id -> rev of the last written/loaded file. */
   private revs = new Map<string, number>()
@@ -133,10 +144,11 @@ export class WorkspaceStore {
         const { kanban, ...rest } = e.project
         projects.push(validKanban(kanban) ? e.project : rest)
       } else if (e.cwd) {
-        const p = await this.readProjectFile(e.cwd, sideline)
-        if (p) {
+        const read = await this.readProjectFile(e.cwd, sideline)
+        if (read) {
+          const p = read.file
           this.revs.set(p.id, p.rev)
-          this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(p))
+          this.lastWritten.set(projectFilePath(e.cwd), read.raw)
           projects.push(
             fileToProject(p, { cwd: e.cwd, closed: e.closed, localExec: this.execOverlay(e, p) })
           )
@@ -204,7 +216,7 @@ export class WorkspaceStore {
    * Edition — and the watcher's readLocalRef*) pass false: a probe must never mutate the disk, and a
    * git-conflict-marked project.json mid-merge must be left in place so the user can hand-resolve it.
    */
-  private async readProjectFile(cwd: string, sideline: boolean): Promise<ProjectFileV1 | null> {
+  private async readProjectFile(cwd: string, sideline: boolean): Promise<ProjectFileRead | null> {
     const file = projectFilePath(cwd)
     let raw: string
     try {
@@ -214,7 +226,8 @@ export class WorkspaceStore {
     }
     try {
       const parsed = JSON.parse(raw) as ProjectFileV1
-      if (parsed?.version === 1 && typeof parsed.id === 'string' && Array.isArray(parsed.nodes)) return parsed
+      // `raw` travels with the parse so callers can record the BYTES on disk in `lastWritten`.
+      if (parsed?.version === 1 && typeof parsed.id === 'string' && Array.isArray(parsed.nodes)) return { file: parsed, raw }
       // parses but isn't a ProjectFileV1 — sideline it too, so a later save can't overwrite the only copy.
     } catch { /* not JSON — sideline below */ }
     if (sideline) {
@@ -382,11 +395,11 @@ export class WorkspaceStore {
   }
 
   async probeFolder(folder: string): Promise<Project | null> {
-    const f = await this.readProjectFile(folder, false)
+    const read = await this.readProjectFile(folder, false)
     // No `localExec`: this folder is being ADOPTED (its project.json may have been cloned from
     // anywhere), so its nodes come up with no custom shell and no extra ssh args — the safe
     // defaults. Only values this machine typed itself are ever restored (@shared/node-exec).
-    return f ? fileToProject(f, { cwd: folder }) : null
+    return read ? fileToProject(read.file, { cwd: folder }) : null
   }
 
   localRefPaths(): string[] {
@@ -400,11 +413,11 @@ export class WorkspaceStore {
   async readLocalRef(projectId: string): Promise<Project | null> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
     if (!e?.cwd) return null
-    const f = await this.readProjectFile(e.cwd, false)
-    if (!f) return null
-    this.revs.set(f.id, f.rev)
-    this.lastWritten.set(projectFilePath(e.cwd), serializeProjectFile(f))
-    return fileToProject(f, { cwd: e.cwd, closed: e.closed, localExec: e.localExec })
+    const read = await this.readProjectFile(e.cwd, false)
+    if (!read) return null
+    this.revs.set(read.file.id, read.file.rev)
+    this.lastWritten.set(projectFilePath(e.cwd), read.raw)
+    return fileToProject(read.file, { cwd: e.cwd, closed: e.closed, localExec: e.localExec })
   }
 
   /** Maps a watched file path back to its project and re-reads it. */
@@ -594,11 +607,15 @@ export class WorkspaceStore {
 
   /**
    * Registers a PHONE-STARTED session as a node in a LOCAL ref project's file — the host side of
-   * the relay `projects.registerNode` verb. Deliberately written as an OUTSIDE edit
-   * (`lastWritten` untouched): the workspace watcher then broadcasts the change and the renderer
-   * adopts the node onto the live canvas, exactly like a git pull would. v1 scope: local-cwd
-   * projects only (an ssh ref's file lives on another machine; the phone reaches that one over
-   * its own SSH path).
+   * the relay `projects.registerNode` verb. v1 scope: local-cwd projects only (an ssh ref's file
+   * lives on another machine; the phone reaches that one over its own SSH path).
+   *
+   * The renderer must adopt the node onto the live canvas, so the change IS announced — but
+   * explicitly, via workspaceExternalChange, not by leaving `lastWritten` stale so the watcher
+   * fires. That side channel only worked while every self-write matched byte-for-byte, and it made
+   * an OUR-write indistinguishable from a teammate's; the store's own caches (getNode,
+   * persistedCanvases) were left holding a file they knew was outdated. Record the write like any
+   * other and send the notification ourselves.
    */
   async appendRemoteNode(projectId: string, input: RemoteNodeInput, now = new Date()): Promise<boolean> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
@@ -614,10 +631,21 @@ export class WorkspaceStore {
     if (updated === null) return false
     try {
       await writeAtomic(file, updated)
-      return true
     } catch {
       return false
     }
+    this.lastWritten.set(file, updated)
+    // appendProjectNode only returns a string it produced from a valid ProjectFileV1, so this parse
+    // cannot realistically fail — but a throw here would turn a landed write into a `false`.
+    try {
+      const parsed = JSON.parse(updated) as ProjectFileV1
+      this.revs.set(parsed.id, parsed.rev)
+      platform().broadcast(
+        IPC.workspaceExternalChange,
+        fileToProject(parsed, { cwd: e.cwd, closed: e.closed, localExec: e.localExec })
+      )
+    } catch { /* the file is written and cached; the next load/poll surfaces the node */ }
+    return true
   }
 
   /**

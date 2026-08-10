@@ -453,10 +453,48 @@ describe('localProjectCwds (the phone bridge jail roots)', () => {
   })
 })
 
-describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
-  it('appends into a local ref project file as an OUTSIDE edit (watcher must see it)', async () => {
+// Field bug 2026-08-10: `lastWritten` was populated on the READ paths with a RE-SERIALIZATION of
+// the parsed file, not with the bytes actually on disk. Any project.json whose formatting differs
+// (a teammate's editor, a git checkout, a trailing newline) therefore never matched isSelfWrite —
+// so EVERY fs event on it read as an external change, forever: spurious reloads and conflict bars.
+describe('watcher self-write detection compares the RAW file bytes', () => {
+  const reformat = async (file: string): Promise<string> => {
+    // Semantically identical, different bytes — exactly what another writer leaves behind.
+    const raw = (await fs.readFile(file, 'utf-8')) + '\n'
+    await fs.writeFile(file, raw)
+    return raw
+  }
+
+  it('load() records the bytes on disk, not a re-serialization of them', async () => {
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot })]))
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    const raw = await reformat(file)
+
+    const store = new WorkspaceStore()
+    await store.load()
+    expect(store.isSelfWrite(file, raw)).toBe(true)
+    // A genuine outside edit still reads as one.
+    expect(store.isSelfWrite(file, raw.replace('"name"', '"nAme"'))).toBe(false)
+  })
+
+  it('readLocalRef records the bytes on disk too (the watcher re-read path)', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    const raw = await reformat(file)
+
+    expect(await store.readLocalRefByPath(file)).toMatchObject({ id: 'p1' })
+    // Editors and git touch a file several times: the follow-up events for the SAME bytes must
+    // not each re-broadcast an "external change".
+    expect(store.isSelfWrite(file, raw)).toBe(true)
+  })
+})
+
+describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
+  it('appends into a local ref project file and broadcasts the change itself', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    fake.sent.length = 0
     const ok = await store.appendRemoteNode('p1', { id: 'term-zz1-1', title: 'Mobile' })
     expect(ok).toBe(true)
     const file = path.join(projRoot, '.nodeterm/project.json')
@@ -464,9 +502,15 @@ describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
     const f = JSON.parse(raw)
     expect(f.rev).toBe(2)
     expect(f.nodes.map((n: { id: string }) => n.id)).toContain('term-zz1-1')
-    // NOT a self-write: the workspace watcher must treat this as an outside edit and broadcast
-    // it, so the renderer adopts the node onto the live canvas.
-    expect(store.isSelfWrite(file, raw)).toBe(false)
+    // This write is OURS. It used to be left out of `lastWritten` on purpose, so the watcher would
+    // fire and notify the renderer — a side channel that only worked while the watcher's byte
+    // comparison happened to be reliable. The notification is now explicit, so the write is
+    // recorded like every other one of ours.
+    expect(store.isSelfWrite(file, raw)).toBe(true)
+    const broadcast = fake.sent.filter((s) => s.channel === 'workspace:external-change')
+    expect(broadcast).toHaveLength(1)
+    expect(broadcast[0].args[0]).toMatchObject({ id: 'p1', cwd: projRoot })
+    expect(broadcast[0].args[0].nodes.map((n: { id: string }) => n.id)).toContain('term-zz1-1')
   })
 
   it('refuses unknown / ssh / cwd-less projects and corrupt files (nothing written)', async () => {
