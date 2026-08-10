@@ -2177,5 +2177,12 @@ app.on('before-quit', (e) => {
   // a master mid-write used to leave a truncated project.json on the server. The masters are
   // therefore kept up through the raced flush and dropped on the second before-quit pass.
   const flush = Promise.allSettled([remoteWorkspaceIO.flush(), ptyManager.killAll()])
-  void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))]).finally(() => app.quit())
+  void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))])
+    // Then let whisper go. A dictation still transcribing when Electron tears down the main
+    // process's node env aborts the WHOLE app from inside the native addon (SIGABRT in
+    // Napi::ThreadSafeFunction::CallJS) — see SpeechService.shutdown. It needs its own budget
+    // because the 1500ms cap above is shorter than a transcription, and it costs nothing at
+    // all when dictation is idle, which is nearly always.
+    .then(() => speechService.shutdown())
+    .finally(() => app.quit())
 })

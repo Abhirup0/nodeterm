@@ -136,6 +136,10 @@ export interface PairingStartResult {
   payload: string
   /** True when 127.0.0.1:22 accepted a connection — sshd is (probably) running. */
   sshOpen: boolean
+  /** What the QR on screen will mint: 'ok' = carries a relay block, 'dev' = unpackaged build
+   *  (relayAllowed() off — the QR is LAN-only regardless of the toggle), 'off' = toggle off.
+   *  Known at start, so the UI can warn BESIDE the QR instead of after the pairing. */
+  relayPlan: 'ok' | 'dev' | 'off'
 }
 
 /** Fired once when pairing finishes: ok=true → a key was installed, ok=false → timeout/cancel. */
@@ -515,7 +519,11 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
       }
     }
 
-    return { payload, sshOpen }
+    return {
+      payload,
+      sshOpen,
+      relayPlan: relayCtx ? 'ok' : relayDeps && !relayDeps.relayAllowed() ? 'dev' : 'off'
+    }
   }
 
   const stop = (): void => {
