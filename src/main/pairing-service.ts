@@ -297,6 +297,24 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
   let timer: ReturnType<typeof setTimeout> | null = null
   let onDoneCb: ((result: PairingDone) => void) | null = null
 
+  /**
+   * Serializes every mutation of agent.json / authorized_keys. Both are read-modify-write over a
+   * whole file and both entry points are unserialized — each `pairing:revoke-device` invoke is
+   * independent (src/main/index.ts) and the pairing POST arrives on its own connection — so two
+   * overlapping mutations each read the ORIGINAL file and write back a copy carrying only their
+   * own change. The revoke case is the dangerous one: the loser's stale read republishes the
+   * device the winner just revoked, key line and agent token both, so a revoked phone silently
+   * keeps SSH and host-agent access. Same idiom as SshStore's writeChain.
+   */
+  let mutateChain: Promise<void> = Promise.resolve()
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    // Both arms run `fn`: one mutation failing must not cancel the ones queued behind it…
+    const run = mutateChain.then(fn, fn)
+    // …nor surface on them, while the caller still sees ITS OWN failure.
+    mutateChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
   const cleanup = (): void => {
     if (timer) {
       clearTimeout(timer)
@@ -457,13 +475,18 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         const deviceId = randomUUID()
         const agentToken = randomBytes(24).toString('base64url')
         const name = normalizeDeviceName(body.deviceName)
-        await appendAuthorizedKey(rewriteKeyComment(publicKey, deviceId))
-        await persistDevice({
-          id: deviceId,
-          name,
-          token: agentToken,
-          pairedAt: Date.now(),
-          lastSeenAt: 0
+        // One unit, and queued behind any in-flight revoke: a pairing that interleaves with one
+        // would either append onto the inode the revoke is about to rename over, or lose its
+        // agent.json entry to the revoke's stale read.
+        await serialize(async () => {
+          await appendAuthorizedKey(rewriteKeyComment(publicKey, deviceId))
+          await persistDevice({
+            id: deviceId,
+            name,
+            token: agentToken,
+            pairedAt: Date.now(),
+            lastSeenAt: 0
+          })
         })
         // Provision relay access for the phone when enabled + Pro. Any failure ⇒ LAN-only: we
         // never fail the pairing over a relay hiccup (the phone still got its SSH key installed).
@@ -535,12 +558,21 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     return toPublicDevices(readDevices(await readAgentJson()))
   }
 
-  const revokeDevice = async (id: string): Promise<void> => {
-    const obj = await readAgentJson()
-    const devices = removeDevice(readDevices(obj), id)
-    await writeAgentJson({ ...obj, devices })
-    await removeAuthorizedKeysForDevice(id)
-  }
+  // One unit: agent.json and authorized_keys must not be revoked half-way by an interleaving writer.
+  //
+  // authorized_keys goes FIRST, and the order is load-bearing on partial failure. That file is full
+  // shell access; agent.json holds the host-agent bearer token and the device the UI lists. If the
+  // second step fails, revoking the SSH key first leaves the BIGGER capability already gone and the
+  // device still listed — visible to its owner, with the Revoke button still there to finish the
+  // job. The reverse order fails the other way: the device disappears from the list while its key
+  // is still live, so the owner believes it revoked and has no way left to retry.
+  const revokeDevice = (id: string): Promise<void> =>
+    serialize(async () => {
+      await removeAuthorizedKeysForDevice(id)
+      const obj = await readAgentJson()
+      const devices = removeDevice(readDevices(obj), id)
+      await writeAgentJson({ ...obj, devices })
+    })
 
   return { start, stop, listDevices, revokeDevice, probeSsh }
 }
