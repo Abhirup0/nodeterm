@@ -6286,6 +6286,16 @@ body,
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
 }
+.ss-group__sig--working { color: #d97757; }
+.ss-group__sig-spin {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid #d97757;
+  border-top-color: transparent;
+  animation: nt-spin 1s steps(12, end) infinite;
+}
 
 .ss-row__body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .ss-row__titleline { display: flex; align-items: center; gap: 6px; min-width: 0; }

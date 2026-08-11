@@ -309,6 +309,12 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                     {signals.unread}
                   </span>
                 )}
+                {signals.working > 0 && (
+                  <span className="ss-group__sig ss-group__sig--working" title="Sessions running right now">
+                    <span className="ss-group__sig-spin" />
+                    {signals.working}/{projectCount(g)}
+                  </span>
+                )}
                 <span className="ss-group__count">{projectCount(g)}</span>
                 <button
                   className="ss-group__add"
