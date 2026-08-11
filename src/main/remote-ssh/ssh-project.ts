@@ -21,7 +21,7 @@ import {
   mkDirArgs,
   exitMasterArgs,
   checkMasterArgs,
-  remoteTmuxKillArgs,
+  remoteTmuxKillEverySocketArgs,
   childArgs,
   scpArgs,
   scpDownArgs,
@@ -869,17 +869,26 @@ export class SshProjectManager {
    * regardless of whether the nodes were mounted (only the active project's nodes are). `nodeIds`
    * are raw node ids; we map each to its `nt-<id>` session name (the same name `spawnSession` /
    * `remoteTmuxHasSessionArgs` use). Best-effort per id, a missing session is ignored.
+   *
+   * The kill goes to EVERY tmux socket on the host, not just the `nodeterm-rmt` one an SSH project
+   * spawns on. Callers here know only a session NAME: project deletion knows its own nodes (always
+   * remote), but the session-memory panel passes rows swept off BOTH of the host's sockets — and a
+   * host that runs its own `nodeterm-server` keeps those sessions on `node-terminal`. Those rows
+   * used to get a confirm reading "this stops its tmux session" followed by a kill aimed at the
+   * other socket, so nothing died. See `KILL_TMUX_SOCKETS`.
    */
   async killSessions(projectId: string, nodeIds: string[]): Promise<void> {
     const c = this.conns.get(projectId)
     if (!c) return
     await Promise.all(
-      nodeIds.map((id) =>
-        this.r.run(remoteTmuxKillArgs(c.conn, c.controlPath, sessionName(id))).then(
-          () => undefined,
-          () => undefined
+      nodeIds
+        .flatMap((id) => remoteTmuxKillEverySocketArgs(c.conn, c.controlPath, sessionName(id)))
+        .map((args) =>
+          this.r.run(args).then(
+            () => undefined,
+            () => undefined
+          )
         )
-      )
     )
   }
 

@@ -23,6 +23,8 @@ import {
   remoteHookEnvArgs,
   remoteTmuxHasSessionArgs,
   remoteTmuxKillArgs,
+  localKillSockets,
+  localTmuxKillArgs,
   remoteTmuxPtyArgs,
   remoteTmuxSendKeysArgs,
   remoteCapturePaneArgs,
@@ -2237,10 +2239,20 @@ export class PtyManager {
       // such session", which is already the ignored case below.
     }
     if (!this.tmuxPath) return
-    try {
-      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'kill-session', '-t', sessionName(persistKey)])
-    } catch {
-      // session may not exist; ignore
+    // Which socket(s) to aim at. Holding the session ourselves means we know: it is the local one.
+    // Holding NOTHING means the name is all we have, and on this machine a `nt-<id>` can also be
+    // living on the `nodeterm-rmt` socket — that is where ANOTHER machine's nodeterm puts the
+    // sessions it SSHes in to spawn. The session-memory panel lists those (it sweeps both sockets)
+    // and offers to end them, so a kill that only ever tried `node-terminal` showed a confirm
+    // saying "this stops its tmux session" and then did nothing. The common path — deleting a node
+    // whose session we hold — is unchanged, and every extra call is the already-ignored
+    // "no such session".
+    for (const socket of localKillSockets(dying ? TMUX_SOCKET : null)) {
+      try {
+        await runAsync(this.tmuxPath, localTmuxKillArgs(socket, sessionName(persistKey)))
+      } catch {
+        // session may not exist on this socket; ignore
+      }
     }
   }
 

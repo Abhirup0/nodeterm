@@ -364,8 +364,33 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     await create(80, 24)
     await m.destroySession(SOLO, 'solo-1')
     const kills = tmuxCalls('kill-session')
+    // ONE kill: we hold this session, so we know which socket it is on and the destroy aims only
+    // there. A destroy with NO live session cannot know, and fans out over both sockets
+    // (`localKillSockets`) — this length is what keeps that off the solo path.
     expect(kills).toHaveLength(1)
-    expect(kills[0].args[kills[0].args.indexOf('-t') + 1]).toBe(sessionName('solo-1'))
+    expect(kills[0].args[kills[0].args.indexOf('-L') + 1]).toBe('node-terminal')
+    // `=` forces an EXACT tmux target. Node ids end in a counter, so `nt-a-1` is a prefix of
+    // `nt-a-12`, and tmux falls back to prefix matching whenever the exact name is not found.
+    expect(kills[0].args[kills[0].args.indexOf('-t') + 1]).toBe(`=${sessionName('solo-1')}`)
+  })
+
+  // Destroying a name we hold NOTHING for is how the session-memory panel ends an ORPHAN row — a
+  // tmux session with no node on any canvas. It is also every session that outlived the process
+  // that spawned it. We cannot know which socket carries it, and on this machine a `nt-<id>` may be
+  // on `nodeterm-rmt`: that is where ANOTHER machine's nodeterm puts the sessions it SSHes in to
+  // spawn, and the panel sweeps (and offers to end) both sockets. Aiming only at `node-terminal`
+  // meant a confirm reading "this stops its tmux session" that killed nothing at all.
+  it('destroying a session we do not hold tries EVERY socket it could be on', async () => {
+    const m = await tmuxManager()
+    await m.destroySession(SOLO, 'never-opened-here')
+    const kills = tmuxCalls('kill-session')
+    expect(kills.map((c) => c.args[c.args.indexOf('-L') + 1]).sort()).toEqual([
+      'node-terminal',
+      'nodeterm-rmt'
+    ])
+    for (const k of kills) {
+      expect(k.args[k.args.indexOf('-t') + 1]).toBe(`=${sessionName('never-opened-here')}`)
+    }
   })
 
   // ── recycle (move into worktree) = destroy, minus the "someone closed it" fan-out ─────────
@@ -379,8 +404,8 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     await (fake.senderListeners[IPC.ptyRecycle](SOLO, 'solo-1') as unknown as Promise<void>)
 
     const kills = tmuxCalls('kill-session')
-    expect(kills).toHaveLength(1)
-    expect(kills[0].args[kills[0].args.indexOf('-t') + 1]).toBe(sessionName('solo-1'))
+    expect(kills).toHaveLength(1) // we hold the session; one socket, one kill
+    expect(kills[0].args[kills[0].args.indexOf('-t') + 1]).toBe(`=${sessionName('solo-1')}`)
     expect(spawned[0].killed).toBe(true) // the old pty client is released
     expect(fake.sent).toEqual([]) // solo: nobody to tell, so nothing is sent
 

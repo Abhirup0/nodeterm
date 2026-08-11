@@ -15,6 +15,11 @@ import {
   listDirArgs,
   mkDirArgs,
   RMT_TMUX_SOCKET,
+  KILL_TMUX_SOCKETS,
+  localKillSockets,
+  localTmuxKillArgs,
+  remoteTmuxKillArgs,
+  remoteTmuxKillEverySocketArgs,
   hookForwardArgs,
   hookForwardCancelArgs,
   remoteHookEnvArgs,
@@ -379,5 +384,53 @@ describe('probeSaysAbsent (has-session probe discrimination)', () => {
     expect(probeSaysAbsent(new Error('plain'))).toBe(false)
     expect(probeSaysAbsent(undefined)).toBe(false)
     expect(probeSaysAbsent(null)).toBe(false)
+  })
+})
+
+describe('killing a session by name (both sockets, exact target)', () => {
+  // Two nodeterm tmux sockets live on every host at once: `node-terminal` for a nodeterm running ON
+  // the machine, `nodeterm-rmt` for one SSH-ing INTO it. The session-memory sweep lists BOTH, so a
+  // kill routed to one of them promised something it could not do for every row off the other — a
+  // host running its own nodeterm-server is exactly that shape.
+  it('covers both sockets a nodeterm session can live on', () => {
+    expect([...KILL_TMUX_SOCKETS].sort()).toEqual(['node-terminal', 'nodeterm-rmt'])
+  })
+
+  it('targets the session EXACTLY — never tmux prefix matching', () => {
+    // A speculative kill misses by design, and a miss is when tmux falls back to fnmatch and then
+    // to prefix matching. Node ids end in a counter, so `nt-a-1` is a prefix of `nt-a-12`: without
+    // `=` a miss could kill a different session.
+    expect(localTmuxKillArgs('node-terminal', 'nt-a-1')).toEqual([
+      '-L', 'node-terminal', 'kill-session', '-t', '=nt-a-1'
+    ])
+    expect(remoteTmuxKillArgs(conn, '/s.sock', 'nt-a-1').at(-1)).toContain('-t =nt-a-1')
+  })
+
+  it('aims a local destroy at the socket we hold, and at every socket when we hold nothing', () => {
+    // Holding the session means we know which socket it is on. Holding nothing (an orphan row in
+    // the session-memory panel, or any session that outlived the process that spawned it) means the
+    // name is all we have.
+    expect(localKillSockets('node-terminal')).toEqual(['node-terminal'])
+    expect([...localKillSockets(null)].sort()).toEqual(['node-terminal', 'nodeterm-rmt'])
+  })
+
+  it('keeps the remote default on the ssh socket, and overrides it explicitly', () => {
+    expect(remoteTmuxKillArgs(conn, '/s.sock', 'nt-x').at(-1)).toBe(
+      `tmux -L ${RMT_TMUX_SOCKET} kill-session -t =nt-x`
+    )
+    expect(remoteTmuxKillArgs(conn, '/s.sock', 'nt-x', 'node-terminal').at(-1)).toBe(
+      'tmux -L node-terminal kill-session -t =nt-x'
+    )
+  })
+
+  it('kills a name on EVERY remote socket, one ssh invocation each', () => {
+    const runs = remoteTmuxKillEverySocketArgs(conn, '/s.sock', 'nt-x')
+    expect(runs).toHaveLength(2)
+    expect(runs.map((r) => r.at(-1)).sort()).toEqual([
+      'tmux -L node-terminal kill-session -t =nt-x',
+      `tmux -L ${RMT_TMUX_SOCKET} kill-session -t =nt-x`
+    ])
+    // Each is a complete child-ssh argv, not a bare command.
+    for (const r of runs) expect(r.slice(0, childPrefix.length)).toEqual(childPrefix)
   })
 })
