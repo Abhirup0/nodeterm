@@ -211,10 +211,13 @@ stricter:
   `sshScopePredicate({ sshProjectIds: () => workspaceStore.sshProjectIds() })`. A query arriving
   without that flag — a client that has not learned the project is an SSH one yet — would otherwise
   fall through to the LOCAL sweep, which is exactly the misattribution the refusal exists to prevent.
-- **That predicate depends on the boot-time `await workspaceStore.load(...)`** earlier in
-  `startServer` (a line documented there as being for Context Link). Move it below the service boot,
-  or drop it, and every SSH project silently reads as local again.
-  `test/server/session-memory-e2e.test.ts` fails if that happens.
+- **That predicate depends on the boot-time `await workspaceStore.load(...)`** in `startServer` (a
+  line documented there as being for Context Link). Drop it — or stop awaiting it before
+  `server.listen()` — and every SSH project silently reads as local again;
+  `test/server/session-memory-e2e.test.ts` fails if that happens. What is **not** load-bearing is
+  where that load sits relative to the service boot: `isRemoteProject` is a closure evaluated per
+  QUERY, and no query can arrive before `startServer` reaches `listen()`. The requirement is that
+  the load completes before the server *serves*, not that it precedes any particular boot line.
 
 A **headless** host boots the service like every other core service, but with no UI attached nothing
 queries it.

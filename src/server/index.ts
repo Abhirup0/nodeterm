@@ -459,9 +459,15 @@ export async function startServer(
   //
   // DEPENDENCY, and one that breaks silently: `sshProjectIds()` reads the IN-MEMORY index, which is
   // populated only by the `await workspaceStore.load(...)` above — a line documented there as being
-  // for context-link. Move it below this point, or drop it, and every SSH project reads as local
-  // here: the refusal quietly degrades to renderer-flag-only routing, which is the misattribution
-  // bug itself. `test/server/session-memory-e2e.test.ts` exists to fail if that happens.
+  // for context-link. Drop it, or stop awaiting it before `server.listen()` below, and every SSH
+  // project reads as local here: the refusal quietly degrades to renderer-flag-only routing, which
+  // is the misattribution bug itself. `test/server/session-memory-e2e.test.ts` exists to fail if
+  // that happens.
+  //
+  // What is NOT load-bearing is this boot's position relative to that load. `isRemoteProject` is a
+  // closure evaluated per QUERY, and no query can arrive before `startServer` reaches `listen()`,
+  // so reordering the two would change nothing. The requirement is that the load happens and is
+  // complete before the server serves — not that it precedes this line.
   startSessionMemoryService({
     tmuxBin: () => ptyManager.getTmuxBin(),
     remote: {

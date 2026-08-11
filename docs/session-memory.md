@@ -219,6 +219,33 @@ That is safe because it is a **round trip, not a lookup**: the panel's `nodeId` 
 observed it on**. It does not rest on node ids being globally unique (they are only per-launch
 unique).
 
+**The name and the host were never the hard part — the SOCKET was.** Two nodeterm tmux sockets exist
+on one machine at the same time: `node-terminal` for a nodeterm running ON it (desktop or Server
+Edition) and `nodeterm-rmt` for one SSH-ing INTO it. The sweep lists **both**
+(`session-memory.ts`, `session-memory-remote.ts`) while the kill targeted **one** — so every row that
+came off the other socket got the confirm "this stops its tmux session" and a kill that landed
+nowhere. That is not an exotic host: one running its own `nodeterm-server` *and* being SSH'd into is
+exactly it, and the local mirror is the same shape (this machine's panel listing the `nodeterm-rmt`
+sessions that another machine's nodeterm spawned here — all of them orphans locally, since their
+nodes are on that machine's canvas). So a kill that knows only a NAME now goes to **every socket that
+name could be on**: `KILL_TMUX_SOCKETS`, via `remoteTmuxKillEverySocketArgs` (remote) and
+`localKillSockets` (local). Three things make that safe rather than reckless:
+
+- It is **best-effort by contract**: tmux exits non-zero with "can't find session" on whichever
+  socket does not hold it, which is the already-ignored case both legs were written around.
+- The target is **exact** — `-t =nt-<id>`. Without `=`, tmux falls back to fnmatch and then to
+  PREFIX matching whenever the name is not found, and "not found" is the normal outcome of a
+  speculative kill. Node ids end in a counter, so `nt-…-1` is a prefix of `nt-…-12`: a miss could
+  have killed a *different* session. The reaper already killed this way, for this reason.
+- The fan-out happens only when we do **not** know the socket. A destroy for a session we hold aims
+  at that session's socket alone, so the ordinary node-`×` path still fires exactly one kill
+  (pinned in `pty-single-user.test.ts`).
+
+Note the deliberate duplication: the sweep and the reaper keep their own `[TMUX_SOCKET,
+RMT_TMUX_SOCKET]` arrays. For them the ORDER is load-bearing — the sweep's `bySession` is first-wins,
+so it decides which socket a duplicate name is attributed to — and for a kill it means nothing.
+Sharing one constant would couple a de-duplication preference to a kill list.
+
 Ownership is re-resolved at click time rather than taken from the row's `orphan` flag — the rows are
 a snapshot of the last sweep, and a node created since would otherwise be killed as an orphan. With
 an owner, the kill goes through `closeSession`, the same path the sessions sidebar and the node's
@@ -236,6 +263,12 @@ own `×` use.
 - **Kanban board** — Canvas passes `overBoard={kanbanOpen}`, which raises the pill to z 26 over the
   board's opaque 25 (the same prop `UsageIndicator` takes beside it); an open panel rises to 60, over
   the board and the banners but below ConfirmDialog / the palette.
+- **Sessions sidebar** — an open panel also has to clear the sidebar (z 12) when the board is
+  *closed*, which is a separate rule: `.sysres-indicator:has(.sessmem-panel) { z-index: 13 }`,
+  mirroring `.usage-indicator:has(.usage-popover)`. Both `:has()` rules only work because the pill
+  cluster is mounted OUTSIDE `<ReactFlow>` — the library's wrapper carries an inline `z-index: 0`
+  that would trap any value inside it, however large. The collapsed pill deliberately keeps its low
+  layer (5) and passes *under* the sidebar.
 - **Mobile companion** — **N/A for v1.** *nodeterm mobile* attaches to tmux sessions over the
   transport protocol and has no concept of per-session host memory; adding one means extending that
   protocol. A follow-up in `~/projects/nodeterm-ios`, not built here.
@@ -264,15 +297,28 @@ the headless Linux box this was built on. Format follows `docs/grok-agent.md` §
 
 ```
 The kill actually reaching the host (the bug most recently fixed, and the one no test can prove)
- 1. SSH project, a row with "no node": press ×, confirm, then on the HOST run
-    `tmux -L nodeterm-rmt ls` — the nt-<id> session must be GONE, not merely absent from the panel.
+ 1. SSH project, a row with "no node": press ×, confirm, then on the HOST run BOTH
+    `tmux -L nodeterm-rmt ls` and `tmux -L node-terminal ls` — the nt-<id> session must be GONE from
+    wherever it was, not merely absent from the panel.
  2. Same, for a row owned by a CLOSED ssh project (it resolves to a title, so it takes the
     closeSession path plus the remote kill — both legs must land).
+ 2b. THE CROSS-SOCKET CASE, and the reason both sockets are now killed. On a host that also runs its
+    own `nodeterm-server`, open an SSH project pointed at it: the panel lists that server's own
+    sessions (they live on `node-terminal`, not `nodeterm-rmt`). Kill one and confirm with
+    `tmux -L node-terminal ls` on the host. Before the fix this row's confirm was a no-op.
+ 2c. The LOCAL mirror of 2b: from another machine, SSH into this one with nodeterm and open a
+    terminal (it lands on this machine's `nodeterm-rmt`). On THIS machine the panel shows it as an
+    orphan; kill it and confirm with `tmux -L nodeterm-rmt ls` locally.
  3. Kill a node created less than a sweep ago (<1 s): the confirm wording may say "no node" from the
-    stale snapshot, but the CANVAS node must be removed too — ownership is re-resolved at click time.
- 4. Local project: kill a row and confirm `tmux -L node-terminal ls` loses it, and that no remote
-    kill is attempted (a local nt-<id> whose node belongs to an SSH project must NOT be killed on
-    the host).
+    stale snapshot, and the CANVAS node is currently left behind (§4's known hole) — confirm which
+    of the two actually happens on a real machine.
+ 4. Local project, ordinary node ×: confirm `tmux -L node-terminal ls` loses it, that the node's own
+    kill still fires exactly ONE kill-session (no fan-out on the path we hold a session for), and
+    that no remote kill is attempted — a local nt-<id> whose node belongs to an SSH project must NOT
+    be killed on the host.
+ 4b. tmux target exactness: create nodes until two session names share a prefix (`nt-…-1` and
+    `nt-…-12` — same millisecond, counters 1 and 12), delete the SHORTER one, and confirm the longer
+    one survives. This is what `-t =<name>` buys and it has only been reasoned about.
 
 macOS (the ps path never runs on Linux)
  5. Open the panel on a Mac: `defaultProcessTableReader` returns null there, so the whole table
@@ -303,6 +349,19 @@ Layout and theming (argued from CSS only)
 17. Both themes: hover (light is why the ink overlay exists) and the bar's colour steps at ~75% and
     ~90% used.
 18. fitView / goToNode must no longer tuck nodes under the pill.
+
+Rows, travel and the panel itself (restored — these were in the task reports and lost on the way in)
+23. A `claude` node with 2 MCP servers must read `+3 child processes`, not +2: `pane_pid` is the
+    pane's SHELL, so the count includes the agent CLI itself. This is the ONLY item that can
+    falsify the "reports 3" claim made twice above; everything else about the sub-line is arithmetic.
+24. Travel to a row whose node lives in a CLOSED project: the tab must REOPEN and the camera land on
+    the node. This is the likeliest thing on the list to be wrong — the load and the focus happen in
+    the same tick, and `travelToNode` (not `focusNodeById`) is what handles it.
+25. A LOCAL orphan row (`tmux -L node-terminal new-session -d -s nt-fake-1`) renders with a hollow
+    dot and a "no node" chip, and its title is inert — clicking it must do nothing at all.
+26. The panel STAYS OPEN through a kill: the ConfirmDialog is a portal outside the pill's container,
+    and answering it must not dismiss the list the user is working through. Clicking anywhere else
+    on the canvas must still close the panel.
 
 Cadence and the other surfaces
 19. Local project, panel closed: the pill's number moves after 30 s.
