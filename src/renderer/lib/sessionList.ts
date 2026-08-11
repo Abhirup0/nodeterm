@@ -52,12 +52,6 @@ export function isGroupCollapsed(
 
 /**
  * Header badges for a project group: how many sessions need the user right now
- * (waiting/blocked) and how many finished unseen. Mirrors the row glyph's precedence —
- * an attention session is never double-counted as unread, and a working one isn't
- * unread yet (a new turn is running; the old mark resurfaces when it ends).
- */
-/**
- * Header badges for a project group: how many sessions need the user right now
  * (waiting/blocked), how many finished unseen, and how many are actively working right now.
  * Mirrors the row glyph's precedence — an attention session is never double-counted as unread,
  * and a working one isn't unread yet (a new turn is running; the old mark resurfaces when it ends).
