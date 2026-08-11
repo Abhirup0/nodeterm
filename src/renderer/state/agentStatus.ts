@@ -42,6 +42,22 @@ export interface AgentNodeStatus {
    * interrupt-inference baseline. Same-state events refresh it in place (no re-render).
    */
   stateAt?: number
+  /**
+   * When this node last CHANGED state — the idle clock the hibernation policy reads
+   * (`terminal/hibernation-policy.ts`). Deliberately not `stateAt`: that one is refreshed by
+   * every same-state event (freshness), while "how long has this session been idle" means "how
+   * long since the turn ended". TRANSIENT — never persisted: a relaunch has seen no events yet,
+   * and a stale stamp read as "idle since before the restart" would hibernate a session the
+   * moment the app came back. Absent ⇒ unknown idle ⇒ never a hibernation candidate.
+   */
+  lastEventAt?: number
+  /**
+   * The agent CLI was exited to reclaim its RAM ("Eco" mode) and its conversation is waiting to be
+   * resumed when the node is next viewed. PERSISTED beside unread/session/sessionId: the tmux
+   * session outlives the app, so after a relaunch this flag is the only thing that knows the pane
+   * holds a shell rather than a live CLI.
+   */
+  hibernated?: boolean
   /** Which agent this node is running (claude/codex/gemini/…), when known. */
   agentId?: AgentId
   /** A turn finished / needs attention while the user wasn't looking. */
@@ -89,6 +105,8 @@ export interface AgentStatusStore {
   sweepStaleWorking(staleMs?: number): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
+  /** Mark the node's agent CLI as exited-for-RAM (true) or live again (false). Persisted. */
+  setHibernated(id: string, on: boolean): void
   markUnread(id: string): void
   /**
    * Drop a node's unread flag. By default a clear of a FINISHED (done) node also ACKs the read
@@ -178,6 +196,9 @@ export function createAgentStatusSession(
       const out: Record<string, AgentNodeStatus> = {}
       for (const [id, v] of Object.entries(data)) {
         out[id] = { unread: !!v.unread, session: v.session, sessionId: v.sessionId, agentId: v.agentId }
+        // Only when set: an absent flag stays absent, so an entry saved before this field
+        // existed hydrates byte-identically (and `hibernated: false` never grows in the file).
+        if (v.hibernated) out[id].hibernated = true
         // A recurring job (cron/schedule — and tmux keeps in-session loops alive too) outlives
         // the app: restore its card. Minimal shape check so a corrupt entry can't break load.
         if (v.loop && typeof v.loop === 'object' && v.loop.kind) {
@@ -202,13 +223,14 @@ export function createAgentStatusSession(
     try {
       const out: Record<string, Partial<AgentNodeStatus>> = {}
       for (const [id, v] of Object.entries(byId)) {
-        if (v.unread || v.session || v.sessionId || v.loop || v.agentId) {
+        if (v.unread || v.session || v.sessionId || v.loop || v.agentId || v.hibernated) {
           out[id] = {
             unread: v.unread,
             session: v.session,
             sessionId: v.sessionId,
             agentId: v.agentId,
-            loop: v.loop
+            loop: v.loop,
+            hibernated: v.hibernated
           }
         }
       }
@@ -258,7 +280,10 @@ export function createAgentStatusSession(
           if (s.byId[id]) s.byId[id].stateAt = now
           return s
         }
-        const next = { ...prev, state, stateAt: now }
+        // The ONE place a state transition is recorded, so it is also the one place the idle
+        // clock is stamped (the same-state fast path above deliberately does not touch it —
+        // see `lastEventAt`).
+        const next = { ...prev, state, stateAt: now, lastEventAt: now }
         if (agentId !== undefined) next.agentId = agentId
         // Retain the approval ticket only while blocked; any other state clears it (transient).
         next.pendingId = state === 'blocked' ? (pendingId ?? prev.pendingId) : undefined
@@ -293,6 +318,18 @@ export function createAgentStatusSession(
         const prev = s.byId[id] ?? EMPTY
         if (prev.sessionId === sessionId) return s
         const byId = { ...s.byId, [id]: { ...prev, sessionId } }
+        save(byId)
+        return { byId }
+      }),
+
+    setHibernated: (id, on) =>
+      set((s) => {
+        const prev = s.byId[id] ?? EMPTY
+        if (!!prev.hibernated === on) return s
+        // Cleared by dropping the key, not by storing `false`: `save` skips entries that carry
+        // nothing durable, so a woken node leaves no residue behind in localStorage.
+        const next = { ...prev, hibernated: on ? true : undefined }
+        const byId = { ...s.byId, [id]: next }
         save(byId)
         return { byId }
       }),

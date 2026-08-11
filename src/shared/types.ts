@@ -907,6 +907,14 @@ export interface Settings {
    *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
    *  `auto` is version-gated: CLIs below 2.1.71 reject the value, so it degrades to no flag. */
   claudePermissionMode: AgentPermissionMode
+  /** "Eco": exit the agent CLI of a session that has been idle AND offscreen for
+   *  `agentHibernationIdleMinutes`, reclaiming its RAM; the conversation is resumed automatically
+   *  when the node is viewed again. Default OFF — opt-in, because it stops a real process.
+   *  Scheduled/loop agents and sessions with live subagents are never touched
+   *  (renderer/terminal/hibernation-policy.ts explains why). */
+  agentHibernationEnabled: boolean
+  /** How long a session must be idle + offscreen before "Eco" hibernates it (minutes). */
+  agentHibernationIdleMinutes: number
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-OUT (default on):
    *  version/OS only, nothing personal, client IP never stored. Turn it off in Settings → Privacy
    *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
@@ -1017,6 +1025,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
   // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
   claudePermissionMode: 'auto',
+  // Opt-in: hibernation exits a live CLI, so nobody gets it without asking. The 30-minute floor
+  // is deliberately long — shorter windows exit sessions the user is between turns on.
+  agentHibernationEnabled: false,
+  agentHibernationIdleMinutes: 30,
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,

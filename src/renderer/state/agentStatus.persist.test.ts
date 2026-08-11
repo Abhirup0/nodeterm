@@ -48,6 +48,56 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     })
   })
 
+  it('persists `hibernated` and drops the key when the node wakes', async () => {
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setHibernated('n1', true)
+    expect(JSON.parse(store.getItem('nodeterm.agentStatus')!).n1.hibernated).toBe(true)
+    useAgentStatus.getState().setHibernated('n1', false)
+    expect(JSON.parse(store.getItem('nodeterm.agentStatus') ?? '{}').n1?.hibernated).toBeUndefined()
+  })
+
+  it('restores `hibernated` on load (the CLI stays exited across an app restart)', async () => {
+    vi.stubGlobal(
+      'localStorage',
+      memStorage({
+        'nodeterm.agentStatus': JSON.stringify({ n4: { unread: false, sessionId: 's', hibernated: true } })
+      })
+    )
+    const { useAgentStatus } = await import('./agentStatus')
+    expect(useAgentStatus.getState().byId['n4']?.hibernated).toBe(true)
+  })
+
+  it('never persists `lastEventAt` — a stale idle clock would hibernate on relaunch', async () => {
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setState('n5', 'done', 'claude')
+    // The live entry carries the idle clock…
+    expect(useAgentStatus.getState().byId['n5'].lastEventAt).toBeTypeOf('number')
+    // …but nothing durable happened yet, so nothing was written at all.
+    useAgentStatus.getState().setSessionId('n5', 'sess-1')
+    const saved = JSON.parse(store.getItem('nodeterm.agentStatus')!)
+    expect(saved.n5.sessionId).toBe('sess-1')
+    expect(saved.n5.lastEventAt).toBeUndefined()
+    expect(saved.n5.stateAt).toBeUndefined()
+    expect(saved.n5.state).toBeUndefined()
+  })
+
+  it('stamps `lastEventAt` on a state transition only (same-state refresh keeps the idle clock)', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    const st = useAgentStatus.getState()
+    st.setState('n6', 'working', 'claude')
+    st.setState('n6', 'done', 'claude')
+    const first = useAgentStatus.getState().byId['n6'].lastEventAt!
+    expect(first).toBeTypeOf('number')
+    // A same-state event refreshes freshness, not the idle clock.
+    st.setState('n6', 'done', 'claude')
+    expect(useAgentStatus.getState().byId['n6'].lastEventAt).toBe(first)
+  })
+
   it('tolerates a persisted entry without loop (older format)', async () => {
     vi.stubGlobal(
       'localStorage',

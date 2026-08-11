@@ -27,6 +27,7 @@ import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
 import { Select } from '@renderer/ui/Select'
 import { Switch } from '@renderer/ui/Switch'
+import { NumberField } from '@renderer/ui/NumberField'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
@@ -60,6 +61,21 @@ const ROWS = {
     title: 'One-click approvals',
     keywords: ['approve', 'deny', 'approval', 'permission', 'hook', 'phone', 'canvas', 'one click', 'claude']
   },
+  hibernation: {
+    title: 'Hibernate idle agents',
+    keywords: [
+      'hibernate',
+      'eco',
+      'idle',
+      'memory',
+      'ram',
+      'exit',
+      'resume',
+      'offscreen',
+      'minutes',
+      'sleep'
+    ]
+  }
 }
 const ENTRIES = Object.values(ROWS)
 
@@ -199,6 +215,38 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               ariaLabel="One-click hook-reply approvals"
               onChange={(on) => update({ hookReplyApprovals: on })}
             />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.hibernation}>
+        <FieldRow
+          label="Hibernate idle agents"
+          description="Exit an agent CLI that has been idle and offscreen this long, freeing its memory; the conversation resumes automatically when you view the node. Scheduled, /loop and /cron agents — and sessions with subagents still running — are never touched."
+          control={
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={settings.agentHibernationEnabled}
+                ariaLabel="Hibernate idle agents"
+                onChange={(on) => update({ agentHibernationEnabled: on })}
+              />
+              <NumberField
+                value={settings.agentHibernationIdleMinutes}
+                ariaLabel="Hibernate after minutes"
+                disabled={!settings.agentHibernationEnabled}
+                min={5}
+                max={600}
+                step={5}
+                // A cleared/invalid field falls back to the default rather than 0: zero minutes
+                // would exit every session the instant a turn ends. Never NaN — it does not
+                // survive the JSON round-trip to settings.json (it lands as `null`).
+                onChange={(v) =>
+                  update({
+                    agentHibernationIdleMinutes: Number.isFinite(v) && v > 0 ? Math.max(5, v) : 30
+                  })
+                }
+              />
+              <span className="text-[13px] text-muted">min</span>
+            </div>
           }
         />
       </SearchableRow>
