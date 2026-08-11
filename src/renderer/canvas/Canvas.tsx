@@ -27,7 +27,11 @@ import {
   setSshRetryHandler,
   disposeTerminalOnUnmount,
   disposeParkedTerminal,
-  disposeAllParkedTerminals
+  disposeAllParkedTerminals,
+  isNodeRemote,
+  isNodeWatched,
+  setWatchedNode,
+  wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
 import {
@@ -157,6 +161,7 @@ import { SshPassphrasePrompt } from '../components/SshPassphrasePrompt'
 import { transport } from '../terminal/local-transport'
 import { sshFs } from '../terminal/ssh-fs'
 import {
+  agentHibernateFns,
   agentRestartFn,
   planBulkRestart,
   restartEligibility,
@@ -165,6 +170,9 @@ import {
   type BulkRestartPlan,
   type RestartOutcome
 } from '../terminal/agent-restart'
+import { planHibernation, HIBERNATE_SWEEP_MS } from '../terminal/hibernation-policy'
+import { buildHibernationCandidates } from '../lib/hibernationCandidates'
+import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
@@ -1137,7 +1145,9 @@ export function Canvas() {
     let sig = ''
     for (const [id, st] of Object.entries(s.byId)) {
       if (!st.loop) continue
-      sig += `${id}|${st.loop.kind ?? ''}|${st.loop.count}|${st.loop.items?.length ?? 0}|${st.loop.task ?? ''}|${st.loop.schedule ?? ''}|${st.state === 'working' ? 1 : 0}|`
+      // `dismissed` rides the signature (it is what the card derivation filters on), so the ×
+      // removes the card on the next render rather than waiting for some other loop change.
+      sig += `${id}|${st.loop.kind ?? ''}|${st.loop.count}|${st.loop.items?.length ?? 0}|${st.loop.task ?? ''}|${st.loop.schedule ?? ''}|${st.state === 'working' ? 1 : 0}|${st.loop.dismissed ? 1 : 0}|`
     }
     return sig
   })
@@ -1222,7 +1232,10 @@ export function Canvas() {
     const eEdges: Edge[] = []
     // Loop nodes: one per terminal node currently running a /loop, placed below-left.
     for (const [pid, st] of Object.entries(claudeById)) {
-      if (!st.loop) continue
+      // A DISMISSED cron/schedule entry is kept on purpose (it is the hibernation guard's only
+      // evidence that a wakeup is pending — see agentStatus's `loop.dismissed`), so the filter
+      // lives here, in the render layer, and nowhere else.
+      if (!st.loop || st.loop.dismissed) continue
       const parent = nodes.find((n) => n.id === pid)
       if (!parent) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
@@ -5007,15 +5020,15 @@ export function Canvas() {
       ...(isLoop
         ? ([
             {
-              // Same as the card's own ×: drops the CARD, never the cron/schedule job itself.
+              // Same as the card's own ×: drops the CARD, never the cron/schedule job itself —
+              // and literally the same code path (`applyLoopDismiss`), because these two surfaces
+              // are one user action and had already drifted apart once: this one cleared the
+              // durable `loop` entry, which is the only thing keeping Eco mode from quitting the
+              // CLI a live cron was going to fire in.
               label: 'Dismiss card',
               icon: <IconTrash />,
               danger: true,
-              onClick: () => {
-                const pid = id.slice('loop-'.length)
-                useAgentStatus.getState().setLoop(pid, false)
-                useAgentNodes.getState().clearLoop(pid)
-              }
+              onClick: () => applyLoopDismiss(id.slice('loop-'.length))
             }
           ] as MenuItem[])
         : [])
@@ -5430,6 +5443,16 @@ export function Canvas() {
   // whole board on every Canvas render.
   const setKanbanModalNode = useCallback((id: string | null) => {
     kanbanModalNodeRef.current = id
+    // The one place the "is anyone looking at this session" predicate learns about the modal —
+    // every asker (the sweep's plan, the node's fire-time re-ask, the nudge) reads it through
+    // `isNodeWatched`, so the modal clause cannot go missing from one of them.
+    setWatchedNode(id)
+    // Opening a card IS opening the session — the second way in, and the one the canvas
+    // visibility observer says nothing about. A hibernated node reached this way resumes its
+    // conversation just as it would on a pan-back, instead of showing the bare shell it was
+    // exited to with nothing on screen to explain it. No-op for every node that is not
+    // hibernated (the node re-reads the flag itself).
+    if (id) wakeHibernatedNode(id)
   }, [])
 
   const onPaletteQuery = useCallback((q: string) => {
@@ -7025,7 +7048,18 @@ export function Canvas() {
           break
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
-          if (e.sessionPhase === 'start') cs.setState(e.nodeId, undefined, e.agentId)
+          if (e.sessionPhase === 'start') {
+            cs.setState(e.nodeId, undefined, e.agentId)
+            // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
+            // this node is now false — our own `/exit` produces a SessionEnd, never a
+            // SessionStart. This is the residual `setState`'s live-state self-heal cannot reach:
+            // a user who relaunches the agent by hand and then takes no turn would keep a SLEEPING
+            // chip on a running CLI (and the sweep, which skips hibernated nodes, would leave that
+            // session exempt from Eco for good). Deliberately NOT the same as clearing on `done`,
+            // which would let a late Stop POST undo a hibernation we just performed. The setter
+            // bails when the flag is already unset, so this is free for every other session start.
+            cs.setHibernated(e.nodeId, false)
+          }
           if (e.sessionPhase === 'end') {
             cs.setState(e.nodeId, undefined, e.agentId)
             // In-session /loop dies with its session; cron (and scheduled cloud routines)
@@ -7048,6 +7082,98 @@ export function Canvas() {
     const t = setInterval(() => useAgentStatus.getState().sweepStaleWorking(), 60_000)
     return () => clearInterval(t)
   }, [])
+
+  /**
+   * ECO — hibernate idle, offscreen agent CLIs (`settings.agentHibernationEnabled`, off by
+   * default). The CLI is asked to `/exit` and its conversation is resumed (`--resume`) the next
+   * time the node is looked at; the tmux session, its pane and its scrollback are untouched. What
+   * is reclaimed is the agent process's RAM, which on a canvas of a dozen sessions is most of it.
+   *
+   * Every DECISION is in the pure `planHibernation`, and every FACT it reads is assembled by the
+   * pure `buildHibernationCandidates` — deliberately not inline here, because two of those facts
+   * (a dismissed cron card is still recurring; an unfinished subagent pins its parent) are the
+   * difference between Eco mode and a silently cancelled job, and an inline `.map()` is where a
+   * rule like that rots untested.
+   *
+   * Nothing is retried and nothing is remembered: an outcome other than `'exited'` simply leaves
+   * the node alone, and the next sweep re-asks with fresh facts. The batch cap lives in the policy.
+   */
+  const hibernationEnabled = useSettings((s) => s.settings.agentHibernationEnabled)
+  useEffect(() => {
+    if (!hibernationEnabled) return
+    let stopped = false
+    let sweeping = false
+    const sweep = async (): Promise<void> => {
+      // One sweep at a time. Each exit waits on a real pane (up to RESTART_EXIT_TIMEOUT_MS), so a
+      // slow pass can outlive its interval; overlapping passes would only be refused by the
+      // per-node guard, but re-planning against half-applied state is noise nobody needs.
+      if (sweeping) return
+      sweeping = true
+      try {
+        const s = useSettings.getState().settings
+        const candidates = buildHibernationCandidates({
+          nodes: nodesRef.current
+            .filter((n) => n.type === 'terminal')
+            .map((n) => ({ id: n.id, agentId: createdAgentId(n.data) })),
+          statusById: useAgentStatus.getState().byId,
+          // Any card that has not finished pins its parent — see the adapter's header.
+          subagents: Object.values(useAgentNodes.getState().byId).map((v) => ({
+            parentNodeId: v.parentNodeId,
+            status: v.state
+          })),
+          // `isNodeWatched` is the ONE predicate for "the user is looking at this session" — the
+          // nodes' own visibility observers (Phase 2's) plus the open card modal, which no
+          // observer can see (it co-attaches the same tmux session over a canvas nobody is
+          // looking at). The node's exit closure re-asks the SAME function at fire time.
+          isOffscreen: (nodeId) => !isNodeWatched(nodeId),
+          // Remote (SSH / relay) sessions are excluded in v1 — here rather than only at the exit,
+          // or two of them could occupy both batch slots on every pass (see the policy).
+          isRemote: isNodeRemote,
+          // Wired = mounted with a live terminal that registered its hibernate pair. An
+          // offscreen-DISPOSED node (Phase 2) has already given its buffer back and has no pane
+          // to quit, so it drops out here.
+          isWired: (nodeId) => !!agentHibernateFns(nodeId)
+        })
+        const ids = planHibernation(candidates, Date.now(), {
+          enabled: s.agentHibernationEnabled,
+          idleMinutes: s.agentHibernationIdleMinutes
+        })
+        // Sequential, like the bulk restart: each exit is a real conversation being asked to quit
+        // in a real pane, and the cap keeps the pass short.
+        for (const nodeId of ids) {
+          if (stopped) return
+          const fns = agentHibernateFns(nodeId)
+          if (!fns) continue // unmounted between the plan and its turn
+          try {
+            if ((await fns.exit()) === 'exited') {
+              useAgentStatus.getState().setHibernated(nodeId, true)
+              // A batch can take ~12 s, and the user may have arrived during it. The node's own
+              // exit closure re-checks visibility before writing anything, but the pan can also
+              // land in the window between that check and this line — and by then the visible
+              // EDGE has passed, so no wake trigger is left and the node would sit SLEEPING in
+              // front of the user. Nudge it: the node re-reads the flag itself, so this is a
+              // no-op wherever the user did not arrive.
+              if (isNodeWatched(nodeId)) wakeHibernatedNode(nodeId)
+            }
+            // 'exit-timeout' / 'not-eligible': the CLI is still running and NOTHING is recorded —
+            // marking it hibernated would put a SLEEPING chip on a live session and suppress the
+            // wake's only trigger. The next sweep re-evaluates.
+          } catch (err) {
+            // The writes go unguarded down to the socket; one node's throw must not abandon the
+            // rest of the pass (nor the interval).
+            console.warn('[hibernate] exit failed for', nodeId, err)
+          }
+        }
+      } finally {
+        sweeping = false
+      }
+    }
+    const t = setInterval(() => void sweep(), HIBERNATE_SWEEP_MS)
+    return () => {
+      stopped = true
+      clearInterval(t)
+    }
+  }, [hibernationEnabled])
 
   // When the palette opens, capture each terminal's visible buffer (cached ~3s) so the
   // search can match text shown in terminals/Claude sessions.
