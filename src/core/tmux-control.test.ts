@@ -34,6 +34,23 @@ describe('createControlDecoder', () => {
     const ev = d.push('%begin 100 8 0\nno such session\n%error 100 8 0\n')
     expect(ev).toEqual([{ kind: 'reply', num: 8, ok: false, body: ['no such session'] }])
   })
+  it('keeps a body line that only looks like a terminator inside the reply body', () => {
+    // tmux does NOT escape command output inside a block, so a reply carrying pane text (e.g.
+    // capture-pane) can contain a line spelled exactly like `%end`. Only the OPEN block's ts+num
+    // may close it — otherwise the reply truncates and every later line is parsed one block off.
+    const d = createControlDecoder()
+    const ev = d.push('%begin 100 7 0\n%end 99 6 0\ntail\n%end 100 7 0\n')
+    expect(ev).toEqual([{ kind: 'reply', num: 7, ok: true, body: ['%end 99 6 0', 'tail'] }])
+  })
+  it('does not let a foreign %error close the open block', () => {
+    const d = createControlDecoder()
+    const ev = d.push('%begin 100 7 0\n%error 100 6 0\n%end 100 7 0\n')
+    expect(ev).toEqual([{ kind: 'reply', num: 7, ok: true, body: ['%error 100 6 0'] }])
+  })
+  it('parses CRLF-terminated lines like LF ones, keeping an escaped CR in the payload', () => {
+    const d = createControlDecoder()
+    expect(d.push('%output %3 ab\\015\r\n')).toEqual([{ kind: 'output', paneId: '%3', data: 'ab\r' }])
+  })
   it('reports %exit as exited', () => {
     expect(createControlDecoder().push('%exit\n')).toEqual([{ kind: 'exited' }])
   })
