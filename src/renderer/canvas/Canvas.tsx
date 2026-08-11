@@ -7307,8 +7307,8 @@ export function Canvas() {
     [commitActiveToStore, writeDisk, disposeRelayTabForProject]
   )
 
-  // Right-click on a sidebar project header: the same project actions as the tab caret menu,
-  // in the shared ContextMenu shell.
+  // Right-click on a sidebar project header: mostly the same project actions as the tab caret
+  // menu (plus a color swatch the tab caret menu doesn't have), in the shared ContextMenu shell.
   const onProjectContextMenu = useCallback(
     (e: React.MouseEvent, projectId: string) => {
       e.preventDefault()
