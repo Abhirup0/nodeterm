@@ -70,6 +70,17 @@ describe('planHibernation', () => {
     expect(planHibernation([base('a', { lastEventAt: NOW - 30 * 60_000 })], NOW, cfg)).toEqual(['a'])
   })
 
+  it('refuses a non-positive / unreadable idle window — settings.json is hand-editable', () => {
+    // settings.json is hand-edited and merged without clamping, so any of these can reach here.
+    // Each must read as "off": a 0 or negative window makes EVERY done+offscreen node eligible on
+    // the first sweep — Eco would exit live CLIs the instant a turn ends.
+    for (const idleMinutes of [0, -1, -30, NaN, null as unknown as number, undefined as unknown as number]) {
+      expect(planHibernation([base('a')], NOW, { ...cfg, idleMinutes }), String(idleMinutes)).toEqual([])
+    }
+    // …but a small positive window is honored, not floored away.
+    expect(planHibernation([base('a', { lastEventAt: NOW - 60_000 })], NOW, { ...cfg, idleMinutes: 1 })).toEqual(['a'])
+  })
+
   it('refuses a node the restart gate itself refuses (no session id / not resumable)', () => {
     expect(planHibernation([base('a', { sessionId: undefined })], NOW, cfg)).toEqual([])
     expect(planHibernation([base('a', { agentId: 'opencode' })], NOW, cfg)).toEqual([])

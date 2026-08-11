@@ -6,8 +6,9 @@ import type { NodeTerminalApi } from '@shared/types'
 
 /**
  * Transient per-node status for agent (e.g. Claude Code) sessions, driven by the agent's hooks.
- * `unread`, `session`, `sessionId` and `agentId` are persisted to localStorage so they survive
- * a reload/restart; the live `state` (working/waiting/…) is not (it'd be stale on relaunch).
+ * `unread`, `session`, `sessionId`, `agentId`, `loop` and `hibernated` are persisted to
+ * localStorage so they survive a reload/restart; the live `state` (working/waiting/…) is not
+ * (it'd be stale on relaunch), and neither are its two clocks (`stateAt`, `lastEventAt`).
  * `agentId` is durable because a PLAIN terminal's agent identity exists nowhere else: an
  * explicit agent node re-derives it from `data.agentId`, but a hand-launched `claude` in a
  * plain terminal is only known here, and its context links must keep classifying across

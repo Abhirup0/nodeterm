@@ -236,14 +236,11 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
                 min={5}
                 max={600}
                 step={5}
-                // A cleared/invalid field falls back to the default rather than 0: zero minutes
-                // would exit every session the instant a turn ends. Never NaN — it does not
-                // survive the JSON round-trip to settings.json (it lands as `null`).
-                onChange={(v) =>
-                  update({
-                    agentHibernationIdleMinutes: Number.isFinite(v) && v > 0 ? Math.max(5, v) : 30
-                  })
-                }
+                // A cleared/invalid field falls back to the default rather than 0 (zero minutes
+                // would mean "the instant a turn ends"). Deliberately no floor mid-typing: a
+                // per-keystroke `Math.max(5, v)` makes 45 untypable (4 snaps to 5, then 55). The
+                // real guard is `planHibernation`, which refuses any non-positive window outright.
+                onChange={(v) => update({ agentHibernationIdleMinutes: v || 30 })}
               />
               <span className="text-[13px] text-muted">min</span>
             </div>

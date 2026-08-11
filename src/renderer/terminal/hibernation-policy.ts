@@ -68,6 +68,12 @@ export function planHibernation(
   cfg: HibernationConfig
 ): string[] {
   if (!cfg.enabled) return []
+  // The window is re-validated HERE, not trusted from the type: settings.json is hand-editable and
+  // merged without clamping, so `idleMinutes` can arrive as null, NaN, 0 or negative — and the UI
+  // clamp only guards keystrokes. Each of those would make the window zero or negative, i.e. EVERY
+  // done+offscreen node eligible on the first sweep: Eco exiting live CLIs the instant a turn ends.
+  // So an unreadable window reads as "off" — the same call `offscreenDisposeMs` makes one file over.
+  if (!(cfg.idleMinutes > 0)) return []
   const idleMs = cfg.idleMinutes * 60_000
   return candidates
     .filter(
