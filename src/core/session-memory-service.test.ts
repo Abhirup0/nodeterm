@@ -17,8 +17,14 @@ const read = (q: SessionMemoryQuery): Promise<SessionMemoryReport> =>
 const host = (q: SessionMemoryQuery): Promise<MemInfo | null> =>
   platform.handlers[IPC.sessionMemoryHost](q) as Promise<MemInfo | null>
 
-/** A remote reply the parser accepts: all three markers, in order, with one process row. */
-const OK_REPLY = '##MEM\n##PANES\n##PROCS\n100 1 1024\n'
+/** One socket answering "no server running" — the per-socket fence the sweep now emits. A `##PANES`
+ *  section with NO fence in it means no socket answered, which is `ok:false` by design (see
+ *  session-memory-remote.ts): "every tmux call failed" must not render as "this host has nothing". */
+const IDLE_SOCKET = '##SOCK node-terminal\nno server running on /tmp/x\n##SOCKRC 1\n'
+
+/** A remote reply the parser accepts: all three markers, in order, one answered socket, one
+ *  process row. */
+const OK_REPLY = `##MEM\n##PANES\n${IDLE_SOCKET}##PROCS\n100 1 1024\n`
 
 /** The same, carrying the HOST's RAM — so an answer says positively which machine produced it.
  *  `totalMb` comes back as `totalKb / 1024`, i.e. 4096 MB for the default. */
@@ -28,6 +34,7 @@ const hostReply = (totalMb = 4096): string =>
     `MemAvailable: ${(totalMb / 2) * 1024} kB`,
     `MemTotal: ${totalMb * 1024} kB`,
     '##PANES',
+    IDLE_SOCKET.trimEnd(),
     '##PROCS',
     '100 1 1024'
   ].join('\n')
@@ -239,7 +246,9 @@ describe('startSessionMemoryService', () => {
 
   it('reads the local RAM for a local scope and the host RAM for a remote one', async () => {
     const readMem = vi.fn(() => ({ availableMb: 11, totalMb: 22 }))
-    const run = vi.fn(async () => ['##MEM', 'MemAvailable: 2097152 kB', 'MemTotal: 4194304 kB', '##PANES', '##PROCS', '100 1 1024'].join('\n'))
+    const run = vi.fn(async () =>
+      ['##MEM', 'MemAvailable: 2097152 kB', 'MemTotal: 4194304 kB', '##PANES', IDLE_SOCKET.trimEnd(), '##PROCS', '100 1 1024'].join('\n')
+    )
     startSessionMemoryService({
       tmuxBin: () => '/usr/bin/tmux',
       readMem,
