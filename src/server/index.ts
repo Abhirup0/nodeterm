@@ -50,6 +50,7 @@ import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
+import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
@@ -442,6 +443,19 @@ export async function startServer(
   // open. Kill switch + tuning via NODETERM_SESSION_* env (core/session-budget.ts).
   const sessionReaper = createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() })
   sessionReaper.start()
+  // Memory pressure (core/memory-pressure.ts): only the reaper leg on this shell. A CRITICAL
+  // reading sweeps NOW instead of waiting out the reaper's 10-minute timer — that is the whole
+  // responder chain here. The renderer levers the desktop also runs (hidden WebGL contexts,
+  // parked terminals) are deliberately NOT pushed to attached browsers: a tab's own memory is the
+  // browser's to manage, and it already discards on its own terms (see the documented no-op in
+  // renderer/bridge/stubs.ts). Stopped on close beside the reaper — the timer is unref'd, but a
+  // test that starts and closes several servers must not leave sweepers behind.
+  const pressure = createMemoryPressureMonitor({
+    onPressure: (severity) => {
+      if (severity === 'critical') void sessionReaper.sweep()
+    }
+  })
+  pressure.start()
 
   // Headless notification host: every core service above (incl. the loopback hook server, which
   // is its own listener and MUST run) is booted, but we bind NO public HTTP/WS listener — no
@@ -454,6 +468,7 @@ export async function startServer(
       async close() {
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
+        pressure.stop()
         await contextLink.stop()
         await ptyManager.killAll()
         // Same native hazard as the desktop app: a whisper transcribe still running when the
@@ -500,6 +515,7 @@ export async function startServer(
     async close() {
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
+      pressure.stop()
       await contextLink.stop()
       await ptyManager.killAll()
       // Same native hazard as the desktop app: a whisper transcribe still running when the node

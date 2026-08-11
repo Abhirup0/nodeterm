@@ -26,7 +26,8 @@ import {
   setSshDropHandler,
   setSshRetryHandler,
   disposeTerminalOnUnmount,
-  disposeParkedTerminal
+  disposeParkedTerminal,
+  disposeAllParkedTerminals
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
 import {
@@ -44,7 +45,12 @@ import {
 } from './SharedGlyphLayer'
 import { SshReconnector } from '../lib/sshReconnect'
 import { terminalKey } from '../terminal/terminal-config'
-import { setWebglGesture, setWebglZoom, WEBGL_GESTURE_SETTLE_MS } from '../terminal/webgl-budget'
+import {
+  setWebglGesture,
+  setWebglZoom,
+  releaseAllHiddenGrants,
+  WEBGL_GESTURE_SETTLE_MS
+} from '../terminal/webgl-budget'
 import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
@@ -7393,6 +7399,21 @@ export function Canvas() {
   // OS-notification click → focus the originating node (see the note beside focusNodeById:
   // travelToNode, not focusNodeById, so a closed project's tab is reopened first).
   useEffect(() => window.nodeTerminal.onFocusNode(travelToNode), [travelToNode])
+
+  // Memory pressure (core/memory-pressure.ts, pushed by the shell): run the renderer's reclaim
+  // levers. Both are idempotent and cost only warmth — a reclaimed hidden context re-grants on its
+  // next visibility transition, a dropped park re-mounts as an ordinary warm reattach — and the
+  // shell re-fires at most once a minute, so this never runs hot. Severity is not branched on
+  // (yet): the levers are cheap enough to run on 'warning', and the extra CRITICAL step (an early
+  // session-reaper sweep) belongs to the shell, not here. Optional-called because the Server
+  // Edition's bridge declares this a documented no-op.
+  useEffect(() => {
+    const off = window.nodeTerminal.onMemoryPressure?.(() => {
+      releaseAllHiddenGrants()
+      disposeAllParkedTerminals()
+    })
+    return () => off?.()
+  }, [])
 
   // Permanently remove a project (from the "Recently closed" list): end every terminal's tmux
   // session, drop persisted agent status, tear down any SSH master, then delete it from disk.

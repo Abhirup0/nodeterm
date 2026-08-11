@@ -296,6 +296,14 @@ export function disposeParkedTerminal(key: string): void {
   disposeParked(p)
 }
 
+/** Memory-pressure lever: drop EVERY parked terminal now, without waiting out `TERM_PARK_MS`. The
+ *  park is a cache, not state — each dropped entry costs only its warm re-adopt, and the node
+ *  re-mounts as an ordinary warm reattach (tmux redraws; the session and its scrollback are
+ *  untouched). Idempotent; iterates a copy because `disposeParkedTerminal` mutates the map. */
+export function disposeAllParkedTerminals(): void {
+  for (const key of [...parkedTerminals.keys()]) disposeParkedTerminal(key)
+}
+
 /** Session-scoped keys (`terminalKey`) whose next unmount must dispose (not park) — set on permanent
  *  deletion, where the unmount runs AFTER the session was already destroyed, so parking would keep a
  *  dead xterm. */
