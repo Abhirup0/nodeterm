@@ -163,16 +163,25 @@ export interface SessionReaperOpts {
    *  process) is the natural owner of reaping them; the desktops that spawned them may be gone. */
   sockets?: string[]
   /**
-   * The tmux sessions THIS process holds a control-mode SHADOW on, per socket (see
-   * `PtyManager.shadowedTmuxSessions`). They are reported as DETACHED regardless of what tmux says,
-   * in the plan AND in the kill-time re-verify.
+   * The tmux sessions THIS process holds a control-mode client on, per socket — a per-session
+   * shadow or the shared background-write client (see `PtyManager.shadowedTmuxSessions`). Each name
+   * listed has exactly ONE client SUBTRACTED FROM ITS COUNT, in the plan AND in the kill-time
+   * re-verify; anything left over is somebody else's client and keeps its exemption.
    *
-   * A shadow is a real tmux client, so a held `-C attach` flips `#{session_attached}` to 1 — and an
-   * attached session is never evicted here. Without this hook, attaching a shadow (something no
-   * user asked for and nobody is watching) would make a session permanently exempt from the
-   * memory-pressure safety valve this whole module exists to be. A shadow is not a watcher: the
-   * session may be reaped under it exactly as if nothing were attached, and the shadow's client
-   * dies with the session it was attached to.
+   * A control client is a real tmux client, so a held `-C attach` puts this process into
+   * `#{session_attached}` — and an attached session is never evicted here. Without this hook,
+   * attaching one (something no user asked for and nobody is watching) would make a session
+   * permanently exempt from the memory-pressure safety valve this whole module exists to be. It is
+   * not a watcher: the session may be reaped under it exactly as if nothing were attached, and the
+   * client dies with the session it was attached to.
+   *
+   * SUBTRACT, never force-detach — `#{session_attached}` is a client COUNT, not a flag. A session
+   * holding ours PLUS a real one (the user's own `tmux attach`, a second nodeterm process on this
+   * socket) must stay exempt, or the budget kills a session out from under a live user. That is
+   * this module's one hard rule, and forcing the state inverts it.
+   *
+   * At most one of ours per name: PtyManager retires the shared client before shadowing the session
+   * it is attached to, so nothing here ever owes a subtraction of two.
    *
    * Per SOCKET, not per name: `nt-<node>` is only unique within a socket, and a genuinely attached
    * session of the same name on `nodeterm-rmt` must keep its exemption.
