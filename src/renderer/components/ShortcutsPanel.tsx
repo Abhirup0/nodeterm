@@ -26,6 +26,7 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
         { keys: ['⌘', 'K'], label: 'Command palette' },
         { keys: ['⌘', ','], label: 'Settings' },
         { keys: ['⌘', '/'], label: 'This shortcuts panel' },
+        { keys: ['⌘', '1-9'], label: 'Jump to project' },
         { keys: dictationKeys, label: dictationLabel },
         { keys: ['⌘', 'Z'], label: 'Undo' },
         { keys: ['⌘', '⇧', 'Z'], label: 'Redo' }
