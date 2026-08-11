@@ -6381,6 +6381,14 @@ body,
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
 }
+/* Respect the OS setting: spinning ring/arc badges freeze in place rather than
+   keep animating forever. */
+@media (prefers-reduced-motion: reduce) {
+  .ss-dot--working,
+  .ss-group__sig-spin {
+    animation: none;
+  }
+}
 .ss-group__add { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; }
 .ss-group__head:hover .ss-group__add { opacity: 0.7; }
 .ss-group__add:hover { opacity: 1 !important; color: var(--accent); }
