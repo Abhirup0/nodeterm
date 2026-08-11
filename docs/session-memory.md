@@ -1,0 +1,314 @@
+# Session memory: the RAM pill and the per-session panel
+
+A bottom-left **RAM pill** beside the usage pill, and the **session-memory panel** it opens: how
+much memory the machine the *active project* runs on is using, and which `nt-*` tmux session is
+holding it.
+
+> Design spec: `docs/superpowers/specs/2026-08-10-session-memory-panel-design.md`.
+> The condensed rules live in `CLAUDE.md` ("Session memory"); this document carries the
+> measurements, the reasoning that is too long for that file, and **§10, the device checklist** for
+> everything that could not be verified on the headless Linux box this was built on.
+
+Files:
+
+| Layer | File |
+|---|---|
+| Local read + pure assembly | `src/core/session-memory.ts` |
+| The SSH host's leg (generated `sh`) | `src/core/session-memory-remote.ts` |
+| RPC + routing (booted by BOTH shells) | `src/core/session-memory-service.ts` |
+| Renderer store (two cadences) | `src/renderer/state/sessionMemory.ts` |
+| Rows → titles / projects / orphans | `src/renderer/lib/sessionMemoryRows.ts` |
+| Where a kill has to land | `src/renderer/lib/sessionKill.ts` |
+| Pill + panel | `src/renderer/components/SystemResourcePill.tsx`, `SessionMemoryPanel.tsx` |
+
+---
+
+## 1. What was measured, and what it means
+
+The feature exists because a user reported *"Claude terminals are killing my memory, each one takes
+2 GB"*. Measured on the production host (64 GB, 95 live `claude` processes):
+
+| What | Measurement |
+|---|---|
+| `claude` process alone | avg **335 MB**, peak **1159 MB** |
+| 95 `claude` processes | **31.1 GB** |
+| MCP children per session | +30–200 MB (playwright-mcp + Chrome ≈ 200 MB alone) |
+| One "Claude terminal" tree | **440 MB – 1.2 GB** |
+| nodeterm-server (per user) | 49–82 MB |
+| tmux client (per attached session) | 5.1 MB × 59 = 303 MB |
+
+Two facts settle the attribution:
+
+1. **nodeterm does not allocate it.** It is the agent CLI's own V8 heap. `RssAnon` is essentially
+   all of the RSS (1165 MB of 1187 MB on the largest process), and this repo sets no `NODE_OPTIONS`
+   / `--max-old-space-size`, so V8 sizes its heap from system RAM (`heap_size_limit = 4144 MB` on
+   that host).
+2. **It is not a leak.** RSS is flat with process age — 0–24 h avg **340 MB**, 1–7 day avg 339 MB,
+   7 day+ avg **326 MB**. Each process takes a flat baseline and never returns it.
+
+So the user's *number* was right and their *attribution* was wrong — but nodeterm is not innocent
+either: it keeps those processes alive (only `×` kills a session; project close and app quit merely
+detach) and the canvas invites many at once. One measured client held **51 attached sessions ≈
+17 GB**.
+
+**The gap this closes is the blindness, not the allocation.** Nothing in the product told the user
+that 18 sessions were live, that one of them was 1.2 GB, or that six belonged to a project they
+closed three weeks ago. Capping agent memory (`--max-old-space-size`) was considered and rejected
+for v1: a low ceiling OOM-kills a long-context session, which is worse than the 2 GB.
+
+**Do not re-derive these numbers.** They are here so the next person does not spend an afternoon on
+`/proc` arithmetic to reach the same conclusion.
+
+## 2. Why the reaper is deliberately untouched
+
+`src/core/session-budget.ts` reaps only **detached** sessions idle past a grace window. On the
+measured host that made its kill list **empty** — 60 `nt-` sessions, 50 attached, **0 eligible** —
+while 31 GB sat there. An open canvas is attached, and attached is untouchable.
+
+Retargeting the reaper is a separate change with separate risk (it would start killing sessions a
+user is looking at). This feature adds **sight**, not policy: it shows the 31 GB and lets a human
+decide. The one thing it shares with the reaper is `readMemInfo` (§3).
+
+## 3. `readMemInfo` has exactly one home
+
+It lives in `session-memory.ts`; `session-budget.ts` imports **and re-exports** it. Two features now
+read host RAM — the reaper's watermark and the pill — and a second copy would drift. The reaper and
+the pill must never disagree about how much RAM is free.
+
+Linux `/proc/meminfo` `MemAvailable` is the honest number; `os.freemem()` is the fallback elsewhere
+(on Linux that fallback would report `MemFree`, materially smaller under a warm page cache, which
+is why the file read comes first). `null` when nothing is readable — **never zero**.
+
+## 4. `ok:false` is not `ok:true` with no rows
+
+This is the rule the whole feature exists to honour, and every layer preserves it:
+
+- `collectSessionMemory` returns `ok:false` when there is no tmux binary, when the process table is
+  unreadable, or when **no socket answered**. A socket with no tmux server is an *answer* (the
+  normal state of a socket nobody has used), classified by `isNoServerError` — deliberately narrow
+  and **anchored** to tmux's own connect message, because `promisify(execFile)` folds stderr into
+  `err.message` and a bare `no such file or directory` also matches a tmux client missing a shared
+  library (exit 127 on *every* socket) and a dead ssh ControlMaster. Laundering either into "no
+  sessions here" prints an empty panel over 20 live ones.
+- `parseRemoteSessionMemory` returns `ok:false` on a missing **or out-of-order** section marker, and
+  on an empty process table (a host always has processes).
+- The store carries `ok:false` through untouched, and treats a *rejected* call as the same fact.
+- The panel renders four distinct sentences: "Could not measure sessions on this machine.",
+  "Measuring…", "No sessions are running here.", and the list. The grand total and the
+  "*n* sessions" count are gated on a `measured` flag (`ok && loadedScope === scopeKey`), so a
+  failure can never show "0 B / 0 sessions" beside it.
+
+## 5. Reading this machine
+
+`/proc/<pid>/status` is read for the whole table, **never `statm`**. `status` carries `PPid` and
+`VmRSS` in one file and already in kB; `statm` reports RSS in **pages**, which forces a page-size
+assumption — a hard-coded 4096 under-reports **4×** on a 16 KiB-page arm64 kernel and **16×** on the
+64 KiB-page enterprise arm64 builds (it would print 40 MB for a 640 MB session). Do not "optimise"
+this back to `statm`.
+
+Non-Linux (and an unreadable `/proc`) falls through to one `ps -eo pid,ppid,rss` call, through the
+same injectable seam as tmux — nothing in `session-memory.ts` reaches a subprocess around it.
+
+`rollupTree` walks each pane pid's descendants with a `seen` guard (a table captured while pids are
+recycling can present a cyclic ppid chain, and a sweep that hangs is worse than one that
+under-reports). **`childCount` counts EVERY descendant**, the agent CLI included: `pane_pid` is the
+pane's *shell*, so a claude session with two MCP servers reports **3**. The panel therefore says
+"child processes", never "MCP" — a plain `npm run dev` has children too.
+
+`list-panes -a` emits one line per **pane**, so the first pane of a session wins in both legs (same
+key, same order) — one session is one row.
+
+## 6. The SSH leg
+
+An SSH project's sessions live on the host, so the sweep runs there: core generates ONE POSIX `sh`
+script, the shell runs it over the project's ControlMaster, and only the printed sections come back
+— the same division of labour as `remote-claude-usage.ts` (core owns the command *and* the parsing;
+the shell owns the master). One round trip carries all three facts, because each extra `ssh` exec is
+a login on someone else's machine.
+
+It is generated shell that no compiler checks, so `session-memory-remote.test.ts` runs it **for real
+under `/bin/sh`** against a fake host tree — the same discipline as `remote-claude-usage.test.ts` and
+`canvas-control-shim.test.ts`. Keep it that way. It is not ceremony: the plan's own script said
+`echo ##MEM`, which prints an **empty line** under POSIX sh (an unquoted `#` starts a word-initial
+comment), and would have made **every healthy host report `ok:false`**. The markers are quoted for
+that reason.
+
+Two more properties of that script are load-bearing: every section header is printed
+**unconditionally** (a missing one means the stream was cut short, not that the host had nothing),
+and the socket names + `-F` format come from the shared constants, so the remote sweep can never
+look at a different socket or ask for different fields than the local one. A non-Linux host has no
+`/proc/meminfo`, so its `mem` is legitimately `null` — the pill must pulse there, never show 0.
+
+## 7. Which machine answers
+
+`session-memory-service.ts` makes exactly one decision: local sweep or remote leg. Two independent
+sources say "remote" and **either is enough** (OR, never AND) — the renderer's own `remote` flag
+(it already knows from `usageScope`) and the shell's `isRemoteProject`. A source that answers "no"
+because it is momentarily uninformed (an index not loaded, a master that just dropped) would
+otherwise turn a remote query into a local sweep and publish **this** machine's sessions under the
+host's name.
+
+`sshScopePredicate` builds that shell-side answer from **identity, not liveness**:
+`workspaceStore.sshProjectIds()` (a disconnected SSH project is still someone else's machine),
+OR-ed with the live masters for a project the index has not yet listed.
+
+The `remote` option pair is deliberately asymmetric: `run` is optional (a shell may be unable to
+read another host), `isRemoteProject` is **required** — reading-without-knowing is not coherent and
+stays a compile error.
+
+One in-flight remote read per project is coalesced (the panel wants both the RAM number and the
+rows; that is two identical `ps` execs on someone else's machine otherwise). The key is the
+`projectId` and nothing else, because that is the only thing deciding which host the command lands
+on. It is cleared on settle — a concurrency guard, never a cache.
+
+## 8. The renderer: scope, cadence, ownership
+
+**Scope** is `usageScopeKey(activeProject)` — the same helper the usage indicator uses, so the two
+pills cannot disagree about which machine they describe. The store stamps every request with the
+scope itself (not a counter: `refreshFull` and `startHostPoll` can be called for different scopes
+with no intervening bump), discards a response stamped with a scope it has left, and clears the
+previous machine's facts on a real change.
+
+**The cadence split follows the cost:**
+
+- **Local scope** — the pill polls `HOST_POLL_MS` (30 s). One file read, free.
+- **SSH scope** — **never polled.** One read on scope entry, one when the project's ControlMaster
+  comes up (an SSH project is opened before its master is ready, and with no timer behind it a first
+  read against a dead master would leave the pill blank), and one per panel open / `⟳`. This is the
+  rule `CLAUDE.md` already sets for remote usage, for the same reason.
+
+**The full sweep never runs on a timer and never from the pill.** The panel is *unmounted* while
+closed and its mount is what triggers the sweep.
+
+**Ownership contract:** the store's poll timer and its active-scope stamp are **module singletons**,
+and the **pill is their single owner**. The panel must never call `startHostPoll` / `stopHostPoll` —
+a `stopHostPoll` on unmount would clear the pill's interval with nothing left to restart it, and the
+number would silently freeze until the next scope change.
+
+The store resolves its api through `sessionForProject(projectId).api`, not `window.nodeTerminal`: a
+relay tab's renderer runs on the guest while its sessions live on the host, and its api is the
+stub — `ok:false`, which the panel surfaces as *not available here*, not as a failure to retry.
+
+## 9. Rows, orphans, and where a kill lands
+
+`resolveSessionRows` resolves each `nt-<nodeId>` against **every** project the store holds:
+
+- **A closed project is not an orphan.** `closeProject` only sets `closed = true` and keeps the
+  project and its nodes on disk, so its sessions resolve to a real title and are labelled with their
+  project. Calling them orphans would invite the user to kill sessions they deliberately parked. The
+  panel therefore passes the full `projects` array — filtering to open tabs defeats this rule
+  silently, from outside the file that states it.
+- **`orphan` is the distinguishing field, not `state === null`.** A plain terminal never enters the
+  agent-status map, so deriving orphan-ness from a missing agent state would flag every one of them.
+  An orphan's state is dropped rather than passed on (the panel could not explain a "working" dot on
+  a row it cannot travel to) and its dot renders hollow.
+- Orphans are the point: they are exactly what the reaper cannot see and no canvas can show.
+
+**The kill is routed by the SCOPE, not by the row** (`planSessionKill`). `transport.destroy(nodeId)`
+reaches a *remote* tmux session only through a LIVE local client carrying `sshRemote` — which an
+orphan has not, and neither has a node owned by a non-active project. Before this, every orphan
+row's `×` on an SSH project promised a kill it could not perform: the local socket was touched, the
+host's `nt-<id>` kept running, and the row came back on the next refresh with no explanation. So on
+an SSH scope the kill *additionally* runs `sshProject.killSessions(activeProjectId, [nodeId])` over
+that project's own ControlMaster, which needs no live session and is idempotent (the mounted case,
+where `destroy` already ended it, is a harmless best-effort miss).
+
+That is safe because it is a **round trip, not a lookup**: the panel's `nodeId` is literally
+`session.slice('nt-')` from the sweep, and `killSessions` maps it back through the same idempotent
+`sessionName()`, so the remote leg kills **the exact session name the sweep observed, on the host it
+observed it on**. It does not rest on node ids being globally unique (they are only per-launch
+unique).
+
+Ownership is re-resolved at click time rather than taken from the row's `orphan` flag — the rows are
+a snapshot of the last sweep, and a node created since would otherwise be killed as an orphan. With
+an owner, the kill goes through `closeSession`, the same path the sessions sidebar and the node's
+own `×` use.
+
+### Surfaces
+
+- **Desktop** — full, including the SSH leg.
+- **Server Edition** — the service runs and reports the machine it is served from. An SSH scope
+  answers `ok:false` (no ControlMaster is injected) — and it says so **by identity**, via
+  `sshScopePredicate` over `workspaceStore.sshProjectIds()`, rather than trusting the renderer's
+  flag. See `docs/SERVER.md`.
+- **Relay tabs** — the ws-bridge stub answers `ok:false`; the panel says session memory is not
+  available on a relay tab rather than reporting a failure.
+- **Kanban board** — Canvas passes `overBoard={kanbanOpen}`, which raises the pill to z 26 over the
+  board's opaque 25 (the same prop `UsageIndicator` takes beside it); an open panel rises to 60, over
+  the board and the banners but below ConfirmDialog / the palette.
+- **Mobile companion** — **N/A for v1.** *nodeterm mobile* attaches to tmux sessions over the
+  transport protocol and has no concept of per-session host memory; adding one means extending that
+  protocol. A follow-up in `~/projects/nodeterm-ios`, not built here.
+
+### Known gaps (v1, deliberate)
+
+- The session list is **uncapped**. A host with hundreds of sessions makes a long list; truncating
+  silently would hide exactly the rows that matter. If it becomes a problem the fix is a visible
+  "showing top N" line, never a silent cap.
+- A pane pid that exits between the tmux call and the process sweep emits a legitimate-looking
+  **0 MB row** rather than being dropped — the same "measurement failure rendered as zero" shape as
+  §4, at row granularity.
+- Switching between two SSH projects with the **same `user@host`** (the scope key carries no port)
+  leaves the previous rows on screen until the re-sweep, because `enterScope` only clears when the
+  scope *string* changes.
+- The **sessions sidebar** has the same class of bug this feature fixed in the panel: a destructive
+  confirm that lies for a row owned by a non-active project. Not fixed here — its rows span
+  arbitrary projects on arbitrary hosts, so its correct fix is owner-routed per row, a different
+  rule on a surface this change does not own.
+
+## 10. Device checklist
+
+Everything below was argued from code, CSS or a Linux measurement and could **not** be exercised on
+the headless Linux box this was built on. Format follows `docs/grok-agent.md` §9 /
+`docs/gemini-agent.md` §9. Highest value first: items 1–5.
+
+```
+The kill actually reaching the host (the bug most recently fixed, and the one no test can prove)
+ 1. SSH project, a row with "no node": press ×, confirm, then on the HOST run
+    `tmux -L nodeterm-rmt ls` — the nt-<id> session must be GONE, not merely absent from the panel.
+ 2. Same, for a row owned by a CLOSED ssh project (it resolves to a title, so it takes the
+    closeSession path plus the remote kill — both legs must land).
+ 3. Kill a node created less than a sweep ago (<1 s): the confirm wording may say "no node" from the
+    stale snapshot, but the CANVAS node must be removed too — ownership is re-resolved at click time.
+ 4. Local project: kill a row and confirm `tmux -L node-terminal ls` loses it, and that no remote
+    kill is attempted (a local nt-<id> whose node belongs to an SSH project must NOT be killed on
+    the host).
+
+macOS (the ps path never runs on Linux)
+ 5. Open the panel on a Mac: `defaultProcessTableReader` returns null there, so the whole table
+    comes from `ps -eo pid,ppid,rss`. Rows must populate, and the totals must be plausible — BSD ps
+    reports rss in kB, but confirm one known process against Activity Monitor before trusting it.
+ 6. macOS pill numbers: `os.freemem()` reports FREE, not AVAILABLE, memory. Confirm used/total reads
+    plausibly rather than alarmingly (a Mac with a big page cache will look fuller than it is).
+
+The SSH leg
+ 7. Open an SSH project: the panel must list THAT host's sessions and no local ones, and its header
+    scope + the pill's title must read `user@host`.
+ 8. Open an SSH project BEFORE its ControlMaster is up. The pill must end on a NUMBER, not a
+    permanent pulse — this is the only place the connection-up re-read can be observed.
+ 9. A non-Linux SSH host (no /proc/meminfo): the pill must PULSE, never show "0 GB".
+10. Kill the master mid-sweep (`ssh -O exit`) and press ⟳: "Could not measure", never an empty list.
+11. Watch ⟳ during a slow remote sweep: the button must be disabled and spinning (loading is
+    asserted nowhere).
+
+Layout and theming (argued from CSS only)
+12. Default window and ~900 px wide: the cluster at left:60px clears the React Flow controls and the
+    canvas-lock button.
+13. A machine with NO agent usage — UsageIndicator renders null, so the RAM pill must sit alone at
+    left:60px, un-clipped.
+14. Kanban board open: the pill is visible AND clickable over the board.
+15. Sessions sidebar open: the collapsed pill passes UNDER the sidebar exactly as the usage pill
+    does.
+16. Usage popover open beside the RAM pill: no overlap, pill still clickable.
+17. Both themes: hover (light is why the ink overlay exists) and the bar's colour steps at ~75% and
+    ~90% used.
+18. fitView / goToNode must no longer tuck nodes under the pill.
+
+Cadence and the other surfaces
+19. Local project, panel closed: the pill's number moves after 30 s.
+20. Local project: opening the panel triggers a sweep; closing and reopening triggers another; the
+    pill alone never does (watch for `ps`/`/proc` activity, or an ssh exec on an SSH scope).
+21. Server Edition in a browser: a local project's panel is full; an SSH project's panel says
+    "Could not measure", with no local rows attributed to the host.
+22. Relay tab: the panel says session memory is not available there, and offers no ⟳.
+```
