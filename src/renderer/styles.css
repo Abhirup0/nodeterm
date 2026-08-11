@@ -3187,6 +3187,12 @@ body,
   border-left-color: var(--warn);
 }
 
+/* One step past --warning, for a strip whose condition is already breaking things (the machine is
+   out of pty devices, so new terminals fail) rather than about to. */
+.announce-banner--danger {
+  border-left-color: var(--danger);
+}
+
 .announce-banner__dot {
   width: 8px;
   height: 8px;
@@ -3201,6 +3207,10 @@ body,
 
 .announce-banner--warning .announce-banner__dot {
   background: var(--warn);
+}
+
+.announce-banner--danger .announce-banner__dot {
+  background: var(--danger);
 }
 
 .announce-banner__content {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import os from 'os'
 import {
   PTY_DEVICE_HEADROOM,
+  invalidatePtyCeiling,
   ptyDevicesExhausted,
   readPtyDevices,
   spawnFailureHint
@@ -73,5 +74,13 @@ describe('readPtyDevices', () => {
     // Off darwin there is no `kern.tty.ptmx_max` and no `/dev/ttys*` convention to count: the
     // diagnostic says nothing rather than counting the wrong thing.
     if (os.platform() !== 'darwin') expect(d).toEqual({ ceiling: null, inUse: null })
+  })
+
+  it('invalidatePtyCeiling makes the next read re-measure instead of trusting the cache', () => {
+    // The "Fix automatically…" button changes `kern.tty.ptmx_max` under us; the cached value would
+    // otherwise keep the banner up for another minute after the machine was already fixed.
+    expect(() => invalidatePtyCeiling()).not.toThrow()
+    const d = readPtyDevices()
+    expect(d.ceiling === null || d.ceiling > 0).toBe(true)
   })
 })

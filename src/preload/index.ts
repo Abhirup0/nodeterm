@@ -6,6 +6,7 @@ import type {
   NodeTerminalApi,
   Project,
   PtyCreateOptions,
+  PtyPressure,
   RecycledInfo,
   RelayPeerPending,
   RemoteUsageQuery,
@@ -555,6 +556,12 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.appMemoryPressure, handler)
     return () => ipcRenderer.removeListener(IPC.appMemoryPressure, handler)
   },
+  onPtyPressure: (listener) => {
+    const handler = (_e: unknown, reading: PtyPressure) => listener(reading)
+    ipcRenderer.on(IPC.ptyPressure, handler)
+    return () => ipcRenderer.removeListener(IPC.ptyPressure, handler)
+  },
+  raisePtyDeviceLimit: () => ipcRenderer.invoke(IPC.ptyRaiseDeviceLimit),
   answerPermission: (payload) => ipcRenderer.invoke(IPC.agentAnswerPermission, payload),
   ackDone: (nodeId) => {
     void ipcRenderer.invoke(IPC.agentAckDone, nodeId)
