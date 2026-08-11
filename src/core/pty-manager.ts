@@ -786,8 +786,13 @@ export class PtyManager {
       socket: TMUX_SOCKET,
       sessionName: sessionName(persistKey),
       // Nothing consumes a shadowed session's output yet (the first consumer, Task 4's background
-      // write path, only WRITES). Dropping it keeps `%output`'s ~4x octal inflation off the main
-      // thread until something actually asks for the bytes.
+      // write path, only WRITES). This drops the bytes; it does NOT avoid their cost — an attached
+      // `-C` client is sent every `%output` line regardless, and the client octal-decodes then
+      // UTF-8-decodes each one on the main thread before this callback throws it away. All the drop
+      // buys is not forwarding it any further. STANDING OBLIGATION: before any first production
+      // caller, either run the wire-cost probe (measure that traffic on a busy session) or issue
+      // `refresh-client -fno-output` for write-only clients so tmux stops sending it at all
+      // (tmux >= 3.2 — the floor this feature would then require).
       onOutput: () => {},
       // An UNEXPECTED death only — `dispose()` is silent by design, so this can never fire for a
       // swap-out we asked for. Forget the entry and stop there: the tmux session, its processes and
@@ -1026,8 +1031,14 @@ export class PtyManager {
       tmuxBin: this.tmuxPath,
       socket: TMUX_SOCKET,
       sessionName: sessionName(persistKey),
-      // This client writes; it never reads. Dropping `%output` keeps its ~4x octal inflation off
-      // the main thread for every session on the server it happens to be attached to.
+      // This client writes; it never reads — but dropping `%output` here saves none of its cost.
+      // While attached, tmux sends this client the pane output of the session it landed on, and it
+      // octal-decodes then UTF-8-decodes all of it on the main thread before this callback discards
+      // it; the drop
+      // only stops it going further. The linger bounds how long that is paid for. STANDING
+      // OBLIGATION (same as the per-session shadow above): before any first production caller,
+      // either run the wire-cost probe or issue `refresh-client -fno-output` for these write-only
+      // clients (tmux >= 3.2) so the bytes are never sent.
       onOutput: () => {},
       onExit: () => {
         if (this.shared?.client === client) this.shared = null
