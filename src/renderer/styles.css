@@ -1952,6 +1952,24 @@ body,
   height: auto;
 }
 
+/* Offscreen dispose (terminal/offscreen-policy.ts): this node's view was released after sitting
+   out of the viewport; the tmux session keeps running and re-entering the viewport reattaches.
+   Same geometry as `.term-node__closed` — it covers the (now empty) terminal body — but a quieter
+   fill and no action, because there is nothing for the user to do and nothing has gone wrong. */
+.term-node__offscreen {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(var(--card-rgb), 0.94);
+}
+
 /* Another client permanently destroyed this node's session (tmux kill-session): the terminal is
    dead and must never respawn — say so over the last screen. */
 .term-node__closed {
