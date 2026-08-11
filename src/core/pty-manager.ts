@@ -1950,6 +1950,18 @@ export class PtyManager {
     // (non-darwin, a `sysctl` that failed, or a ceiling whose async prime — kicked in `init` — has
     // not landed yet), so an unknown machine spawns exactly as it always did. Refusing a terminal
     // on a machine that had room would be a worse bug than the leak this avoids.
+    //
+    // AND THAT IS THE WHOLE FIX — no backoff, no circuit breaker, deliberately. The bursts of
+    // consecutive failed creates in the field log are not a retry storm: NOTHING re-attempts a
+    // create that failed. The renderer's create rejection lands in one `.catch` that only records
+    // `spawnError` for the node's overlay (TerminalNode.tsx) — no timer, no respawn bump, and no
+    // `reportSshDrop`, so a failure cannot even feed the SSH reconnect coordinator (whose own loop
+    // is bounded anyway: 1→2→4→8→15s, then parked until a `connected` event, plus a 10s re-drop
+    // refusal). A burst is therefore N DISTINCT nodes each trying exactly once, fanned out by one
+    // moment — app boot, a project tab switch past the park window, an agent's bulk
+    // `open-terminal --count N`, or one reconnect flush. Rate-limiting that would only stagger
+    // failures the user asked for. What made it look like a storm was the amplification: 40
+    // one-shot creates used to cost 80 devices, and now cost none.
     const devices = readPtyDevices()
     if (ptyDevicesExhausted(devices)) {
       // `archNote` is deliberately not consulted: it outranks the device note in
