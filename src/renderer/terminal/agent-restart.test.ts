@@ -3,6 +3,7 @@ import { resumeCommand } from '../../shared/agents/config'
 import { withPermissionMode } from '../../shared/agents/approval-mode'
 import {
   __resetAgentRestartForTests,
+  agentHibernateFns,
   agentRestartFn,
   exitSequence,
   guardConcurrentRestart,
@@ -11,12 +12,15 @@ import {
   performRestartResume,
   performResumePhase,
   planBulkRestart,
+  registerAgentHibernate,
   registerAgentRestart,
   restartEligibility,
   settleRestart,
   summarizeBulkRestart,
   summarizeOutcomes,
+  type AgentHibernateFns,
   type BulkRestartCandidate,
+  type ExitPhaseOutcome,
   type RestartOutcome
 } from './agent-restart'
 
@@ -539,6 +543,29 @@ describe('performExitPhase', () => {
     expect(written).toEqual([])
   })
 
+  it('needs the changed reading TWICE before it calls an unlisted shell an exit', async () => {
+    // The allowlist cannot know `nu` / `xonsh` / a hand-set defaultShell, so "the foreground
+    // command is no longer what it was" is the other exit signal — and it is required on two
+    // CONSECUTIVE polls, because a single changed reading can be a momentary foreground CHILD of a
+    // still-running CLI. Typing the resume line into a live CLI would send it as a message.
+    const { io } = fakeIo()
+    const panes = ['claude', 'git', 'claude', 'nu', 'nu']
+    let i = 0
+    const p = performExitPhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      // The pre-flight consumes the first reading, so `before` is 'claude'.
+      paneCommand: async () => panes[Math.min(i++, panes.length - 1)] ?? null,
+      timeoutMs: 5000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(150) // poll 1 → 'git': changed, but not yet twice
+    await vi.advanceTimersByTimeAsync(100) // poll 2 → 'claude': the CLI is still there
+    await vi.advanceTimersByTimeAsync(250) // polls 3+4 → 'nu' twice in a row
+    expect(await p).toBe('exited')
+  })
+
   it('stops polling a pane that dies under the wait', async () => {
     const { io } = fakeIo()
     let live = true
@@ -628,6 +655,24 @@ describe('performResumePhase', () => {
     expect(settled).toBe(false) // written, but still un-submitted through the verify retries
     await vi.advanceTimersByTimeAsync(10_000)
     expect(await p).toBe('resumed')
+  })
+
+  it('rejects when the transport throws after the delivery announced itself', async () => {
+    // The delivery can announce its end from INSIDE deliverCommand's synchronous body and THEN
+    // throw (a transport that rejects the very first write ends the delivery, then reports). A
+    // promise resolved on that announcement could no longer be rejected, and the caller would
+    // record a resume — a woken node, with a dead pane and nothing typed into it.
+    const io = {
+      write() {
+        throw new Error('socket CONNECTING')
+      },
+      onData() {
+        return () => {}
+      }
+    }
+    await expect(
+      performResumePhase({ agentId: 'claude', sessionId: 'sid-1', io })
+    ).rejects.toThrow('socket CONNECTING')
   })
 
   it('respects isLive: a session that died under the delivery is not a resume', async () => {
@@ -931,6 +976,53 @@ describe('agent restart registry', () => {
     const fn = async (): Promise<RestartOutcome> => 'restarted'
     registerAgentRestart('n2', fn)()
     expect(agentRestartFn('n2')).toBeUndefined()
+  })
+})
+
+describe('agent hibernate registry', () => {
+  beforeEach(() => __resetAgentRestartForTests())
+
+  const pair = (tag: 'a' | 'b'): AgentHibernateFns => ({
+    exit: async () => (tag === 'a' ? 'exited' : 'exit-timeout'),
+    resume: async () => 'resumed'
+  })
+
+  it('registers, resolves and unregisters; re-register supersedes', () => {
+    const a = pair('a')
+    const un = registerAgentHibernate('n1', a)
+    expect(agentHibernateFns('n1')).toBe(a)
+    const b = pair('b')
+    registerAgentHibernate('n1', b)
+    un() // stale unregister from the superseded registration must be inert
+    expect(agentHibernateFns('n1')).toBe(b)
+  })
+
+  it('drops a live registration on unregister (node unmount)', () => {
+    registerAgentHibernate('n2', pair('a'))()
+    expect(agentHibernateFns('n2')).toBeUndefined()
+  })
+
+  it('is cleared by the test reset, like the restart registry', () => {
+    registerAgentHibernate('n3', pair('a'))
+    __resetAgentRestartForTests()
+    expect(agentHibernateFns('n3')).toBeUndefined()
+  })
+
+  it('shares one in-flight guard with restarts: a sweep cannot quit a pane mid-restart', async () => {
+    // Both halves go through `guardConcurrentRestart` with the NODE id, so the hibernation sweep,
+    // the wake and a user restart serialize against each other — two `/exit` lines into one pane
+    // is the exact accident the guard exists for.
+    let release: (o: RestartOutcome) => void = () => {}
+    const restart = guardConcurrentRestart(
+      'n-shared',
+      () => new Promise<RestartOutcome>((r) => (release = r))
+    )
+    const hibernateExit = guardConcurrentRestart('n-shared', async (): Promise<ExitPhaseOutcome> => 'exited')
+    const running = restart()
+    expect(await hibernateExit()).toBe('not-eligible')
+    release('restarted')
+    expect(await running).toBe('restarted')
+    expect(await hibernateExit()).toBe('exited') // pane free again
   })
 })
 

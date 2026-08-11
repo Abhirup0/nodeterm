@@ -197,6 +197,12 @@ export async function performExitPhase(d: {
 /**
  * PHASE 2 — echo-deliver the resume command into a pane the CLI has already let go of.
  *
+ * Deliberately NOT gated on `exitSequence`: this half only types a launch line into a pane that is
+ * already free, so a CLI we have no way to ASK to quit is still perfectly resumable here (the exit
+ * half owns that question). What gates this half is the bare `resumeCommand` below — the session id
+ * has to be one this app would put on a command line. Hibernation's wake path relies on the split:
+ * it drives this half alone, hours after the exit.
+ *
  * Resolves only once the resume line has actually LEFT the pane (deliverCommand's echo-verify
  * retries run for up to DELIVERY_ATTEMPTS × VERIFY_TIMEOUT_MS after the first write). The
  * un-submitted line is the pane's most fragile moment — anything typed into it during that window
@@ -287,9 +293,10 @@ export async function performResumePhase(d: {
  * function's four outcomes are unchanged: `'exited'` continues, anything else from the exit half
  * is passed through as-is, and a `'resumed'` is what the caller reads as `'restarted'`.
  *
- * The eligibility gate is repeated here so a refusal costs no phase call at all; both halves
- * re-check it themselves, since either can be driven directly (hibernation quits a pane in one
- * phase and resumes it much later in the other).
+ * No gate of its own: `performExitPhase` refuses (writing nothing) on exactly the same two facts —
+ * no exit sequence, or a session id `resumeCommand` would not put on a command line — and it runs
+ * first, so a copy here could only drift. Both halves re-check for themselves because either can be
+ * driven directly: hibernation quits a pane in one phase and resumes it much later in the other.
  */
 export async function performRestartResume(d: {
   agentId: string
@@ -312,9 +319,6 @@ export async function performRestartResume(d: {
    */
   isLive?: () => boolean
 }): Promise<RestartOutcome> {
-  // The BARE command is the gate even when the caller overrides it: `resumeCommand` is what
-  // validates the session id before it reaches a command line.
-  if (!exitSequence(d.agentId) || !resumeCommand(d.agentId, d.sessionId)) return 'not-eligible'
   const exited = await performExitPhase({
     agentId: d.agentId,
     sessionId: d.sessionId,
@@ -347,7 +351,13 @@ const inFlight = new Set<string>()
  * reach the same node, and two runs against one pane would write two `/exit` lines (the second
  * typed INTO the CLI the first is resuming) and two resume commands.
  *
- * The node is held for the WHOLE run, delivery included (see performRestartResume's header): a
+ * ONE set for every kind of run: a hibernation exit, a wake resume and a user restart all pass
+ * through here, so a sweep cannot quit the pane a menu restart is already resuming, and vice versa.
+ * Generic in the outcome so the two halves can be guarded on their own (`ExitPhaseOutcome` /
+ * `ResumePhaseOutcome`), which is what hibernation drives — the refusal is `'not-eligible'`, a
+ * member of every one of those unions.
+ *
+ * The node is held for the WHOLE run, delivery included (see performResumePhase's header): a
  * second `/exit` arriving while the resume line sits un-submitted in the pane would be spliced
  * into it and submit `claude --resume <sid>/exit` — the exact mangled line command-delivery.ts
  * exists to prevent, and likeliest precisely when echo verification is being slow.
@@ -357,10 +367,10 @@ const inFlight = new Set<string>()
  * does not count — so a doubled request is neither counted twice as restarted nor reported as a
  * failure the user could act on. (The alternative, a fifth outcome, would break that frozen line.)
  */
-export function guardConcurrentRestart(
+export function guardConcurrentRestart<T extends string>(
   nodeId: string,
-  fn: () => Promise<RestartOutcome>
-): () => Promise<RestartOutcome> {
+  fn: () => Promise<T>
+): () => Promise<T | 'not-eligible'> {
   return async () => {
     if (inFlight.has(nodeId)) return 'not-eligible'
     inFlight.add(nodeId)
@@ -389,12 +399,44 @@ export function agentRestartFn(nodeId: string): (() => Promise<RestartOutcome>) 
   return restartFns.get(nodeId)
 }
 
-/** TEST ONLY (house pattern: webgl-budget's `__resetWebglBudgetForTests`): both maps above are
+/**
+ * A node's two HIBERNATION halves, registered together because they are useless apart: the sweep
+ * quits the CLI now, and the wake resumes the same conversation minutes or hours later.
+ *
+ * Separate from `restartFns` on purpose — a restart is one indivisible action, hibernation is two
+ * that are deliberately far apart in time — but both are built by the SAME node from the same
+ * `io` / `paneCommand` / `isLive`, and both go through `guardConcurrentRestart`, so the sweep, the
+ * wake and a user restart can never write into one pane at once.
+ */
+export interface AgentHibernateFns {
+  /** Ask the CLI to quit and wait for the pane. `'exited'` is the only outcome that may be
+   *  recorded as hibernated — anything else leaves the node exactly as it was. */
+  exit: () => Promise<ExitPhaseOutcome>
+  /** Re-launch the conversation with the provider's own `--resume`. */
+  resume: () => Promise<ResumePhaseOutcome>
+}
+
+const hibernateFns = new Map<string, AgentHibernateFns>()
+
+/** Register a node's hibernate/wake pair; returns an unregister that is inert if superseded. */
+export function registerAgentHibernate(nodeId: string, fns: AgentHibernateFns): () => void {
+  hibernateFns.set(nodeId, fns)
+  return () => {
+    if (hibernateFns.get(nodeId) === fns) hibernateFns.delete(nodeId)
+  }
+}
+
+export function agentHibernateFns(nodeId: string): AgentHibernateFns | undefined {
+  return hibernateFns.get(nodeId)
+}
+
+/** TEST ONLY (house pattern: webgl-budget's `__resetWebglBudgetForTests`): the maps above are
  *  module-global, so a test that leaves a restart in flight would otherwise refuse the next
  *  test's restart of the same node id. */
 export function __resetAgentRestartForTests(): void {
   inFlight.clear()
   restartFns.clear()
+  hibernateFns.clear()
 }
 
 // ── Bulk run: who gets restarted, and how the run is summed up ──────────────────────────
