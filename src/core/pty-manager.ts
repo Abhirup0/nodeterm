@@ -1693,6 +1693,59 @@ export class PtyManager {
     clientId: ClientId | null,
     sinks: DetachedSinks | undefined
   ): string {
+    // PRE-FLIGHT — refuse before node-pty is touched, not after it fails.
+    //
+    // node-pty's darwin spawn path LEAKS the pty it opened when `posix_spawn` fails:
+    // `pty_posix_spawn` (node_modules/node-pty/src/unix/pty.cc) opens the master with
+    // `posix_openpt` and the slave with `open()`, and the error branch in `PtyFork` throws without
+    // closing either — measured at 2 `/dev/ptmx` fds + 1 `/dev/ttys*` fd, i.e. 2 pty DEVICES, per
+    // failed spawn (there is a third, smaller leak of one device per SUCCESSFUL spawn from the
+    // `low_fds` cleanup loop's off-by-one). That makes exhaustion self-amplifying: at the ceiling
+    // every spawn fails, every failure eats two more devices, and each retry pushes the ceiling
+    // further away — a 31-minute-old main held 479 masters against 28 tmux panes and dozens of
+    // consecutive failed creates. The leak is node-pty's to fix; ours is to stop feeding it.
+    //
+    // FIRST STATEMENT IN THE FUNCTION, ahead of the swap-out below, because a refusal must leave
+    // the node exactly as it found it. Retiring the shadow first would trade a live background
+    // client for nothing at all: the painter it was making way for never arrives, and nothing
+    // re-attaches a shadow (`shadowAttach` is driven by release/reap, not by a failed create), so
+    // a node nobody is watching would go quietly dark on a machine that is merely full. Nothing
+    // between here and `pty.spawn` is needed to decide this — the reading is machine-wide.
+    //
+    // FAIL-OPEN is the rule here: `ptyDevicesExhausted` is false for anything unmeasured
+    // (non-darwin, a `sysctl` that failed, or a ceiling whose async prime — kicked in `init` — has
+    // not landed yet), so an unknown machine spawns exactly as it always did. Refusing a terminal
+    // on a machine that had room would be a worse bug than the leak this avoids.
+    //
+    // AND THAT IS THE WHOLE FIX — no backoff, no circuit breaker, deliberately. The bursts of
+    // consecutive failed creates in the field log are not a retry storm: NOTHING re-attempts a
+    // create that failed. The renderer's create rejection lands in one `.catch` that only records
+    // `spawnError` for the node's overlay (TerminalNode.tsx) — no timer, no respawn bump, and no
+    // `reportSshDrop`, so a failure cannot even feed the SSH reconnect coordinator (whose own loop
+    // is bounded anyway: 1→2→4→8→15s, then parked until a `connected` event, plus a 10s re-drop
+    // refusal). A burst is therefore N DISTINCT nodes each trying exactly once, fanned out by one
+    // moment — app boot, a project tab switch past the park window, an agent's bulk
+    // `open-terminal --count N`, or one reconnect flush. Rate-limiting that would only stagger
+    // failures the user asked for. What made it look like a storm was the amplification: 40
+    // one-shot creates used to cost 80 devices, and now cost none.
+    const devices = readPtyDevices()
+    if (ptyDevicesExhausted(devices)) {
+      // The REQUESTED program and cwd, not the resolved ones — resolution happens further down and
+      // deliberately has not run. Nothing was chosen, so nothing is claimed to have been.
+      //
+      // `archNote` is deliberately not consulted: it outranks the device note in
+      // `spawnFailureHint`, and no helper was exec'd here, so its architecture cannot be the
+      // reason. Saying "rebuild node-pty" to a machine that is simply full is the 2026-08-06
+      // mistake with a new cause.
+      throw this.spawnFailureError(
+        'not attempted',
+        options.shell ?? '(default shell)',
+        options.cwd ?? os.homedir(),
+        null,
+        devices
+      )
+    }
+
     // SWAP-OUT, before anything at all is spawned: a painter pty client is arriving for this node,
     // and a session never has both. The painter attaches with `-D` and would kick the shadow off by
     // itself — but only once tmux has processed both attaches, leaving a window where two clients
@@ -1702,7 +1755,8 @@ export class PtyManager {
     //
     // Here rather than in `create()` so EVERY path to a painter is covered — the warm reattach, the
     // relay host's `attachDetached`, and whatever spawns next — and so the ordering is provable:
-    // it is the first statement before `pty.spawn` in the same synchronous function.
+    // nothing between here and `pty.spawn` can fail, in the same synchronous function. (The
+    // pre-flight above is the one thing that CAN, which is exactly why it runs before this.)
     // The shared background-write client goes too, for the same reason, when it is this node's
     // session it happens to be attached to.
     if (options.persistKey) {
@@ -1932,43 +1986,6 @@ export class PtyManager {
         process.env.SHELL ||
         (os.platform() === 'win32' ? 'powershell.exe' : 'bash')
       args = program ? programArgs : []
-    }
-
-    // PRE-FLIGHT — refuse before node-pty is touched, not after it fails.
-    //
-    // node-pty's darwin spawn path LEAKS the pty it opened when `posix_spawn` fails:
-    // `pty_posix_spawn` (node_modules/node-pty/src/unix/pty.cc) opens the master with
-    // `posix_openpt` and the slave with `open()`, and the error branch in `PtyFork` throws without
-    // closing either — measured at 2 `/dev/ptmx` fds + 1 `/dev/ttys*` fd, i.e. 2 pty DEVICES, per
-    // failed spawn (there is a third, smaller leak of one device per SUCCESSFUL spawn from the
-    // `low_fds` cleanup loop's off-by-one). That makes exhaustion self-amplifying: at the ceiling
-    // every spawn fails, every failure eats two more devices, and each retry pushes the ceiling
-    // further away — a 31-minute-old main held 479 masters against 28 tmux panes and dozens of
-    // consecutive failed creates. The leak is node-pty's to fix; ours is to stop feeding it.
-    //
-    // FAIL-OPEN is the rule here: `ptyDevicesExhausted` is false for anything unmeasured
-    // (non-darwin, a `sysctl` that failed, or a ceiling whose async prime — kicked in `init` — has
-    // not landed yet), so an unknown machine spawns exactly as it always did. Refusing a terminal
-    // on a machine that had room would be a worse bug than the leak this avoids.
-    //
-    // AND THAT IS THE WHOLE FIX — no backoff, no circuit breaker, deliberately. The bursts of
-    // consecutive failed creates in the field log are not a retry storm: NOTHING re-attempts a
-    // create that failed. The renderer's create rejection lands in one `.catch` that only records
-    // `spawnError` for the node's overlay (TerminalNode.tsx) — no timer, no respawn bump, and no
-    // `reportSshDrop`, so a failure cannot even feed the SSH reconnect coordinator (whose own loop
-    // is bounded anyway: 1→2→4→8→15s, then parked until a `connected` event, plus a 10s re-drop
-    // refusal). A burst is therefore N DISTINCT nodes each trying exactly once, fanned out by one
-    // moment — app boot, a project tab switch past the park window, an agent's bulk
-    // `open-terminal --count N`, or one reconnect flush. Rate-limiting that would only stagger
-    // failures the user asked for. What made it look like a storm was the amplification: 40
-    // one-shot creates used to cost 80 devices, and now cost none.
-    const devices = readPtyDevices()
-    if (ptyDevicesExhausted(devices)) {
-      // `archNote` is deliberately not consulted: it outranks the device note in
-      // `spawnFailureHint`, and no helper was exec'd here, so its architecture cannot be the
-      // reason. Saying "rebuild node-pty" to a machine that is simply full is the 2026-08-06
-      // mistake with a new cause.
-      throw this.spawnFailureError('not attempted', file, cwd, null, devices)
     }
 
     let proc: pty.IPty

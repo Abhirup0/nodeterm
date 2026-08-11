@@ -31,6 +31,20 @@ export interface PtyDevices {
  * may already have been returned. Small, because unlike the descriptor check this one names a
  * SYSTEM limit: claiming the machine is full when it has room would be a worse sentence than saying
  * nothing.
+ *
+ * TWO CONSUMERS NOW, and the slack means something different to each:
+ *  - the post-mortem hint above — the reading is a snapshot taken after the fact, so the slack
+ *    absorbs devices returned between the failure and the count;
+ *  - `PtyManager.spawnSession`'s pre-flight, where it is not slack at all but a PRE-EMPTIVE band:
+ *    a refusal starts at `ceiling - 4` (507 of 511), while the machine still has four devices.
+ *
+ * The band is deliberate, and it is the same arithmetic read forwards. A tmux-backed spawn wants
+ * two devices, so a create begun at 508 lands ON the wall rather than under it — and a spawn that
+ * reaches the wall does not merely fail, it LEAKS two devices doing so (node-pty; see the
+ * pre-flight's comment). Refusing inside the band trades at most four devices of capacity, on a
+ * machine already at 99% of a system limit, for the guarantee that no failure-with-leak is ever
+ * started. Those four are the cheapest possible price for closing the spiral, and the user is told
+ * the true numbers either way.
  */
 export const PTY_DEVICE_HEADROOM = 4
 
@@ -82,8 +96,13 @@ function ptyCeiling(): number | null {
  *
  * A directory listing, not a subprocess: this runs inside an error path that is already one failed
  * spawn deep, and shelling out to `ls` to count files would need the very resource that just ran
- * out. `/dev/ttys*` is the macOS naming (`ttys000`, `ttys001`, …); the entries are created on demand
- * and stay until reboot, which is what makes the count meaningful.
+ * out. `/dev/ttys*` is the macOS naming (`ttys000`, `ttys001`, …): entries are created on demand
+ * and RECLAIMED when the pty is closed — measured on this host going 492 → 500 → 492 across a batch
+ * of terminals opening and closing. Nothing is cached, so every call is a fresh readdir, which is
+ * what lets a machine that just freed some devices spawn again immediately instead of staying
+ * refused until a restart. (It is also why a LEAKED master is so costly: a device whose master fd
+ * is never closed is never reclaimed either, so it counts against the ceiling until the process
+ * that leaked it exits.)
  */
 function countPtyDevices(): number | null {
   if (os.platform() !== 'darwin') return null
