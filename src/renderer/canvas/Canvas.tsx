@@ -140,6 +140,7 @@ import {
   viewportForRect,
   type FocusableNode
 } from '../lib/nodeFocus'
+import { planSessionKill } from '../lib/sessionKill'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { SshPassphrasePrompt } from '../components/SshPassphrasePrompt'
@@ -6538,7 +6539,7 @@ export function Canvas() {
   // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an
   // inactive project's node even though it isn't mounted; then drop it from the store.
   const closeSession = useCallback(
-    (projectId: string, id: string) => {
+    (projectId: string, id: string, alsoOnConfirm?: () => void) => {
       setConfirm({
         message: 'End this session? This stops its tmux session.',
         confirmLabel: 'End session',
@@ -6553,6 +6554,10 @@ export function Canvas() {
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
           }
+          // The session-memory panel's remote leg (see `killSessionById`): the local destroy above
+          // cannot reach a HOST's tmux session unless a live client carries `sshRemote`. Runs only
+          // after the user confirmed, which is why it is a callback and not done at the call site.
+          alsoOnConfirm?.()
           setConfirm(null)
         }
       })
@@ -6561,22 +6566,36 @@ export function Canvas() {
   )
 
   /**
-   * End a session picked from the session-memory panel, which lists tmux sessions rather than
-   * canvas nodes — so a row may have no node behind it at all.
+   * End a session picked from the session-memory panel, which lists tmux SESSIONS rather than
+   * canvas nodes — so a row may have no node behind it at all, and (on an SSH project) may not even
+   * be on this machine.
    *
-   * The owner is resolved HERE, at click time, instead of being taken from the row's `orphan` flag:
-   * the panel's rows are a snapshot of the last sweep, and a node created since would otherwise be
-   * killed as an orphan — tmux dies, the canvas node stays, pointing at nothing. When there IS an
-   * owner this goes through `closeSession`, i.e. the exact path the sessions sidebar and the node's
-   * own × use (confirm → destroy → drop the node), so the panel can never invent a third one.
+   * Both halves of the plan are the pure `planSessionKill`:
+   *
+   * - **Who owns it** is resolved HERE, at click time, rather than taken from the row's `orphan`
+   *   flag: the rows are a snapshot of the last sweep, and a node created since would otherwise be
+   *   killed as an orphan. With an owner this goes through `closeSession` — the exact path the
+   *   sessions sidebar and the node's own × use — so the panel never invents a third one.
+   * - **Which machine** is the ACTIVE project's, because that is the machine the panel is showing.
+   *   `transport.destroy` reaches a REMOTE session only through a live client carrying `sshRemote`,
+   *   which an orphan and an unmounted node both lack — so on an SSH scope the kill would have
+   *   touched only the local socket while the host's `nt-<id>` kept running, after a confirm that
+   *   said otherwise. `sshProject.killSessions` runs `tmux kill-session` over that project's own
+   *   ControlMaster and needs no live session; it is best-effort per id, so running it for the
+   *   mounted case too (where `destroy` already ended it) is a harmless miss.
    */
   const killSessionById = useCallback(
     (nodeId: string, orphan: boolean) => {
-      const owner = useProjects
-        .getState()
-        .projects.find((p) => p.nodes.some((n) => n.id === nodeId))
-      if (owner) {
-        closeSession(owner.id, nodeId)
+      const store = useProjects.getState()
+      const plan = planSessionKill(nodeId, store.projects, store.activeProjectId)
+      const remoteKill = plan.remoteProjectId
+        ? () =>
+            void window.nodeTerminal.sshProject
+              .killSessions(plan.remoteProjectId!, [nodeId])
+              .catch(() => {})
+        : undefined
+      if (plan.ownerProjectId) {
+        closeSession(plan.ownerProjectId, nodeId, remoteKill)
         return
       }
       setConfirm({
@@ -6587,6 +6606,7 @@ export function Canvas() {
         danger: true,
         onConfirm: () => {
           transport.destroy(nodeId)
+          remoteKill?.()
           // Nothing else to clean up: with no node anywhere, there is no canvas entry to remove and
           // no parked terminal to dispose. Persisted agent status is dropped anyway, since a
           // session id can outlive the node it belonged to.

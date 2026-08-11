@@ -9,7 +9,7 @@
 //      never enters the agent-status map at all.
 //   3. Every row is rendered. A cap would have to announce itself.
 
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import type { AgentState } from '@shared/agents/normalize'
 import { formatBytes } from '@shared/fsLimits'
 import { useAgentStatus } from '../state/agentStatus'
@@ -92,15 +92,17 @@ export function SessionMemoryPanel({
   // The sweep runs on OPEN (the panel is unmounted while closed) and on ⟳ — never on a timer, and
   // never from the pill: it walks the whole process table, and on an SSH scope that is an ssh exec
   // plus a `ps` of somebody else's machine. The project id is explicit, because the store's
-  // `activeSessionApi()` fallback is the one path that can address the wrong machine.
+  // `activeSessionApi()` fallback is the one path that can address the wrong machine — so BOTH
+  // callers go through this one guarded function instead of each repeating the condition.
   //
   // This component must NEVER call `startHostPoll` / `stopHostPoll`: the store's timer and its
   // active-scope stamp are module singletons owned by the pill, and a `stopHostPoll` on unmount
   // would clear the pill's interval with nothing left to restart it.
-  useEffect(() => {
+  const sweep = useCallback(() => {
     if (relay || !activeProjectId) return
     void refreshFull(scopeKey, activeProjectId)
   }, [relay, scopeKey, activeProjectId, refreshFull])
+  useEffect(() => sweep(), [sweep])
 
   // Have we got an answer for THIS machine yet? A `loadedScope` from the machine we just left says
   // nothing about this one, so it is compared, not merely checked for existence.
@@ -199,7 +201,7 @@ export function SessionMemoryPanel({
             title="Re-measure"
             aria-label="Re-measure"
             disabled={loading}
-            onClick={() => void refreshFull(scopeKey, activeProjectId)}
+            onClick={sweep}
           >
             ⟳
           </button>

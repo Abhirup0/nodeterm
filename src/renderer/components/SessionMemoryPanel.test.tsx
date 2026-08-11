@@ -241,6 +241,34 @@ describe('SessionMemoryPanel', () => {
     expect(text()).not.toContain('No sessions')
     expect(text()).not.toContain('Could not measure')
     expect(text()).toContain('Measuring')
+    // …and the header and footer have to stay silent too. `ok` is still TRUE in this state, so a
+    // total or a count gated on `ok` instead of on "did we measure THIS machine" prints `0 B` /
+    // `0 sessions` beside "Measuring…" — the same conflation, one state along.
+    expect(host.querySelector('.sessmem-panel__total')).toBeNull()
+    expect(text()).not.toContain('0 sessions')
+    expect(text()).not.toMatch(/\d/)
+  })
+
+  it('disables the refresh and spins it while a sweep is in flight', () => {
+    // A remote sweep is an ssh exec plus a `ps` on someone else's machine. Without this the user
+    // can queue several by clicking, and nothing on screen says one is already running.
+    mount({ loading: true })
+    const refresh = host.querySelector<HTMLButtonElement>('.sessmem-panel__refresh')!
+    expect(refresh.disabled).toBe(true)
+    expect(refresh.classList.contains('spin')).toBe(true)
+    act(() => refresh.click())
+    expect(refreshFull).toHaveBeenCalledTimes(1) // the mount sweep, and nothing the click added
+  })
+
+  it('refuses to sweep with no active project — never through the api fallback', () => {
+    // Unreachable from the pill today (it renders nothing without an active project), but this is
+    // the one call that could fall through to the store's `activeSessionApi()`, which is the single
+    // path able to address the wrong machine. The mount effect always guarded it; the ⟳ did not.
+    useProjects.setState({ projects: [], activeProjectId: '' })
+    mount()
+    expect(refreshFull).not.toHaveBeenCalled()
+    act(() => host.querySelector<HTMLButtonElement>('.sessmem-panel__refresh')!.click())
+    expect(refreshFull).not.toHaveBeenCalled()
   })
 
   it('tells a relay tab it is unsupported here, not that the measurement failed', () => {
