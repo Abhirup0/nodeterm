@@ -577,9 +577,11 @@ export class PtyManager {
    *    under the same name. Never shadow it locally.
    *
    * It deliberately outlives the `Session` (the tmux session outlives it too) and is dropped when
-   * the node is destroyed. Growth is one small record per tmux-backed node this process has ever
-   * released — the same order as the session map itself, and rewritten rather than appended on
-   * every subsequent release.
+   * the node is destroyed. The write is unconditional for every PERSISTED session released — local
+   * tmux-backed and remote alike, with or without a recorded size — so the map also holds records
+   * whose only content is "remote, do not shadow". Growth is therefore one small record per
+   * persisted node this process has ever released: the same order as the session map itself, and
+   * rewritten rather than appended on every subsequent release of the same node.
    */
   private released = new Map<string, { size?: PtySize; remote: boolean }>()
   /** The child-process seam for shadow clients. Undefined in production, where `ControlModeClient`

@@ -414,6 +414,49 @@ describe('control-mode shadow clients for released sessions', () => {
     expect(killed).toEqual([{ socket: 'node-terminal', target: '=nt-node-1' }])
   })
 
+  it('leaves a session somebody is really watching alone — the attached flag is a client COUNT', async () => {
+    // `#{session_attached}` counts clients. Subtracting our shadow by forcing the flag to false
+    // would report a session that has our shadow PLUS a real client — the user's own
+    // `tmux -L node-terminal attach`, or a second nodeterm process on the same socket — as
+    // detached, and the budget would then kill a session out from under a live user, inverting its
+    // one hard rule in the state-destroying direction. The shadow comes off the COUNT.
+    const { createSessionReaper } = await import('./session-budget')
+    const m = await tmuxManager()
+    const a = await create(ALICE, 'node-1')
+    const b = await create(BOB, 'node-2')
+    kill(ALICE, a.sessionId)
+    kill(BOB, b.sessionId)
+    await m.shadowAttach('node-1')
+    await m.shadowAttach('node-2')
+
+    const NOW = 1_000_000
+    const OLD = NOW - 100_000
+    const killed: string[] = []
+    let listings = 0
+    const reaper = createSessionReaper({
+      tmuxBin: () => m.getTmuxBin(),
+      sockets: ['node-terminal'],
+      shadowed: (socket) => m.shadowedTmuxSessions(socket),
+      exec: async (_bin: string, args: string[]) => {
+        if (args.includes('kill-session')) {
+          killed.push(args[args.indexOf('-t') + 1])
+          return ''
+        }
+        // nt-node-1 carries the user's own client the whole time (2 = theirs + ours), so the PLAN
+        // must never name it. nt-node-2 is shadow-only when the plan is made and gains a real
+        // client before the kill — precisely what the kill-time re-verify exists for.
+        const nodeTwo = listings++ === 0 ? 1 : 2
+        return `nt-node-1|2|${OLD}\nnt-node-2|${nodeTwo}|${OLD}`
+      },
+      readMem: () => ({ availableMb: 100, totalMb: 8000 }), // under the watermark: real pressure
+      env: {},
+      nowSec: () => NOW
+    })
+
+    expect(await reaper.sweep()).toBe(0)
+    expect(killed).toEqual([])
+  })
+
   it('refuses a released REMOTE node — its tmux lives on the far host, not on our socket', async () => {
     const m = await tmuxManager()
     const res = (await fake.handlers[IPC.ptyCreate](ALICE, {

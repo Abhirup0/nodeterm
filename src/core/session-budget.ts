@@ -35,7 +35,18 @@ const runAsync = promisify(execFile)
 /** One tmux session as reported by `list-sessions`. `activitySec` is epoch seconds. */
 export interface SessionInfo {
   name: string
-  attached: boolean
+  /**
+   * How many clients tmux reports attached. A COUNT, not a flag: `#{session_attached}` is the
+   * number of clients, and one session can have several — the app's painter, the user's own `tmux
+   * -L node-terminal attach`, a second nodeterm process on the same socket, one of our
+   * control-mode shadows.
+   *
+   * Carried numerically rather than collapsed to a boolean at parse time because the `shadowed`
+   * seam SUBTRACTS: a session holding our shadow AND a real client must still read as attached,
+   * and a boolean can only be forced to false — which would reap the session out from under
+   * whoever the other client belongs to.
+   */
+  clients: number
   activitySec: number
 }
 
@@ -98,7 +109,7 @@ export function planReap(
 ): string[] {
   if (cfg.disabled) return []
   const nt = sessions.filter((s) => s.name.startsWith('nt-'))
-  const detached = nt.filter((s) => !s.attached)
+  const detached = nt.filter((s) => s.clients === 0)
   const eligible = detached
     .filter((s) => nowSec - s.activitySec >= cfg.graceSec)
     .sort((a, b) => a.activitySec - b.activitySec)
@@ -119,7 +130,7 @@ export function parseSessionList(stdout: string): SessionInfo[] {
     const attached = Number(parts[1])
     const activity = Number(parts[2])
     if (!parts[0] || !Number.isFinite(attached) || !Number.isFinite(activity)) continue
-    out.push({ name: parts[0], attached: attached > 0, activitySec: activity })
+    out.push({ name: parts[0], clients: Math.max(0, attached), activitySec: activity })
   }
   return out
 }
@@ -209,13 +220,20 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
   const listSocket = async (bin: string, socket: string): Promise<SessionInfo[] | null> => {
     try {
       const listed = parseSessionList(await exec(bin, ['-L', socket, 'list-sessions', '-F', LIST_FMT]))
-      // Our own shadows are subtracted from tmux's `attached` HERE, at the one place every listing
-      // comes through, so the plan and the kill-time re-verify can never disagree about it (a
-      // shadow attached between the two would otherwise resurrect the exemption). Re-read each
+      // Our own shadows are subtracted from tmux's client COUNT here, at the one place every
+      // listing comes through, so the plan and the kill-time re-verify can never disagree about it
+      // (a shadow attached between the two would otherwise resurrect the exemption). Re-read each
       // time: the set changes as sessions are shadowed and swapped back to painters.
+      //
+      // Minus ONE client, never "detached": this app holds at most one shadow per session, and
+      // anything left over is somebody else's client — the user's own `tmux attach`, another
+      // nodeterm process on this socket — whose session must keep the exemption. Forcing the flag
+      // false here would reap a session out from under a live user.
       const shadowed = new Set(opts.shadowed?.(socket) ?? [])
       if (shadowed.size === 0) return listed
-      return listed.map((s) => (s.attached && shadowed.has(s.name) ? { ...s, attached: false } : s))
+      return listed.map((s) =>
+        s.clients > 0 && shadowed.has(s.name) ? { ...s, clients: s.clients - 1 } : s
+      )
     } catch {
       // "no server running" and a real failure both land here; neither yields candidates.
       return null
@@ -245,7 +263,7 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
       // Kill-time re-verify on a FRESH list: only sessions still present and still detached die.
       const fresh = await listSocket(bin, socket)
       if (!fresh) continue
-      const stillDetached = new Set(fresh.filter((s) => !s.attached).map((s) => s.name))
+      const stillDetached = new Set(fresh.filter((s) => s.clients === 0).map((s) => s.name))
       for (const name of names) {
         if (!stillDetached.has(name)) continue
         try {
