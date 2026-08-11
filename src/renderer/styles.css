@@ -17,6 +17,10 @@
      (A white that sits on a saturated ACCENT fill is a different thing and stays `#fff`.) */
   --text-strong: #fff;
 
+  /* Working (agent mid-turn) accent: the clay spinner/glow color, shared by every "working"
+     indicator (node glow, sidebar dot, project-header badge) so it only has to be edited once. */
+  --agent-working: #d97757;
+
   --bg: #1e1e1e; /* content / canvas / terminal (controlBackground) */
   --panel: #282828; /* bars, panels, node chrome (underPage) */
   --panel-header: #323232; /* elevated / hover (windowBackground) */
@@ -6282,17 +6286,7 @@ body,
 .ss-bell svg { width: 13px; height: 13px; }
 .ss-dot--working {
   background: transparent;
-  border: 2px solid #d97757;
-  border-top-color: transparent;
-  animation: nt-spin 1s steps(12, end) infinite;
-}
-.ss-group__sig--working { color: #d97757; }
-.ss-group__sig-spin {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  border: 1.5px solid #d97757;
+  border: 2px solid var(--agent-working);
   border-top-color: transparent;
   animation: nt-spin 1s steps(12, end) infinite;
 }
@@ -6377,6 +6371,16 @@ body,
 .ss-group__sig svg { width: 11px; height: 11px; }
 .ss-group__sig--attention { color: var(--danger); }
 .ss-group__sig--unread { color: var(--accent); }
+.ss-group__sig--working { color: var(--agent-working); }
+.ss-group__sig-spin {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--agent-working);
+  border-top-color: transparent;
+  animation: nt-spin 1s steps(12, end) infinite;
+}
 .ss-group__add { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; }
 .ss-group__head:hover .ss-group__add { opacity: 0.7; }
 .ss-group__add:hover { opacity: 1 !important; color: var(--accent); }
