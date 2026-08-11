@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createMemoryPressureMonitor } from './memory-pressure'
+import { createMemoryPressureMonitor, hostMemReader } from './memory-pressure'
+import { readMemInfo } from './session-budget'
 
 const mem = (availableMb: number, totalMb = 16000) => () => ({ availableMb, totalMb })
 
@@ -48,6 +49,20 @@ describe('memory pressure monitor', () => {
     vi.advanceTimersByTime(600_000)
     expect(on).toHaveBeenCalledTimes(1)
     vi.useRealTimers()
+  })
+  it('the default host reader is SILENT on darwin (os.freemem there is vm_stat free_count)', () => {
+    const read = hostMemReader('darwin')
+    expect(read()).toBeNull()
+    // Host leg silent → a healthy Mac is never classified from "free" memory…
+    const quiet = createMemoryPressureMonitor({ readMem: read, selfRssMb: () => 500, onPressure: vi.fn() })
+    expect(quiet.check()).toBeNull()
+    // …but the self-RSS leg still carries the monitor on its own.
+    const loud = createMemoryPressureMonitor({ readMem: read, selfRssMb: () => 9000, onPressure: vi.fn() })
+    expect(loud.check()).toBe('critical')
+  })
+  it('the default host reader is the real one everywhere else', () => {
+    expect(hostMemReader('linux')).toBe(readMemInfo)
+    expect(hostMemReader('win32')).toBe(readMemInfo)
   })
   it('a throwing consumer does not break the monitor', () => {
     vi.useFakeTimers()
