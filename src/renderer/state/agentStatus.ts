@@ -59,6 +59,19 @@ export interface AgentNodeStatus {
    * holds a shell rather than a live CLI.
    */
   hibernated?: boolean
+  /**
+   * What the pane's foreground command settled to once the CLI let go of it — recorded at the
+   * moment of hibernation, persisted beside the flag, and dropped with it.
+   *
+   * The wake refuses to type a launch line into a pane it does not recognize as a shell, and its
+   * allowlist (`isShellCommand`) knows zsh/bash/fish/… but not `nu`, `xonsh` or `pwsh`. The EXIT
+   * half has a second, allowlist-free signal for exactly those users (the foreground command
+   * stopped being the CLI, twice in a row) — so without this the wake is STRICTER than the exit,
+   * and a `nu` user could be hibernated and then never woken: the chip would refuse forever.
+   * Remembering what we exited TO closes that gap, and it is narrow by construction: it permits
+   * one specific string, on one specific node, recorded by us.
+   */
+  hibernatedPane?: string
   /** Which agent this node is running (claude/codex/gemini/…), when known. */
   agentId?: AgentId
   /** A turn finished / needs attention while the user wasn't looking. */
@@ -124,6 +137,9 @@ export interface AgentStatusStore {
    *  Waking also restarts the idle clock (`lastEventAt`), so a quiet resumed session is not
    *  re-hibernated on the next sweep. */
   setHibernated(id: string, on: boolean): void
+  /** Record what the pane settled to when this node's CLI let go of it (`null` = forget: a stale
+   *  value must never permit a wake into a pane we did not measure). See `hibernatedPane`. */
+  setHibernatedPane(id: string, pane: string | null): void
   markUnread(id: string): void
   /**
    * Drop a node's unread flag. By default a clear of a FINISHED (done) node also ACKs the read
@@ -219,6 +235,10 @@ export function createAgentStatusSession(
         // Only when set: an absent flag stays absent, so an entry saved before this field
         // existed hydrates byte-identically (and `hibernated: false` never grows in the file).
         if (v.hibernated) out[id].hibernated = true
+        // Only alongside the flag: the pane we exited TO is meaningless (and, as a wake
+        // permission, unwanted) once the node is not hibernated any more.
+        if (v.hibernated && typeof v.hibernatedPane === 'string')
+          out[id].hibernatedPane = v.hibernatedPane
         // A recurring job (cron/schedule — and tmux keeps in-session loops alive too) outlives
         // the app: restore its card. Minimal shape check so a corrupt entry can't break load.
         if (v.loop && typeof v.loop === 'object' && v.loop.kind) {
@@ -253,7 +273,9 @@ export function createAgentStatusSession(
             sessionId: v.sessionId,
             agentId: v.agentId,
             loop: v.loop,
-            hibernated: v.hibernated
+            hibernated: v.hibernated,
+            // Never written without the flag it belongs to (see `hibernatedPane`).
+            hibernatedPane: v.hibernated ? v.hibernatedPane : undefined
           }
         }
       }
@@ -320,7 +342,10 @@ export function createAgentStatusSession(
         // `done` deliberately does NOT clear it — a hibernated node's last known state IS done,
         // and a late Stop POST arriving after the exit would undo the hibernation we just did.
         const alive = state === 'working' || state === 'blocked' || state === 'waiting'
-        if (alive && prev.hibernated) next.hibernated = undefined
+        if (alive && prev.hibernated) {
+          next.hibernated = undefined
+          next.hibernatedPane = undefined // goes with the flag, always
+        }
         const byId = { ...s.byId, [id]: next }
         // `state` itself is transient, so a plain transition writes nothing — but dropping a
         // PERSISTED flag has to reach disk, or a relaunch would restore a hibernated node that
@@ -367,7 +392,15 @@ export function createAgentStatusSession(
         if (!!prev.hibernated === on) return s
         // Cleared by dropping the key, not by storing `false`: `save` skips entries that carry
         // nothing durable, so a woken node leaves no residue behind in localStorage.
-        const next = { ...prev, hibernated: on ? true : undefined }
+        // The recorded pane belongs to THIS hibernation: it goes with the flag, in both
+        // directions. Kept past a wake it would be a standing permission to type into whatever
+        // that string names, long after we measured it.
+        const next: AgentNodeStatus = {
+          ...prev,
+          hibernated: on ? true : undefined,
+          // Hibernating KEEPS what the exit closure just recorded; waking drops it.
+          hibernatedPane: on ? prev.hibernatedPane : undefined
+        }
         // Waking RESTARTS the idle clock. Without this, a node whose conversation was resumed but
         // whose CLI then sits quiet (an agent that fires no hook until you talk to it) still
         // carries the `lastEventAt` from before it was hibernated — hours old — so the very next
@@ -376,6 +409,16 @@ export function createAgentStatusSession(
         // the sweep off it.
         if (!on) next.lastEventAt = Date.now()
         const byId = { ...s.byId, [id]: next }
+        save(byId)
+        return { byId }
+      }),
+
+    setHibernatedPane: (id, pane) =>
+      set((s) => {
+        const prev = s.byId[id] ?? EMPTY
+        const next = pane ?? undefined
+        if (prev.hibernatedPane === next) return s
+        const byId = { ...s.byId, [id]: { ...prev, hibernatedPane: next } }
         save(byId)
         return { byId }
       }),

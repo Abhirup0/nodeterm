@@ -221,7 +221,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
       <SearchableRow {...ROWS.hibernation}>
         <FieldRow
           label="Hibernate idle agents"
-          description="Exit an agent CLI that has been idle and offscreen this long, freeing its memory; the conversation resumes automatically when you view the node. Scheduled, /loop and /cron agents — and sessions with subagents still running — are never touched."
+          description="Exit an agent CLI that has been idle and offscreen this long, freeing its memory; the conversation resumes automatically when you view the node. While this is on, the terminal view of an offscreen agent is kept until the agent hibernates, so the bigger saving happens first. Scheduled, /loop and /cron agents — and sessions with subagents still running — are never touched."
           control={
             <div className="flex items-center gap-2">
               <Switch

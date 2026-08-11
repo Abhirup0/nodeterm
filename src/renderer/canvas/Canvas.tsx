@@ -28,7 +28,9 @@ import {
   disposeTerminalOnUnmount,
   disposeParkedTerminal,
   disposeAllParkedTerminals,
-  isNodeOffscreen,
+  isNodeRemote,
+  isNodeWatched,
+  setWatchedNode,
   wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
@@ -5441,6 +5443,10 @@ export function Canvas() {
   // whole board on every Canvas render.
   const setKanbanModalNode = useCallback((id: string | null) => {
     kanbanModalNodeRef.current = id
+    // The one place the "is anyone looking at this session" predicate learns about the modal —
+    // every asker (the sweep's plan, the node's fire-time re-ask, the nudge) reads it through
+    // `isNodeWatched`, so the modal clause cannot go missing from one of them.
+    setWatchedNode(id)
     // Opening a card IS opening the session — the second way in, and the one the canvas
     // visibility observer says nothing about. A hibernated node reached this way resumes its
     // conversation just as it would on a pan-back, instead of showing the bare shell it was
@@ -7115,16 +7121,14 @@ export function Canvas() {
             parentNodeId: v.parentNodeId,
             status: v.state
           })),
-          // The nodes' own visibility observers (Phase 2's) are the authority — never a second
-          // observer here, and "we have not heard" is never read as "nobody is looking".
-          //
-          // …with ONE override the observers structurally cannot know about: a kanban card modal
-          // co-attaches the same tmux session over a canvas nobody can see, so its node is
-          // off-screen by every measurement and yet is the one session the user is looking at.
-          // Quitting the CLI under an open modal is the same intrusion as quitting it under the
-          // node itself.
-          isOffscreen: (nodeId) =>
-            nodeId !== kanbanModalNodeRef.current && isNodeOffscreen(nodeId),
+          // `isNodeWatched` is the ONE predicate for "the user is looking at this session" — the
+          // nodes' own visibility observers (Phase 2's) plus the open card modal, which no
+          // observer can see (it co-attaches the same tmux session over a canvas nobody is
+          // looking at). The node's exit closure re-asks the SAME function at fire time.
+          isOffscreen: (nodeId) => !isNodeWatched(nodeId),
+          // Remote (SSH / relay) sessions are excluded in v1 — here rather than only at the exit,
+          // or two of them could occupy both batch slots on every pass (see the policy).
+          isRemote: isNodeRemote,
           // Wired = mounted with a live terminal that registered its hibernate pair. An
           // offscreen-DISPOSED node (Phase 2) has already given its buffer back and has no pane
           // to quit, so it drops out here.
@@ -7149,9 +7153,7 @@ export function Canvas() {
               // EDGE has passed, so no wake trigger is left and the node would sit SLEEPING in
               // front of the user. Nudge it: the node re-reads the flag itself, so this is a
               // no-op wherever the user did not arrive.
-              if (!isNodeOffscreen(nodeId) || nodeId === kanbanModalNodeRef.current) {
-                wakeHibernatedNode(nodeId)
-              }
+              if (isNodeWatched(nodeId)) wakeHibernatedNode(nodeId)
             }
             // 'exit-timeout' / 'not-eligible': the CLI is still running and NOTHING is recorded —
             // marking it hibernated would put a SLEEPING chip on a live session and suppress the

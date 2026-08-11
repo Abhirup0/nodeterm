@@ -12,6 +12,7 @@ function inputs(over: Partial<HibernationCandidateInputs> = {}): HibernationCand
     subagents: [],
     isOffscreen: () => true,
     isWired: () => true,
+    isRemote: () => false,
     ...over
   }
 }
@@ -27,6 +28,7 @@ describe('buildHibernationCandidates', () => {
         wired: true,
         offscreen: true,
         hibernated: false,
+        remote: false,
         recurring: false,
         liveSubagents: false,
         lastEventAt: IDLE
@@ -80,6 +82,24 @@ describe('buildHibernationCandidates', () => {
         { parentNodeId: 'a', status: 'working' }
       ])
     ).toBe(true)
+  })
+
+  it('carries the REMOTE fact per node, so the plan can exclude it before the batch slice', () => {
+    const rows = buildHibernationCandidates(
+      inputs({
+        nodes: [
+          { id: 'a', agentId: 'claude' },
+          { id: 'b', agentId: 'claude' }
+        ],
+        isRemote: (id) => id === 'a'
+      })
+    )
+    expect(rows.map((r) => [r.id, r.remote])).toEqual([
+      ['a', true],
+      ['b', false]
+    ])
+    // A remote node is refused however idle it looks — the whole point of asking at plan time.
+    expect(planHibernation([rows[0]], NOW, { enabled: true, idleMinutes: 30 })).toEqual([])
   })
 
   it('carries wiring and visibility from the callbacks, per node', () => {

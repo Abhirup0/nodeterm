@@ -55,6 +55,9 @@ export interface HibernationCandidateInputs {
   isOffscreen: (nodeId: string) => boolean
   /** Does this node have a live terminal with a registered hibernate pair? */
   isWired: (nodeId: string) => boolean
+  /** Does this node's session run on another machine (SSH project / relay tab)? Excluded in v1 —
+   *  and excluded HERE, at plan time, for the batch-slot reason in the policy's `remote` field. */
+  isRemote: (nodeId: string) => boolean
 }
 
 export function buildHibernationCandidates(
@@ -75,6 +78,7 @@ export function buildHibernationCandidates(
       wired: inputs.isWired(n.id),
       offscreen: inputs.isOffscreen(n.id),
       hibernated: !!st?.hibernated,
+      remote: inputs.isRemote(n.id),
       recurring: !!st?.loop,
       liveSubagents: liveParents.has(n.id),
       lastEventAt: st?.lastEventAt

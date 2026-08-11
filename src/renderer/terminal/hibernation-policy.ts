@@ -24,6 +24,10 @@
  *  - **Unknown idle is NOT idle.** A candidate with no `lastEventAt` (no hook event has ever been
  *    seen for it in this run) is never eligible — the same rule as pendingLaunch's "an unknown
  *    dependency state is not satisfied". Guessing here costs the user a live session.
+ *  - **Never a REMOTE session** (SSH project / relay tab) in v1 — and excluded at PLAN time, not
+ *    only when the exit is attempted: the plan is a deterministic sort-and-slice, so two remote
+ *    nodes at the head of the oldest-idle order would occupy both batch slots on every pass and no
+ *    local node would ever hibernate.
  *  - **`restartEligibility` is the shared gate.** Hibernation is exit + resume, so a node this
  *    module picks must be one the restart machinery could actually bring back: a CLI we cannot
  *    quit or resume, or a session with no provider session id, has nothing to resume INTO.
@@ -52,6 +56,19 @@ export interface HibernationCandidate {
   offscreen: boolean
   /** Already hibernated — nothing left to reclaim. */
   hibernated: boolean
+  /**
+   * The session runs on ANOTHER MACHINE (an SSH project's terminal, or a relay/remote-server tab).
+   * Excluded in v1, the same call the offscreen dispose makes: the exit and its much later resume
+   * would race the ControlMaster / relay lifecycle, and a wake that cannot reach the host leaves a
+   * dead conversation behind.
+   *
+   * Excluded HERE and not only at the moment of the exit, because this plan is a deterministic
+   * sort-and-slice: two remote nodes sitting at the head of the oldest-idle order would fill both
+   * batch slots on every pass, refuse at fire time, and no local node would ever be hibernated —
+   * a feature that silently does nothing, which is the hardest kind of failure to notice. The
+   * fire-time check stays as the freshness re-ask (a project can BECOME an SSH project).
+   */
+  remote: boolean
   /** Any `/loop`, `/schedule` or `/cron` indicator on this node (from `agentStatus.loop`). */
   recurring: boolean
   /** Any non-done subagent card whose parent is this node (from `state/agentNodes.ts`). */
@@ -83,6 +100,7 @@ export function planHibernation(
     .filter(
       (c) =>
         !c.hibernated &&
+        !c.remote &&
         c.wired &&
         c.offscreen &&
         c.state === 'done' &&

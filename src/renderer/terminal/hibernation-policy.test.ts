@@ -9,6 +9,7 @@ const base = (id: string, over: object = {}) => ({
   wired: true,
   offscreen: true,
   hibernated: false,
+  remote: false,
   recurring: false,
   liveSubagents: false,
   lastEventAt: 0,
@@ -91,6 +92,24 @@ describe('planHibernation', () => {
     expect(planHibernation([base('a', { wired: false })], NOW, cfg)).toEqual([])
     expect(planHibernation([base('a', { offscreen: false })], NOW, cfg)).toEqual([])
     expect(planHibernation([base('a', { hibernated: true })], NOW, cfg)).toEqual([])
+  })
+
+  it('excludes REMOTE sessions here, not only at the exit — the batch is a slice', () => {
+    expect(planHibernation([base('a', { remote: true })], NOW, cfg)).toEqual([])
+    // The reason it must be excluded at PLAN time: two remote nodes at the head of the oldest-idle
+    // order would fill both slots on every pass, and the local node behind them would never be
+    // reached — Eco silently doing nothing on the machine it was enabled for.
+    expect(
+      planHibernation(
+        [
+          base('r1', { remote: true, lastEventAt: 0 }),
+          base('r2', { remote: true, lastEventAt: 1 }),
+          base('local', { lastEventAt: 2 })
+        ],
+        NOW,
+        cfg
+      )
+    ).toEqual(['local'])
   })
 
   it('empty candidate list → empty', () => {

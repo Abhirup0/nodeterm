@@ -64,7 +64,10 @@ import {
   mayDisposeOffscreen,
   offscreenCoreIsRemote,
   offscreenDisposeMs,
-  planOffscreenVisibility
+  planOffscreenVisibility,
+  shouldDeferReleaseForEco,
+  OFFSCREEN_DEFER_RETRY_MS,
+  OFFSCREEN_DISPOSE_MS_DEFAULT
 } from '../terminal/offscreen-policy'
 import { attachGlyphGrid, type GlyphGridAttachment } from '../terminal/glyphgrid-attach'
 import type { GridHandle } from '../glyphgrid/engine'
@@ -88,6 +91,7 @@ import {
 import { deliverCommand, KILL_LINE, type DeliveryIo } from '../terminal/command-delivery'
 import {
   agentHibernateFns,
+  exitSequence,
   guardConcurrentRestart,
   isShellCommand,
   performExitPhase,
@@ -651,6 +655,38 @@ const restartSubs = new Map<string, () => void>()
  */
 const offscreenNodes = new Set<string>()
 
+/**
+ * Nodes whose session runs on ANOTHER machine (SSH project terminal, relay/remote-server tab).
+ * Published by the node itself, because the answer is a union of two independent facts only it can
+ * see (`offscreenRemoteRef`). Read by the hibernation sweep at PLAN time — see the policy's
+ * `remote` field for why excluding these only at the exit was not enough.
+ */
+const remoteNodes = new Set<string>()
+
+function setNodeRemote(nodeId: string, remote: boolean): void {
+  if (remote) remoteNodes.add(nodeId)
+  else remoteNodes.delete(nodeId)
+}
+
+/** Does this node's session live on another machine? Unknown answers `false` (a node that has not
+ *  reported is local until it says otherwise; the exit closure re-asks at fire time regardless). */
+export function isNodeRemote(nodeId: string): boolean {
+  return remoteNodes.has(nodeId)
+}
+
+/**
+ * The open kanban card modal's node, if any — the ONE thing that makes a node "being looked at"
+ * without the canvas observer knowing: the modal co-attaches the same tmux session over a canvas
+ * nobody can see, so its node is off-screen by every measurement and is nevertheless the session
+ * the user has open. Published by Canvas (which owns the modal), kept HERE so that the watched
+ * question has exactly one answer for all of its askers.
+ */
+let watchedNodeId: string | null = null
+
+export function setWatchedNode(nodeId: string | null): void {
+  watchedNodeId = nodeId
+}
+
 /** How long a freshly mounted node waits before asking to be woken: the spawn its resume line is
  *  written into is still in flight at mount (no session id, no pane). */
 const WAKE_MOUNT_DELAY_MS = 2000
@@ -663,9 +699,20 @@ function setNodeOffscreen(nodeId: string, offscreen: boolean): void {
   else offscreenNodes.delete(nodeId)
 }
 
-/** Is this node out of the viewport? Unknown answers `false` — see `offscreenNodes`. */
-export function isNodeOffscreen(nodeId: string): boolean {
-  return offscreenNodes.has(nodeId)
+/**
+ * "Is the user looking at this session RIGHT NOW?" — the one predicate behind every hibernation
+ * decision that turns on attention: the sweep's plan, the exit closure's fire-time re-ask, and the
+ * post-mark nudge. It has to be ONE function: the first version of this feature asked the question
+ * three times, and the fire-time copy was missing the modal clause — so a card modal opened
+ * mid-batch could still have `/exit` typed into it.
+ *
+ * Two ways to be watched, and the second is not visible to any observer: the node is on screen, or
+ * its kanban card modal is open (see `watchedNodeId`). Unknown answers WATCHED — a node whose
+ * observer has not delivered yet must never be read as "nobody is looking", which is the direction
+ * that quits a session out from under someone.
+ */
+export function isNodeWatched(nodeId: string): boolean {
+  return !offscreenNodes.has(nodeId) || watchedNodeId === nodeId
 }
 
 /**
@@ -910,6 +957,9 @@ export function TerminalNode({
   const [offscreenDown, setOffscreenDown] = useState(false)
   const offscreenDownRef = useRef(false)
   const offscreenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** When the current offscreen stretch began (null = on screen). The Eco deferral's cap is
+   *  measured against it, so it is stamped once per stretch, not per observer callback. */
+  const offscreenSinceRef = useRef<number | null>(null)
   const [offscreenEpoch, setOffscreenEpoch] = useState(0)
   /** The visibility observer's last verdict. Component-level (not per-lifecycle-run) because it
    *  must survive an offscreen dispose and because a budget client registered by a later run needs
@@ -999,6 +1049,12 @@ export function TerminalNode({
   // gemini names its own sessions but has no rename command, so it polls and never pushes.
   const canReadTitleNode = !!agentId && canReadTitle(agentId)
   const agentLabel = (agentId ? agentConfig(agentId) : undefined)?.label ?? 'Agent'
+  // Could this node's CLI ever be hibernated — quit AND brought back? A durable property of the
+  // agent, not of its current state: the offscreen release consults it to decide whether waiting
+  // for Eco is even meaningful here (see `shouldDeferReleaseForEco`).
+  const hibernationTarget = !!agentId && canResume(agentId) && !!exitSequence(agentId)
+  const hibernationTargetRef = useRef(hibernationTarget)
+  hibernationTargetRef.current = hibernationTarget
 
   // Keep the listener's mirrors current every render.
   titleAutoRef.current = data.titleAuto !== false
@@ -1046,6 +1102,14 @@ export function TerminalNode({
   // project long after the lifecycle run that would otherwise have captured the answer.
   const offscreenRemoteRef = useRef(false)
   offscreenRemoteRef.current = remoteSession || offscreenCoreIsRemote(session.source)
+  // …and published for the hibernation sweep, which needs the same answer at PLAN time (see the
+  // policy's `remote` field: excluding these only at the exit let two remote nodes occupy both
+  // batch slots forever). Re-published whenever it changes — a local project can become an SSH one.
+  const nodeIsRemote = offscreenRemoteRef.current
+  useEffect(() => {
+    setNodeRemote(id, nodeIsRemote)
+    return () => setNodeRemote(id, false)
+  }, [id, nodeIsRemote])
   const canMoveIntoWorktree =
     !!parentWtPath &&
     !parentWtStale &&
@@ -1113,7 +1177,7 @@ export function TerminalNode({
     const trigger = (): void => wakeRef.current()
     wakeSubs.set(id, trigger)
     const t = setTimeout(() => {
-      if (!isNodeOffscreen(id)) wakeRef.current()
+      if (isNodeWatched(id)) wakeRef.current()
     }, WAKE_MOUNT_DELAY_MS)
     return () => {
       clearTimeout(t)
@@ -2607,15 +2671,15 @@ export function TerminalNode({
     // (parked → remounted) terminal never reaches the spawn continuation.
     const unregisterHibernate = registerAgentHibernate(id, {
       exit: guardConcurrentRestart(id, async (): Promise<ExitPhaseOutcome> => {
-        // "Is this node STILL out of view?" — re-asked at FIRE time, never trusted from the plan,
-        // the same discipline as `mayDisposeOffscreen`. A sweep can spend ~12 s working through
-        // its batch, and the node whose turn comes last may be one the user panned back to and is
-        // now typing in: KILL_LINE + `/exit` would land in a pane they are watching, taking their
-        // half-written prompt with it. Worse, the visible EDGE has already passed by then, so no
-        // wake trigger is left and the node would sit SLEEPING on screen until clicked.
-        // (`isNodeOffscreen` and this node's own `wasVisibleRef` are the same observer's verdict;
-        // the map is used here so the sweep and the node cannot disagree.)
-        if (!isNodeOffscreen(id)) return 'not-eligible'
+        // "Is the user looking at this session STILL?" — re-asked at FIRE time, never trusted from
+        // the plan, the same discipline as `mayDisposeOffscreen`. A sweep can spend ~12 s working
+        // through its batch, and the node whose turn comes last may be one the user panned back to
+        // (or opened as a card modal) and is now typing in: KILL_LINE + `/exit` would land in a
+        // pane they are watching, taking their half-written prompt with it. Worse, the visible
+        // EDGE has already passed by then, so no wake trigger is left and the node would sit
+        // SLEEPING on screen until clicked. Deliberately the SAME `isNodeWatched` the plan and the
+        // nudge ask — a second copy of this question is how the modal clause went missing once.
+        if (isNodeWatched(id)) return 'not-eligible'
         // SSH / relay sessions are excluded in v1, exactly as the offscreen dispose excludes them
         // (offscreen-policy.ts): the exit and its much later resume would race the ControlMaster /
         // relay lifecycle, and a wake that cannot reach the host leaves a dead conversation behind.
@@ -2628,13 +2692,29 @@ export function TerminalNode({
         // permission prompt ANSWERS it).
         const gate = restartEligibility(agentId, st?.state, agentSessionId)
         if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
-        return performExitPhase({
+        const outcome = await performExitPhase({
           agentId,
           sessionId: agentSessionId,
           io: restartIo,
           paneCommand: () => api.pty.paneCommand(id),
           isLive: restartTarget
         })
+        if (outcome === 'exited') {
+          // Remember WHAT the pane settled to. The wake will only type into a pane it recognizes,
+          // and its `isShellCommand` allowlist does not know `nu`, `xonsh` or `pwsh` — while the
+          // exit half accepts those through its allowlist-free "the command stopped being the CLI"
+          // signal. Without this record the wake is STRICTER than the exit that produced it, and
+          // such a user is hibernated and then never woken: the chip refuses forever.
+          // One extra poll rather than a value out of `performExitPhase`, whose behavior is pinned
+          // byte-for-byte by Task 8's tests. `null` (a pane we could not read) FORGETS the old
+          // value: a stale string must never stand in as permission to type into today's pane.
+          const settled = await queryPaneWithin(
+            () => api.pty.paneCommand(id),
+            RESTART_EXIT_TIMEOUT_MS
+          )
+          useAgentStatus.getState().setHibernatedPane(id, settled)
+        }
+        return outcome
       }),
       resume: guardConcurrentRestart(id, async (): Promise<ResumePhaseOutcome> => {
         const st = useAgentStatus.getState().byId[id]
@@ -2648,16 +2728,29 @@ export function TerminalNode({
         // mode is a property of how a session is LAUNCHED, so it is re-resolved now (a wake can be
         // hours after the exit, and days after the node was created).
         const base = resumeCommand(agentId, agentSessionId)
-        const command = base
-          ? withPermissionMode(base, agentId, await ensureActivePermissionMode(agentId))
-          : undefined
+        // Refused BEFORE anything is written. `performResumePhase` gates on this same bare command
+        // and would refuse too — but the KILL_LINE below is ours, so leaving this check to it
+        // meant an unusable session id erased the pane's line (three times, once per wake trigger)
+        // and then declined to resume.
+        if (!base) return 'not-eligible'
+        const command = withPermissionMode(
+          base,
+          agentId,
+          await ensureActivePermissionMode(agentId)
+        )
         // THE load-bearing gate of the wake half. Hours can pass between the exit and this
         // resume, and the pane is a REPL the user can type into: by now it may belong to vim, to
         // `top`, or to a claude the user launched by hand — and a launch line typed into a live
         // program is sent to that program, as a message or a mangled command. A pane we cannot
         // READ answers null and is refused for the same reason.
+        //
+        // Two ways to recognize it, mirroring the exit half's two: a KNOWN shell, or the exact
+        // command this node's own exit measured the pane settling to (`hibernatedPane`). The
+        // second is what keeps a `nu` / `xonsh` / `pwsh` user — whom the exit accepts through its
+        // allowlist-free signal — from being hibernated and never woken.
         const pane = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
-        if (!isShellCommand(pane)) return 'not-eligible'
+        const settled = useAgentStatus.getState().byId[id]?.hibernatedPane
+        if (!isShellCommand(pane) && !(pane !== null && pane === settled)) return 'not-eligible'
         // Clear the line before the launch line goes in. The shell above is the one WE exited to,
         // hours ago — nothing stops a passer-by (or a stray paste, or the user's own aborted
         // command) from having left a half-typed line at its prompt, and `deliverCommand`'s first
@@ -3026,6 +3119,9 @@ export function TerminalNode({
         // conversation resumed before they can reach for the chip. No-op (one map lookup) for a
         // node that is not hibernated, which is every node in the default case.
         if (visible && !wasVisible) wakeRef.current()
+        // A visible node is not in an offscreen stretch at all — the next hidden edge starts a
+        // fresh clock for the Eco deferral's cap.
+        if (visible) offscreenSinceRef.current = null
         // …and the offscreen-dispose state machine. Every decision is the pure
         // `planOffscreenVisibility`; this block only executes the plan.
         const disposeMs = offscreenDisposeMs(
@@ -3047,7 +3143,11 @@ export function TerminalNode({
           setOffscreenEpoch((n) => n + 1) // re-run the lifecycle effect → fresh warm tmux attach
         }
         if (plan.armTimer && disposeMs !== null) {
-          offscreenTimerRef.current = setTimeout(() => {
+          // When this offscreen stretch began — the clock the Eco deferral's cap is measured
+          // against. Stamped only here, where a NEW timer is armed (the plan refuses to re-arm
+          // while one is pending), so a pan that keeps reporting hidden cannot keep pushing it out.
+          offscreenSinceRef.current = Date.now()
+          const fireRelease = (): void => {
             offscreenTimerRef.current = null
             // Every input re-asked at FIRE time, never at arm time: ten minutes is long enough for
             // all of them to have changed. `wasVisibleRef` is the observer's own latest verdict.
@@ -3059,16 +3159,43 @@ export function TerminalNode({
               })
             )
               return
+            // The setting can also have been switched OFF while this timer counted down; a fire
+            // that disposed anyway would take a buffer the user has just asked us to keep.
+            const liveSettings = useSettings.getState().settings
+            if (offscreenDisposeMs(liveSettings.offscreenTerminalMinutes) === null) return
             // Nothing to give back (no session yet, or one that was closed/ended under us) ⇒ no
             // dispose. A null ref means no lifecycle run is live at all, which answers the same way.
             if (!offscreenLiveRef.current?.()) return
+            // ECO ORDERING (see `shouldDeferReleaseForEco`): hibernate first, release second. This
+            // release would UNWIRE the node — the lifecycle effect tears down, the hibernate pair
+            // unregisters, and `planHibernation` then reads the node as unwired — and at the
+            // shipped defaults it fires at 10 minutes against a 30-minute idle window, so the
+            // canonical "finish a turn, pan away" session never hibernated at all. The viewer is
+            // ~15 MB; the CLI is hundreds. So wait for the big prize, on the sweep's own cadence,
+            // and only up to the capped total — a node that can never hibernate must not hold its
+            // viewer forever.
+            if (
+              shouldDeferReleaseForEco({
+                ecoEnabled: liveSettings.agentHibernationEnabled,
+                resumableAgent: hibernationTargetRef.current,
+                hibernated: !!useAgentStatus.getState().byId[id]?.hibernated,
+                offscreenElapsedMs: Date.now() - (offscreenSinceRef.current ?? Date.now()),
+                idleMinutes: liveSettings.agentHibernationIdleMinutes,
+                offscreenMinutes:
+                  liveSettings.offscreenTerminalMinutes ?? OFFSCREEN_DISPOSE_MS_DEFAULT / 60_000
+              })
+            ) {
+              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+              return
+            }
             offscreenDownRef.current = true
             // The cleanup must DISPOSE, not park: parking keeps the very buffer this feature exists
             // to give back. Set before the state flip, since that flip is what runs the cleanup.
             noParkIds.add(termKey)
             setOffscreenDown(true)
             setOffscreenEpoch((n) => n + 1)
-          }, disposeMs)
+          }
+          offscreenTimerRef.current = setTimeout(fireRelease, disposeMs)
         }
       },
       { rootMargin: '256px' }

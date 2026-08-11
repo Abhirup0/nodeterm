@@ -4,7 +4,8 @@ import {
   offscreenDisposeMs,
   mayDisposeOffscreen,
   offscreenCoreIsRemote,
-  planOffscreenVisibility
+  planOffscreenVisibility,
+  shouldDeferReleaseForEco
 } from './offscreen-policy'
 
 describe('offscreen dispose policy', () => {
@@ -96,5 +97,44 @@ describe('planOffscreenVisibility', () => {
     expect(
       planOffscreenVisibility({ visible: true, down: false, timerArmed: false, disposeMs: ms })
     ).toEqual({ cancelTimer: false, armTimer: false, revive: false })
+  })
+})
+
+describe('shouldDeferReleaseForEco — hibernate first, then release the viewer', () => {
+  // Defaults: the release fires at 10 minutes, the idle window closes at 30. Without the deferral
+  // the release wins, unwires the node, and "finish a turn and pan away" never hibernates at all.
+  const base = {
+    ecoEnabled: true,
+    resumableAgent: true,
+    hibernated: false,
+    offscreenElapsedMs: 10 * 60_000,
+    idleMinutes: 30,
+    offscreenMinutes: 10
+  }
+
+  it('defers at the release deadline, so the bigger prize (the CLI) is still reachable', () => {
+    expect(shouldDeferReleaseForEco(base)).toBe(true)
+  })
+
+  it('stops deferring once the node HAS hibernated — the pane is a plain shell now', () => {
+    expect(shouldDeferReleaseForEco({ ...base, hibernated: true })).toBe(false)
+  })
+
+  it('never defers with Eco off, or for a CLI that can never be quit + resumed', () => {
+    expect(shouldDeferReleaseForEco({ ...base, ecoEnabled: false })).toBe(false)
+    expect(shouldDeferReleaseForEco({ ...base, resumableAgent: false })).toBe(false)
+  })
+
+  it('never defers on an unusable idle window (planHibernation refuses those outright)', () => {
+    for (const idleMinutes of [0, -5, NaN])
+      expect(shouldDeferReleaseForEco({ ...base, idleMinutes }), String(idleMinutes)).toBe(false)
+  })
+
+  it('caps the wait at idle + offscreen, so a node that can NEVER hibernate is not stranded', () => {
+    // A /cron node, one with a live subagent, one whose session id never arrived: nothing here
+    // knows that, and the cap is what makes not knowing safe.
+    expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 - 1 })).toBe(true)
+    expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 })).toBe(false)
+    expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 90 * 60_000 })).toBe(false)
   })
 })

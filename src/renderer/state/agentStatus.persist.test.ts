@@ -96,6 +96,56 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     expect(Date.now() - st.lastEventAt!).toBeLessThan(5000) // hours-old clock replaced
   })
 
+  it('persists `hibernatedPane` with the flag and drops it on wake', async () => {
+    // What the pane settled to when the CLI let go: the wake's second way of recognizing a pane it
+    // may type into, for shells the `isShellCommand` allowlist does not know (nu/xonsh/pwsh).
+    // Kept past a wake it would be a standing permission to type into whatever that string names.
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setHibernatedPane('n15', 'nu')
+    useAgentStatus.getState().setHibernated('n15', true)
+    expect(JSON.parse(store.getItem('nodeterm.agentStatus')!).n15).toMatchObject({
+      hibernated: true,
+      hibernatedPane: 'nu'
+    })
+    useAgentStatus.getState().setHibernated('n15', false)
+    expect(useAgentStatus.getState().byId['n15'].hibernatedPane).toBeUndefined()
+    expect(JSON.parse(store.getItem('nodeterm.agentStatus')!).n15?.hibernatedPane).toBeUndefined()
+  })
+
+  it('forgets the recorded pane when the exit could not read one (null)', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setHibernatedPane('n16', 'nu')
+    useAgentStatus.getState().setHibernatedPane('n16', null)
+    // A stale string must never stand in as permission to type into TODAY's pane.
+    expect(useAgentStatus.getState().byId['n16'].hibernatedPane).toBeUndefined()
+  })
+
+  it('drops `hibernatedPane` with the flag on the live-state self-heal', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setHibernatedPane('n17', 'nu')
+    useAgentStatus.getState().setHibernated('n17', true)
+    useAgentStatus.getState().setState('n17', 'working', 'claude')
+    expect(useAgentStatus.getState().byId['n17'].hibernated).toBeUndefined()
+    expect(useAgentStatus.getState().byId['n17'].hibernatedPane).toBeUndefined()
+  })
+
+  it('never restores a recorded pane without the flag it belongs to', async () => {
+    vi.stubGlobal(
+      'localStorage',
+      memStorage({
+        'nodeterm.agentStatus': JSON.stringify({
+          n18: { unread: false, sessionId: 's', hibernatedPane: 'nu' }
+        })
+      })
+    )
+    const { useAgentStatus } = await import('./agentStatus')
+    expect(useAgentStatus.getState().byId['n18'].hibernatedPane).toBeUndefined()
+  })
+
   it('setHibernated(false) on a node that is not hibernated changes NOTHING', async () => {
     // Load-bearing since Canvas calls it on every SessionStart (a fresh launch disproves the
     // flag): the bail must not create an entry, must not touch the idle clock — which would hide
