@@ -7248,6 +7248,14 @@ export function Canvas() {
     [persist]
   )
 
+  const setProjectColor = useCallback(
+    (id: string, color: string) => {
+      useProjects.getState().setProjectColor(id, color)
+      void persist()
+    },
+    [persist]
+  )
+
   const setProjectFolder = useCallback(
     async (id: string) => {
       const folder = await window.nodeTerminal.dialog.selectFolder()
@@ -7328,6 +7336,8 @@ export function Canvas() {
           },
           { label: 'Set folder…', icon: <IconProject />, onClick: () => setProjectFolder(projectId) },
           { type: 'separator' },
+          { type: 'colors', onPick: (color) => setProjectColor(projectId, color) },
+          { type: 'separator' },
           {
             label: 'Close project',
             icon: <IconTrash />,
@@ -7337,7 +7347,7 @@ export function Canvas() {
         ]
       })
     },
-    [activeProjectId, switchProject, renameProject, setProjectFolder, closeProject]
+    [activeProjectId, switchProject, renameProject, setProjectFolder, setProjectColor, closeProject]
   )
 
   // Reopen a previously closed project and make it active — the active-project effect reloads its
