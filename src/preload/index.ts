@@ -61,7 +61,8 @@ const api: NodeTerminalApi = {
     setFlow: (sessionId, resume, viewerId) =>
       ipcRenderer.send(IPC.ptyFlow, sessionId, resume, viewerId),
     kill: (sessionId, viewerId) => ipcRenderer.send(IPC.ptyKill, sessionId, viewerId),
-    destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
+    destroy: (persistKey, opts) =>
+      ipcRenderer.send(IPC.ptyDestroy, persistKey, opts?.everySocket === true),
     recycle: (persistKey) => ipcRenderer.send(IPC.ptyRecycle, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
     generateGroupName: (memberKeys, cwd) =>
@@ -191,8 +192,8 @@ const api: NodeTerminalApi = {
     connect: (projectId, conn, remoteCwd) =>
       ipcRenderer.invoke(IPC.sshConnectProject, projectId, conn, remoteCwd),
     disconnect: (projectId) => ipcRenderer.invoke(IPC.sshDisconnectProject, projectId),
-    killSessions: (projectId, nodeIds) =>
-      ipcRenderer.invoke(IPC.sshKillSessions, projectId, nodeIds),
+    killSessions: (projectId, nodeIds, opts) =>
+      ipcRenderer.invoke(IPC.sshKillSessions, projectId, nodeIds, opts),
     listDir: (projectId, dir) => ipcRenderer.invoke(IPC.sshListDir, projectId, dir),
     mkdir: (projectId, dir) => ipcRenderer.invoke(IPC.sshMkdir, projectId, dir),
     uploadFile: (projectId, localPath, fileName) =>

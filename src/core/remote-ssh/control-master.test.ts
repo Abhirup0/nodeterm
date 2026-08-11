@@ -406,12 +406,19 @@ describe('killing a session by name (both sockets, exact target)', () => {
     expect(remoteTmuxKillArgs(conn, '/s.sock', 'nt-a-1').at(-1)).toContain('-t =nt-a-1')
   })
 
-  it('aims a local destroy at the socket we hold, and at every socket when we hold nothing', () => {
-    // Holding the session means we know which socket it is on. Holding nothing (an orphan row in
-    // the session-memory panel, or any session that outlived the process that spawned it) means the
-    // name is all we have.
+  it('aims a local destroy at the socket we hold, whatever the caller asked for', () => {
+    // Holding the session means we KNOW which socket it is on, so the fan-out flag is irrelevant:
+    // one kill either way. This is what keeps the ordinary node-x path at exactly one kill.
     expect(localKillSockets('node-terminal')).toEqual(['node-terminal'])
-    expect([...localKillSockets(null)].sort()).toEqual(['node-terminal', 'nodeterm-rmt'])
+    expect(localKillSockets('node-terminal', true)).toEqual(['node-terminal'])
+  })
+
+  it('fans a socket-less kill out only when the caller opts in', () => {
+    // Holding nothing means the name is all we have — but the unheld branch is NOT rare (an
+    // ordinary node-x on a node never mounted in this process takes it), so the blast radius is
+    // the caller's to ask for. Only the session-memory panel, which swept BOTH sockets, does.
+    expect(localKillSockets(null)).toEqual(['node-terminal'])
+    expect([...localKillSockets(null, true)].sort()).toEqual(['node-terminal', 'nodeterm-rmt'])
   })
 
   it('keeps the remote default on the ssh socket, and overrides it explicitly', () => {

@@ -37,29 +37,43 @@ function managerWithConn(): { mgr: SshProjectManager; runs: string[][] } {
 const commands = (runs: string[][]): string[] => runs.map((r) => r.at(-1)!).sort()
 
 describe('SshProjectManager.killSessions', () => {
-  it('kills the name on EVERY tmux socket the host can carry it on', async () => {
+  it('kills the name on EVERY tmux socket when the caller opts in', async () => {
     // The session-memory sweep lists both sockets, so its rows can come off either. A kill aimed
     // only at `nodeterm-rmt` left every row from a host's own nodeterm-server running, after a
     // confirm that said otherwise.
     const { mgr, runs } = managerWithConn()
-    await mgr.killSessions('p1', ['abc'])
+    await mgr.killSessions('p1', ['abc'], { everySocket: true })
     expect(commands(runs)).toEqual([
       'tmux -L node-terminal kill-session -t =nt-abc',
       'tmux -L nodeterm-rmt kill-session -t =nt-abc'
     ])
   })
 
+  it('stays on the project s own socket by default', async () => {
+    // Project deletion knows its own nodes and they are all on `nodeterm-rmt`. `node-terminal` on
+    // that host belongs to a nodeterm running ON it, so a delete must not speculate there.
+    const { mgr, runs } = managerWithConn()
+    await mgr.killSessions('p1', ['abc'])
+    expect(commands(runs)).toEqual(['tmux -L nodeterm-rmt kill-session -t =nt-abc'])
+  })
+
+  it('demands a literal true — the flag comes off the wire', async () => {
+    const { mgr, runs } = managerWithConn()
+    await mgr.killSessions('p1', ['abc'], { everySocket: 'yes' as unknown as boolean })
+    expect(commands(runs)).toEqual(['tmux -L nodeterm-rmt kill-session -t =nt-abc'])
+  })
+
   it('is best-effort: a socket that refuses does not spare the others', async () => {
     // The `node-terminal` run above throws. `killSessions` must still resolve, and the sibling
     // kill must still have gone out.
     const { mgr, runs } = managerWithConn()
-    await expect(mgr.killSessions('p1', ['abc'])).resolves.toBeUndefined()
+    await expect(mgr.killSessions('p1', ['abc'], { everySocket: true })).resolves.toBeUndefined()
     expect(runs).toHaveLength(2)
   })
 
   it('covers every id it was given', async () => {
     const { mgr, runs } = managerWithConn()
-    await mgr.killSessions('p1', ['a', 'b'])
+    await mgr.killSessions('p1', ['a', 'b'], { everySocket: true })
     expect(commands(runs)).toEqual([
       'tmux -L node-terminal kill-session -t =nt-a',
       'tmux -L node-terminal kill-session -t =nt-b',

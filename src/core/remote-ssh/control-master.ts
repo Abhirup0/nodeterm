@@ -272,13 +272,27 @@ export function probeSaysAbsent(err: unknown): boolean {
 export const KILL_TMUX_SOCKETS: readonly string[] = [TMUX_SOCKET, RMT_TMUX_SOCKET]
 
 /**
- * Which local sockets a destroy must attempt. `liveSocket` is the socket of the session we actually
- * hold (which we know is the right one); `null` = we hold nothing, so the name is all we have and
- * every socket that could carry it has to be tried. An orphan row in the session-memory panel — and
- * any node whose session outlived the process that spawned it — takes the `null` branch.
+ * Which local sockets a destroy must attempt.
+ *
+ * `liveSocket` is the socket of the session we actually HOLD, which we know is the right one: one
+ * kill, and the fan-out below can never reach the ordinary path.
+ *
+ * With no live session the name is all we have, and then it depends on who is asking:
+ *  - `everySocket: false` (the default, and every ordinary caller) → the local socket only. An
+ *    ordinary node-× on a node that was never mounted in THIS process — the common case after an
+ *    app restart — has no business speculating at `nodeterm-rmt`, which carries the sessions
+ *    ANOTHER machine's nodeterm SSHed in to spawn here.
+ *  - `everySocket: true` → every socket the name could be on. Only the session-memory panel's
+ *    speculative kill asks for this, and it is the one caller that has earned it: the panel sweeps
+ *    BOTH sockets, so an orphan row genuinely can be on either, and a kill aimed at one of them
+ *    showed a confirm reading "this stops its tmux session" and then killed nothing at all.
  */
-export function localKillSockets(liveSocket: string | null): readonly string[] {
-  return liveSocket ? [liveSocket] : KILL_TMUX_SOCKETS
+export function localKillSockets(
+  liveSocket: string | null,
+  everySocket = false
+): readonly string[] {
+  if (liveSocket) return [liveSocket]
+  return everySocket ? KILL_TMUX_SOCKETS : [TMUX_SOCKET]
 }
 
 /**
@@ -307,10 +321,14 @@ export function remoteTmuxKillArgs(
 }
 
 /**
- * One kill per socket, for a caller that knows only the session NAME (`SshProjectManager.
- * killSessions`, which the session-memory panel and project deletion both use). Best-effort by
- * contract: tmux exits non-zero with "can't find session" on every socket that does not hold it,
- * and that is an expected, ignored outcome rather than a failure.
+ * One kill per socket, for a caller that knows only the session NAME and does not know which socket
+ * carries it — i.e. `SshProjectManager.killSessions({ everySocket: true })`, which is the
+ * session-memory panel's route. Project deletion does NOT use this: it knows its own nodes, they
+ * are all on the SSH project's own socket, and speculating at the host's `node-terminal` would aim
+ * at sessions a nodeterm running ON that host owns.
+ *
+ * Best-effort by contract: tmux exits non-zero with "can't find session" on every socket that does
+ * not hold it, and that is an expected, ignored outcome rather than a failure.
  */
 export function remoteTmuxKillEverySocketArgs(
   conn: SshConnection,

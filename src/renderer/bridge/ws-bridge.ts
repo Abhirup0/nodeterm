@@ -212,7 +212,9 @@ export function buildRealApi(
       client.cast(IPC.ptyResize, sessionId, cols, rows, viewerId),
     setFlow: (sessionId, resume, viewerId) => client.cast(IPC.ptyFlow, sessionId, resume, viewerId),
     kill: (sessionId, viewerId) => client.cast(IPC.ptyKill, sessionId, viewerId),
-    destroy: (persistKey) => client.cast(IPC.ptyDestroy, persistKey),
+    // The trailing flag rides as a plain boolean; the core handler re-checks `=== true`.
+    destroy: (persistKey, opts) =>
+      client.cast(IPC.ptyDestroy, persistKey, opts?.everySocket === true),
     recycle: (persistKey) => client.cast(IPC.ptyRecycle, persistKey),
     // No server handler — degrade gracefully (never reject the boot path).
     generateName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),

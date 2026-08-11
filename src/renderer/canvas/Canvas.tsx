@@ -6588,10 +6588,13 @@ export function Canvas() {
     (nodeId: string, orphan: boolean) => {
       const store = useProjects.getState()
       const plan = planSessionKill(nodeId, store.projects, store.activeProjectId)
+      // `everySocket` on BOTH legs, and only here: the panel's rows are swept off both of the
+      // machine's tmux sockets, so a row it offers to end genuinely can be on either. Every other
+      // caller (project deletion, an ordinary node-×) knows its own nodes and stays narrow.
       const remoteKill = plan.remoteProjectId
         ? () =>
             void window.nodeTerminal.sshProject
-              .killSessions(plan.remoteProjectId!, [nodeId])
+              .killSessions(plan.remoteProjectId!, [nodeId], { everySocket: true })
               .catch(() => {})
         : undefined
       if (plan.ownerProjectId) {
@@ -6605,7 +6608,7 @@ export function Canvas() {
         confirmLabel: 'End session',
         danger: true,
         onConfirm: () => {
-          transport.destroy(nodeId)
+          transport.destroy(nodeId, { everySocket: true })
           remoteKill?.()
           // Nothing else to clean up: with no node anywhere, there is no canvas entry to remove and
           // no parked terminal to dispose. Persisted agent status is dropped anyway, since a

@@ -248,9 +248,19 @@ name could be on**: `KILL_TMUX_SOCKETS`, via `remoteTmuxKillEverySocketArgs` (re
   PREFIX matching whenever the name is not found, and "not found" is the normal outcome of a
   speculative kill. Node ids end in a counter, so `nt-…-1` is a prefix of `nt-…-12`: a miss could
   have killed a *different* session. The reaper already killed this way, for this reason.
-- The fan-out happens only when we do **not** know the socket. A destroy for a session we hold aims
-  at that session's socket alone, so the ordinary node-`×` path still fires exactly one kill
-  (pinned in `pty-single-user.test.ts`).
+- **The fan-out is opt-in, and only the panel opts in.** Two conditions have to hold: we do not know
+  the socket, *and* the caller asked for it (`localKillSockets(liveSocket, everySocket)`,
+  `sshProject.killSessions(…, { everySocket: true })`, `transport.destroy(id, { everySocket: true })`).
+  A destroy for a session we hold aims at that session's socket alone whatever the caller asked, so
+  the ordinary node-`×` on a mounted node still fires exactly one kill. But the **unheld** branch is
+  not rare — an ordinary node-`×` on a node that was never mounted in this process takes it every
+  time, which is the common case right after an app restart and for every non-active project's node
+  — and project deletion is the same shape remotely. Those callers know their own nodes, so they
+  stay narrow: speculating at `nodeterm-rmt` aims at sessions ANOTHER machine's nodeterm SSHed in to
+  spawn here, and speculating at a host's `node-terminal` aims at sessions a nodeterm running ON it
+  owns. Both defaults and both opt-ins are pinned (`pty-single-user.test.ts`,
+  `control-master.test.ts`, `ssh-project.killSessions.test.ts`), including that the wire flag must
+  be a literal `true`.
 
 Note the deliberate duplication: the sweep and the reaper keep their own `[TMUX_SOCKET,
 RMT_TMUX_SOCKET]` arrays. For them the ORDER is load-bearing — the sweep's `bySession` is first-wins,

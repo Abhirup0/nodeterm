@@ -532,8 +532,14 @@ export interface PtyApi {
    *  node attached; absent ⇒ the PRIMARY view. */
   kill(sessionId: string, viewerId?: string): void
   /** Permanently ends the persistent session for a node (kills its tmux session) because the node
-   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it. */
-  destroy(persistKey: string): void
+   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it.
+   *
+   *  `everySocket` (optional, trailing) widens a kill for a session we hold NOTHING for to every
+   *  local tmux socket the name could be on. Opt-in for one caller — the session-memory panel's
+   *  speculative kill of a row it swept off either socket. An ordinary node-× must not set it: it
+   *  takes the same unheld branch after an app restart, and `nodeterm-rmt` holds sessions another
+   *  machine's nodeterm SSHed in to spawn. */
+  destroy(persistKey: string, opts?: { everySocket?: boolean }): void
   /** Ends a node's persistent session so the SAME node id respawns in a new cwd ("move into
    *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
    *  co-viewers get `onRecycled` (restart + re-attach), never the permanent closed state. */
@@ -1103,8 +1109,17 @@ export interface SshProjectApi {
    * Authoritative teardown on project delete: works regardless of whether the nodes are
    * mounted, and must be awaited BEFORE disconnect (which kills the master). `nodeIds` are
    * raw node ids; main maps them to `nt-<id>` session names.
+   *
+   * `everySocket` widens the kill to every tmux socket on the host rather than the `nodeterm-rmt`
+   * one an SSH project spawns on. Opt-in for ONE caller — the session-memory panel, whose rows are
+   * swept off both sockets. Project deletion stays narrow: `node-terminal` on that host belongs to
+   * a nodeterm running ON it, not to us.
    */
-  killSessions(projectId: string, nodeIds: string[]): Promise<void>
+  killSessions(
+    projectId: string,
+    nodeIds: string[],
+    opts?: { everySocket?: boolean }
+  ): Promise<void>
   /** List remote sub-directories of `path` (default ~). */
   listDir(projectId: string, path: string): Promise<{ path: string; dirs: string[] }>
   /** Create a remote directory (mkdir -p). Resolves false when not connected or the mkdir fails. */

@@ -655,8 +655,13 @@ export class PtyManager {
     // event they get has to name WHO did it ("closed by <name>" — see `destroySession`).
     // Registered ONLY here: `on` and `onWithSender` compose on the same channel, so a leftover
     // plain listener would run the destroy — and its `tmux kill-session` — twice.
-    platform().onWithSender(IPC.ptyDestroy, (senderId: number, persistKey: string) =>
-      this.endFromClient(senderId, IPC.ptyDestroy, persistKey, 'delete')
+    // Optional TRAILING `everySocket`: only the session-memory panel's SPECULATIVE kill sets it,
+    // and only for a row it holds no session for (see `localKillSockets`). `=== true` because the
+    // value arrives verbatim off the wire; absent ⇒ the narrow, historical single-socket kill.
+    platform().onWithSender(
+      IPC.ptyDestroy,
+      (senderId: number, persistKey: string, everySocket?: unknown) =>
+        this.endFromClient(senderId, IPC.ptyDestroy, persistKey, 'delete', everySocket === true)
     )
     // Sender-aware for the opposite reason: the client that RECYCLED the node drives its own
     // respawn, so it is the one client that must NOT be sent the restart notice.
@@ -746,12 +751,13 @@ export class PtyManager {
     clientId: ClientId,
     channel: string,
     persistKey: string,
-    intent: EndIntent
+    intent: EndIntent,
+    everySocket = false
   ): Promise<void> {
     if (typeof persistKey !== 'string' || !persistKey || persistKey.length > REF_MAX_LEN)
       return Promise.resolve()
     if (!this.allowEnd(clientId, channel)) return Promise.resolve()
-    return this.endSession(clientId, persistKey, intent)
+    return this.endSession(clientId, persistKey, intent, everySocket)
   }
 
   /** Take one token from this client's bucket for a session-ending channel (see PTY_END_BUDGET).
@@ -2123,8 +2129,12 @@ export class PtyManager {
    *
    * `clientId` is null when nothing/no-one attributable did it (an internal caller).
    */
-  destroySession(clientId: ClientId | null, persistKey: string): Promise<void> {
-    return this.endSession(clientId, persistKey, 'delete')
+  destroySession(
+    clientId: ClientId | null,
+    persistKey: string,
+    opts?: { everySocket?: boolean }
+  ): Promise<void> {
+    return this.endSession(clientId, persistKey, 'delete', opts?.everySocket === true)
   }
 
   /**
@@ -2161,7 +2171,8 @@ export class PtyManager {
   private async endSession(
     clientId: ClientId | null,
     persistKey: string,
-    intent: EndIntent
+    intent: EndIntent,
+    everySocket = false
   ): Promise<void> {
     // Both callers run while the session is still live, so its sshRemote is known. Capture it
     // synchronously before any await. The index is the co-attach one (UI sessions); the scan is
@@ -2239,15 +2250,16 @@ export class PtyManager {
       // such session", which is already the ignored case below.
     }
     if (!this.tmuxPath) return
-    // Which socket(s) to aim at. Holding the session ourselves means we know: it is the local one.
-    // Holding NOTHING means the name is all we have, and on this machine a `nt-<id>` can also be
-    // living on the `nodeterm-rmt` socket — that is where ANOTHER machine's nodeterm puts the
-    // sessions it SSHes in to spawn. The session-memory panel lists those (it sweeps both sockets)
-    // and offers to end them, so a kill that only ever tried `node-terminal` showed a confirm
-    // saying "this stops its tmux session" and then did nothing. The common path — deleting a node
-    // whose session we hold — is unchanged, and every extra call is the already-ignored
-    // "no such session".
-    for (const socket of localKillSockets(dying ? TMUX_SOCKET : null)) {
+    // Which socket(s) to aim at. Holding the session ourselves means we KNOW: it is the local one,
+    // one kill, unchanged. Holding nothing means the name is all we have — and then the fan-out is
+    // the CALLER's to ask for, because on this machine a `nt-<id>` we hold nothing for can also be
+    // living on the `nodeterm-rmt` socket, where ANOTHER machine's nodeterm puts the sessions it
+    // SSHes in to spawn. Only the session-memory panel's speculative kill sets `everySocket`: it
+    // sweeps both sockets and offers to end what it found, so a kill that only tried
+    // `node-terminal` showed a confirm saying "this stops its tmux session" and did nothing. An
+    // ordinary node-× on a node never mounted in this process takes the same unheld branch and
+    // must NOT inherit that blast radius.
+    for (const socket of localKillSockets(dying ? TMUX_SOCKET : null, everySocket)) {
       try {
         await runAsync(this.tmuxPath, localTmuxKillArgs(socket, sessionName(persistKey)))
       } catch {
