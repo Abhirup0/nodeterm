@@ -736,7 +736,14 @@ export function terminalKeyAction(e: CopyShortcutEvent, hasSelection: boolean): 
   // BEFORE it writes the control byte to the PTY. The bubble-phase keydown listener in Canvas.tsx
   // runs `preventDefault()` too late for that — this handler is xterm's own, invoked first via
   // `attachCustomKeyEventHandler`. No meta check needed: Cmd never reaches here as ctrlKey.
-  if (e.type === 'keydown' && e.ctrlKey && !e.metaKey && !e.altKey && DIGIT_SHORTCUT_RE.test(e.code))
+  if (
+    e.type === 'keydown' &&
+    e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey &&
+    !e.shiftKey &&
+    DIGIT_SHORTCUT_RE.test(e.code)
+  )
     return 'swallow'
   return copyKeyAction(e, hasSelection)
 }

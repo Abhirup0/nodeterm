@@ -530,6 +530,41 @@ describe('terminalKeyAction', () => {
   it('exports the ESC+CR sequence', () => {
     expect(SHIFT_ENTER_SEQ).toBe('\x1b\r')
   })
+
+  it('swallows Ctrl+Digit[1-9] keydown so the PTY never sees the jump-to-project chord', () => {
+    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true }), false)).toBe(
+      'swallow'
+    )
+    expect(terminalKeyAction(ev({ key: '9', code: 'Digit9', ctrlKey: true }), false)).toBe(
+      'swallow'
+    )
+  })
+
+  it('passes Cmd+Digit1 through (meta without ctrl never reaches the PTY as a control code)', () => {
+    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', metaKey: true }), false)).toBe('pass')
+  })
+
+  it('passes Ctrl+Alt+Digit1 through (AltGr on non-US layouts types a real character)', () => {
+    expect(
+      terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true, altKey: true }), false)
+    ).toBe('pass')
+  })
+
+  it('passes Ctrl+Shift+Digit1 through (matches Canvas.tsx rejecting shifted digit chords)', () => {
+    expect(
+      terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true, shiftKey: true }), false)
+    ).toBe('pass')
+  })
+
+  it('passes Ctrl+Digit0 through (0 is out of the addressable 1-9 range)', () => {
+    expect(terminalKeyAction(ev({ key: '0', code: 'Digit0', ctrlKey: true }), false)).toBe('pass')
+  })
+
+  it('passes a Ctrl+Digit1 keyup through (only keydown swallows)', () => {
+    expect(
+      terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true, type: 'keyup' }), false)
+    ).toBe('pass')
+  })
 })
 
 describe('seedPaint', () => {

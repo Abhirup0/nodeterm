@@ -4661,10 +4661,18 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
-      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && DIGIT_SHORTCUT_RE.test(e.code)) {
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        DIGIT_SHORTCUT_RE.test(e.code)
+      ) {
         const n = Number(e.code.slice(5))
         const { projects, activeProjectId } = useProjects.getState()
-        const targetId = projectIdAtIndex(projects, n)
+        const targetId = projectIdAtIndex(
+          projects.filter((p) => !p.closed),
+          n
+        )
         if (targetId && targetId !== activeProjectId) {
           e.preventDefault()
           switchProject(targetId)
