@@ -33,7 +33,9 @@ import { parsePaneCursor } from './pane-cursor'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
 import { primePtyCeiling, readPtyDevices, spawnFailureHint } from './pty-devices'
 import { REAP_SWEEP_MS, shouldReap } from './pty-reap'
-import { TMUX_SOCKET, sessionName } from './tmux-naming'
+import { ControlModeClient, type ControlSpawn } from './tmux-control-client'
+import { TMUX_SOCKET, sessionName, isSessionName } from './tmux-naming'
+import { encodeSendKeysHex } from './tmux-control'
 import { bracketedInjection } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { effectiveSize, type PtySize } from './pty-size'
@@ -470,6 +472,34 @@ export const TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000
 export const PTY_END_BUDGET = { perSec: 20, burst: 200 }
 
 /**
+ * How long a command issued to a SHADOW may go unanswered before that shadow is torn down.
+ *
+ * `ControlModeClient` has no timers of its own, deliberately (tmux-control-client.ts): it pairs
+ * replies with commands POSITIONALLY, so a reply that never arrives does not merely stall one
+ * caller — every later reply pairs with the wrong command, permanently, and there is no recovery
+ * short of a new client. That is why the timeout disposes rather than retries.
+ *
+ * Five seconds is orders of magnitude past what it bounds: the only command a shadow issues today
+ * is a local `refresh-client -C` over a pipe to a tmux server on this machine (sub-millisecond).
+ * Hitting it means the server is wedged or the pipe is dead, not that it is busy.
+ */
+export const SHADOW_CMD_TIMEOUT_MS = 5_000
+
+/**
+ * How long the SHARED background-write control client stays attached after the last background
+ * write (see `backgroundWrite`).
+ *
+ * It exists so a BURST — an agent pushing a multi-line prompt, a run of slash commands — costs one
+ * `tmux -C` child instead of one per keystroke batch, and nothing more. Ten seconds is past any
+ * plausible gap inside one such burst and far short of every lifecycle it must not interfere with:
+ * the renderer's 5-minute park (`TERM_PARK_MS`), the 10-minute offscreen dispose
+ * (`offscreen-policy.ts`) and the 10-minute idle reap (`REAP_IDLE_MS`). That ordering is the point
+ * of picking a number this small: an idle client is a real tmux client on some session, and the
+ * shorter it lives the smaller the window in which anything has to reason about it at all.
+ */
+export const BACKGROUND_WRITE_LINGER_MS = 10_000
+
+/**
  * Manages all live PTY processes and bridges them to the renderer over IPC.
  *
  * On macOS/Linux with tmux available, each terminal node attaches to a persistent
@@ -537,6 +567,64 @@ export class PtyManager {
   /** ONE shared sweep for the idle reap (see `reapTick` / pty-reap.ts), armed by the first
    *  tmux-backed session and cleared once no session is left. */
   private reapTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * persistKey (node id) → the control-mode SHADOW attached to that node's tmux session.
+   *
+   * Keyed by persistKey rather than held on `Session`, because the nodes a shadow exists for are
+   * exactly the ones that HAVE no `Session`: `releaseClient` → `forget` drops the entry from
+   * `sessions` and `byPersistKey` the moment the pty client is released, and what survives is the
+   * tmux session — which is the thing a shadow attaches to.
+   *
+   * This map IS the invariant. An entry here means no painter pty client of ours is attached for
+   * that node: `shadowAttach` refuses while one is, and `spawnSession` disposes the entry before
+   * spawning one. Nothing else may put a client in here.
+   */
+  private shadows = new Map<string, ControlModeClient>()
+  /**
+   * persistKey (node id) → what a shadow needs to know about a session whose pty client this
+   * manager has RELEASED. Written by `releaseClient`, because `forget` then drops the `Session` and
+   * with it the only other record of any of these facts:
+   *  - `sessionId`: the id that session answered to. A caller can still be holding it — the relay
+   *    host keeps one per stream — and `write()` resolves it back to this node instead of dropping
+   *    the bytes, which is the only route a released session has left to an existing write path.
+   *  - `size`: the effective grid the painter last enforced. With only a control client attached
+   *    the pane follows `refresh-client -C <cols>x<rows>`, so this is what a shadow re-asserts.
+   *  - `remote`: this node's tmux ran on a REMOTE host (an SSH project) — over that project's
+   *    ControlMaster, on the `nodeterm-rmt` socket THERE. Our local socket holds no session for it;
+   *    at best nothing, at worst the local orphan a create issued with the master down once left
+   *    under the same name. Never shadow it locally.
+   *
+   * It deliberately outlives the `Session` (the tmux session outlives it too) and is dropped when
+   * the node is destroyed. The write is unconditional for every PERSISTED session released — local
+   * tmux-backed and remote alike, with or without a recorded size — so the map also holds records
+   * whose only content is "remote, do not shadow". Growth is therefore one small record per
+   * persisted node this process has ever released: the same order as the session map itself, and
+   * rewritten rather than appended on every subsequent release of the same node.
+   */
+  private released = new Map<string, { sessionId: string; size?: PtySize; remote: boolean }>()
+  /**
+   * The ONE control-mode client this manager keeps for background WRITES, plus the node whose tmux
+   * session it is attached to (see `backgroundWrite` / `sharedClientFor`).
+   *
+   * Shared rather than per-session because control-mode COMMANDS are server-wide: `send-keys -t X`
+   * reaches every session on the socket from whatever session the client happens to be attached to.
+   * Only `%output` streaming is scoped to the attachment, and this client streams nothing.
+   *
+   * `persistKey` is kept because the attachment is the one thing about it that is NOT server-wide:
+   * it makes this a real tmux client of THAT session, so it has to be subtracted from the session
+   * budget (`shadowedTmuxSessions`) and retired whenever something else wants to be that session's
+   * only client of ours — a painter spawning, or a per-session shadow attaching.
+   */
+  private shared: { client: ControlModeClient; persistKey: string } | null = null
+  /** Disposes `shared` once no background write has needed it for `BACKGROUND_WRITE_LINGER_MS`. */
+  private sharedLinger: ReturnType<typeof setTimeout> | null = null
+  /** The child-process seam for shadow clients. Undefined in production, where `ControlModeClient`
+   *  uses `child_process` (see tmux-control-client.ts); tests inject a fake spawner. */
+  private readonly controlSpawn: ControlSpawn | undefined
+
+  constructor(deps: { controlSpawn?: ControlSpawn } = {}) {
+    this.controlSpawn = deps.controlSpawn
+  }
 
   private ensureSnapshotTimer(): void {
     if (this.snapshotTimer) return
@@ -618,8 +706,396 @@ export class PtyManager {
     // Skipped when nothing arrived since the last periodic capture (pane content is unchanged).
     if (session.persistKey && session.outputSinceSnapshot)
       void this.snapshotScrollback(session.persistKey, session.sshRemote)
+    // Remember what a later shadow would have no other way to learn — the grid the painter last
+    // enforced (so the pane is not left to reflow), and whether this node's tmux was REMOTE (so it
+    // is never shadowed against our local socket). The `Session` holding both goes with `forget`
+    // below; this is the record that survives it.
+    if (session.persistKey)
+      this.released.set(session.persistKey, {
+        sessionId,
+        size: session.appliedSize,
+        remote: !!session.sshRemote
+      })
     releasePty(session.proc as ReleasablePty)
     this.forget(sessionId, session)
+  }
+
+  /**
+   * Attach a control-mode SHADOW to the tmux session of a node whose painter pty client has been
+   * released — `tmux -C attach-session` over plain pipes, holding ZERO pty devices — so a
+   * background feature can reach a session nobody is watching without respawning the terminal (a
+   * pty device, a tmux client, an ssh child, and a full redraw the user never asked for).
+   *
+   * Attach-or-reuse; returns the live client, or null when there is nothing to shadow or nothing to
+   * shadow it with:
+   *  - tmux is unavailable or switched off: there is no tmux session to attach to, and a non-tmux
+   *    session's work lives in the pty client that is already gone.
+   *  - `ptyShadowClients` is off: the kill switch (see the setting's doc). This is ONE of the two
+   *    places it is read — the other is `backgroundWrite` — because these are the only two entry
+   *    points that can start a control client of ours.
+   *  - a PAINTER pty client is still attached for this node. A session never has both: the painter
+   *    attaches with `-D` (it would kick the shadow off a moment later anyway), and two clients of
+   *    ours on one pane would hand tmux the size negotiation that pty-size.ts exists to keep.
+   *  - the node is REMOTE (an SSH project): its tmux runs on the far host, not on our socket.
+   *  - the control client could not be spawned, or was torn down while its opening size push was
+   *    outstanding (see `shadowCommand`). This method never rejects; failure is always null.
+   *
+   * WHAT A SHADOW IS NOT: not a subscriber, not a `Session`, not a renderer client id. Nothing in
+   * this process that decides "is somebody watching" can see it — the reap sweep asks
+   * `platform().clientIds()` and walks `this.sessions`, and the renderer's park and offscreen
+   * dispose are per-node renderer state.
+   *
+   * It IS a real tmux client, so anything that asks TMUX "is this session attached" does see it,
+   * and must subtract it. There is one such consumer: the session budget (session-budget.ts) culls
+   * idle DETACHED sessions under memory pressure, and it takes `shadowedTmuxSessions` for exactly
+   * this reason. Any future `list-clients`/`session_attached` reader owes the same subtraction.
+   */
+  async shadowAttach(persistKey: string): Promise<ControlModeClient | null> {
+    // Both halves of "is there a tmux session at all": the binary, and the setting that decides
+    // whether sessions are spawned under it. With tmux switched OFF, `tmuxPath` is still set (the
+    // binary is installed) but every session is a plain shell — so a shadow would attach to a name
+    // nothing ever created and die on arrival, and its caller would read that as "reached it".
+    const settings = this.getSettings()
+    if (!this.tmuxPath || !settings.tmuxEnabled) return null
+    // The kill switch, read here rather than at each of the three places a shadow is USED: a caller
+    // that cannot get a client cannot use one, and a flag scattered over the tier guards would be a
+    // flag with three chances to be forgotten.
+    if (!settings.ptyShadowClients) return null
+    const live = this.shadows.get(persistKey)
+    if (live?.alive) return live
+    // Died since it was attached (its `onExit` normally clears the entry; this covers a caller that
+    // gets here first). Re-attaching is LAZY on purpose: nothing re-shadows a session nobody asked
+    // about, so a node that is never wanted again costs nothing.
+    if (live) this.shadows.delete(persistKey)
+    if (this.sessionByPersistKey(persistKey)) return null
+    const known = this.released.get(persistKey)
+    // A remote (SSH-project) node's tmux server is on the FAR host, reached over that project's
+    // ControlMaster on the `nodeterm-rmt` socket. A local `-C attach -t nt-<id>` here would find
+    // nothing — or, if a create once ran with the master down, the LOCAL orphan wearing this node's
+    // name, which is a different machine's idea of the node and must never be typed into. Routing
+    // control mode over ssh is a separate job; refusing is the honest answer until it exists.
+    if (known?.remote) return null
+    // At most ONE client of ours per tmux session. The shared background-write client may already
+    // be attached to this one (it attaches to whatever session first needed a background write);
+    // it is the one that yields, because it can be re-started against any session and a shadow
+    // cannot. Two of ours here would also break the session budget's "subtract one client per
+    // shadowed name" arithmetic, which has no way to know it should subtract two.
+    this.sharedDisposeOn(persistKey)
+    const client = new ControlModeClient({
+      tmuxBin: this.tmuxPath,
+      socket: TMUX_SOCKET,
+      sessionName: sessionName(persistKey),
+      // Nothing consumes a shadowed session's output yet (the first consumer, Task 4's background
+      // write path, only WRITES). This drops the bytes; it does NOT avoid their cost — an attached
+      // `-C` client is sent every `%output` line regardless, and the client octal-decodes then
+      // UTF-8-decodes each one on the main thread before this callback throws it away. All the drop
+      // buys is not forwarding it any further. STANDING OBLIGATION: before any first production
+      // caller, either run the wire-cost probe (measure that traffic on a busy session) or issue
+      // `refresh-client -fno-output` for write-only clients so tmux stops sending it at all
+      // (tmux >= 3.2 — the floor this feature would then require).
+      onOutput: () => {},
+      // An UNEXPECTED death only — `dispose()` is silent by design, so this can never fire for a
+      // swap-out we asked for. Forget the entry and stop there: the tmux session, its processes and
+      // its scrollback are untouched, and the next `shadowAttach` re-attaches.
+      onExit: () => {
+        if (this.shadows.get(persistKey) === client) this.shadows.delete(persistKey)
+      },
+      spawner: this.controlSpawn
+    })
+    this.shadows.set(persistKey, client)
+    try {
+      client.start()
+    } catch {
+      // `child_process.spawn` throws SYNCHRONOUSLY on EMFILE and friends — and a machine short of
+      // file descriptors is exactly the machine a background feature reaches for a shadow on. The
+      // contract is "null, never a rejection", so swallow it and leave no half-attached entry.
+      this.shadows.delete(persistKey)
+      return null
+    }
+    // One line per swap direction, in the field-report vocabulary of this feature ("shadow attach" /
+    // "painter attach", see `spawnSession`). Only when a client is actually STARTED: a re-used
+    // shadow swapped nothing, and a line per caller would say nothing about the session's state.
+    console.log(`[pty] shadow attach ${sessionName(persistKey)}`)
+    const size = this.released.get(persistKey)?.size
+    if (size) {
+      const line = `refresh-client -C ${size.cols}x${size.rows}`
+      const reply = await this.shadowCommand(persistKey, line)
+      // Only a torn-down shadow (timeout, or death under us) fails the attach. tmux REFUSING the
+      // size (`%error`) leaves a perfectly usable client and a pane at its standing size, which is
+      // the same outcome as having no size to push.
+      if (reply === null) return null
+    }
+    // NO recorded size pushes nothing, deliberately: the pane keeps the standing size it has had
+    // since its last painter, and inventing one here would reflow a pane that is perfectly fine.
+    // (A relay-served pty released without ever reporting a size is exactly that case.)
+    //
+    // Re-read the map rather than returning `client`: a `create()` may have swapped this shadow out
+    // for a painter across the await above, and handing back a disposed client would look live.
+    return this.shadows.get(persistKey) ?? null
+  }
+
+  /**
+   * The tmux sessions this manager currently shadows on `socket` — the subtraction the session
+   * budget needs (session-budget.ts): a held `-C attach` flips `#{session_attached}` to 1, and an
+   * attached session is never culled, so without this a shadowed session would be permanently
+   * exempt from the memory-pressure safety valve. A shadow is not a watcher; the budget may kill
+   * the session under it, and the shadow dies with it.
+   *
+   * Socket-scoped because `nt-<node>` is only unique within a socket: shadows are attached on the
+   * LOCAL socket only, and a genuinely attached session of the same name on `nodeterm-rmt` (an SSH
+   * host's own sessions) keeps its exemption.
+   */
+  shadowedTmuxSessions(socket: string): string[] {
+    if (socket !== TMUX_SOCKET) return []
+    const names: string[] = []
+    for (const [persistKey, client] of this.shadows)
+      if (client.alive) names.push(sessionName(persistKey))
+    // The shared background-write client is a tmux client of the session it attached to, exactly
+    // like a shadow, and is subtracted the same way. It can never DOUBLE with a shadow of that same
+    // session — `shadowAttach` retires it first — which is what keeps the budget's "minus one
+    // client per name" arithmetic (session-budget.ts) honest.
+    if (this.shared?.client.alive) names.push(sessionName(this.shared.persistKey))
+    return names
+  }
+
+  /** Retire a node's shadow, if it has one. Idempotent. The entry is dropped HERE because
+   *  `dispose()` is silent (it does not fire `onExit`) — a deliberate swap-out is not a death. */
+  shadowDispose(persistKey: string): void {
+    const client = this.shadows.get(persistKey)
+    if (!client) return
+    this.shadows.delete(persistKey)
+    client.dispose()
+  }
+
+  /**
+   * Run ONE control-mode command on a node's shadow, bounded by `SHADOW_CMD_TIMEOUT_MS`. EVERY
+   * command issued to a shadow must go through here: the client owns no timers, and a reply that
+   * never comes desyncs its positional FIFO for good — so the timeout is a teardown, not a retry.
+   *
+   * Returns the reply (`ok` is tmux's own verdict), or null when there is no shadow, when the line
+   * is not a single command, or when the command timed out / the client died — in the last case the
+   * shadow is gone and a caller that still wants one asks `shadowAttach` for a fresh client.
+   *
+   * Public because it is the sanctioned way to talk to a shadow: a caller reaching past it to
+   * `client.command()` would be issuing an unbounded command, which is the one thing this whole
+   * mechanism cannot survive.
+   */
+  async shadowCommand(
+    persistKey: string,
+    line: string
+  ): Promise<{ ok: boolean; body: string[] } | null> {
+    const client = this.shadows.get(persistKey)
+    if (!client) return null
+    return this.controlCommand(client, line, () => {
+      // Only if it is still OUR client: a shadow replaced across the await was already disposed by
+      // whoever replaced it, and disposing again would take down a healthy successor.
+      if (this.shadows.get(persistKey) === client) this.shadowDispose(persistKey)
+    })
+  }
+
+  /**
+   * The timeout that every control-mode command in this manager is issued under — the shared body
+   * of `shadowCommand` and of the shared background-write client's commands. `onBroken` is how the
+   * caller retires ITS client; this method never decides which registry a client lives in.
+   */
+  private async controlCommand(
+    client: ControlModeClient,
+    line: string,
+    onBroken: () => void
+  ): Promise<{ ok: boolean; body: string[] } | null> {
+    // Refuse a multi-line command HERE rather than letting the client refuse it below. Both answer
+    // null, but the difference is what happens to the shadow: the catch treats a rejection as
+    // evidence the channel is unusable and DISPOSES, which is right for a timeout or a death and
+    // pure collateral damage for a line that was never written (the FIFO cannot have desynced —
+    // see the same guard in tmux-control-client.ts). Screening it out up front is what makes the
+    // catch's blanket teardown safe: everything that can reject past this point has either reached
+    // the wire or lost the client.
+    if (/[\r\n]/.test(line)) return null
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        client.command(line),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`tmux control-mode command timed out: ${line}`)),
+            SHADOW_CMD_TIMEOUT_MS
+          )
+          timer.unref?.()
+        })
+      ])
+    } catch {
+      onBroken()
+      return null
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Type `data` into a node whose PAINTER pty client is gone, without spawning one.
+   *
+   * The fallthrough, in order:
+   *  1. **the painter**, if the node is on screen after all — the session's own pty, exactly as a
+   *     keystroke from its terminal. (A caller holding a stale session id can land here; it is the
+   *     same NODE either way, which is what the caller asked for.)
+   *  2. **the node's own shadow**, if one is already up. Never attaches one: a shadow exists to be
+   *     re-used by whoever attached it, and a write does not need a session-scoped client.
+   *  3. **the shared control client** (`sharedClientFor`) — one `tmux -C` child for the whole
+   *     server, because `send-keys -t <session>` is a server-wide command.
+   *
+   * Returns whether the keys were delivered. **A false is never retried on another client**: a
+   * timed-out `send-keys` may well have run — control mode loses the REPLY, not necessarily the
+   * command — so re-sending it elsewhere risks typing the input twice, which is worse than not
+   * typing it at all.
+   *
+   * REFUSALS, both of them the same rule — never write into a session this process cannot prove is
+   * the node's own local one:
+   *  - a node with no `released` record: this process never released it, so `nt-<id>` on our socket
+   *    is a name we have no claim to (a remote node's local orphan, another machine's idea of it, a
+   *    session someone else made). An unknown key is not evidence of a session.
+   *  - a node whose record says `remote`: its tmux is on the far host. Reaching it means the
+   *    project's ControlMaster (`remoteTmuxSendKeysArgs`), not this channel; refusing is the honest
+   *    answer until that exists.
+   */
+  async backgroundWrite(persistKey: string, data: string): Promise<boolean> {
+    // Nothing to type — and `encodeSendKeysHex` would build a `send-keys -H ` with no bytes after
+    // it, which is a command line worth not sending.
+    if (!data) return false
+    const live = this.sessionByPersistKey(persistKey)
+    if (live) {
+      try {
+        live.proc.write(data)
+      } catch {
+        // node-pty throws on a write to a process that has already exited (the same hazard
+        // `applySize` guards on resize). This method is called fire-and-forget from `write()`, so a
+        // throw would surface as an UNHANDLED rejection in the main process — the crash risk Task
+        // 2's handoff note 2 names. A dead painter is a delivery failure, not an exception.
+        return false
+      }
+      return true
+    }
+    const settings = this.getSettings()
+    if (!this.tmuxPath || !settings.tmuxEnabled) return false
+    // The kill switch, and the reason it sits BELOW tier 1: the painter is the session's own pty,
+    // which exists with or without this feature — gating it would turn "no control clients" into
+    // "background writes stop working", which is a different setting. Below here, every tier needs
+    // a `tmux -C` child, so this one check covers both of them (`shadowAttach` carries the other).
+    if (!settings.ptyShadowClients) return false
+    const known = this.released.get(persistKey)
+    if (!known || known.remote) return false
+    const target = sessionName(persistKey)
+    // Belt and braces: `encodeSendKeysHex` interpolates the target UNQUOTED (Task 2 handoff note
+    // 12), and this line reaches a tmux server holding every session on the socket. `sessionName`
+    // cannot produce anything else today — which is exactly why this stays cheap.
+    if (!isSessionName(target)) return false
+    const line = encodeSendKeysHex(target, data)
+    const shadow = this.shadows.get(persistKey)
+    // ALIVE, not merely present: `dispose()` is silent (it fires no `onExit`), so a shadow retired
+    // by whoever was handed it leaves its entry behind, and a dead client can deliver nothing.
+    // Falling through to tier 3 does not violate the never-retry rule either — a client that is not
+    // running rejects `command()` BEFORE writing a byte (tmux-control-client.ts), so the keys it
+    // refused cannot also have reached tmux.
+    if (shadow?.alive) return (await this.shadowCommand(persistKey, line))?.ok ?? false
+    const client = this.sharedClientFor(persistKey)
+    if (!client) return false
+    return (await this.controlCommand(client, line, () => this.sharedDispose(client)))?.ok ?? false
+  }
+
+  /**
+   * The shared background-write client, started on demand and attached to `persistKey`'s session.
+   *
+   * WHICH session it attaches to is deterministic and deliberately the least interesting choice
+   * available: the session of the background write that needed it. That session was just proved to
+   * be local, released and ours — so the attach cannot land on a foreign session, and cannot put a
+   * second client of ours on a pane a painter is already drawing. Every command it then issues
+   * carries its own explicit `-t`, so the attachment never decides where the keys go.
+   *
+   * It pushes NO size, unlike a per-session shadow: it displays nothing, and `refresh-client -C`
+   * would resize the pane for whoever IS watching that session (their own `tmux attach`). The pane
+   * keeps the standing size its last painter left it at.
+   *
+   * Null when tmux is unavailable or the child could not be spawned (`child_process.spawn` throws
+   * synchronously on EMFILE and friends — the machine a background feature reaches for a client on).
+   */
+  private sharedClientFor(persistKey: string): ControlModeClient | null {
+    // BOTH halves of "is there a tmux session at all", as `shadowAttach` carries them: with tmux
+    // switched off `tmuxPath` is still set (the binary is installed) but nothing ever created a
+    // session, so this would attach to a name that does not exist. Its only caller checks the same
+    // thing three lines earlier — this is here so a second caller cannot arrive without it.
+    if (!this.tmuxPath || !this.getSettings().tmuxEnabled) return null
+    this.armSharedLinger()
+    const live = this.shared
+    if (live?.client.alive) return live.client
+    if (live) this.shared = null // died since it was started; its onExit normally clears this
+    const client = new ControlModeClient({
+      tmuxBin: this.tmuxPath,
+      socket: TMUX_SOCKET,
+      sessionName: sessionName(persistKey),
+      // This client writes; it never reads — but dropping `%output` here saves none of its cost.
+      // While attached, tmux sends this client the pane output of the session it landed on, and it
+      // octal-decodes then UTF-8-decodes all of it on the main thread before this callback discards
+      // it; the drop
+      // only stops it going further. The linger bounds how long that is paid for. STANDING
+      // OBLIGATION (same as the per-session shadow above): before any first production caller,
+      // either run the wire-cost probe or issue `refresh-client -fno-output` for these write-only
+      // clients (tmux >= 3.2) so the bytes are never sent.
+      onOutput: () => {},
+      onExit: () => {
+        if (this.shared?.client === client) this.shared = null
+      },
+      spawner: this.controlSpawn
+    })
+    this.shared = { client, persistKey }
+    try {
+      client.start()
+    } catch {
+      this.shared = null
+      return null
+    }
+    // Same line as a per-session shadow, deliberately: from the outside these are the same event —
+    // a control client of ours became this session's attached client — and a field report should
+    // not have to know which of the two kinds it is looking at. The linger keeps it rare.
+    console.log(`[pty] shadow attach ${sessionName(persistKey)}`)
+    return client
+  }
+
+  /** (Re)arm the linger: the client goes `BACKGROUND_WRITE_LINGER_MS` after the LAST write wanted
+   *  it, so a burst keeps one child and a trickle does not churn one per write. */
+  private armSharedLinger(): void {
+    if (this.sharedLinger) clearTimeout(this.sharedLinger)
+    this.sharedLinger = setTimeout(() => this.sharedDispose(), BACKGROUND_WRITE_LINGER_MS)
+    // Node keeps the process alive for a pending timer, and this one must never be the reason a
+    // quitting app lingers (the other manager timers unref for the same reason).
+    this.sharedLinger.unref?.()
+  }
+
+  /** Retire the shared client AND its linger. Idempotent. `only` makes it a no-op while a DIFFERENT
+   *  client is the current one — a caller reacting to its own client's failure must take down
+   *  neither the successor nor the successor's timer. With nothing attached at all there is no
+   *  successor to protect, and the timer goes either way. */
+  private sharedDispose(only?: ControlModeClient): void {
+    const live = this.shared
+    // A SUCCESSOR is left entirely alone, linger included: `only` is passed by a caller reacting to
+    // its own client's failure, and by then a later write may already have started a new one.
+    if (only && live && live.client !== only) return
+    // Cleared even when nothing is attached — `onExit` clears `shared` on its own (a client that
+    // died under us), and the linger armed for it would otherwise stay pending, aimed at whatever
+    // is attached when it fires.
+    if (this.sharedLinger) {
+      clearTimeout(this.sharedLinger)
+      this.sharedLinger = null
+    }
+    if (!live) return
+    this.shared = null
+    live.client.dispose()
+  }
+
+  /** Retire the shared client if it is attached to THIS node's session — for the two events that
+   *  claim that session for another client of ours (a painter spawning, a shadow attaching) and for
+   *  the one that ends it (`endSession`). Elsewhere it keeps lingering; the attachment is
+   *  incidental, and it can be re-started against any session. */
+  private sharedDisposeOn(persistKey: string): void {
+    if (this.shared?.persistKey === persistKey) this.sharedDispose()
   }
 
   /** Must run after app is ready (needs userData path). */
@@ -1172,6 +1648,29 @@ export class PtyManager {
     clientId: ClientId | null,
     sinks: DetachedSinks | undefined
   ): string {
+    // SWAP-OUT, before anything at all is spawned: a painter pty client is arriving for this node,
+    // and a session never has both. The painter attaches with `-D` and would kick the shadow off by
+    // itself — but only once tmux has processed both attaches, leaving a window where two clients
+    // of ours negotiate one pane. Retiring it first (politely: `dispose()` sends `detach-client`)
+    // means exactly one client is ever attached, and because `dispose()` is silent this can never
+    // be mistaken for a shadow that died and wants re-attaching.
+    //
+    // Here rather than in `create()` so EVERY path to a painter is covered — the warm reattach, the
+    // relay host's `attachDetached`, and whatever spawns next — and so the ordering is provable:
+    // it is the first statement before `pty.spawn` in the same synchronous function.
+    // The shared background-write client goes too, for the same reason, when it is this node's
+    // session it happens to be attached to.
+    if (options.persistKey) {
+      // The other half of the swap log (see `shadowAttach`), and only when there is really
+      // something to retire: a painter arriving at a session no control client held swapped
+      // nothing, and a line per terminal anyone opens is noise in the report it exists for.
+      const held =
+        this.shadows.get(options.persistKey)?.alive ||
+        (this.shared?.persistKey === options.persistKey && this.shared.client.alive)
+      if (held) console.log(`[pty] painter attach ${sessionName(options.persistKey)}`)
+      this.shadowDispose(options.persistKey)
+      this.sharedDisposeOn(options.persistKey)
+    }
     const sessionId = `pty-${++this.counter}`
     // For a remote (ssh-project) node the local PTY just holds the ssh client, so its local cwd
     // must be a real LOCAL directory (options.cwd is a REMOTE path that wouldn't exist locally and
@@ -1765,10 +2264,34 @@ export class PtyManager {
    */
   write(clientId: ClientId | null, sessionId: string, data: string): void {
     const session = this.sessions.get(sessionId)
-    if (!session) return
+    if (!session) return this.backgroundWriteBySessionId(sessionId, data)
     if (clientId !== null && session.nodeId && presenceHub.peerCount() > 1)
       presenceHub.noteTyping(clientId, session.nodeId)
     session.proc.write(data)
+  }
+
+  /**
+   * The `write()` miss: no live session answers to this id. It may still be a session THIS process
+   * released — the pty client detached, the tmux session (and everything running in it) untouched —
+   * whose id a caller is still holding, which is what the relay host does for the lifetime of a
+   * stream. Those bytes used to go on the floor; now they take the background path, which reaches
+   * the node without respawning a pty client for it.
+   *
+   * A linear scan rather than a second index: the `released` map is one small record per node this
+   * process has released, this is the cold path (a stray write, not a keystroke stream), and two
+   * maps that have to agree about the same fact is precisely the shape of bug the session-budget
+   * subtraction already had to be fixed for once.
+   *
+   * Fire-and-forget, because `write()` is: `backgroundWrite` never rejects, and there is nobody to
+   * report a delivery failure to on this path. No typing badge either — a released session is one
+   * nobody is watching, so the badge would light up on a terminal that is not on anybody's screen.
+   */
+  private backgroundWriteBySessionId(sessionId: string, data: string): void {
+    for (const [persistKey, rec] of this.released) {
+      if (rec.sessionId !== sessionId) continue
+      void this.backgroundWrite(persistKey, data)
+      return
+    }
   }
 
   /**
@@ -2276,6 +2799,12 @@ export class PtyManager {
     // Also drop any in-flight create for this node: a create racing the kill-session below must
     // spawn a fresh session, not await (and then join) the one we are ending.
     this.inflight.delete(persistKey)
+    // The tmux session is about to be killed, so everything attached to it goes now: a shadow would
+    // otherwise linger until tmux dropped its client, and what we remembered about the released
+    // session describes a pane that is about to stop existing.
+    this.shadowDispose(persistKey)
+    this.sharedDisposeOn(persistKey)
+    this.released.delete(persistKey)
     // A DELETE is remembered (the respawn guard for clients `pty:closed` cannot reach — see
     // `tombstones`); a RECYCLE explicitly forgets, because the node is not going anywhere and its
     // replacement session must be spawnable. Recorded even when no live session exists in this
@@ -2372,6 +2901,12 @@ export class PtyManager {
         finals.push(this.snapshotScrollback(session.persistKey, session.sshRemote))
       releasePty(session.proc as ReleasablePty)
     }
+    // Shadows are child processes of OURS, so quitting takes them with us — the tmux sessions they
+    // were attached to keep running with no client at all, which is exactly what persistence means.
+    for (const persistKey of [...this.shadows.keys()]) this.shadowDispose(persistKey)
+    // …and so does the shared background-write client, along with its linger timer.
+    this.sharedDispose()
+    this.released.clear()
     this.sessions.clear()
     this.byPersistKey.clear()
     // Pending recycle notices die with the sessions they were waiting on (their timers would

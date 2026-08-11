@@ -2,6 +2,8 @@
 //   R1 — host serves no `pty.create`; `fs.*` is confined to the shared roots.
 //   R2 — the channel SAS is deterministic + identical on both peers.
 //   R3 — replayed/reordered encrypted boxes are dropped (per-direction monotonic counter).
+//   R4 — killing a stream forgets it in the SAME synchronous turn, so a late Input frame for that
+//        streamId can never be written into a session that is already released.
 import { describe, expect, it, vi } from 'vitest'
 import { createHostHandlers, type HostFsOps, type HostPtyManager, type HostRelaySocket } from './host-service'
 import { genKeyPair, deriveSharedKey, sasFromSharedKey, publicKeyToB64 } from './e2ee'
@@ -298,5 +300,74 @@ describe('pty.scroll drives tmux through the session pty', () => {
     handlers.onRpc({ id: '3', method: 'pty.scroll', params: { streamId: 99, dir: 'up', lines: 2 } })
     expect(pty.write).not.toHaveBeenCalled()
     expect(responses.at(-1)).toMatchObject({ id: '3', ok: true })
+  })
+})
+
+// --- R4: kill → dropStream is ONE synchronous step ---------------------------
+
+// The invariant: a client's Input frame must never be written into a session the host has already
+// released. Nothing enforces that but the ADJACENCY of two statements — `pty.kill(null, sessionId)`
+// and the `dropStream` that forgets the streamId (handleKill; closeAll's `streams.clear()`). Put any
+// yield between them and every frame the relay delivers in that window is written into a session on
+// its way out (and, once a session is released, a background write can re-reach its tmux pane).
+//
+// So these tests pin the adjacency rather than the outcome: the late frame is queued as a microtask
+// BEFORE the kill turn runs, which is exactly the window an `await` between the two statements would
+// open. They pass only while the drop is synchronous with the kill.
+function inputFrame(streamId: number, data: string): Frame {
+  return { op: OP.Input, streamId, seq: 0, payload: new TextEncoder().encode(data) }
+}
+
+/** Attach a stream (id = n-th attach) and settle the async capture → attachDetached handoff. */
+async function attachStream(
+  handlers: ReturnType<typeof createHostHandlers>,
+  nodeId: string
+): Promise<void> {
+  handlers.onRpc({ id: `a-${nodeId}`, method: 'pty.attach', params: { nodeId, cols: 80, rows: 24 } })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+describe('R4: a killed stream stops accepting input in the same turn', () => {
+  it('drops an Input frame that lands one microtask after pty.kill', async () => {
+    const { socket, fs, pty } = makeHostFakes()
+    const writeMock = pty.write as ReturnType<typeof vi.fn>
+    const handlers = createHostHandlers(pty, socket, fs, () => ['/work'])
+    await attachStream(handlers, 'node-a')
+
+    // Control: while the stream lives, this exact frame IS written — so a later "not written"
+    // cannot be an artifact of a wrong streamId or an attach that never completed.
+    handlers.onFrame(inputFrame(1, 'echo live\n'))
+    expect(writeMock).toHaveBeenCalledWith(null, 'sess', 'echo live\n')
+    writeMock.mockClear()
+
+    // Queue the frame FIRST: its microtask runs immediately after the kill's synchronous turn,
+    // i.e. inside the gap any `await` between kill() and dropStream() would create.
+    const late = Promise.resolve().then(() => handlers.onFrame(inputFrame(1, 'echo late\n')))
+    handlers.onRpc({ id: 'k', method: 'pty.kill', params: { streamId: 1 } })
+    expect(pty.kill).toHaveBeenCalledWith(null, 'sess')
+    await late
+
+    expect(writeMock).not.toHaveBeenCalled()
+  })
+
+  it('drops Input frames for every stream that closeAll killed', async () => {
+    const { socket, fs, pty } = makeHostFakes()
+    const writeMock = pty.write as ReturnType<typeof vi.fn>
+    const handlers = createHostHandlers(pty, socket, fs, () => ['/work'])
+    await attachStream(handlers, 'node-a')
+    await attachStream(handlers, 'node-b')
+    handlers.onFrame(inputFrame(2, 'echo live\n')) // control: stream 2 is real and routable
+    expect(writeMock).toHaveBeenCalledTimes(1)
+    writeMock.mockClear()
+
+    const late = Promise.resolve().then(() => {
+      handlers.onFrame(inputFrame(1, 'echo late\n'))
+      handlers.onFrame(inputFrame(2, 'echo late\n'))
+    })
+    handlers.closeAll()
+    expect(pty.kill).toHaveBeenCalledTimes(2)
+    await late
+
+    expect(writeMock).not.toHaveBeenCalled()
   })
 })
