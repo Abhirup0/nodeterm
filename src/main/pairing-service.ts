@@ -69,7 +69,17 @@ interface RelayDeviceResponse {
 /** Mint a relay device token so a freshly-paired phone can reach this host over the relay. */
 async function mintRelayDevice(
   apiBase: string,
-  body: { entitlement: string | null; deviceId: string; hostPublicKeyB64: string; label?: string }
+  body: {
+    entitlement: string | null
+    deviceId: string
+    hostPublicKeyB64: string
+    label?: string
+    /** The phone's previous device token, relayed from the pair request: the backend's C2
+     *  proof-of-possession demands it for FREE-tier re-registration — without it every free
+     *  re-pair 403'd into a silent LAN-only pairing (the desktop can never hold this token
+     *  itself; only the phone can supply it). */
+    priorDeviceToken?: string
+  }
 ): Promise<RelayDeviceResponse | null> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 8000)
@@ -80,7 +90,13 @@ async function mintRelayDevice(
       body: JSON.stringify(
         body.entitlement
           ? body
-          : { deviceId: body.deviceId, hostDeviceId: getDeviceId(), hostPublicKeyB64: body.hostPublicKeyB64, label: body.label }
+          : {
+              deviceId: body.deviceId,
+              hostDeviceId: getDeviceId(),
+              hostPublicKeyB64: body.hostPublicKeyB64,
+              label: body.label,
+              priorDeviceToken: body.priorDeviceToken
+            }
       ),
       signal: ctrl.signal
     })
@@ -497,7 +513,13 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         // {epk, box}. Derive the shared key from the ephemeral public key + our secret and open
         // the box to recover the SAME {token, publicKey, deviceId} JSON. A present-but-undecryptable
         // envelope is a hard 400 — we never fall through to parsing ciphertext as plaintext.
-        let body: { token?: unknown; publicKey?: unknown; deviceName?: unknown; deviceId?: unknown }
+        let body: {
+          token?: unknown
+          publicKey?: unknown
+          deviceName?: unknown
+          deviceId?: unknown
+          priorDeviceToken?: unknown
+        }
         let sealed: Uint8Array | null = null // the shared key, set only on the encrypted path
         if (typeof outer.epk === 'string') {
           if (!hostKeys) {
@@ -530,6 +552,7 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
             publicKey?: unknown
             deviceName?: unknown
             deviceId?: unknown
+            priorDeviceToken?: unknown
           }
         }
         if (body.token !== token) {
@@ -571,7 +594,9 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
             entitlement: relayCtx.entitlement,
             deviceId: phoneDeviceId,
             hostPublicKeyB64: relayCtx.block.hostPublicKeyB64,
-            label: name
+            label: name,
+            priorDeviceToken:
+              typeof body.priorDeviceToken === 'string' ? body.priorDeviceToken : undefined
           })
           if (minted?.deviceToken) {
             relayFields = {
