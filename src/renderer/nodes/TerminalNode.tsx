@@ -65,6 +65,7 @@ import {
   offscreenCoreIsRemote,
   offscreenDisposeMs,
   planOffscreenVisibility,
+  releaseStillEnabled,
   shouldDeferReleaseForEco,
   OFFSCREEN_DEFER_RETRY_MS,
   OFFSCREEN_DISPOSE_MS_DEFAULT
@@ -3162,7 +3163,7 @@ export function TerminalNode({
             // The setting can also have been switched OFF while this timer counted down; a fire
             // that disposed anyway would take a buffer the user has just asked us to keep.
             const liveSettings = useSettings.getState().settings
-            if (offscreenDisposeMs(liveSettings.offscreenTerminalMinutes) === null) return
+            if (!releaseStillEnabled(liveSettings.offscreenTerminalMinutes)) return
             // Nothing to give back (no session yet, or one that was closed/ended under us) ⇒ no
             // dispose. A null ref means no lifecycle run is live at all, which answers the same way.
             if (!offscreenLiveRef.current?.()) return
@@ -3174,11 +3175,17 @@ export function TerminalNode({
             // ~15 MB; the CLI is hundreds. So wait for the big prize, on the sweep's own cadence,
             // and only up to the capped total — a node that can never hibernate must not hold its
             // viewer forever.
+            const ecoStatus = useAgentStatus.getState().byId[id]
             if (
               shouldDeferReleaseForEco({
                 ecoEnabled: liveSettings.agentHibernationEnabled,
                 resumableAgent: hibernationTargetRef.current,
-                hibernated: !!useAgentStatus.getState().byId[id]?.hibernated,
+                hibernated: !!ecoStatus?.hibernated,
+                // Same "unknown idle is not idle" rule the policy applies: with no hook event seen
+                // in this run there is no idle clock, `planHibernation` refuses this node outright,
+                // and waiting for a hibernation that cannot come would hold every warm node's
+                // viewer for the full cap after each app restart.
+                idleKnown: ecoStatus?.lastEventAt !== undefined,
                 offscreenElapsedMs: Date.now() - (offscreenSinceRef.current ?? Date.now()),
                 idleMinutes: liveSettings.agentHibernationIdleMinutes,
                 offscreenMinutes:

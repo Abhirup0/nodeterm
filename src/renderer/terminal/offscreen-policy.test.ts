@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   OFFSCREEN_DISPOSE_MS_DEFAULT,
   offscreenDisposeMs,
+  releaseStillEnabled,
   mayDisposeOffscreen,
   offscreenCoreIsRemote,
   planOffscreenVisibility,
@@ -107,6 +108,7 @@ describe('shouldDeferReleaseForEco — hibernate first, then release the viewer'
     ecoEnabled: true,
     resumableAgent: true,
     hibernated: false,
+    idleKnown: true,
     offscreenElapsedMs: 10 * 60_000,
     idleMinutes: 30,
     offscreenMinutes: 10
@@ -125,6 +127,15 @@ describe('shouldDeferReleaseForEco — hibernate first, then release the viewer'
     expect(shouldDeferReleaseForEco({ ...base, resumableAgent: false })).toBe(false)
   })
 
+  it('never defers while the idle clock is UNKNOWN — the policy refuses those nodes anyway', () => {
+    // `lastEventAt` is transient by design, so after every app restart a warm agent node has no
+    // clock until it takes a turn — and `planHibernation`'s "unknown idle is not idle" rule
+    // refuses it. Deferring for it would hold every warm node's viewer for the whole cap, i.e.
+    // switching Eco ON would mean a memory REGRESSION for the first stretch of each session.
+    expect(shouldDeferReleaseForEco({ ...base, idleKnown: false })).toBe(false)
+    expect(shouldDeferReleaseForEco({ ...base, idleKnown: true })).toBe(true)
+  })
+
   it('never defers on an unusable idle window (planHibernation refuses those outright)', () => {
     for (const idleMinutes of [0, -5, NaN])
       expect(shouldDeferReleaseForEco({ ...base, idleMinutes }), String(idleMinutes)).toBe(false)
@@ -136,5 +147,17 @@ describe('shouldDeferReleaseForEco — hibernate first, then release the viewer'
     expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 - 1 })).toBe(true)
     expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 })).toBe(false)
     expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 90 * 60_000 })).toBe(false)
+  })
+})
+
+describe('releaseStillEnabled — the fire-time re-ask of the setting itself', () => {
+  it('refuses a release whose feature was switched off while the timer counted down', () => {
+    // A timer armed ten minutes ago outlives the setting that armed it, and the Eco deferral makes
+    // that window longer still. Disposing anyway would take the buffer the user just asked us to
+    // keep — indistinguishable, from the outside, from the feature being broken.
+    expect(releaseStillEnabled(10)).toBe(true)
+    expect(releaseStillEnabled(undefined)).toBe(true) // unset = the default window, still on
+    expect(releaseStillEnabled(0)).toBe(false)
+    expect(releaseStillEnabled(-5)).toBe(false)
   })
 })

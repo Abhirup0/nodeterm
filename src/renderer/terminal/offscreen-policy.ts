@@ -43,6 +43,17 @@ export function mayDisposeOffscreen(i: {
   return !i.visible && !i.remote && !i.selected
 }
 
+/**
+ * Is the offscreen release still switched ON — asked at FIRE time, not only when the timer was
+ * armed. A timer armed ten minutes ago outlives the setting that armed it: the user can turn the
+ * feature off (or to 0) while it counts down, and a fire that disposed anyway would take the very
+ * buffer they just asked us to keep, with no way to tell the difference from a bug. The deferral
+ * below makes this window longer still, which is what turned a latent case into a real one.
+ */
+export function releaseStillEnabled(settingMinutes: number | undefined): boolean {
+  return offscreenDisposeMs(settingMinutes) !== null
+}
+
 /** How often a DEFERRED release re-asks. The hibernation sweep's own cadence, because that is
  *  exactly what the deferral is waiting for: one sweep after the node hibernates, the viewer goes. */
 export const OFFSCREEN_DEFER_RETRY_MS = 60_000
@@ -71,6 +82,14 @@ export const OFFSCREEN_DEFER_RETRY_MS = 60_000
  * (a working node goes done, a session id arrives late), and asking for it here would re-implement
  * `planHibernation` in a second place. The question asked is the durable one — could this node's
  * CLI ever be quit and resumed at all — and the cap covers the rest.
+ *
+ * ONE exception to that, and it is not a moving target at all: `idleKnown`. The policy's "unknown
+ * idle is NOT idle" rule refuses any candidate with no `lastEventAt`, and that clock is TRANSIENT
+ * by design — a relaunch has seen no hook events yet. So after every app restart, every warm
+ * agent node is one hibernation can provably deliver nothing for until it takes a turn, and
+ * deferring for them would hold every viewer for the whole 40-minute cap: Eco switched on would
+ * MEAN a memory regression for the first stretch of each session. Waiting is only justified when
+ * the thing waited for can actually happen.
  */
 export function shouldDeferReleaseForEco(i: {
   ecoEnabled: boolean
@@ -78,12 +97,18 @@ export function shouldDeferReleaseForEco(i: {
   resumableAgent: boolean
   /** Already hibernated — the CLI is gone, so the release is now a pure win and must proceed. */
   hibernated: boolean
+  /**
+   * Has ANY hook event been seen for this node in this app run (`lastEventAt` is set)? Without
+   * one, `planHibernation` refuses the node outright — unknown idle is not idle — so there is
+   * nothing to wait for. See the header.
+   */
+  idleKnown: boolean
   /** How long this node has been continuously out of view. */
   offscreenElapsedMs: number
   idleMinutes: number
   offscreenMinutes: number
 }): boolean {
-  if (!i.ecoEnabled || !i.resumableAgent || i.hibernated) return false
+  if (!i.ecoEnabled || !i.resumableAgent || i.hibernated || !i.idleKnown) return false
   // An unusable window means Eco is off in practice (`planHibernation` refuses a non-positive one),
   // so there is nothing to wait for — release on the ordinary schedule.
   if (!(i.idleMinutes > 0)) return false
