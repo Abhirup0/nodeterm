@@ -17,6 +17,13 @@
 // needs no live session. It is idempotent — a session already ended by `destroy` (the mounted case)
 // is a best-effort miss on the host — so no case analysis is needed at the call site.
 
+// KNOWN GAP, recorded in docs/session-memory.md's "Known gaps": the SESSIONS SIDEBAR still calls
+// `closeSession` with no remote leg, so ending an unmounted SSH node's session there leaves the
+// host's `nt-<id>` running after a confirm that said otherwise — the two surfaces now disagree
+// about the same session. Its correct fix is owner-routed per row (the row's OWNER project's
+// master, not the active project's, which is only sound here because the panel shows one machine
+// at a time); reuse this file rather than adding a third kill path.
+
 import type { Project } from '@shared/types'
 
 export interface SessionKillPlan {

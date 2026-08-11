@@ -305,10 +305,20 @@ own `×` use.
 - Switching between two SSH projects with the **same `user@host`** (the scope key carries no port)
   leaves the previous rows on screen until the re-sweep, because `enterScope` only clears when the
   scope *string* changes.
-- The **sessions sidebar** has the same class of bug this feature fixed in the panel: a destructive
-  confirm that lies for a row owned by a non-active project. Not fixed here — its rows span
-  arbitrary projects on arbitrary hosts, so its correct fix is owner-routed per row, a different
-  rule on a surface this change does not own.
+- **FOLLOW-UP OWED — the sessions sidebar still has the bug this feature fixed in the panel, and the
+  two surfaces now disagree about the same session.** `SessionsSidebar.tsx`'s close button calls
+  `closeSession(projectId, id)` (via `Canvas.tsx`'s `onCloseSession`) with **no remote leg**: for an
+  SSH project's node that is not mounted, `transport.destroy` has no live client carrying
+  `sshRemote`, so it touches only the local socket while the host's `nt-<id>` keeps running — after
+  a confirm that says it stopped. The session-memory panel routes the identical case through
+  `planSessionKill` → `sshProject.killSessions`, so ending a session from the panel works and
+  ending the same session from the sidebar does not.
+  Deliberately out of scope here: the sidebar's rows span arbitrary projects on arbitrary hosts, so
+  its correct fix is **owner-routed per row** (the owner project's own master, not the active
+  project's — the panel's rule is only sound because the panel shows one machine at a time), which
+  is a different rule on a surface this change does not own. Whoever takes it should reuse
+  `planSessionKill`'s shape rather than inventing a third kill path, and should widen its
+  `remoteProjectId` leg from "the active project" to "the row's owner" as the same change.
 
 ## 10. Device checklist
 
@@ -355,6 +365,9 @@ The SSH leg
     permanent pulse — this is the only place the connection-up re-read can be observed.
  9. A non-Linux SSH host (no /proc/meminfo): the pill must PULSE, never show "0 GB".
 10. Kill the master mid-sweep (`ssh -O exit`) and press ⟳: "Could not measure", never an empty list.
+10b. BREAK TMUX ON THE HOST while sessions are running (rename the binary, or `chmod 000` the socket
+    dir) and press ⟳: the panel must say "Could not measure", NOT "No sessions are running here.".
+    This is what the per-socket `##SOCKRC` fence buys, and the only place it can be seen for real.
 11. Watch ⟳ during a slow remote sweep: the button must be disabled and spinning (loading is
     asserted nowhere).
 
@@ -371,24 +384,26 @@ Layout and theming (argued from CSS only)
     ~90% used.
 18. fitView / goToNode must no longer tuck nodes under the pill.
 
-Rows, travel and the panel itself (restored — these were in the task reports and lost on the way in)
-23. A `claude` node with 2 MCP servers must read `+3 child processes`, not +2: `pane_pid` is the
+Rows, travel and the panel itself
+19. A `claude` node with 2 MCP servers must read `+3 child processes`, not +2: `pane_pid` is the
     pane's SHELL, so the count includes the agent CLI itself. This is the ONLY item that can
     falsify the "reports 3" claim made twice above; everything else about the sub-line is arithmetic.
-24. Travel to a row whose node lives in a CLOSED project: the tab must REOPEN and the camera land on
+20. Travel to a row whose node lives in a CLOSED project: the tab must REOPEN and the camera land on
     the node. This is the likeliest thing on the list to be wrong — the load and the focus happen in
     the same tick, and `travelToNode` (not `focusNodeById`) is what handles it.
-25. A LOCAL orphan row (`tmux -L node-terminal new-session -d -s nt-fake-1`) renders with a hollow
+21. A LOCAL orphan row (`tmux -L node-terminal new-session -d -s nt-fake-1`) renders with a hollow
     dot and a "no node" chip, and its title is inert — clicking it must do nothing at all.
-26. The panel STAYS OPEN through a kill: the ConfirmDialog is a portal outside the pill's container,
+22. The panel STAYS OPEN through a kill: the ConfirmDialog is a portal outside the pill's container,
     and answering it must not dismiss the list the user is working through. Clicking anywhere else
     on the canvas must still close the panel.
+23. The confirm on a row that HAS a node must say the node is removed too, and it must actually be
+    gone from the canvas afterwards — the panel's purpose invites a user who only wanted the RAM.
 
 Cadence and the other surfaces
-19. Local project, panel closed: the pill's number moves after 30 s.
-20. Local project: opening the panel triggers a sweep; closing and reopening triggers another; the
+24. Local project, panel closed: the pill's number moves after 30 s.
+25. Local project: opening the panel triggers a sweep; closing and reopening triggers another; the
     pill alone never does (watch for `ps`/`/proc` activity, or an ssh exec on an SSH scope).
-21. Server Edition in a browser: a local project's panel is full; an SSH project's panel says
+26. Server Edition in a browser: a local project's panel is full; an SSH project's panel says
     "Could not measure", with no local rows attributed to the host.
-22. Relay tab: the panel says session memory is not available there, and offers no ⟳.
+27. Relay tab: the panel says session memory is not available there, and offers no ⟳.
 ```
