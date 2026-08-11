@@ -98,8 +98,11 @@ class FakeControlSpawn implements ControlSpawn {
   calls: Array<{ bin: string; args: string[] }> = []
   children: FakeControlChild[] = []
   autoReply = true
+  /** `child_process.spawn` throws SYNCHRONOUSLY (EMFILE, a bad cwd) — this plays that. */
+  throwOnSpawn = false
   private num = 0
   spawn(bin: string, args: string[]) {
+    if (this.throwOnSpawn) throw new Error('spawn EMFILE')
     this.calls.push({ bin, args })
     log.push('control-spawn')
     let onData: ((b: Buffer) => void) | undefined
@@ -367,6 +370,93 @@ describe('control-mode shadow clients for released sessions', () => {
 
     expect(control.children.map((c) => c.killed)).toEqual([1, 1])
     expect(control.children.every((c) => c.writes.includes('detach-client\n'))).toBe(true)
+  })
+
+  it('stays reapable by the SESSION BUDGET, which reads tmux’s own attached flag', async () => {
+    // The one attachment check a shadow really is visible to: `session-budget.ts` culls idle
+    // DETACHED `nt-*` sessions under memory pressure, and a held `-C attach` flips
+    // `#{session_attached}` to 1 — so a shadowed session would be permanently exempt from the
+    // memory-pressure safety valve. It runs in production from BOTH shells against this socket.
+    const { createSessionReaper } = await import('./session-budget')
+    const m = await tmuxManager()
+    const { sessionId } = await create(ALICE)
+    kill(ALICE, sessionId)
+    await m.shadowAttach('node-1')
+
+    const NOW = 1_000_000
+    const OLD = NOW - 100_000 // well past the 6h grace window
+    const listings: Record<string, string> = {
+      // `nt-node-1` reads as attached because our shadow IS a real tmux client; `nt-node-9` is a
+      // genuinely attached session (somebody is looking at it) and must survive.
+      'node-terminal': `nt-node-1|1|${OLD}\nnt-node-9|1|${OLD}`,
+      // The SAME NAME on the SSH-remote socket, attached for real. Shadows only ever live on the
+      // local socket, so the exclusion must not follow the name across sockets.
+      'nodeterm-rmt': `nt-node-1|1|${OLD}`
+    }
+    const killed: Array<{ socket: string; target: string }> = []
+    const reaper = createSessionReaper({
+      tmuxBin: () => m.getTmuxBin(),
+      shadowed: (socket) => m.shadowedTmuxSessions(socket),
+      exec: async (_bin: string, args: string[]) => {
+        const socket = args[args.indexOf('-L') + 1]
+        if (args.includes('kill-session')) {
+          killed.push({ socket, target: args[args.indexOf('-t') + 1] })
+          return ''
+        }
+        return listings[socket] ?? ''
+      },
+      readMem: () => ({ availableMb: 100, totalMb: 8000 }), // under the watermark: real pressure
+      env: {},
+      nowSec: () => NOW
+    })
+
+    expect(await reaper.sweep()).toBe(1)
+    expect(killed).toEqual([{ socket: 'node-terminal', target: '=nt-node-1' }])
+  })
+
+  it('refuses a released REMOTE node — its tmux lives on the far host, not on our socket', async () => {
+    const m = await tmuxManager()
+    const res = (await fake.handlers[IPC.ptyCreate](ALICE, {
+      cols: 80,
+      rows: 24,
+      persistKey: 'node-r',
+      sshRemote: { conn: { host: 'h1', user: 'u' }, controlPath: '/tmp/cm', remoteCwd: '/srv/app' }
+    })) as { sessionId: string }
+    expect(m.sshRemoteForNode('node-r')).toBeDefined() // the spawn really did take the remote branch
+    kill(ALICE, res.sessionId)
+
+    // `nt-node-r` on OUR socket is either nothing at all or — worse — the local orphan a create
+    // issued with the master down once left behind. Neither is this node's session.
+    expect(await m.shadowAttach('node-r')).toBeNull()
+    expect(control.calls).toHaveLength(0)
+  })
+
+  it('returns null (never rejects) when the control client cannot even be spawned', async () => {
+    const m = await tmuxManager()
+    const { sessionId } = await create(ALICE)
+    kill(ALICE, sessionId)
+    control.throwOnSpawn = true
+
+    expect(await m.shadowAttach('node-1')).toBeNull()
+
+    // …and no half-attached entry is left behind: the next ask spawns a real one.
+    control.throwOnSpawn = false
+    expect(await m.shadowAttach('node-1')).not.toBeNull()
+    expect(control.calls).toHaveLength(1)
+  })
+
+  it('keeps a shadow whose command was refused before anything was written', async () => {
+    const m = await tmuxManager()
+    const { sessionId } = await create(ALICE)
+    kill(ALICE, sessionId)
+    const shadow = await m.shadowAttach('node-1')
+
+    // A malformed line is refused CLIENT-side, before a byte is written, so the FIFO cannot have
+    // desynced — tearing the shadow (and its tmux client) down over it would be pure collateral.
+    expect(await m.shadowCommand('node-1', 'display-message -p x\nkill-server')).toBeNull()
+
+    expect(control.only.killed).toBe(0)
+    expect(await m.shadowAttach('node-1')).toBe(shadow)
   })
 
   it('does nothing with tmux switched off in settings — no session is tmux-backed', async () => {

@@ -440,7 +440,13 @@ export async function startServer(
   // and this standing process is the natural owner of reaping them (field report: 95 sessions /
   // 34 GB idle claude). Attached sessions are never touched; a reaped node cold-restores on next
   // open. Kill switch + tuning via NODETERM_SESSION_* env (core/session-budget.ts).
-  const sessionReaper = createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() })
+  // `shadowed` subtracts our own control-mode shadows from tmux's attached flag: a shadow is a real
+  // tmux client but NOT a watcher, so a shadowed session must stay exactly as cullable as an idle
+  // detached one (see PtyManager.shadowedTmuxSessions).
+  const sessionReaper = createSessionReaper({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+  })
   sessionReaper.start()
 
   // Headless notification host: every core service above (incl. the loopback hook server, which

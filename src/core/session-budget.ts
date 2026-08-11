@@ -7,7 +7,9 @@
 //   - a bounded budget, enforced only when exceeded — never a calendar-based expiry;
 //   - eviction picks the LEAST-RECENTLY-ACTIVE holder;
 //   - an ATTACHED session (someone is looking at it) is never evicted, exactly like a visible
-//     WebGL holder; a recently-active one is protected by a grace window (the release delay);
+//     WebGL holder; a recently-active one is protected by a grace window (the release delay).
+//     "Attached" means a WATCHER: this app's own control-mode shadows are tmux clients too, and
+//     they are subtracted from tmux's flag via the `shadowed` seam — see SessionReaperOpts;
 //   - reaping is gradual (per-sweep batch), so one sweep can never mass-kill its way past the
 //     target — the next sweep re-evaluates.
 //
@@ -149,6 +151,22 @@ export interface SessionReaperOpts {
    *  SSH projects accumulates sessions on `nodeterm-rmt`, and its own nodeterm-server (this
    *  process) is the natural owner of reaping them; the desktops that spawned them may be gone. */
   sockets?: string[]
+  /**
+   * The tmux sessions THIS process holds a control-mode SHADOW on, per socket (see
+   * `PtyManager.shadowedTmuxSessions`). They are reported as DETACHED regardless of what tmux says,
+   * in the plan AND in the kill-time re-verify.
+   *
+   * A shadow is a real tmux client, so a held `-C attach` flips `#{session_attached}` to 1 — and an
+   * attached session is never evicted here. Without this hook, attaching a shadow (something no
+   * user asked for and nobody is watching) would make a session permanently exempt from the
+   * memory-pressure safety valve this whole module exists to be. A shadow is not a watcher: the
+   * session may be reaped under it exactly as if nothing were attached, and the shadow's client
+   * dies with the session it was attached to.
+   *
+   * Per SOCKET, not per name: `nt-<node>` is only unique within a socket, and a genuinely attached
+   * session of the same name on `nodeterm-rmt` must keep its exemption.
+   */
+  shadowed?: (socket: string) => Iterable<string>
   exec?: (bin: string, args: string[]) => Promise<string>
   readMem?: () => MemInfo | null
   env?: NodeJS.ProcessEnv
@@ -190,7 +208,14 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
 
   const listSocket = async (bin: string, socket: string): Promise<SessionInfo[] | null> => {
     try {
-      return parseSessionList(await exec(bin, ['-L', socket, 'list-sessions', '-F', LIST_FMT]))
+      const listed = parseSessionList(await exec(bin, ['-L', socket, 'list-sessions', '-F', LIST_FMT]))
+      // Our own shadows are subtracted from tmux's `attached` HERE, at the one place every listing
+      // comes through, so the plan and the kill-time re-verify can never disagree about it (a
+      // shadow attached between the two would otherwise resurrect the exemption). Re-read each
+      // time: the set changes as sessions are shadowed and swapped back to painters.
+      const shadowed = new Set(opts.shadowed?.(socket) ?? [])
+      if (shadowed.size === 0) return listed
+      return listed.map((s) => (s.attached && shadowed.has(s.name) ? { ...s, attached: false } : s))
     } catch {
       // "no server running" and a real failure both land here; neither yields candidates.
       return null

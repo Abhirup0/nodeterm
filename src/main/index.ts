@@ -1525,7 +1525,13 @@ app.whenReady().then(async () => {
   // budget). Attached sessions are never touched; a reaped node cold-restores on next open.
   // Local sockets only — a remote SSH host's sessions are reaped by that host's own
   // nodeterm-server, never across the wire. Timer is unref'd; no explicit stop needed.
-  createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() }).start()
+  // `shadowed` subtracts our own control-mode shadows from tmux's attached flag: a shadow is a real
+  // tmux client but NOT a watcher, so a shadowed session must stay exactly as cullable as an idle
+  // detached one (see PtyManager.shadowedTmuxSessions).
+  createSessionReaper({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+  }).start()
   const ackSweeper = createAckSweeper({
     handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
   })
