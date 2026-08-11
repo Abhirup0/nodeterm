@@ -518,6 +518,30 @@ export interface TmuxStatus {
   platform: string
 }
 
+/**
+ * How close THIS MACHINE is to `kern.tty.ptmx_max`, the system-wide pty-device ceiling that took
+ * the whole app down in the 2026-08-11 field report (every spawn failing with a bare
+ * `posix_spawnp failed.`). See core/pty-pressure.ts for the bands.
+ */
+export type PtyPressureLevel = 'none' | 'elevated' | 'critical'
+
+/** A pty-pressure reading, as broadcast on `IPC.ptyPressure`. `null` = could not be measured. */
+export interface PtyPressure {
+  level: PtyPressureLevel
+  /** `/dev/ttys*` entries in existence right now. */
+  usage: number | null
+  /** `kern.tty.ptmx_max`. */
+  ceiling: number | null
+}
+
+/** Outcome of the banner's "Fix automatically…" button (macOS only) — see main/ptmx-limit.ts. */
+export type PtyLimitFixResult =
+  | { ok: true; ceiling: number }
+  /** `canceled` = the user dismissed macOS's own admin-password dialog. Not an error to retry.
+   *  `busy` = a password dialog from another window/reload is already up. Both are SILENT for the
+   *  renderer: nothing failed, so neither may raise an error toast. */
+  | { ok: false; error: string; canceled?: boolean; busy?: boolean }
+
 export interface PtyApi {
   /** Starts a new PTY session; returns its sessionId and whether the session was freshly
    *  created (cold start) vs reattached to a still-running tmux session (warm). */
@@ -2044,6 +2068,17 @@ export interface NodeTerminalApi {
    *  need only be idempotent, not cheap. Returns unsubscribe. Server Edition: never fires (the
    *  pressure levers run host-side there; a browser tab's memory belongs to the browser). */
   onMemoryPressure(listener: (severity: 'warning' | 'critical') => void): () => void
+  /** Fires when THIS MACHINE's pty-device pressure band changes (core/pty-pressure.ts): the
+   *  renderer raises/lowers the banner that warns before `kern.tty.ptmx_max` stops every new
+   *  terminal from opening. Band changes only, re-sent for a held band at most once every five
+   *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
+   *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
+  onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
+   *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
+   *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
+   *  dialog resolves `{ ok: false, canceled: true }`, which is not an error to report or retry. */
+  raisePtyDeviceLimit(): Promise<PtyLimitFixResult>
   /** Answer a Claude permission request via the deterministic hook-reply channel (spec:
    *  docs/hook-reply-approvals.md). Writes the one-line answer file the held hook is polling
    *  (`~/.nodeterm/pending/<pendingId>.answer`) on the host the agent runs on — the LOCAL fs for a

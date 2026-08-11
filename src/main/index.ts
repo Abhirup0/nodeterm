@@ -70,6 +70,8 @@ import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
+import { createPtyPressureMonitor } from '../core/pty-pressure'
+import { registerPtmxLimitHandler } from './ptmx-limit'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -1547,6 +1549,29 @@ app.whenReady().then(async () => {
       if (severity === 'critical') void sessionReaper.sweep()
     }
   }).start()
+  // Pty-device pressure (core/pty-pressure.ts): the OTHER way this machine runs out, and the one
+  // that actually happened. The memory monitor above could not see it — during the 2026-08-11
+  // incident RAM was plentiful while `/dev/ttys*` was full, so the reaper never woke and the user
+  // got no warning at all, just terminals that stopped opening. Same shape as the memory leg: tell
+  // the renderer (which raises a banner) on every band change, and sweep the reaper NOW on
+  // critical — a reaped detached session returns its pty device, which is exactly the resource in
+  // short supply. Transitions only, re-announced at most every five minutes.
+  //
+  // The sweep is passed `pressure: 'pty'` because a bare `sweep()` here would plan NOTHING: the
+  // budget's own triggers are memory and a detached-count cap, and the incident profile clears
+  // both (healthy RAM, under the cap). The reason grants the same batch allowance low memory
+  // would and widens no exemption — attached and in-grace sessions stay untouchable.
+  const ptyPressure = createPtyPressureMonitor({
+    onLevel: (reading) => {
+      sendToMain(IPC.ptyPressure, reading)
+      if (reading.level === 'critical') void sessionReaper.sweep({ pressure: 'pty' })
+    }
+  })
+  ptyPressure.start()
+  // The banner's "Fix automatically…" button. Registered, never called on our own initiative: it
+  // raises `kern.tty.ptmx_max` behind macOS's own admin-password dialog. Its success re-announces
+  // through the monitor's funnel, so the banner clears without waiting out the next tick.
+  registerPtmxLimitHandler(corePlatform, { announce: (reading) => ptyPressure.announce(reading) })
   const ackSweeper = createAckSweeper({
     handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
   })

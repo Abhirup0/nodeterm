@@ -125,6 +125,7 @@ import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
+import { PtyPressureBanner } from '../components/PtyPressureBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
@@ -7808,6 +7809,9 @@ export function Canvas() {
       <div className="top-banners">
         <AnnouncementBanner />
         <TmuxBanner onInstall={runInTerminal} />
+        {/* This MACHINE is running out of pty devices — subscribes for itself; a failed
+            "Fix automatically…" lands in the same notice strip as every other async op. */}
+        <PtyPressureBanner onError={(text) => setNotice({ kind: 'error', text })} />
         {migrationNote && (
           <div className="announce-banner announce-banner--info">
             <span className="announce-banner__dot" />

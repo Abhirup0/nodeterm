@@ -132,6 +132,15 @@ export function spawnFailureHint(
   )
 }
 
+/**
+ * Forget the cached ceiling because something just CHANGED it (the "Fix automatically…" button's
+ * `sysctl -w`). Without this the TTL would keep serving the pre-fix number for up to a minute — and
+ * the pressure banner it feeds would keep saying the machine is full after it was emptied.
+ */
+export function invalidatePtyCeiling(): void {
+  ceiling = null
+}
+
 /** Test seam: forget the cached ceiling so a test can pin the read itself. */
 export function resetPtyDevicesCacheForTests(): void {
   ceiling = null

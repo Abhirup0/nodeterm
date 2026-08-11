@@ -341,6 +341,16 @@ export function buildStubApi(): Omit<
     // on its own terms; pushing our levers over the wire would fight it, not help it. Deliberate
     // no-op, not an oversight.
     onMemoryPressure: noopUnsub,
+    // Same asymmetry, one step further: the desktop's pty-pressure banner exists to offer "Fix
+    // automatically…", which ends in macOS's admin-password dialog on the HOST's physical display.
+    // A browser tab cannot answer that prompt, so the host keeps the reaper leg and says nothing
+    // here (see the note beside createPtyPressureMonitor in src/server/index.ts). The fix itself
+    // rejects rather than pretending, so a stray call can never look like it worked.
+    onPtyPressure: noopUnsub,
+    raisePtyDeviceLimit: async () => ({
+      ok: false as const,
+      error: 'Raising the terminal limit must be done on the machine running the server.'
+    }),
     onAgentControl: noopUnsub,
     sendAgentControlResult: noop
   } satisfies Omit<
