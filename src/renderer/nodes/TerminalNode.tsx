@@ -2848,6 +2848,12 @@ export function TerminalNode({
    * cleanup at all, so an unmount that follows a dispose would clear nothing, ever — a leaked store
    * entry per node, in a branch about memory.
    *
+   * The RESPAWN case (worktree move, Refresh) changes with it, and is correct for the same reason:
+   * that node did not depart either, and its session comes back within seconds — reattached or
+   * cold-restored — at which point the agent's own hooks re-fire and Canvas's `agent:status`
+   * listener overwrites the state (a SessionStart is what clears it). Clearing it here would only
+   * blank the badge for the gap in between, on a node the user is looking at.
+   *
    * What is NOT cleared here is as deliberate as it was before: the node's PERSISTED status
    * (unread / session / sessionId) stays, because a project switch is a detach and the context
    * meter looks that sessionId up on remount. Real deletion drops the whole entry in
@@ -3669,7 +3675,15 @@ export function TerminalNode({
             Deliberately above the overlays below it in the DOM but the least insistent of them —
             it states a resting state, not a failure. Nobody is ever looking at it as it appears
             (that is the precondition for appearing); it exists for the frame between coming into
-            view and the reattach redraw, and for a node parked at the edge of the viewport. */}
+            view and the reattach redraw, and for a node parked at the edge of the viewport.
+
+            …with ONE case where it is seen head-on, and it is deliberate: a COLLAPSED node. The
+            body is `display: none` while collapsed, so the observed element reports
+            not-intersecting and a collapsed terminal is disposed after the window even though its
+            header sits in plain view. Expanding revives it — the display flip changes the
+            intersection, the observer fires, and the node reattaches. Collapsed is exactly the
+            state in which nobody is reading this terminal's output, which is why the WebGL budget
+            has always treated it as hidden too; this feature only agrees with it. Not a bug. */}
         {offscreenDown && (
           <div className="term-node__offscreen nodrag">
             <span>Session running — reattaches on view</span>
