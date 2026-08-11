@@ -335,6 +335,12 @@ export function buildStubApi(): Omit<
     },
     openNotificationSettings: pnoop,
     onFocusNode: noopUnsub,
+    // Server Edition v1: the memory-pressure levers run HOST-side only (the session reaper, driven
+    // by the same core monitor in src/server/index.ts). A browser tab's own memory — its WebGL
+    // contexts and parked terminals — belongs to the browser, which already discards and reclaims
+    // on its own terms; pushing our levers over the wire would fight it, not help it. Deliberate
+    // no-op, not an oversight.
+    onMemoryPressure: noopUnsub,
     onAgentControl: noopUnsub,
     sendAgentControlResult: noop
   } satisfies Omit<

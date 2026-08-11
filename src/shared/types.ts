@@ -2026,6 +2026,12 @@ export interface NodeTerminalApi {
   openNotificationSettings(): Promise<void>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
   onFocusNode(listener: (nodeId: string) => void): () => void
+  /** Fires when the shell's memory-pressure monitor (core/memory-pressure.ts) sees the host — or
+   *  this process's own RSS — cross a watermark: the renderer answers by running its reclaim
+   *  levers (hidden WebGL contexts, parked terminals). At most one fire a minute, so the levers
+   *  need only be idempotent, not cheap. Returns unsubscribe. Server Edition: never fires (the
+   *  pressure levers run host-side there; a browser tab's memory belongs to the browser). */
+  onMemoryPressure(listener: (severity: 'warning' | 'critical') => void): () => void
   /** Answer a Claude permission request via the deterministic hook-reply channel (spec:
    *  docs/hook-reply-approvals.md). Writes the one-line answer file the held hook is polling
    *  (`~/.nodeterm/pending/<pendingId>.answer`) on the host the agent runs on — the LOCAL fs for a
