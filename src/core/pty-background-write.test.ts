@@ -518,6 +518,43 @@ describe('background writes into released sessions', () => {
     expect(vi.getTimerCount()).toBe(before)
   })
 
+  it('logs the shared client’s attach with the same line a shadow logs', async () => {
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => void lines.push(a.join(' ')))
+    const m = await tmuxManager()
+    await release(ALICE, 'node-1')
+
+    await m.backgroundWrite('node-1', 'ls\n')
+    await m.backgroundWrite('node-1', 'ls\n') // served by the SAME client — so no second line
+
+    // From the outside the shared client and a per-session shadow are the same event: a control
+    // client of ours became that session's attached client. Somebody reading `list-clients` after a
+    // field report should not have to know which of the two kinds they are looking at.
+    expect(lines.filter((l) => l === `[pty] shadow attach ${sessionName('node-1')}`)).toHaveLength(1)
+  })
+
+  it('a relay-served session is never reaped, so a phone’s keystrokes reach its painter', async () => {
+    // The relay host holds `stream.sessionId` for the lifetime of a stream and calls
+    // `pty.write(clientId, stream.sessionId, …)` directly (host-service.ts), BYPASSING the
+    // `subscribes()` gate the renderer's `pty:write` goes through — so it genuinely can reach
+    // `write()`'s miss path. What it cannot reach is a RELEASED record: a relay sink counts as a
+    // watcher (`reapTick`), and `kill()` only releases once that sink is gone — by which time the
+    // host has dropped the stream and `onFrame` no longer routes input for it. This pins the
+    // reasoning that "the mechanism has no production caller" rests on; if a future change stops
+    // the sink counting as a watcher, this test is the one that says so.
+    const { REAP_IDLE_MS, REAP_SWEEP_MS } = await import('./pty-reap')
+    const m = await tmuxManager()
+    const sessionId = m.attachDetached('node-1', { onData: () => {}, onExit: () => {} })
+
+    vi.advanceTimersByTime(REAP_IDLE_MS + REAP_SWEEP_MS * 3)
+    m.write(null, sessionId, 'ls\n')
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(spawned[0].killed).toBe(false) // the sweep left the phone's pty alone…
+    expect(spawned[0].writes).toEqual(['ls\n']) // …and tier 1 answered the write
+    expect(control.calls).toHaveLength(0) // no control client was needed, or started
+  })
+
   it('destroying a node disposes the shared client attached to its session', async () => {
     const m = await tmuxManager()
     await release(ALICE, 'node-1')
