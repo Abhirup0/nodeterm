@@ -37,6 +37,10 @@ import { restartEligibility } from './agent-restart'
 /** How many sessions one hibernation pass may take. */
 export const HIBERNATE_BATCH_MAX = 2
 
+/** How often the canvas re-asks. Coarse on purpose: the shortest window the setting offers is
+ *  measured in minutes, so a faster sweep would only pay for a plan that cannot have changed. */
+export const HIBERNATE_SWEEP_MS = 60_000
+
 export interface HibernationCandidate {
   id: string
   agentId?: string

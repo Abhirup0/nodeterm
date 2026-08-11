@@ -78,6 +78,20 @@ export interface AgentNodeStatus {
   loop?: {
     count: number
     kind: 'loop' | 'schedule' | 'cron'
+    /**
+     * The user dismissed the CARD, but the job itself is still out there. Only `cron`/`schedule`
+     * ever carry this: those outlive turns, sessions and app restarts, so "I don't want to look at
+     * this card" and "this job is gone" are different statements — and the card's × has always
+     * said so ("does not remove the job"). An in-session `/loop` still clears outright; it dies
+     * with its session anyway.
+     *
+     * It matters beyond the card: `loop` is the ONLY record that this node has a wakeup pending,
+     * and it is what stops Eco mode from hibernating it (`/exit` kills the CLI process, and the
+     * scheduled wakeup dies with it — a silently cancelled job). Clearing the entry on dismiss
+     * dropped that guard while the job lived on, so the fact is now retained and only the RENDER
+     * filters on it. A real end (CronDelete) still clears the entry.
+     */
+    dismissed?: boolean
     /** Schedule expression (cron) shown as a sub-label. */
     schedule?: string
     /** The task/prompt — shown in full and re-issued by the node's Play button. */
@@ -123,6 +137,9 @@ export interface AgentStatusStore {
     kind?: 'loop' | 'schedule' | 'cron',
     opts?: { schedule?: string; task?: string }
   ): void
+  /** Hide a cron/schedule CARD while keeping the fact that the job exists (see `loop.dismissed`).
+   *  No-op if the node has no loop entry. */
+  dismissLoopCard(id: string): void
   /** Record a /loop iteration (count++ and append its summary). No-op if not looping. */
   bumpLoop(id: string, message?: string): void
   remove(id: string): void
@@ -210,6 +227,9 @@ export function createAgentStatusSession(
             task: v.loop.task,
             items: Array.isArray(v.loop.items) ? v.loop.items : []
           }
+          // A dismissed card must STAY dismissed across a restart — and the fact it hides
+          // (a live cron/schedule job) must stay readable to the hibernation guard.
+          if (v.loop.dismissed) out[id].loop.dismissed = true
         }
       }
       return out
@@ -388,6 +408,15 @@ export function createAgentStatusSession(
         if (!prev.loop) return s
         const { loop: _drop, ...rest } = prev
         const byId = { ...s.byId, [id]: rest }
+        save(byId)
+        return { byId }
+      }),
+
+    dismissLoopCard: (id) =>
+      set((s) => {
+        const prev = s.byId[id]
+        if (!prev?.loop || prev.loop.dismissed) return s
+        const byId = { ...s.byId, [id]: { ...prev, loop: { ...prev.loop, dismissed: true } } }
         save(byId)
         return { byId }
       }),

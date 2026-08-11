@@ -87,10 +87,19 @@ import {
 } from '../lib/glyphGridNode'
 import { deliverCommand, type DeliveryIo } from '../terminal/command-delivery'
 import {
+  agentHibernateFns,
   guardConcurrentRestart,
+  isShellCommand,
+  performExitPhase,
   performRestartResume,
+  performResumePhase,
+  queryPaneWithin,
+  registerAgentHibernate,
   registerAgentRestart,
-  restartEligibility
+  restartEligibility,
+  RESTART_EXIT_TIMEOUT_MS,
+  type ExitPhaseOutcome,
+  type ResumePhaseOutcome
 } from '../terminal/agent-restart'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic, IconReload } from '../components/icons'
@@ -628,6 +637,38 @@ const coSubs = new Map<string, (s: CoState) => void>()
 const restartSubs = new Map<string, () => void>()
 
 /**
+ * Which mounted terminals are currently OUT of the viewport, published by the one visibility
+ * observer each node already runs (Phase 2's) — never a second observer, and never a second
+ * verdict: this map only mirrors what that callback decided.
+ *
+ * Read by Canvas's hibernation sweep, which asks about nodes it does not render itself. Keyed by
+ * NODE id (like `restartFns`, not like the session-scoped `termKey` maps) because that is the id
+ * the sweep, the plan and the registry all speak.
+ *
+ * ABSENT = not offscreen. A node that has not reported yet (its observer's first delivery is
+ * queued, or the environment has no IntersectionObserver at all) must never be read as "nobody is
+ * looking at it" — that is the direction that hibernates a session the user is staring at.
+ */
+const offscreenNodes = new Set<string>()
+
+/** How long a freshly mounted node waits before asking to be woken: the spawn its resume line is
+ *  written into is still in flight at mount (no session id, no pane). */
+const WAKE_MOUNT_DELAY_MS = 2000
+/** Bounded retries for a wake that came back `'not-eligible'` — timing, not a standing refusal. */
+const WAKE_ATTEMPTS = 3
+const WAKE_RETRY_MS = 4000
+
+function setNodeOffscreen(nodeId: string, offscreen: boolean): void {
+  if (offscreen) offscreenNodes.add(nodeId)
+  else offscreenNodes.delete(nodeId)
+}
+
+/** Is this node out of the viewport? Unknown answers `false` — see `offscreenNodes`. */
+export function isNodeOffscreen(nodeId: string): boolean {
+  return offscreenNodes.has(nodeId)
+}
+
+/**
  * The mounted instance publishes its copy-feedback sink here, for the same reason as
  * `restartSubs`: the OSC 52 handler is registered ONCE per xterm instance and that instance
  * SURVIVES A PARK (project switch → remount within TERM_PARK_MS), so a handler holding this
@@ -994,6 +1035,76 @@ export function TerminalNode({
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  // --- Eco / hibernation wake (see terminal/hibernation-policy.ts) ---
+  // A hibernated node's CLI was asked to `/exit` while nobody was looking; its tmux session, pane
+  // and scrollback are untouched, and the conversation comes back with the provider's own
+  // `--resume`. THREE things ask for that here, all through one function:
+  //   1. the visibility observer, on the offscreen→visible edge (the everyday path);
+  //   2. mount-while-already-visible — a node the canvas opens ON SCREEN never transitions, so
+  //      after a relaunch (the flag is persisted) nothing would ever ask;
+  //   3. the SLEEPING chip's own click, which is also the escape hatch when the two above have
+  //      given up.
+  // Never fired more than once at a time (`wakeInFlightRef`, plus `guardConcurrentRestart` inside
+  // the registered closure), and always re-reads the flag: a wake that raced another one, or a
+  // sweep that landed in between, must not deliver a second launch line into the same pane.
+  const wakeInFlightRef = useRef(false)
+  const wakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const wakeRef = useRef<(attempt?: number) => void>(() => {})
+  wakeRef.current = (attempt = 0): void => {
+    // A wake that could not run YET is retried a couple of times: at mount the spawn is still in
+    // flight, and a node coming back from an offscreen DISPOSE re-registers its pair one render
+    // later than the visibility edge that asked. Past the attempts it is a standing refusal (the
+    // pane belongs to something else now) and the chip's click is the way forward — nothing keeps
+    // typing into a pane on a timer.
+    const retryLater = (): void => {
+      if (attempt + 1 >= WAKE_ATTEMPTS) return
+      if (wakeTimerRef.current) clearTimeout(wakeTimerRef.current)
+      wakeTimerRef.current = setTimeout(() => wakeRef.current(attempt + 1), WAKE_RETRY_MS)
+    }
+    if (wakeInFlightRef.current) return
+    if (!useAgentStatus.getState().byId[id]?.hibernated) return
+    const fns = agentHibernateFns(id)
+    if (!fns) return retryLater() // no terminal here yet (mid-spawn, or an offscreen revive)
+    wakeInFlightRef.current = true
+    void fns
+      .resume()
+      .then((outcome) => {
+        if (outcome === 'resumed') {
+          useAgentStatus.getState().setHibernated(id, false)
+          return
+        }
+        // 'not-eligible' — usually timing, not a refusal that will stand: at mount the spawn is
+        // still in flight (no session id yet), and right after a reveal tmux may not have answered
+        // `paneCommand` yet. See `retryLater`.
+        retryLater()
+      })
+      .catch(() => {
+        // A transport that threw leaves the node hibernated (and the chip clickable). Reporting a
+        // wake here would clear the badge over a pane nothing was typed into.
+      })
+      .finally(() => {
+        wakeInFlightRef.current = false
+      })
+  }
+  // Ask once shortly after mount, for the node that is ALREADY visible: its observer reports
+  // `visible` with no preceding hidden verdict, and an environment without IntersectionObserver
+  // reports nothing at all. Delayed because the spawn this wake writes into is still in flight at
+  // mount. Skipped while the node is known-offscreen — the reveal edge owns that case.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (!isNodeOffscreen(id)) wakeRef.current()
+    }, WAKE_MOUNT_DELAY_MS)
+    return () => {
+      clearTimeout(t)
+      if (wakeTimerRef.current) {
+        clearTimeout(wakeTimerRef.current)
+        wakeTimerRef.current = null
+      }
+      // This node is leaving the canvas: it is nobody's hibernation candidate until it reports
+      // again. (Absent = not offscreen; see `offscreenNodes`.)
+      setNodeOffscreen(id, false)
+    }
+  }, [id])
   // Held launch (canvas-control `--after`). Canvas owns firing it; the node only surfaces that
   // it is armed, and by WHAT it is blocked — dep titles read straight off the live canvas, since
   // "waits for term-17" tells the user nothing.
@@ -2330,6 +2441,20 @@ export function TerminalNode({
             unsub()
           })
         }
+        // Hibernation × cold restore. `hibernated` is PERSISTED, so it can outlive the very thing
+        // it describes:
+        //  - `fresh` (the tmux session is GONE — a reboot, a reaped server, a first open): the CLI
+        //    it refers to died with the session. The node is not hibernated, it is simply gone, so
+        //    the flag is dropped and the ORDINARY cold-restore auto-resume below brings the
+        //    conversation back exactly as it does for any other node. Leaving the flag set would
+        //    park a SLEEPING chip over a dead pane and hand the resume to the wake path, which
+        //    (rightly) refuses a pane it cannot see a shell in.
+        //  - warm attach (`!fresh`): the shell we exited to is still sitting in the pane, by
+        //    design. Nothing auto-resumes here — the branch below is `fresh`-only — and the wake
+        //    path owns the relaunch. That is the whole feature.
+        if (fresh && useAgentStatus.getState().byId[id]?.hibernated) {
+          useAgentStatus.getState().setHibernated(id, false)
+        }
         // Run a one-shot command on first open (e.g. "gh auth login" or the agent CLI), then
         // forget it.
         if (data.initialCommand) {
@@ -2450,6 +2575,68 @@ export function TerminalNode({
         })
       })
     )
+
+    // Eco / hibernation (`settings.agentHibernationEnabled`): the same two halves as the restart
+    // above, registered as a PAIR because they are driven far apart in time — Canvas's sweep quits
+    // an idle, offscreen CLI to reclaim its RAM, and the node's own wake resumes the conversation
+    // when the user comes back to it. Same `io`, same `paneCommand`, same `isLive`, same
+    // `guardConcurrentRestart` node id, so a sweep and a menu restart can never write into one pane
+    // at once. Registered in the effect BODY for the same reason as the restart closure: an adopted
+    // (parked → remounted) terminal never reaches the spawn continuation.
+    const unregisterHibernate = registerAgentHibernate(id, {
+      exit: guardConcurrentRestart(id, async (): Promise<ExitPhaseOutcome> => {
+        // SSH / relay sessions are excluded in v1, exactly as the offscreen dispose excludes them
+        // (offscreen-policy.ts): the exit and its much later resume would race the ControlMaster /
+        // relay lifecycle, and a wake that cannot reach the host leaves a dead conversation behind.
+        // Read at CALL time — a local project can BECOME an SSH project long after this mount.
+        if (offscreenRemoteRef.current) return 'not-eligible'
+        const st = useAgentStatus.getState().byId[id]
+        const agentSessionId = st?.sessionId
+        // Re-asked here, not trusted from the plan: a node that started working between the sweep's
+        // decision and its turn must keep its turn (BUSY_STATES — an exit line typed into a
+        // permission prompt ANSWERS it).
+        const gate = restartEligibility(agentId, st?.state, agentSessionId)
+        if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
+        return performExitPhase({
+          agentId,
+          sessionId: agentSessionId,
+          io: restartIo,
+          paneCommand: () => api.pty.paneCommand(id),
+          isLive: restartTarget
+        })
+      }),
+      resume: guardConcurrentRestart(id, async (): Promise<ResumePhaseOutcome> => {
+        const st = useAgentStatus.getState().byId[id]
+        const agentSessionId = st?.sessionId
+        if (!agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
+        // THE load-bearing gate of the wake half. Hours can pass between the exit and this
+        // resume, and the pane is a REPL the user can type into: by now it may belong to vim, to
+        // `top`, or to a claude the user launched by hand. `deliverCommand`'s first write is NOT
+        // preceded by a Ctrl-U (the exit half is where that lives), so a launch line typed into a
+        // live program is sent to that program — a message to somebody's session, or a mangled
+        // command. A pane we cannot READ answers null and is refused for the same reason.
+        const pane = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
+        if (!isShellCommand(pane)) return 'not-eligible'
+        // Same funnel, same await, same reasoning as the restart closure above: the permission
+        // mode is a property of how a session is LAUNCHED, so it is re-resolved now (a wake can be
+        // hours after the exit, and days after the node was created).
+        const base = resumeCommand(agentId, agentSessionId)
+        const command = base
+          ? withPermissionMode(base, agentId, await ensureActivePermissionMode(agentId))
+          : undefined
+        return performResumePhase({
+          agentId,
+          sessionId: agentSessionId,
+          io: restartIo,
+          command,
+          isLive: restartTarget,
+          onDelivery: (cancel) => {
+            if (life.dead) cancel()
+            else cleanups.push(cancel)
+          }
+        })
+      })
+    })
 
     // Coalesce observer bursts: dragging the NodeResizer fires per animation frame, and every
     // call is a full cell-geometry measure + a resize IPC → node-pty → tmux (which redraws the
@@ -2629,6 +2816,9 @@ export function TerminalNode({
       // Nothing may restart a node that is no longer mounted — park, respawn and real teardown all
       // pass through here. A remount re-registers (superseding, so a stale unregister is inert).
       unregisterRestart()
+      // …and nothing may hibernate or wake one either: with no registration the sweep reads this
+      // node as unwired (`planHibernation` refuses it) and the wake finds nothing to resume into.
+      unregisterHibernate()
       observer.disconnect()
       rootObserver.disconnect()
       // The visibility observer is NOT disconnected here — it is mount-stable and must outlive an
@@ -2784,7 +2974,16 @@ export function TerminalNode({
         // The renderer half first: it reads `wasVisibleRef` as the PREVIOUS verdict for its
         // hidden→visible edge test, so the write below must come after it.
         visibilityReportRef.current?.(visible)
+        const wasVisible = wasVisibleRef.current
         wasVisibleRef.current = visible
+        // Publish the same verdict for the hibernation sweep, which runs in Canvas and cannot see
+        // this node's box. One observer, two consumers — a second observer would be a second
+        // opinion about the same rectangle.
+        setNodeOffscreen(id, !visible)
+        // …and the wake edge: a hibernated node the user has just panned back to gets its
+        // conversation resumed before they can reach for the chip. No-op (one map lookup) for a
+        // node that is not hibernated, which is every node in the default case.
+        if (visible && !wasVisible) wakeRef.current()
         // …and the offscreen-dispose state machine. Every decision is the pure
         // `planOffscreenVisibility`; this block only executes the plan.
         const disposeMs = offscreenDisposeMs(
@@ -3458,7 +3657,28 @@ export function TerminalNode({
             RUNNING
           </span>
         )}
-        {showLoop && status?.loop && (
+        {/* Eco: this node's CLI was exited to reclaim its RAM while nobody was looking. The tmux
+            session, the pane and the scrollback are untouched — only the process is gone — and
+            revealing the node resumes the conversation. Clickable because the automatic wake can
+            refuse (a pane that now belongs to something else, a spawn that is still coming up),
+            and a badge with no way forward is a dead end. Muted on purpose: nothing is wrong. */}
+        {status?.hibernated && (
+          <button
+            className="term-node__status term-node__status--sleeping nodrag"
+            title="Agent hibernated to save memory — click to resume"
+            onClick={(e) => {
+              e.stopPropagation()
+              wakeRef.current()
+            }}
+          >
+            <span className="term-node__status-dot" />
+            SLEEPING
+          </button>
+        )}
+        {/* Dismissed (cron/schedule) entries are retained as a fact but hidden everywhere they
+            were shown before — chip included, so the × still does exactly what it always did to
+            the screen. See agentStatus's `loop.dismissed`. */}
+        {showLoop && status?.loop && !status.loop.dismissed && (
           <span
             className="term-node__status term-node__status--loop"
             title={`Running /${status.loop.kind}`}

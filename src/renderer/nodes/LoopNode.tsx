@@ -36,10 +36,19 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // Manual dismiss: cron/schedule cards persist across turns/sessions/restarts, so a job
   // removed while the app wasn't watching (or one the user just wants gone) needs an ×.
   // Dismissing only drops the CARD — it does not touch the cron job itself.
+  //
+  // …which is why a cron/schedule card is dismissed by MARKING it, not by clearing the entry.
+  // That entry is the only record that this node has a wakeup pending, and it is what keeps Eco
+  // mode from hibernating the node (`/exit` kills the CLI, and the scheduled wakeup dies with it).
+  // Clearing it dropped that guard while the job kept running — the card's own tooltip promises
+  // the opposite. An in-session `/loop` still clears outright: it dies with its session anyway,
+  // so there is no fact left to keep.
   const dismiss = (e: React.MouseEvent) => {
     e.stopPropagation()
     const parentId = id.replace(/^loop-/, '')
-    useAgentStatus.getState().setLoop(parentId, false)
+    const cs = useAgentStatus.getState()
+    if (kind === 'cron' || kind === 'schedule') cs.dismissLoopCard(parentId)
+    else cs.setLoop(parentId, false)
     useAgentNodes.getState().clearLoop(parentId)
   }
 

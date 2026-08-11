@@ -98,6 +98,46 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     expect(useAgentStatus.getState().byId['n6'].lastEventAt).toBe(first)
   })
 
+  it('dismissLoopCard hides the card but KEEPS the entry — the job is still out there', async () => {
+    // The card's × has always promised "does not remove the job", but clearing the entry dropped
+    // the only record that a wakeup is pending — which is what stops Eco mode from `/exit`ing the
+    // CLI the wakeup lives in. So a dismiss now MARKS, and only the render filters on the mark.
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setLoop('n7', true, 'cron', { schedule: '0 9 * * *' })
+    useAgentStatus.getState().dismissLoopCard('n7')
+    expect(useAgentStatus.getState().byId['n7'].loop).toMatchObject({ kind: 'cron', dismissed: true })
+    const saved = JSON.parse(store.getItem('nodeterm.agentStatus')!)
+    expect(saved.n7.loop).toMatchObject({ kind: 'cron', dismissed: true })
+    // A real end (CronDelete) is still a real clear.
+    useAgentStatus.getState().setLoop('n7', false)
+    expect(useAgentStatus.getState().byId['n7'].loop).toBeUndefined()
+  })
+
+  it('restores `loop.dismissed` on load, and a new recurring event un-dismisses', async () => {
+    vi.stubGlobal(
+      'localStorage',
+      memStorage({
+        'nodeterm.agentStatus': JSON.stringify({
+          n8: { unread: false, loop: { count: 1, kind: 'schedule', items: [], dismissed: true } }
+        })
+      })
+    )
+    const { useAgentStatus } = await import('./agentStatus')
+    expect(useAgentStatus.getState().byId['n8'].loop).toMatchObject({ kind: 'schedule', dismissed: true })
+    // setLoop(active) rebuilds the entry from scratch — a freshly created job shows its card again.
+    useAgentStatus.getState().setLoop('n8', true, 'cron')
+    expect(useAgentStatus.getState().byId['n8'].loop?.dismissed).toBeUndefined()
+  })
+
+  it('is a no-op for a node with no loop entry', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().dismissLoopCard('n9')
+    expect(useAgentStatus.getState().byId['n9']).toBeUndefined()
+  })
+
   it('tolerates a persisted entry without loop (older format)', async () => {
     vi.stubGlobal(
       'localStorage',

@@ -88,8 +88,17 @@ export const RESTART_DELIVERY_TIMEOUT_MS = DELIVERY_ATTEMPTS * VERIFY_TIMEOUT_MS
  * One bounded pane query. Unbounded, a wedged tmux server (or a relay whose IPC never answers)
  * would hang the restart — and with it the bulk run's summary — forever. A lapsed, failed or
  * empty query reads as `null`: "we cannot see this pane right now".
+ *
+ * Exported for hibernation's WAKE, which asks the same question for a sharper reason: hours pass
+ * between the exit and the resume, so the pane may since have been given to vim, to `top`, or to a
+ * CLI the user launched by hand — and the resume's first write is un-KILL_LINE'd, so it would be
+ * spliced into whatever is there. One definition, not a second copy in the node (a duplicated rule
+ * drifts; see CLAUDE.md's "Adding a new agent" rule 10).
  */
-async function queryPane(fn: () => Promise<string | null>, ms: number): Promise<string | null> {
+export async function queryPaneWithin(
+  fn: () => Promise<string | null>,
+  ms: number
+): Promise<string | null> {
   let lapse: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
@@ -159,7 +168,7 @@ export async function performExitPhase(d: {
   // ── Pre-flight: prove we can SEE this pane before quitting anything in it (see the header).
   // Reported as `'not-eligible'`, the outcome that means "not a target right now" and is the one
   // the menu and the notice already have wording for. Nothing has been written at this point.
-  const before = await queryPane(d.paneCommand, timeoutMs)
+  const before = await queryPaneWithin(d.paneCommand, timeoutMs)
   if (before === null || gone()) return 'not-eligible'
   // Clear the prompt before typing the exit command. The pane is a REPL the user types into: a
   // half-written prompt left in it would otherwise be submitted as `…refactor the/exit` — the
@@ -178,7 +187,7 @@ export async function performExitPhase(d: {
   let last: string | null = null
   for (;;) {
     await new Promise((r) => setTimeout(r, pollMs))
-    const pane = await queryPane(d.paneCommand, Math.max(0, deadline - Date.now()))
+    const pane = await queryPaneWithin(d.paneCommand, Math.max(0, deadline - Date.now()))
     if (gone()) return 'not-eligible' // stop polling a pane that no longer exists
     // Two ways to know the CLI let go of the pane. The allowlist is the confident one and is
     // taken immediately. The other — "the foreground command is no longer what it was before the
