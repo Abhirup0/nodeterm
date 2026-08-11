@@ -168,6 +168,23 @@ describe('ControlModeClient.command', () => {
     expect(await first).toEqual({ ok: true, body: ['80'] })
     expect(await second).toEqual({ ok: true, body: ['24'] })
   })
+  it('refuses a line with an embedded newline instead of desyncing the FIFO', async () => {
+    // One `command()` call queues ONE resolver, so a line carrying its own newline would send TWO
+    // commands, draw TWO replies, and pair every later reply with the wrong caller — forever, since
+    // this layer has no timers to notice. Reject before anything is written or queued.
+    const { client, child } = makeClient()
+    const bad = client.command('display -p a\nkill-server')
+    await expect(bad).rejects.toThrow(/newline/)
+    expect(child.writes).toEqual([])
+    const good = client.command('list-panes')
+    child.feed(reply(1, ['still in phase']))
+    await expect(good).resolves.toEqual({ ok: true, body: ['still in phase'] })
+  })
+  it('refuses a line with an embedded carriage return', async () => {
+    const { client, child } = makeClient()
+    await expect(client.command('display -p a\rkill-server')).rejects.toThrow(/newline/)
+    expect(child.writes).toEqual([])
+  })
   it('rejects instead of hanging when the client is not running', async () => {
     const spawner = new FakeControlSpawn()
     const client = new ControlModeClient({
@@ -210,7 +227,12 @@ describe('ControlModeClient exit', () => {
     const { client, child } = makeClient({ onExit })
     const pending = client.command('list-panes')
     child.feed('%begin 1700 1 0\n')
-    child.feed('x'.repeat(MAX_PENDING_BYTES + 1))
+    // Fed in realistic ~64KiB pipe chunks, each one complete lines and each far under the cap: what
+    // must trip is the total accumulated SINCE THE LAST COMPLETED EVENT (no event can complete while
+    // the block stays open), not any single chunk's length.
+    const chunk = `${'x'.repeat(64 * 1024 - 1)}\n`
+    const enough = Math.ceil(MAX_PENDING_BYTES / chunk.length) + 1
+    for (let i = 0; i < enough && client.alive; i++) child.feed(chunk)
     expect(child.killed).toBe(1)
     expect(onExit).toHaveBeenCalledTimes(1)
     expect(client.alive).toBe(false)

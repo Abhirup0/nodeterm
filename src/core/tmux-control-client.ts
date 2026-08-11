@@ -113,8 +113,19 @@ export class ControlModeClient {
     return ok
   }
 
-  /** Run one control-mode command line. Rejects if the client is not running or dies while waiting. */
+  /**
+   * Run ONE control-mode command line. Every failure arrives as a rejected promise (this class never
+   * throws at the caller): a `line` that is not a single line, a client that is not running, or a
+   * client that dies while the reply is outstanding.
+   */
   command(line: string): Promise<{ ok: boolean; body: string[] }> {
+    if (/[\r\n]/.test(line)) {
+      // The protocol is one command per line and this call queues exactly ONE resolver, so a line
+      // carrying its own newline would run two commands, draw two replies, and pair every later
+      // reply with the wrong caller — permanently, because positional correlation has no timer to
+      // notice. Refusing the input is what keeps that state unreachable.
+      return Promise.reject(new Error('tmux control-mode command must not contain a newline'))
+    }
     if (!this.alive || !this.proc) {
       return Promise.reject(new Error('tmux control-mode client is not running'))
     }
