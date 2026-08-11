@@ -28,7 +28,8 @@ import {
   disposeTerminalOnUnmount,
   disposeParkedTerminal,
   disposeAllParkedTerminals,
-  isNodeOffscreen
+  isNodeOffscreen,
+  wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
 import {
@@ -169,6 +170,7 @@ import {
 } from '../terminal/agent-restart'
 import { planHibernation, HIBERNATE_SWEEP_MS } from '../terminal/hibernation-policy'
 import { buildHibernationCandidates } from '../lib/hibernationCandidates'
+import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
@@ -5016,15 +5018,15 @@ export function Canvas() {
       ...(isLoop
         ? ([
             {
-              // Same as the card's own ×: drops the CARD, never the cron/schedule job itself.
+              // Same as the card's own ×: drops the CARD, never the cron/schedule job itself —
+              // and literally the same code path (`applyLoopDismiss`), because these two surfaces
+              // are one user action and had already drifted apart once: this one cleared the
+              // durable `loop` entry, which is the only thing keeping Eco mode from quitting the
+              // CLI a live cron was going to fire in.
               label: 'Dismiss card',
               icon: <IconTrash />,
               danger: true,
-              onClick: () => {
-                const pid = id.slice('loop-'.length)
-                useAgentStatus.getState().setLoop(pid, false)
-                useAgentNodes.getState().clearLoop(pid)
-              }
+              onClick: () => applyLoopDismiss(id.slice('loop-'.length))
             }
           ] as MenuItem[])
         : [])
@@ -5439,6 +5441,12 @@ export function Canvas() {
   // whole board on every Canvas render.
   const setKanbanModalNode = useCallback((id: string | null) => {
     kanbanModalNodeRef.current = id
+    // Opening a card IS opening the session — the second way in, and the one the canvas
+    // visibility observer says nothing about. A hibernated node reached this way resumes its
+    // conversation just as it would on a pan-back, instead of showing the bare shell it was
+    // exited to with nothing on screen to explain it. No-op for every node that is not
+    // hibernated (the node re-reads the flag itself).
+    if (id) wakeHibernatedNode(id)
   }, [])
 
   const onPaletteQuery = useCallback((q: string) => {
@@ -7098,7 +7106,14 @@ export function Canvas() {
           })),
           // The nodes' own visibility observers (Phase 2's) are the authority — never a second
           // observer here, and "we have not heard" is never read as "nobody is looking".
-          isOffscreen: isNodeOffscreen,
+          //
+          // …with ONE override the observers structurally cannot know about: a kanban card modal
+          // co-attaches the same tmux session over a canvas nobody can see, so its node is
+          // off-screen by every measurement and yet is the one session the user is looking at.
+          // Quitting the CLI under an open modal is the same intrusion as quitting it under the
+          // node itself.
+          isOffscreen: (nodeId) =>
+            nodeId !== kanbanModalNodeRef.current && isNodeOffscreen(nodeId),
           // Wired = mounted with a live terminal that registered its hibernate pair. An
           // offscreen-DISPOSED node (Phase 2) has already given its buffer back and has no pane
           // to quit, so it drops out here.
@@ -7117,6 +7132,15 @@ export function Canvas() {
           try {
             if ((await fns.exit()) === 'exited') {
               useAgentStatus.getState().setHibernated(nodeId, true)
+              // A batch can take ~12 s, and the user may have arrived during it. The node's own
+              // exit closure re-checks visibility before writing anything, but the pan can also
+              // land in the window between that check and this line — and by then the visible
+              // EDGE has passed, so no wake trigger is left and the node would sit SLEEPING in
+              // front of the user. Nudge it: the node re-reads the flag itself, so this is a
+              // no-op wherever the user did not arrive.
+              if (!isNodeOffscreen(nodeId) || nodeId === kanbanModalNodeRef.current) {
+                wakeHibernatedNode(nodeId)
+              }
             }
             // 'exit-timeout' / 'not-eligible': the CLI is still running and NOTHING is recorded —
             // marking it hibernated would put a SLEEPING chip on a live session and suppress the

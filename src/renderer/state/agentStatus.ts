@@ -120,7 +120,9 @@ export interface AgentStatusStore {
   sweepStaleWorking(staleMs?: number): void
   setSession(id: string, session: string): void
   setSessionId(id: string, sessionId: string): void
-  /** Mark the node's agent CLI as exited-for-RAM (true) or live again (false). Persisted. */
+  /** Mark the node's agent CLI as exited-for-RAM (true) or live again (false). Persisted.
+   *  Waking also restarts the idle clock (`lastEventAt`), so a quiet resumed session is not
+   *  re-hibernated on the next sweep. */
   setHibernated(id: string, on: boolean): void
   markUnread(id: string): void
   /**
@@ -308,7 +310,23 @@ export function createAgentStatusSession(
         if (agentId !== undefined) next.agentId = agentId
         // Retain the approval ticket only while blocked; any other state clears it (transient).
         next.pendingId = state === 'blocked' ? (pendingId ?? prev.pendingId) : undefined
-        return { byId: { ...s.byId, [id]: next } }
+        // A LIVE state is proof the CLI is running, so the hibernated flag is simply wrong and is
+        // dropped here — the one self-heal this flag has. It is set by a controller that watched
+        // the CLI let go of the pane, but the world moves on without us: the user relaunches the
+        // agent by hand, a wake lands and its `--resume` starts reporting, or a resume we could
+        // not confirm turns out to have worked. Left standing, the flag is not cosmetic: it
+        // renders RUNNING and SLEEPING side by side, and (because a hibernated node is skipped by
+        // the sweep) exempts that session from Eco for good.
+        // `done` deliberately does NOT clear it — a hibernated node's last known state IS done,
+        // and a late Stop POST arriving after the exit would undo the hibernation we just did.
+        const alive = state === 'working' || state === 'blocked' || state === 'waiting'
+        if (alive && prev.hibernated) next.hibernated = undefined
+        const byId = { ...s.byId, [id]: next }
+        // `state` itself is transient, so a plain transition writes nothing — but dropping a
+        // PERSISTED flag has to reach disk, or a relaunch would restore a hibernated node that
+        // has been demonstrably running since.
+        if (alive && prev.hibernated) save(byId)
+        return { byId }
       }),
 
     sweepStaleWorking: (staleMs = STALE_WORKING_MS) =>
@@ -350,6 +368,13 @@ export function createAgentStatusSession(
         // Cleared by dropping the key, not by storing `false`: `save` skips entries that carry
         // nothing durable, so a woken node leaves no residue behind in localStorage.
         const next = { ...prev, hibernated: on ? true : undefined }
+        // Waking RESTARTS the idle clock. Without this, a node whose conversation was resumed but
+        // whose CLI then sits quiet (an agent that fires no hook until you talk to it) still
+        // carries the `lastEventAt` from before it was hibernated — hours old — so the very next
+        // sweep, 60 s later, would quit the session the user just came back to. Hibernating does
+        // not touch the clock: nothing happened in that session, and the flag itself is what keeps
+        // the sweep off it.
+        if (!on) next.lastEventAt = Date.now()
         const byId = { ...s.byId, [id]: next }
         save(byId)
         return { byId }

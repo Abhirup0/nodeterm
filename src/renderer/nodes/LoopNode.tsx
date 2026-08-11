@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import type { CanvasNode } from '../state/workspace'
 import { useAgentNodes } from '../state/agentNodes'
-import { useAgentStatus } from '../state/agentStatus'
+import { applyLoopDismiss } from '../lib/loopCard'
 import { useSession } from '../session/session'
 
 /**
@@ -37,19 +37,13 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // removed while the app wasn't watching (or one the user just wants gone) needs an ×.
   // Dismissing only drops the CARD — it does not touch the cron job itself.
   //
-  // …which is why a cron/schedule card is dismissed by MARKING it, not by clearing the entry.
-  // That entry is the only record that this node has a wakeup pending, and it is what keeps Eco
-  // mode from hibernating the node (`/exit` kills the CLI, and the scheduled wakeup dies with it).
-  // Clearing it dropped that guard while the job kept running — the card's own tooltip promises
-  // the opposite. An in-session `/loop` still clears outright: it dies with its session anyway,
-  // so there is no fact left to keep.
+  // …which is why the whole decision lives in `lib/loopCard.ts`, shared with the card's
+  // right-click "Dismiss card": a cron/schedule dismiss MARKS the entry rather than clearing it,
+  // because that entry is the only record that a wakeup is pending — and the guard that keeps Eco
+  // mode from `/exit`ing the CLI it lives in.
   const dismiss = (e: React.MouseEvent) => {
     e.stopPropagation()
-    const parentId = id.replace(/^loop-/, '')
-    const cs = useAgentStatus.getState()
-    if (kind === 'cron' || kind === 'schedule') cs.dismissLoopCard(parentId)
-    else cs.setLoop(parentId, false)
-    useAgentNodes.getState().clearLoop(parentId)
+    applyLoopDismiss(id.replace(/^loop-/, ''))
   }
 
   // The cards are `selectable: false` in React Flow (a rubber band must not sweep a fan-out

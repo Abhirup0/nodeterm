@@ -58,6 +58,44 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     expect(JSON.parse(store.getItem('nodeterm.agentStatus') ?? '{}').n1?.hibernated).toBeUndefined()
   })
 
+  it('clears `hibernated` on a LIVE state — a hook event is proof the CLI is running', async () => {
+    // Left standing, the flag renders RUNNING and SLEEPING at once AND exempts the session from
+    // Eco for good (the sweep skips hibernated nodes). The three ways it goes stale are all real:
+    // the user relaunched the agent by hand, a wake landed, or a resume we could not confirm
+    // actually worked.
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    for (const state of ['working', 'blocked', 'waiting'] as const) {
+      useAgentStatus.getState().setHibernated('n10', true)
+      useAgentStatus.getState().setState('n10', state, 'claude')
+      expect(useAgentStatus.getState().byId['n10'].hibernated, state).toBeUndefined()
+      // …and it reaches disk, or a relaunch would restore a flag we have disproved.
+      expect(JSON.parse(store.getItem('nodeterm.agentStatus')!).n10?.hibernated, state).toBeUndefined()
+      useAgentStatus.getState().setState('n10', undefined)
+    }
+  })
+
+  it('keeps `hibernated` through a `done` event — a late Stop must not undo the exit', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setHibernated('n11', true)
+    useAgentStatus.getState().setState('n11', 'done', 'claude')
+    expect(useAgentStatus.getState().byId['n11'].hibernated).toBe(true)
+  })
+
+  it('waking restarts the idle clock, so a quiet resumed session is not re-hibernated', async () => {
+    vi.stubGlobal('localStorage', memStorage())
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.setState({
+      byId: { n12: { unread: false, state: 'done', lastEventAt: Date.now() - 6 * 3600_000, hibernated: true } }
+    })
+    useAgentStatus.getState().setHibernated('n12', false)
+    const st = useAgentStatus.getState().byId['n12']
+    expect(st.hibernated).toBeUndefined()
+    expect(Date.now() - st.lastEventAt!).toBeLessThan(5000) // hours-old clock replaced
+  })
+
   it('restores `hibernated` on load (the CLI stays exited across an app restart)', async () => {
     vi.stubGlobal(
       'localStorage',

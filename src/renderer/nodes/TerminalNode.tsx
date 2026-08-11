@@ -85,7 +85,7 @@ import {
   validCellSize,
   type Vec2
 } from '../lib/glyphGridNode'
-import { deliverCommand, type DeliveryIo } from '../terminal/command-delivery'
+import { deliverCommand, KILL_LINE, type DeliveryIo } from '../terminal/command-delivery'
 import {
   agentHibernateFns,
   guardConcurrentRestart,
@@ -669,6 +669,23 @@ export function isNodeOffscreen(nodeId: string): boolean {
 }
 
 /**
+ * Each mounted node publishes its wake trigger here, so anything that means "the user is looking
+ * at this session now" can ask for the conversation back without owning the machinery: the sweep
+ * itself (a node hibernated in the same tick the user panned back to it), and the kanban card
+ * modal (a second, equally real way of opening a session — the canvas visibility observer says
+ * nothing about it).
+ *
+ * Same park-surviving reason as `restartSubs`: no entry = nobody is mounted = nothing to wake.
+ */
+const wakeSubs = new Map<string, () => void>()
+
+/** Ask a node to resume its hibernated CLI. No-op if it is not mounted, or not hibernated (the
+ *  node re-reads the flag itself — this is a nudge, never an assertion). */
+export function wakeHibernatedNode(nodeId: string): void {
+  wakeSubs.get(nodeId)?.()
+}
+
+/**
  * The mounted instance publishes its copy-feedback sink here, for the same reason as
  * `restartSubs`: the OSC 52 handler is registered ONCE per xterm instance and that instance
  * SURVIVES A PARK (project switch → remount within TERM_PARK_MS), so a handler holding this
@@ -1091,11 +1108,16 @@ export function TerminalNode({
   // reports nothing at all. Delayed because the spawn this wake writes into is still in flight at
   // mount. Skipped while the node is known-offscreen — the reveal edge owns that case.
   useEffect(() => {
+    // Published for the two askers that are not this node: the sweep (a node hibernated in the
+    // very tick the user panned back to it) and the kanban card modal.
+    const trigger = (): void => wakeRef.current()
+    wakeSubs.set(id, trigger)
     const t = setTimeout(() => {
       if (!isNodeOffscreen(id)) wakeRef.current()
     }, WAKE_MOUNT_DELAY_MS)
     return () => {
       clearTimeout(t)
+      if (wakeSubs.get(id) === trigger) wakeSubs.delete(id)
       if (wakeTimerRef.current) {
         clearTimeout(wakeTimerRef.current)
         wakeTimerRef.current = null
@@ -2585,6 +2607,15 @@ export function TerminalNode({
     // (parked → remounted) terminal never reaches the spawn continuation.
     const unregisterHibernate = registerAgentHibernate(id, {
       exit: guardConcurrentRestart(id, async (): Promise<ExitPhaseOutcome> => {
+        // "Is this node STILL out of view?" — re-asked at FIRE time, never trusted from the plan,
+        // the same discipline as `mayDisposeOffscreen`. A sweep can spend ~12 s working through
+        // its batch, and the node whose turn comes last may be one the user panned back to and is
+        // now typing in: KILL_LINE + `/exit` would land in a pane they are watching, taking their
+        // half-written prompt with it. Worse, the visible EDGE has already passed by then, so no
+        // wake trigger is left and the node would sit SLEEPING on screen until clicked.
+        // (`isNodeOffscreen` and this node's own `wasVisibleRef` are the same observer's verdict;
+        // the map is used here so the sweep and the node cannot disagree.)
+        if (!isNodeOffscreen(id)) return 'not-eligible'
         // SSH / relay sessions are excluded in v1, exactly as the offscreen dispose excludes them
         // (offscreen-policy.ts): the exit and its much later resume would race the ControlMaster /
         // relay lifecycle, and a wake that cannot reach the host leaves a dead conversation behind.
@@ -2609,14 +2640,10 @@ export function TerminalNode({
         const st = useAgentStatus.getState().byId[id]
         const agentSessionId = st?.sessionId
         if (!agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
-        // THE load-bearing gate of the wake half. Hours can pass between the exit and this
-        // resume, and the pane is a REPL the user can type into: by now it may belong to vim, to
-        // `top`, or to a claude the user launched by hand. `deliverCommand`'s first write is NOT
-        // preceded by a Ctrl-U (the exit half is where that lives), so a launch line typed into a
-        // live program is sent to that program — a message to somebody's session, or a mangled
-        // command. A pane we cannot READ answers null and is refused for the same reason.
-        const pane = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
-        if (!isShellCommand(pane)) return 'not-eligible'
+        // Command FIRST, pane check LAST. Both of these awaits can take a moment (the claude
+        // version probe behind `ensureActivePermissionMode` most of all), and whatever is asked
+        // first is stale by the time the delivery runs — so the fact that must be freshest is the
+        // one asked last: what owns the pane we are about to type into.
         // Same funnel, same await, same reasoning as the restart closure above: the permission
         // mode is a property of how a session is LAUNCHED, so it is re-resolved now (a wake can be
         // hours after the exit, and days after the node was created).
@@ -2624,6 +2651,21 @@ export function TerminalNode({
         const command = base
           ? withPermissionMode(base, agentId, await ensureActivePermissionMode(agentId))
           : undefined
+        // THE load-bearing gate of the wake half. Hours can pass between the exit and this
+        // resume, and the pane is a REPL the user can type into: by now it may belong to vim, to
+        // `top`, or to a claude the user launched by hand — and a launch line typed into a live
+        // program is sent to that program, as a message or a mangled command. A pane we cannot
+        // READ answers null and is refused for the same reason.
+        const pane = await queryPaneWithin(() => api.pty.paneCommand(id), RESTART_EXIT_TIMEOUT_MS)
+        if (!isShellCommand(pane)) return 'not-eligible'
+        // Clear the line before the launch line goes in. The shell above is the one WE exited to,
+        // hours ago — nothing stops a passer-by (or a stray paste, or the user's own aborted
+        // command) from having left a half-typed line at its prompt, and `deliverCommand`'s first
+        // write is not preceded by a Ctrl-U. The exit half clears the line for exactly this
+        // reason; the wake half owes the same. Deliberately HERE and not inside
+        // `performResumePhase`: that function's output is pinned byte-for-byte by Task 8's tests,
+        // and the restart path (which just cleared the line itself) must not clear it twice.
+        restartIo.write(KILL_LINE)
         return performResumePhase({
           agentId,
           sessionId: agentSessionId,
