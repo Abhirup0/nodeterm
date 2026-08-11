@@ -90,8 +90,16 @@ This is the rule the whole feature exists to honour, and every layer preserves i
   `err.message` and a bare `no such file or directory` also matches a tmux client missing a shared
   library (exit 127 on *every* socket) and a dead ssh ControlMaster. Laundering either into "no
   sessions here" prints an empty panel over 20 live ones.
-- `parseRemoteSessionMemory` returns `ok:false` on a missing **or out-of-order** section marker, and
-  on an empty process table (a host always has processes).
+- `parseRemoteSessionMemory` returns `ok:false` on a missing **or out-of-order** section marker, on
+  an empty process table (a host always has processes), and — the remote counterpart of the rule
+  above — when **no socket answered**. Each socket is fenced in the reply (`##SOCK <name>` … its
+  tmux exit status as `##SOCKRC <n>`) with tmux's stderr folded in (`2>&1`), and the SAME
+  `isNoServerError` classifies it: exit 0 answers with panes, "no server running" / "error
+  connecting to … (no such file or directory)" answers "nothing here", **anything else did not
+  answer** (nor did a fence the stream cut off mid-socket). Before this the sweep was
+  `{ tmux …; tmux …; } || true` with stderr discarded, so a host whose tmux client could not start
+  — exit 127 on *every* socket, live sessions untouched — produced a stream byte-identical to an
+  idle host's and the panel said "No sessions are running here." over thirty of them.
 - The store carries `ok:false` through untouched, and treats a *rejected* call as the same fact.
 - The panel renders four distinct sentences: "Could not measure sessions on this machine.",
   "Measuring…", "No sessions are running here.", and the list. The grand total and the
@@ -133,10 +141,13 @@ under `/bin/sh`** against a fake host tree — the same discipline as `remote-cl
 comment), and would have made **every healthy host report `ok:false`**. The markers are quoted for
 that reason.
 
-Two more properties of that script are load-bearing: every section header is printed
-**unconditionally** (a missing one means the stream was cut short, not that the host had nothing),
-and the socket names + `-F` format come from the shared constants, so the remote sweep can never
-look at a different socket or ask for different fields than the local one. A non-Linux host has no
+Three more properties of that script are load-bearing: every section header is printed
+**unconditionally** (a missing one means the stream was cut short, not that the host had nothing);
+the socket names + `-F` format come from the shared constants, so the remote sweep can never
+look at a different socket or ask for different fields than the local one; and **each socket is
+fenced with its own tmux exit status and its stderr** (§4) — an exit status alone cannot tell an
+unused socket from a broken tmux, and dropping both is what let a failed sweep render as an empty
+host. A non-Linux host has no
 `/proc/meminfo`, so its `mem` is legitimately `null` — the pill must pulse there, never show 0.
 
 ## 7. Which machine answers

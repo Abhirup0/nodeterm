@@ -12,11 +12,23 @@ import {
 
 const run = promisify(execFile)
 
+/** One socket's fence inside the `##PANES` section: what the generated command prints per socket.
+ *  Every fixture below goes through this, so a change to the fence breaks the tests loudly rather
+ *  than leaving them asserting a shape the command no longer emits. */
+const sock = (name: string, rc: number, body = ''): string =>
+  `##SOCK ${name}\n${body}##SOCKRC ${rc}\n`
+
+/** The two sockets answering "no server running" — the normal state of an idle host, and the
+ *  baseline every "the panes are what matters" fixture wants. */
+const bothIdle = (panes = ''): string =>
+  sock('node-terminal', 0, panes) + sock('nodeterm-rmt', 1, 'no server running on /tmp/x\n')
+
 describe('parseRemoteSessionMemory', () => {
   it('parses all three sections into a report', () => {
     const r = parseRemoteSessionMemory(
       '##MEM\nMemAvailable: 13500000 kB\nMemTotal: 65700000 kB\n' +
-        '##PANES\nnt-term-a|100|claude\n' +
+        '##PANES\n' +
+        bothIdle('nt-term-a|100|claude\n') +
         '##PROCS\n100 1 1024\n200 100 358400\n'
     )
     expect(r.ok).toBe(true)
@@ -26,15 +38,87 @@ describe('parseRemoteSessionMemory', () => {
   })
 
   it('reports ok:false when the PROCS section is missing (the read was cut short)', () => {
-    const r = parseRemoteSessionMemory('##MEM\n##PANES\nnt-term-a|100|claude\n')
+    const r = parseRemoteSessionMemory('##MEM\n##PANES\n' + bothIdle('nt-term-a|100|claude\n'))
     expect(r.ok).toBe(false)
     expect(r.rows).toEqual([])
   })
 
   it('reports ok:true with no rows when the host has no nt- sessions', () => {
-    const r = parseRemoteSessionMemory('##MEM\n##PANES\n##PROCS\n100 1 1024\n')
+    const r = parseRemoteSessionMemory('##MEM\n##PANES\n' + bothIdle() + '##PROCS\n100 1 1024\n')
     expect(r.ok).toBe(true)
     expect(r.rows).toEqual([])
+  })
+
+  // The whole point of the per-socket fence. `{ tmux …; tmux …; } || true` with stderr discarded
+  // produced a byte-identical stream for "this host has no tmux server" and "every tmux call on
+  // this host failed", and the panel rendered the second as "No sessions are running here.".
+  describe('a socket that FAILED is not a socket that answered "nothing"', () => {
+    const procs = '##PROCS\n100 1 1024\n'
+
+    it('accepts tmux saying there is no server (an ANSWER: the socket is simply unused)', () => {
+      const r = parseRemoteSessionMemory(
+        '##MEM\n##PANES\n' +
+          sock('node-terminal', 1, 'no server running on /tmp/tmux-0/node-terminal\n') +
+          sock('nodeterm-rmt', 1, 'error connecting to /tmp/tmux-0/nodeterm-rmt (No such file or directory)\n') +
+          procs
+      )
+      expect(r.ok).toBe(true)
+      expect(r.rows).toEqual([])
+    })
+
+    it('reports ok:false when EVERY socket failed for some other reason', () => {
+      // A tmux client missing a shared library exits 127 on every socket — the same binary, so the
+      // host's live sessions are untouched and very much still there.
+      const linker =
+        'tmux: error while loading shared libraries: libevent-2.1.so.7: cannot open shared object file: No such file or directory\n'
+      const r = parseRemoteSessionMemory(
+        '##MEM\n##PANES\n' +
+          sock('node-terminal', 127, linker) +
+          sock('nodeterm-rmt', 127, linker) +
+          procs
+      )
+      expect(r.ok).toBe(false)
+      expect(r.rows).toEqual([])
+    })
+
+    it('reports ok:true when only SOME sockets failed — one answer is enough', () => {
+      const r = parseRemoteSessionMemory(
+        '##MEM\n##PANES\n' +
+          sock('node-terminal', 0, 'nt-term-a|100|claude\n') +
+          sock('nodeterm-rmt', 13, 'error connecting to /tmp/tmux-1/nodeterm-rmt (Permission denied)\n') +
+          '##PROCS\n100 1 1024\n'
+      )
+      expect(r.ok).toBe(true)
+      expect(r.rows.map((x) => x.nodeId)).toEqual(['term-a'])
+    })
+
+    it('reports ok:false when a socket fence was never closed (the stream was cut mid-socket)', () => {
+      const r = parseRemoteSessionMemory(
+        '##MEM\n##PANES\n##SOCK node-terminal\nnt-term-a|100|claude\n' + procs
+      )
+      expect(r.ok).toBe(false)
+      expect(r.rows).toEqual([])
+    })
+
+    // The fence is matched against the sockets we asked for and a numeric status, so a session
+    // whose NAME or foreground command looks like a marker cannot open or close a block.
+    it('cannot be fenced by pane data that looks like a marker', () => {
+      // The fake opener sits AFTER a real pane and the fake closer INSIDE a real pane line, so a
+      // loosened match (`startsWith('##SOCK ')`, or an unanchored `##SOCKRC`) drops one of the two
+      // rows instead of merely renaming a command.
+      const r = parseRemoteSessionMemory(
+        '##MEM\n##PANES\n' +
+          sock(
+            'node-terminal',
+            0,
+            'nt-term-a|100|claude\n##SOCK not-a-socket\nnt-term-b|200|##SOCKRC 0\n'
+          ) +
+          sock('nodeterm-rmt', 1, 'no server running\n') +
+          '##PROCS\n100 1 1024\n200 1 2048\n'
+      )
+      expect(r.ok).toBe(true)
+      expect(r.rows.map((x) => x.nodeId).sort()).toEqual(['term-a', 'term-b'])
+    })
   })
 
   // An ssh exec channel is not a clean pipe — a login shell's rc file can write to stdout ahead of
@@ -47,7 +131,8 @@ describe('parseRemoteSessionMemory', () => {
     const r = parseRemoteSessionMemory(
       '##PROCS\n' +
         '##MEM\nMemAvailable: 1024 kB\nMemTotal: 2048 kB\n' +
-        '##PANES\nnt-term-a|100|claude\n' +
+        '##PANES\n' +
+        bothIdle('nt-term-a|100|claude\n') +
         '##PROCS\n100 1 1024\n200 100 358400\n'
     )
     expect(r.ok).toBe(false)
@@ -58,7 +143,8 @@ describe('parseRemoteSessionMemory', () => {
   it('is not confused by a marker appearing inside pane or process data', () => {
     const r = parseRemoteSessionMemory(
       '##MEM\nMemAvailable: 1024 kB\nMemTotal: 2048 kB\n' +
-        '##PANES\nnt-term-b|300|##PROCS\n' +
+        '##PANES\n' +
+        bothIdle('nt-term-b|300|##PROCS\n') +
         '##PROCS\n300 1 1024\n##PANES\n400 1 2048\n'
     )
     expect(r.ok).toBe(true)
@@ -72,9 +158,13 @@ describe('parseRemoteSessionMemory', () => {
   // `bySession` map makes the same promise).
   it('collapses a session reported by several panes into one row', () => {
     const r = parseRemoteSessionMemory(
-      '##MEM\n##PANES\nnt-term-a|100|claude\nnt-term-a|300|bash\n##PROCS\n100 1 1024\n300 1 2048\n'
+      '##MEM\n##PANES\n' +
+        sock('node-terminal', 0, 'nt-term-a|100|claude\n') +
+        sock('nodeterm-rmt', 0, 'nt-term-a|300|bash\n') +
+        '##PROCS\n100 1 1024\n300 1 2048\n'
     )
     expect(r.ok).toBe(true)
+    // First socket in sweep order wins, exactly as the local leg's first-wins `bySession` does.
     expect(r.rows.map((x) => x.panePid)).toEqual([100])
   })
 })
@@ -170,14 +260,42 @@ describe('remoteSessionMemoryCommand under /bin/sh', () => {
     expect(r.rows.map((x) => x.nodeId)).toEqual(['term-a'])
   })
 
-  it('exits 0 and reports no rows when no tmux server is running', async () => {
-    const empty = fakeHost('sessmem-notmux-', { tmux: '#!/bin/sh\nexit 1\n' })
+  // tmux's OWN words for "there is no server on this socket", on stderr with a non-zero status.
+  // A blanket `exit 1` would pass this test while proving nothing: it cannot tell "no server" from
+  // "tmux is broken", which are the two cases the fence exists to separate.
+  it('exits 0 and reports no rows when tmux says no server is running', async () => {
+    const empty = fakeHost('sessmem-notmux-', {
+      tmux: '#!/bin/sh\necho "no server running on /tmp/tmux-0/default" >&2\nexit 1\n'
+    })
     const { stdout } = await run('/bin/sh', ['-c', remoteSessionMemoryCommand()], {
       env: { ...process.env, PATH: `${empty}:${process.env.PATH ?? ''}` }
     })
     const r = parseRemoteSessionMemory(stdout)
     // A clean miss is an ANSWER: the sweep ran, the host simply has nothing.
     expect(r.ok).toBe(true)
+    expect(r.rows).toEqual([])
+  })
+
+  // The failure this whole fence was added for, end to end through the real shell: a tmux client
+  // that cannot start exits 127 on EVERY socket while the host's sessions keep running. Under the
+  // old command (stderr to /dev/null, status dropped) this stream was byte-identical to the one
+  // above and the panel said "No sessions are running here." over thirty live sessions.
+  it('reports ok:false when the tmux client itself is broken on every socket', async () => {
+    const broken = fakeHost('sessmem-brokentmux-', {
+      tmux:
+        '#!/bin/sh\necho "tmux: error while loading shared libraries: libevent-2.1.so.7: ' +
+        'cannot open shared object file: No such file or directory" >&2\nexit 127\n'
+    })
+    const { stdout } = await run('/bin/sh', ['-c', remoteSessionMemoryCommand()], {
+      env: { ...process.env, PATH: `${broken}:${process.env.PATH ?? ''}` }
+    })
+    // The shell still exits 0 and still prints all three markers plus a real process table — which
+    // is exactly why the panes section had to carry a per-socket STATUS to tell the two apart.
+    expect(stdout).toContain('##MEM')
+    expect(stdout).toContain('##PANES')
+    expect(stdout).toContain('##PROCS')
+    const r = parseRemoteSessionMemory(stdout)
+    expect(r.ok).toBe(false)
     expect(r.rows).toEqual([])
   })
 })
