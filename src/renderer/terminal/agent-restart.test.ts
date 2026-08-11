@@ -7,7 +7,9 @@ import {
   exitSequence,
   guardConcurrentRestart,
   isShellCommand,
+  performExitPhase,
   performRestartResume,
+  performResumePhase,
   planBulkRestart,
   registerAgentRestart,
   restartEligibility,
@@ -444,6 +446,202 @@ describe('performRestartResume', () => {
     await vi.advanceTimersByTimeAsync(2000)
     expect(await p).toBe('exit-timeout')
     expect(handles).toEqual([])
+  })
+})
+
+describe('performExitPhase', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('quits the CLI and reports exited once the pane reports a shell — writing nothing after', async () => {
+    const { written, io } = fakeIo()
+    let pane = 'claude'
+    const p = performExitPhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => pane,
+      timeoutMs: 6000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(250) // a few polls while the CLI is still up
+    pane = 'zsh'
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('exited')
+    // The exit phase's ENTIRE output: clear the line, then the CLI's own exit command. The resume
+    // line belongs to the other phase, so nothing here may reach the pane after `/exit`.
+    expect(written).toEqual(['\x15', '/exit\r'])
+  })
+
+  it('writes NOTHING and refuses when the pre-flight probe answers null', async () => {
+    const { written, io } = fakeIo()
+    const p = performExitPhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => null, // tmux off / no binary — the poll could never end
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    // A pane we cannot WATCH must never be quit: the CLI would die with the resume never sent.
+    expect(await p).toBe('not-eligible')
+    expect(written).toEqual([])
+  })
+
+  it('reports exit-timeout, without a resume, when the CLI never lets go of the pane', async () => {
+    const { written, io } = fakeIo()
+    const p = performExitPhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => 'claude',
+      timeoutMs: 1000,
+      pollMs: 100
+    })
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(await p).toBe('exit-timeout')
+    expect(written).toEqual(['\x15', '/exit\r']) // never force-killed, never resumed
+  })
+
+  it('refuses a session we could never resume into — the exit alone would lose it', async () => {
+    const { written, io } = fakeIo()
+    expect(
+      await performExitPhase({
+        agentId: 'claude',
+        sessionId: '-bad', // rejected by resumeCommand's SAFE_SESSION_ID
+        io,
+        paneCommand: async () => 'zsh'
+      })
+    ).toBe('not-eligible')
+    expect(
+      await performExitPhase({
+        agentId: 'opencode', // resumable, but no exit sequence
+        sessionId: 's',
+        io,
+        paneCommand: async () => 'zsh'
+      })
+    ).toBe('not-eligible')
+    expect(written).toEqual([])
+  })
+
+  it('respects isLive: a session already gone is never written to', async () => {
+    const { written, io } = fakeIo()
+    expect(
+      await performExitPhase({
+        agentId: 'claude',
+        sessionId: 'sid-1',
+        io,
+        paneCommand: async () => 'zsh',
+        isLive: () => false
+      })
+    ).toBe('not-eligible')
+    expect(written).toEqual([])
+  })
+
+  it('stops polling a pane that dies under the wait', async () => {
+    const { io } = fakeIo()
+    let live = true
+    const p = performExitPhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      paneCommand: async () => 'claude',
+      timeoutMs: 5000,
+      pollMs: 100,
+      isLive: () => live
+    })
+    await vi.advanceTimersByTimeAsync(150)
+    live = false
+    await vi.advanceTimersByTimeAsync(200)
+    expect(await p).toBe('not-eligible') // not a timeout: there is no pane left to time out in
+  })
+})
+
+describe('performResumePhase', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('delivers the bare resume command and reports resumed once the delivery settles', async () => {
+    const { written, io } = fakeIo()
+    const p = performResumePhase({ agentId: 'claude', sessionId: 'sid-1', io })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('resumed')
+    expect(written.join('')).toContain('claude --resume sid-1')
+    expect(written.join('')).not.toContain('/exit') // the exit belongs to the other phase
+  })
+
+  it("prefers the caller's command (permission mode) over the bare one", async () => {
+    const { written, io } = fakeIo()
+    const p = performResumePhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      command: 'claude --resume sid-1 --permission-mode plan'
+    })
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('resumed')
+    expect(written.join('')).toContain('claude --resume sid-1 --permission-mode plan')
+  })
+
+  it('keeps the bare command as the gate even when the caller overrides it', async () => {
+    const { written, io } = fakeIo()
+    expect(
+      await performResumePhase({
+        agentId: 'claude',
+        sessionId: '-bad',
+        io,
+        command: 'claude --resume -bad --permission-mode plan'
+      })
+    ).toBe('not-eligible')
+    expect(written).toEqual([])
+  })
+
+  it('hands the delivery cancel out as the delivery starts', async () => {
+    const { written, io } = silentIo()
+    let cancel: (() => void) | undefined
+    const p = performResumePhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      onDelivery: (c) => {
+        cancel = c
+      }
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(typeof cancel).toBe('function')
+    const delivered = written.length
+    cancel?.()
+    expect(await p).toBe('resumed')
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(written.length).toBe(delivered) // no retries into a torn-down transport
+  })
+
+  it('resolves only once the resume line has left the pane', async () => {
+    const { io } = silentIo()
+    let settled = false
+    const p = performResumePhase({ agentId: 'claude', sessionId: 'sid-1', io }).then((o) => {
+      settled = true
+      return o
+    })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(settled).toBe(false) // written, but still un-submitted through the verify retries
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(await p).toBe('resumed')
+  })
+
+  it('respects isLive: a session that died under the delivery is not a resume', async () => {
+    const { io } = fakeIo()
+    let live = true
+    const p = performResumePhase({
+      agentId: 'claude',
+      sessionId: 'sid-1',
+      io,
+      isLive: () => live
+    })
+    live = false
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(await p).toBe('not-eligible')
   })
 })
 

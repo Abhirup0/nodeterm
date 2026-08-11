@@ -105,11 +105,18 @@ async function queryPane(fn: () => Promise<string | null>, ms: number): Promise<
   }
 }
 
+/** The exit half's own outcomes. `'exited'` means only that the CLI let go of the pane — the
+ *  conversation is not back until the resume half has delivered. */
+export type ExitPhaseOutcome = 'exited' | 'exit-timeout' | 'not-eligible'
+
+/** The resume half's own outcomes. `'not-eligible'` covers both refusals: a session id that could
+ *  never reach a command line, and a pane that stopped existing under the delivery. */
+export type ResumePhaseOutcome = 'resumed' | 'not-eligible'
+
 /**
- * In-place CLI restart: ask the agent to quit, wait until the CLI has let go of the pane, then
- * echo-deliver the resume command into it. Never force-kills — on timeout the CLI is left
- * running and the caller reports the node. Once the exit has been sent, `paneCommand` errors count
- * as "not a shell yet"; the timeout is the backstop.
+ * PHASE 1 — ask the agent to quit and wait until the CLI has let go of the pane. Never
+ * force-kills: on timeout the CLI is left running and the caller reports the node. Once the exit
+ * has been sent, `paneCommand` errors count as "not a shell yet"; the timeout is the backstop.
  *
  * NOTHING is written until one `paneCommand` has come back non-null. The exit command is
  * irreversible — the conversation is only recoverable through the `--resume` that follows it — so
@@ -118,53 +125,30 @@ async function queryPane(fn: () => Promise<string | null>, ms: number): Promise<
  * relaunch never sent, and the user told (after 6s of polling) that "the session was left
  * running". The pre-flight makes that state a plain `'not-eligible'`, with an untouched pane.
  *
- * Resolves only once the resume line has actually LEFT the pane (deliverCommand's echo-verify
- * retries run for up to DELIVERY_ATTEMPTS × VERIFY_TIMEOUT_MS after the first write). The
- * un-submitted line is the pane's most fragile moment — anything typed into it during that window
- * is spliced into the command — so "this restart is over" must mean the delivery settled, not that
- * it was started. `guardConcurrentRestart` frees the node on exactly that boundary.
+ * The bare `resumeCommand` is a gate HERE too, not only in the resume half: a session this app
+ * would refuse to resume must not be exited either, or the exit alone would lose it. Hibernation
+ * (which quits a pane it means to bring back later) depends on that refusal being decided before
+ * the first byte is written.
  */
-export async function performRestartResume(d: {
+export async function performExitPhase(d: {
   agentId: string
   sessionId: string
   io: DeliveryIo
   paneCommand: () => Promise<string | null>
-  /**
-   * The exact launch line to relaunch with, when the caller has one. `withPermissionMode` is the
-   * app's single funnel for every CLI launch, and it needs the ACTIVE mode — an async read that
-   * belongs to the node, not to this module. Without it a canvas running in `acceptEdits` / `plan`
-   * would come back from a bulk restart in the default mode and start prompting.
-   *
-   * Eligibility is still decided by the bare `resumeCommand` below: a session id this app would
-   * not put on a command line (SAFE_SESSION_ID) refuses the restart before anything is written,
-   * whatever the caller passes.
-   */
-  command?: string
   timeoutMs?: number
   pollMs?: number
-  /** Backstop for the resume delivery; see RESTART_DELIVERY_TIMEOUT_MS. */
-  deliveryTimeoutMs?: number
   /**
-   * Handed `deliverCommand`'s cancel the moment a delivery starts — and only then. The delivery
-   * outlives this promise (it runs on its own echo-verify timers), so its lifetime belongs to
-   * whoever owns the transport: a node torn down mid-restart cancels it here instead of letting
-   * a retry rewrite, or the fail-open submit, land in a dead session.
-   */
-  onDelivery?: (cancel: () => void) => void
-  /**
-   * "Is the pane we are restarting still there?" — asked before the exit is written, on every
-   * poll, and once more after the delivery, before a restart is reported. A session can die under
-   * a restart (the node is deleted or respawned, or another client destroys the tmux session): its
-   * io then silently no-ops and reporting `'restarted'` would put a phantom in the bulk summary.
+   * "Is the pane we are quitting still there?" — asked before the exit is written and on every
+   * poll. A session can die under a restart (the node is deleted or respawned, or another client
+   * destroys the tmux session), and there is then no pane left to fail in.
    */
   isLive?: () => boolean
-}): Promise<RestartOutcome> {
+}): Promise<ExitPhaseOutcome> {
   const exit = exitSequence(d.agentId)
   const base = resumeCommand(d.agentId, d.sessionId)
-  // The BARE command is the gate even when the caller overrides it: `resumeCommand` is what
-  // validates the session id before it reaches a command line.
+  // The BARE command is the gate: `resumeCommand` is what validates the session id before it
+  // reaches a command line, and a session we could not resume must not be quit.
   if (!exit || !base) return 'not-eligible'
-  const cmd = d.command ?? base
   const timeoutMs = d.timeoutMs ?? RESTART_EXIT_TIMEOUT_MS
   const pollMs = d.pollMs ?? RESTART_POLL_MS
   // A dead session is not a restart that failed — there is no pane left to fail in. `'not-eligible'`
@@ -203,11 +187,59 @@ export async function performRestartResume(d: {
     // already quit and never resumed. It is required on two CONSECUTIVE polls: a single changed
     // reading can be a momentary foreground child of a still-running CLI, and typing the resume
     // line into a live CLI would send it as a message.
-    if (isShellCommand(pane)) break
-    if (pane !== null && pane !== before && pane === last) break
+    if (isShellCommand(pane)) return 'exited'
+    if (pane !== null && pane !== before && pane === last) return 'exited'
     last = pane
     if (Date.now() > deadline) return 'exit-timeout'
   }
+}
+
+/**
+ * PHASE 2 — echo-deliver the resume command into a pane the CLI has already let go of.
+ *
+ * Resolves only once the resume line has actually LEFT the pane (deliverCommand's echo-verify
+ * retries run for up to DELIVERY_ATTEMPTS × VERIFY_TIMEOUT_MS after the first write). The
+ * un-submitted line is the pane's most fragile moment — anything typed into it during that window
+ * is spliced into the command — so "this delivery is over" must mean it settled, not that it was
+ * started. `guardConcurrentRestart` frees the node on exactly that boundary.
+ */
+export async function performResumePhase(d: {
+  agentId: string
+  sessionId: string
+  io: DeliveryIo
+  /**
+   * The exact launch line to relaunch with, when the caller has one. `withPermissionMode` is the
+   * app's single funnel for every CLI launch, and it needs the ACTIVE mode — an async read that
+   * belongs to the node, not to this module. Without it a canvas running in `acceptEdits` / `plan`
+   * would come back from a bulk restart in the default mode and start prompting.
+   *
+   * Eligibility is still decided by the bare `resumeCommand` below: a session id this app would
+   * not put on a command line (SAFE_SESSION_ID) refuses the delivery before anything is written,
+   * whatever the caller passes.
+   */
+  command?: string
+  /** Backstop for the resume delivery; see RESTART_DELIVERY_TIMEOUT_MS. */
+  deliveryTimeoutMs?: number
+  /**
+   * Handed `deliverCommand`'s cancel the moment a delivery starts — and only then. The delivery
+   * outlives this promise (it runs on its own echo-verify timers), so its lifetime belongs to
+   * whoever owns the transport: a node torn down mid-restart cancels it here instead of letting
+   * a retry rewrite, or the fail-open submit, land in a dead session.
+   */
+  onDelivery?: (cancel: () => void) => void
+  /**
+   * Asked once more after the delivery, before a resume is reported: a session that died under it
+   * had the delivery cancelled by the teardown, so nothing reached the pane and reporting success
+   * would put a phantom in the bulk summary.
+   */
+  isLive?: () => boolean
+}): Promise<ResumePhaseOutcome> {
+  const base = resumeCommand(d.agentId, d.sessionId)
+  // The BARE command is the gate even when the caller overrides it: `resumeCommand` is what
+  // validates the session id before it reaches a command line.
+  if (!base) return 'not-eligible'
+  const cmd = d.command ?? base
+  const gone = (): boolean => !!d.isLive && !d.isLive()
   // Awaited, not fire-and-forget: see the header. `deliverCommand` is started inside the executor
   // (synchronously, so `onDelivery` still hands the cancel out before any await) and announces the
   // end of the delivery — submitted, fail-open or cancelled — through `settle`.
@@ -244,8 +276,67 @@ export async function performRestartResume(d: {
     lapse = setTimeout(resolve, d.deliveryTimeoutMs ?? RESTART_DELIVERY_TIMEOUT_MS)
   })
   // The session can have died while the line was being verified — the delivery is then cancelled by
-  // the teardown and nothing reached the pane, so don't claim a restart.
-  return gone() ? 'not-eligible' : 'restarted'
+  // the teardown and nothing reached the pane, so don't claim a resume.
+  return gone() ? 'not-eligible' : 'resumed'
+}
+
+/**
+ * In-place CLI restart: the two phases above, in order. Ask the agent to quit, wait until the CLI
+ * has let go of the pane (`performExitPhase`), then echo-deliver the resume command into it
+ * (`performResumePhase`). Composition only — every rule lives in one of the two halves, and this
+ * function's four outcomes are unchanged: `'exited'` continues, anything else from the exit half
+ * is passed through as-is, and a `'resumed'` is what the caller reads as `'restarted'`.
+ *
+ * The eligibility gate is repeated here so a refusal costs no phase call at all; both halves
+ * re-check it themselves, since either can be driven directly (hibernation quits a pane in one
+ * phase and resumes it much later in the other).
+ */
+export async function performRestartResume(d: {
+  agentId: string
+  sessionId: string
+  io: DeliveryIo
+  paneCommand: () => Promise<string | null>
+  /** See `performResumePhase`: the caller's launch line (permission mode), gated by the bare one. */
+  command?: string
+  timeoutMs?: number
+  pollMs?: number
+  /** Backstop for the resume delivery; see RESTART_DELIVERY_TIMEOUT_MS. */
+  deliveryTimeoutMs?: number
+  /** Handed `deliverCommand`'s cancel as the delivery starts; see `performResumePhase`. */
+  onDelivery?: (cancel: () => void) => void
+  /**
+   * "Is the pane we are restarting still there?" — asked before the exit is written, on every
+   * poll, and once more after the delivery, before a restart is reported. A session can die under
+   * a restart (the node is deleted or respawned, or another client destroys the tmux session): its
+   * io then silently no-ops and reporting `'restarted'` would put a phantom in the bulk summary.
+   */
+  isLive?: () => boolean
+}): Promise<RestartOutcome> {
+  // The BARE command is the gate even when the caller overrides it: `resumeCommand` is what
+  // validates the session id before it reaches a command line.
+  if (!exitSequence(d.agentId) || !resumeCommand(d.agentId, d.sessionId)) return 'not-eligible'
+  const exited = await performExitPhase({
+    agentId: d.agentId,
+    sessionId: d.sessionId,
+    io: d.io,
+    paneCommand: d.paneCommand,
+    timeoutMs: d.timeoutMs,
+    pollMs: d.pollMs,
+    isLive: d.isLive
+  })
+  // `'exit-timeout'` / `'not-eligible'` mean the same things they always did, so they are the
+  // restart's outcome verbatim — nothing has been resumed and nothing more may be written.
+  if (exited !== 'exited') return exited
+  const resumed = await performResumePhase({
+    agentId: d.agentId,
+    sessionId: d.sessionId,
+    io: d.io,
+    command: d.command,
+    deliveryTimeoutMs: d.deliveryTimeoutMs,
+    onDelivery: d.onDelivery,
+    isLive: d.isLive
+  })
+  return resumed === 'resumed' ? 'restarted' : resumed
 }
 
 // ── One restart at a time, per node ──────────────────────────────────────────────────────
