@@ -834,6 +834,20 @@ export interface Settings {
   browserMemorySaver: boolean
   accent: string
   tmuxEnabled: boolean
+  /**
+   * Reach a released tmux session with a control-mode (`tmux -C`) client instead of respawning its
+   * terminal — the shadow clients in pty-manager.ts (`shadowAttach`) and the shared background-write
+   * client behind `backgroundWrite`. A control client holds ZERO pty devices, which is the whole
+   * point: the machine-wide `kern.tty.ptmx_max` ceiling is what a canvas of idle terminals runs into
+   * first (see pty-devices.ts).
+   *
+   * ON by default, and read at those two entry points only: switching it off means this process
+   * spawns no `tmux -C` child at all, and a released session is simply unreachable again — exactly
+   * the behavior of the release before it. It is a kill switch for one soak release, not a feature
+   * toggle: nothing user-visible depends on it (the mechanism has no production caller yet), so it
+   * has no settings row and is flipped in settings.json.
+   */
+  ptyShadowClients: boolean
   /** GPU (WebGL) terminal rendering. 'off' routes every terminal to xterm's DOM renderer.
    *  'auto' (default) = one WebGL context PER TERMINAL everywhere except macOS, where it is
    *  'shared'. Repeated macOS field reports (whole-window flicker; terminals compositing black
@@ -997,6 +1011,7 @@ export const DEFAULT_SETTINGS: Settings = {
   browserMemorySaver: true,
   accent: '#0a84ff',
   tmuxEnabled: true,
+  ptyShadowClients: true,
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
   offscreenTerminalMinutes: 10,

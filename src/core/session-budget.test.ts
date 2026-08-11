@@ -19,10 +19,10 @@ const cfg = (over: Partial<SessionBudgetConfig> = {}): SessionBudgetConfig => ({
   ...over
 })
 
-/** A detached nt- session idle for `idleH` hours. */
-const idle = (name: string, idleH: number, attached = false): SessionInfo => ({
+/** An nt- session idle for `idleH` hours, with `clients` attached (0 = detached). */
+const idle = (name: string, idleH: number, clients = 0): SessionInfo => ({
   name,
-  attached,
+  clients,
   activitySec: NOW - idleH * 3600
 })
 
@@ -36,7 +36,7 @@ describe('planReap (pure policy)', () => {
   })
 
   it('never reaps an attached session, no matter how idle', () => {
-    const plan = planReap([idle('nt-watched', 500, true), idle('nt-idle', 500)], lowMem, NOW, cfg())
+    const plan = planReap([idle('nt-watched', 500, 1), idle('nt-idle', 500)], lowMem, NOW, cfg())
     expect(plan).toEqual(['nt-idle'])
   })
 
@@ -68,7 +68,7 @@ describe('planReap (pure policy)', () => {
   })
 
   it('attached sessions do not count toward freeing the cap, but are never the ones killed', () => {
-    const sessions = [idle('nt-live', 500, true), ...Array.from({ length: 5 }, (_, i) => idle(`nt-d${i}`, 100 + i))]
+    const sessions = [idle('nt-live', 500, 2), ...Array.from({ length: 5 }, (_, i) => idle(`nt-d${i}`, 100 + i))]
     const plan = planReap(sessions, okMem, NOW, cfg({ maxDetached: 4 }))
     expect(plan).toEqual(['nt-d4'])
   })
@@ -92,11 +92,11 @@ describe('planReap (pure policy)', () => {
 })
 
 describe('parseSessionList', () => {
-  it('parses names, attached counts and activity, skipping malformed lines', () => {
+  it('parses names, CLIENT COUNTS and activity, skipping malformed lines', () => {
     const out = parseSessionList('nt-a|0|1753000000\nnt-b|2|1753000100\n\njunk\nx|y|z\n')
     expect(out).toEqual([
-      { name: 'nt-a', attached: false, activitySec: 1_753_000_000 },
-      { name: 'nt-b', attached: true, activitySec: 1_753_000_100 }
+      { name: 'nt-a', clients: 0, activitySec: 1_753_000_000 },
+      { name: 'nt-b', clients: 2, activitySec: 1_753_000_100 }
     ])
   })
 })
