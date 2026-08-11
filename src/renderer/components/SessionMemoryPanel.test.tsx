@@ -325,6 +325,24 @@ describe('SessionMemoryPanel', () => {
     expect(host.querySelector('.sessmem-panel__count')?.textContent).toBe('4 sessions')
   })
 
+  // The feature's own premise: the user who prompted it blamed nodeterm for memory that is the
+  // agent CLI's own V8 heap. Numbers rendered inside nodeterm's chrome with nothing said about
+  // whose they are let this panel repeat the mistake it exists to correct, and that fact lived only
+  // in the docs.
+  it('says whose memory it is showing', () => {
+    mount()
+    const attrib = host.querySelector('.sessmem-panel__attrib')?.textContent ?? ''
+    expect(attrib).toMatch(/not nodeterm/i)
+  })
+
+  it('says it in EVERY state, including a failed sweep', () => {
+    // A failed measurement is exactly when a user is most likely to be blaming the wrong process,
+    // so the line must not hang off the rows.
+    mount({ ok: false, rows: [] })
+    expect(host.querySelector('.sessmem-panel__note')?.textContent).toContain('Could not measure')
+    expect(host.querySelector('.sessmem-panel__attrib')?.textContent ?? '').toMatch(/not nodeterm/i)
+  })
+
   it('never touches the host poll — the pill owns that timer', () => {
     // `timer` and `activeScope` in the store are MODULE singletons. A `stopHostPoll` here would
     // clear the pill's interval on close with nothing left to restart it, and the pill's number

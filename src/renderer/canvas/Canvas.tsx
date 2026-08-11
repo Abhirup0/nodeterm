@@ -6541,7 +6541,13 @@ export function Canvas() {
   const closeSession = useCallback(
     (projectId: string, id: string, alsoOnConfirm?: () => void) => {
       setConfirm({
-        message: 'End this session? This stops its tmux session.',
+        // Both halves, because this does both: the tmux session ends AND the node is removed from
+        // its canvas (either branch below). The wording came from the sessions sidebar, where the
+        // node going too is the obvious intent — but the session-memory panel reuses this path, and
+        // there the user's intent is reclaiming RAM, for which killing the node is a side effect
+        // they have to be told about. (Keeping the node would need a second destroy path, which is
+        // deliberately NOT what this is.)
+        message: 'End this session? This stops its tmux session and removes the node from its canvas.',
         confirmLabel: 'End session',
         danger: true,
         onConfirm: () => {
@@ -6602,9 +6608,12 @@ export function Canvas() {
         return
       }
       setConfirm({
+        // The orphan wording stays as it is: there is no node to remove, which is the whole point
+        // of the row. The other branch is a node the sweep saw but this click could not resolve an
+        // owner for, so it says what the owner path says.
         message: orphan
           ? 'End this session? It has no node on any canvas — this stops its tmux session.'
-          : 'End this session? This stops its tmux session.',
+          : 'End this session? This stops its tmux session and removes the node from its canvas.',
         confirmLabel: 'End session',
         danger: true,
         onConfirm: () => {

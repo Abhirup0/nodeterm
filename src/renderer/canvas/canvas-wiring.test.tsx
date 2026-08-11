@@ -77,3 +77,20 @@ describe('the session-memory panel is the one caller that fans a kill across soc
     expect(CANVAS_SRC).toContain('.killSessions(id, nodeIds)')
   })
 })
+
+describe('the end-session confirm describes both things it does', () => {
+  // `closeSession` stops the tmux session AND deletes the canvas node. The wording is inherited
+  // from the sessions sidebar, where deleting the node is the obvious intent — but the
+  // session-memory panel reuses the same path, and there the user came to reclaim RAM. Saying only
+  // "this stops its tmux session" makes the node's removal a surprise on the one surface whose
+  // purpose invites it. (Keeping the node would need a SECOND destroy path; deliberately not built.)
+  it('says the node goes too, on every owned-session confirm', () => {
+    const owned = CANVAS_SRC.match(/End this session\?[^']*/g) ?? []
+    expect(owned.length).toBeGreaterThanOrEqual(3)
+    for (const m of owned) {
+      // The orphan row is the one exception, and it is honest: there is no node to remove.
+      if (m.includes('no node on any canvas')) continue
+      expect(m).toContain('removes the node from its canvas')
+    }
+  })
+})

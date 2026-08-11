@@ -5808,6 +5808,14 @@ body,
   color: rgba(var(--tint-rgb), 0.45);
   font-variant-numeric: tabular-nums;
 }
+/* The attribution line: quieter than a row, above the foot rule, and rendered in EVERY state — a
+   failed sweep is exactly when a user is most likely to be blaming the wrong process. */
+.sessmem-panel__attrib {
+  margin-top: 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(var(--tint-rgb), 0.45);
+}
 .sessmem-panel__foot {
   display: flex;
   align-items: center;

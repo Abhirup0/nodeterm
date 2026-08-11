@@ -190,6 +190,17 @@ export function SessionMemoryPanel({
 
       {body}
 
+      {/* Whose memory this is. The feature exists because a user reported "Claude terminals are
+          killing my memory" — their NUMBER was right and their attribution was wrong: it is the
+          agent CLI's own V8 heap, and nodeterm allocates none of it. Showing those numbers inside
+          nodeterm's chrome with nothing said about it lets the panel repeat the mistake it was
+          built to correct. One line, no figures: the measurements vary per machine and per model,
+          and quoting one here would age into a lie (docs/session-memory.md §1 has them). */}
+      <div className="sessmem-panel__attrib">
+        Memory held by each session's own processes — the agent CLI and what it spawned, not
+        nodeterm itself.
+      </div>
+
       <div className="sessmem-panel__foot">
         <span className="sessmem-panel__count">
           {measured ? `${views.length} session${views.length === 1 ? '' : 's'}` : ''}
