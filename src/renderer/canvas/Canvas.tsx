@@ -7042,7 +7042,18 @@ export function Canvas() {
           break
         case 'session':
           if (e.sessionTitle) cs.setSession(e.nodeId, e.sessionTitle)
-          if (e.sessionPhase === 'start') cs.setState(e.nodeId, undefined, e.agentId)
+          if (e.sessionPhase === 'start') {
+            cs.setState(e.nodeId, undefined, e.agentId)
+            // A SessionStart is proof a CLI just LAUNCHED in that pane, so a hibernated flag on
+            // this node is now false — our own `/exit` produces a SessionEnd, never a
+            // SessionStart. This is the residual `setState`'s live-state self-heal cannot reach:
+            // a user who relaunches the agent by hand and then takes no turn would keep a SLEEPING
+            // chip on a running CLI (and the sweep, which skips hibernated nodes, would leave that
+            // session exempt from Eco for good). Deliberately NOT the same as clearing on `done`,
+            // which would let a late Stop POST undo a hibernation we just performed. The setter
+            // bails when the flag is already unset, so this is free for every other session start.
+            cs.setHibernated(e.nodeId, false)
+          }
           if (e.sessionPhase === 'end') {
             cs.setState(e.nodeId, undefined, e.agentId)
             // In-session /loop dies with its session; cron (and scheduled cloud routines)

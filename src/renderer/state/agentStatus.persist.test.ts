@@ -96,6 +96,22 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     expect(Date.now() - st.lastEventAt!).toBeLessThan(5000) // hours-old clock replaced
   })
 
+  it('setHibernated(false) on a node that is not hibernated changes NOTHING', async () => {
+    // Load-bearing since Canvas calls it on every SessionStart (a fresh launch disproves the
+    // flag): the bail must not create an entry, must not touch the idle clock — which would hide
+    // a genuinely idle session from the sweep — and must not write.
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().setHibernated('n13', false)
+    expect(useAgentStatus.getState().byId['n13']).toBeUndefined()
+    const idle = Date.now() - 45 * 60_000
+    useAgentStatus.setState({ byId: { n14: { unread: false, state: 'done', lastEventAt: idle } } })
+    useAgentStatus.getState().setHibernated('n14', false)
+    expect(useAgentStatus.getState().byId['n14'].lastEventAt).toBe(idle)
+    expect(store.getItem('nodeterm.agentStatus')).toBeNull()
+  })
+
   it('restores `hibernated` on load (the CLI stays exited across an app restart)', async () => {
     vi.stubGlobal(
       'localStorage',
