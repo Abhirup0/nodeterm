@@ -47,7 +47,11 @@ function mount(mem: MemInfo | null, overBoard = false): void {
   useSessionMemory.setState({ mem, startHostPoll, stopHostPoll, refreshFull })
   host = document.createElement('div')
   root = createRoot(host)
-  act(() => root.render(<SystemResourcePill overBoard={overBoard} />))
+  act(() =>
+    root.render(
+      <SystemResourcePill overBoard={overBoard} onGoToNode={vi.fn()} onKillSession={vi.fn()} />
+    )
+  )
 }
 
 beforeEach(() => {
@@ -128,16 +132,22 @@ describe('SystemResourcePill', () => {
     expect(refreshFull).not.toHaveBeenCalled()
   })
 
-  it('never runs the full sweep — the cheap read is the pill´s, the expensive one the panel´s', () => {
+  it('never runs the full sweep itself — the cheap read is the pill´s, the expensive one the panel´s', () => {
     // `refreshFull` walks the whole process table, and on an SSH scope that is an ssh exec plus a
     // remote `ps`. On this component's 30 s timer that would be a background cost nobody asked for,
     // and the real action swallows its failures, so it would show no symptom at all.
     mount(MEM)
     expect(refreshFull).not.toHaveBeenCalled()
-    // Not even when the pill is clicked: opening the panel is what triggers the sweep, and the
-    // panel does it itself (Task 9).
+    // Clicking sweeps exactly once, and the call comes from the MOUNTED PANEL — never from a
+    // second caller here that a later timer could be attached to. (The sweep-on-open contract
+    // itself is pinned in SessionMemoryPanel.test.tsx.)
     act(() => host.querySelector<HTMLButtonElement>('.sysres-pill')!.click())
-    expect(refreshFull).not.toHaveBeenCalled()
+    expect(host.querySelector('.sessmem-panel')).not.toBeNull()
+    expect(refreshFull).toHaveBeenCalledTimes(1)
+    // Closing unmounts the panel, so nothing keeps sweeping behind it.
+    act(() => host.querySelector<HTMLButtonElement>('.sysres-pill')!.click())
+    expect(host.querySelector('.sessmem-panel')).toBeNull()
+    expect(refreshFull).toHaveBeenCalledTimes(1)
   })
 
   it('renders nothing and polls nothing without an active project', () => {
@@ -163,5 +173,19 @@ describe('SystemResourcePill', () => {
     expect(host.querySelector('.sysres-pill')?.getAttribute('aria-expanded')).toBe('true')
     act(() => host.querySelector<HTMLButtonElement>('.sysres-pill')!.click())
     expect(host.querySelector('.sysres-pill')?.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('announces a region that actually exists', () => {
+    // `aria-expanded` on its own told assistive tech about an expandable region and expanded
+    // nothing. It may only ship pointing at the real panel.
+    mount(MEM)
+    const pill = host.querySelector<HTMLButtonElement>('.sysres-pill')!
+    const controls = pill.getAttribute('aria-controls')
+    expect(controls).toBeTruthy()
+    expect(host.querySelector(`#${controls}`)).toBeNull()
+    act(() => pill.click())
+    const panel = host.querySelector(`#${controls}`)
+    expect(panel).not.toBeNull()
+    expect(panel?.classList.contains('sessmem-panel')).toBe(true)
   })
 })

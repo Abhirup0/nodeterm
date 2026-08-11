@@ -6560,6 +6560,44 @@ export function Canvas() {
     [activeProjectId, deleteNodes, writeDisk]
   )
 
+  /**
+   * End a session picked from the session-memory panel, which lists tmux sessions rather than
+   * canvas nodes — so a row may have no node behind it at all.
+   *
+   * The owner is resolved HERE, at click time, instead of being taken from the row's `orphan` flag:
+   * the panel's rows are a snapshot of the last sweep, and a node created since would otherwise be
+   * killed as an orphan — tmux dies, the canvas node stays, pointing at nothing. When there IS an
+   * owner this goes through `closeSession`, i.e. the exact path the sessions sidebar and the node's
+   * own × use (confirm → destroy → drop the node), so the panel can never invent a third one.
+   */
+  const killSessionById = useCallback(
+    (nodeId: string, orphan: boolean) => {
+      const owner = useProjects
+        .getState()
+        .projects.find((p) => p.nodes.some((n) => n.id === nodeId))
+      if (owner) {
+        closeSession(owner.id, nodeId)
+        return
+      }
+      setConfirm({
+        message: orphan
+          ? 'End this session? It has no node on any canvas — this stops its tmux session.'
+          : 'End this session? This stops its tmux session.',
+        confirmLabel: 'End session',
+        danger: true,
+        onConfirm: () => {
+          transport.destroy(nodeId)
+          // Nothing else to clean up: with no node anywhere, there is no canvas entry to remove and
+          // no parked terminal to dispose. Persisted agent status is dropped anyway, since a
+          // session id can outlive the node it belonged to.
+          useAgentStatus.getState().remove(nodeId)
+          setConfirm(null)
+        }
+      })
+    },
+    [closeSession, setConfirm]
+  )
+
   const renameSession = useCallback(
     (projectId: string, id: string, title: string) => {
       if (projectId === activeProjectId) {
@@ -7897,7 +7935,14 @@ export function Canvas() {
             parks a node underneath either pill. */}
         <div className="canvas-pills" data-canvas-chrome>
           <UsageIndicator overBoard={kanbanOpen} />
-          <SystemResourcePill overBoard={kanbanOpen} />
+          {/* `travelToNode`, not `focusNodeById`: the panel resolves sessions in CLOSED projects
+              too (their tmux sessions keep running), and reaching one means reopening its tab
+              first — the same path a notification click and a peer jump take. */}
+          <SystemResourcePill
+            overBoard={kanbanOpen}
+            onGoToNode={travelToNode}
+            onKillSession={killSessionById}
+          />
         </div>
 
         <PresenceNamePrompt />

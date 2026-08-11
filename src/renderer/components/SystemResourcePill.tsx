@@ -4,6 +4,7 @@ import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
 import { useSessionMemory } from '../state/sessionMemory'
 import { usageScopeKey } from '../lib/usageScope'
+import { SessionMemoryPanel } from './SessionMemoryPanel'
 
 /** `formatBytes` speaks bytes; every number in this feature is MB. */
 const MB = 1024 * 1024
@@ -12,15 +13,29 @@ const MB = 1024 * 1024
 const WARN_PERCENT = 75
 const DANGER_PERCENT = 90
 
+export interface SystemResourcePillProps {
+  overBoard?: boolean
+  /** Handed straight to the panel. Required, not optional: an omitted callback would compile into
+   *  a panel whose rows silently do nothing. */
+  onGoToNode: (nodeId: string) => void
+  onKillSession: (nodeId: string, orphan: boolean) => void
+}
+
 /**
  * Bottom-left system-resource pill: how much RAM the machine the ACTIVE project runs on is using.
  * Sits beside the usage pill in the same cluster and takes its scope from the same helper
  * (`usageScopeKey`), so the two can never disagree about which machine they describe.
  *
- * Clicking toggles the session-memory panel (Task 9 renders it into the slot below); this pill is
- * the panel's only entry point.
+ * Clicking toggles the session-memory panel; this pill is the panel's only entry point. The panel
+ * is UNMOUNTED while closed — its sweep is expensive (the whole process table, and over SSH an
+ * exec on someone else's machine) and must never run behind a closed panel. Mounting is what
+ * triggers the sweep, which is also why the pill itself never calls `refreshFull`.
  */
-export function SystemResourcePill({ overBoard = false }: { overBoard?: boolean }): JSX.Element | null {
+export function SystemResourcePill({
+  overBoard = false,
+  onGoToNode,
+  onKillSession
+}: SystemResourcePillProps): JSX.Element | null {
   const [open, setOpen] = useState(false)
 
   const mem = useSessionMemory((s) => s.mem)
@@ -97,13 +112,20 @@ export function SystemResourcePill({ overBoard = false }: { overBoard?: boolean 
 
   return (
     <div className={`sysres-indicator${overBoard ? ' sysres-indicator--board' : ''}`}>
-      {/* Task 9 renders <SessionMemoryPanel /> here while `open`. The pill owns the open state so
-          the panel can be unmounted entirely when closed — its sweep is expensive and must never
-          run behind a closed panel. */}
+      {open && (
+        <SessionMemoryPanel
+          onGoToNode={onGoToNode}
+          onKillSession={onKillSession}
+          onClose={() => setOpen(false)}
+        />
+      )}
       <button
         className="sysres-pill"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        // Points at the region `aria-expanded` announces. The panel is mounted only while open, so
+        // this resolves exactly when it claims to.
+        aria-controls="sessmem-panel"
         // The SSH pill is visually identical to the local one, so the title is what answers
         // "whose memory is this?" without opening the panel.
         title={scopeKey ? `Memory on ${scopeKey}` : 'Memory on this machine'}
