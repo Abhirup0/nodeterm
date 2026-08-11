@@ -716,6 +716,9 @@ export const SHIFT_ENTER_SEQ = '\x1b\r'
 
 export type TerminalKeyAction = CopyKeyAction | 'shift-enter'
 
+/** Matches the Cmd/Ctrl+Digit[1-9] "jump to Nth project" shortcut's key code. */
+const DIGIT_SHORTCUT_RE = /^Digit[1-9]$/
+
 /** Superset of `copyKeyAction` used by the terminal's custom key handler. */
 export function terminalKeyAction(e: CopyShortcutEvent, hasSelection: boolean): TerminalKeyAction {
   if (
@@ -727,5 +730,13 @@ export function terminalKeyAction(e: CopyShortcutEvent, hasSelection: boolean): 
     !e.altKey
   )
     return 'shift-enter'
+  // Ctrl+Digit[1-9] is the "jump to Nth project" shortcut (Canvas.tsx). On macOS this is Cmd,
+  // which xterm already ignores — but on Linux/Windows the Ctrl variant maps to real terminal
+  // control codes (Ctrl+2..Ctrl+8 = ^@, ^[, ^\, ^], ^^, ^_), so xterm must be told to swallow it
+  // BEFORE it writes the control byte to the PTY. The bubble-phase keydown listener in Canvas.tsx
+  // runs `preventDefault()` too late for that — this handler is xterm's own, invoked first via
+  // `attachCustomKeyEventHandler`. No meta check needed: Cmd never reaches here as ctrlKey.
+  if (e.type === 'keydown' && e.ctrlKey && !e.metaKey && !e.altKey && DIGIT_SHORTCUT_RE.test(e.code))
+    return 'swallow'
   return copyKeyAction(e, hasSelection)
 }

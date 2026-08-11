@@ -307,6 +307,10 @@ const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 const GRID = 24
 
+/** Cmd/Ctrl+1-9 "jump to Nth project" shortcut key match — hoisted so the keydown handler
+ *  doesn't re-allocate a regex literal on every keystroke. */
+const DIGIT_SHORTCUT_RE = /^Digit[1-9]$/
+
 /** The empty opaque set (glyphgrid), shared so the render-time compute allocates nothing on the
  *  overwhelmingly common "nothing overlaps / layer off" path. */
 const EMPTY_OPAQUE: string[] = []
@@ -4615,6 +4619,22 @@ export function Canvas() {
     [goToNode]
   )
 
+  // ---- project (tab) actions ----
+  // Declared here (ahead of the keydown effect below, rather than near the other project
+  // actions further down) so the Cmd/Ctrl+digit shortcut can list it as a dependency without
+  // a TDZ violation: `useCallback`/`const` bindings are not hoisted like function declarations,
+  // so referencing switchProject in that effect's deps array before this point would throw
+  // "used before its declaration".
+  const switchProject = useCallback(
+    (id: string) => {
+      if (id === useProjects.getState().activeProjectId) return
+      commitActiveToStore()
+      useProjects.getState().setActive(id)
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
   // Cmd/Ctrl+K toggles the command palette; Cmd/Ctrl+, opens settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -4641,7 +4661,7 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
-      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && /^Digit[1-9]$/.test(e.code)) {
+      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && DIGIT_SHORTCUT_RE.test(e.code)) {
         const n = Number(e.code.slice(5))
         const { projects, activeProjectId } = useProjects.getState()
         const targetId = projectIdAtIndex(projects, n)
@@ -4659,7 +4679,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleSessionsPin])
+  }, [toggleSessionsPin, switchProject])
 
   // Apply the accent color as a CSS variable.
   useEffect(() => {
@@ -5271,17 +5291,6 @@ export function Canvas() {
       }
     },
     [markDirty]
-  )
-
-  // ---- project (tab) actions ----
-  const switchProject = useCallback(
-    (id: string) => {
-      if (id === useProjects.getState().activeProjectId) return
-      commitActiveToStore()
-      useProjects.getState().setActive(id)
-      void writeDisk()
-    },
-    [commitActiveToStore, writeDisk]
   )
 
   // Focus a node by id (notification click): select + center it; if it lives in another
