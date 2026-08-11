@@ -537,8 +537,10 @@ export interface PtyPressure {
 /** Outcome of the banner's "Fix automatically…" button (macOS only) — see main/ptmx-limit.ts. */
 export type PtyLimitFixResult =
   | { ok: true; ceiling: number }
-  /** `canceled` = the user dismissed macOS's own admin-password dialog. Not an error to retry. */
-  | { ok: false; error: string; canceled?: boolean }
+  /** `canceled` = the user dismissed macOS's own admin-password dialog. Not an error to retry.
+   *  `busy` = a password dialog from another window/reload is already up. Both are SILENT for the
+   *  renderer: nothing failed, so neither may raise an error toast. */
+  | { ok: false; error: string; canceled?: boolean; busy?: boolean }
 
 export interface PtyApi {
   /** Starts a new PTY session; returns its sessionId and whether the session was freshly

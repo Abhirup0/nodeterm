@@ -1556,10 +1556,15 @@ app.whenReady().then(async () => {
   // the renderer (which raises a banner) on every band change, and sweep the reaper NOW on
   // critical — a reaped detached session returns its pty device, which is exactly the resource in
   // short supply. Transitions only, re-announced at most every five minutes.
+  //
+  // The sweep is passed `pressure: 'pty'` because a bare `sweep()` here would plan NOTHING: the
+  // budget's own triggers are memory and a detached-count cap, and the incident profile clears
+  // both (healthy RAM, under the cap). The reason grants the same batch allowance low memory
+  // would and widens no exemption — attached and in-grace sessions stay untouchable.
   const ptyPressure = createPtyPressureMonitor({
     onLevel: (reading) => {
       sendToMain(IPC.ptyPressure, reading)
-      if (reading.level === 'critical') void sessionReaper.sweep()
+      if (reading.level === 'critical') void sessionReaper.sweep({ pressure: 'pty' })
     }
   })
   ptyPressure.start()

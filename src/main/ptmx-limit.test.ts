@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import fs from 'fs'
+import path from 'path'
 import { IPC } from '@shared/ipc'
 import { fakePlatform } from '../core/platform-fake'
 import {
+  OSASCRIPT_BIN,
   PTMX_DAEMON_LABEL,
   PTMX_MIN_TARGET,
   PTMX_PLIST_PATH,
@@ -117,7 +120,11 @@ describe('the raise-limit IPC handler', () => {
     const runs: string[][] = []
     registerPtmxLimitHandler(p, {
       platform: over.platform ?? 'darwin',
-      read: () => ({ ceiling: over.ceiling ?? 511, inUse: over.inUse ?? 508 }),
+      // `?? 511` would swallow the explicit `ceiling: null` case this suite has to cover.
+      read: () => ({
+        ceiling: 'ceiling' in over ? over.ceiling! : 511,
+        inUse: over.inUse ?? 508
+      }),
       run: async (args) => {
         runs.push(args)
         return over.run ? over.run(args) : { ok: true as const }
@@ -184,6 +191,55 @@ describe('the raise-limit IPC handler', () => {
   it('never spawns osascript on its own — only the explicit invoke does', () => {
     const { runs } = setup()
     expect(runs).toEqual([])
+  })
+
+  // ptmxTarget(null) is the FLOOR, and the floor is a DOWNGRADE on a machine already at 4096 —
+  // written into a LaunchDaemon, so the downgrade would survive every reboot. A ceiling we could
+  // not read is the one input we must never compute a new limit from.
+  it('refuses to write a limit computed from an unmeasured ceiling', async () => {
+    const { call, runs, announced } = setup({ ceiling: null })
+    const res: any = await call()
+    expect(res.ok).toBe(false)
+    expect(res.error).toMatch(/could not read/i)
+    expect(runs).toEqual([])
+    expect(announced).toEqual([])
+  })
+
+  // One password dialog is up and modal; a renderer reload or a second window must not stack a
+  // second one behind it. The loser is silent — nothing failed, the user is already being asked.
+  it('a second invoke while the dialog is still up is a silent no-op', async () => {
+    let release: (() => void) | null = null
+    const { call, runs } = setup({
+      run: () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ok: true as const })
+        })
+    })
+    const first = call()
+    const second: any = await call()
+    expect(second).toEqual({ ok: false, busy: true, error: expect.any(String) })
+    expect(runs).toHaveLength(1)
+    release!()
+    await expect(first).resolves.toEqual({ ok: true, ceiling: 2048 })
+    // …and the guard clears with it, so a later click is not locked out for good.
+    void call()
+    expect(runs).toHaveLength(2)
+    release!()
+  })
+})
+
+describe('the binary this file runs', () => {
+  it('is pinned to an absolute path', () => {
+    expect(OSASCRIPT_BIN).toBe('/usr/bin/osascript')
+  })
+
+  it('is never resolved through PATH', () => {
+    // A GUI launch inherits no shell environment (the DMG/Finder incidents), and this exec is the
+    // one immediately preceding an administrator-password prompt: a PATH-resolved `osascript` is
+    // both the likeliest to be missing and the worst one to let anything else answer to.
+    const src = fs.readFileSync(path.join(__dirname, 'ptmx-limit.ts'), 'utf8')
+    expect(src).not.toMatch(/execFile\(\s*['"]osascript['"]/)
+    expect(src).toMatch(/execFile\(\s*OSASCRIPT_BIN/)
   })
 })
 

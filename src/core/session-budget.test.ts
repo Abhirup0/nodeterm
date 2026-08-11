@@ -89,6 +89,26 @@ describe('planReap (pure policy)', () => {
     const plan = planReap(sessions, lowMem, NOW, cfg({ batchMax: 3 }))
     expect(plan).toHaveLength(3)
   })
+
+  // The 2026-08-11 profile: plenty of RAM, well under the detached cap, and the machine still
+  // could not open a terminal because it was out of pty DEVICES. Without an allowance of its own
+  // that reading plans nothing at all — the sweep the shell fires on critical pty pressure would
+  // be a no-op, which is exactly the bug this argument exists to close.
+  it('an external pressure reason earns the same allowance low memory does', () => {
+    const sessions = Array.from({ length: 20 }, (_, i) => idle(`nt-s${i}`, 100 + i))
+    expect(planReap(sessions, okMem, NOW, cfg({ batchMax: 3 }))).toHaveLength(0)
+    expect(planReap(sessions, okMem, NOW, cfg({ batchMax: 3 }), true)).toHaveLength(3)
+  })
+
+  it('external pressure widens NO safety gate: attached and in-grace sessions still live', () => {
+    const sessions = [idle('nt-watched', 500, 1), idle('nt-fresh', 1), idle('user-shell', 500)]
+    expect(planReap(sessions, okMem, NOW, cfg(), true)).toEqual([])
+  })
+
+  it('the kill switch still wins over an external pressure reason', () => {
+    const plan = planReap([idle('nt-a', 500)], okMem, NOW, cfg({ disabled: true }), true)
+    expect(plan).toEqual([])
+  })
 })
 
 describe('parseSessionList', () => {
@@ -237,6 +257,33 @@ describe('createSessionReaper (service)', () => {
       exec: w.exec
     })
     expect(await reaper.sweep()).toBe(0)
+    expect(w.calls.filter((c) => c.args[2] === 'kill-session')).toHaveLength(0)
+  })
+
+  it('…but the same host sweeps under an explicit external pressure reason', async () => {
+    const w = fakeWorld({ 'node-terminal': [`nt-x|0|${OLD}`] })
+    const reaper = createSessionReaper({
+      ...base,
+      readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
+      tmuxBin: () => 'tmux',
+      sockets: ['node-terminal'],
+      exec: w.exec
+    })
+    expect(await reaper.sweep({ pressure: 'pty' })).toBe(1)
+  })
+
+  it('an external reason never overrides the attached/grace exemptions', async () => {
+    const w = fakeWorld({
+      'node-terminal': [`nt-watched|1|${OLD}`, `nt-fresh|0|${NOW - 60}`]
+    })
+    const reaper = createSessionReaper({
+      ...base,
+      readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
+      tmuxBin: () => 'tmux',
+      sockets: ['node-terminal'],
+      exec: w.exec
+    })
+    expect(await reaper.sweep({ pressure: 'pty' })).toBe(0)
     expect(w.calls.filter((c) => c.args[2] === 'kill-session')).toHaveLength(0)
   })
 })

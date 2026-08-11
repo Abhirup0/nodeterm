@@ -476,9 +476,13 @@ export async function startServer(
   // already documented for the memory-pressure levers in renderer/bridge/stubs.ts. Server hosts
   // hitting the wall are told by the spawn error (core/pty-devices.ts), which is the surface a
   // headless host actually has. Stopped on close beside the memory monitor.
+  //
+  // `pressure: 'pty'` for the same reason as the desktop: without an explicit reason the budget's
+  // own triggers (memory watermark, detached cap) are both clear on a pty-starved host and the
+  // sweep plans nothing. It buys an allowance, not an exemption — see planReap.
   const ptyPressure = createPtyPressureMonitor({
     onLevel: (reading) => {
-      if (reading.level === 'critical') void sessionReaper.sweep()
+      if (reading.level === 'critical') void sessionReaper.sweep({ pressure: 'pty' })
     }
   })
   ptyPressure.start()

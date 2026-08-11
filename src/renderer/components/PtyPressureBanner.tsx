@@ -56,20 +56,38 @@ export function PtyPressureBanner({
   onError: (message: string) => void
   isMac?: boolean
 }): JSX.Element | null {
-  const [reading, setReading] = useState<PtyPressure | null>(null)
-  // Dismissal is per-LEVEL, not for the session: a user who waved away "close to the limit" has
-  // not agreed to hear nothing when the machine actually fills up.
-  const [dismissed, setDismissed] = useState<PtyPressure['level'] | null>(null)
+  // `seq` counts BROADCASTS, not levels: the shell sends one per band change and one per
+  // five-minute re-announce, which is what lets a dismissal be scoped to a single reminder.
+  const [state, setState] = useState<{ reading: PtyPressure; seq: number } | null>(null)
+  const [dismissed, setDismissed] = useState<{ level: PtyPressure['level']; seq: number } | null>(
+    null
+  )
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     // Optional-called: the Server Edition bridge declares this a documented no-op.
-    const off = window.nodeTerminal.onPtyPressure?.(setReading)
+    const off = window.nodeTerminal.onPtyPressure?.((r) =>
+      setState((prev) => ({ reading: r, seq: (prev?.seq ?? 0) + 1 }))
+    )
     return () => off?.()
   }, [])
 
+  const reading = state?.reading ?? null
   const copy = reading ? ptyPressureCopy(reading) : null
-  if (!reading || !copy || dismissed === reading.level) return null
+  // Dismissal is never for the session, and the two bands are not dismissed on the same terms:
+  //   - ELEVATED sticks until the level changes. It is an early warning with runway left; the
+  //     user has been told, and a strip that comes back every five minutes on a machine that is
+  //     merely busy is how a banner teaches people to ignore it.
+  //   - CRITICAL expires with the broadcast it dismissed. Terminals are failing to open RIGHT NOW,
+  //     so ✕ buys quiet until the next reminder (five minutes, see PTY_PRESSURE_RE_ANNOUNCE_MS),
+  //     never permanent silence.
+  // Either way a drop to `none` clears everything: there is nothing left to dismiss.
+  const hidden =
+    !!dismissed &&
+    !!reading &&
+    dismissed.level === reading.level &&
+    (reading.level !== 'critical' || dismissed.seq === state!.seq)
+  if (!reading || !copy || hidden) return null
 
   const fix = (): void => {
     if (busy) return
@@ -81,7 +99,9 @@ export function PtyPressureBanner({
     void window.nodeTerminal
       .raisePtyDeviceLimit?.()
       .then((res) => {
-        if (!res.ok && !res.canceled) onError(res.error)
+        // `canceled` (the user said no) and `busy` (another window is already asking) are both
+        // outcomes, not failures — neither may raise a toast.
+        if (!res.ok && !res.canceled && !res.busy) onError(res.error)
       })
       .catch((e: unknown) => onError(String((e as Error)?.message ?? e)))
       .finally(() => setBusy(false))
@@ -107,7 +127,7 @@ export function PtyPressureBanner({
       <button
         className="announce-banner__close"
         title="Dismiss"
-        onClick={() => setDismissed(reading.level)}
+        onClick={() => setDismissed({ level: reading.level, seq: state!.seq })}
       >
         ✕
       </button>

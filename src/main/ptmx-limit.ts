@@ -132,9 +132,17 @@ export type OsascriptRunner = (
   args: string[]
 ) => Promise<{ ok: true } | { ok: false; message: string }>
 
+/**
+ * Absolute, never PATH-resolved. A GUI launch inherits no shell environment — the DMG/Finder
+ * incidents in this repo were exactly that — and of every binary the app runs, this is the one that
+ * must not be answered by whatever a broken (or hostile) PATH happens to point at: the next thing
+ * it does is ask the user for their administrator password.
+ */
+export const OSASCRIPT_BIN = '/usr/bin/osascript'
+
 const defaultRunner: OsascriptRunner = (args) =>
   new Promise((resolve) => {
-    execFile('osascript', args, { timeout: 5 * 60_000 }, (err, _stdout, stderr) => {
+    execFile(OSASCRIPT_BIN, args, { timeout: 5 * 60_000 }, (err, _stdout, stderr) => {
       // The password dialog has no timeout of its own; the cap above is a backstop for a wedged
       // osascript, generous enough that a user hunting for their password never trips it.
       if (!err) return resolve({ ok: true })
@@ -161,6 +169,10 @@ export function registerPtmxLimitHandler(platform: CorePlatform, deps: PtmxLimit
   const read = deps.read ?? readPtyDevices
   const run = deps.run ?? defaultRunner
   const os = deps.platform ?? process.platform
+  // The password dialog is modal and there is one of it. A renderer reload mid-prompt, or a second
+  // window, would otherwise queue a second osascript behind the first — two password prompts for
+  // one click the user made once.
+  let asking = false
 
   platform.handle(IPC.ptyRaiseDeviceLimit, async (): Promise<PtyLimitFixResult> => {
     if (os !== 'darwin') {
@@ -169,9 +181,28 @@ export function registerPtmxLimitHandler(platform: CorePlatform, deps: PtmxLimit
         error: 'Raising the pty-device limit is only supported on macOS.'
       }
     }
+    if (asking) {
+      // Silent for the caller: nothing failed and nothing is lost — the user is already being
+      // asked, and the answer will re-announce to every window.
+      return { ok: false, busy: true, error: 'Already asking for permission.' }
+    }
     const before = read()
+    // `ptmxTarget(null)` is the FLOOR, and on a machine already raised past it the floor is a
+    // DOWNGRADE — one we would then pin across every reboot with the LaunchDaemon. A ceiling we
+    // could not measure is the one input never worth guessing from; the read self-heals in a
+    // moment (pty-devices re-primes in the background), so the honest answer is "not now".
+    if (before.ceiling === null) {
+      return {
+        ok: false,
+        error:
+          'Could not read this machine’s terminal limit (kern.tty.ptmx_max) — try again in a moment.'
+      }
+    }
     const target = ptmxTarget(before.ceiling)
-    const res = await run(osascriptArgs(target))
+    asking = true
+    const res = await run(osascriptArgs(target)).finally(() => {
+      asking = false
+    })
     if (!res.ok) {
       return isUserCancel(res.message)
         ? {

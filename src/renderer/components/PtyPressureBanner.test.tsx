@@ -107,13 +107,26 @@ describe('PtyPressureBanner', () => {
     expect(host.querySelector('.announce-banner')).toBeNull()
   })
 
-  it('the ✕ hides it, and a WORSENING level brings it back', () => {
+  it('a dismissed ELEVATED banner stays down while the level holds, and returns when it worsens', () => {
     const { host } = mount()
     act(() => listener!(reading('elevated')))
     act(() => (host.querySelector('.announce-banner__close') as HTMLButtonElement).click())
     expect(host.querySelector('.announce-banner')).toBeNull()
+    // A five-minute re-announce of the SAME early warning respects the dismissal — the user was
+    // told, it is not urgent yet, and nagging is how a banner gets ignored for good.
     act(() => listener!(reading('elevated')))
-    expect(host.querySelector('.announce-banner')).toBeNull() // same level: stays dismissed
+    expect(host.querySelector('.announce-banner')).toBeNull()
+    act(() => listener!(reading('critical')))
+    expect(host.querySelector('.announce-banner')).not.toBeNull()
+  })
+
+  it('a dismissed CRITICAL banner comes back on the next re-announce', () => {
+    const { host } = mount()
+    act(() => listener!(reading('critical')))
+    act(() => (host.querySelector('.announce-banner__close') as HTMLButtonElement).click())
+    expect(host.querySelector('.announce-banner')).toBeNull()
+    // The shell re-announces a held critical every five minutes. Terminals are failing to open
+    // right now: a dismissal buys quiet until the next reminder, never permanent silence.
     act(() => listener!(reading('critical')))
     expect(host.querySelector('.announce-banner')).not.toBeNull()
   })
@@ -147,6 +160,19 @@ describe('PtyPressureBanner', () => {
     })
     expect(onError).not.toHaveBeenCalled()
     expect(host.querySelector('.announce-banner')).not.toBeNull() // banner stays
+  })
+
+  it('a busy answer is silent too — another window is already holding the dialog', async () => {
+    fix = vi.fn(async () => ({ ok: false as const, busy: true, error: 'Already asking' }))
+    const { host, onError } = mount()
+    act(() => listener!(reading('critical')))
+    const btn = [...host.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Fix automatically…'
+    ) as HTMLButtonElement
+    await act(async () => {
+      btn.click()
+    })
+    expect(onError).not.toHaveBeenCalled()
   })
 
   it('a real failure goes to the caller error surface', async () => {

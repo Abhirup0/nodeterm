@@ -37,10 +37,15 @@ export const PTY_PRESSURE_INTERVAL_MS = 60_000
  * How long a HELD level stays quiet before it is said again.
  *
  * Five minutes, not one: unlike memory pressure — whose re-fire drives idempotent reclaim levers
- * the user never sees — a re-announce here re-raises a BANNER the user may have just dismissed.
- * Long enough that dismissing means something, short enough that a user who dismissed it and then
- * left the machine climbing is reminded before the wall. A level CHANGE always fires immediately;
- * `none` is never re-announced (there is nothing to re-say — the banner is already gone).
+ * the user never sees — a re-announce here can re-raise a BANNER, so the interval is a nagging
+ * budget, not just a refresh rate. A level CHANGE always fires immediately; `none` is never
+ * re-announced (there is nothing to re-say — the banner is already gone).
+ *
+ * What a re-announce MEANS is the renderer's call, and the two bands answer differently
+ * (PtyPressureBanner): a dismissed `elevated` stays dismissed through these — it is an early
+ * warning and the user has been told — while a dismissed `critical` comes back on the next one,
+ * because terminals are failing to open while it is up. So this constant is the reminder cadence
+ * for the wall, and the freshness cadence for the warning.
  */
 export const PTY_PRESSURE_RE_ANNOUNCE_MS = 300_000
 
