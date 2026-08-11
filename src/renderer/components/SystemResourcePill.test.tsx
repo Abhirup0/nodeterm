@@ -175,6 +175,26 @@ describe('SystemResourcePill', () => {
     expect(host.querySelector('.sysres-pill')?.getAttribute('aria-expanded')).toBe('false')
   })
 
+  it('closes on an outside click, but not on the kill confirm', () => {
+    mount(MEM)
+    document.body.appendChild(host)
+    act(() => host.querySelector<HTMLButtonElement>('.sysres-pill')!.click())
+    expect(host.querySelector('.sessmem-panel')).not.toBeNull()
+
+    // The `×` raises a ConfirmDialog through a portal OUTSIDE this container. Answering it must not
+    // dismiss the list the user is working through.
+    const confirm = document.createElement('div')
+    confirm.className = 'confirm-overlay'
+    document.body.appendChild(confirm)
+    act(() => confirm.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })))
+    expect(host.querySelector('.sessmem-panel')).not.toBeNull()
+
+    act(() => document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })))
+    expect(host.querySelector('.sessmem-panel')).toBeNull()
+    confirm.remove()
+    host.remove()
+  })
+
   it('announces a region that actually exists', () => {
     // `aria-expanded` on its own told assistive tech about an expandable region and expanded
     // nothing. It may only ship pointing at the real panel.

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { formatBytes } from '@shared/fsLimits'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
@@ -37,6 +37,7 @@ export function SystemResourcePill({
   onKillSession
 }: SystemResourcePillProps): JSX.Element | null {
   const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
 
   const mem = useSessionMemory((s) => s.mem)
   const startHostPoll = useSessionMemory((s) => s.startHostPoll)
@@ -71,6 +72,22 @@ export function SystemResourcePill({
     startHostPoll(scopeKey, activeProjectId)
     return () => stopHostPoll()
   }, [scopeKey, activeProjectId, sshUp, startHostPoll, stopHostPoll])
+
+  // Close on an outside click, like the usage popover beside it — otherwise the panel sits over the
+  // canvas until the pill is clicked again. The ConfirmDialog the `×` raises is a PORTAL outside
+  // this container, so it is excluded explicitly: answering "yes, end it" must not also dismiss the
+  // list the user is working through.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      const target = e.target as HTMLElement | null
+      if (wrapRef.current?.contains(target)) return
+      if (target?.closest('.confirm-overlay')) return
+      setOpen(false)
+    }
+    window.addEventListener('mousedown', onDown)
+    return () => window.removeEventListener('mousedown', onDown)
+  }, [open])
 
   if (!activeProjectId) return null
 
@@ -111,7 +128,7 @@ export function SystemResourcePill({
   }
 
   return (
-    <div className={`sysres-indicator${overBoard ? ' sysres-indicator--board' : ''}`}>
+    <div ref={wrapRef} className={`sysres-indicator${overBoard ? ' sysres-indicator--board' : ''}`}>
       {open && (
         <SessionMemoryPanel
           onGoToNode={onGoToNode}

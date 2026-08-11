@@ -211,12 +211,20 @@ describe('SessionMemoryPanel', () => {
   })
 
   it('says it could not measure — never an empty list, never a zero', () => {
-    mount({ ok: false, rows: [], loadedScope: null })
+    // `loadedScope: ''` on purpose, and it is the realistic shape: the store's failure path sets
+    // `ok:false, rows:[]` and leaves `loadedScope` where the last SUCCESSFUL sweep put it. So a
+    // panel that decided "have we measured?" from the scope stamp alone would find a match here and
+    // render a confident `0 MB` / `0 sessions` over a sweep that failed — with a `loadedScope: null`
+    // fixture it would have fallen into "Measuring…" and passed.
+    mount({ ok: false, rows: [], loadedScope: '' })
     expect(text()).toContain('Could not measure')
     expect(rowsOf()).toHaveLength(0)
     expect(host.querySelector('.sessmem-panel__total')).toBeNull()
-    expect(text()).not.toContain('0 MB')
     expect(text()).not.toContain('0 sessions')
+    // Not `not.toContain('0 MB')`: `formatBytes(0)` is "0 B", so spelling one unit would have let
+    // the zero through. Without a reading there is no number we are entitled to print at all —
+    // the same rule the pill holds itself to.
+    expect(text()).not.toMatch(/\d/)
     // "We could not look" is the one state where the retry matters most.
     expect(host.querySelector<HTMLButtonElement>('.sessmem-panel__refresh')?.disabled).toBe(false)
   })
@@ -245,6 +253,7 @@ describe('SessionMemoryPanel', () => {
     })
     mount({ ok: false, rows: [], loadedScope: null })
     expect(text()).not.toContain('Could not measure')
+    expect(text()).not.toContain('Measuring')
     expect(text()).toContain('relay')
     expect(host.querySelector('.sessmem-panel__refresh')).toBeNull()
     // No point sweeping a machine whose answer is a stub.
