@@ -80,6 +80,17 @@ export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
   }
 }
 
+/**
+ * Resolves the Cmd/Ctrl+N project shortcut: N is 1-based, matches sidebar/store array order.
+ * Only 1-9 are addressable — out of range (including an empty or short project list) is null,
+ * a silent no-op at the call site rather than a wraparound or error.
+ */
+export function projectIdAtIndex(projects: { id: string }[], oneBasedIndex: number): string | null {
+  if (oneBasedIndex < 1 || oneBasedIndex > 9) return null
+  const project = projects[oneBasedIndex - 1]
+  return project ? project.id : null
+}
+
 export interface SessionRowVM {
   id: string
   title: string
