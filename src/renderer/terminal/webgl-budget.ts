@@ -344,6 +344,20 @@ function reclaim(c: Client): void {
   c.granted = false
 }
 
+/**
+ * Memory-pressure lever: reclaim EVERY hidden holder's context now, bypassing the release delay.
+ * Visible holders are untouched — the same invariant `lruHiddenHolder` applies, and for the same
+ * reason: taking a context off a terminal the user is looking at trades memory for a visible
+ * downgrade. Idempotent (a client that holds nothing is skipped), and each reclaimed client
+ * re-grants through the normal budget-gated path on its next visibility transition.
+ */
+export function releaseAllHiddenGrants(): void {
+  for (const c of clients.values()) {
+    if (!c.granted || c.visible) continue
+    reclaim(c)
+  }
+}
+
 /** The least-recently-visible HIDDEN holder, or null if every holder is currently visible. */
 function lruHiddenHolder(): Client | null {
   let best: Client | null = null

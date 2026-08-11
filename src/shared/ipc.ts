@@ -41,6 +41,10 @@ export const IPC = {
   appOpenNotificationSettings: 'app:open-notification-settings',
   appFocusNode: 'app:focus-node',
   appSetBadge: 'app:set-badge',
+  /** Main → renderer: the host (or this process's own RSS) crossed a memory-pressure watermark,
+   *  so the renderer should run its reclaim levers now (hidden WebGL contexts, parked terminals).
+   *  Payload: `'warning' | 'critical'`. Re-fired at most once a minute — see core/memory-pressure. */
+  appMemoryPressure: 'app:memory-pressure',
   agentStatus: 'agent:status',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See

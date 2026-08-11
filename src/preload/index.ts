@@ -550,6 +550,11 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.appFocusNode, handler)
     return () => ipcRenderer.removeListener(IPC.appFocusNode, handler)
   },
+  onMemoryPressure: (listener) => {
+    const handler = (_e: unknown, severity: 'warning' | 'critical') => listener(severity)
+    ipcRenderer.on(IPC.appMemoryPressure, handler)
+    return () => ipcRenderer.removeListener(IPC.appMemoryPressure, handler)
+  },
   answerPermission: (payload) => ipcRenderer.invoke(IPC.agentAnswerPermission, payload),
   ackDone: (nodeId) => {
     void ipcRenderer.invoke(IPC.agentAckDone, nodeId)

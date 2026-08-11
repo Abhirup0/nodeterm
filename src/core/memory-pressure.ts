@@ -51,7 +51,14 @@ export function createMemoryPressureMonitor(opts: {
         const now = Date.now()
         if (now - lastFired < RE_FIRE_FLOOR_MS) return
         lastFired = now
-        opts.onPressure(s)
+        // A consumer throw must never take the shell down with it — the responders run in a
+        // shell (`webContents.send` on a destroyed window, a reaper sweep) and this timer is the
+        // only thing on the stack. Log and keep the monitor alive, like session-budget's sweep.
+        try {
+          opts.onPressure(s)
+        } catch (e) {
+          console.warn('[memory-pressure] onPressure threw', e)
+        }
       }, opts.intervalMs ?? PRESSURE_INTERVAL_MS)
       timer.unref?.()
     },

@@ -69,6 +69,7 @@ import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
+import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -1525,7 +1526,21 @@ app.whenReady().then(async () => {
   // budget). Attached sessions are never touched; a reaped node cold-restores on next open.
   // Local sockets only — a remote SSH host's sessions are reaped by that host's own
   // nodeterm-server, never across the wire. Timer is unref'd; no explicit stop needed.
-  createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() }).start()
+  const sessionReaper = createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() })
+  sessionReaper.start()
+  // Memory pressure (core/memory-pressure.ts): the reaper's own 10-minute timer is the steady
+  // state; this is the fast path. On a watermark crossing the renderer runs its reclaim levers
+  // (hidden WebGL contexts, parked terminals) and a CRITICAL reading also sweeps the reaper NOW
+  // rather than waiting out its timer. Both levers are idempotent and the monitor re-fires at most
+  // once a minute. The send goes through `sendToMain`, which resolves the window AT SEND TIME and
+  // no-ops while it is closed (macOS keeps the app alive without one) — the monitor's own
+  // try/catch is the backstop, not the primary.
+  createMemoryPressureMonitor({
+    onPressure: (severity) => {
+      sendToMain(IPC.appMemoryPressure, severity)
+      if (severity === 'critical') void sessionReaper.sweep()
+    }
+  }).start()
   const ackSweeper = createAckSweeper({
     handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
   })
