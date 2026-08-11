@@ -35,6 +35,8 @@ function makeHostFakes() {
     createDetached: vi.fn(() => 'sess'),
     attachDetached: vi.fn(() => 'sess'),
     captureSnapshot: vi.fn(async () => ''),
+    // Asked before every attach so the client learns whether the session had to be created.
+    sessionExists: vi.fn(async () => true),
     write: vi.fn(),
     resize: vi.fn(),
     setFlow: vi.fn(),
@@ -213,6 +215,54 @@ describe('R3: replayed encrypted frames are dropped', () => {
     const lastBox = pair.capturedToClient[pair.capturedToClient.length - 1]
     pair.replayToClient(lastBox)
     expect(clientFrames).toHaveLength(1) // dropped — not re-delivered
+  })
+})
+
+// `attachDetached` goes through `tmux new-session -A`, so an attach to a node whose tmux session
+// is gone CREATES a bare login shell in $HOME. Without being told, a mirrored client showed that
+// empty shell under the node's own title — a phone tapping a Claude session after the host's tmux
+// server died got `~ %` and no agent. The attach reply now says which happened, so the client can
+// run its cold restore (cd + `claude --resume`) instead.
+describe('pty.attach reports whether it had to CREATE the session', () => {
+  const attach = (handlers: ReturnType<typeof createHostHandlers>): void => {
+    handlers.onRpc({ id: 'a', method: 'pty.attach', params: { nodeId: 'node-a', cols: 80, rows: 24 } })
+  }
+  const reply = async (responses: unknown[]): Promise<Record<string, unknown>> => {
+    // The probe precedes the response, so let the microtasks settle.
+    await vi.waitFor(() => expect(responses.length).toBeGreaterThan(0))
+    return responses.at(-1) as Record<string, unknown>
+  }
+
+  it('reports fresh=false when the session is already live (a warm join types nothing)', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    ;(pty.sessionExists as ReturnType<typeof vi.fn>).mockResolvedValue(true)
+    attach(createHostHandlers(pty, socket, fs, () => ['/work']))
+    expect(await reply(responses)).toMatchObject({ ok: true, body: { fresh: false } })
+  })
+
+  it('reports fresh=true when the session is gone, so the client cold-restores', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    ;(pty.sessionExists as ReturnType<typeof vi.fn>).mockResolvedValue(false)
+    attach(createHostHandlers(pty, socket, fs, () => ['/work']))
+    expect(await reply(responses)).toMatchObject({ ok: true, body: { fresh: true } })
+  })
+
+  it('a probe that throws answers WARM — never invent a cold start over a live agent', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    ;(pty.sessionExists as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('tmux wedged'))
+    attach(createHostHandlers(pty, socket, fs, () => ['/work']))
+    expect(await reply(responses)).toMatchObject({ ok: true, body: { fresh: false } })
+  })
+
+  it('asks BEFORE attaching — after `new-session -A` the answer is always "exists"', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    ;(pty.sessionExists as ReturnType<typeof vi.fn>).mockResolvedValue(false)
+    attach(createHostHandlers(pty, socket, fs, () => ['/work']))
+    await reply(responses)
+    const probedAt = (pty.sessionExists as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
+    await vi.waitFor(() => expect(pty.attachDetached).toHaveBeenCalled())
+    const attachedAt = (pty.attachDetached as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
+    expect(probedAt).toBeLessThan(attachedAt)
   })
 })
 

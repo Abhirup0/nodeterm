@@ -1562,6 +1562,21 @@ export class PtyManager {
     return { controlPath: s.sshRemote.controlPath, conn: s.sshRemote.conn }
   }
 
+  /**
+   * Public read of the probe below, for callers that attach WITHOUT going through `create()` and
+   * so never receive its `fresh` flag — today the relay host's `pty.attach` (`host-service.ts`).
+   * `attachDetached` spawns through `tmux new-session -A`, which CREATES when the session is
+   * gone, so without asking first a mirrored client cannot tell "I joined your live agent" from
+   * "I just made you an empty login shell". That is what showed a phone a bare `~ %` prompt
+   * under a Claude node's title after the host's tmux server died.
+   *
+   * Same fail-safe direction as everywhere else here: an unprobeable tmux answers "exists", so
+   * the caller treats it as a warm join and types nothing into it.
+   */
+  async sessionExists(persistKey: string): Promise<boolean> {
+    return this.tmuxSessionExists(persistKey)
+  }
+
   /** Whether a tmux session for this node id currently exists (server alive + session present).
    *  Async like the remote probe: a bulk project load fires one `create()` per terminal node,
    *  and a synchronous subprocess per probe would serialize on the main event loop. */
