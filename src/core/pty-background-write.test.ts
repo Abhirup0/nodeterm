@@ -183,6 +183,14 @@ describe('background writes into released sessions', () => {
     m.registerIpc()
     return m
   }
+  /** The same manager with one setting flipped — tmux is still installed and still enabled. */
+  async function managerWith(patch: Partial<typeof DEFAULT_SETTINGS>) {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager({ controlSpawn: control })
+    m.init(() => ({ ...DEFAULT_SETTINGS, ...patch }))
+    m.registerIpc()
+    return m
+  }
   const create = (clientId: number, persistKey = 'node-1', cols = 80, rows = 24) =>
     fake.handlers[IPC.ptyCreate](clientId, { cols, rows, persistKey }) as Promise<{
       sessionId: string
@@ -451,6 +459,77 @@ describe('background writes into released sessions', () => {
     // session, so the keys would go to a name that does not exist.
     expect(await m.backgroundWrite('node-1', 'ls\n')).toBe(false)
     expect(control.calls).toHaveLength(0)
+  })
+
+  it('refuses the control-client tiers with ptyShadowClients switched off', async () => {
+    const m = await managerWith({ ptyShadowClients: false })
+    const { sessionId } = await create(ALICE)
+    kill(ALICE, sessionId)
+
+    // The kill switch means what it says: with it off, this process never spawns a `tmux -C` child,
+    // so a released node is simply unreachable again — the behavior of the release this mechanism
+    // shipped in.
+    expect(await m.backgroundWrite('node-1', 'ls\n')).toBe(false)
+    expect(control.calls).toHaveLength(0)
+  })
+
+  it('still writes into the painter with ptyShadowClients switched off — tier 1 is not a shadow', async () => {
+    const m = await managerWith({ ptyShadowClients: false })
+    await create(ALICE, 'node-1')
+
+    // Tier 1 is the session's own pty, which exists with or without this feature. Gating it would
+    // turn the kill switch into "background writes stop working", which is a different setting.
+    expect(await m.backgroundWrite('node-1', 'ls\n')).toBe(true)
+    expect(spawned[0].writes).toEqual(['ls\n'])
+    expect(control.calls).toHaveLength(0)
+  })
+
+  it('falls through to the shared client when the node’s shadow is dead but still indexed', async () => {
+    const m = await tmuxManager()
+    await release(ALICE, 'node-1')
+    const shadow = await m.shadowAttach('node-1')
+    // A holder retiring the client it was handed. `dispose()` is SILENT by design (it fires no
+    // `onExit`), so nothing evicted the map entry — the shadow is dead and still indexed.
+    shadow?.dispose()
+
+    expect(await m.backgroundWrite('node-1', 'ls\n')).toBe(true)
+
+    // Tier 2 asks whether the shadow is ALIVE, not whether an entry exists. And falling through is
+    // safe for exactly the reason the never-retry rule needs: a client that is not running rejects
+    // `command()` BEFORE writing a byte (tmux-control-client.ts), so no send-keys can have reached
+    // tmux twice.
+    expect(control.calls).toHaveLength(2)
+    expect(control.children[1].writes).toContain(LS_KEYS('nt-node-1'))
+    expect(control.children[0].writes).not.toContain(LS_KEYS('nt-node-1'))
+  })
+
+  it('clears the linger when the shared client dies mid-command', async () => {
+    const m = await tmuxManager()
+    await release(ALICE, 'node-1')
+    const before = vi.getTimerCount()
+
+    const writing = m.backgroundWrite('node-1', 'ls\n') // arms the linger
+    control.only.exit(1) // …and the client dies under it: its own onExit clears `shared`
+
+    expect(await writing).toBe(false)
+    // With nothing attached, the linger is a timer armed for a client that no longer exists — and
+    // the dispose it will run is aimed at whatever IS attached when it fires. It goes with the
+    // client, whether or not there was still an entry to dispose.
+    expect(vi.getTimerCount()).toBe(before)
+  })
+
+  it('destroying a node disposes the shared client attached to its session', async () => {
+    const m = await tmuxManager()
+    await release(ALICE, 'node-1')
+    await m.backgroundWrite('node-1', 'ls\n')
+
+    await m.destroySession(ALICE, 'node-1')
+
+    // The tmux session is about to be killed: a client of ours attached to it would linger until
+    // tmux dropped it, and would meanwhile be subtracted from the session budget for a name that no
+    // longer exists.
+    expect(control.only.killed).toBe(1)
+    expect(m.shadowedTmuxSessions(TMUX_SOCKET)).toEqual([])
   })
 })
 

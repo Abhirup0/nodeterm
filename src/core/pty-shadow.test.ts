@@ -516,6 +516,55 @@ describe('control-mode shadow clients for released sessions', () => {
     expect(control.calls).toHaveLength(0)
   })
 
+  it('spawns nothing with ptyShadowClients switched off — the kill switch', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager({ controlSpawn: control })
+    m.init(() => ({ ...DEFAULT_SETTINGS, ptyShadowClients: false }))
+    m.registerIpc()
+    const { sessionId } = await create(ALICE)
+    kill(ALICE, sessionId)
+
+    // Everything else about this session is exactly as it is with the flag on: tmux is there, the
+    // session is released, the record is ours. The flag is the ONE reason nothing attaches, which
+    // is what makes "switch it off" a truthful instruction in a field report.
+    expect(await m.shadowAttach('node-1')).toBeNull()
+    expect(control.calls).toHaveLength(0)
+  })
+
+  it('logs one greppable line per swap direction', async () => {
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => void lines.push(a.join(' ')))
+    const m = await tmuxManager()
+    const { sessionId } = await create(ALICE)
+    kill(ALICE, sessionId)
+
+    await m.shadowAttach('node-1')
+    await m.shadowAttach('node-1') // re-used, not re-attached — so no second line
+
+    expect(lines.filter((l) => l === `[pty] shadow attach ${sessionName('node-1')}`)).toHaveLength(1)
+
+    liveTmuxSessions.add(sessionName('node-1')) // tmux kept the session across the detach
+    await create(ALICE)
+
+    // The other direction. "My terminal came back blank" is answerable from these two lines alone:
+    // they name the session, the direction, and (by their order) which client held it when.
+    expect(lines.filter((l) => l === `[pty] painter attach ${sessionName('node-1')}`)).toHaveLength(
+      1
+    )
+  })
+
+  it('says nothing when a painter spawns with no control client to retire', async () => {
+    const lines: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => void lines.push(a.join(' ')))
+    const m = await tmuxManager()
+
+    await create(ALICE) // the ordinary case: opening a terminal retires nothing
+
+    // One line per SWAP, not per terminal anyone ever opens: a log nobody can read is a log that
+    // answers no field report.
+    expect(lines.some((l) => l.startsWith('[pty] painter attach'))).toBe(false)
+  })
+
   it('does nothing without tmux — there is no tmux session to shadow', async () => {
     const m = await plainManager()
     const { sessionId } = await create(ALICE)

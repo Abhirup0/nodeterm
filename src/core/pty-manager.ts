@@ -730,6 +730,9 @@ export class PtyManager {
    * shadow it with:
    *  - tmux is unavailable or switched off: there is no tmux session to attach to, and a non-tmux
    *    session's work lives in the pty client that is already gone.
+   *  - `ptyShadowClients` is off: the kill switch (see the setting's doc). This is ONE of the two
+   *    places it is read — the other is `backgroundWrite` — because these are the only two entry
+   *    points that can start a control client of ours.
    *  - a PAINTER pty client is still attached for this node. A session never has both: the painter
    *    attaches with `-D` (it would kick the shadow off a moment later anyway), and two clients of
    *    ours on one pane would hand tmux the size negotiation that pty-size.ts exists to keep.
@@ -752,7 +755,12 @@ export class PtyManager {
     // whether sessions are spawned under it. With tmux switched OFF, `tmuxPath` is still set (the
     // binary is installed) but every session is a plain shell — so a shadow would attach to a name
     // nothing ever created and die on arrival, and its caller would read that as "reached it".
-    if (!this.tmuxPath || !this.getSettings().tmuxEnabled) return null
+    const settings = this.getSettings()
+    if (!this.tmuxPath || !settings.tmuxEnabled) return null
+    // The kill switch, read here rather than at each of the three places a shadow is USED: a caller
+    // that cannot get a client cannot use one, and a flag scattered over the tier guards would be a
+    // flag with three chances to be forgotten.
+    if (!settings.ptyShadowClients) return null
     const live = this.shadows.get(persistKey)
     if (live?.alive) return live
     // Died since it was attached (its `onExit` normally clears the entry; this covers a caller that
@@ -799,6 +807,10 @@ export class PtyManager {
       this.shadows.delete(persistKey)
       return null
     }
+    // One line per swap direction, in the field-report vocabulary of this feature ("shadow attach" /
+    // "painter attach", see `spawnSession`). Only when a client is actually STARTED: a re-used
+    // shadow swapped nothing, and a line per caller would say nothing about the session's state.
+    console.log(`[pty] shadow attach ${sessionName(persistKey)}`)
     const size = this.released.get(persistKey)?.size
     if (size) {
       const line = `refresh-client -C ${size.cols}x${size.rows}`
@@ -957,7 +969,13 @@ export class PtyManager {
       }
       return true
     }
-    if (!this.tmuxPath || !this.getSettings().tmuxEnabled) return false
+    const settings = this.getSettings()
+    if (!this.tmuxPath || !settings.tmuxEnabled) return false
+    // The kill switch, and the reason it sits BELOW tier 1: the painter is the session's own pty,
+    // which exists with or without this feature — gating it would turn "no control clients" into
+    // "background writes stop working", which is a different setting. Below here, every tier needs
+    // a `tmux -C` child, so this one check covers both of them (`shadowAttach` carries the other).
+    if (!settings.ptyShadowClients) return false
     const known = this.released.get(persistKey)
     if (!known || known.remote) return false
     const target = sessionName(persistKey)
@@ -967,7 +985,12 @@ export class PtyManager {
     if (!isSessionName(target)) return false
     const line = encodeSendKeysHex(target, data)
     const shadow = this.shadows.get(persistKey)
-    if (shadow) return (await this.shadowCommand(persistKey, line))?.ok ?? false
+    // ALIVE, not merely present: `dispose()` is silent (it fires no `onExit`), so a shadow retired
+    // by whoever was handed it leaves its entry behind, and a dead client can deliver nothing.
+    // Falling through to tier 3 does not violate the never-retry rule either — a client that is not
+    // running rejects `command()` BEFORE writing a byte (tmux-control-client.ts), so the keys it
+    // refused cannot also have reached tmux.
+    if (shadow?.alive) return (await this.shadowCommand(persistKey, line))?.ok ?? false
     const client = this.sharedClientFor(persistKey)
     if (!client) return false
     return (await this.controlCommand(client, line, () => this.sharedDispose(client)))?.ok ?? false
@@ -990,7 +1013,11 @@ export class PtyManager {
    * synchronously on EMFILE and friends — the machine a background feature reaches for a client on).
    */
   private sharedClientFor(persistKey: string): ControlModeClient | null {
-    if (!this.tmuxPath) return null
+    // BOTH halves of "is there a tmux session at all", as `shadowAttach` carries them: with tmux
+    // switched off `tmuxPath` is still set (the binary is installed) but nothing ever created a
+    // session, so this would attach to a name that does not exist. Its only caller checks the same
+    // thing three lines earlier — this is here so a second caller cannot arrive without it.
+    if (!this.tmuxPath || !this.getSettings().tmuxEnabled) return null
     this.armSharedLinger()
     const live = this.shared
     if (live?.client.alive) return live.client
@@ -1014,6 +1041,10 @@ export class PtyManager {
       this.shared = null
       return null
     }
+    // Same line as a per-session shadow, deliberately: from the outside these are the same event —
+    // a control client of ours became this session's attached client — and a field report should
+    // not have to know which of the two kinds it is looking at. The linger keeps it rare.
+    console.log(`[pty] shadow attach ${sessionName(persistKey)}`)
     return client
   }
 
@@ -1027,16 +1058,24 @@ export class PtyManager {
     this.sharedLinger.unref?.()
   }
 
-  /** Retire the shared client. Idempotent. `only` makes it a no-op unless that exact client is
-   *  still the current one — a caller reacting to a failure must not take down its successor. */
+  /** Retire the shared client AND its linger. Idempotent. `only` makes it a no-op while a DIFFERENT
+   *  client is the current one — a caller reacting to its own client's failure must take down
+   *  neither the successor nor the successor's timer. With nothing attached at all there is no
+   *  successor to protect, and the timer goes either way. */
   private sharedDispose(only?: ControlModeClient): void {
     const live = this.shared
-    if (!live || (only && live.client !== only)) return
-    this.shared = null
+    // A SUCCESSOR is left entirely alone, linger included: `only` is passed by a caller reacting to
+    // its own client's failure, and by then a later write may already have started a new one.
+    if (only && live && live.client !== only) return
+    // Cleared even when nothing is attached — `onExit` clears `shared` on its own (a client that
+    // died under us), and the linger armed for it would otherwise stay pending, aimed at whatever
+    // is attached when it fires.
     if (this.sharedLinger) {
       clearTimeout(this.sharedLinger)
       this.sharedLinger = null
     }
+    if (!live) return
+    this.shared = null
     live.client.dispose()
   }
 
@@ -1596,6 +1635,13 @@ export class PtyManager {
     // The shared background-write client goes too, for the same reason, when it is this node's
     // session it happens to be attached to.
     if (options.persistKey) {
+      // The other half of the swap log (see `shadowAttach`), and only when there is really
+      // something to retire: a painter arriving at a session no control client held swapped
+      // nothing, and a line per terminal anyone opens is noise in the report it exists for.
+      const held =
+        this.shadows.get(options.persistKey)?.alive ||
+        (this.shared?.persistKey === options.persistKey && this.shared.client.alive)
+      if (held) console.log(`[pty] painter attach ${sessionName(options.persistKey)}`)
       this.shadowDispose(options.persistKey)
       this.sharedDisposeOn(options.persistKey)
     }
