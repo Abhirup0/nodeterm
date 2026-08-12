@@ -76,6 +76,16 @@
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
       "notarize": true,
+      "extraResources": [
+        {
+          "from": "resources/bin/tmux",
+          "to": "bin/tmux"
+        },
+        {
+          "from": "resources/licenses",
+          "to": "licenses"
+        }
+      ],
       "extendInfo": {
         "NSMicrophoneUsageDescription": "nodeterm uses the microphone so you can dictate into your terminals."
       },

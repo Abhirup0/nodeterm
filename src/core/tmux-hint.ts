@@ -107,6 +107,47 @@ export function findFixedTmux(
   return null
 }
 
+/**
+ * The tmux nodeterm SHIPS (macOS only — `scripts/build-tmux.mjs` builds a static universal binary
+ * into `resources/bin/tmux`, and electron-builder copies it to `<app>/Contents/Resources/bin/tmux`
+ * via extraResources). Returns the packaged copy if it is there, else the dev artifact under the
+ * repo root, else null — a checkout that never ran the build script behaves exactly as before.
+ *
+ * WHY IT IS THE LAST RESORT and not the first (`findTmux` appends it after every system path):
+ * a tmux CLIENT talks to a tmux SERVER that may already be running on this machine — started by
+ * whatever tmux the user has installed, and outliving the app by design. Preferring our own binary
+ * would pair a client we chose with a server we did not, which upstream rejects outright when the
+ * protocol differs ("server version is too old"). System-first means every user who already has
+ * tmux sees literally zero change in behavior; the bundled copy exists solely for the population
+ * that has none, where there is no server to be incompatible with.
+ *
+ * `resourcesPath` is Electron's `process.resourcesPath`, injected through CorePlatform — src/core
+ * must stay Electron-free (see no-electron.test.ts), and the Server Edition supplies neither it nor
+ * a repo root, so this correctly returns null there (Linux keeps system-tmux-only).
+ *
+ * `exists` is injected (fs.existsSync in production) so the walk stays pure; a throwing `exists`
+ * reads as "not here", never as a failed probe.
+ */
+export function bundledTmuxPath(opts: {
+  /** Electron's process.resourcesPath — `<app>/Contents/Resources` in a packaged build. */
+  resourcesPath?: string | null
+  /** Repo root for a dev run (process.cwd() under `electron-vite dev`). */
+  repoRoot?: string | null
+  exists: (path: string) => boolean
+}): string | null {
+  const candidates: string[] = []
+  if (opts.resourcesPath) candidates.push(`${opts.resourcesPath}/bin/tmux`)
+  if (opts.repoRoot) candidates.push(`${opts.repoRoot}/resources/bin/tmux`)
+  for (const candidate of candidates) {
+    try {
+      if (opts.exists(candidate)) return candidate
+    } catch {
+      // unreadable — keep looking
+    }
+  }
+  return null
+}
+
 /** Is `name` on the process PATH or in the common bin dirs? `exists` is injected (fs.existsSync
  *  in production) so the lookup stays pure and testable. */
 export function findCommand(
