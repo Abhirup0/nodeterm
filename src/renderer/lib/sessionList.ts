@@ -50,6 +50,30 @@ export function isGroupCollapsed(
   return autoCollapse ? !isActive : false
 }
 
+/** What a left-click on a project header in the sessions sidebar does. */
+export type ProjectHeadAction = 'switch' | 'toggle-collapse'
+
+/**
+ * A project header's click does exactly ONE of two things, and never both.
+ *
+ * - An INACTIVE project **switches** to that project and leaves `overrides` alone. Touching
+ *   collapse here would be dead-or-wrong under both settings: with `sidebarAutoCollapse` ON
+ *   the sidebar's own effect wipes every override on the `activeProjectId` change, so any
+ *   toggle written here is clobbered a tick later (and unnecessary — the newly active project
+ *   is expanded by default); with it OFF, writing one would discard the user's explicit
+ *   choice, contradicting the documented "off = switches never touch the user's choices".
+ * - The ACTIVE project **toggles its own collapse** — the pre-existing behavior of the whole
+ *   header, kept so the row has no dead zone. It sets a normal override, which is transient
+ *   under auto-collapse (dropped at the next switch) and sticky without it, exactly like the
+ *   chevron button.
+ *
+ * The chevron is the escape hatch either way: it toggles collapse on ANY row (it
+ * stops propagation), so an inactive project can be peeked into without switching.
+ */
+export function projectHeadClickAction(isActive: boolean): ProjectHeadAction {
+  return isActive ? 'toggle-collapse' : 'switch'
+}
+
 /**
  * Header badges for a project group: how many sessions need the user right now
  * (waiting/blocked) and how many finished unseen. Mirrors the row glyph's precedence —
