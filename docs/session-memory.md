@@ -126,6 +126,31 @@ pane's *shell*, so a claude session with two MCP servers reports **3**. The pane
 `list-panes -a` emits one line per **pane**, so the first pane of a session wins in both legs (same
 key, same order) — one session is one row.
 
+### macOS reads `vm_stat`, not `os.freemem()`
+
+libuv's `os.freemem()` counts only genuinely FREE pages, and a healthy Mac keeps that near zero on
+purpose — file-backed and purgeable pages are held until something needs them. So `total - free`
+renders every Mac at ~100% used. Observed in the field: a 24 GB Mac reporting **23.9 / 24.0 GB**
+while the panel's sessions summed to 2.8 GB.
+
+`parseVmStat` computes what Activity Monitor calls Memory Used —
+`anonymous - purgeable + wired + compressor` — and treats the rest as available. It is an
+**approximation of Activity Monitor, not a reproduction**: Apple documents no exact figure, and on
+Apple Silicon the parts are known not to sum to its total.
+
+**The page size is read from `vm_stat`'s own header, never assumed.** Apple Silicon uses 16 KiB
+pages; hard-coding 4096 would report a quarter of real usage — the identical mistake this file
+already fixed on the Linux side, where `statm` tempted the same constant.
+
+**This also fixed the reaper, which is why the change lives in `readMemInfo` rather than in the
+pill.** `sessionBudgetConfig`'s watermark defaults to 10% of RAM (2457 MB on a 24 GB machine), and
+`os.freemem()` sat permanently below it — so `planReap` saw memory pressure on EVERY sweep and a Mac
+reaped idle detached sessions every 10 minutes regardless of how much memory was actually free. One
+reader, two consumers: that is the reason they share a definition.
+
+**Unverified:** the fixture in `session-memory.test.ts` is composed from Apple's documented format,
+not captured from a real machine. Device checklist item 6 is what closes it.
+
 ## 6. The SSH leg
 
 An SSH project's sessions live on the host, so the sweep runs there: core generates ONE POSIX `sh`
@@ -364,7 +389,8 @@ macOS (the ps path never runs on Linux)
  5. Open the panel on a Mac: `defaultProcessTableReader` returns null there, so the whole table
     comes from `ps -eo pid,ppid,rss`. Rows must populate, and the totals must be plausible — BSD ps
     reports rss in kB, but confirm one known process against Activity Monitor before trusting it.
- 6. macOS pill numbers: `os.freemem()` reports FREE, not AVAILABLE, memory. Confirm used/total reads
+ 6. macOS: capture real `vm_stat` output and check `parseVmStat` against Activity Monitor's Memory
+    Used (the fixture is COMPOSED, not captured). Confirm the pill's used/total reads
     plausibly rather than alarmingly (a Mac with a big page cache will look fuller than it is).
 
 The SSH leg

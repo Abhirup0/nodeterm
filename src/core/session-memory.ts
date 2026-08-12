@@ -10,7 +10,7 @@
 
 import fs from 'fs'
 import os from 'os'
-import { execFile } from 'child_process'
+import { execFile, execFileSync } from 'child_process'
 import { promisify } from 'util'
 import type { MemInfo, SessionMemoryRow, SessionMemoryReport } from '../shared/types'
 import { TMUX_SOCKET } from './tmux-naming'
@@ -105,6 +105,48 @@ export function parseProcessTable(stdout: string): ProcEntry[] {
  *
  *  Lives here rather than in session-budget.ts because two features now read it (the reaper's
  *  watermark and the system-resource pill) and a second copy would drift. */
+/**
+ * Parse `vm_stat` into the same MemInfo shape, given the machine's total bytes.
+ *
+ * macOS deliberately keeps almost nothing "free": file-backed and purgeable pages are held until
+ * something needs them, so libuv's `os.freemem()` — which counts only genuinely free pages —
+ * reports near zero on a healthy Mac. `total - free` therefore renders every Mac as ~100% full,
+ * which is both useless and alarming. (It also pinned the session reaper's watermark permanently
+ * below its threshold, so a Mac reaped idle detached sessions on every sweep regardless of memory.)
+ *
+ * The number Activity Monitor calls "Memory Used" is app + wired + compressed, i.e.
+ * `anonymous - purgeable + wired + compressor`; everything else is reclaimable and counts as
+ * available. This is an approximation of Activity Monitor, not a reproduction of it — Apple does not
+ * document the exact figure, and on Apple Silicon the parts are known not to sum to its total.
+ *
+ * The page size is READ FROM THE HEADER, never assumed: Apple Silicon uses 16 KiB pages, and
+ * hard-coding 4096 is the identical bug this file already fixed on the Linux side.
+ */
+export function parseVmStat(text: string, totalBytes: number): MemInfo | null {
+  const pageSize = Number(/page size of (\d+) bytes/.exec(text)?.[1])
+  if (!Number.isFinite(pageSize) || pageSize <= 0 || !Number.isFinite(totalBytes) || totalBytes <= 0) {
+    return null
+  }
+  const pages = (label: string): number | null => {
+    const m = new RegExp(`^${label}:\\s+(\\d+)\\.`, 'm').exec(text)
+    return m ? Number(m[1]) : null
+  }
+  const anonymous = pages('Anonymous pages')
+  const wired = pages('Pages wired down')
+  const compressor = pages('Pages occupied by compressor')
+  // `Pages purgeable` is a SUBSET of anonymous — caches an app has volunteered as droppable.
+  const purgeable = pages('Pages purgeable') ?? 0
+  // A missing field means we are not looking at vm_stat output we understand. Report nothing rather
+  // than a number built from a partial read — the pill pulses, which is the honest answer.
+  if (anonymous === null || wired === null || compressor === null) return null
+
+  const usedBytes = (Math.max(0, anonymous - purgeable) + wired + compressor) * pageSize
+  const totalMb = Math.round(totalBytes / 1048576)
+  // Clamp: the parts are an approximation and can exceed the total on a heavily compressed system.
+  const availableMb = Math.max(0, totalMb - Math.round(usedBytes / 1048576))
+  return { availableMb, totalMb }
+}
+
 export function readMemInfo(): MemInfo | null {
   try {
     const text = fs.readFileSync('/proc/meminfo', 'utf8')
@@ -118,6 +160,20 @@ export function readMemInfo(): MemInfo | null {
     }
   } catch {
     // fall through to the os fallback
+  }
+  // macOS: `os.freemem()` counts only genuinely free pages, which a healthy Mac keeps near zero —
+  // see parseVmStat. Ask the kernel for the real breakdown instead. Sync on purpose: both callers
+  // (the 30 s pill poll and the reaper's 10 min sweep) are far apart, and keeping ONE signature
+  // means the reaper's watermark is fixed by the same change.
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('vm_stat', { encoding: 'utf8', timeout: 5_000 })
+      const parsed = parseVmStat(out, os.totalmem())
+      if (parsed) return parsed
+    } catch {
+      // vm_stat missing or unreadable — fall through to the generic reader below, which is wrong on
+      // macOS but is still better than reporting nothing at all.
+    }
   }
   try {
     return {

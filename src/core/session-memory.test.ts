@@ -236,3 +236,59 @@ describe('collectSessionMemory', () => {
     }
   })
 })
+
+import { parseVmStat } from './session-memory'
+
+/** Shaped from Apple's documented `vm_stat` format, at a 16 KiB page (Apple Silicon). COMPOSED, not
+ *  captured — nobody in this loop has a Mac. Numbers chosen so the arithmetic is checkable by hand:
+ *  anonymous 800k - purgeable 50k + wired 150k + compressor 100k = 1,000,000 pages.
+ *  1,000,000 x 16384 B = 15625 MiB used of a 24576 MiB machine, i.e. 8951 MiB available. */
+const VM_STAT = [
+  'Mach Virtual Memory Statistics: (page size of 16384 bytes)',
+  'Pages free:                                50000.',
+  'Pages active:                             600000.',
+  'Pages inactive:                           400000.',
+  'Pages speculative:                         30000.',
+  'Pages throttled:                               0.',
+  'Pages wired down:                         150000.',
+  'Pages purgeable:                           50000.',
+  '"Translation faults":                  987654321.',
+  'Pages occupied by compressor:             100000.',
+  'File-backed pages:                        700000.',
+  'Anonymous pages:                          800000.'
+].join('\n')
+
+const TOTAL_BYTES = 24576 * 1048576
+
+describe('parseVmStat', () => {
+  it('reports app+wired+compressed as used, not the near-zero free page count', () => {
+    // The bug this exists for: `Pages free` is 50000 (≈781 MiB) on a machine with 8.4 GiB genuinely
+    // available, because macOS holds the rest as reclaimable cache.
+    expect(parseVmStat(VM_STAT, TOTAL_BYTES)).toEqual({ availableMb: 8951, totalMb: 24576 })
+  })
+
+  it('reads the page size from the header rather than assuming 4096', () => {
+    // Same class as the Linux statm bug: a hard-coded 4096 would report a QUARTER of the real usage
+    // on Apple Silicon, i.e. an alarmingly empty machine.
+    const fourK = parseVmStat(VM_STAT.replace('16384 bytes', '4096 bytes'), TOTAL_BYTES)
+    // 1,000,000 x 4096 B = 3906 MiB, so the machine would read 5044 MiB emptier than it is.
+    expect(fourK).toEqual({ availableMb: 20670, totalMb: 24576 })
+  })
+
+  it('subtracts purgeable pages from anonymous — they are droppable cache, not app memory', () => {
+    const noPurge = parseVmStat(VM_STAT.replace(/Pages purgeable:.*\n/, ''), TOTAL_BYTES)
+    // Without the subtraction the machine reads 50000 pages (781 MiB) fuller than it is.
+    expect(noPurge?.availableMb).toBe(8951 - 781)
+  })
+
+  it('returns null when a field it needs is missing, rather than a partial number', () => {
+    expect(parseVmStat(VM_STAT.replace(/Pages wired down:.*\n/, ''), TOTAL_BYTES)).toBeNull()
+    expect(parseVmStat('not vm_stat output', TOTAL_BYTES)).toBeNull()
+    expect(parseVmStat(VM_STAT, 0)).toBeNull()
+  })
+
+  it('never reports negative availability on a heavily compressed machine', () => {
+    const tiny = parseVmStat(VM_STAT, 1024 * 1048576)
+    expect(tiny?.availableMb).toBe(0)
+  })
+})
