@@ -295,6 +295,8 @@ interface ParkedTerminal {
    *  lever reads later than that, so without this snapshot every park looks agent-less. See
    *  `effectiveAgentState`. */
   parkedAgentState?: AgentState
+  /** When this entry was parked — what ages the snapshot above (`parkedStateFloor`). */
+  parkedAt: number
   /** The node's agent state RIGHT NOW, read from the store of the session this node belongs to
    *  (a relay tab's status lives in its own instance, not the default one). Closed over at park
    *  time because the module-level levers have no access to the component's session. */
@@ -324,6 +326,7 @@ function parkDisposable(key: string): boolean {
   return canDisposeParkedEntry({
     tmuxBacked: p.tmuxBacked,
     parkedAgentState: p.parkedAgentState,
+    parkedAt: p.parkedAt,
     liveAgentState: p.readAgentState()
   })
 }
@@ -846,17 +849,27 @@ export function TerminalNode({
   // unmounts the node), so capturing it in the once-mounted lifecycle effect below is safe, like `api`.
   const presence = useActiveSessionPresence()
   /**
-   * THIS node's agent-status store, for the memory levers that must not kill live work.
+   * THIS node's agent-status store, for the memory levers that must not kill live work — resolved
+   * the way the session registry resolves it (`buildStores` → `agentStatusForApi`, memoized by api
+   * identity), so this node is judged against the status table of the core it actually runs on.
    *
-   * Resolved the way the session registry resolves it — memoized by api identity — so a relay
-   * tab's node reads the RELAY core's status table rather than the local one. That matters now
-   * that `persistent:false` can arrive from a tmux-less relay HOST: such a node is exactly a
-   * plain-shell agent session, and against the default store its state would always read
-   * `undefined` (= disposable), i.e. unprotected. For the local session this IS `useAgentStatus`
-   * (the WeakMap is seeded with `window.nodeTerminal`), so nothing about local behavior changes.
+   * WHAT THAT MEANS TODAY, PLAINLY: for the local session this resolves to the default persisted
+   * instance — the exact object `useAgentStatus` exports — so local nodes are protected. For a
+   * RELAY tab it resolves to that core's keyless instance, and NOTHING WRITES THAT INSTANCE YET:
+   * Canvas's `agent:status` subscription sits above the per-project session provider and writes
+   * the default store, and `useSessionStores()` currently has no consumers at all. So a relay
+   * node's state always reads `undefined` here, and RELAY PARKS REMAIN UNPROTECTED — which now
+   * matters, because `persistent:false` can arrive from a tmux-less relay HOST, i.e. exactly a
+   * plain-shell agent session on someone else's machine.
+   *
+   * Resolving it this way regardless is deliberate and is the cheap half of the fix: routing relay
+   * agent-status into the per-session stores (`useSessionStores` / `SessionStores.agentStatus` is
+   * the intended seam) is a real feature and belongs in its own change. When it lands, this code
+   * lights up unchanged — no branch here to find and update.
    *
    * Scoped deliberately to the protection paths. The other status reads in this file predate
-   * per-session stores and are left exactly as they were; widening them is a separate change.
+   * per-session stores and are left exactly as they were; widening them is that same separate
+   * change.
    */
   const agentStatusStore = agentStatusForApi(api).store
   const readAgentState = useCallback(
@@ -3117,6 +3130,7 @@ export function TerminalNode({
           // Snapshot NOW, because the departure effect declared below this one clears this node's
           // agent status on this very unmount — every lever reads later and would see nothing.
           parkedAgentState: readAgentState(),
+          parkedAt: Date.now(),
           readAgentState,
           cleanups,
           life,

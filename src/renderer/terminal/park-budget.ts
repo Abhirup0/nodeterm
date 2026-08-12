@@ -1,4 +1,9 @@
-import { effectiveAgentState, wouldKillLiveWork, type LiveWorkInput } from './live-work'
+import {
+  effectiveAgentState,
+  parkedStateFloor,
+  wouldKillLiveWork,
+  type LiveWorkInput
+} from './live-work'
 import type { AgentState } from '@shared/agents/normalize'
 
 /**
@@ -25,13 +30,13 @@ export const PARK_MAX = 12
  * changed. The cost of the coarseness is bounded and small — one already-parked xterm held at
  * most a minute past the moment it became disposable.
  *
- * How long a protected park can live in the worst case: a `working` one resolves within the
- * stale-working sweep's window (`shared/agents/stale.ts`, 20 minutes) even if the CLI died without
- * saying so, because that sweep's synthetic end edge reaches the store like any other event. A
- * `waiting`/`blocked` one has no such sweep and is held until the user answers the question the
- * badge is showing them — possibly for the whole run. Accepted, and bounded by NODE COUNT rather
- * than by time: at most one held xterm buffer per non-tmux node actually sitting on an unanswered
- * prompt. See `offscreen-policy.ts`'s live-work deferral for the same argument at more length.
+ * How long a protected park can live in the worst case. A `working` one is bounded at
+ * `WORKING_STALE_MS` — NOT because a sweep corrects it (neither sweep can reach a parked entry;
+ * see `parkedStateFloor`, which is why the snapshot ages itself out) but because the floor stops
+ * counting there. A `waiting`/`blocked` one is NOT bounded in time at all: it is held until the
+ * user answers the question the badge is showing them, possibly for the whole run. Accepted, and
+ * bounded by NODE COUNT instead — at most one held xterm buffer per non-tmux node actually sitting
+ * on an unanswered prompt. See `offscreen-policy.ts`'s live-work deferral for the longer argument.
  */
 export const PARK_RECHECK_MS = 60_000
 
@@ -58,17 +63,23 @@ export interface ParkedEntryState {
   /** The node's agent state AT PARK TIME. The floor — see `effectiveAgentState` for why a park
    *  cannot rely on a live read alone. */
   parkedAgentState?: AgentState
+  /** When the snapshot was taken. Absent ⇒ it cannot be aged (see `parkedStateFloor`). */
+  parkedAt?: number
   /** The node's agent state RIGHT NOW, read from that node's own agent-status store. */
   liveAgentState?: AgentState
 }
 
-/** `canDisposePark` for a park entry: the live read with the park-time snapshot under it. This is
- *  the form all three park levers actually ask (they hold entries, not states), and the one place
- *  the floor is applied — a lever that assembled the state itself could forget it. */
-export function canDisposeParkedEntry(e: ParkedEntryState): boolean {
+/** `canDisposePark` for a park entry: the live read, with the AGED park-time snapshot under it.
+ *  This is the form all three park levers actually ask (they hold entries, not states), and the
+ *  one place the floor is assembled — a lever that built the state itself could forget half of
+ *  it. `now` is injected for tests. */
+export function canDisposeParkedEntry(e: ParkedEntryState, now: number = Date.now()): boolean {
   return canDisposePark({
     tmuxBacked: e.tmuxBacked,
-    agentState: effectiveAgentState(e.liveAgentState, e.parkedAgentState)
+    agentState: effectiveAgentState(
+      e.liveAgentState,
+      parkedStateFloor(e.parkedAgentState, e.parkedAt, now)
+    )
   })
 }
 

@@ -87,12 +87,14 @@ export const OFFSCREEN_DEFER_RETRY_MS = 60_000
  * for is the user's own session ending, and "give up and release anyway" IS the reported bug — a
  * cap would just be the same kill with a delay in front of it. So no clock is an input at all.
  *
- * BE HONEST ABOUT WHAT THAT COSTS. `working` always resolves — the stale-working sweep
- * (`shared/agents/stale.ts`, 20 minutes) fires a synthetic end edge for a session that died
- * without saying so, and that reaches this store like any other event. `waiting`/`blocked` has no
- * such sweep, and legitimately so: a question held open for the user is not stale, it is waiting
- * for them. A user who never answers therefore holds this node's viewer for as long as the app
- * runs.
+ * BE HONEST ABOUT WHAT THAT COSTS. `working` resolves within `WORKING_STALE_MS` even when the CLI
+ * dies without saying so: Canvas's 60-second `sweepStaleWorking` blanks a working entry that has
+ * gone that quiet, and this predicate reads that entry. (It works HERE because the node is still
+ * MOUNTED, so its store entry is intact — the park path cannot rely on the same sweep, which is
+ * why the park's snapshot ages itself out instead; see `live-work.ts`'s `parkedStateFloor`.)
+ * `waiting`/`blocked` has no such sweep, and legitimately so: a question held open for the user is
+ * not stale, it is waiting for them. A user who never answers therefore holds this node's viewer
+ * for as long as the app runs.
  *
  * That is accepted, because the exposure is bounded in the dimension that matters. It is not
  * unbounded growth: it is at most one held viewer (~15 MB) per non-tmux node that is actually

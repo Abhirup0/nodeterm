@@ -21,6 +21,7 @@
  * reclaiming it is free); a plain terminal, a finished agent and an unknown state are never
  * protected either (nothing is running to lose).
  */
+import { WORKING_STALE_MS } from '@shared/agents/stale'
 import type { AgentState } from '@shared/agents/normalize'
 
 /**
@@ -75,4 +76,38 @@ export function effectiveAgentState(
   atParkTime: AgentState | undefined
 ): AgentState | undefined {
   return live ?? atParkTime
+}
+
+/**
+ * The park-time snapshot, AGED: a `working` snapshot stops counting once it is older than
+ * `WORKING_STALE_MS`; every other state keeps counting indefinitely.
+ *
+ * WHY THE SNAPSHOT NEEDS AN EXPIRY THE LIVE STATE DOES NOT. A `working` session that dies without
+ * saying so is an ordinary event (Esc during a tool call runs no Stop hook, a killed CLI, a slept
+ * machine, a dropped link), and the product already has one answer for it: the stale-working
+ * sweep. Neither copy of that sweep can reach a PARKED node's snapshot, though — the renderer's
+ * matches `state === 'working'` in the store, and the departure clear on the parking unmount has
+ * already blanked that entry; the core's mirror fires an `onNodeStateChange` edge that reaches its
+ * own consumers but never the renderer's `agent:status` IPC. So nothing would ever retire this
+ * evidence, and the park would re-arm its expiry for the rest of the run, permanently holding one
+ * of `PARK_MAX` slots for a session that no longer exists.
+ *
+ * The window is the SHARED constant, not a new number: this is the same judgment call about the
+ * same signal ("a working node this quiet is presumed gone"), and two numbers for one question
+ * drift apart. A LIVE `working` reading is deliberately never aged here — the store still knows
+ * about that node, so the renderer sweep can and does correct it, and second-guessing a store that
+ * says "working" right now would kill a real turn.
+ *
+ * `waiting`/`blocked` never expires, and that asymmetry is the point: a question held open is not
+ * a stale signal, it is a session waiting for the user, and no elapsed time makes ending it right.
+ * A snapshot with no timestamp cannot be aged and is treated as fresh — the safe direction, since
+ * the alternative drops a live agent's protection over a bookkeeping omission.
+ */
+export function parkedStateFloor(
+  atParkTime: AgentState | undefined,
+  parkedAt: number | undefined,
+  now: number
+): AgentState | undefined {
+  if (atParkTime !== 'working' || parkedAt === undefined) return atParkTime
+  return now - parkedAt > WORKING_STALE_MS ? undefined : atParkTime
 }

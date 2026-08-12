@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { WORKING_STALE_MS } from '@shared/agents/stale'
 import {
   PARK_MAX,
   PARK_RECHECK_MS,
@@ -124,6 +125,38 @@ describe('a parked plain-shell agent survives the departure clear (#126)', () =>
     park('ask', { tmuxBacked: false, parkedAgentState: 'waiting', liveAgentState: 'waiting' })
     departureClear('ask')
     expect(disposable('ask')).toBe(false)
+  })
+
+  /**
+   * The one bound the snapshot needs, because no sweep can supply it.
+   *
+   * A `working` snapshot outlives its evidence when the CLI dies without saying so (Esc mid-tool,
+   * a killed process, a slept machine). Neither stale-working sweep can correct a PARKED node: the
+   * renderer's matches `state === 'working'` and the departure clear already blanked the entry;
+   * the core's fires an `onNodeStateChange` edge that never reaches the renderer's agent:status
+   * IPC. Unaged, that park re-arms its expiry forever and permanently eats a PARK_MAX slot.
+   */
+  describe('the working snapshot ages out at WORKING_STALE_MS', () => {
+    const parkedAt = 5_000_000
+    const working: ParkedEntryState = { tmuxBacked: false, parkedAgentState: 'working', parkedAt }
+
+    it('protects inside the window and releases past it', () => {
+      expect(canDisposeParkedEntry(working, parkedAt + WORKING_STALE_MS)).toBe(false)
+      expect(canDisposeParkedEntry(working, parkedAt + WORKING_STALE_MS + 1)).toBe(true)
+    })
+
+    it('keeps protecting a waiting snapshot past the same window', () => {
+      const waiting: ParkedEntryState = { ...working, parkedAgentState: 'waiting' }
+      expect(canDisposeParkedEntry(waiting, parkedAt + 10 * WORKING_STALE_MS)).toBe(false)
+    })
+
+    it('never ages a LIVE working reading — the live sweep owns that case', () => {
+      // The store says it is working NOW, so the snapshot's age is irrelevant: this is a real
+      // session mid-turn (and the renderer sweep CAN reach a node the store still knows about).
+      expect(
+        canDisposeParkedEntry({ ...working, liveAgentState: 'working' }, parkedAt + 10 * WORKING_STALE_MS)
+      ).toBe(false)
+    })
   })
 
   it('still disposes the cases that were always disposable, snapshot or not', () => {
