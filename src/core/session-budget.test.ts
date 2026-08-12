@@ -6,6 +6,7 @@ import {
   parseSessionList,
   sessionBudgetConfig,
   createSessionReaper,
+  readMemInfo,
   type SessionInfo,
   type SessionBudgetConfig
 } from './session-budget'
@@ -316,10 +317,11 @@ describe('planReap with no memory signal (the darwin shape)', () => {
 
 describe("the reaper's default memory reader", () => {
   /**
-   * A SOURCE-level guard, deliberately, and here is why a behavioural one is not possible:
-   * `hostMemReader` differs from `readMemInfo` ONLY on darwin, and these tests run on Linux, where
-   * the two are the same function. Reverting the default to `readMemInfo` therefore leaves every
-   * behavioural test green — measured, not assumed.
+   * A SOURCE-level guard, deliberately, and here is why a behavioural one is not possible ON THIS
+   * PLATFORM: `hostMemReader` differs from `readMemInfo` ONLY on darwin, and CI runs on Linux,
+   * where the two are the same function. Reverting the default to `readMemInfo` therefore leaves
+   * every behavioural test green — measured, not assumed. The darwin-gated suite below IS the
+   * behavioural version of this guard; this string check is what stands in for it everywhere else.
    *
    * What it guards is the thing that actually broke: on macOS `readMemInfo` reports honest bytes,
    * but available BYTES are not the OS's pressure signal (82% used with macOS's own graph GREEN,
@@ -329,5 +331,46 @@ describe("the reaper's default memory reader", () => {
     const src = readFileSync(join(__dirname, 'session-budget.ts'), 'utf8')
     expect(src).toContain('opts.readMem ?? hostMemReader()')
     expect(src).not.toContain('opts.readMem ?? readMemInfo')
+  })
+})
+
+describe('darwin default reader: no byte reading may ever reap (behavioural)', () => {
+  /**
+   * Gated to darwin because only there do `hostMemReader` and `readMemInfo` diverge — on Linux
+   * they are the same function, so this test would FAIL there for the wrong reason (the real
+   * `/proc/meminfo` reading legitimately trips the impossible watermark below). On a Mac it is
+   * the real guard the source-text check above merely approximates.
+   */
+  const onDarwin = it.skipIf(process.platform !== 'darwin')
+
+  onDarwin('readMemInfo yields an honest reading here — the discriminator is real, not vacuous', () => {
+    // If vm_stat parsing ever regressed to null on darwin, the reaping test below would pass for
+    // an empty reason (both readers null). This companion assertion is what keeps it meaningful.
+    const mem = readMemInfo()
+    expect(mem).not.toBeNull()
+    expect(mem!.totalMb).toBeGreaterThan(1024)
+    expect(mem!.availableMb).toBeGreaterThan(0)
+    expect(mem!.availableMb).toBeLessThan(mem!.totalMb)
+  })
+
+  onDarwin('without an injected readMem, sessions survive NO MATTER how full memory is', async () => {
+    // The watermark is set above any physically possible host (1 TB available), so ANY byte
+    // reading — however healthy the machine — counts as pressure. Only a reader that refuses to
+    // produce bytes at all (hostMemReader's darwin null) keeps these sessions alive. This encodes
+    // "memory fullness must never reap on macOS" without depending on the host's current load.
+    const w = fakeWorld({
+      'node-terminal': Array.from({ length: 20 }, (_, i) => `nt-idle-${i}|0|${OLD}`)
+    })
+    const reaper = createSessionReaper({
+      tmuxBin: () => 'tmux',
+      sockets: ['node-terminal'],
+      exec: w.exec,
+      env: { NODETERM_SESSION_MIN_AVAILABLE_MB: '1000000000' },
+      nowSec: () => NOW,
+      log: () => {}
+      // deliberately NO readMem: the default reader is the thing under test
+    })
+    expect(await reaper.sweep()).toBe(0)
+    expect(w.calls.filter((c) => c.args[2] === 'kill-session')).toHaveLength(0)
   })
 })
