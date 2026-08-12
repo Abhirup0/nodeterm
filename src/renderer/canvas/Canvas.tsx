@@ -7481,6 +7481,14 @@ export function Canvas() {
     [persist]
   )
 
+  const setProjectColor = useCallback(
+    (id: string, color: string) => {
+      useProjects.getState().setProjectColor(id, color)
+      void persist()
+    },
+    [persist]
+  )
+
   const setProjectFolder = useCallback(
     async (id: string) => {
       const folder = await window.nodeTerminal.dialog.selectFolder()
@@ -7532,8 +7540,8 @@ export function Canvas() {
     [commitActiveToStore, writeDisk, disposeRelayTabForProject]
   )
 
-  // Right-click on a sidebar project header: the same project actions as the tab caret menu,
-  // in the shared ContextMenu shell.
+  // Right-click on a sidebar project header: mostly the same project actions as the tab caret
+  // menu (plus a color swatch the tab caret menu doesn't have), in the shared ContextMenu shell.
   const onProjectContextMenu = useCallback(
     (e: React.MouseEvent, projectId: string) => {
       e.preventDefault()
@@ -7561,6 +7569,8 @@ export function Canvas() {
           },
           { label: 'Set folder…', icon: <IconProject />, onClick: () => setProjectFolder(projectId) },
           { type: 'separator' },
+          { type: 'colors', onPick: (color) => setProjectColor(projectId, color) },
+          { type: 'separator' },
           {
             label: 'Close project',
             icon: <IconTrash />,
@@ -7570,7 +7580,7 @@ export function Canvas() {
         ]
       })
     },
-    [activeProjectId, switchProject, renameProject, setProjectFolder, closeProject]
+    [activeProjectId, switchProject, renameProject, setProjectFolder, setProjectColor, closeProject]
   )
 
   // Reopen a previously closed project and make it active — the active-project effect reloads its
