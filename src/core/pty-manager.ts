@@ -174,13 +174,20 @@ bind -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X 
  * through the now-resolved tmux.
  */
 function findTmux(): string | null {
+  // BOTH lookups inside the guard: `os.homedir()` throws the same SystemError as `userInfo()` when
+  // there is no passwd entry and no $HOME (some containers), and a thrown probe here would take
+  // out tmux discovery entirely — degrading a machine that HAS tmux to the plain-shell fallback,
+  // which is the failure this whole function is being hardened against. Unknown home/user simply
+  // drops the candidates derived from them.
+  let home: string | null = null
   let user: string | null = null
   try {
+    home = os.homedir()
     user = os.userInfo().username
   } catch {
-    // no passwd entry (some containers) — findFixedTmux falls back to the home basename
+    // no home / no passwd entry — the fixed system paths below are still checked
   }
-  const fixed = findFixedTmux((p) => fs.existsSync(p), os.homedir(), user)
+  const fixed = findFixedTmux((p) => fs.existsSync(p), home, user)
   if (fixed) return fixed
   return findInPathString('tmux', shellPathNow() ?? process.env.PATH)
 }

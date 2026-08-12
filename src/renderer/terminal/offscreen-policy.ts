@@ -83,10 +83,23 @@ export const OFFSCREEN_DEFER_RETRY_MS = 60_000
  *
  * UNCAPPED, and that is the one place it deliberately differs from the Eco deferral above. That
  * one caps because it waits for a hibernation that may never come, and stranding a viewer forever
- * for an event that cannot happen would be worse than the memory it saves. This one waits for the
- * user's own turn to end — a thing that always ends — and "give up and release anyway" is
- * precisely the reported bug. So no clock is an input here at all. The exposure is bounded by
- * what it protects: only non-tmux sessions, only while an agent is actually mid-task.
+ * for an event that cannot happen would be worse than the memory it saves. Here the thing waited
+ * for is the user's own session ending, and "give up and release anyway" IS the reported bug — a
+ * cap would just be the same kill with a delay in front of it. So no clock is an input at all.
+ *
+ * BE HONEST ABOUT WHAT THAT COSTS. `working` always resolves — the stale-working sweep
+ * (`shared/agents/stale.ts`, 20 minutes) fires a synthetic end edge for a session that died
+ * without saying so, and that reaches this store like any other event. `waiting`/`blocked` has no
+ * such sweep, and legitimately so: a question held open for the user is not stale, it is waiting
+ * for them. A user who never answers therefore holds this node's viewer for as long as the app
+ * runs.
+ *
+ * That is accepted, because the exposure is bounded in the dimension that matters. It is not
+ * unbounded growth: it is at most one held viewer (~15 MB) per non-tmux node that is actually
+ * sitting on an unanswered prompt — a count the user creates by hand and can see on the canvas,
+ * where the badge is telling them the node needs them. Bounded by node count, not by time. The
+ * alternative is trading a bounded amount of memory for the user's running work, which is the
+ * trade this whole change exists to stop making.
  */
 export function shouldDeferReleaseForLiveWork(i: LiveWorkInput): boolean {
   return wouldKillLiveWork(i)

@@ -50,3 +50,29 @@ export interface LiveWorkInput {
 export function wouldKillLiveWork(i: LiveWorkInput): boolean {
   return !i.tmuxBacked && !!i.agentState && LIVE_AGENT_STATES.has(i.agentState)
 }
+
+/**
+ * The state to judge a PARKED terminal by: the live store read, with the state captured at park
+ * time as a FLOOR under it.
+ *
+ * A snapshot alone would be stale and a live read alone is not available — because the unmount
+ * that parks a terminal is the same unmount that CLEARS its agent status. TerminalNode's
+ * departure-only effect exists so a project switch doesn't leave a stale RUNNING badge behind, and
+ * it runs right after the lifecycle cleanup that created the park. Every park lever reads the
+ * store later than that — the LRU in a microtask, the expiry minutes on — so every one of them saw
+ * `undefined` and called a working agent disposable. That is the reported #126 case (a project
+ * switch past `PARK_MAX`) and, worse, it made `waiting`/`blocked` parks unprotectable in
+ * principle: an agent holding a question open emits no further hook events, so nothing would ever
+ * repopulate the store for it.
+ *
+ * The floor is only a floor, never a latch: hook events for a parked node still land in the store
+ * (Canvas's `agent:status` listener is keyed by node id, not by what is mounted), so a turn that
+ * ENDS while parked releases the protection on the next re-check, and one that starts adds it.
+ * Live truth always wins; the snapshot only answers when there is no live truth to have.
+ */
+export function effectiveAgentState(
+  live: AgentState | undefined,
+  atParkTime: AgentState | undefined
+): AgentState | undefined {
+  return live ?? atParkTime
+}

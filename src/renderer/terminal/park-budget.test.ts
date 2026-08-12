@@ -1,11 +1,13 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import {
   PARK_MAX,
   PARK_RECHECK_MS,
   armParkExpiry,
   canDisposePark,
+  canDisposeParkedEntry,
   disposableParks,
-  planParkEviction
+  planParkEviction,
+  type ParkedEntryState
 } from './park-budget'
 
 describe('planParkEviction', () => {
@@ -48,6 +50,94 @@ describe('canDisposePark', () => {
   it('disposes a TMUX-backed park even while its agent works — the kill only detaches a client', () => {
     expect(canDisposePark({ tmuxBacked: true, agentState: 'working' })).toBe(true)
     expect(canDisposePark({ tmuxBacked: true, agentState: 'waiting' })).toBe(true)
+  })
+})
+
+/**
+ * THE REPRO, at the level the logic lives on.
+ *
+ * The park levers do not read a state, they read a REGISTRY of parked entries; so does the real
+ * `parkDisposable` in TerminalNode. This fakes that registry and drives all three levers through
+ * the same predicate they use in production, because the bug was never in any one lever — it was
+ * in what they all read.
+ *
+ * Sequence: a plain-shell terminal parks while its agent is WORKING, then TerminalNode's departure
+ * effect clears the node's agent status (the unmount that parks is the same unmount that clears),
+ * so every later live read answers `undefined`.
+ */
+describe('a parked plain-shell agent survives the departure clear (#126)', () => {
+  const registry = new Map<string, ParkedEntryState>()
+  const disposable = (key: string): boolean => {
+    const e = registry.get(key)
+    return e ? canDisposeParkedEntry(e) : true
+  }
+  /** Park `key`, snapshotting the state the node had at that moment. */
+  const park = (key: string, e: ParkedEntryState): void => void registry.set(key, e)
+  /** What the departure effect does: the store forgets the node entirely. */
+  const departureClear = (key: string): void => {
+    const e = registry.get(key)
+    if (e) registry.set(key, { ...e, liveAgentState: undefined })
+  }
+
+  beforeEach(() => registry.clear())
+
+  it('LRU eviction: the just-parked working terminal is not evicted past the cap', () => {
+    park('victim', { tmuxBacked: false, parkedAgentState: 'working', liveAgentState: 'working' })
+    departureClear('victim')
+    for (let i = 0; i < PARK_MAX; i++) park(`other${i}`, { tmuxBacked: true })
+    // 13 parks against a cap of 12, oldest ('victim') first — the exact >PARK_MAX project switch.
+    const plan = planParkEviction([...registry.keys()], PARK_MAX, disposable)
+    expect(plan).not.toContain('victim')
+    expect(plan).toEqual(['other0']) // the cap still holds, paid by the next-oldest disposable park
+  })
+
+  it('window expiry: re-arms instead of disposing, then disposes when the agent reports done', () => {
+    park('victim', { tmuxBacked: false, parkedAgentState: 'working', liveAgentState: 'working' })
+    departureClear('victim')
+    const armed: Array<{ fn: () => void; ms: number }> = []
+    let disposed = 0
+    armParkExpiry(() => disposable('victim'), () => disposed++, 5000, {
+      set: (fn, ms) => armed.push({ fn, ms }) - 1,
+      clear: () => {}
+    })
+    armed[0].fn()
+    expect(disposed).toBe(0)
+    expect(armed[1].ms).toBe(PARK_RECHECK_MS)
+    // A `done` hook event lands while the node is still parked — Canvas's listener is keyed by
+    // node id, not by mount, so the store CAN learn this — and the live read overrides the floor.
+    registry.set('victim', { ...registry.get('victim')!, liveAgentState: 'done' })
+    armed[1].fn()
+    expect(disposed).toBe(1)
+  })
+
+  it('memory-pressure lever: drops every other park and leaves this one', () => {
+    park('victim', { tmuxBacked: false, parkedAgentState: 'working', liveAgentState: 'working' })
+    departureClear('victim')
+    park('plain', { tmuxBacked: false })
+    park('tmux-working', { tmuxBacked: true, parkedAgentState: 'working' })
+    expect(disposableParks([...registry.keys()], disposable)).toEqual(['plain', 'tmux-working'])
+  })
+
+  it('protects a WAITING park, which no later hook event would ever repopulate', () => {
+    // `waiting`/`blocked` is a question held open for the user: the agent emits nothing more until
+    // they answer, so the store clear is permanent and the snapshot is the ONLY evidence left.
+    park('ask', { tmuxBacked: false, parkedAgentState: 'waiting', liveAgentState: 'waiting' })
+    departureClear('ask')
+    expect(disposable('ask')).toBe(false)
+  })
+
+  it('still disposes the cases that were always disposable, snapshot or not', () => {
+    expect(canDisposeParkedEntry({ tmuxBacked: true, parkedAgentState: 'working' })).toBe(true)
+    expect(canDisposeParkedEntry({ tmuxBacked: false, parkedAgentState: 'done' })).toBe(true)
+    expect(canDisposeParkedEntry({ tmuxBacked: false })).toBe(true)
+    // A live `done` overrides a `working` snapshot — the protection must not be one-way.
+    expect(
+      canDisposeParkedEntry({
+        tmuxBacked: false,
+        parkedAgentState: 'working',
+        liveAgentState: 'done'
+      })
+    ).toBe(true)
   })
 })
 

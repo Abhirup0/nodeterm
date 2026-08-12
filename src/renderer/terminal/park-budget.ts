@@ -1,4 +1,5 @@
-import { wouldKillLiveWork, type LiveWorkInput } from './live-work'
+import { effectiveAgentState, wouldKillLiveWork, type LiveWorkInput } from './live-work'
+import type { AgentState } from '@shared/agents/normalize'
 
 /**
  * Count cap for parked terminals (see TerminalNode's parkedTerminals). The park window
@@ -23,6 +24,14 @@ export const PARK_MAX = 12
  * event (an agent turn ending), so a faster poll would only pay for an answer that cannot have
  * changed. The cost of the coarseness is bounded and small — one already-parked xterm held at
  * most a minute past the moment it became disposable.
+ *
+ * How long a protected park can live in the worst case: a `working` one resolves within the
+ * stale-working sweep's window (`shared/agents/stale.ts`, 20 minutes) even if the CLI died without
+ * saying so, because that sweep's synthetic end edge reaches the store like any other event. A
+ * `waiting`/`blocked` one has no such sweep and is held until the user answers the question the
+ * badge is showing them — possibly for the whole run. Accepted, and bounded by NODE COUNT rather
+ * than by time: at most one held xterm buffer per non-tmux node actually sitting on an unanswered
+ * prompt. See `offscreen-policy.ts`'s live-work deferral for the same argument at more length.
  */
 export const PARK_RECHECK_MS = 60_000
 
@@ -41,6 +50,26 @@ export const PARK_RECHECK_MS = 60_000
  */
 export function canDisposePark(p: LiveWorkInput): boolean {
   return !wouldKillLiveWork(p)
+}
+
+export interface ParkedEntryState {
+  /** `PtyCreateResult.persistent` for the parked session. */
+  tmuxBacked: boolean
+  /** The node's agent state AT PARK TIME. The floor — see `effectiveAgentState` for why a park
+   *  cannot rely on a live read alone. */
+  parkedAgentState?: AgentState
+  /** The node's agent state RIGHT NOW, read from that node's own agent-status store. */
+  liveAgentState?: AgentState
+}
+
+/** `canDisposePark` for a park entry: the live read with the park-time snapshot under it. This is
+ *  the form all three park levers actually ask (they hold entries, not states), and the one place
+ *  the floor is applied — a lever that assembled the state itself could forget it. */
+export function canDisposeParkedEntry(e: ParkedEntryState): boolean {
+  return canDisposePark({
+    tmuxBacked: e.tmuxBacked,
+    agentState: effectiveAgentState(e.liveAgentState, e.parkedAgentState)
+  })
 }
 
 /** Keys to dispose so the park stays within `max`, oldest first. Caller passes keys in park
@@ -103,6 +132,9 @@ export function armParkExpiry<H>(
     clear: (h) => clearTimeout(h as unknown as ReturnType<typeof setTimeout>)
   }
 ): ParkTimer {
+  // Declared BEFORE `tick` closes over it: a `timers.set` that ran its callback synchronously
+  // (a fake, a shimmed scheduler) would otherwise hit the temporal dead zone and throw.
+  let handle: H | undefined
   const tick = (): void => {
     if (canDispose()) {
       dispose()
@@ -110,6 +142,10 @@ export function armParkExpiry<H>(
     }
     handle = timers.set(tick, PARK_RECHECK_MS)
   }
-  let handle = timers.set(tick, windowMs)
-  return { cancel: () => timers.clear(handle) }
+  handle = timers.set(tick, windowMs)
+  return {
+    cancel: () => {
+      if (handle !== undefined) timers.clear(handle)
+    }
+  }
 }

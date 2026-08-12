@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import fs from 'fs'
+import path from 'path'
 import {
   OFFSCREEN_DISPOSE_MS_DEFAULT,
   offscreenDisposeMs,
@@ -177,17 +179,30 @@ describe('shouldDeferReleaseForLiveWork — the fourth kill lever behind issue #
     expect(shouldDeferReleaseForLiveWork({ tmuxBacked: false })).toBe(false)
   })
 
-  it('is UNCAPPED, unlike the Eco deferral — there is no elapsed time that makes the kill safe', () => {
-    // shouldDeferReleaseForEco takes `offscreenElapsedMs` and gives up at the cap because it waits
-    // for a hibernation that may never come. This one waits for the user's own turn to end, and
-    // "give up and kill it anyway" is precisely the reported bug — so time is not an input at all.
-    // Pinned structurally: the input carries no clock, so no caller can grow a cap by passing one.
-    const input: Parameters<typeof shouldDeferReleaseForLiveWork>[0] = {
-      tmuxBacked: false,
-      agentState: 'working'
-    }
-    expect(Object.keys(input).sort()).toEqual(['agentState', 'tmuxBacked'])
-    expect(shouldDeferReleaseForLiveWork(input)).toBe(true)
+  /**
+   * UNCAPPED, unlike the Eco deferral one screen up — and that is a decision, not an oversight, so
+   * it is pinned rather than described. `shouldDeferReleaseForEco` takes `offscreenElapsedMs` and
+   * gives up at a cap because it waits for a hibernation that may never come; this one waits for
+   * the user's own turn to end, and "give up and release anyway" is precisely the bug (#126).
+   *
+   * A behavioural test cannot state this: the claim is about an input that must NOT exist, and any
+   * argument object a test writes itself passes trivially. So it is pinned over the source — the
+   * same move `canvas/agent-status-rescue.test.ts` and `core/no-electron.test.ts` make for
+   * invariants no call can express — and it fails the moment someone threads a clock through.
+   */
+  it('is UNCAPPED: no clock reaches the predicate, so no caller can grow a cap', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, 'offscreen-policy.ts'), 'utf8')
+    const start = src.indexOf('export function shouldDeferReleaseForLiveWork')
+    expect(start, 'the predicate must still exist').toBeGreaterThan(-1)
+    const body = src.slice(start, src.indexOf('\n}', start))
+    // Its whole input is LiveWorkInput (tmuxBacked + agentState). Nothing time-shaped may appear:
+    // an elapsed reading, a deadline, a Date.now() — each of those is a cap in the making.
+    expect(body).toMatch(/shouldDeferReleaseForLiveWork\(\s*i: LiveWorkInput\s*\)/)
+    expect(body).not.toMatch(/elapsed|Ms\b|Date\.now|cap|minutes/i)
+    // …and the shared input type itself carries no clock either (the other end of the same claim).
+    const live = fs.readFileSync(path.resolve(__dirname, 'live-work.ts'), 'utf8')
+    const iface = live.slice(live.indexOf('export interface LiveWorkInput'))
+    expect(iface.slice(0, iface.indexOf('\n}'))).not.toMatch(/elapsed|Date\.now|cap|minutes/i)
   })
 })
 

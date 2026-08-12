@@ -62,7 +62,7 @@ import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '
 import {
   PARK_MAX,
   armParkExpiry,
-  canDisposePark,
+  canDisposeParkedEntry,
   disposableParks,
   planParkEviction,
   type ParkTimer
@@ -125,7 +125,8 @@ import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { useSettings } from '../state/settings'
-import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
+import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
+import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
@@ -286,12 +287,18 @@ interface ParkedTerminal {
   search: SearchAddon
   transport: TerminalTransport
   sessionId: string
-  /** The node this park belongs to — the key into `agentStatus.byId` the protection reads. (The
-   *  map's own key is session-scoped, `terminalKey(sessionId, nodeId)`, so it is not the node id.) */
-  nodeId: string
   /** `PtyCreateResult.persistent`: the session survives a client kill (tmux, local or remote).
    *  False = plain shell, where disposing this park ends the session for real. */
   tmuxBacked: boolean
+  /** The node's agent state AT PARK TIME — the protection FLOOR. The unmount that parks is also
+   *  the one that CLEARS this node's agent status (TerminalNode's departure effect), and every
+   *  lever reads later than that, so without this snapshot every park looks agent-less. See
+   *  `effectiveAgentState`. */
+  parkedAgentState?: AgentState
+  /** The node's agent state RIGHT NOW, read from the store of the session this node belongs to
+   *  (a relay tab's status lives in its own instance, not the default one). Closed over at park
+   *  time because the module-level levers have no access to the component's session. */
+  readAgentState: () => AgentState | undefined
   /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
   cleanups: Array<() => void>
   /**
@@ -307,20 +314,17 @@ interface ParkedTerminal {
 const parkedTerminals = new Map<string, ParkedTerminal>()
 const TERM_PARK_MS = 5 * 60 * 1000
 
-/** May the BUDGET levers dispose this park? Reads the node's live agent state the way the
- *  hibernation sweep does (the same store, non-reactively) and pairs it with the session's
- *  tmux-backedness. An unknown key is disposable — there is nothing there to protect.
- *
- *  `useAgentStatus` is the DEFAULT (local-core) store, like every other status read in this file.
- *  A relay tab's status lives in its own session-scoped store, so a remote node reads as "no
- *  agent" here — which changes nothing: a remote session is tmux-backed on the remote host, so it
- *  is disposable either way. */
+/** May the BUDGET levers dispose this park? The entry carries both halves of the answer: the
+ *  session's tmux-backedness, and a live read of the node's OWN agent-status store with the
+ *  park-time snapshot as a floor under it (see `canDisposeParkedEntry`). An unknown key is
+ *  disposable — there is nothing there to protect. */
 function parkDisposable(key: string): boolean {
   const p = parkedTerminals.get(key)
   if (!p) return true
-  return canDisposePark({
+  return canDisposeParkedEntry({
     tmuxBacked: p.tmuxBacked,
-    agentState: useAgentStatus.getState().byId[p.nodeId]?.state
+    parkedAgentState: p.parkedAgentState,
+    liveAgentState: p.readAgentState()
   })
 }
 
@@ -841,6 +845,28 @@ export function TerminalNode({
   // `defaultPresence` (byte-identical to before). Stable for the node's lifetime (a tab switch
   // unmounts the node), so capturing it in the once-mounted lifecycle effect below is safe, like `api`.
   const presence = useActiveSessionPresence()
+  /**
+   * THIS node's agent-status store, for the memory levers that must not kill live work.
+   *
+   * Resolved the way the session registry resolves it — memoized by api identity — so a relay
+   * tab's node reads the RELAY core's status table rather than the local one. That matters now
+   * that `persistent:false` can arrive from a tmux-less relay HOST: such a node is exactly a
+   * plain-shell agent session, and against the default store its state would always read
+   * `undefined` (= disposable), i.e. unprotected. For the local session this IS `useAgentStatus`
+   * (the WeakMap is seeded with `window.nodeTerminal`), so nothing about local behavior changes.
+   *
+   * Scoped deliberately to the protection paths. The other status reads in this file predate
+   * per-session stores and are left exactly as they were; widening them is a separate change.
+   */
+  const agentStatusStore = agentStatusForApi(api).store
+  const readAgentState = useCallback(
+    (): AgentState | undefined => agentStatusStore.getState().byId[id]?.state,
+    [agentStatusStore, id]
+  )
+  /** Mirror for the mount-stable visibility observer, which is keyed on `termKey` alone and takes
+   *  everything mutable through a ref (see its docblock). */
+  const readAgentStateRef = useRef(readAgentState)
+  readAgentStateRef.current = readAgentState
   // Session-scope the module-global node-keyed maps (parkedTerminals / coStates / coSubs /
   // restartSubs / noParkIds): a relay tab adopts the host's project KEEPING node ids, so a local
   // node and a relay node can share a bare id. `session.id` is stable for this node's lifetime
@@ -3087,8 +3113,11 @@ export function TerminalNode({
           search: searchAddon,
           transport,
           sessionId,
-          nodeId: id,
           tmuxBacked: sessionPersistent,
+          // Snapshot NOW, because the departure effect declared below this one clears this node's
+          // agent status on this very unmount — every lever reads later and would see nothing.
+          parkedAgentState: readAgentState(),
+          readAgentState,
           cleanups,
           life,
           // The window RE-ARMS (PARK_RECHECK_MS) while this park is protected, instead of killing a
@@ -3253,9 +3282,16 @@ export function TerminalNode({
             if (
               shouldDeferReleaseForLiveWork({
                 tmuxBacked: sessionPersistentRef.current,
-                agentState: useAgentStatus.getState().byId[id]?.state
+                agentState: readAgentStateRef.current()
               })
             ) {
+              // Re-stamp the offscreen clock: this node is not RELEASABLE yet, and the Eco
+              // deferral's cap is measured from the start of the releasable stretch. Without this
+              // a long live-work wait would blow that cap outright, so the release that finally
+              // runs would skip the hibernate-first ordering and forfeit the CLI's hundreds of MB
+              // at the exact moment they became reclaimable. The stretch effectively begins when
+              // the work ends.
+              offscreenSinceRef.current = Date.now()
               offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
               return
             }
