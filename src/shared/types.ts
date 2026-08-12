@@ -127,6 +127,21 @@ export interface PtyCreateResult {
    */
   coAttachMouse?: boolean
   /**
+   * This session is TMUX-BACKED (local or remote) — it survives losing this client, so killing our
+   * pty client only detaches us and everything running in the session keeps going.
+   *
+   * False = the plain-shell fallback (no tmux installed, tmux switched off, or a node with no
+   * persistKey): the pty IS the shell, and killing it kills the shell and every process under it —
+   * an agent CLI mid-task included. The renderer needs the difference because several of its
+   * levers dispose a terminal purely as a CACHE (the park window, the park LRU cap, the
+   * memory-pressure drop), a call that is only cheap when tmux is underneath. See
+   * `renderer/terminal/park-budget.ts` (`canDisposePark`) and issue #126.
+   *
+   * Absent = unknown (a core older than this field, over the relay): the renderer must then assume
+   * the historical behavior (persistent), never protect on a guess.
+   */
+  persistent?: boolean
+  /**
    * REFUSED: this node's session was permanently destroyed by ANOTHER client, so nothing was
    * spawned (`sessionId` is empty) — the terminal shows the "closed by <name>" state instead.
    *

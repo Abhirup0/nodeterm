@@ -59,7 +59,14 @@ import {
 } from '../terminal/terminal-config'
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
-import { PARK_MAX, planParkEviction } from '../terminal/park-budget'
+import {
+  PARK_MAX,
+  armParkExpiry,
+  canDisposePark,
+  disposableParks,
+  planParkEviction,
+  type ParkTimer
+} from '../terminal/park-budget'
 import {
   mayDisposeOffscreen,
   offscreenCoreIsRemote,
@@ -265,6 +272,12 @@ export function setSshRetryHandler(
  * COUNT as well as time — beyond `PARK_MAX` the oldest entries are evicted early (see
  * `terminal/park-budget.ts`), so a remount past the cap is the same warm reattach as one past the
  * window.
+ *
+ * "The PTY client detaches; the session keeps running" is true ONLY with tmux underneath. On the
+ * plain-shell fallback the pty IS the shell, so the same dispose kills the shell and whatever runs
+ * in it — which is how a project switch could terminate a working agent mid-task (issue #126).
+ * Every dispose driven purely by the BUDGET (window expiry, LRU cap, memory-pressure lever) is
+ * therefore gated on `canDisposePark`; a deliberate dispose (delete, respawn, dead session) is not.
  */
 interface ParkedTerminal {
   term: Terminal
@@ -272,6 +285,12 @@ interface ParkedTerminal {
   search: SearchAddon
   transport: TerminalTransport
   sessionId: string
+  /** The node this park belongs to — the key into `agentStatus.byId` the protection reads. (The
+   *  map's own key is session-scoped, `terminalKey(sessionId, nodeId)`, so it is not the node id.) */
+  nodeId: string
+  /** `PtyCreateResult.persistent`: the session survives a client kill (tmux, local or remote).
+   *  False = plain shell, where disposing this park ends the session for real. */
+  tmuxBacked: boolean
   /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
   cleanups: Array<() => void>
   /**
@@ -281,13 +300,31 @@ interface ParkedTerminal {
    * cleanup and the park dispose all race for it.
    */
   life: SessionLife & { killed: boolean }
-  timer: ReturnType<typeof setTimeout>
+  /** The park window, which RE-ARMS while the entry is protected (see `armParkExpiry`). */
+  timer: ParkTimer
 }
 const parkedTerminals = new Map<string, ParkedTerminal>()
 const TERM_PARK_MS = 5 * 60 * 1000
 
+/** May the BUDGET levers dispose this park? Reads the node's live agent state the way the
+ *  hibernation sweep does (the same store, non-reactively) and pairs it with the session's
+ *  tmux-backedness. An unknown key is disposable — there is nothing there to protect.
+ *
+ *  `useAgentStatus` is the DEFAULT (local-core) store, like every other status read in this file.
+ *  A relay tab's status lives in its own session-scoped store, so a remote node reads as "no
+ *  agent" here — which changes nothing: a remote session is tmux-backed on the remote host, so it
+ *  is disposable either way. */
+function parkDisposable(key: string): boolean {
+  const p = parkedTerminals.get(key)
+  if (!p) return true
+  return canDisposePark({
+    tmuxBacked: p.tmuxBacked,
+    agentState: useAgentStatus.getState().byId[p.nodeId]?.state
+  })
+}
+
 function disposeParked(p: ParkedTerminal): void {
-  clearTimeout(p.timer)
+  p.timer.cancel()
   // Mark the session dead BEFORE tearing it down: a spawn continuation still awaiting its history
   // seed reads this to see that the session it handed off no longer exists (→ teardown, not
   // continue-parked), instead of wiring listeners onto a killed session.
@@ -313,9 +350,16 @@ export function disposeParkedTerminal(key: string): void {
 /** Memory-pressure lever: drop EVERY parked terminal now, without waiting out `TERM_PARK_MS`. The
  *  park is a cache, not state — each dropped entry costs only its warm re-adopt, and the node
  *  re-mounts as an ordinary warm reattach (tmux redraws; the session and its scrollback are
- *  untouched). Idempotent; iterates a copy because `disposeParkedTerminal` mutates the map. */
+ *  untouched). Idempotent; iterates a copy because `disposeParkedTerminal` mutates the map.
+ *
+ *  EXCEPT the protected ones (`canDisposePark`): for a plain-shell session the sentence above is
+ *  false — the dispose is not a re-adopt cost, it is the end of the session — so a park holding a
+ *  working agent on a non-tmux shell is left alone and released by its own expiry re-check.
+ *  Everything else still goes, which is the whole point of the lever. */
 export function disposeAllParkedTerminals(): void {
-  for (const key of [...parkedTerminals.keys()]) disposeParkedTerminal(key)
+  for (const key of disposableParks([...parkedTerminals.keys()], parkDisposable)) {
+    disposeParkedTerminal(key)
+  }
 }
 
 /** Session-scoped keys (`terminalKey`) whose next unmount must dispose (not park) — set on permanent
@@ -1359,7 +1403,7 @@ export function TerminalNode({
     const parked = parkedTerminals.get(termKey)
     if (parked) {
       parkedTerminals.delete(termKey)
-      clearTimeout(parked.timer)
+      parked.timer.cancel()
     }
 
     const s = useSettings.getState().settings
@@ -1585,6 +1629,12 @@ export function TerminalNode({
     }
 
     let sessionId: string | null = parked ? parked.sessionId : null
+    // Does this session survive losing its client (tmux, local or remote)? Read off the create
+    // result below, carried over when adopting a park. Seeded `true` — the historical assumption —
+    // so a session whose create has not answered yet, or a core too old to say
+    // (`PtyCreateResult.persistent` absent), behaves exactly as it always did rather than being
+    // protected on a guess. See `canDisposePark`.
+    let sessionPersistent = parked ? parked.tmuxBacked : true
     let disposed = false
     // Last cols/rows REPORTED to the pty (seeded at create): a resize IPC makes tmux redraw the
     // whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after mount)
@@ -2240,6 +2290,7 @@ export function TerminalNode({
           screen,
           cursor,
           coAttachMouse,
+          persistent,
           unavailable
         }) => {
         // REFUSED: `requireRemote` and core could not spawn remotely (the master died inside our
@@ -2278,6 +2329,8 @@ export function TerminalNode({
         let offData: (() => void) | undefined
         if (onDisposed()) return
         sessionId = sid
+        // `?? true`: an absent flag is an older core over the relay, not a plain shell.
+        sessionPersistent = persistent ?? true
         if (fellBack) setAccountFallback(true)
         // Catch up a size change that landed while the spawn was in flight (applyFit skips the
         // IPC until sessionId is set, and the observer won't re-fire without another change).
@@ -3023,26 +3076,38 @@ export function TerminalNode({
           search: searchAddon,
           transport,
           sessionId,
+          nodeId: id,
+          tmuxBacked: sessionPersistent,
           cleanups,
           life,
-          timer: setTimeout(() => {
-            if (parkedTerminals.get(termKey) === entry) {
-              parkedTerminals.delete(termKey)
-              disposeParked(entry)
-            }
-          }, TERM_PARK_MS)
+          // The window RE-ARMS (PARK_RECHECK_MS) while this park is protected, instead of killing a
+          // plain shell that is still running the user's agent — and instead of leaking the park,
+          // which is what a plain "skip the dispose" would do.
+          timer: armParkExpiry(
+            () => parkDisposable(termKey),
+            () => {
+              if (parkedTerminals.get(termKey) === entry) {
+                parkedTerminals.delete(termKey)
+                disposeParked(entry)
+              }
+            },
+            TERM_PARK_MS
+          )
         }
         disposeParkedTerminal(termKey) // defensive: never stack two entries for one node
         parkedTerminals.set(termKey, entry)
         // Enforce the park count cap: evict the OLDEST parks (their next remount becomes a warm
-        // tmux reattach — the post-window behavior, just earlier). Never the entry just parked.
+        // tmux reattach — the post-window behavior, just earlier). Never the entry just parked,
+        // and never a PROTECTED one — the plan skips those and takes the next-oldest disposable
+        // park instead, and the cap is simply exceeded when every park is protected (see
+        // planParkEviction: a bounded cache overrun beats killing live work).
         // Eviction MUST observe the POST-ADOPTION map: a project switch flushes every outgoing
         // node's cleanup (parking each) BEFORE any incoming node's mount effect adopts its own
         // park, so evicting inline would dispose the parks the incoming project is about to
         // re-adopt. A microtask is what defers past the whole synchronous passive-effect flush
         // (cleanups AND mounts); adoption has removed its entries from the map by then.
         queueMicrotask(() => {
-          for (const k of planParkEviction([...parkedTerminals.keys()], PARK_MAX)) {
+          for (const k of planParkEviction([...parkedTerminals.keys()], PARK_MAX, parkDisposable)) {
             if (k !== termKey) disposeParkedTerminal(k)
           }
         })

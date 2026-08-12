@@ -16,7 +16,7 @@ import {
   type Settings,
   type TmuxStatus
 } from '../shared/types'
-import { findCommand, tmuxInstall } from './tmux-hint'
+import { findCommand, findFixedTmux, tmuxInstall } from './tmux-hint'
 import { hookServer, PERM_WAIT_SECS_DEFAULT } from './agents/hook-server'
 import {
   probeSaysAbsent,
@@ -156,20 +156,32 @@ bind -T copy-mode-vi TripleClick1Pane send-keys -X select-line \\; send-keys -X 
 `
 }
 
-/** Resolve an absolute tmux path (GUI apps don't inherit the shell PATH). Subprocess-free:
- *  the old fallback here was a SYNC login-shell `command -v tmux` — sourcing the profile
- *  (nvm/conda: 100-800ms) on the main thread, re-triggered every 3s by the tmux-missing
- *  banner's install poll, freezing all windows and IPC each time. Now it walks the cached
- *  login-shell PATH instead; before that async probe settles a nonstandard location can be
- *  missed, which init()'s post-probe ensureTmux() re-run and tmuxStatus()'s re-probe cover. */
+/**
+ * Resolve an absolute tmux path (GUI apps don't inherit the shell PATH). Subprocess-free: the old
+ * fallback here was a SYNC login-shell `command -v tmux` — sourcing the profile (nvm/conda:
+ * 100-800ms) on the main thread, re-triggered every 3s by the tmux-missing banner's install poll,
+ * freezing all windows and IPC each time. Now it walks a fixed candidate list
+ * (`tmuxCandidatePaths` — Homebrew, MacPorts, Nix, Linuxbrew, the distro paths) and then the
+ * cached login-shell PATH.
+ *
+ * BEFORE THAT ASYNC PATH PROBE SETTLES, a tmux living ONLY on the user's shell PATH is still
+ * invisible, and a session spawned in that window silently becomes a plain shell with no
+ * persistence — the window this candidate list narrows, and the reason issue #126 could bite a
+ * machine that has tmux installed. Two things close it after the fact: init()'s post-probe
+ * `ensureTmux()` re-run and `tmuxStatus()`'s re-probe, both of which upgrade NEW sessions without
+ * a restart. A session already spawned plain is NOT migrated (there is no way to move a running
+ * process into a tmux pane); its recovery is the node's own Refresh/respawn, which re-creates it
+ * through the now-resolved tmux.
+ */
 function findTmux(): string | null {
-  for (const c of ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux', '/bin/tmux']) {
-    try {
-      if (fs.existsSync(c)) return c
-    } catch {
-      // ignore
-    }
+  let user: string | null = null
+  try {
+    user = os.userInfo().username
+  } catch {
+    // no passwd entry (some containers) — findFixedTmux falls back to the home basename
   }
+  const fixed = findFixedTmux((p) => fs.existsSync(p), os.homedir(), user)
+  if (fixed) return fixed
   return findInPathString('tmux', shellPathNow() ?? process.env.PATH)
 }
 
@@ -1122,9 +1134,13 @@ export class PtyManager {
   }
 
   /** Probe tmux and write/push the generated config. Idempotent and safe to re-run: a later
-   *  successful probe (e.g. right after the banner's install command finishes) brings tmux
-   *  up for NEW sessions without an app restart — existing plain-shell sessions are left
-   *  alone. No-op while tmux is already resolved or before init() provided settings. */
+   *  successful probe (the banner's install command finishing, or init()'s post-PATH-probe re-run
+   *  finding a tmux only the login shell knew about) brings tmux up for NEW sessions without an
+   *  app restart — existing plain-shell sessions are left alone. There is deliberately no
+   *  migration: a process already running under a bare pty cannot be moved into a tmux pane, so
+   *  the recovery for one of those is the node's own refresh/respawn, which re-creates the session
+   *  through the now-resolved tmux (at the cost of that shell's state, as any respawn is).
+   *  No-op while tmux is already resolved or before init() provided settings. */
   ensureTmux(): void {
     if (this.tmuxPath || !this.getSettings) return
     const found = findTmux()
@@ -1470,9 +1486,12 @@ export class PtyManager {
     // our tmux always runs `mouse on`, so enabling these unconditionally matches its client state.
     // Rides `base` so it reaches the renderer on BOTH the resized and screen-painted branches.
     const coAttachMouse = existing.persistKey ? true : undefined
+    // Same source, different question (and different consumer): a joiner needs to know whether the
+    // session it landed on survives losing a client, because its own unmount may park it.
+    const persistent = !!existing.persistKey
     const base: PtyCreateResult = existing.accountFallback
-      ? { sessionId: existingId, fresh: false, accountFallback: true, coAttachMouse }
-      : { sessionId: existingId, fresh: false, coAttachMouse }
+      ? { sessionId: existingId, fresh: false, accountFallback: true, coAttachMouse, persistent }
+      : { sessionId: existingId, fresh: false, coAttachMouse, persistent }
     if (resized) return Promise.resolve(base) // tmux is redrawing this client — do not paint twice
     // An empty capture (plain shell — no tmux to capture; a tmux/ssh blip) is OMITTED, never sent
     // as '': the renderer must not reset a terminal for nothing. A plain-shell joiner therefore
@@ -1530,9 +1549,16 @@ export class PtyManager {
     // so the session env below picks it up — awaiting keeps the event loop free either way.
     await resolveShellPath()
     const sessionId = this.spawnSession(options, clientId, undefined)
+    const spawned = this.sessions.get(sessionId)
     // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
-    const accountFallback = this.sessions.get(sessionId)?.accountFallback
-    return accountFallback ? { sessionId, fresh, accountFallback } : { sessionId, fresh }
+    const accountFallback = spawned?.accountFallback
+    // The session's `persistKey` is set iff the spawn actually landed on a tmux, local or remote
+    // (`persisted` in spawnSession) — i.e. exactly "this session survives losing its client",
+    // which is what the renderer's cache-dispose levers must not assume. See PtyCreateResult.
+    const persistent = !!spawned?.persistKey
+    return accountFallback
+      ? { sessionId, fresh, accountFallback, persistent }
+      : { sessionId, fresh, persistent }
   }
 
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
