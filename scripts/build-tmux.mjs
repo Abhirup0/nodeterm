@@ -17,11 +17,12 @@
  * The OUTPUT (resources/bin/tmux) is gitignored — this script is the source of truth. The release
  * job runs it before electron-builder, which copies it in via `extraResources`.
  *
- * Shape of the build: static libevent (so the app never depends on a Homebrew dylib that isn't
- * there), ncurses taken dynamically from macOS itself (/usr/lib/libncurses.dylib ships with the
- * OS — vendoring terminfo would be a second, larger problem), one `lipo` pass to make the two
- * arch builds universal. No npm dependencies on purpose: node stdlib + the system curl/cc/lipo,
- * so the release runner needs nothing installed beyond the Xcode command line tools.
+ * Shape of the build: static libevent and static utf8proc (so the app never depends on a Homebrew
+ * dylib that isn't there), ncurses taken dynamically from macOS itself (/usr/lib/libncurses.dylib
+ * ships with the OS — vendoring terminfo would be a second, larger problem), one `lipo` pass to
+ * make the two arch builds universal. No npm dependencies on purpose: node stdlib + the system
+ * curl/cc/make/lipo, so the release runner needs nothing installed beyond the Xcode command line
+ * tools — in particular no cmake, no autoconf, no pkg-config and no Rosetta.
  *
  * Usage: node scripts/build-tmux.mjs [--force] [--verbose]
  */
@@ -49,6 +50,12 @@ const LIBEVENT_VERSION = '2.1.13-stable'
 const LIBEVENT_SHA256 = 'f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c'
 const LIBEVENT_URL = `https://github.com/libevent/libevent/releases/download/release-${LIBEVENT_VERSION}/libevent-${LIBEVENT_VERSION}.tar.gz`
 
+// utf8proc supplies the Unicode width/grapheme tables tmux uses for `--enable-utf8proc`. See the
+// configure flag below for why it is worth a third vendored library.
+const UTF8PROC_VERSION = '2.11.3'
+const UTF8PROC_SHA256 = '415189fd2c85cd6ee5ff26af500fa387de9ada1e3e316e93f7338551481d557d'
+const UTF8PROC_URL = `https://github.com/JuliaStrings/utf8proc/releases/download/v${UTF8PROC_VERSION}/utf8proc-${UTF8PROC_VERSION}.tar.gz`
+
 /** Slices in the universal output, with the deployment target each is built against.
  *  arm64 cannot go below 11.0 (Apple Silicon did not exist before it); 10.15 keeps the Intel
  *  slice usable on every macOS the Intel app build still supports. */
@@ -64,7 +71,7 @@ const licenseDir = path.join(repoRoot, 'resources', 'licenses')
 /** Written next to the binary; its exact content is the "is the output already the pinned build?"
  *  test, so bumping a version above automatically invalidates a stale binary. */
 const markerFile = path.join(outDir, '.tmux-build-version')
-const MARKER = `tmux-${TMUX_VERSION} libevent-${LIBEVENT_VERSION} universal(${ARCHS.map((a) => a.arch).join('+')})\n`
+const MARKER = `tmux-${TMUX_VERSION} libevent-${LIBEVENT_VERSION} utf8proc-${UTF8PROC_VERSION} universal(${ARCHS.map((a) => a.arch).join('+')})\n`
 
 const force = process.argv.includes('--force')
 const verbose = process.argv.includes('--verbose')
@@ -129,8 +136,10 @@ function buildArch({ arch, triple, minOs }, work, tarballs) {
   const stage = path.join(work, `build-${arch}`)
   fs.mkdirSync(stage, { recursive: true })
   run('tar', ['-xzf', tarballs.libevent, '-C', stage])
+  run('tar', ['-xzf', tarballs.utf8proc, '-C', stage])
   run('tar', ['-xzf', tarballs.tmux, '-C', stage])
   const evDir = path.join(stage, `libevent-${LIBEVENT_VERSION}`)
+  const u8Dir = path.join(stage, `utf8proc-${UTF8PROC_VERSION}`)
   const tmuxDir = path.join(stage, `tmux-${TMUX_VERSION}`)
 
   const prefix = path.join(work, `prefix-${arch}`)
@@ -172,27 +181,56 @@ function buildArch({ arch, triple, minOs }, work, tarballs) {
   run('make', [`-j${os.cpus().length}`], { cwd: evDir, env })
   run('make', ['install'], { cwd: evDir, env })
 
+  log(`building utf8proc (${arch})…`)
+  // utf8proc ships a plain Makefile as well as a CMakeLists — the Makefile route is used on
+  // purpose so the release runner never needs cmake installed. `libutf8proc.a` is a target of its
+  // own (the default `all` would also build a dylib), and the .a plus the header are placed into
+  // our prefix BY HAND rather than with `make install`: that target insists on the dylib, and a
+  // libutf8proc.dylib sitting in the prefix is exactly what the linker would then prefer, turning
+  // the bundled tmux into something that needs a library the user does not have.
+  run(
+    'make',
+    [`-j${os.cpus().length}`, 'libutf8proc.a', 'CC=cc', `CFLAGS=${flags} -O2`],
+    { cwd: u8Dir, env }
+  )
+  fs.mkdirSync(path.join(prefix, 'lib'), { recursive: true })
+  fs.mkdirSync(path.join(prefix, 'include'), { recursive: true })
+  fs.copyFileSync(
+    path.join(u8Dir, 'libutf8proc.a'),
+    path.join(prefix, 'lib', 'libutf8proc.a')
+  )
+  fs.copyFileSync(path.join(u8Dir, 'utf8proc.h'), path.join(prefix, 'include', 'utf8proc.h'))
+
   log(`building tmux (${arch})…`)
   // Point tmux at OUR libevent and nothing else: only the static .a lives in that prefix, so the
   // link is static with no -static flag and no chance of picking up a system libevent.dylib.
   const tmuxEnv = {
     ...env,
     CPPFLAGS: `-I${path.join(prefix, 'include')}`,
-    LDFLAGS: `${flags} -L${path.join(prefix, 'lib')}`
+    LDFLAGS: `${flags} -L${path.join(prefix, 'lib')}`,
+    // Pre-answer tmux's PKG_CHECK_MODULES for utf8proc. That macro is invoked with NO
+    // action-if-not-found, so with pkg-config disabled it would abort configure outright
+    // ("The pkg-config script could not be found") — but autoconf skips the pkg-config call
+    // entirely when both <VAR>_CFLAGS and <VAR>_LIBS are already set, which is what these do.
+    // Result: PKG_CONFIG stays neutralized AND tmux links the static lib we just built.
+    LIBUTF8PROC_CFLAGS: `-I${path.join(prefix, 'include')}`,
+    LIBUTF8PROC_LIBS: `-L${path.join(prefix, 'lib')} -lutf8proc`
   }
   run(
     './configure',
     [
       `--prefix=${prefix}`,
-      // Deliberately OFF — and it must be stated explicitly, because tmux 3.7's configure REFUSES
-      // to guess on macOS. Upstream recommends --enable-utf8proc there ("macOS library support for
-      // Unicode is very poor, particularly for complex codepoints like emojis"), and the cost of
-      // saying no is that wide-character widths come from macOS's own wcwidth: emoji-heavy TUIs
-      // (the agent CLIs) can mis-wrap. The trade taken here is minimalism — utf8proc would be a
-      // third vendored library to download, pin, cross-build and license — against a rendering
-      // nicety, for a binary that only ever runs when the machine has NO tmux at all. Revisit by
-      // flipping this to --enable-utf8proc plus a static utf8proc slice per arch.
-      '--disable-utf8proc',
+      // ON, and it must be stated explicitly: tmux 3.7's configure REFUSES to guess on macOS and
+      // recommends this ("macOS library support for Unicode is very poor, particularly for complex
+      // codepoints like emojis"). Without it, character widths come from macOS's own wcwidth,
+      // whose tables predate modern emoji — a 2-cell emoji measured as 1 cell corrupts every line
+      // drawn after it. What nodeterm's terminals mostly show is agent TUIs (Claude Code and
+      // friends), which are emoji-dense and redraw boxes constantly, and the only people who ever
+      // run THIS binary are those with no tmux of their own — they have no better copy to fall
+      // back on. Homebrew's tmux enables it too, so this also keeps bundled and system tmux
+      // rendering the same. The price is the third vendored library above: one more pinned
+      // tarball to download, verify, cross-build statically and carry a license for.
+      '--enable-utf8proc',
       ...hostArg
     ],
     { cwd: tmuxDir, env: tmuxEnv }
@@ -213,6 +251,10 @@ function writeLicenses(sources) {
   fs.copyFileSync(
     path.join(sources.libevent, 'LICENSE'),
     path.join(licenseDir, 'libevent-LICENSE.txt')
+  )
+  fs.copyFileSync(
+    path.join(sources.utf8proc, 'LICENSE.md'),
+    path.join(licenseDir, 'utf8proc-LICENSE.md')
   )
   log(`licenses refreshed in ${path.relative(repoRoot, licenseDir)}/`)
 }
@@ -244,17 +286,75 @@ function assertNoForeignDylibs(file) {
   log(`dylib deps are all system: ${deps.join(', ')}`)
 }
 
-/** End-to-end proof that the binary actually runs a server: start one on a THROWAWAY socket,
- *  list it, kill it. Never touches the app's own `node-terminal` socket. */
+/**
+ * Prove utf8proc really got linked into BOTH slices — the decisive check, and the only one that
+ * can speak for the cross slice at all (the runner may have no Rosetta to execute it with).
+ * `_utf8proc_charwidth` is the exact symbol tmux's configure searches for, and `strip -S -x` keeps
+ * global symbols, so it survives into the shipped binary as a defined (T) symbol.
+ */
+function assertUtf8procLinked(file) {
+  for (const { arch } of ARCHS) {
+    const defined = capture('nm', ['-arch', arch, file])
+      .split('\n')
+      .some((l) => / T _utf8proc_charwidth$/.test(l.trimEnd()))
+    if (!defined) {
+      throw new Error(
+        `the ${arch} slice has no _utf8proc_charwidth — tmux was built without utf8proc, or the ` +
+          'static lib was not picked up (check LIBUTF8PROC_CFLAGS/LIBUTF8PROC_LIBS).'
+      )
+    }
+  }
+  log('utf8proc is statically linked into both slices (_utf8proc_charwidth defined)')
+}
+
+/** Block the (single-threaded, already synchronous) build for `ms` — the pane below needs a beat
+ *  to run its command before the capture can see the output. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * End-to-end proof that the binary actually runs a server: start one on a THROWAWAY socket, list
+ * it, run the emoji check below, kill it. Never touches the app's own `node-terminal` socket.
+ *
+ * The emoji check exercises the width path end to end, which `tmux -V` cannot: a pane prints a
+ * 2-cell emoji followed by two ASCII characters, and the cursor must end at column 4 — the
+ * off-by-one this guards against is what smears every subsequent redraw in an agent TUI. It is a
+ * BEHAVIORAL check, not proof that utf8proc is present (macOS's own wcwidth agrees about some
+ * emoji, and about U+1F680 on current macOS); `assertUtf8procLinked` is the proof.
+ */
 function smokeTest(file) {
   const sock = `nodeterm-bundle-test-${process.pid}`
+  const EMOJI = '🚀'
   const tmux = (...args) =>
-    capture(file, ['-L', sock, '-f', '/dev/null', ...args], { env: { ...process.env, TMUX: '' } })
+    capture(file, ['-L', sock, '-f', '/dev/null', '-u', ...args], {
+      // -u plus a UTF-8 locale: the release runner's env may carry neither, and tmux decides
+      // whether it is in UTF-8 mode from exactly these.
+      env: { ...process.env, TMUX: '', LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' }
+    })
   try {
     tmux('new-session', '-d', '-s', 'smoke')
     const sessions = tmux('list-sessions')
     if (!/^smoke:/m.test(sessions)) throw new Error(`unexpected list-sessions output: ${sessions}`)
     log(`smoke: server started on -L ${sock}, list-sessions → ${sessions.trim()}`)
+
+    tmux('new-session', '-d', '-s', 'emoji', `printf '${EMOJI}AB'; sleep 30`)
+    let pane = ''
+    for (let i = 0; i < 60 && !pane.includes(EMOJI); i++) {
+      sleepSync(50)
+      pane = tmux('capture-pane', '-p', '-t', 'emoji')
+    }
+    if (!pane.includes(`${EMOJI}AB`)) {
+      throw new Error(`emoji did not survive the pane round-trip; capture-pane gave: ${pane}`)
+    }
+    const cursorX = tmux('display-message', '-p', '-t', 'emoji', '#{cursor_x}').trim()
+    if (cursorX !== '4') {
+      throw new Error(
+        `emoji width is wrong: after "${EMOJI}AB" the cursor is at column ${cursorX}, expected 4. ` +
+          'utf8proc is probably not linked in (macOS wcwidth measures the emoji as 1 cell).'
+      )
+    }
+    log(`smoke: "${EMOJI}AB" round-tripped through a pane, cursor at column ${cursorX} (2+1+1) ok`)
   } finally {
     try {
       capture(file, ['-L', sock, 'kill-server'])
@@ -281,18 +381,22 @@ function main() {
   try {
     const tmuxTar = path.join(work, `tmux-${TMUX_VERSION}.tar.gz`)
     const evTar = path.join(work, `libevent-${LIBEVENT_VERSION}.tar.gz`)
+    const u8Tar = path.join(work, `utf8proc-${UTF8PROC_VERSION}.tar.gz`)
     download(TMUX_URL, tmuxTar, TMUX_SHA256)
     download(LIBEVENT_URL, evTar, LIBEVENT_SHA256)
-    const tarballs = { tmux: tmuxTar, libevent: evTar }
+    download(UTF8PROC_URL, u8Tar, UTF8PROC_SHA256)
+    const tarballs = { tmux: tmuxTar, libevent: evTar, utf8proc: u8Tar }
 
-    // One extra extraction, purely to lift the two license texts out of the pinned tarballs.
+    // One extra extraction, purely to lift the three license texts out of the pinned tarballs.
     const licenseSrc = path.join(work, 'licenses-src')
     fs.mkdirSync(licenseSrc, { recursive: true })
     run('tar', ['-xzf', tmuxTar, '-C', licenseSrc, `tmux-${TMUX_VERSION}/COPYING`])
     run('tar', ['-xzf', evTar, '-C', licenseSrc, `libevent-${LIBEVENT_VERSION}/LICENSE`])
+    run('tar', ['-xzf', u8Tar, '-C', licenseSrc, `utf8proc-${UTF8PROC_VERSION}/LICENSE.md`])
     writeLicenses({
       tmux: path.join(licenseSrc, `tmux-${TMUX_VERSION}`),
-      libevent: path.join(licenseSrc, `libevent-${LIBEVENT_VERSION}`)
+      libevent: path.join(licenseSrc, `libevent-${LIBEVENT_VERSION}`),
+      utf8proc: path.join(licenseSrc, `utf8proc-${UTF8PROC_VERSION}`)
     })
 
     const slices = ARCHS.map((a) => buildArch(a, work, tarballs))
@@ -312,6 +416,7 @@ function main() {
     )
     if (missing.length) throw new Error(`universal binary is missing slices: ${missing.join(', ')}`)
     assertNoForeignDylibs(outFile)
+    assertUtf8procLinked(outFile)
 
     // -V runs the NATIVE slice; the cross slice is verified structurally (lipo/otool) because the
     // runner may have no Rosetta to execute it with.

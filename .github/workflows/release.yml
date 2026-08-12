@@ -43,9 +43,16 @@ jobs:
       # only a WARNING to electron-builder, so a failure folded into the release command could
       # publish a DMG with no tmux in it and nobody would notice. Here a build failure fails the
       # job. Idempotent — a rerun with the binary already present is a no-op, so the retry loop in
-      # the next step costs nothing. Needs only the Xcode command line tools (curl/cc/lipo/make);
-      # no autoconf, no Homebrew, no npm deps.
-      - name: Build bundled tmux (universal, static libevent)
+      # the next step costs nothing.
+      #
+      # RUNNER TOOLCHAIN: the Xcode command line tools and nothing else — curl, cc, make, ar, yacc,
+      # lipo, strip, otool, nm. Explicitly NOT needed: cmake (utf8proc is built through its plain
+      # Makefile, not its CMakeLists), autoconf (release tarballs ship a generated `configure`, and
+      # each arch is extracted fresh so no maintainer rule fires), pkg-config (deliberately
+      # disabled — a Homebrew .pc file would link the bundle to dylibs users don't have), Homebrew,
+      # Rosetta (the cross slice is configured with --host, so no test binary is ever executed) and
+      # npm packages (node stdlib only).
+      - name: Build bundled tmux (universal, static libevent + utf8proc)
         run: node scripts/build-tmux.mjs
 
       - name: Build, sign & notarize
