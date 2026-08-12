@@ -51,7 +51,10 @@ applicable here":
 
 1. **Desktop** (Electron)
 2. **Server Edition** (Linux, browser)
-3. **Mobile companion** — a separate repo, usually a follow-up note rather than same-PR work
+3. **Mobile companion** — *nodeterm mobile*, a **private** repo (`nodeterm-ios`, SwiftUI). You
+   cannot open a PR against it, so this is normally a follow-up note rather than same-PR
+   work: say in your PR what the mobile side would need, and **mention @eneskirca** so it
+   gets picked up there. "Not applicable" is a fine answer — just make it a stated one.
 
 Anything reachable from `window.nodeTerminal` needs a **real** implementation in
 `src/renderer/bridge/`, or a deliberate, documented degrade. The `satisfies NodeTerminalApi` gate
