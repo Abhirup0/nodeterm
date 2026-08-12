@@ -137,6 +137,7 @@ import { WorktreeDialog } from '../components/WorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
+import { liveProjectJumpTarget, projectJumpDigit } from '../lib/projectJump'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
@@ -4639,6 +4640,22 @@ export function Canvas() {
     [goToNode]
   )
 
+  // ---- project (tab) actions ----
+  // Declared here (ahead of the keydown effect below, rather than near the other project
+  // actions further down) so the Cmd/Ctrl+digit shortcut can list it as a dependency without
+  // a TDZ violation: `useCallback`/`const` bindings are not hoisted like function declarations,
+  // so referencing switchProject in that effect's deps array before this point would throw
+  // "used before its declaration".
+  const switchProject = useCallback(
+    (id: string) => {
+      if (id === useProjects.getState().activeProjectId) return
+      commitActiveToStore()
+      useProjects.getState().setActive(id)
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
   // Cmd/Ctrl+K toggles the command palette; Cmd/Ctrl+, opens settings.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -4665,6 +4682,16 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
+      } else if (projectJumpDigit(e) !== null) {
+        // Cmd/Ctrl+1-9 jumps to the Nth project — but only when the app actually owns the key
+        // (desktop shell, and the digit addresses an open project). `liveProjectJumpTarget`
+        // is the same decision the terminals' swallow asks, so the two can't disagree; a null
+        // target leaves the key to whatever has focus. `switchProject` no-ops on the active id.
+        const targetId = liveProjectJumpTarget(e)
+        if (targetId) {
+          e.preventDefault()
+          switchProject(targetId)
+        }
       } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'c') {
         // Copy the current page selection (e.g. markdown view) to the clipboard.
         const tag = (document.activeElement?.tagName || '').toLowerCase()
@@ -4675,7 +4702,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleSessionsPin])
+  }, [toggleSessionsPin, switchProject])
 
   // Apply the accent color as a CSS variable.
   useEffect(() => {
@@ -5287,17 +5314,6 @@ export function Canvas() {
       }
     },
     [markDirty]
-  )
-
-  // ---- project (tab) actions ----
-  const switchProject = useCallback(
-    (id: string) => {
-      if (id === useProjects.getState().activeProjectId) return
-      commitActiveToStore()
-      useProjects.getState().setActive(id)
-      void writeDisk()
-    },
-    [commitActiveToStore, writeDisk]
   )
 
   // Focus a node by id (notification click): select + center it; if it lives in another
