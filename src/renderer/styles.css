@@ -6364,7 +6364,26 @@ body,
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
   flex: 0 0 auto;
 }
-.ss-group__chev { font-size: 9px; color: var(--muted); width: 10px; }
+/* The chevron is the ONLY collapse toggle on an inactive project row (the row itself switches),
+   so it is a real button with a clickable box around the 9px glyph, not the glyph alone. */
+.ss-group__chev {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin: -3px -2px -3px -3px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+.ss-group__chev:hover { background: rgba(var(--tint-rgb), 0.12); color: var(--text); }
 .ss-group__dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
 .ss-group__name { font-size: 12px; font-weight: 600; color: var(--text); }
 .ss-group.is-active .ss-group__name { color: var(--accent); }

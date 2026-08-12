@@ -8466,6 +8466,7 @@ export function Canvas() {
         onReorder={reorderSession}
         onRowContextMenu={onRowContextMenu}
         onProjectContextMenu={onProjectContextMenu}
+        onSwitchProject={switchProject}
         onAddToProject={addToProject}
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
