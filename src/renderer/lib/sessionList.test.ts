@@ -161,6 +161,51 @@ describe('projectSignalCounts', () => {
     }))
   })
 
+  // Restored from before the working badge: the original a–f matrix. It pins the row-glyph
+  // PRECEDENCE (attention beats unread, a working session is not yet unread) across both
+  // ungrouped and grouped sessions, which the narrower fixtures below do not reach. The working
+  // count is asserted alongside it rather than replacing it.
+  it('counts attention and unread across ungrouped and grouped sessions', () => {
+    const proj: ProjectInput[] = [
+      {
+        id: 'p1',
+        name: 'P1',
+        color: '#123',
+        nodes: [
+          node('g1', { kind: 'group', title: 'G', color: '#abc' }),
+          node('a'), // waiting → attention
+          node('b', { parentId: 'g1' }), // blocked → attention
+          node('c'), // done + unread → unread
+          node('d'), // idle + unread → unread (state lost, unread persisted)
+          node('e'), // working + unread → NOT counted (mirrors the row glyph precedence)
+          node('f') // plain idle → neither
+        ]
+      }
+    ]
+    const status: Record<string, AgentNodeStatus> = {
+      a: { unread: false, state: 'waiting' },
+      b: { unread: true, state: 'blocked' }, // attention wins over unread
+      c: { unread: true, state: 'done' },
+      d: { unread: true },
+      e: { unread: true, state: 'working' }
+    }
+    const [g] = buildSessionList(proj, null, 'p1', status, '')
+    // `e` is the load-bearing one: it is the single working session AND carries an unread mark,
+    // so it must land in `working` and NOT in `unread`.
+    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2, working: 1 })
+  })
+
+  it('returns zeros for a quiet project', () => {
+    const [g] = buildSessionList(
+      [{ id: 'p1', name: 'P1', color: '#123', nodes: [node('x')] }],
+      null,
+      'p1',
+      {},
+      ''
+    )
+    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 0, working: 0 })
+  })
+
   it('counts working sessions alongside attention/unread', () => {
     const g = group([
       { statusKind: 'working' },
