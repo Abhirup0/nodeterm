@@ -158,8 +158,14 @@ and the pill pulses instead of printing a number it has not earned.
 disappearing" on macOS, before the cause was known. Until this ships, the workaround on an affected
 machine is the reaper's own kill switch: `NODETERM_SESSION_REAP_DISABLED=1`.
 
-**Unverified:** the fixture in `session-memory.test.ts` is composed from Apple's documented format,
-not captured from a real machine. Device checklist item 6 is what closes it.
+**VERIFIED on a real Mac (2026-08-12, 24 GB machine) — device checklist item 6 is closed.**
+Activity Monitor reported App 7.67 GB + Wired 2.95 GB + Compressed 8.38 GB = **19.00 GB**; the pill
+read **19.1 GB**. AM's own headline "Memory Used" said 19.73 GB — it exceeds the sum of its own
+parts on Apple Silicon, a documented discrepancy rather than an error here. Before the fix the same
+machine read **23.9 / 24.0 GB**.
+
+The test fixture remains composed from Apple's documented format; what is verified is the FORMULA
+against a real machine, not that fixture's specific numbers.
 
 ## 6. The SSH leg
 
@@ -399,11 +405,10 @@ macOS (the ps path never runs on Linux)
  5. Open the panel on a Mac: `defaultProcessTableReader` returns null there, so the whole table
     comes from `ps -eo pid,ppid,rss`. Rows must populate, and the totals must be plausible — BSD ps
     reports rss in kB, but confirm one known process against Activity Monitor before trusting it.
- 6. macOS: capture real `vm_stat` output and check `parseVmStat` against Activity Monitor's Memory
-    Used (the fixture is COMPOSED, not captured). Confirm the pill's used/total reads
-    plausibly rather than alarmingly (a Mac with a big page cache will look fuller than it is).
-
-The SSH leg
+ 6. ~~macOS: check `parseVmStat` against Activity Monitor.~~ **DONE 2026-08-12** — 19.1 GB vs
+    AM's 19.00 GB of parts on a 24 GB machine (was 23.9/24.0 before the fix). Still open on
+    macOS: give the memory-PRESSURE monitor a real signal (`kern.memorystatus_vm_pressure_level`)
+    rather than a byte watermark — the same capture showed 82% used with AM's pressure graph GREEN.
  7. Open an SSH project: the panel must list THAT host's sessions and no local ones, and its header
     scope + the pill's title must read `user@host`.
  8. Open an SSH project BEFORE its ControlMaster is up. The pill must end on a NUMBER, not a
