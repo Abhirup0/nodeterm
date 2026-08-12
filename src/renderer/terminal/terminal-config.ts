@@ -716,11 +716,25 @@ export const SHIFT_ENTER_SEQ = '\x1b\r'
 
 export type TerminalKeyAction = CopyKeyAction | 'shift-enter'
 
-/** Matches the Cmd/Ctrl+Digit[1-9] "jump to Nth project" shortcut's key code. */
-const DIGIT_SHORTCUT_RE = /^Digit[1-9]$/
-
-/** Superset of `copyKeyAction` used by the terminal's custom key handler. */
-export function terminalKeyAction(e: CopyShortcutEvent, hasSelection: boolean): TerminalKeyAction {
+/**
+ * Superset of `copyKeyAction` used by the terminal's custom key handler.
+ *
+ * `ownsProjectJump` is the Cmd/Ctrl+1-9 "jump to the Nth project" decision, made by the caller
+ * (`liveProjectJumpTarget` in `lib/projectJump.ts`) and passed in — this module deliberately does
+ * NOT re-derive it. There is exactly one matcher for that chord, because it has to agree with the
+ * Canvas handler that performs the switch. When it is true the key must be swallowed HERE: xterm's
+ * own handler runs first (via `attachCustomKeyEventHandler`), and by the time Canvas's bubble-phase
+ * listener calls `preventDefault()` the control byte has already gone to the pty (on Linux/Windows
+ * Ctrl+2..Ctrl+8 are `^@ ^[ ^\ ^] ^^ ^_`).
+ *
+ * It defaults to `false` = never swallow = the byte-identical pre-feature behavior, which is also
+ * what the Server Edition wants: browsers reserve the chord, so nothing there can act on it.
+ */
+export function terminalKeyAction(
+  e: CopyShortcutEvent,
+  hasSelection: boolean,
+  ownsProjectJump = false
+): TerminalKeyAction {
   if (
     e.type === 'keydown' &&
     e.key === 'Enter' &&
@@ -730,20 +744,6 @@ export function terminalKeyAction(e: CopyShortcutEvent, hasSelection: boolean): 
     !e.altKey
   )
     return 'shift-enter'
-  // Ctrl+Digit[1-9] is the "jump to Nth project" shortcut (Canvas.tsx). On macOS this is Cmd,
-  // which xterm already ignores — but on Linux/Windows the Ctrl variant maps to real terminal
-  // control codes (Ctrl+2..Ctrl+8 = ^@, ^[, ^\, ^], ^^, ^_), so xterm must be told to swallow it
-  // BEFORE it writes the control byte to the PTY. The bubble-phase keydown listener in Canvas.tsx
-  // runs `preventDefault()` too late for that — this handler is xterm's own, invoked first via
-  // `attachCustomKeyEventHandler`. No meta check needed: Cmd never reaches here as ctrlKey.
-  if (
-    e.type === 'keydown' &&
-    e.ctrlKey &&
-    !e.metaKey &&
-    !e.altKey &&
-    !e.shiftKey &&
-    DIGIT_SHORTCUT_RE.test(e.code)
-  )
-    return 'swallow'
+  if (ownsProjectJump) return 'swallow'
   return copyKeyAction(e, hasSelection)
 }

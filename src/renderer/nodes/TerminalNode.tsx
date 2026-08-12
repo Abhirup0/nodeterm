@@ -102,6 +102,7 @@ import { ContextMeter } from '../components/ContextMeter'
 import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
+import { liveProjectJumpTarget } from '../lib/projectJump'
 import { useSettings } from '../state/settings'
 import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
 import type { ClientId } from '@shared/presence'
@@ -1896,8 +1897,11 @@ export function TerminalNode({
     // NOT preventable by a page — hence Ctrl+Insert, which no browser reserves.
     // Shift+Enter is also intercepted here: xterm would send a plain \r (submit), so we remap it to
     // ESC+CR (`SHIFT_ENTER_SEQ`) — agent CLIs read that as "insert newline" (see terminal-config.ts).
+    // Cmd/Ctrl+1-9 (jump to the Nth project) must be swallowed before xterm turns Ctrl+2..Ctrl+8
+    // into control bytes — but ONLY when the app owns the key: desktop shell, digit addressing an
+    // open project. `liveProjectJumpTarget` is the same decision Canvas's handler makes.
     term.attachCustomKeyEventHandler((e) => {
-      const action = terminalKeyAction(e, term.hasSelection())
+      const action = terminalKeyAction(e, term.hasSelection(), liveProjectJumpTarget(e) !== null)
       if (action === 'pass') return true
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())

@@ -126,7 +126,7 @@ import { WorktreeDialog } from '../components/WorktreeDialog'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
-import { projectIdAtIndex } from '../lib/sessionList'
+import { liveProjectJumpTarget, projectJumpDigit } from '../lib/projectJump'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
@@ -306,10 +306,6 @@ import {
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 const GRID = 24
-
-/** Cmd/Ctrl+1-9 "jump to Nth project" shortcut key match — hoisted so the keydown handler
- *  doesn't re-allocate a regex literal on every keystroke. */
-const DIGIT_SHORTCUT_RE = /^Digit[1-9]$/
 
 /** The empty opaque set (glyphgrid), shared so the render-time compute allocates nothing on the
  *  overwhelmingly common "nothing overlaps / layer off" path. */
@@ -4661,19 +4657,13 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
-      } else if (
-        (e.metaKey || e.ctrlKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        DIGIT_SHORTCUT_RE.test(e.code)
-      ) {
-        const n = Number(e.code.slice(5))
-        const { projects, activeProjectId } = useProjects.getState()
-        const targetId = projectIdAtIndex(
-          projects.filter((p) => !p.closed),
-          n
-        )
-        if (targetId && targetId !== activeProjectId) {
+      } else if (projectJumpDigit(e) !== null) {
+        // Cmd/Ctrl+1-9 jumps to the Nth project — but only when the app actually owns the key
+        // (desktop shell, and the digit addresses an open project). `liveProjectJumpTarget`
+        // is the same decision the terminals' swallow asks, so the two can't disagree; a null
+        // target leaves the key to whatever has focus. `switchProject` no-ops on the active id.
+        const targetId = liveProjectJumpTarget(e)
+        if (targetId) {
           e.preventDefault()
           switchProject(targetId)
         }

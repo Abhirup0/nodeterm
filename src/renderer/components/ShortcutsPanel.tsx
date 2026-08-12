@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
+import { isBrowserRuntime } from '../bridge/runtime'
 import { useSettings } from '../state/settings'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -26,7 +27,9 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
         { keys: ['⌘', 'K'], label: 'Command palette' },
         { keys: ['⌘', ','], label: 'Settings' },
         { keys: ['⌘', '/'], label: 'This shortcuts panel' },
-        { keys: ['⌘', '1-9'], label: 'Jump to project' },
+        // Desktop only: browsers own Cmd/Ctrl+1-9 for tab switching and a page cannot take it
+        // back, so listing it in the Server Edition would promise a shortcut that never fires.
+        ...(isBrowserRuntime() ? [] : [{ keys: ['⌘', '1-9'], label: 'Jump to project' }]),
         { keys: dictationKeys, label: dictationLabel },
         { keys: ['⌘', 'Z'], label: 'Undo' },
         { keys: ['⌘', '⇧', 'Z'], label: 'Redo' }

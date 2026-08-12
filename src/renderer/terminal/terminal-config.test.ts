@@ -531,39 +531,33 @@ describe('terminalKeyAction', () => {
     expect(SHIFT_ENTER_SEQ).toBe('\x1b\r')
   })
 
-  it('swallows Ctrl+Digit[1-9] keydown so the PTY never sees the jump-to-project chord', () => {
-    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true }), false)).toBe(
+  // The jump-to-project chord: WHICH events are the chord is decided once, in lib/projectJump.ts
+  // (and tested there — layout, AltGr, keyup, digit range). This module only obeys the answer.
+  it('swallows the jump-to-project chord so the PTY never sees the control byte', () => {
+    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true }), false, true)).toBe(
       'swallow'
     )
-    expect(terminalKeyAction(ev({ key: '9', code: 'Digit9', ctrlKey: true }), false)).toBe(
-      'swallow'
+  })
+
+  // REGRESSION GUARD (review #2): the swallow follows the caller's resolution, so a digit that
+  // addresses no open project keeps reaching the pty — Ctrl+2..Ctrl+8 are ^@ ^[ ^\ ^] ^^ ^_, and
+  // vim's ^] (jump to tag) and ^^ (alternate file) are daily-use keys.
+  it('passes the same chord through when the app does not own it', () => {
+    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true }), false, false)).toBe(
+      'pass'
+    )
+    expect(terminalKeyAction(ev({ key: '5', code: 'Digit5', ctrlKey: true }), false, false)).toBe(
+      'pass'
     )
   })
 
-  it('passes Cmd+Digit1 through (meta without ctrl never reaches the PTY as a control code)', () => {
-    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', metaKey: true }), false)).toBe('pass')
+  it('defaults to not swallowing — the pre-feature behavior, byte for byte', () => {
+    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true }), false)).toBe('pass')
   })
 
-  it('passes Ctrl+Alt+Digit1 through (AltGr on non-US layouts types a real character)', () => {
-    expect(
-      terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true, altKey: true }), false)
-    ).toBe('pass')
-  })
-
-  it('passes Ctrl+Shift+Digit1 through (matches Canvas.tsx rejecting shifted digit chords)', () => {
-    expect(
-      terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true, shiftKey: true }), false)
-    ).toBe('pass')
-  })
-
-  it('passes Ctrl+Digit0 through (0 is out of the addressable 1-9 range)', () => {
-    expect(terminalKeyAction(ev({ key: '0', code: 'Digit0', ctrlKey: true }), false)).toBe('pass')
-  })
-
-  it('passes a Ctrl+Digit1 keyup through (only keydown swallows)', () => {
-    expect(
-      terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true, type: 'keyup' }), false)
-    ).toBe('pass')
+  it('never lets the jump swallow shadow a copy chord', () => {
+    // Cmd+C with a selection still copies; the digit flag only ever applies to a digit keydown.
+    expect(terminalKeyAction(ev({ metaKey: true }), true, false)).toBe('copy')
   })
 })
 

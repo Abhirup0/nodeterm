@@ -5,6 +5,7 @@ import { SearchAddon } from '@xterm/addon-search'
 import { reportsOwnCopy } from '@shared/agents/config'
 import type { AgentId } from '@shared/agents/config'
 import { readsClaudeTranscript } from '../../lib/transcriptGates'
+import { liveProjectJumpTarget } from '../../lib/projectJump'
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
@@ -185,8 +186,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // the xterm selection (a canvas can't be DOM-copied), and Shift+Enter → ESC+CR (`SHIFT_ENTER_SEQ`)
     // so agent CLIs insert a newline instead of submitting. A copy chord is always swallowed (else
     // Ctrl+Shift+C would fall through to the pty as \x03/SIGINT); plain Ctrl+C is left alone.
+    // MIRROR TerminalNode: Cmd/Ctrl+1-9 (jump to the Nth project) is swallowed here, before xterm
+    // turns Ctrl+2..Ctrl+8 into control bytes — but only when the app owns the key (desktop shell,
+    // digit addressing an open project), which `liveProjectJumpTarget` decides for both surfaces.
     term.attachCustomKeyEventHandler((e) => {
-      const action = terminalKeyAction(e, term.hasSelection())
+      const action = terminalKeyAction(e, term.hasSelection(), liveProjectJumpTarget(e) !== null)
       if (action === 'pass') return true
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
