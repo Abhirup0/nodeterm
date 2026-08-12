@@ -89,7 +89,10 @@ async function mintRelayDevice(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(
         body.entitlement
-          ? body
+          ? // hostDeviceId rides the ENTITLED mint too: without it the row lands with
+            // hostDev=null and the backend's same-desktop C2 allowance can never match a
+            // later free re-pair from this same machine (decoded live from a reauth log).
+            { ...body, hostDeviceId: getDeviceId() }
           : {
               deviceId: body.deviceId,
               hostDeviceId: getDeviceId(),
