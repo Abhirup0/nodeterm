@@ -216,6 +216,14 @@ export interface CanvasNodeState {
    * and immutable for the node's lifetime. Undefined = system default (~/.claude).
    */
   accountId?: string
+  /**
+   * Agents in `SESSION_ID_CAPABLE` (claude): the session id nodeterm minted and launched this
+   * node's CLI with (`--session-id`). Persisted so a cold restore can resume even when no hook
+   * ever delivered an id — the SSH reverse tunnel is the only path that carries one, and a node
+   * whose tunnel was down came back as a blank conversation with its transcript intact on disk.
+   * The hook-fed id still wins when known: `/clear` and `--fork-session` mint a new one in-CLI.
+   */
+  agentSessionId?: string
   /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
   ssh?: import('./ssh').SshConnection
   /** When true (SSH-project terminals), the node runs in REMOTE tmux on `ssh` rather than `ssh`-on-local-PTY. */
@@ -510,6 +518,30 @@ export interface TmuxStatus {
   platform: string
 }
 
+/**
+ * How close THIS MACHINE is to `kern.tty.ptmx_max`, the system-wide pty-device ceiling that took
+ * the whole app down in the 2026-08-11 field report (every spawn failing with a bare
+ * `posix_spawnp failed.`). See core/pty-pressure.ts for the bands.
+ */
+export type PtyPressureLevel = 'none' | 'elevated' | 'critical'
+
+/** A pty-pressure reading, as broadcast on `IPC.ptyPressure`. `null` = could not be measured. */
+export interface PtyPressure {
+  level: PtyPressureLevel
+  /** `/dev/ttys*` entries in existence right now. */
+  usage: number | null
+  /** `kern.tty.ptmx_max`. */
+  ceiling: number | null
+}
+
+/** Outcome of the banner's "Fix automatically…" button (macOS only) — see main/ptmx-limit.ts. */
+export type PtyLimitFixResult =
+  | { ok: true; ceiling: number }
+  /** `canceled` = the user dismissed macOS's own admin-password dialog. Not an error to retry.
+   *  `busy` = a password dialog from another window/reload is already up. Both are SILENT for the
+   *  renderer: nothing failed, so neither may raise an error toast. */
+  | { ok: false; error: string; canceled?: boolean; busy?: boolean }
+
 export interface PtyApi {
   /** Starts a new PTY session; returns its sessionId and whether the session was freshly
    *  created (cold start) vs reattached to a still-running tmux session (warm). */
@@ -608,6 +640,10 @@ export interface WorkspaceApi {
    *  project folders; `exec` = the custom shell / advanced ssh args of already-open projects moved
    *  out of the shared project file into this machine's own workspace index (@shared/node-exec). */
   onMigrated(cb: (kind: WorkspaceMigrationKind) => void): () => void
+  /** Fired once per run when a load found the workspace index unreadable and preserved it as
+   *  `workspace.json.corrupt-<ts>` (the payload). The projects themselves are untouched — their
+   *  canvases live in each <cwd>/.nodeterm/project.json — so the note tells the user to re-add them. */
+  onCorruptRecovered(cb: (backupFile: string) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
 }
@@ -818,8 +854,30 @@ export interface Settings {
    *  directly (grab cursor), for mouse users who pan constantly; box-select then moves to
    *  Shift+drag (React Flow's selectionKeyCode). */
   canvasDragMode: 'select' | 'pan'
+  /**
+   * Browser memory saver: release a browser/web node's page after it has been hidden for
+   * `BROWSER_DISCARD_MS` (5 min), reloading it from its URL when it is shown again. Each
+   * `<webview>` is a whole Chromium renderer process and the canvas caps nothing, so an
+   * afternoon of opened pages is otherwise permanently resident. On by default — the cost is a
+   * reload (and the lost back/forward stack, which a webview cannot serialize), not lost work.
+   */
+  browserMemorySaver: boolean
   accent: string
   tmuxEnabled: boolean
+  /**
+   * Reach a released tmux session with a control-mode (`tmux -C`) client instead of respawning its
+   * terminal — the shadow clients in pty-manager.ts (`shadowAttach`) and the shared background-write
+   * client behind `backgroundWrite`. A control client holds ZERO pty devices, which is the whole
+   * point: the machine-wide `kern.tty.ptmx_max` ceiling is what a canvas of idle terminals runs into
+   * first (see pty-devices.ts).
+   *
+   * ON by default, and read at those two entry points only: switching it off means this process
+   * spawns no `tmux -C` child at all, and a released session is simply unreachable again — exactly
+   * the behavior of the release before it. It is a kill switch for one soak release, not a feature
+   * toggle: nothing user-visible depends on it (the mechanism has no production caller yet), so it
+   * has no settings row and is flipped in settings.json.
+   */
+  ptyShadowClients: boolean
   /** GPU (WebGL) terminal rendering. 'off' routes every terminal to xterm's DOM renderer.
    *  'auto' (default) = one WebGL context PER TERMINAL everywhere except macOS, where it is
    *  'shared'. Repeated macOS field reports (whole-window flicker; terminals compositing black
@@ -836,6 +894,9 @@ export interface Settings {
    *  renderer. See `resolveTerminalRenderer` (shared/webgl.ts) for the full history. */
   terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
+  /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
+   *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
+  offscreenTerminalMinutes: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
   /** For commitAgent='custom': command template; {prompt} placeholder optional (else stdin). */
@@ -890,6 +951,14 @@ export interface Settings {
    *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
    *  `auto` is version-gated: CLIs below 2.1.71 reject the value, so it degrades to no flag. */
   claudePermissionMode: AgentPermissionMode
+  /** "Eco": exit the agent CLI of a session that has been idle AND offscreen for
+   *  `agentHibernationIdleMinutes`, reclaiming its RAM; the conversation is resumed automatically
+   *  when the node is viewed again. Default OFF — opt-in, because it stops a real process.
+   *  Scheduled/loop agents and sessions with live subagents are never touched
+   *  (renderer/terminal/hibernation-policy.ts explains why). */
+  agentHibernationEnabled: boolean
+  /** How long a session must be idle + offscreen before "Eco" hibernates it (minutes). */
+  agentHibernationIdleMinutes: number
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-OUT (default on):
    *  version/OS only, nothing personal, client IP never stored. Turn it off in Settings → Privacy
    *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
@@ -969,10 +1038,13 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalMiddleClickPaste: false,
   wheelZoom: false,
   canvasDragMode: 'select',
+  browserMemorySaver: true,
   accent: '#0a84ff',
   tmuxEnabled: true,
+  ptyShadowClients: true,
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
+  offscreenTerminalMinutes: 10,
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
@@ -998,6 +1070,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
   // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
   claudePermissionMode: 'auto',
+  // Opt-in: hibernation exits a live CLI, so nobody gets it without asking. The 30-minute floor
+  // is deliberately long — shorter windows exit sessions the user is between turns on.
+  agentHibernationEnabled: false,
+  agentHibernationIdleMinutes: 30,
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,
@@ -1741,6 +1817,14 @@ export interface ClaudeCliCaps {
   /** `"tui": "fullscreen"` in settings.json is only understood by Claude Code >= 2.1.89. Gates
    *  whether nodeterm writes that key (write-if-absent) so sessions render fullscreen in tmux. */
   fullscreenTui: boolean
+  /**
+   * Whether this CLI accepts `--session-id <uuid>`, which lets nodeterm MINT a node's session id
+   * instead of waiting to learn it from a hook. Detected by reading `claude --help`, not by
+   * comparing versions: the version this flag first shipped in is not documented anywhere we can
+   * check, and a guessed floor is the one mistake that would be fatal here — an unknown flag makes
+   * the CLI exit, so a wrong guess kills every claude launch rather than degrading.
+   */
+  sessionIdFlag: boolean
 }
 
 /** The answer whenever the CLI version can't be determined: no `auto` flag → bare command, and no
@@ -1748,7 +1832,8 @@ export interface ClaudeCliCaps {
 export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   version: null,
   autoPermissionMode: false,
-  fullscreenTui: false
+  fullscreenTui: false,
+  sessionIdFlag: false
 }
 
 export interface ClaudeApi {
@@ -1952,7 +2037,7 @@ export interface PairedDevice {
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
 export interface PairingApi {
   /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
-  start(): Promise<{ payload: string; sshOpen: boolean }>
+  start(): Promise<{ payload: string; sshOpen: boolean; relayPlan?: 'ok' | 'dev' | 'off' }>
   /** Cancel an in-flight pairing (e.g. when the settings section unmounts). */
   stop(): Promise<void>
   /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
@@ -2059,6 +2144,23 @@ export interface NodeTerminalApi {
   openNotificationSettings(): Promise<void>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
   onFocusNode(listener: (nodeId: string) => void): () => void
+  /** Fires when the shell's memory-pressure monitor (core/memory-pressure.ts) sees the host — or
+   *  this process's own RSS — cross a watermark: the renderer answers by running its reclaim
+   *  levers (hidden WebGL contexts, parked terminals). At most one fire a minute, so the levers
+   *  need only be idempotent, not cheap. Returns unsubscribe. Server Edition: never fires (the
+   *  pressure levers run host-side there; a browser tab's memory belongs to the browser). */
+  onMemoryPressure(listener: (severity: 'warning' | 'critical') => void): () => void
+  /** Fires when THIS MACHINE's pty-device pressure band changes (core/pty-pressure.ts): the
+   *  renderer raises/lowers the banner that warns before `kern.tty.ptmx_max` stops every new
+   *  terminal from opening. Band changes only, re-sent for a held band at most once every five
+   *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
+   *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
+  onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
+   *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
+   *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
+   *  dialog resolves `{ ok: false, canceled: true }`, which is not an error to report or retry. */
+  raisePtyDeviceLimit(): Promise<PtyLimitFixResult>
   /** Answer a Claude permission request via the deterministic hook-reply channel (spec:
    *  docs/hook-reply-approvals.md). Writes the one-line answer file the held hook is polling
    *  (`~/.nodeterm/pending/<pendingId>.answer`) on the host the agent runs on — the LOCAL fs for a

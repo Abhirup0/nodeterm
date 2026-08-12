@@ -19,6 +19,12 @@
  *    (`createContextLossPolicy` → `engine.suspendGpu` / `reviveGpu`), because a GPU reset is what
  *    macOS does on sleep/wake and the shared renderer is meant to be the default. A second loss
  *    inside the cooldown, or a rebuild that throws, falls back through the same `failSharedGlyph`.
+ *    **A GPU reset has a SECOND half**: it also blanks the OffscreenCanvas the atlas rasterizes
+ *    into, and that one cannot be restored — its pixels are gone while `GlyphAtlas.slots` still
+ *    claims every key is cached, which is the "every terminal went blank at once" report. It is
+ *    answered by the same policy object driving `rebuildSharedContext` instead of a revive
+ *    (`createContext`'s `atlasLoss`), and by a pixel check on the revive path for the silent case
+ *    that fires no event at all (`reviveGpuOrRebuild`, `ATLAS_SENTINEL_RGBA`).
  * 3. **The seams the rest of the integration reads**: `useSharedGlyph` (mode + generation +
  *    failure), `setNodeZOrder`/`nodeZFor`/`subscribeNodeZOrder` (paint order),
  *    `setOpaqueNodeIds`/`nodeIsOpaque`/`subscribeOpaqueSet` (which terminals must leave the shared
@@ -40,13 +46,13 @@ import {
   type GlyphAtlasSubscription,
   type GlyphSlotAllocation
 } from '../glyphgrid/atlas'
-import type { Camera } from '../glyphgrid/camera'
+import { sanitizeCamera, type Camera } from '../glyphgrid/camera'
 import { GlyphGridEngine } from '../glyphgrid/engine'
 import { setBlankCellProbe } from '../glyphgrid/feed'
 import { createFrameLoop, type FrameLoop } from '../glyphgrid/frame-driver'
 import type { GlyphGL } from '../glyphgrid/gl'
 import { createWebgl2GL } from '../glyphgrid/gl-webgl2'
-import { createCanvasRasterizer } from '../glyphgrid/raster'
+import { createCanvasRasterizer, type AtlasPageHealth } from '../glyphgrid/raster'
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useViewMode, viewFor } from '../state/viewMode'
@@ -131,6 +137,11 @@ export const useSharedGlyph = create<SharedGlyphState>((set, get) => ({
       // project switch), and the setting would look broken. Safe for a node that has never
       // registered a grid: its teardown is a no-op and its re-setup is the same gated
       // `setupGlyph()` a fresh mount runs.
+      //
+      // A FRESH CELL EPOCH too: the next context is built from whichever terminal asks first, and
+      // whatever the last one measured — possibly before a webfont resolved — must not still be
+      // holding this epoch's one drift rebuild. See `CellRebuildGuard`.
+      cellGuard.beginEpoch()
       set({ enabled: true, generation: get().generation + 1 })
       return
     }
@@ -646,6 +657,14 @@ export interface SharedGlyphContext {
 interface LiveContext extends SharedGlyphContext {
   canvas: HTMLCanvasElement
   gl: GlyphGL
+  /** The atlas PAGE, held for its health surface alone (`sourceIntact` on the revive path). The
+   *  atlas itself never exposes it — see `ATLAS_SENTINEL_RGBA` for why the page has to be asked. */
+  raster: AtlasPageHealth
+  /** The page's own contextlost/contextrestored subscription, and the policy behind it. Both die
+   *  with the context: a listener on a page we have thrown away would rebuild a context that no
+   *  longer exists, and the policy's watchdog would fail a session that has already recovered. */
+  sourceLoss: { dispose(): void }
+  atlasLoss: ContextLossPolicy
   /** The console reset gauge's subscription, held so teardown can drop it: the atlas dies with the
    *  context, but a subscription left on a rebuilt-and-then-disposed one would keep a closure alive
    *  per font change. */
@@ -664,6 +683,17 @@ interface LiveContext extends SharedGlyphContext {
 }
 
 let live: LiveContext | null = null
+/** The context as it stands RIGHT NOW, typed honestly.
+ *
+ *  Exists to defeat TypeScript's narrowing, which is not a style point here: `live` is a module
+ *  `let` that several functions null out (`disposeContext`, and therefore every rebuild funnel),
+ *  and control-flow narrowing from an `if (live)` survives any call made inside the branch. Reading
+ *  it back through a function call is the one spelling the compiler cannot narrow, so a caller that
+ *  re-reads after doing something that MIGHT have disposed gets `LiveContext | null` and is forced
+ *  to handle the null the runtime can genuinely produce. */
+function currentLive(): LiveContext | null {
+  return live
+}
 /** One creation attempt per context lifetime (reset by `disposeContext`). Without it every
  *  terminal mount would re-probe a machine that has already said "no WebGL2", and each probe is a
  *  real `getContext` call. */
@@ -909,11 +939,49 @@ function createContext(cell: DeviceCell): LiveContext | null {
   installBlankCellProbe()
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
+  /**
+   * The ATLAS PAGE's own loss policy — the 2D half of a GPU reset, which until now had none.
+   *
+   * It is the SAME policy object the WebGL side uses, and the four rules transfer intact: restore
+   * once, give up on a second loss inside the cooldown, give up if the rebuild throws, give up on a
+   * bounded watchdog rather than waiting forever. Two details differ and both are spelled here
+   * rather than in the policy, because they are properties of the 2D context and not of the rule:
+   *
+   *  - `onLost()`'s BOOLEAN IS MEANINGLESS HERE and is deliberately dropped. It means "call
+   *    preventDefault()", which on a WebGL canvas is how you ASK for a restore and on a 2D canvas is
+   *    how you REFUSE automatic restoration — the exact opposite. `onSourceLoss` never cancels.
+   *  - REVIVE IS A REBUILD, not a restore. A lost 2D page cannot be restored: its pixels are gone
+   *    while `GlyphAtlas.slots` still claims every key is present, so the only correct answer is to
+   *    throw the whole context away and let every terminal re-rasterize what it needs against a
+   *    fresh page. That is precisely `rebuildSharedContext`, the funnel a font change already uses,
+   *    and it begins a new cell epoch for the same reason a font change does.
+   *
+   * SUSPEND IS A NO-OP, and that is the useful behaviour rather than a gap: the GL texture still
+   * holds the LAST GOOD upload of the page, so leaving the canvas exactly as it is shows the user
+   * their text — frozen — for the fraction of a second until the restore lands. Parking frames would
+   * show the same thing; re-uploading, which is what the un-fixed code did, shows nothing at all.
+   */
+  const atlasLoss = createContextLossPolicy({
+    now: () => Date.now(),
+    suspend: () => undefined,
+    revive: () => rebuildSharedContext(),
+    fail: (reason, err) => failSharedGlyph(reason, err),
+    setTimer: (cb, ms) => window.setTimeout(cb, ms),
+    clearTimer: (h) => window.clearTimeout(h)
+  })
   return {
     engine,
     atlas,
     canvas,
     gl,
+    raster,
+    atlasLoss,
+    sourceLoss: raster.onSourceLoss({
+      lost: () => {
+        atlasLoss.onLost()
+      },
+      restored: () => atlasLoss.onRestored()
+    }),
     resetLog: installAtlasResetLog(atlas),
     fontKey: fontKeyOf(fontFamily, fontSize, fontWeight, fontWeightBold),
     dpr,
@@ -933,6 +1001,13 @@ function disposeContext(): void {
   // than submit against deleted objects (see `LiveContext.disposed`).
   ctx.disposed = true
   try {
+    // FIRST, and before anything that can throw: the atlas page's listeners and the watchdog behind
+    // them are the two things here that could outlive the context. A surviving listener would drive
+    // a rebuild off a page nobody is drawing from, and a surviving watchdog would fail a session
+    // whose context was merely handed back (this rebuild, the mode switched off) — which cannot then
+    // be re-enabled without a relaunch.
+    ctx.sourceLoss.dispose()
+    ctx.atlasLoss.stop()
     ctx.resetLog.dispose()
     ctx.engine.disposeAll()
     ctx.gl.dispose()
@@ -968,14 +1043,26 @@ export function failSharedGlyph(reason: string, err?: unknown): void {
  * THE re-rasterize path: drop the context and tell every registered terminal to re-evaluate its
  * participation, which is how they end up re-registering their grids against a freshly built atlas.
  *
- * ONE function, because there is now more than one trigger — a font change and a display pixel
- * ratio change — and they must be the same event. The order is load-bearing and is the same
- * contract `setEnabled(false)` and `failSharedGlyph` honour: dispose FIRST, announce SECOND, never
- * dispose without announcing (every registered grid is holding an inert handle until the bump
- * arrives) and never announce before disposing (a terminal that re-asked for the context in
- * between would adopt the very context we are about to delete).
+ * ONE function, because there is now more than one trigger — a font change, a display pixel ratio
+ * change, an atlas page whose 2D context was lost, and a cell drift — and they must be the same
+ * event. The order is load-bearing and is the same contract `setEnabled(false)` and
+ * `failSharedGlyph` honour: dispose FIRST, announce SECOND, never dispose without announcing (every
+ * registered grid is holding an inert handle until the bump arrives) and never announce before
+ * disposing (a terminal that re-asked for the context in between would adopt the very context we
+ * are about to delete).
+ *
+ * `cellEpoch` is the ONE thing the triggers do not agree on, which is why it is a parameter rather
+ * than something this function could decide for itself. Everything that rebuilds because the world
+ * changed (a new font, a new display, a fresh atlas page) makes the previous cell measurement
+ * meaningless and starts a new epoch — the DEFAULT, so a future trigger gets the safe answer by
+ * omission. The drift rebuild alone passes 'same': it is spending that epoch's single allowance, and
+ * re-arming the guard from inside the rebuild the guard permitted is exactly the ping-pong loop
+ * `CellRebuildGuard` exists to prevent.
  */
-function rebuildSharedContext(): void {
+type CellEpoch = 'new' | 'same'
+
+function rebuildSharedContext(cellEpoch: CellEpoch = 'new'): void {
+  if (cellEpoch === 'new') cellGuard.beginEpoch()
   disposeContext()
   useSharedGlyph.getState().bumpGeneration()
 }
@@ -1000,8 +1087,8 @@ function ensureSettingsSubscription(): void {
       )
     )
       return
-    cellRebuilds = 0
-    cellMismatchWarned = false
+    // A new font is a new cell epoch, and `rebuildSharedContext` begins one by default — the reset
+    // no longer lives here, so every other epoch-establishing trigger gets it too.
     rebuildSharedContext()
   })
 }
@@ -1141,6 +1228,44 @@ export function createPixelRatioWatcher(
   }
 }
 
+/**
+ * Bring the engine's GPU objects back — UNLESS the atlas page did not survive whatever took them.
+ * Returns whether the caller may carry on with this context; false means it has been rebuilt and
+ * the generation bump is already on its way.
+ *
+ * THE CASE THIS CATCHES, and why the WebGL side's own policy cannot. A GPU reset takes the WebGL
+ * context AND blanks the OffscreenCanvas the atlas rasterizes into. The WebGL half announces itself
+ * and is answered by `engine.reviveGpu`, which re-uploads the atlas page — and `reviveGpu`'s comment
+ * says outright that this costs one upload rather than a re-rasterization "because the atlas SOURCE
+ * did not die with the context". When it did die, that upload is of an EMPTY page: `GlyphAtlas.slots`
+ * still holds every key, so nothing re-rasterizes, and every terminal on the canvas goes blank at
+ * once and stays blank until a font or dpr change happens to rebuild.
+ *
+ * The 2D context usually announces itself too (`onSourceLoss`), and when it does this check never
+ * fires. It exists for the case where it does NOT — a backing store that comes back wiped with no
+ * event — which is why the question is asked of the PIXELS (`ATLAS_SENTINEL_RGBA`) rather than of a
+ * flag. One 1px readback, on a path that runs at most once per context.
+ */
+function reviveGpuOrRebuild(ctx: LiveContext): boolean {
+  // ALREADY GONE. Both halves of a GPU reset land as events, in an order nobody controls, and the
+  // 2D half answers by DISPOSING this context — while the generation bump that tears the effect
+  // down is a React state update, i.e. not synchronous. So `webglcontextrestored` can arrive for a
+  // context that no longer exists, and reviving it would call into a disposed GL layer: a throw the
+  // policy reads as a failed rebuild, taking the whole session to the DOM renderer for a context
+  // that was merely replaced. Same guard, same reason, as `syncAtlasPixelRatio`'s.
+  if (ctx.disposed) return false
+  if (!ctx.raster.sourceIntact()) {
+    console.warn(
+      '[glyphgrid] the atlas page did not survive the GPU outage — every cached glyph now points ' +
+        'at a blank texel, so the context is being rebuilt rather than re-uploaded'
+    )
+    rebuildSharedContext()
+    return false
+  }
+  ctx.engine.reviveGpu()
+  return true
+}
+
 /** Fires when a context has just been BUILT. The component listens so it can mount the fresh
  *  canvas: creation is now driven by the first terminal that offers a device cell, which can
  *  happen after the layer's own effect has already run and found nothing. Deliberately NOT a
@@ -1161,20 +1286,62 @@ export function subscribeSharedGlyphContext(fn: () => void): () => void {
  *  change under a live context, a per-terminal letterSpacing — and the symptom is soft text, so
  *  say so rather than silently rescaling. */
 /**
- * How many times the atlas has been rebuilt for a cell DISAGREEMENT in this font epoch.
+ * THE LOOP-GUARD INVARIANT for the drift rebuild, in one object because it was previously two
+ * module variables reset in one place and read in another.
  *
- * Capped at one, and the cap is the whole point. The rebuild it guards disposes the context, and
- * `disposeContext` deliberately clears the other creation state — so a guard that lived there
- * would be wiped by the very rebuild it is supposed to bound. Two terminals with genuinely
- * different cells would then rebuild for each other forever, one per registration, and the canvas
- * would never paint.
+ * **One drift rebuild per CELL EPOCH, and an epoch begins only where a new cell is legitimately
+ * expected.** Both halves are load-bearing and they fail in opposite directions:
  *
- * Reset only where a new cell is legitimately expected: a font change (see the settings
- * subscription), which is also the only thing that makes the old measurement meaningless.
+ *  - WITHOUT the cap: the rebuild disposes the context, and `disposeContext` deliberately clears
+ *    the other creation state — so a guard stored there would be wiped by the very rebuild it
+ *    bounds. Two terminals with genuinely different cells would rebuild for each other forever, one
+ *    per registration, and the canvas would never paint. This is why `allowRebuild()` does NOT
+ *    re-arm itself and why the funnel it calls must be told not to begin an epoch.
+ *  - WITHOUT the re-arm: the FIRST drift in a session spends the only allowance there will ever be.
+ *    That is the defect this replaces — the counter was reset in the settings subscription alone, so
+ *    a later, unrelated drift (a webfont resolving after a dpr rebuild latched a fallback face's
+ *    cell) only warned, and that terminal stayed resampled — soft and 5% wide — for the rest of the
+ *    session, with the cause long gone.
+ *
+ * AN EPOCH BEGINS at every rebuild cause that makes the previous measurement meaningless: a font
+ * change, a dpr rebuild, the atlas page being rebuilt after a 2D context loss, and the mode being
+ * switched back on. It does NOT begin at the drift rebuild itself — see `rebuildSharedContext`'s
+ * `cellEpoch` argument, which is where that distinction is spelled.
+ *
+ * Pure and injectable-free, so the rule is exercisable without a GPU (the singleton around it is
+ * not testable at all — see the header).
  */
-let cellRebuilds = 0
-/** One-shot log for the give-up branch above. */
-let cellMismatchWarned = false
+export interface CellRebuildGuard {
+  /** A fresh cell epoch: the old measurement is meaningless and the next drift may rebuild. */
+  beginEpoch(): void
+  /** Consume this epoch's rebuild allowance. False = already spent; leave the terminal resampled. */
+  allowRebuild(): boolean
+  /** True at most once per epoch — the give-up log, which must not repeat per registration. */
+  takeWarning(): boolean
+}
+
+export function createCellRebuildGuard(limit = 1): CellRebuildGuard {
+  let rebuilds = 0
+  let warned = false
+  return {
+    beginEpoch(): void {
+      rebuilds = 0
+      warned = false
+    },
+    allowRebuild(): boolean {
+      if (rebuilds >= limit) return false
+      rebuilds++
+      return true
+    },
+    takeWarning(): boolean {
+      if (warned) return false
+      warned = true
+      return true
+    }
+  }
+}
+
+const cellGuard = createCellRebuildGuard()
 /**
  * The atlas cell against a terminal's real one — and REBUILD when they disagree, rather than only
  * saying so.
@@ -1207,12 +1374,11 @@ export function cellsDisagree(atlas: DeviceCell, cell: DeviceCell): boolean {
 function reconcileAtlasCell(ctx: LiveContext, cell: DeviceCell | null): void {
   if (!cell) return
   if (!cellsDisagree({ cellW: ctx.atlas.cellW, cellH: ctx.atlas.cellH }, cell)) return
-  if (cellRebuilds >= 1) {
+  if (!cellGuard.allowRebuild()) {
     // Already spent this epoch's rebuild and a terminal STILL disagrees: two of them want
     // different cells, and rebuilding again would just hand the atlas back and forth. Say so and
     // leave it — one resampled terminal is a cosmetic loss, a rebuild loop is a dead canvas.
-    if (!cellMismatchWarned) {
-      cellMismatchWarned = true
+    if (cellGuard.takeWarning()) {
       console.warn(
         `[glyphgrid] atlas cell ${ctx.atlas.cellW}×${ctx.atlas.cellH} still does not match a ` +
           `terminal's device cell ${cell.cellW}×${cell.cellH} after a rebuild — terminals disagree ` +
@@ -1221,13 +1387,14 @@ function reconcileAtlasCell(ctx: LiveContext, cell: DeviceCell | null): void {
     }
     return
   }
-  cellRebuilds++
   console.warn(
     `[glyphgrid] atlas cell ${ctx.atlas.cellW}×${ctx.atlas.cellH} does not match this terminal's ` +
       `device cell ${cell.cellW}×${cell.cellH} — rebuilding the atlas for it (every glyph was ` +
       `being resampled by the ratio between them)`
   )
-  rebuildSharedContext()
+  // 'same' is the guard: this rebuild must NOT begin a new epoch, or it would restore the allowance
+  // it has just consumed and two disagreeing terminals would rebuild for each other forever.
+  rebuildSharedContext('same')
 }
 
 /**
@@ -1242,8 +1409,17 @@ function reconcileAtlasCell(ctx: LiveContext, cell: DeviceCell | null): void {
 function ensureLiveContext(cell?: DeviceCell): LiveContext | null {
   if (!sharedGlyphActive()) return null
   if (live) {
+    // `reconcileAtlasCell` CAN DISPOSE THE VERY CONTEXT IT IS HANDED — a cell drift rebuilds, and
+    // `disposeContext()` nulls `live`. So the answer has to be re-read afterwards, and it is read
+    // through `currentLive()` rather than as `live` because TypeScript's narrowing from the `if`
+    // above survives the call: written `return live`, the value is correct at RUNTIME (it is a
+    // variable read, not a captured reference) while the compiler believes it is non-null, and the
+    // first edit that trusts that type — `live.engine`, a spread, an `!` — hands a caller an engine
+    // whose GL objects have been deleted. Null is the DESIGNED answer here: the caller drops to
+    // `ensureWebglClient` and the generation bump the rebuild raised brings it back on a fresh
+    // context.
     reconcileAtlasCell(live, usableCell(cell))
-    return live
+    return currentLive()
   }
   const seed = usableCell(cell)
   if (!seed) return null
@@ -1284,9 +1460,15 @@ export function getSharedGlyphContext(deviceCell?: DeviceCell): SharedGlyphConte
 }
 
 /** Camera feed. Always records (so a context created later opens at the right place) and only
- *  reaches the engine — which change-gates it — when one exists. */
+ *  reaches the engine — which change-gates it — when one exists.
+ *
+ *  SANITIZED HERE, at the boundary, rather than at any one call site: the camera arrives from a live
+ *  React Flow gesture (already clamped) AND from a persisted project viewport (clamped by nothing),
+ *  and a zoom of 0 or NaN from the second blanks every terminal on the canvas at once. See
+ *  `sanitizeCamera` for why that is invisible everywhere else. One funnel means a future third
+ *  caller cannot reintroduce it. */
 export function setSharedGlyphCamera(cam: Camera): void {
-  lastCamera = { x: cam.x, y: cam.y, zoom: cam.zoom }
+  lastCamera = sanitizeCamera(cam)
   live?.engine.setCamera(lastCamera)
 }
 
@@ -1880,7 +2062,9 @@ export function SharedGlyphLayer(): JSX.Element {
     // comment: nothing enforces that ordering, and a mount is the one moment we can still decide.
     if (ctx.engine.gpuIsSuspended()) {
       try {
-        ctx.engine.reviveGpu()
+        // Rebuilt instead of revived (a blanked atlas page) means this context is gone and the
+        // generation bump will re-run this effect against the fresh one.
+        if (!reviveGpuOrRebuild(ctx)) return
         console.warn('[glyphgrid] mounted onto a suspended engine — GPU objects rebuilt')
       } catch (err) {
         // The context is still gone (its programs will not compile), so there is nothing to mount
@@ -2086,7 +2270,11 @@ export function SharedGlyphLayer(): JSX.Element {
         ctx.engine.suspendGpu()
       },
       revive: () => {
-        ctx.engine.reviveGpu()
+        // A GPU reset takes the atlas page with the context. Reviving onto a blanked page would
+        // upload an empty atlas over every terminal on the canvas, so that case rebuilds instead —
+        // and there is no runtime to start here, because there is no longer a context to start it
+        // against.
+        if (!reviveGpuOrRebuild(ctx)) return
         runtime = startRuntime()
       },
       fail: (reason, err) => failSharedGlyph(reason, err),

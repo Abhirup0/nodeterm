@@ -19,10 +19,10 @@ const cfg = (over: Partial<SessionBudgetConfig> = {}): SessionBudgetConfig => ({
   ...over
 })
 
-/** A detached nt- session idle for `idleH` hours. */
-const idle = (name: string, idleH: number, attached = false): SessionInfo => ({
+/** An nt- session idle for `idleH` hours, with `clients` attached (0 = detached). */
+const idle = (name: string, idleH: number, clients = 0): SessionInfo => ({
   name,
-  attached,
+  clients,
   activitySec: NOW - idleH * 3600
 })
 
@@ -36,7 +36,7 @@ describe('planReap (pure policy)', () => {
   })
 
   it('never reaps an attached session, no matter how idle', () => {
-    const plan = planReap([idle('nt-watched', 500, true), idle('nt-idle', 500)], lowMem, NOW, cfg())
+    const plan = planReap([idle('nt-watched', 500, 1), idle('nt-idle', 500)], lowMem, NOW, cfg())
     expect(plan).toEqual(['nt-idle'])
   })
 
@@ -68,7 +68,7 @@ describe('planReap (pure policy)', () => {
   })
 
   it('attached sessions do not count toward freeing the cap, but are never the ones killed', () => {
-    const sessions = [idle('nt-live', 500, true), ...Array.from({ length: 5 }, (_, i) => idle(`nt-d${i}`, 100 + i))]
+    const sessions = [idle('nt-live', 500, 2), ...Array.from({ length: 5 }, (_, i) => idle(`nt-d${i}`, 100 + i))]
     const plan = planReap(sessions, okMem, NOW, cfg({ maxDetached: 4 }))
     expect(plan).toEqual(['nt-d4'])
   })
@@ -89,14 +89,34 @@ describe('planReap (pure policy)', () => {
     const plan = planReap(sessions, lowMem, NOW, cfg({ batchMax: 3 }))
     expect(plan).toHaveLength(3)
   })
+
+  // The 2026-08-11 profile: plenty of RAM, well under the detached cap, and the machine still
+  // could not open a terminal because it was out of pty DEVICES. Without an allowance of its own
+  // that reading plans nothing at all — the sweep the shell fires on critical pty pressure would
+  // be a no-op, which is exactly the bug this argument exists to close.
+  it('an external pressure reason earns the same allowance low memory does', () => {
+    const sessions = Array.from({ length: 20 }, (_, i) => idle(`nt-s${i}`, 100 + i))
+    expect(planReap(sessions, okMem, NOW, cfg({ batchMax: 3 }))).toHaveLength(0)
+    expect(planReap(sessions, okMem, NOW, cfg({ batchMax: 3 }), true)).toHaveLength(3)
+  })
+
+  it('external pressure widens NO safety gate: attached and in-grace sessions still live', () => {
+    const sessions = [idle('nt-watched', 500, 1), idle('nt-fresh', 1), idle('user-shell', 500)]
+    expect(planReap(sessions, okMem, NOW, cfg(), true)).toEqual([])
+  })
+
+  it('the kill switch still wins over an external pressure reason', () => {
+    const plan = planReap([idle('nt-a', 500)], okMem, NOW, cfg({ disabled: true }), true)
+    expect(plan).toEqual([])
+  })
 })
 
 describe('parseSessionList', () => {
-  it('parses names, attached counts and activity, skipping malformed lines', () => {
+  it('parses names, CLIENT COUNTS and activity, skipping malformed lines', () => {
     const out = parseSessionList('nt-a|0|1753000000\nnt-b|2|1753000100\n\njunk\nx|y|z\n')
     expect(out).toEqual([
-      { name: 'nt-a', attached: false, activitySec: 1_753_000_000 },
-      { name: 'nt-b', attached: true, activitySec: 1_753_000_100 }
+      { name: 'nt-a', clients: 0, activitySec: 1_753_000_000 },
+      { name: 'nt-b', clients: 2, activitySec: 1_753_000_100 }
     ])
   })
 })
@@ -237,6 +257,33 @@ describe('createSessionReaper (service)', () => {
       exec: w.exec
     })
     expect(await reaper.sweep()).toBe(0)
+    expect(w.calls.filter((c) => c.args[2] === 'kill-session')).toHaveLength(0)
+  })
+
+  it('…but the same host sweeps under an explicit external pressure reason', async () => {
+    const w = fakeWorld({ 'node-terminal': [`nt-x|0|${OLD}`] })
+    const reaper = createSessionReaper({
+      ...base,
+      readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
+      tmuxBin: () => 'tmux',
+      sockets: ['node-terminal'],
+      exec: w.exec
+    })
+    expect(await reaper.sweep({ pressure: 'pty' })).toBe(1)
+  })
+
+  it('an external reason never overrides the attached/grace exemptions', async () => {
+    const w = fakeWorld({
+      'node-terminal': [`nt-watched|1|${OLD}`, `nt-fresh|0|${NOW - 60}`]
+    })
+    const reaper = createSessionReaper({
+      ...base,
+      readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
+      tmuxBin: () => 'tmux',
+      sockets: ['node-terminal'],
+      exec: w.exec
+    })
+    expect(await reaper.sweep({ pressure: 'pty' })).toBe(0)
     expect(w.calls.filter((c) => c.args[2] === 'kill-session')).toHaveLength(0)
   })
 })

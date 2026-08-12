@@ -89,6 +89,23 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
 // automatically gets only spawn + terminal-title + process status.
 export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
+// Agents whose session id we MINT at launch (`--session-id <uuid>`) instead of learning it from
+// hook events. Claude only: it is the one CLI here that accepts a caller-chosen id.
+//
+// Why it matters: everything that resumes a conversation — cold restore after a reboot, the
+// session reaper's recovery path, the ⌘M transcript view — needs the id, and the id used to
+// arrive ONLY over the hook channel (agent fires a hook → POST → renderer stores it in
+// localStorage). For an SSH node that POST rides the reverse tunnel, so a node whose tunnel was
+// down, or that simply never ran a tool, never had an id at all. Measured on one host after a
+// reboot: 18 of 40 agent nodes relaunched as BLANK conversations because there was nothing to
+// resume with, while their transcripts sat intact on disk.
+//
+// Minting fixes the floor, not the whole problem: `/clear`, `--fork-session` and compaction all
+// mint a NEW id inside the CLI (claude's SessionStart hook reports these as source
+// clear/fork/compact), so hooks remain the only way to TRACK an id after launch. What minting
+// guarantees is that a node always has SOME resumable id, so the worst case degrades from "the
+// conversation is gone" to "continuity since the last /clear is gone".
+export const SESSION_ID_CAPABLE = ['claude'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
@@ -178,6 +195,7 @@ const includes = (list: readonly string[], id: AgentId): boolean => list.include
 
 export const hasHooks = (id: AgentId): boolean => includes(AGENT_HOOK_TARGETS, id)
 export const canResume = (id: AgentId): boolean => includes(RESUMABLE_AGENTS, id)
+export const mintsSessionId = (id: AgentId): boolean => includes(SESSION_ID_CAPABLE, id)
 export const canSubagent = (id: AgentId): boolean => includes(SUBAGENT_CAPABLE, id)
 export const canRecur = (id: AgentId): boolean => includes(RECURRING_CAPABLE, id)
 export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)
@@ -223,6 +241,27 @@ export function createdAgentId(
 // cold restart), so accept only the safe charset agents actually use (UUIDs etc.) — never a
 // flag-like or metacharacter-bearing value.
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * Appends the minted-session-id flag to a FIRST-LAUNCH command, for agents in
+ * `SESSION_ID_CAPABLE`. Anything else — another agent, an empty or unsafe id — returns `cmd`
+ * unchanged, so a command line that had no business carrying the flag stays byte-identical.
+ *
+ * First launch ONLY. `claude --session-id <uuid>` refuses an id that already exists ("Session ID
+ * … is already in use.", measured against claude 2.1.226), so a relaunch of the same node must
+ * resume instead — that is `resumeCommand`'s job, and the two shapes can never be collapsed into
+ * one idempotent command.
+ *
+ * Re-validated against SAFE_SESSION_ID at this interpolation site for the same reason
+ * `resumeCommand` is: the value ends up on a tmux `send-keys` line, and the caller's type is a
+ * compile-time promise, not a runtime one.
+ */
+export function withSessionId(cmd: string, id: AgentId, sessionId: string): string {
+  if (!mintsSessionId(id)) return cmd
+  const sid = sessionId.trim()
+  if (!sid || !SAFE_SESSION_ID.test(sid)) return cmd
+  return `${cmd} --session-id ${sid}`
+}
 
 /**
  * The command that resumes a resumable agent's prior conversation by its provider session id.

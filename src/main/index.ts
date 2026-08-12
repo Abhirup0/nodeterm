@@ -32,7 +32,7 @@ import {
   isValidPendingId,
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
-import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose } from './main-window'
+import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose, createCrashReloadPolicy } from './main-window'
 import {
   initNotchHud,
   applyNotchHudSettings,
@@ -70,6 +70,9 @@ import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
 import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
+import { createMemoryPressureMonitor } from '../core/memory-pressure'
+import { createPtyPressureMonitor } from '../core/pty-pressure'
+import { registerPtmxLimitHandler } from './ptmx-limit'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -410,7 +413,32 @@ function createWindow(): BrowserWindow {
   })
   // A crashed/killed renderer is the same story, minus the window: drop its subscriptions so the
   // reloaded renderer reattaches to live sessions instead of inheriting the dead one's state.
-  win.webContents.on('render-process-gone', () => ptyManager.dropClient(presenceId))
+  // And actually reload — a dead renderer otherwise leaves the window a permanent blank page
+  // (both projects, every terminal). Bounded by the policy so a boot-path crash can't loop;
+  // past the budget the user decides. The tmux sessions all live in this process, so a reload
+  // costs nothing but the canvas re-hydrating from the workspace store.
+  const crashReload = createCrashReloadPolicy()
+  win.webContents.on('render-process-gone', (_event, details) => {
+    ptyManager.dropClient(presenceId)
+    if (quitting || win.isDestroyed()) return
+    const action = crashReload(details.reason, Date.now())
+    if (action === 'reload') {
+      win.webContents.reload()
+    } else if (action === 'give-up') {
+      void dialog
+        .showMessageBox(win, {
+          type: 'error',
+          message: 'The window keeps crashing',
+          detail: `The interface process died repeatedly (${details.reason}). Your terminal sessions are still running.`,
+          buttons: ['Reload', 'Not Now'],
+          defaultId: 0,
+          cancelId: 1
+        })
+        .then(({ response }) => {
+          if (response === 0 && !win.isDestroyed()) win.webContents.reload()
+        })
+    }
+  })
 
   win.on('ready-to-show', () => win.show())
   // The main window is a regular app window; establishing its Dock presence explicitly means the
@@ -1501,7 +1529,50 @@ app.whenReady().then(async () => {
   // budget). Attached sessions are never touched; a reaped node cold-restores on next open.
   // Local sockets only — a remote SSH host's sessions are reaped by that host's own
   // nodeterm-server, never across the wire. Timer is unref'd; no explicit stop needed.
-  createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() }).start()
+  // `shadowed` subtracts our own control-mode shadows from tmux's attached flag: a shadow is a real
+  // tmux client but NOT a watcher, so a shadowed session must stay exactly as cullable as an idle
+  // detached one (see PtyManager.shadowedTmuxSessions).
+  const sessionReaper = createSessionReaper({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+  })
+  sessionReaper.start()
+  // Memory pressure (core/memory-pressure.ts): the reaper's own 10-minute timer is the steady
+  // state; this is the fast path. On a watermark crossing the renderer runs its reclaim levers
+  // (hidden WebGL contexts, parked terminals) and a CRITICAL reading also sweeps the reaper NOW
+  // rather than waiting out its timer. Both levers are idempotent and the monitor re-fires at most
+  // once a minute. The send goes through `sendToMain`, which resolves the window AT SEND TIME and
+  // no-ops while it is closed (macOS keeps the app alive without one) — the monitor's own
+  // try/catch is the backstop, not the primary.
+  createMemoryPressureMonitor({
+    onPressure: (severity) => {
+      sendToMain(IPC.appMemoryPressure, severity)
+      if (severity === 'critical') void sessionReaper.sweep()
+    }
+  }).start()
+  // Pty-device pressure (core/pty-pressure.ts): the OTHER way this machine runs out, and the one
+  // that actually happened. The memory monitor above could not see it — during the 2026-08-11
+  // incident RAM was plentiful while `/dev/ttys*` was full, so the reaper never woke and the user
+  // got no warning at all, just terminals that stopped opening. Same shape as the memory leg: tell
+  // the renderer (which raises a banner) on every band change, and sweep the reaper NOW on
+  // critical — a reaped detached session returns its pty device, which is exactly the resource in
+  // short supply. Transitions only, re-announced at most every five minutes.
+  //
+  // The sweep is passed `pressure: 'pty'` because a bare `sweep()` here would plan NOTHING: the
+  // budget's own triggers are memory and a detached-count cap, and the incident profile clears
+  // both (healthy RAM, under the cap). The reason grants the same batch allowance low memory
+  // would and widens no exemption — attached and in-grace sessions stay untouchable.
+  const ptyPressure = createPtyPressureMonitor({
+    onLevel: (reading) => {
+      sendToMain(IPC.ptyPressure, reading)
+      if (reading.level === 'critical') void sessionReaper.sweep({ pressure: 'pty' })
+    }
+  })
+  ptyPressure.start()
+  // The banner's "Fix automatically…" button. Registered, never called on our own initiative: it
+  // raises `kern.tty.ptmx_max` behind macOS's own admin-password dialog. Its success re-announces
+  // through the monitor's funnel, so the banner clears without waiting out the next tick.
+  registerPtmxLimitHandler(corePlatform, { announce: (reading) => ptyPressure.announce(reading) })
   // Session memory (docs/superpowers/specs/2026-08-10-session-memory-panel-design.md): the pill's
   // cheap RAM read plus the on-demand per-session breakdown. An SSH project's sessions live on ITS
   // host, so they are read THERE over the project's ControlMaster — the same injection Context Link
@@ -2191,5 +2262,12 @@ app.on('before-quit', (e) => {
   // a master mid-write used to leave a truncated project.json on the server. The masters are
   // therefore kept up through the raced flush and dropped on the second before-quit pass.
   const flush = Promise.allSettled([remoteWorkspaceIO.flush(), ptyManager.killAll()])
-  void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))]).finally(() => app.quit())
+  void Promise.race([flush, new Promise((r) => setTimeout(r, 1500))])
+    // Then let whisper go. A dictation still transcribing when Electron tears down the main
+    // process's node env aborts the WHOLE app from inside the native addon (SIGABRT in
+    // Napi::ThreadSafeFunction::CallJS) — see SpeechService.shutdown. It needs its own budget
+    // because the 1500ms cap above is shorter than a transcription, and it costs nothing at
+    // all when dictation is idle, which is nearly always.
+    .then(() => speechService.shutdown())
+    .finally(() => app.quit())
 })

@@ -22,6 +22,9 @@ export function usePhonePairing(onPaired?: () => void): {
    *  'failed' = mint failed → LAN-only). Surfaced so the silent degrade is visible at the one
    *  moment the user is looking. */
   relayResult: 'ok' | 'off' | 'failed' | 'dev' | null
+  /** While 'waiting': what the QR on screen WILL mint — lets the surfaces warn beside the QR
+   *  (esp. 'dev': unpackaged build, relay off regardless of the toggle). */
+  relayPlan: 'ok' | 'dev' | 'off' | null
   error: string
   busy: boolean
   start: () => Promise<void>
@@ -35,6 +38,7 @@ export function usePhonePairing(onPaired?: () => void): {
   // instead of silently dropping the warning (the user just flipped a toggle; acknowledge it).
   const [sshHealed, setSshHealed] = useState(false)
   const [relayResult, setRelayResult] = useState<'ok' | 'off' | 'failed' | 'dev' | null>(null)
+  const [relayPlan, setRelayPlan] = useState<'ok' | 'dev' | 'off' | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   // Track whether a pairing listener is currently running so unmount can stop it.
@@ -70,7 +74,8 @@ export function usePhonePairing(onPaired?: () => void): {
     setError('')
     setBusy(true)
     try {
-      const { payload, sshOpen: open } = await window.nodeTerminal.pairing.start()
+      const { payload, sshOpen: open, relayPlan: plan } = await window.nodeTerminal.pairing.start()
+      setRelayPlan(plan ?? null)
       const dataUrl = await toDataURL(payload, { margin: 1, width: 240 })
       setQr(dataUrl)
       setSshOpen(open)
@@ -118,5 +123,5 @@ export function usePhonePairing(onPaired?: () => void): {
     }
   }, [])
 
-  return { phase, qr, sshOpen, sshHealed, relayResult, error, busy, start, stop, reset: () => setPhase('idle') }
+  return { phase, qr, sshOpen, sshHealed, relayResult, relayPlan, error, busy, start, stop, reset: () => setPhase('idle') }
 }

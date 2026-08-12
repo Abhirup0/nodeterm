@@ -1396,6 +1396,25 @@ body,
   color: #bf7af0;
 }
 
+/* SLEEPING: the agent CLI was exited to reclaim its RAM (Eco); the session itself is fine, so
+   this is the quietest chip on the header — grey, no pulse. It is a <button> (click = resume),
+   which the base chip's styling does not cover. */
+.term-node__status--sleeping {
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.term-node__status--sleeping:hover {
+  color: var(--text);
+}
+
 .term-node__status--attention .term-node__status-dot {
   animation: nt-pulse 1.1s ease-in-out infinite;
 }
@@ -1950,6 +1969,24 @@ body,
 
 .term-node__xterm.letterboxed .xterm {
   height: auto;
+}
+
+/* Offscreen dispose (terminal/offscreen-policy.ts): this node's view was released after sitting
+   out of the viewport; the tmux session keeps running and re-entering the viewport reattaches.
+   Same geometry as `.term-node__closed` — it covers the (now empty) terminal body — but a quieter
+   fill and no action, because there is nothing for the user to do and nothing has gone wrong. */
+.term-node__offscreen {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(var(--card-rgb), 0.94);
 }
 
 /* Another client permanently destroyed this node's session (tmux kill-session): the terminal is
@@ -3150,6 +3187,12 @@ body,
   border-left-color: var(--warn);
 }
 
+/* One step past --warning, for a strip whose condition is already breaking things (the machine is
+   out of pty devices, so new terminals fail) rather than about to. */
+.announce-banner--danger {
+  border-left-color: var(--danger);
+}
+
 .announce-banner__dot {
   width: 8px;
   height: 8px;
@@ -3164,6 +3207,10 @@ body,
 
 .announce-banner--warning .announce-banner__dot {
   background: var(--warn);
+}
+
+.announce-banner--danger .announce-banner__dot {
+  background: var(--danger);
 }
 
 .announce-banner__content {
@@ -6442,6 +6489,21 @@ body,
   width: 100%;
   height: 100%;
 }
+/* Memory saver plate: what stands in for a page whose Chromium process was released while the
+   node sat off-screen. Deliberately quiet — this is an ambient state that heals itself on view,
+   not an error. */
+.browser-node__discarded {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+}
 .browser-node__error {
   position: absolute;
   left: 0;
@@ -7866,6 +7928,11 @@ body,
 .kanban-badge--needs {
   color: var(--warn);
   background: rgba(255, 159, 10, 0.12);
+}
+/* Eco: the agent CLI was exited to reclaim RAM. Quiet — the session is fine. */
+.kanban-badge--sleeping {
+  color: var(--muted);
+  background: rgba(var(--tint-rgb), 0.08);
 }
 .kanban-card__unread {
   width: 7px;
