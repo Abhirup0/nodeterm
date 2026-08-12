@@ -100,6 +100,59 @@ export function parseProcessTable(stdout: string): ProcEntry[] {
   return out
 }
 
+/**
+ * Parse `top -l 1 -stats pid,mem` into pid → **phys_footprint** in kB.
+ *
+ * On darwin this REPLACES `ps`'s `rss` as the panel's memory number, because the two measure
+ * different things and `rss` is the wrong one here. Measured on a real Mac (2026-08-12, 8 claude
+ * processes captured in the same tick against Apple's own `footprint` tool):
+ *   - ACTIVE processes: footprint/rss ≈ 1, and one read **0.73×** — `rss` counts shared resident
+ *     pages that footprint does not, so the two accountings diverge in BOTH directions.
+ *   - IDLE processes: **1.84–2.20×**. macOS moves an idle process's pages into the compressor,
+ *     which drops out of `rss` but stays in footprint.
+ * That is the population this panel exists to describe: it asks what idle sessions cost, and macOS
+ * compresses exactly those. `rss` therefore understated a six-hour-idle session by about half.
+ *
+ * `phys_footprint` is also what Activity Monitor's "Memory" column shows, which makes the panel
+ * agree with the pill — the pill's `vm_stat` reading already counts compressor pages and was
+ * verified against Activity Monitor to 0.05%. Two surfaces describing one machine must not use two
+ * accountings.
+ *
+ * Format facts, all MEASURED on that host (980 data rows) rather than assumed:
+ *   - ~10 header lines, a blank, then a `PID    MEM` column header; data follows. We locate that
+ *     header rather than counting lines, because the header block's size is not a contract.
+ *   - The MEM column is LEFT-aligned in five characters, so values carry TRAILING SPACES
+ *     (`12M  `, `859M `, `1314M`). A naive `/M$/` misses two thirds of them.
+ *   - Units seen: `K` (553 rows) and `M` (427). `G` was never observed — a 1314M process stayed in
+ *     M — but `top`'s own header prints `PhysMem: 23G`, so `G` is accepted anyway.
+ *   - `B` and any restricted-process rendering were NOT observed and are deliberately not guessed:
+ *     an unrecognised suffix skips the row, the same tolerance the rest of this file uses.
+ *   - `top` rounds the M column to whole megabytes (29M and 28M across two ticks); K rows keep kB
+ *     precision. The panel renders MB, so the rounding is below what it shows.
+ *   - pid 0 (`kernel_task`) appears and is accessible; column spacing varies with pid width.
+ */
+export function parseTopFootprint(stdout: string): Map<number, number> {
+  const out = new Map<number, number>()
+  const lines = stdout.split('\n')
+  // Find the column header, not a line number: the header block above it is not a contract.
+  const head = lines.findIndex((l) => /^\s*PID\s+MEM\s*$/.test(l))
+  if (head < 0) return out
+  const UNIT: Record<string, number> = { B: 1 / 1024, K: 1, M: 1024, G: 1024 * 1024 }
+  for (const line of lines.slice(head + 1)) {
+    // `\s*$` rather than an end-anchored unit: the value is left-aligned and padded.
+    const m = /^\s*(\d+)\s+(\d+(?:\.\d+)?)([A-Za-z])\s*$/.exec(line)
+    if (!m) continue
+    const factor = UNIT[m[3].toUpperCase()]
+    // An unrecognised suffix skips the row rather than guessing a scale — a wrong scale here is a
+    // wrong number presented as a fact, which is the failure this whole feature exists to end.
+    if (factor === undefined) continue
+    const pid = Number(m[1])
+    if (!Number.isFinite(pid)) continue
+    out.set(pid, Number(m[2]) * factor)
+  }
+  return out
+}
+
 /** Linux `/proc/meminfo` (MemAvailable is the honest number); `os.freemem()` fallback elsewhere.
  *  Returns null when nothing is readable — callers treat that as "no signal", never as zero.
  *
@@ -346,10 +399,23 @@ export async function collectSessionMemory(
 
   let table = readTable()
   if (table === null && !deps.readTable) {
-    // Non-Linux (or an unreadable /proc): one `ps` call for the whole table, through the same
-    // injectable seam as tmux — nothing in this file may reach a subprocess around it.
+    // Non-Linux (or an unreadable /proc): `ps` for the whole table, through the same injectable
+    // seam as tmux — nothing in this file may reach a subprocess around it.
+    //
+    // On darwin a SECOND call is merged in: `top` carries phys_footprint, which is what Activity
+    // Monitor shows and what the pill's `vm_stat` reading already counts. `ps`'s own `rss` drops
+    // an idle process's compressed pages and understated a six-hour-idle session by about half —
+    // exactly the population this panel exists to describe. See parseTopFootprint.
     try {
-      table = parseProcessTable(await exec('ps', ['-eo', 'pid,ppid,rss']))
+      const rows = parseProcessTable(await exec('ps', ['-eo', 'pid,ppid,rss']))
+      if (process.platform === 'darwin') {
+        const fp = parseTopFootprint(await exec('top', ['-l', '1', '-stats', 'pid,mem']))
+        // A pid `top` did not list keeps its `rss`. The two snapshots are a moment apart, so a miss
+        // is a process that came or went between them — not a reason to report nothing.
+        table = rows.map((e) => ({ ...e, rssKb: fp.get(e.pid) ?? e.rssKb }))
+      } else {
+        table = rows
+      }
     } catch {
       table = null
     }

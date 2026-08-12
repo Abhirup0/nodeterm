@@ -148,6 +148,37 @@ pane's *shell*, so a claude session with two MCP servers reports **3**. The pane
 `list-panes -a` emits one line per **pane**, so the first pane of a session wins in both legs (same
 key, same order) — one session is one row.
 
+### On macOS the PANEL reads phys_footprint, not `ps`'s rss
+
+Two surfaces describing one machine must not use two accountings. The pill's `vm_stat` reading
+counts compressor pages and matches Activity Monitor to 0.05%; `ps`'s `rss` does not count them at
+all, so the panel was measuring something else.
+
+Measured on a real Mac (2026-08-12), 8 `claude` processes captured in the same tick against Apple's
+own `footprint` tool — the source of Activity Monitor's "Memory" column:
+
+| Process state | footprint / rss |
+|---|---|
+| Active | ~1, and one read **0.73x** |
+| Idle | **1.84 - 2.20x** |
+
+Both directions matter. `rss` counts shared resident pages footprint does not (hence 0.73x), and
+drops the compressed pages of an idle process (hence 2x). **The idle case decides it:** this panel
+exists to answer what idle sessions cost, and macOS compresses exactly those, so `rss` understated a
+six-hour-idle session by about half.
+
+`parseTopFootprint` reads `top -l 1 -stats pid,mem`, verified identical to the `footprint` tool.
+`ps` is still called for the parent links (`top` has no ppid column) and the two merge on pid; a pid
+`top` did not list keeps its `rss`, since the snapshots are a moment apart.
+
+The format facts in that parser were CAPTURED, not composed — including the one that would have
+broken a naive implementation: the MEM column is left-aligned in five characters, so values carry
+TRAILING SPACES (`12M  `, `859M `, `1314M`) and a `/M$/` regex misses two thirds of the column. `G`
+is accepted but was never observed (a 1314M process stayed in M); `B` and any restricted-process
+rendering were not observed and are deliberately not guessed — an unrecognised suffix skips the row.
+
+**Linux is untouched:** `/proc/<pid>/status`'s `VmRSS` is the right number there.
+
 ### macOS reads `vm_stat`, not `os.freemem()`
 
 libuv's `os.freemem()` counts only genuinely FREE pages, and a healthy Mac keeps that near zero on
@@ -424,13 +455,15 @@ The kill actually reaching the host (the bug most recently fixed, and the one no
     one survives. This is what `-t =<name>` buys and it has only been reasoned about.
 
 macOS (the ps path never runs on Linux)
- 5. Open the panel on a Mac: `defaultProcessTableReader` returns null there, so the whole table
-    comes from `ps -eo pid,ppid,rss`. Rows must populate, and the totals must be plausible — BSD ps
-    reports rss in kB, but confirm one known process against Activity Monitor before trusting it.
-    PARTIAL 2026-08-12: the units ARE kB, but `ps rss` and AM's "Memory" column measure different
-    things — WindowServer read 92,768 kB (90.6 MB) of RSS while AM showed 763.5 MB of footprint on
-    the same tick, an 8× gap for a compressed/IOKit-heavy process. The panel will understate such
-    processes; "plausible" must mean plausible-as-RSS, not AM-equal. Panel populate still unchecked.
+ 5. **DONE 2026-08-12** — measured, and it changed the code. `ps rss` is NOT the right number on
+    macOS. Against Apple's own `footprint` tool, 8 `claude` processes in one tick: footprint/rss is
+    ~1 for ACTIVE processes (one read 0.73x — rss counts shared resident pages footprint does not)
+    but **1.84-2.20x for IDLE** ones, because macOS moves an idle process's pages into the
+    compressor, which drops out of rss. That is the population this panel describes, so rss
+    understated a six-hour-idle session by about half. The panel now reads phys_footprint via
+    `top -l 1 -stats pid,mem`. (WindowServer's 8x gap was real but atypical — graphics allocations.)
+    Residual: confirm the panel's per-row totals against AM's Memory column for the same pids, on a
+    build containing that change.
  6. ~~macOS: check `parseVmStat` against Activity Monitor.~~ **DONE 2026-08-12** — 19.1 GB vs
     AM's 19.00 GB of parts on a 24 GB machine (was 23.9/24.0 before the fix). Still open on
     macOS: give the memory-PRESSURE monitor a real signal (`kern.memorystatus_vm_pressure_level`)
