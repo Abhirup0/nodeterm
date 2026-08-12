@@ -74,6 +74,7 @@ import {
   planOffscreenVisibility,
   releaseStillEnabled,
   shouldDeferReleaseForEco,
+  shouldDeferReleaseForLiveWork,
   OFFSCREEN_DEFER_RETRY_MS,
   OFFSCREEN_DISPOSE_MS_DEFAULT
 } from '../terminal/offscreen-policy'
@@ -1017,6 +1018,13 @@ export function TerminalNode({
   /** Is there a live session here that could be given back? Published by the lifecycle run
    *  (`restartTarget`), null between runs — the dispose timer refuses when it cannot ask. */
   const offscreenLiveRef = useRef<(() => boolean) | null>(null)
+  /** Does the CURRENT session survive losing its client (tmux, local or remote)? Published by the
+   *  lifecycle run from `PtyCreateResult.persistent` — the offscreen release reads it to decide
+   *  whether disposing this terminal would end a running agent (`wouldKillLiveWork`). Read only
+   *  AFTER `offscreenLiveRef` has confirmed a live session, so a value left over from a torn-down
+   *  run is never acted on. Seeded `true`: the historical assumption, never a protection on a
+   *  guess. */
+  const sessionPersistentRef = useRef(true)
   // Selection is a live veto (`mayDisposeOffscreen`): a selected node is one the user is working
   // with — it can be off-screen mid-drag or right after a ⌘K jump — so it is never taken down.
   const selectedRef = useRef(selected)
@@ -1635,6 +1643,7 @@ export function TerminalNode({
     // (`PtyCreateResult.persistent` absent), behaves exactly as it always did rather than being
     // protected on a guess. See `canDisposePark`.
     let sessionPersistent = parked ? parked.tmuxBacked : true
+    sessionPersistentRef.current = sessionPersistent
     let disposed = false
     // Last cols/rows REPORTED to the pty (seeded at create): a resize IPC makes tmux redraw the
     // whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after mount)
@@ -2331,6 +2340,8 @@ export function TerminalNode({
         sessionId = sid
         // `?? true`: an absent flag is an older core over the relay, not a plain shell.
         sessionPersistent = persistent ?? true
+        // Published for the mount-stable observer effect, which cannot see this closure.
+        sessionPersistentRef.current = sessionPersistent
         if (fellBack) setAccountFallback(true)
         // Catch up a size change that landed while the spawn was in flight (applyFit skips the
         // IPC until sessionId is set, and the observer won't re-fire without another change).
@@ -3232,6 +3243,22 @@ export function TerminalNode({
             // Nothing to give back (no session yet, or one that was closed/ended under us) ⇒ no
             // dispose. A null ref means no lifecycle run is live at all, which answers the same way.
             if (!offscreenLiveRef.current?.()) return
+            // LIVE WORK ON A PLAIN SHELL (issue #126): this release is only "give the buffer back,
+            // re-attach later" while tmux is underneath. Without it the pty is the shell, so
+            // disposing an offscreen agent node kills the CLI mid-turn — panning away is not a
+            // request to stop it. Defer on the same retry the Eco ordering uses, but with no cap:
+            // what this waits for (the turn ending) always comes, and giving up would BE the bug.
+            // Asked after `offscreenLiveRef`, so the persistence ref is only read for a session
+            // this run actually has.
+            if (
+              shouldDeferReleaseForLiveWork({
+                tmuxBacked: sessionPersistentRef.current,
+                agentState: useAgentStatus.getState().byId[id]?.state
+              })
+            ) {
+              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+              return
+            }
             // ECO ORDERING (see `shouldDeferReleaseForEco`): hibernate first, release second. This
             // release would UNWIRE the node — the lifecycle effect tears down, the hibernate pair
             // unregisters, and `planHibernation` then reads the node as unwired — and at the

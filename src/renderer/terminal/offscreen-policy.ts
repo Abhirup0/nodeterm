@@ -8,7 +8,12 @@
  * REMOTE (SSH) nodes are excluded in v1: their spawn path runs the requireRemote/offline
  * machinery and a re-spawn while the ControlMaster is down would surface the offline overlay for
  * a node the user never touched. Follow-up once demand exists.
+ *
+ * "The tmux session keeps running and re-attach redraws" is the load-bearing sentence, and it is
+ * FALSE without tmux — where this release kills the shell and the agent CLI in it. See
+ * `shouldDeferReleaseForLiveWork`.
  */
+import { wouldKillLiveWork, type LiveWorkInput } from './live-work'
 import type { SessionSource } from '../session/session'
 
 export const OFFSCREEN_DISPOSE_MS_DEFAULT = 10 * 60_000
@@ -55,8 +60,37 @@ export function releaseStillEnabled(settingMinutes: number | undefined): boolean
 }
 
 /** How often a DEFERRED release re-asks. The hibernation sweep's own cadence, because that is
- *  exactly what the deferral is waiting for: one sweep after the node hibernates, the viewer goes. */
+ *  exactly what the deferral is waiting for: one sweep after the node hibernates, the viewer goes.
+ *  The live-work deferral below rides the same retry, and a minute suits it for the same kind of
+ *  reason — what it waits for is a human-scale event (an agent turn ending). */
 export const OFFSCREEN_DEFER_RETRY_MS = 60_000
+
+/**
+ * THE FOURTH KILL LEVER (issue #126). Defer this release — indefinitely — while disposing the
+ * terminal would destroy work that is still running.
+ *
+ * This module's whole premise is that a release is cheap: the node stays mounted, the tmux session
+ * keeps running, and the revive is a warm re-attach that redraws. Without tmux underneath none of
+ * that holds — the pty IS the shell — so releasing an offscreen agent node on a plain-shell setup
+ * terminates the CLI mid-turn and the node's restart machinery resumes it from wherever the kill
+ * landed. Panning away from a working agent is not a request to stop it.
+ *
+ * Expressed as a DEFERRAL rather than a refusal because this fire path already has exactly that
+ * shape and cadence (`shouldDeferReleaseForEco` → re-arm at `OFFSCREEN_DEFER_RETRY_MS`): every
+ * input is re-asked a minute later, so "protected" is a state the node LEAVES on its own the
+ * moment its agent goes idle, and the release then proceeds normally. No new timer, no new state,
+ * nothing to remember.
+ *
+ * UNCAPPED, and that is the one place it deliberately differs from the Eco deferral above. That
+ * one caps because it waits for a hibernation that may never come, and stranding a viewer forever
+ * for an event that cannot happen would be worse than the memory it saves. This one waits for the
+ * user's own turn to end — a thing that always ends — and "give up and release anyway" is
+ * precisely the reported bug. So no clock is an input here at all. The exposure is bounded by
+ * what it protects: only non-tmux sessions, only while an agent is actually mid-task.
+ */
+export function shouldDeferReleaseForLiveWork(i: LiveWorkInput): boolean {
+  return wouldKillLiveWork(i)
+}
 
 /**
  * PHASE 5 ORDERING: with Eco on, releasing an offscreen terminal's viewer WAITS for its agent to

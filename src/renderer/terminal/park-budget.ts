@@ -1,4 +1,4 @@
-import type { AgentState } from '@shared/agents/normalize'
+import { wouldKillLiveWork, type LiveWorkInput } from './live-work'
 
 /**
  * Count cap for parked terminals (see TerminalNode's parkedTerminals). The park window
@@ -26,52 +26,21 @@ export const PARK_MAX = 12
  */
 export const PARK_RECHECK_MS = 60_000
 
-/** Agent states that mean the CLI is mid-task or holding a question open for the user. Same set
- *  hibernation refuses to `/exit` (`hibernation-policy.ts`), for the same reason: `working` is a
- *  turn in flight, `waiting`/`blocked` is a question the user is being asked to come back to. */
-const LIVE_AGENT_STATES: ReadonlySet<AgentState> = new Set<AgentState>([
-  'working',
-  'waiting',
-  'blocked'
-])
-
-export interface ParkProtectionInput {
-  /**
-   * The session survives losing this client — a tmux session, local or remote
-   * (`PtyCreateResult.persistent`). With tmux, disposing a park KILLS ONLY OUR CLIENT: the tmux
-   * session, its pane and everything running in it keep going, and the next mount is a warm
-   * reattach. Without it (the plain-shell fallback — no tmux installed, tmux switched off, or a
-   * tmux whose install path `findTmux` missed) the pty IS the shell, and the same dispose kills
-   * the shell and every process under it.
-   */
-  tmuxBacked: boolean
-  /** The node's live agent state (`agentStatus.byId[nodeId].state`); absent = plain terminal or
-   *  no hook event seen yet. */
-  agentState?: AgentState
-}
-
 /**
  * May this parked terminal be disposed by a BUDGET lever — the park window expiring, the LRU cap
  * evicting, or the memory-pressure "drop every park" lever?
  *
- * Reported (issue #126): switching projects killed a Claude agent mid-task and it came back
- * "terminated mid action", auto-resuming on return. The park is a CACHE and its dispose is
- * "detach the client", which is exactly what it costs — but only where tmux is underneath. On the
- * plain-shell fallback the very same dispose is the whole session: the shell dies, the agent CLI
- * dies with it, and the node's restart machinery resumes the conversation from wherever the kill
- * landed. Three levers reached that kill and none of them looked at what was running.
- *
- * So the protection is the narrowest one that closes it: BOTH no tmux underneath AND live agent
- * work on the node. A plain terminal, a `done`/unknown agent, and every tmux-backed session keep
- * today's behavior bit for bit.
+ * The park's name for the shared safety question (`wouldKillLiveWork`, see `live-work.ts`): its
+ * dispose is "detach the client", which is exactly what a cache eviction should cost — but only
+ * where tmux is underneath. On the plain-shell fallback the very same dispose is the whole
+ * session, so a park holding a working agent there is protected (issue #126).
  *
  * This is only about the budget levers. A deliberate dispose — node deleted, session closed by
  * another client, respawn into a worktree, a dead pty — goes through `disposeParkedTerminal` and
  * is never gated: there the session is already gone or is meant to be.
  */
-export function canDisposePark(p: ParkProtectionInput): boolean {
-  if (p.tmuxBacked) return true
-  return !(p.agentState && LIVE_AGENT_STATES.has(p.agentState))
+export function canDisposePark(p: LiveWorkInput): boolean {
+  return !wouldKillLiveWork(p)
 }
 
 /** Keys to dispose so the park stays within `max`, oldest first. Caller passes keys in park

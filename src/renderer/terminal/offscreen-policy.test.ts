@@ -6,7 +6,8 @@ import {
   mayDisposeOffscreen,
   offscreenCoreIsRemote,
   planOffscreenVisibility,
-  shouldDeferReleaseForEco
+  shouldDeferReleaseForEco,
+  shouldDeferReleaseForLiveWork
 } from './offscreen-policy'
 
 describe('offscreen dispose policy', () => {
@@ -147,6 +148,46 @@ describe('shouldDeferReleaseForEco — hibernate first, then release the viewer'
     expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 - 1 })).toBe(true)
     expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 40 * 60_000 })).toBe(false)
     expect(shouldDeferReleaseForEco({ ...base, offscreenElapsedMs: 90 * 60_000 })).toBe(false)
+  })
+})
+
+describe('shouldDeferReleaseForLiveWork — the fourth kill lever behind issue #126', () => {
+  it('defers a PLAIN-SHELL terminal whose agent is mid-task, where the release would end it', () => {
+    for (const agentState of ['working', 'waiting', 'blocked'] as const) {
+      expect(shouldDeferReleaseForLiveWork({ tmuxBacked: false, agentState })).toBe(true)
+    }
+  })
+
+  it('releases the same terminal once the agent goes idle — the deferral drains itself', () => {
+    // The retry cadence re-asks, so "protected" is a state the node LEAVES; nothing has to
+    // remember that it was ever deferred.
+    expect(shouldDeferReleaseForLiveWork({ tmuxBacked: false, agentState: 'working' })).toBe(true)
+    expect(shouldDeferReleaseForLiveWork({ tmuxBacked: false, agentState: 'done' })).toBe(false)
+  })
+
+  it('never defers a TMUX-BACKED terminal, even one mid-turn — that release is safe', () => {
+    // The whole point of the distinction: with tmux the dispose detaches a client and the CLI
+    // keeps working. Deferring here would forfeit the memory this feature exists to reclaim, on
+    // the setups where reclaiming it is free.
+    expect(shouldDeferReleaseForLiveWork({ tmuxBacked: true, agentState: 'working' })).toBe(false)
+    expect(shouldDeferReleaseForLiveWork({ tmuxBacked: true, agentState: 'waiting' })).toBe(false)
+  })
+
+  it('never defers a plain terminal or an agent-less node', () => {
+    expect(shouldDeferReleaseForLiveWork({ tmuxBacked: false })).toBe(false)
+  })
+
+  it('is UNCAPPED, unlike the Eco deferral — there is no elapsed time that makes the kill safe', () => {
+    // shouldDeferReleaseForEco takes `offscreenElapsedMs` and gives up at the cap because it waits
+    // for a hibernation that may never come. This one waits for the user's own turn to end, and
+    // "give up and kill it anyway" is precisely the reported bug — so time is not an input at all.
+    // Pinned structurally: the input carries no clock, so no caller can grow a cap by passing one.
+    const input: Parameters<typeof shouldDeferReleaseForLiveWork>[0] = {
+      tmuxBacked: false,
+      agentState: 'working'
+    }
+    expect(Object.keys(input).sort()).toEqual(['agentState', 'tmuxBacked'])
+    expect(shouldDeferReleaseForLiveWork(input)).toBe(true)
   })
 })
 
