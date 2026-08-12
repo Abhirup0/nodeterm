@@ -148,6 +148,16 @@ pill.** `sessionBudgetConfig`'s watermark defaults to 10% of RAM (2457 MB on a 2
 reaped idle detached sessions every 10 minutes regardless of how much memory was actually free. One
 reader, two consumers: that is the reason they share a definition.
 
+**A failed `vm_stat` yields NO SIGNAL, not a fallback.** `darwinMemInfo` returns `null` rather than
+dropping through to `os.freemem()` — that value is exactly what caused the bug, so falling back to it
+would restore it on any Mac where `vm_stat` is missing, slow or unparseable. Both consumers degrade
+correctly on `null`: `planReap` treats it as no pressure (absence of evidence never triggers a kill)
+and the pill pulses instead of printing a number it has not earned.
+
+**Confirmed in the field.** The reaper symptom was reported independently as "my sessions keep
+disappearing" on macOS, before the cause was known. Until this ships, the workaround on an affected
+machine is the reaper's own kill switch: `NODETERM_SESSION_REAP_DISABLED=1`.
+
 **Unverified:** the fixture in `session-memory.test.ts` is composed from Apple's documented format,
 not captured from a real machine. Device checklist item 6 is what closes it.
 

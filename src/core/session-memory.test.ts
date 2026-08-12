@@ -237,7 +237,7 @@ describe('collectSessionMemory', () => {
   })
 })
 
-import { parseVmStat } from './session-memory'
+import { parseVmStat, darwinMemInfo } from './session-memory'
 
 /** Shaped from Apple's documented `vm_stat` format, at a 16 KiB page (Apple Silicon). COMPOSED, not
  *  captured — nobody in this loop has a Mac. Numbers chosen so the arithmetic is checkable by hand:
@@ -290,5 +290,27 @@ describe('parseVmStat', () => {
   it('never reports negative availability on a heavily compressed machine', () => {
     const tiny = parseVmStat(VM_STAT, 1024 * 1048576)
     expect(tiny?.availableMb).toBe(0)
+  })
+})
+
+describe('darwinMemInfo', () => {
+  it('reports null when vm_stat cannot run — never the os.freemem() value', () => {
+    // The whole point. Falling back to os.freemem() here would restore the bug: on macOS it reads
+    // near zero, the reaper's 10%-of-RAM watermark reads as permanent pressure, and idle detached
+    // sessions get reaped every sweep. A confirmed field symptom ("my sessions keep disappearing").
+    // planReap treats null as NO pressure, so no signal is the safe answer.
+    expect(
+      darwinMemInfo(() => {
+        throw new Error('spawn vm_stat ENOENT')
+      }, TOTAL_BYTES)
+    ).toBeNull()
+  })
+
+  it('reports null on output it cannot parse', () => {
+    expect(darwinMemInfo(() => 'garbage', TOTAL_BYTES)).toBeNull()
+  })
+
+  it('passes a good reading through', () => {
+    expect(darwinMemInfo(() => VM_STAT, TOTAL_BYTES)).toEqual({ availableMb: 8951, totalMb: 24576 })
   })
 })

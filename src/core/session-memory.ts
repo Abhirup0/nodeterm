@@ -106,6 +106,26 @@ export function parseProcessTable(stdout: string): ProcEntry[] {
  *  Lives here rather than in session-budget.ts because two features now read it (the reaper's
  *  watermark and the system-resource pill) and a second copy would drift. */
 /**
+ * macOS reading, or `null`. **There is deliberately no fallback to `os.freemem()` here.**
+ *
+ * That fallback is the very number this function exists to replace: on macOS it sits near zero, and
+ * the session reaper's watermark (10% of RAM) then reads as permanent memory pressure — which had a
+ * Mac reaping idle detached sessions every 10 minutes regardless of how much memory was free. A
+ * confirmed field symptom, reported as "my sessions keep disappearing".
+ *
+ * So a `vm_stat` we cannot run or cannot parse yields NO SIGNAL, not a wrong one. Both consumers
+ * degrade correctly on null: `planReap` treats it as "no pressure" (absence of evidence never
+ * triggers a kill) and the pill pulses instead of printing a number it has not earned.
+ */
+export function darwinMemInfo(runVmStat: () => string, totalBytes: number): MemInfo | null {
+  try {
+    return parseVmStat(runVmStat(), totalBytes)
+  } catch {
+    return null
+  }
+}
+
+/**
  * Parse `vm_stat` into the same MemInfo shape, given the machine's total bytes.
  *
  * macOS deliberately keeps almost nothing "free": file-backed and purgeable pages are held until
@@ -166,14 +186,10 @@ export function readMemInfo(): MemInfo | null {
   // (the 30 s pill poll and the reaper's 10 min sweep) are far apart, and keeping ONE signature
   // means the reaper's watermark is fixed by the same change.
   if (process.platform === 'darwin') {
-    try {
-      const out = execFileSync('vm_stat', { encoding: 'utf8', timeout: 5_000 })
-      const parsed = parseVmStat(out, os.totalmem())
-      if (parsed) return parsed
-    } catch {
-      // vm_stat missing or unreadable — fall through to the generic reader below, which is wrong on
-      // macOS but is still better than reporting nothing at all.
-    }
+    return darwinMemInfo(
+      () => execFileSync('vm_stat', { encoding: 'utf8', timeout: 5_000 }),
+      os.totalmem()
+    )
   }
   try {
     return {
