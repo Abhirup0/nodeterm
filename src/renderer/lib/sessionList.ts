@@ -76,18 +76,20 @@ export function projectHeadClickAction(isActive: boolean): ProjectHeadAction {
 
 /**
  * Header badges for a project group: how many sessions need the user right now
- * (waiting/blocked) and how many finished unseen. Mirrors the row glyph's precedence —
- * an attention session is never double-counted as unread, and a working one isn't
- * unread yet (a new turn is running; the old mark resurfaces when it ends).
+ * (waiting/blocked), how many finished unseen, and how many are actively working right now.
+ * Mirrors the row glyph's precedence — an attention session is never double-counted as unread,
+ * and a working one isn't unread yet (a new turn is running; the old mark resurfaces when it ends).
  */
-export function projectSignalCounts(group: SessionGroup): { attention: number; unread: number } {
+export function projectSignalCounts(group: SessionGroup): { attention: number; unread: number; working: number } {
   let attention = 0
   let unread = 0
+  let working = 0
   for (const s of [...group.ungrouped, ...group.groups.flatMap((b) => b.sessions)]) {
     if (s.statusKind === 'attention') attention++
     else if (s.unread && s.statusKind !== 'working') unread++
+    if (s.statusKind === 'working') working++
   }
-  return { attention, unread }
+  return { attention, unread, working }
 }
 
 export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {

@@ -6,7 +6,9 @@ import {
   isGroupCollapsed,
   projectHeadClickAction,
   projectSignalCounts,
-  type ProjectInput
+  type ProjectInput,
+  type SessionRowVM,
+  type SessionGroup
 } from './sessionList'
 import type { AgentNodeStatus } from '../state/agentStatus'
 
@@ -188,6 +190,29 @@ describe('buildSessionList', () => {
 })
 
 describe('projectSignalCounts', () => {
+  const group = (sessions: Partial<SessionRowVM>[]): SessionGroup => ({
+    projectId: 'p1',
+    projectName: 'P',
+    projectColor: '#111',
+    isActive: false,
+    groups: [],
+    ungrouped: sessions.map((s, i) => ({
+      id: `s${i}`,
+      title: `s${i}`,
+      color: '#888',
+      isAgent: false,
+      statusKind: 'idle' as const,
+      stateLabel: 'Idle',
+      unread: false,
+      usesContext: false,
+      ...s
+    }))
+  })
+
+  // Restored from before the working badge: the original a–f matrix. It pins the row-glyph
+  // PRECEDENCE (attention beats unread, a working session is not yet unread) across both
+  // ungrouped and grouped sessions, which the narrower fixtures below do not reach. The working
+  // count is asserted alongside it rather than replacing it.
   it('counts attention and unread across ungrouped and grouped sessions', () => {
     const proj: ProjectInput[] = [
       {
@@ -213,7 +238,9 @@ describe('projectSignalCounts', () => {
       e: { unread: true, state: 'working' }
     }
     const [g] = buildSessionList(proj, null, 'p1', status, '')
-    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2 })
+    // `e` is the load-bearing one: it is the single working session AND carries an unread mark,
+    // so it must land in `working` and NOT in `unread`.
+    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2, working: 1 })
   })
 
   it('returns zeros for a quiet project', () => {
@@ -224,6 +251,44 @@ describe('projectSignalCounts', () => {
       {},
       ''
     )
-    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 0 })
+    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 0, working: 0 })
+  })
+
+  it('counts working sessions alongside attention/unread', () => {
+    const g = group([
+      { statusKind: 'working' },
+      { statusKind: 'working' },
+      { statusKind: 'attention' },
+      { statusKind: 'idle' }
+    ])
+    expect(projectSignalCounts(g)).toEqual({ attention: 1, unread: 0, working: 2 })
+  })
+
+  it('working is 0 when nothing is running, and unread is counted when not working', () => {
+    const g = group([{ statusKind: 'idle' }, { statusKind: 'done', unread: true }])
+    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 1, working: 0 })
+  })
+
+  it('drives through buildSessionList: counts grouped sessions, attention wins over unread, working is not double-counted as unread', () => {
+    const proj: ProjectInput[] = [
+      {
+        id: 'p1',
+        name: 'Alpha',
+        color: '#111',
+        nodes: [
+          node('g1', { kind: 'group', title: 'Frontend', color: '#abc' }),
+          node('a1', { agentId: 'claude', parentId: 'g1' }), // attention + unread -> attention only
+          node('a2', { agentId: 'claude', parentId: 'g1' }), // working + unread -> working only
+          node('t1') // ungrouped, idle
+        ]
+      }
+    ]
+    const status: Record<string, AgentNodeStatus> = {
+      a1: { unread: true, state: 'blocked', agentId: 'claude', session: 'blocked task', sessionId: 'sess-a1' },
+      a2: { unread: true, state: 'working', agentId: 'claude', session: 'working task', sessionId: 'sess-a2' }
+    }
+    const [p1] = buildSessionList(proj, null, 'p1', status, '')
+    expect(p1.groups[0].sessions.map((s) => s.id)).toEqual(['a1', 'a2']) // sanity: sessions really live under group.groups
+    expect(projectSignalCounts(p1)).toEqual({ attention: 1, unread: 0, working: 1 })
   })
 })
