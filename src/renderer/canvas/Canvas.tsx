@@ -7966,7 +7966,6 @@ export function Canvas() {
             obstacle rect (instead of one per pill, overlapping after inflation), so fitView never
             parks a node underneath either pill. */}
         <div className="canvas-pills" data-canvas-chrome>
-          <UsageIndicator overBoard={kanbanOpen} />
           {/* `travelToNode`, not `focusNodeById`: the panel resolves sessions in CLOSED projects
               too (their tmux sessions keep running), and reaching one means reopening its tab
               first — the same path a notification click and a peer jump take. */}
@@ -7975,7 +7974,9 @@ export function Canvas() {
             onGoToNode={travelToNode}
             onKillSession={killSessionById}
           />
-        </div>
+        
+          <UsageIndicator overBoard={kanbanOpen} />
+</div>
 
         <PresenceNamePrompt />
 

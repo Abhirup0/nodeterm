@@ -191,6 +191,15 @@ previous machine's facts on a real change.
 **The full sweep never runs on a timer and never from the pill.** The panel is *unmounted* while
 closed and its mount is what triggers the sweep.
 
+**The pill is icon-only at rest.** It sits on every canvas, always, so a permanent
+`RAM 15.6 GB / 62.5 GB` is a row of numbers nobody asked for — the pill's job is to be findable, not
+to report continuously. Hover (or keyboard focus, or an open panel) reveals used/total; the icon
+itself carries the pressure reading through the same thresholds the old mini-bar used, tinting as
+memory is CONSUMED. The reveal is **CSS, not a conditional mount**: the numbers stay in the DOM at
+rest so they remain the button's accessible name, and a hover-mounted figure would be unreachable to
+anything that reads the control without pointing at it. The pill sits to the LEFT of the usage pill
+— this machine's resources before this account's quota.
+
 **Ownership contract:** the store's poll timer and its active-scope stamp are **module singletons**,
 and the **pill is their single owner**. The panel must never call `startHostPoll` / `stopHostPoll` —
 a `stopHostPoll` on unmount would clear the pill's interval with nothing left to restart it, and the
@@ -380,7 +389,7 @@ Layout and theming (argued from CSS only)
 15. Sessions sidebar open: the collapsed pill passes UNDER the sidebar exactly as the usage pill
     does.
 16. Usage popover open beside the RAM pill: no overlap, pill still clickable.
-17. Both themes: hover (light is why the ink overlay exists) and the bar's colour steps at ~75% and
+17. Both themes: hover (light is why the ink overlay exists) and the icon's colour steps at ~75% and
     ~90% used.
 18. fitView / goToNode must no longer tuck nodes under the pill.
 

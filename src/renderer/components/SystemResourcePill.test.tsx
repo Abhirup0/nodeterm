@@ -75,10 +75,26 @@ describe('SystemResourcePill', () => {
     expect(pill?.textContent).not.toContain('46.9 GB')
   })
 
-  it('fills the bar by memory USED, not by what is free', () => {
+  it('keeps the numbers in the DOM at rest — the reveal is CSS, not a mount', () => {
+    // The collapsed pill is icon-only, but the detail must still exist: it carries the button's
+    // accessible name, and a hover-mounted number would be unreachable to a screen reader and to
+    // anything that reads the control without pointing at it.
     mount(MEM)
-    const fill = host.querySelector<HTMLElement>('.sysres-pill__minibar-fill')
-    expect(fill?.style.width).toBe('25%')
+    const detail = host.querySelector('.sysres-pill__detail')
+    expect(detail).not.toBeNull()
+    expect(detail?.textContent).toContain('15.6 GB')
+  })
+
+  it('tints the icon by memory USED, not by what is free', () => {
+    // The icon carries the pressure reading now that the bar is gone. 25% used is calm; the same
+    // machine read as 75% FREE would be the danger tint, which is the mistake this pins.
+    mount(MEM)
+    expect(host.querySelector<HTMLElement>('.sysres-pill__icon')?.style.color).toBe('')
+    act(() => root.unmount())
+    // 63 of 64 GB used — the same machine read as "98% free" would stay calm, which is the
+    // direction this pins.
+    mount({ totalMb: 64000, availableMb: 1000 })
+    expect(host.querySelector<HTMLElement>('.sysres-pill__icon')?.style.color).toBe('var(--danger)')
   })
 
   it('pulses instead of claiming a number when the reading is null', () => {
@@ -90,7 +106,6 @@ describe('SystemResourcePill', () => {
     // is any digit at all — there is no number we are entitled to print without a reading.
     expect(pill?.textContent).not.toMatch(/\d/)
     expect(pill?.textContent).not.toContain('GB')
-    expect(host.querySelector('.sysres-pill__minibar')).toBeNull()
   })
 
   it('treats a zero total as unreadable rather than dividing by it', () => {

@@ -5500,13 +5500,22 @@ body,
 /* The two pills share one shell so they read as a single control rather than as two widgets that
    happen to be adjacent. Grouped rather than duplicated, so tuning one can never drift the other. */
 .usage-pill,
+/* Icon-only at rest: the pill is ambient chrome, and a permanent "RAM 15.6 / 62.5 GB" is a row of
+   numbers nobody asked for on every canvas. The detail is revealed on hover (and while the panel is
+   open, so the control does not shrink out from under the cursor that opened it). */
 .sysres-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 0;
   height: 26px;
-  padding: 0 9px;
+  width: 26px;
+  padding: 0;
+  justify-content: center;
   border-radius: 13px;
+  transition:
+    width 140ms ease,
+    padding 140ms ease,
+    gap 140ms ease;
   background: rgba(var(--card-rgb), 0.92);
   border: 1px solid rgba(var(--tint-rgb), 0.08);
   color: var(--text-strong);
@@ -5516,8 +5525,7 @@ body,
 }
 .usage-pill:hover { background: rgba(44, 44, 46, 0.95); }
 .usage-pill__icon { color: #d97757; font-size: 13px; }
-.usage-pill__minibar,
-.sysres-pill__minibar {
+.usage-pill__minibar {
   display: inline-block;
   width: 42px;
   height: 6px;
@@ -5525,8 +5533,7 @@ body,
   background: rgba(var(--tint-rgb), 0.14);
   overflow: hidden;
 }
-.usage-pill__minibar-fill,
-.sysres-pill__minibar-fill { display: block; height: 100%; border-radius: 3px; }
+.usage-pill__minibar-fill { display: block; height: 100%; border-radius: 3px; }
 .usage-pill__num,
 .sysres-pill__num { color: var(--text-strong); }
 .usage-pill__sep,
@@ -5539,6 +5546,40 @@ body,
 .usage-pill__pulse,
 .sysres-pill__pulse { animation: usage-pulse 1.2s ease-in-out infinite; }
 @keyframes usage-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+/* Expanded: hover, keyboard focus, or an open panel. `width: auto` cannot be transitioned, so the
+   pill animates padding/gap only and the detail carries the width — enough to read as a reveal
+   rather than a jump, without a magic max-width that clips a wider number (a 1 TB host prints
+   more characters than a 16 GB one). */
+.sysres-pill:hover,
+.sysres-pill:focus-visible,
+.sysres-indicator:has(.sessmem-panel) .sysres-pill {
+  width: auto;
+  gap: 6px;
+  padding: 0 9px;
+}
+/* Present in the DOM at rest (so the accessible name and any assertion still see the number) but
+   taking no space until the pill expands. */
+.sysres-pill__detail {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 0;
+  transition:
+    max-width 140ms ease,
+    opacity 140ms ease;
+}
+.sysres-pill:hover .sysres-pill__detail,
+.sysres-pill:focus-visible .sysres-pill__detail,
+.sysres-indicator:has(.sessmem-panel) .sysres-pill__detail {
+  max-width: 200px;
+  opacity: 1;
+}
+.sysres-pill__icon {
+  display: inline-flex;
+  color: rgba(var(--tint-rgb), 0.75);
+}
 
 /* ---- System-resource pill (RAM of the machine the active project runs on) ----
    Shares the usage pill's shell above; only the bits that differ live here. */
@@ -5572,16 +5613,6 @@ body,
     linear-gradient(rgba(var(--tint-rgb), 0.08), rgba(var(--tint-rgb), 0.08)),
     rgba(var(--card-rgb), 0.92);
 }
-/* A word, not a glyph: "12.4 GB / 62.5 GB" beside a quota pill is ambiguous about what is being
-   measured, and every symbol for memory is either an emoji or a guess. Set quiet — it is a unit
-   label, not a value. */
-.sysres-pill__icon {
-  color: rgba(var(--tint-rgb), 0.5);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-}
-
 .usage-refresh {
   display: inline-flex;
   align-items: center;

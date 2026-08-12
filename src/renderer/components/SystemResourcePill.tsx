@@ -5,6 +5,7 @@ import { useSshConn } from '../state/sshConn'
 import { useSessionMemory } from '../state/sessionMemory'
 import { usageScopeKey } from '../lib/usageScope'
 import { SessionMemoryPanel } from './SessionMemoryPanel'
+import { IconResource } from './icons'
 
 /** `formatBytes` speaks bytes; every number in this feature is MB. */
 const MB = 1024 * 1024
@@ -92,39 +93,33 @@ export function SystemResourcePill({
   if (!activeProjectId) return null
 
   let body: JSX.Element
+  let iconColor: string | undefined
   // `null` = could not read — the normal answer on a non-Linux SSH host, and on any host whose
   // first read has not landed yet. Pulse, NEVER "0 GB": a confident zero is the one thing this pill
   // must never say, since the number is the whole reason anyone looks at it. A `totalMb` of zero is
   // the same fact wearing a plausible shape (and would render the bar as NaN%).
   if (mem === null || mem.totalMb <= 0) {
-    body = <span className="sysres-pill__dim sysres-pill__pulse">···</span>
+    body = <span className="sysres-pill__detail sysres-pill__dim sysres-pill__pulse">···</span>
   } else {
     const usedMb = Math.max(0, mem.totalMb - mem.availableMb)
     const usedPercent = Math.min(100, (usedMb / mem.totalMb) * 100)
-    // The bar fills as memory is CONSUMED — the opposite direction to the usage pill's bar beside
-    // it, which drains as quota is spent. Deliberate: every system monitor draws RAM this way, and
-    // "the bar is nearly full" is the reading a user already has for memory pressure.
+    // The ICON carries the pressure reading now that the bar is gone: it tints as memory is
+    // consumed, so a glance still says "this machine is tight" without the pill claiming a row of
+    // the canvas. Same thresholds the bar used.
     const color =
       usedPercent >= DANGER_PERCENT
         ? 'var(--danger)'
         : usedPercent >= WARN_PERCENT
           ? 'var(--warn)'
-          : 'var(--success)'
+          : undefined
     body = (
-      <>
-        <span className="sysres-pill__minibar" aria-hidden>
-          <span
-            className="sysres-pill__minibar-fill"
-            style={{ width: `${usedPercent}%`, background: color }}
-          />
-        </span>
-        <span className="sysres-pill__num">
-          {formatBytes(usedMb * MB)}
-          <span className="sysres-pill__sep"> / </span>
-          {formatBytes(mem.totalMb * MB)}
-        </span>
-      </>
+      <span className="sysres-pill__detail sysres-pill__num" style={color ? { color } : undefined}>
+        {formatBytes(usedMb * MB)}
+        <span className="sysres-pill__sep"> / </span>
+        {formatBytes(mem.totalMb * MB)}
+      </span>
     )
+    iconColor = color
   }
 
   return (
@@ -147,7 +142,9 @@ export function SystemResourcePill({
         // "whose memory is this?" without opening the panel.
         title={scopeKey ? `Memory on ${scopeKey}` : 'Memory on this machine'}
       >
-        <span className="sysres-pill__icon">RAM</span>
+        <span className="sysres-pill__icon" style={iconColor ? { color: iconColor } : undefined}>
+          <IconResource />
+        </span>
         {body}
       </button>
     </div>
