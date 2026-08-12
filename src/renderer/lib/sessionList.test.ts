@@ -4,6 +4,7 @@ import {
   sessionStatusKind,
   projectIdAtIndex,
   isGroupCollapsed,
+  projectHeadClickAction,
   projectSignalCounts,
   type ProjectInput
 } from './sessionList'
@@ -69,6 +70,30 @@ describe('isGroupCollapsed', () => {
     expect(isGroupCollapsed({}, 'p1', true, false)).toBe(false)
     expect(isGroupCollapsed({}, 'p2', false, false)).toBe(false) // inactive stays expanded
     expect(isGroupCollapsed({ p2: true }, 'p2', false, false)).toBe(true) // user collapsed
+  })
+})
+
+describe('projectHeadClickAction', () => {
+  it('switches to an inactive project and toggles the active one (never both, never nothing)', () => {
+    expect(projectHeadClickAction(false)).toBe('switch')
+    // No dead zone: the active row still does what the whole header used to do.
+    expect(projectHeadClickAction(true)).toBe('toggle-collapse')
+  })
+
+  it('needs no collapse write on a switch: the target expands from the DEFAULT', () => {
+    // With autoCollapse ON the sidebar wipes every override on the activeProjectId change, so
+    // a toggle written by the click would be clobbered a tick later anyway — and is pointless,
+    // because the newly active project is expanded by the default rule.
+    expect(projectHeadClickAction(false)).toBe('switch')
+    expect(isGroupCollapsed({}, 'p2', true)).toBe(false)
+  })
+
+  it("with autoCollapse off, a switch leaves the target's explicit collapse choice alone", () => {
+    // Documented contract: "off = switches never touch the user's choices". The click writes no
+    // override, so a project the user collapsed by hand stays collapsed after switching to it.
+    const overrides = { p2: true }
+    expect(projectHeadClickAction(false)).toBe('switch')
+    expect(isGroupCollapsed(overrides, 'p2', true, false)).toBe(true)
   })
 })
 

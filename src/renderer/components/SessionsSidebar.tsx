@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   buildSessionList,
   isGroupCollapsed,
+  projectHeadClickAction,
   projectSignalCounts,
   type SessionNodeInput
 } from '../lib/sessionList'
@@ -26,6 +27,11 @@ export interface SessionsSidebarProps {
   onRowContextMenu(e: React.MouseEvent, projectId: string, id: string): void
   /** Right-click on a project header: the project actions menu (switch/rename/folder/close). */
   onProjectContextMenu(e: React.MouseEvent, projectId: string): void
+  /** Make a project active. MUST be Canvas's `switchProject`, never `useProjects.setActive`:
+   *  a switch has to commit the live React Flow nodes back into the store and persist first,
+   *  or the outgoing project's unsaved edits are dropped by the active-project reload and the
+   *  new activeProjectId never reaches disk (the app reopens on the old project). */
+  onSwitchProject(projectId: string): void
   onAddToProject(projectId: string): void
   /** Move a node into a canvas group (groupId) or out to the top level (null). */
   onMoveToGroup(projectId: string, nodeId: string, groupId: string | null): void
@@ -275,7 +281,14 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
             >
               <div
                 className={`ss-group__head${dropClass(g.projectId, null)}`}
-                onClick={() => toggleCollapse(g.projectId, isCollapsed)}
+                // One click, one action (projectHeadClickAction documents why it is never both):
+                // an inactive project switches — through Canvas, so the outgoing project's live
+                // nodes are committed and the new active id is persisted — and the active one
+                // toggles its own collapse, so the row keeps no dead zone.
+                onClick={() => {
+                  if (projectHeadClickAction(g.isActive) === 'switch') props.onSwitchProject(g.projectId)
+                  else toggleCollapse(g.projectId, isCollapsed)
+                }}
                 onContextMenu={(e) => props.onProjectContextMenu(e, g.projectId)}
                 title={drag?.projectId === g.projectId ? 'Drop here to remove from group' : undefined}
                 draggable
@@ -289,7 +302,22 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                 }}
                 {...dropProps(g.projectId, null)}
               >
-                <span className="ss-group__chev">{isCollapsed ? '▶' : '▼'}</span>
+                {/* Collapse is now the chevron's job alone on an inactive row, so it has to be a
+                    real target: a button with its own hit area and keyboard focus, not the bare
+                    9px glyph. It stops propagation so peeking into a project never switches. */}
+                <button
+                  type="button"
+                  className="ss-group__chev"
+                  title={isCollapsed ? 'Expand' : 'Collapse'}
+                  aria-label={isCollapsed ? `Expand ${g.projectName}` : `Collapse ${g.projectName}`}
+                  aria-expanded={!isCollapsed}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    toggleCollapse(g.projectId, isCollapsed)
+                  }}
+                >
+                  {isCollapsed ? '▶' : '▼'}
+                </button>
                 <span className="ss-group__monogram" style={{ background: g.projectColor }}>
                   {(g.projectName.trim() || '?').charAt(0).toUpperCase()}
                 </span>

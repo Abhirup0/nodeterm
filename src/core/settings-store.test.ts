@@ -38,6 +38,27 @@ describe('SettingsStore nested-default merge', () => {
     expect(s.fontSize).toBe(15)
   })
 
+  it('turns pty shadow clients ON for an existing settings.json that predates the flag', () => {
+    writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ tmuxEnabled: true }), 'utf-8')
+    const store = new SettingsStore()
+    store.init()
+    // Every install that upgrades into this release has a settings.json without the key. If the
+    // shallow merge did not carry the default through, the feature would be off for exactly the
+    // population it needs its soak release from.
+    expect(store.get().ptyShadowClients).toBe(true)
+  })
+
+  it('keeps an explicit ptyShadowClients:false — the kill switch survives a load', () => {
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ ptyShadowClients: false }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().ptyShadowClients).toBe(false)
+  })
+
   it('leaves an already-modern speech object alone', () => {
     writeFileSync(
       path.join(dir, 'settings.json'),
