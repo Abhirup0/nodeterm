@@ -5499,29 +5499,37 @@ body,
 }
 /* The two pills share one shell so they read as a single control rather than as two widgets that
    happen to be adjacent. Grouped rather than duplicated, so tuning one can never drift the other. */
+/* SHARED SHELL — both pills. Do not fold pill-specific sizing in here: the system-resource pill's
+   icon-only collapse lives in its OWN rule below, because putting it here silently shrank the usage
+   pill to a 26px circle too. */
 .usage-pill,
-/* Icon-only at rest: the pill is ambient chrome, and a permanent "RAM 15.6 / 62.5 GB" is a row of
-   numbers nobody asked for on every canvas. The detail is revealed on hover (and while the panel is
-   open, so the control does not shrink out from under the cursor that opened it). */
 .sysres-pill {
   display: inline-flex;
   align-items: center;
-  gap: 0;
+  gap: 6px;
   height: 26px;
-  width: 26px;
-  padding: 0;
-  justify-content: center;
+  padding: 0 9px;
   border-radius: 13px;
-  transition:
-    width 140ms ease,
-    padding 140ms ease,
-    gap 140ms ease;
   background: rgba(var(--card-rgb), 0.92);
   border: 1px solid rgba(var(--tint-rgb), 0.08);
   color: var(--text-strong);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
+}
+/* Icon-only at rest — this pill ONLY. It is ambient chrome on every canvas, so a permanent
+   "RAM 15.6 GB / 62.5 GB" is a row of numbers nobody asked for. Overrides the shared shell's
+   padding/gap; the detail is revealed on hover (and while the panel is open, so the control does
+   not shrink out from under the cursor that opened it). */
+.sysres-pill {
+  width: 26px;
+  padding: 0;
+  gap: 0;
+  justify-content: center;
+  transition:
+    width 140ms ease,
+    padding 140ms ease,
+    gap 140ms ease;
 }
 .usage-pill:hover { background: rgba(44, 44, 46, 0.95); }
 .usage-pill__icon { color: #d97757; font-size: 13px; }
