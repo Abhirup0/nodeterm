@@ -7197,6 +7197,9 @@ export function Canvas() {
           nodes: nodesRef.current
             .filter((n) => n.type === 'terminal')
             .map((n) => ({ id: n.id, agentId: createdAgentId(n.data) })),
+          // Pass the store entries WHOLE: every optional field here (backgroundTaskAt,
+          // lastEventAt, loop) is read by the policy; narrowing this to a hand-picked literal
+          // would silently kill those guards with the suite still green.
           statusById: useAgentStatus.getState().byId,
           // Any card that has not finished pins its parent — see the adapter's header.
           subagents: Object.values(useAgentNodes.getState().byId).map((v) => ({

@@ -120,15 +120,17 @@ describe('background-task stamp (Eco / bulk-restart guard)', () => {
     expect(useAgentStatus.getState().byId[id]?.backgroundTaskAt).toBeTypeOf('number')
   })
 
-  // Only a turn START clears the stamp. A `working` arriving from blocked/waiting is a MID-TURN
-  // RESUMPTION — the same turn picking back up — and clearing there would drop the guard for
-  // exactly the task it exists for (see the approval walk-through below).
-  it('clears only on a turn start (from done/idle), never on a mid-turn resumption', () => {
+  // Only a turn START — a `working` arriving from `done` — clears the stamp. Everything else keeps
+  // it. blocked/waiting → working is a MID-TURN RESUMPTION (the same turn picking back up; see the
+  // approval walk-through below), and an UNKNOWN previous state is not evidence of a turn start
+  // at all: it is what a renderer reload or the stale-working sweeper leaves behind MID-TURN, so
+  // clearing there would delete the stamp for a task that is still running.
+  it('clears only on a turn start (done → working), never on a resumption or from an unknown state', () => {
     for (const { from, cleared } of [
       { from: 'blocked' as const, cleared: false },
       { from: 'waiting' as const, cleared: false },
-      { from: 'done' as const, cleared: true },
-      { from: undefined, cleared: true }
+      { from: undefined, cleared: false },
+      { from: 'done' as const, cleared: true }
     ]) {
       const id = nid()
       const s = useAgentStatus.getState()

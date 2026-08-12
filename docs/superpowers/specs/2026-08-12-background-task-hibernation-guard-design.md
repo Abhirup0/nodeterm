@@ -27,7 +27,7 @@ Both shells get this for free: normalize is shared, and the raw listeners forwar
 Transient `backgroundTaskAt?: number` per node. **Not persisted** — same rationale as `lastEventAt`: after an app relaunch Eco is structurally inert until the node takes a turn, so a persisted stamp would only assert staleness with confidence.
 
 - **Set:** Canvas's `agent:status` listener stamps `Date.now()` on a `background-task` event (a dedicated store action in house style, bail-when-unchanged not needed — re-stamping on every launch is correct).
-- **Clear:** in `setState`'s transition branch, only at a turn **START** (`done`/`undefined` → `working`; `blocked`/`waiting` → `working` is a mid-turn resumption and KEEPS the stamp). Rationale: a background task's completion queues a `<task-notification>` into the parent transcript, which re-invokes the agent — a turn starts — `working` fires. Clearing on `done` would be wrong: a turn can end while the task still runs. And clearing on *every* `working` transition would be wrong too: a background `Bash` whose command needs approval runs UserPromptSubmit(working) → PreToolUse(stamp) → PermissionRequest(blocked) → approve → PostToolUse(working), so the resumption edge would clear the stamp milliseconds after it was set, for exactly the task this guard exists for.
+- **Clear:** in `setState`'s transition branch, only at a turn **START** — `done` → `working`, and nothing else. `blocked`/`waiting` → `working` is a mid-turn resumption and KEEPS the stamp; so does `undefined` → `working`, because an unknown previous state is reachable mid-turn (a renderer reload starts with an empty table; `sweepStaleWorking` blanks a working entry) and is therefore no evidence of a turn start. Rationale: a background task's completion queues a `<task-notification>` into the parent transcript, which re-invokes the agent — a turn starts — `working` fires. Clearing on `done` would be wrong: a turn can end while the task still runs. And clearing on *every* `working` transition would be wrong too: a background `Bash` whose command needs approval runs UserPromptSubmit(working) → PreToolUse(stamp) → PermissionRequest(blocked) → approve → PostToolUse(working), so the resumption edge would clear the stamp milliseconds after it was set, for exactly the task this guard exists for.
 
 ### 3. Consumers
 
@@ -40,14 +40,15 @@ Transient `backgroundTaskAt?: number` per node. **Not persisted** — same ratio
 - **App relaunch:** stamp is gone (transient) — consistent, because Eco cannot act until a turn happens, and any turn's `working` would have cleared the stamp anyway.
 - **A task reporting back while the node sits `waiting`/`blocked`:** the clear needs a turn START, so a `<task-notification>` that lands while the session holds a question open (`waiting`/`blocked` → `working` is a resumption) leaves the stamp in place until the turn after that. Bounded and in the fail-safe direction — and such a node is never a hibernation candidate anyway, since `planHibernation` requires `state === 'done'`.
 - **Manual task kill without a turn:** the stamp stays until the next turn — the node simply isn't hibernated. Fail-safe direction (memory not reclaimed; work never killed).
+- **A stamp set while the node's state is unknown** (renderer reload, or `sweepStaleWorking` having blanked the entry): since only `done` → `working` clears, the completing `<task-notification>` turn is a resumption from `undefined` and does NOT clear — the stamp survives until the turn AFTER that, i.e. the node's hibernation is deferred by one more turn. Accepted: the cost is memory reclaimed one turn late, whereas clearing on `undefined` would delete the guard for a task that is still running.
 
 ### 5. Testing
 
 - Normalize: a `PreToolUse` Bash payload with `run_in_background: true` yields the event; without the field (or with `false`, or another tool) yields nothing — mutation-sensitive both ways.
-- Store: stamp set on event; cleared on transition to `working`; NOT cleared on `done`/`waiting`; never persisted (extend the existing persistence tests).
+- Store: stamp set on event; cleared on a turn start (`done` → `working`); NOT cleared on `done`/`waiting`, on a `blocked`/`waiting` resumption, or from an unknown state; never persisted (extend the existing persistence tests).
 - Adapter/policy: `liveBackgroundTask` row in `hibernationCandidates` + exclusion row in `planHibernation` (the oldest-node-surfaces mutation pattern already used there).
 - Bulk plan: a background-task candidate lands in `skipped.working` and not in `runnable`.
-- Device checklist (append to PR #130's list as item 9): a node with a running background shell is not hibernated by an enabled Eco sweep; after the task completes and its turn runs, hibernation happens one idle window later.
+- Device checklist: appended as **item 8** to the tracked Eco list in `docs/superpowers/plans/2026-08-10-ram-optimization.md` (Phase 5, which has 7 items) — a node with a running background shell is not hibernated by an enabled Eco sweep; after the task completes and its turn runs, hibernation happens one idle window later.
 
 ### 6. Surfaces
 

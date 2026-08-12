@@ -355,25 +355,34 @@ export function createAgentStatusSession(
         // the sweep) exempts that session from Eco for good.
         // `done` deliberately does NOT clear it — a hibernated node's last known state IS done,
         // and a late Stop POST arriving after the exit would undo the hibernation we just did.
-        // A background task's guard is dropped at the START OF THE NEXT TURN — and only there.
         //
-        // Not on `done`: that is the launching turn ending while the task runs on, which is
+        // ---- a different field, and the opposite rule ----
+        //
+        // The BACKGROUND-TASK guard is dropped at the START OF THE NEXT TURN — `done` → `working`,
+        // and nothing else.
+        //
+        // Not on `done` itself: that is the launching turn ending while the task runs on, which is
         // precisely the window Eco / the bulk restart would kill it in. A turn start is safe
         // because Claude delivers a finished background task back as a <task-notification>, whose
         // own turn is exactly this `working` — so by the time one begins, the task has reported.
         //
-        // And not on EVERY `working` transition, because `blocked`/`waiting` → `working` is a
-        // MID-TURN RESUMPTION, not a turn start. A background Bash whose command needs approval
-        // runs UserPromptSubmit(working) → PreToolUse(stamp) → PermissionRequest(blocked) →
-        // approve → PostToolUse(working): that last edge would clear the stamp milliseconds after
-        // it was set, for exactly the task this guard exists for. A turn start comes from `done`
-        // or from no known state at all.
+        // Not on EVERY `working` transition either, because `blocked`/`waiting` → `working` is a
+        // MID-TURN RESUMPTION. A background Bash whose command needs approval runs
+        // UserPromptSubmit(working) → PreToolUse(stamp) → PermissionRequest(blocked) → approve →
+        // PostToolUse(working): that last edge would clear the stamp milliseconds after it was
+        // set, for exactly the task this guard exists for.
+        //
+        // And NOT from an unknown previous state, which is the same hole from the other side:
+        // `undefined` is reachable MID-TURN — a renderer reload starts with an empty table, and
+        // `sweepStaleWorking` blanks a working entry after the stale window — so post-reload a
+        // background launch would stamp an entry with no state, and the very next tool event's
+        // `working` would read as a turn start and delete it. Requiring `done` makes the miss
+        // fail SAFE: every real turn ends Stop → `done`, so the clear still happens, at most one
+        // turn late.
         //
         // Deliberately NOT keyed on `newTurn`: the <task-notification> prompt is explicitly not
         // flagged as one (see normalizeClaude), so the intended clear would never fire.
-        if (state === 'working' && (prev.state === 'done' || prev.state === undefined)) {
-          next.backgroundTaskAt = undefined
-        }
+        if (state === 'working' && prev.state === 'done') next.backgroundTaskAt = undefined
         const alive = state === 'working' || state === 'blocked' || state === 'waiting'
         if (alive && prev.hibernated) {
           next.hibernated = undefined
