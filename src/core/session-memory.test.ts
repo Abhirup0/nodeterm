@@ -237,7 +237,7 @@ describe('collectSessionMemory', () => {
   })
 })
 
-import { parseVmStat, darwinMemInfo } from './session-memory'
+import { parseVmStat, darwinMemInfo, parseTopFootprint } from './session-memory'
 
 /** Shaped from Apple's documented `vm_stat` format, at a 16 KiB page (Apple Silicon). COMPOSED, not
  *  captured — nobody in this loop has a Mac. Numbers chosen so the arithmetic is checkable by hand:
@@ -313,4 +313,110 @@ describe('darwinMemInfo', () => {
   it('passes a good reading through', () => {
     expect(darwinMemInfo(() => VM_STAT, TOTAL_BYTES)).toEqual({ availableMb: 8951, totalMb: 24576 })
   })
+})
+
+/** CAPTURED from a real Mac (2026-08-12), not composed: the exact header block, the blank line, the
+ *  `PID    MEM` header and real rows. The bracketed spacing quirks the capture surfaced are kept —
+ *  the MEM column is LEFT-aligned in five chars, so short values carry trailing spaces. */
+const TOP_REAL = [
+  'Processes: 973 total, 5 running, 968 sleeping, 5566 threads',
+  '2026/08/12 04:40:17',
+  'Load Avg: 4.13, 4.82, 6.19',
+  'CPU usage: 22.1% user, 19.11% sys, 58.86% idle',
+  'SharedLibs: 501M resident, 114M data, 85M linkedit.',
+  'MemRegions: 887125 total, 6692M resident, 248M private, 2163M shared.',
+  'PhysMem: 23G used (2941M wired, 8908M compressor), 83M unused.',
+  'VM: 460T vsize, 6144M framework vsize, 210882(0) swapins, 517764(0) swapouts.',
+  'Networks: packets: 754492311/1003G in, 62312609/20G out.',
+  'Disks: 43587984/769G read, 23106973/357G written.',
+  '',
+  'PID    MEM  ',
+  '99554  3696K',
+  '99132  6288K',
+  '98779  12M  ',
+  '97530  8433K',
+  '97519  29M  ',
+  '70698  1314M',
+  '0      36M  '
+].join('\n')
+
+describe('parseTopFootprint', () => {
+  it('parses the real capture, including the left-aligned trailing spaces', () => {
+    const m = parseTopFootprint(TOP_REAL)
+    expect(m.get(99554)).toBe(3696)
+    expect(m.get(8433)).toBeUndefined()
+    expect(m.get(97530)).toBe(8433)
+    // `12M  ` carries two trailing spaces — the quirk that makes a /M$/ regex miss two thirds of
+    // the column on a real host.
+    expect(m.get(98779)).toBe(12 * 1024)
+    expect(m.get(70698)).toBe(1314 * 1024)
+  })
+
+  it('reads pid 0 (kernel_task), which is present and accessible', () => {
+    expect(parseTopFootprint(TOP_REAL).get(0)).toBe(36 * 1024)
+  })
+
+  it('ignores the header block — those lines contain digits and units too', () => {
+    // `PhysMem: 23G used (2941M wired, ...)` would be a tempting false match.
+    const m = parseTopFootprint(TOP_REAL)
+    expect(m.size).toBe(7)
+  })
+
+  it('accepts G even though it was never observed on the capture host', () => {
+    // A 1314M process stayed in M, so the G threshold is unknown — but top's own header prints
+    // `PhysMem: 23G`, so the unit exists and the parser must not choke on it.
+    expect(parseTopFootprint('PID    MEM\n42     3G   ').get(42)).toBe(3 * 1024 * 1024)
+  })
+
+  it('SKIPS a row whose unit it does not recognise rather than guessing a scale', () => {
+    // `B` and any restricted-process rendering were not observed on the capture host and are
+    // deliberately not invented. A wrong scale is a wrong number presented as a fact.
+    const m = parseTopFootprint('PID    MEM\n42     500Q \n43     7K')
+    expect(m.has(42)).toBe(false)
+    expect(m.get(43)).toBe(7)
+  })
+
+  it('returns an empty map when there is no PID/MEM header at all', () => {
+    expect(parseTopFootprint('not top output').size).toBe(0)
+  })
+})
+
+describe('collectSessionMemory on darwin', () => {
+  const asDarwin = (fn: () => Promise<void>) => async (): Promise<void> => {
+    const real = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true })
+    try {
+      await fn()
+    } finally {
+      Object.defineProperty(process, 'platform', real)
+    }
+  }
+
+  const run = async (): Promise<{ calls: string[]; rows: unknown }> => {
+    const calls: string[] = []
+    const r = await collectSessionMemory({
+      tmuxBin: () => '/usr/bin/tmux',
+      sockets: ['s1'],
+      exec: async (bin, args) => {
+        calls.push(bin)
+        if (bin.includes('tmux')) return 'nt-a|4242|claude\n'
+        if (bin === 'ps') return 'PID PPID RSS\n4242 1 100000\n'
+        // 4242's footprint is DOUBLE its rss — the measured idle-process shape.
+        return 'PID    MEM  \n4242   200000K'
+      },
+      readTable: undefined,
+      readMem: () => null
+    })
+    return { calls, rows: r.rows }
+  }
+
+  it(
+    'prefers phys_footprint over rss — the idle-session number rss halves',
+    asDarwin(async () => {
+      const { calls, rows } = await run()
+      expect(calls).toContain('top')
+      // 200000 kB, not the 100000 kB `ps` reported.
+      expect((rows as { selfMb: number }[])[0].selfMb).toBe(Math.round(200000 / 1024))
+    })
+  )
 })
