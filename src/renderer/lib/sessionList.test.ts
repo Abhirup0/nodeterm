@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildSessionList,
   sessionStatusKind,
+  projectIdAtIndex,
   isGroupCollapsed,
   projectHeadClickAction,
   projectSignalCounts,
@@ -31,6 +32,28 @@ describe('sessionStatusKind', () => {
     expect(sessionStatusKind('blocked')).toBe('attention')
     expect(sessionStatusKind('done')).toBe('done')
     expect(sessionStatusKind(undefined)).toBe('idle')
+  })
+})
+
+describe('projectIdAtIndex', () => {
+  const list = [{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]
+
+  it('maps a 1-based index to the project at that position', () => {
+    expect(projectIdAtIndex(list, 1)).toBe('p1')
+    expect(projectIdAtIndex(list, 3)).toBe('p3')
+  })
+
+  it('returns null past the end of the list', () => {
+    expect(projectIdAtIndex(list, 4)).toBeNull()
+  })
+
+  it('returns null for index 0 or above 9', () => {
+    expect(projectIdAtIndex(list, 0)).toBeNull()
+    expect(projectIdAtIndex(list, 10)).toBeNull()
+  })
+
+  it('returns null for an empty project list', () => {
+    expect(projectIdAtIndex([], 1)).toBeNull()
   })
 })
 
