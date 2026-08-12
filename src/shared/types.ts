@@ -564,8 +564,14 @@ export interface PtyApi {
    *  node attached; absent ⇒ the PRIMARY view. */
   kill(sessionId: string, viewerId?: string): void
   /** Permanently ends the persistent session for a node (kills its tmux session) because the node
-   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it. */
-  destroy(persistKey: string): void
+   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it.
+   *
+   *  `everySocket` (optional, trailing) widens a kill for a session we hold NOTHING for to every
+   *  local tmux socket the name could be on. Opt-in for one caller — the session-memory panel's
+   *  speculative kill of a row it swept off either socket. An ordinary node-× must not set it: it
+   *  takes the same unheld branch after an app restart, and `nodeterm-rmt` holds sessions another
+   *  machine's nodeterm SSHed in to spawn. */
+  destroy(persistKey: string, opts?: { everySocket?: boolean }): void
   /** Ends a node's persistent session so the SAME node id respawns in a new cwd ("move into
    *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
    *  co-viewers get `onRecycled` (restart + re-attach), never the permanent closed state. */
@@ -1179,8 +1185,17 @@ export interface SshProjectApi {
    * Authoritative teardown on project delete: works regardless of whether the nodes are
    * mounted, and must be awaited BEFORE disconnect (which kills the master). `nodeIds` are
    * raw node ids; main maps them to `nt-<id>` session names.
+   *
+   * `everySocket` widens the kill to every tmux socket on the host rather than the `nodeterm-rmt`
+   * one an SSH project spawns on. Opt-in for ONE caller — the session-memory panel, whose rows are
+   * swept off both sockets. Project deletion stays narrow: `node-terminal` on that host belongs to
+   * a nodeterm running ON it, not to us.
    */
-  killSessions(projectId: string, nodeIds: string[]): Promise<void>
+  killSessions(
+    projectId: string,
+    nodeIds: string[],
+    opts?: { everySocket?: boolean }
+  ): Promise<void>
   /** List remote sub-directories of `path` (default ~). */
   listDir(projectId: string, path: string): Promise<{ path: string; dirs: string[] }>
   /** Create a remote directory (mkdir -p). Resolves false when not connected or the mkdir fails. */
@@ -1525,6 +1540,72 @@ export interface ProviderUsage {
    * 'fetching' = request in flight. 'ok' = limits present. 'error' = the fetch failed.
    */
   status: 'unavailable' | 'fetching' | 'ok' | 'error'
+}
+
+/** Host memory snapshot in MB. `null` from any reader means "could not read" — never "zero".
+ *  Shared because it crosses the wire for the system-resource pill; core reads it, the renderer
+ *  renders it. */
+export interface MemInfo {
+  availableMb: number
+  totalMb: number
+}
+
+/** One nt- session's memory, as the panel renders it. */
+export interface SessionMemoryRow {
+  /** tmux session name, `nt-<nodeId>`. */
+  session: string
+  /** The canvas node id — the session name minus the `nt-` prefix. */
+  nodeId: string
+  panePid: number
+  /** The pane's own process. */
+  selfMb: number
+  /** Everything below it (MCP servers, headless browsers, …). */
+  childrenMb: number
+  childCount: number
+  totalMb: number
+  /** `#{pane_current_command}` — the agent/shell label. */
+  command: string
+}
+
+/**
+ * `ok: false` means the sweep could not run (no tmux binary, unreadable process table). It is NOT
+ * the same as an empty `rows` with `ok: true`, which means "we looked and there are no sessions".
+ * Collapsing the two would make the panel report "nothing is using memory" at exactly the moment
+ * it failed to measure.
+ */
+export interface SessionMemoryReport {
+  ok: boolean
+  rows: SessionMemoryRow[]
+  mem: MemInfo | null
+}
+
+/**
+ * What the renderer asks for: the machine a project runs ON, never "this machine" implicitly.
+ * `remote: true` is the renderer saying it already knows (from `usageScope`) that the active
+ * project is an SSH one; the shell's own `isRemoteProject` is a second, independent confirmation,
+ * so a project the shell has not (yet) registered as connected still cannot be answered with the
+ * local machine's sessions.
+ */
+export interface SessionMemoryQuery {
+  projectId?: string
+  remote?: boolean
+}
+
+/**
+ * Per-session memory for the machine the ACTIVE PROJECT runs on — the same scoping rule the usage
+ * indicator follows (`usageScope`), for the same reason: a number is meaningless without the
+ * machine it describes.
+ *
+ * Both members are on-demand only, never polled: a remote answer costs an ssh exec plus a `ps` of
+ * somebody else's whole process table. Pass the query through verbatim — `remote` is one of the two
+ * independent sources the service uses to decide which host answers.
+ */
+export interface SessionMemoryApi {
+  /** Per-session breakdown for the scoped machine. `ok:false` = the sweep could not run, which is
+   *  NOT an empty `rows` with `ok:true` ("we looked, there are none"). */
+  read(q?: SessionMemoryQuery): Promise<SessionMemoryReport>
+  /** The scoped machine's RAM. `null` = could not read (never "zero"). */
+  host(q?: SessionMemoryQuery): Promise<MemInfo | null>
 }
 
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
@@ -2025,6 +2106,7 @@ export interface NodeTerminalApi {
   githubIssues: import('./github-issues').GitHubIssuesApi
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
+  sessionMemory: SessionMemoryApi
   context: ContextApi
   canvas: CanvasApi
   claude: ClaudeApi

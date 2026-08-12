@@ -69,6 +69,7 @@ import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
+import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
 import { createMemoryPressureMonitor } from '../core/memory-pressure'
 import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { registerPtmxLimitHandler } from './ptmx-limit'
@@ -1572,6 +1573,44 @@ app.whenReady().then(async () => {
   // raises `kern.tty.ptmx_max` behind macOS's own admin-password dialog. Its success re-announces
   // through the monitor's funnel, so the banner clears without waiting out the next tick.
   registerPtmxLimitHandler(corePlatform, { announce: (reading) => ptyPressure.announce(reading) })
+  // Session memory (docs/superpowers/specs/2026-08-10-session-memory-panel-design.md): the pill's
+  // cheap RAM read plus the on-demand per-session breakdown. An SSH project's sessions live on ITS
+  // host, so they are read THERE over the project's ControlMaster — the same injection Context Link
+  // and remote usage use (core owns the command + the parsing, main owns the master).
+  // `sshProjectManager` is assigned far below, so both closures resolve it lazily; they only ever
+  // run after a project has connected.
+  startSessionMemoryService({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    remote: {
+      // Identity, not liveness: a DISCONNECTED SSH project is still someone else's machine, and
+      // `connectedHosts()` alone would answer "local" for it — exactly the window the service's
+      // refusal exists for. The workspace index is the connection-independent source; the live
+      // masters are OR-ed in for a project the index has not (yet) listed. See sshScopePredicate.
+      isRemoteProject: sshScopePredicate({
+        sshProjectIds: () => workspaceStore.sshProjectIds(),
+        connectedProjectIds: () =>
+          (sshProjectManager?.connectedHosts() ?? []).map((h) => h.projectId)
+      }),
+      run: async (projectId, command) => {
+        const mgr = sshProjectManager
+        const ref = mgr?.refForProject(projectId)
+        if (!mgr || !ref) return null
+        try {
+          const { code, stdout } = await mgr.sshRun(childArgs(ref.conn, ref.controlPath, command))
+          // Gated on the exit code, unlike the usage runner: every command in the generated script
+          // ends `|| true`, so a completed read exits 0 unconditionally. A non-zero code therefore
+          // means ssh itself could not run it — a dead ControlMaster reports exactly that, with an
+          // EMPTY stdout ("Control socket connect(…): No such file or directory" goes to stderr).
+          // Passing that empty string on would leave "the host answered nothing" to be inferred
+          // from a missing marker; `null` says "we could not look" outright.
+          if (code !== 0) return null
+          return stdout
+        } catch {
+          return null
+        }
+      }
+    }
+  })
   const ackSweeper = createAckSweeper({
     handlers: { ackDone, onUnreadClear: (id) => sendToMain(IPC.agentUnreadClear, id) }
   })

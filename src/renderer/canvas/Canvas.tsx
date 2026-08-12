@@ -138,6 +138,7 @@ import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
 import { UsageIndicator } from '../components/UsageIndicator'
+import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
@@ -156,6 +157,7 @@ import {
   viewportForRect,
   type FocusableNode
 } from '../lib/nodeFocus'
+import { planSessionKill } from '../lib/sessionKill'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
 import { SshPassphrasePrompt } from '../components/SshPassphrasePrompt'
@@ -6700,9 +6702,15 @@ export function Canvas() {
   // Close (end) a session. tmux sessions are keyed by node id, so destroy works for an
   // inactive project's node even though it isn't mounted; then drop it from the store.
   const closeSession = useCallback(
-    (projectId: string, id: string) => {
+    (projectId: string, id: string, alsoOnConfirm?: () => void) => {
       setConfirm({
-        message: 'End this session? This stops its tmux session.',
+        // Both halves, because this does both: the tmux session ends AND the node is removed from
+        // its canvas (either branch below). The wording came from the sessions sidebar, where the
+        // node going too is the obvious intent — but the session-memory panel reuses this path, and
+        // there the user's intent is reclaiming RAM, for which killing the node is a side effect
+        // they have to be told about. (Keeping the node would need a second destroy path, which is
+        // deliberately NOT what this is.)
+        message: 'End this session? This stops its tmux session and removes the node from its canvas.',
         confirmLabel: 'End session',
         danger: true,
         onConfirm: () => {
@@ -6715,11 +6723,74 @@ export function Canvas() {
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
           }
+          // The session-memory panel's remote leg (see `killSessionById`): the local destroy above
+          // cannot reach a HOST's tmux session unless a live client carries `sshRemote`. Runs only
+          // after the user confirmed, which is why it is a callback and not done at the call site.
+          alsoOnConfirm?.()
           setConfirm(null)
         }
       })
     },
     [activeProjectId, deleteNodes, writeDisk]
+  )
+
+  /**
+   * End a session picked from the session-memory panel, which lists tmux SESSIONS rather than
+   * canvas nodes — so a row may have no node behind it at all, and (on an SSH project) may not even
+   * be on this machine.
+   *
+   * Both halves of the plan are the pure `planSessionKill`:
+   *
+   * - **Who owns it** is resolved HERE, at click time, rather than taken from the row's `orphan`
+   *   flag: the rows are a snapshot of the last sweep, and a node created since would otherwise be
+   *   killed as an orphan. With an owner this goes through `closeSession` — the exact path the
+   *   sessions sidebar and the node's own × use — so the panel never invents a third one.
+   * - **Which machine** is the ACTIVE project's, because that is the machine the panel is showing.
+   *   `transport.destroy` reaches a REMOTE session only through a live client carrying `sshRemote`,
+   *   which an orphan and an unmounted node both lack — so on an SSH scope the kill would have
+   *   touched only the local socket while the host's `nt-<id>` kept running, after a confirm that
+   *   said otherwise. `sshProject.killSessions` runs `tmux kill-session` over that project's own
+   *   ControlMaster and needs no live session; it is best-effort per id, so running it for the
+   *   mounted case too (where `destroy` already ended it) is a harmless miss.
+   */
+  const killSessionById = useCallback(
+    (nodeId: string, orphan: boolean) => {
+      const store = useProjects.getState()
+      const plan = planSessionKill(nodeId, store.projects, store.activeProjectId)
+      // `everySocket` on BOTH legs, and only here: the panel's rows are swept off both of the
+      // machine's tmux sockets, so a row it offers to end genuinely can be on either. Every other
+      // caller (project deletion, an ordinary node-×) knows its own nodes and stays narrow.
+      const remoteKill = plan.remoteProjectId
+        ? () =>
+            void window.nodeTerminal.sshProject
+              .killSessions(plan.remoteProjectId!, [nodeId], { everySocket: true })
+              .catch(() => {})
+        : undefined
+      if (plan.ownerProjectId) {
+        closeSession(plan.ownerProjectId, nodeId, remoteKill)
+        return
+      }
+      setConfirm({
+        // The orphan wording stays as it is: there is no node to remove, which is the whole point
+        // of the row. The other branch is a node the sweep saw but this click could not resolve an
+        // owner for, so it says what the owner path says.
+        message: orphan
+          ? 'End this session? It has no node on any canvas — this stops its tmux session.'
+          : 'End this session? This stops its tmux session and removes the node from its canvas.',
+        confirmLabel: 'End session',
+        danger: true,
+        onConfirm: () => {
+          transport.destroy(nodeId, { everySocket: true })
+          remoteKill?.()
+          // Nothing else to clean up: with no node anywhere, there is no canvas entry to remove and
+          // no parked terminal to dispose. Persisted agent status is dropped anyway, since a
+          // session id can outlive the node it belonged to.
+          useAgentStatus.getState().remove(nodeId)
+          setConfirm(null)
+        }
+      })
+    },
+    [closeSession, setConfirm]
   )
 
   const renameSession = useCallback(
@@ -8175,11 +8246,26 @@ export function Canvas() {
         {/* MUST stay OUTSIDE <ReactFlow>. The library's wrapper carries inline
             `position: relative; z-index: 0`, which makes the whole flow one stacking context
             painted at 0 among flow-wrap's siblings — so no z-index INSIDE it, however large,
-            can ever rise above the sessions sidebar (z 12). Mounted here, the indicator's own
+            can ever rise above the sessions sidebar (z 12). Mounted here, each pill's own
             z-index (5 collapsed, 13 with the popover open) competes in the same context as the
-            sidebar and the open popover wins. It uses no React Flow hooks, and .flow-wrap is
-            position:relative, so its absolute left/bottom anchors are unchanged. */}
-        <UsageIndicator overBoard={kanbanOpen} />
+            sidebar and the open popover wins. Neither uses React Flow hooks, and .flow-wrap is
+            position:relative, so the cluster's absolute left/bottom anchor is unchanged.
+            The cluster itself deliberately has NO z-index — see .canvas-pills in styles.css.
+            `data-canvas-chrome` is fit-view's own documented opt-in: it makes the whole cluster ONE
+            obstacle rect (instead of one per pill, overlapping after inflation), so fitView never
+            parks a node underneath either pill. */}
+        <div className="canvas-pills" data-canvas-chrome>
+          {/* `travelToNode`, not `focusNodeById`: the panel resolves sessions in CLOSED projects
+              too (their tmux sessions keep running), and reaching one means reopening its tab
+              first — the same path a notification click and a peer jump take. */}
+          <SystemResourcePill
+            overBoard={kanbanOpen}
+            onGoToNode={travelToNode}
+            onKillSession={killSessionById}
+          />
+        
+          <UsageIndicator overBoard={kanbanOpen} />
+</div>
 
         <PresenceNamePrompt />
 
