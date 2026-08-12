@@ -355,13 +355,25 @@ export function createAgentStatusSession(
         // the sweep) exempts that session from Eco for good.
         // `done` deliberately does NOT clear it — a hibernated node's last known state IS done,
         // and a late Stop POST arriving after the exit would undo the hibernation we just did.
-        // A background task's guard is dropped at the START OF THE NEXT TURN, not when the node
-        // goes idle: Claude delivers a finished background task back as a <task-notification>,
-        // whose own turn is exactly the `working` below — so by the time a turn begins, whatever
-        // the task was doing has been reported. Clearing on `done` instead would drop the guard
-        // the instant the launching turn ended, i.e. while the task is still running, which is
-        // precisely the window Eco / the bulk restart would kill it in.
-        if (state === 'working') next.backgroundTaskAt = undefined
+        // A background task's guard is dropped at the START OF THE NEXT TURN — and only there.
+        //
+        // Not on `done`: that is the launching turn ending while the task runs on, which is
+        // precisely the window Eco / the bulk restart would kill it in. A turn start is safe
+        // because Claude delivers a finished background task back as a <task-notification>, whose
+        // own turn is exactly this `working` — so by the time one begins, the task has reported.
+        //
+        // And not on EVERY `working` transition, because `blocked`/`waiting` → `working` is a
+        // MID-TURN RESUMPTION, not a turn start. A background Bash whose command needs approval
+        // runs UserPromptSubmit(working) → PreToolUse(stamp) → PermissionRequest(blocked) →
+        // approve → PostToolUse(working): that last edge would clear the stamp milliseconds after
+        // it was set, for exactly the task this guard exists for. A turn start comes from `done`
+        // or from no known state at all.
+        //
+        // Deliberately NOT keyed on `newTurn`: the <task-notification> prompt is explicitly not
+        // flagged as one (see normalizeClaude), so the intended clear would never fire.
+        if (state === 'working' && (prev.state === 'done' || prev.state === undefined)) {
+          next.backgroundTaskAt = undefined
+        }
         const alive = state === 'working' || state === 'blocked' || state === 'waiting'
         if (alive && prev.hibernated) {
           next.hibernated = undefined

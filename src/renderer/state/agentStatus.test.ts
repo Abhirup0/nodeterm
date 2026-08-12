@@ -109,7 +109,7 @@ describe('interrupt inference (Esc/Ctrl-C with no final hook)', () => {
 })
 
 describe('background-task stamp (Eco / bulk-restart guard)', () => {
-  it('markBackgroundTask stamps; only a transition TO working clears it', () => {
+  it('markBackgroundTask stamps, and a non-working transition never clears it', () => {
     const id = nid()
     const s = useAgentStatus.getState()
     s.setState(id, 'done', 'claude')
@@ -118,9 +118,45 @@ describe('background-task stamp (Eco / bulk-restart guard)', () => {
     // done → waiting is a transition, but the task is still running: the guard must hold.
     s.setState(id, 'waiting', 'claude')
     expect(useAgentStatus.getState().byId[id]?.backgroundTaskAt).toBeTypeOf('number')
-    // A turn START is what clears it — the completed task's <task-notification> precedes it.
-    s.setState(id, 'working', 'claude')
-    expect(useAgentStatus.getState().byId[id]?.backgroundTaskAt).toBeUndefined()
+  })
+
+  // Only a turn START clears the stamp. A `working` arriving from blocked/waiting is a MID-TURN
+  // RESUMPTION — the same turn picking back up — and clearing there would drop the guard for
+  // exactly the task it exists for (see the approval walk-through below).
+  it('clears only on a turn start (from done/idle), never on a mid-turn resumption', () => {
+    for (const { from, cleared } of [
+      { from: 'blocked' as const, cleared: false },
+      { from: 'waiting' as const, cleared: false },
+      { from: 'done' as const, cleared: true },
+      { from: undefined, cleared: true }
+    ]) {
+      const id = nid()
+      const s = useAgentStatus.getState()
+      if (from) s.setState(id, from, 'claude')
+      s.markBackgroundTask(id)
+      // A `done` predecessor needs the holdoff to lapse, or the working event is dropped whole.
+      if (from === 'done') vi.advanceTimersByTime(DONE_HOLDOFF_MS + 500)
+      useAgentStatus.getState().setState(id, 'working', 'claude')
+      const label = String(from)
+      expect(useAgentStatus.getState().byId[id].state, label).toBe('working')
+      const stamp = useAgentStatus.getState().byId[id].backgroundTaskAt
+      if (cleared) expect(stamp, label).toBeUndefined()
+      else expect(stamp, label).toBeTypeOf('number')
+    }
+  })
+
+  // The scenario the predicate exists for: a background Bash whose command needs approval runs
+  // UserPromptSubmit(working) → PreToolUse(stamp) → PermissionRequest(blocked) → approve →
+  // PostToolUse(working). That last edge IS a transition, and clearing on it would drop the guard
+  // milliseconds after the stamp was set, while the task runs on.
+  it('a background task that needed approval keeps its stamp across the approve edge', () => {
+    const id = nid()
+    const s = useAgentStatus.getState()
+    s.setState(id, 'working', 'claude', true) // UserPromptSubmit — the turn starts
+    s.markBackgroundTask(id) // PreToolUse Bash, run_in_background
+    s.setState(id, 'blocked', 'claude') // PermissionRequest
+    s.setState(id, 'working', 'claude') // approved, the turn resumes
+    expect(useAgentStatus.getState().byId[id].backgroundTaskAt).toBeTypeOf('number')
   })
 
   it('stamps a node with no entry yet (the task can precede any state event)', () => {

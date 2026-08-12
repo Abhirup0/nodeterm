@@ -7112,7 +7112,8 @@ export function Canvas() {
         case 'background-task':
           // A background shell task runs INSIDE the CLI process, so the `/exit` Eco hibernation
           // and the bulk restart type would kill it silently. Stamp the node so both skip it.
-          // Cheap: the write touches one entry and nothing subscribes to `backgroundTaskAt`.
+          // The write mints a new entry object, so whole-map subscribers (minimap, the node) do
+          // re-render — once per background launch, which is rarer than any state event.
           cs.markBackgroundTask(e.nodeId)
           break
         case 'recurring':
