@@ -12,6 +12,7 @@ const base = (id: string, over: object = {}) => ({
   remote: false,
   recurring: false,
   liveSubagents: false,
+  liveBackgroundTask: false,
   lastEventAt: 0,
   ...over
 })
@@ -32,7 +33,8 @@ describe('planHibernation', () => {
         base('h', { wired: false }),
         base('i', { state: 'waiting' }),
         base('j', { recurring: true }),
-        base('k', { liveSubagents: true })
+        base('k', { liveSubagents: true }),
+        base('l', { liveBackgroundTask: true })
       ],
       NOW,
       cfg
@@ -49,6 +51,15 @@ describe('planHibernation', () => {
     expect(planHibernation([base('a', { liveSubagents: true, lastEventAt: 0 })], NOW, cfg)).toEqual(
       []
     )
+  })
+
+  it('never hibernates a node with a live background task', () => {
+    // A background shell (`Bash` with run_in_background) lives inside the CLI process, so `/exit`
+    // kills it with no output and no error — and while it runs it emits nothing, so this stamp is
+    // the only evidence the node is not idle at all.
+    expect(
+      planHibernation([base('a', { liveBackgroundTask: true, lastEventAt: 0 })], NOW, cfg)
+    ).toEqual([])
   })
 
   it('never hibernates a waiting node — the question would be swallowed', () => {

@@ -53,6 +53,17 @@ export interface AgentNodeStatus {
    */
   lastEventAt?: number
   /**
+   * When this node last launched a BACKGROUND shell task (Claude's `Bash` with
+   * `run_in_background: true`). Such a task lives inside the CLI process, so `/exit` — Eco
+   * hibernation and the bulk in-place restart both type it — kills it silently, with no output and
+   * no error. The stamp is what those two exclude on.
+   *
+   * TRANSIENT — never persisted, same rationale as `lastEventAt`: after a relaunch Eco is inert
+   * until a turn happens anyway, and any turn's `working` would have cleared this. A stale stamp
+   * restored from disk would exempt the node from Eco for good.
+   */
+  backgroundTaskAt?: number
+  /**
    * The agent CLI was exited to reclaim its RAM ("Eco" mode) and its conversation is waiting to be
    * resumed when the node is next viewed. PERSISTED beside unread/session/sessionId: the tmux
    * session outlives the app, so after a relaunch this flag is the only thing that knows the pane
@@ -140,6 +151,9 @@ export interface AgentStatusStore {
   /** Record what the pane settled to when this node's CLI let go of it (`null` = forget: a stale
    *  value must never permit a wake into a pane we did not measure). See `hibernatedPane`. */
   setHibernatedPane(id: string, pane: string | null): void
+  /** Record that this node just launched a background shell task (see `backgroundTaskAt`).
+   *  Transient — nothing is written to localStorage. */
+  markBackgroundTask(id: string): void
   markUnread(id: string): void
   /**
    * Drop a node's unread flag. By default a clear of a FINISHED (done) node also ACKs the read
@@ -341,6 +355,34 @@ export function createAgentStatusSession(
         // the sweep) exempts that session from Eco for good.
         // `done` deliberately does NOT clear it — a hibernated node's last known state IS done,
         // and a late Stop POST arriving after the exit would undo the hibernation we just did.
+        //
+        // ---- a different field, and the opposite rule ----
+        //
+        // The BACKGROUND-TASK guard is dropped at the START OF THE NEXT TURN — `done` → `working`,
+        // and nothing else.
+        //
+        // Not on `done` itself: that is the launching turn ending while the task runs on, which is
+        // precisely the window Eco / the bulk restart would kill it in. A turn start is safe
+        // because Claude delivers a finished background task back as a <task-notification>, whose
+        // own turn is exactly this `working` — so by the time one begins, the task has reported.
+        //
+        // Not on EVERY `working` transition either, because `blocked`/`waiting` → `working` is a
+        // MID-TURN RESUMPTION. A background Bash whose command needs approval runs
+        // UserPromptSubmit(working) → PreToolUse(stamp) → PermissionRequest(blocked) → approve →
+        // PostToolUse(working): that last edge would clear the stamp milliseconds after it was
+        // set, for exactly the task this guard exists for.
+        //
+        // And NOT from an unknown previous state, which is the same hole from the other side:
+        // `undefined` is reachable MID-TURN — a renderer reload starts with an empty table, and
+        // `sweepStaleWorking` blanks a working entry after the stale window — so post-reload a
+        // background launch would stamp an entry with no state, and the very next tool event's
+        // `working` would read as a turn start and delete it. Requiring `done` makes the miss
+        // fail SAFE: every real turn ends Stop → `done`, so the clear still happens, at most one
+        // turn late.
+        //
+        // Deliberately NOT keyed on `newTurn`: the <task-notification> prompt is explicitly not
+        // flagged as one (see normalizeClaude), so the intended clear would never fire.
+        if (state === 'working' && prev.state === 'done') next.backgroundTaskAt = undefined
         const alive = state === 'working' || state === 'blocked' || state === 'waiting'
         if (alive && prev.hibernated) {
           next.hibernated = undefined
@@ -421,6 +463,14 @@ export function createAgentStatusSession(
         const byId = { ...s.byId, [id]: { ...prev, hibernatedPane: next } }
         save(byId)
         return { byId }
+      }),
+
+    markBackgroundTask: (id) =>
+      set((s) => {
+        const prev = s.byId[id] ?? EMPTY
+        // Transient (see `backgroundTaskAt`) — no save(): a stamp restored from disk would exempt
+        // the node from Eco forever.
+        return { byId: { ...s.byId, [id]: { ...prev, backgroundTaskAt: Date.now() } } }
       }),
 
     markUnread: (id) =>

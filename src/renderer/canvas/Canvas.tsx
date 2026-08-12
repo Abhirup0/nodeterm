@@ -4343,7 +4343,10 @@ export function Canvas() {
         sessionId: byId[n.id]?.sessionId,
         // Registration is unconditional for every terminal node, so this says only "mounted and
         // wired", never "is an agent" — `agentId` above is what decides that.
-        wired: !!agentRestartFn(n.id)
+        wired: !!agentRestartFn(n.id),
+        // A background shell launched by this session is still running (no turn has started since):
+        // the exit line would kill it silently. Presence of the stamp is the whole signal.
+        backgroundTask: !!byId[n.id]?.backgroundTaskAt
       }))
     )
   }, [])
@@ -7109,6 +7112,13 @@ export function Canvas() {
               result: e.result
             })
           break
+        case 'background-task':
+          // A background shell task runs INSIDE the CLI process, so the `/exit` Eco hibernation
+          // and the bulk restart type would kill it silently. Stamp the node so both skip it.
+          // The write mints a new entry object, so whole-map subscribers (minimap, the node) do
+          // re-render — once per background launch, which is rarer than any state event.
+          cs.markBackgroundTask(e.nodeId)
+          break
         case 'recurring':
           if (e.recurringEnd) {
             // The recurring job itself was removed (CronDelete) — take the card down.
@@ -7187,6 +7197,9 @@ export function Canvas() {
           nodes: nodesRef.current
             .filter((n) => n.type === 'terminal')
             .map((n) => ({ id: n.id, agentId: createdAgentId(n.data) })),
+          // Pass the store entries WHOLE: every optional field here (backgroundTaskAt,
+          // lastEventAt, loop) is read by the policy; narrowing this to a hand-picked literal
+          // would silently kill those guards with the suite still green.
           statusById: useAgentStatus.getState().byId,
           // Any card that has not finished pins its parent — see the adapter's header.
           subagents: Object.values(useAgentNodes.getState().byId).map((v) => ({
