@@ -155,6 +155,11 @@
   --warn: #a85c00;
   --caution: #806100;
   --success: #1f7a38;
+  /* Same story for the working clay: #d97757 is tuned for a dark field and measures 2.7:1 against
+     these surfaces — under this palette's 4.3 floor, and it is rendered as TEXT (the badge count),
+     not just a dot. Darkened at the same hue (15°) into the band the other status hues occupy,
+     so "working" still reads as the same colour in both themes. */
+  --agent-working: #b04a28;
 
   /* Dots must read as a grid, not as noise: the dark-mode grey is far too heavy on a pale field,
      and a neutral one would be the only cold thing on screen. */
