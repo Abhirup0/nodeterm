@@ -59,7 +59,14 @@ import {
 } from '../terminal/terminal-config'
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
-import { PARK_MAX, planParkEviction } from '../terminal/park-budget'
+import {
+  PARK_MAX,
+  armParkExpiry,
+  canDisposeParkedEntry,
+  disposableParks,
+  planParkEviction,
+  type ParkTimer
+} from '../terminal/park-budget'
 import {
   mayDisposeOffscreen,
   offscreenCoreIsRemote,
@@ -67,6 +74,7 @@ import {
   planOffscreenVisibility,
   releaseStillEnabled,
   shouldDeferReleaseForEco,
+  shouldDeferReleaseForLiveWork,
   OFFSCREEN_DEFER_RETRY_MS,
   OFFSCREEN_DISPOSE_MS_DEFAULT
 } from '../terminal/offscreen-policy'
@@ -117,7 +125,8 @@ import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { useSettings } from '../state/settings'
-import { useAgentStatus, inferInterruptAfterSettle } from '../state/agentStatus'
+import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
+import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
@@ -265,6 +274,12 @@ export function setSshRetryHandler(
  * COUNT as well as time — beyond `PARK_MAX` the oldest entries are evicted early (see
  * `terminal/park-budget.ts`), so a remount past the cap is the same warm reattach as one past the
  * window.
+ *
+ * "The PTY client detaches; the session keeps running" is true ONLY with tmux underneath. On the
+ * plain-shell fallback the pty IS the shell, so the same dispose kills the shell and whatever runs
+ * in it — which is how a project switch could terminate a working agent mid-task (issue #126).
+ * Every dispose driven purely by the BUDGET (window expiry, LRU cap, memory-pressure lever) is
+ * therefore gated on `canDisposePark`; a deliberate dispose (delete, respawn, dead session) is not.
  */
 interface ParkedTerminal {
   term: Terminal
@@ -272,6 +287,20 @@ interface ParkedTerminal {
   search: SearchAddon
   transport: TerminalTransport
   sessionId: string
+  /** `PtyCreateResult.persistent`: the session survives a client kill (tmux, local or remote).
+   *  False = plain shell, where disposing this park ends the session for real. */
+  tmuxBacked: boolean
+  /** The node's agent state AT PARK TIME — the protection FLOOR. The unmount that parks is also
+   *  the one that CLEARS this node's agent status (TerminalNode's departure effect), and every
+   *  lever reads later than that, so without this snapshot every park looks agent-less. See
+   *  `effectiveAgentState`. */
+  parkedAgentState?: AgentState
+  /** When this entry was parked — what ages the snapshot above (`parkedStateFloor`). */
+  parkedAt: number
+  /** The node's agent state RIGHT NOW, read from the store of the session this node belongs to
+   *  (a relay tab's status lives in its own instance, not the default one). Closed over at park
+   *  time because the module-level levers have no access to the component's session. */
+  readAgentState: () => AgentState | undefined
   /** Session-scoped teardown (transport/xterm listeners) — run only at final dispose. */
   cleanups: Array<() => void>
   /**
@@ -281,13 +310,29 @@ interface ParkedTerminal {
    * cleanup and the park dispose all race for it.
    */
   life: SessionLife & { killed: boolean }
-  timer: ReturnType<typeof setTimeout>
+  /** The park window, which RE-ARMS while the entry is protected (see `armParkExpiry`). */
+  timer: ParkTimer
 }
 const parkedTerminals = new Map<string, ParkedTerminal>()
 const TERM_PARK_MS = 5 * 60 * 1000
 
+/** May the BUDGET levers dispose this park? The entry carries both halves of the answer: the
+ *  session's tmux-backedness, and a live read of the node's OWN agent-status store with the
+ *  park-time snapshot as a floor under it (see `canDisposeParkedEntry`). An unknown key is
+ *  disposable — there is nothing there to protect. */
+function parkDisposable(key: string): boolean {
+  const p = parkedTerminals.get(key)
+  if (!p) return true
+  return canDisposeParkedEntry({
+    tmuxBacked: p.tmuxBacked,
+    parkedAgentState: p.parkedAgentState,
+    parkedAt: p.parkedAt,
+    liveAgentState: p.readAgentState()
+  })
+}
+
 function disposeParked(p: ParkedTerminal): void {
-  clearTimeout(p.timer)
+  p.timer.cancel()
   // Mark the session dead BEFORE tearing it down: a spawn continuation still awaiting its history
   // seed reads this to see that the session it handed off no longer exists (→ teardown, not
   // continue-parked), instead of wiring listeners onto a killed session.
@@ -313,9 +358,16 @@ export function disposeParkedTerminal(key: string): void {
 /** Memory-pressure lever: drop EVERY parked terminal now, without waiting out `TERM_PARK_MS`. The
  *  park is a cache, not state — each dropped entry costs only its warm re-adopt, and the node
  *  re-mounts as an ordinary warm reattach (tmux redraws; the session and its scrollback are
- *  untouched). Idempotent; iterates a copy because `disposeParkedTerminal` mutates the map. */
+ *  untouched). Idempotent; iterates a copy because `disposeParkedTerminal` mutates the map.
+ *
+ *  EXCEPT the protected ones (`canDisposePark`): for a plain-shell session the sentence above is
+ *  false — the dispose is not a re-adopt cost, it is the end of the session — so a park holding a
+ *  working agent on a non-tmux shell is left alone and released by its own expiry re-check.
+ *  Everything else still goes, which is the whole point of the lever. */
 export function disposeAllParkedTerminals(): void {
-  for (const key of [...parkedTerminals.keys()]) disposeParkedTerminal(key)
+  for (const key of disposableParks([...parkedTerminals.keys()], parkDisposable)) {
+    disposeParkedTerminal(key)
+  }
 }
 
 /** Session-scoped keys (`terminalKey`) whose next unmount must dispose (not park) — set on permanent
@@ -796,6 +848,38 @@ export function TerminalNode({
   // `defaultPresence` (byte-identical to before). Stable for the node's lifetime (a tab switch
   // unmounts the node), so capturing it in the once-mounted lifecycle effect below is safe, like `api`.
   const presence = useActiveSessionPresence()
+  /**
+   * THIS node's agent-status store, for the memory levers that must not kill live work — resolved
+   * the way the session registry resolves it (`buildStores` → `agentStatusForApi`, memoized by api
+   * identity), so this node is judged against the status table of the core it actually runs on.
+   *
+   * WHAT THAT MEANS TODAY, PLAINLY: for the local session this resolves to the default persisted
+   * instance — the exact object `useAgentStatus` exports — so local nodes are protected. For a
+   * RELAY tab it resolves to that core's keyless instance, and NOTHING WRITES THAT INSTANCE YET:
+   * Canvas's `agent:status` subscription sits above the per-project session provider and writes
+   * the default store, and `useSessionStores()` currently has no consumers at all. So a relay
+   * node's state always reads `undefined` here, and RELAY PARKS REMAIN UNPROTECTED — which now
+   * matters, because `persistent:false` can arrive from a tmux-less relay HOST, i.e. exactly a
+   * plain-shell agent session on someone else's machine.
+   *
+   * Resolving it this way regardless is deliberate and is the cheap half of the fix: routing relay
+   * agent-status into the per-session stores (`useSessionStores` / `SessionStores.agentStatus` is
+   * the intended seam) is a real feature and belongs in its own change. When it lands, this code
+   * lights up unchanged — no branch here to find and update.
+   *
+   * Scoped deliberately to the protection paths. The other status reads in this file predate
+   * per-session stores and are left exactly as they were; widening them is that same separate
+   * change.
+   */
+  const agentStatusStore = agentStatusForApi(api).store
+  const readAgentState = useCallback(
+    (): AgentState | undefined => agentStatusStore.getState().byId[id]?.state,
+    [agentStatusStore, id]
+  )
+  /** Mirror for the mount-stable visibility observer, which is keyed on `termKey` alone and takes
+   *  everything mutable through a ref (see its docblock). */
+  const readAgentStateRef = useRef(readAgentState)
+  readAgentStateRef.current = readAgentState
   // Session-scope the module-global node-keyed maps (parkedTerminals / coStates / coSubs /
   // restartSubs / noParkIds): a relay tab adopts the host's project KEEPING node ids, so a local
   // node and a relay node can share a bare id. `session.id` is stable for this node's lifetime
@@ -973,6 +1057,13 @@ export function TerminalNode({
   /** Is there a live session here that could be given back? Published by the lifecycle run
    *  (`restartTarget`), null between runs — the dispose timer refuses when it cannot ask. */
   const offscreenLiveRef = useRef<(() => boolean) | null>(null)
+  /** Does the CURRENT session survive losing its client (tmux, local or remote)? Published by the
+   *  lifecycle run from `PtyCreateResult.persistent` — the offscreen release reads it to decide
+   *  whether disposing this terminal would end a running agent (`wouldKillLiveWork`). Read only
+   *  AFTER `offscreenLiveRef` has confirmed a live session, so a value left over from a torn-down
+   *  run is never acted on. Seeded `true`: the historical assumption, never a protection on a
+   *  guess. */
+  const sessionPersistentRef = useRef(true)
   // Selection is a live veto (`mayDisposeOffscreen`): a selected node is one the user is working
   // with — it can be off-screen mid-drag or right after a ⌘K jump — so it is never taken down.
   const selectedRef = useRef(selected)
@@ -1359,7 +1450,7 @@ export function TerminalNode({
     const parked = parkedTerminals.get(termKey)
     if (parked) {
       parkedTerminals.delete(termKey)
-      clearTimeout(parked.timer)
+      parked.timer.cancel()
     }
 
     const s = useSettings.getState().settings
@@ -1585,6 +1676,13 @@ export function TerminalNode({
     }
 
     let sessionId: string | null = parked ? parked.sessionId : null
+    // Does this session survive losing its client (tmux, local or remote)? Read off the create
+    // result below, carried over when adopting a park. Seeded `true` — the historical assumption —
+    // so a session whose create has not answered yet, or a core too old to say
+    // (`PtyCreateResult.persistent` absent), behaves exactly as it always did rather than being
+    // protected on a guess. See `canDisposePark`.
+    let sessionPersistent = parked ? parked.tmuxBacked : true
+    sessionPersistentRef.current = sessionPersistent
     let disposed = false
     // Last cols/rows REPORTED to the pty (seeded at create): a resize IPC makes tmux redraw the
     // whole pane, so a same-size fit (e.g. the ResizeObserver's initial tick right after mount)
@@ -2240,6 +2338,7 @@ export function TerminalNode({
           screen,
           cursor,
           coAttachMouse,
+          persistent,
           unavailable
         }) => {
         // REFUSED: `requireRemote` and core could not spawn remotely (the master died inside our
@@ -2278,6 +2377,10 @@ export function TerminalNode({
         let offData: (() => void) | undefined
         if (onDisposed()) return
         sessionId = sid
+        // `?? true`: an absent flag is an older core over the relay, not a plain shell.
+        sessionPersistent = persistent ?? true
+        // Published for the mount-stable observer effect, which cannot see this closure.
+        sessionPersistentRef.current = sessionPersistent
         if (fellBack) setAccountFallback(true)
         // Catch up a size change that landed while the spawn was in flight (applyFit skips the
         // IPC until sessionId is set, and the observer won't re-fire without another change).
@@ -3023,26 +3126,42 @@ export function TerminalNode({
           search: searchAddon,
           transport,
           sessionId,
+          tmuxBacked: sessionPersistent,
+          // Snapshot NOW, because the departure effect declared below this one clears this node's
+          // agent status on this very unmount — every lever reads later and would see nothing.
+          parkedAgentState: readAgentState(),
+          parkedAt: Date.now(),
+          readAgentState,
           cleanups,
           life,
-          timer: setTimeout(() => {
-            if (parkedTerminals.get(termKey) === entry) {
-              parkedTerminals.delete(termKey)
-              disposeParked(entry)
-            }
-          }, TERM_PARK_MS)
+          // The window RE-ARMS (PARK_RECHECK_MS) while this park is protected, instead of killing a
+          // plain shell that is still running the user's agent — and instead of leaking the park,
+          // which is what a plain "skip the dispose" would do.
+          timer: armParkExpiry(
+            () => parkDisposable(termKey),
+            () => {
+              if (parkedTerminals.get(termKey) === entry) {
+                parkedTerminals.delete(termKey)
+                disposeParked(entry)
+              }
+            },
+            TERM_PARK_MS
+          )
         }
         disposeParkedTerminal(termKey) // defensive: never stack two entries for one node
         parkedTerminals.set(termKey, entry)
         // Enforce the park count cap: evict the OLDEST parks (their next remount becomes a warm
-        // tmux reattach — the post-window behavior, just earlier). Never the entry just parked.
+        // tmux reattach — the post-window behavior, just earlier). Never the entry just parked,
+        // and never a PROTECTED one — the plan skips those and takes the next-oldest disposable
+        // park instead, and the cap is simply exceeded when every park is protected (see
+        // planParkEviction: a bounded cache overrun beats killing live work).
         // Eviction MUST observe the POST-ADOPTION map: a project switch flushes every outgoing
         // node's cleanup (parking each) BEFORE any incoming node's mount effect adopts its own
         // park, so evicting inline would dispose the parks the incoming project is about to
         // re-adopt. A microtask is what defers past the whole synchronous passive-effect flush
         // (cleanups AND mounts); adoption has removed its entries from the map by then.
         queueMicrotask(() => {
-          for (const k of planParkEviction([...parkedTerminals.keys()], PARK_MAX)) {
+          for (const k of planParkEviction([...parkedTerminals.keys()], PARK_MAX, parkDisposable)) {
             if (k !== termKey) disposeParkedTerminal(k)
           }
         })
@@ -3167,6 +3286,29 @@ export function TerminalNode({
             // Nothing to give back (no session yet, or one that was closed/ended under us) ⇒ no
             // dispose. A null ref means no lifecycle run is live at all, which answers the same way.
             if (!offscreenLiveRef.current?.()) return
+            // LIVE WORK ON A PLAIN SHELL (issue #126): this release is only "give the buffer back,
+            // re-attach later" while tmux is underneath. Without it the pty is the shell, so
+            // disposing an offscreen agent node kills the CLI mid-turn — panning away is not a
+            // request to stop it. Defer on the same retry the Eco ordering uses, but with no cap:
+            // what this waits for (the turn ending) always comes, and giving up would BE the bug.
+            // Asked after `offscreenLiveRef`, so the persistence ref is only read for a session
+            // this run actually has.
+            if (
+              shouldDeferReleaseForLiveWork({
+                tmuxBacked: sessionPersistentRef.current,
+                agentState: readAgentStateRef.current()
+              })
+            ) {
+              // Re-stamp the offscreen clock: this node is not RELEASABLE yet, and the Eco
+              // deferral's cap is measured from the start of the releasable stretch. Without this
+              // a long live-work wait would blow that cap outright, so the release that finally
+              // runs would skip the hibernate-first ordering and forfeit the CLI's hundreds of MB
+              // at the exact moment they became reclaimable. The stretch effectively begins when
+              // the work ends.
+              offscreenSinceRef.current = Date.now()
+              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+              return
+            }
             // ECO ORDERING (see `shouldDeferReleaseForEco`): hibernate first, release second. This
             // release would UNWIRE the node — the lifecycle effect tears down, the hibernate pair
             // unregisters, and `planHibernation` then reads the node as unwired — and at the
