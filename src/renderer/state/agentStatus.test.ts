@@ -108,6 +108,29 @@ describe('interrupt inference (Esc/Ctrl-C with no final hook)', () => {
   })
 })
 
+describe('background-task stamp (Eco / bulk-restart guard)', () => {
+  it('markBackgroundTask stamps; only a transition TO working clears it', () => {
+    const id = nid()
+    const s = useAgentStatus.getState()
+    s.setState(id, 'done', 'claude')
+    s.markBackgroundTask(id)
+    expect(useAgentStatus.getState().byId[id]?.backgroundTaskAt).toBeTypeOf('number')
+    // done → waiting is a transition, but the task is still running: the guard must hold.
+    s.setState(id, 'waiting', 'claude')
+    expect(useAgentStatus.getState().byId[id]?.backgroundTaskAt).toBeTypeOf('number')
+    // A turn START is what clears it — the completed task's <task-notification> precedes it.
+    s.setState(id, 'working', 'claude')
+    expect(useAgentStatus.getState().byId[id]?.backgroundTaskAt).toBeUndefined()
+  })
+
+  it('stamps a node with no entry yet (the task can precede any state event)', () => {
+    const id = nid()
+    useAgentStatus.getState().markBackgroundTask(id)
+    expect(useAgentStatus.getState().byId[id]?.backgroundTaskAt).toBeTypeOf('number')
+    expect(useAgentStatus.getState().byId[id]?.unread).toBe(false)
+  })
+})
+
 describe('clearUnread — cross-surface ack vs. external (host-driven) clear', () => {
   it('a normal clear of a done+unread node ACKs the read (dismisses the phone activity)', () => {
     const acked: string[] = []

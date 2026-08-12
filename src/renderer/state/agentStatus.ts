@@ -53,6 +53,17 @@ export interface AgentNodeStatus {
    */
   lastEventAt?: number
   /**
+   * When this node last launched a BACKGROUND shell task (Claude's `Bash` with
+   * `run_in_background: true`). Such a task lives inside the CLI process, so `/exit` — Eco
+   * hibernation and the bulk in-place restart both type it — kills it silently, with no output and
+   * no error. The stamp is what those two exclude on.
+   *
+   * TRANSIENT — never persisted, same rationale as `lastEventAt`: after a relaunch Eco is inert
+   * until a turn happens anyway, and any turn's `working` would have cleared this. A stale stamp
+   * restored from disk would exempt the node from Eco for good.
+   */
+  backgroundTaskAt?: number
+  /**
    * The agent CLI was exited to reclaim its RAM ("Eco" mode) and its conversation is waiting to be
    * resumed when the node is next viewed. PERSISTED beside unread/session/sessionId: the tmux
    * session outlives the app, so after a relaunch this flag is the only thing that knows the pane
@@ -140,6 +151,9 @@ export interface AgentStatusStore {
   /** Record what the pane settled to when this node's CLI let go of it (`null` = forget: a stale
    *  value must never permit a wake into a pane we did not measure). See `hibernatedPane`. */
   setHibernatedPane(id: string, pane: string | null): void
+  /** Record that this node just launched a background shell task (see `backgroundTaskAt`).
+   *  Transient — nothing is written to localStorage. */
+  markBackgroundTask(id: string): void
   markUnread(id: string): void
   /**
    * Drop a node's unread flag. By default a clear of a FINISHED (done) node also ACKs the read
@@ -341,6 +355,13 @@ export function createAgentStatusSession(
         // the sweep) exempts that session from Eco for good.
         // `done` deliberately does NOT clear it — a hibernated node's last known state IS done,
         // and a late Stop POST arriving after the exit would undo the hibernation we just did.
+        // A background task's guard is dropped at the START OF THE NEXT TURN, not when the node
+        // goes idle: Claude delivers a finished background task back as a <task-notification>,
+        // whose own turn is exactly the `working` below — so by the time a turn begins, whatever
+        // the task was doing has been reported. Clearing on `done` instead would drop the guard
+        // the instant the launching turn ended, i.e. while the task is still running, which is
+        // precisely the window Eco / the bulk restart would kill it in.
+        if (state === 'working') next.backgroundTaskAt = undefined
         const alive = state === 'working' || state === 'blocked' || state === 'waiting'
         if (alive && prev.hibernated) {
           next.hibernated = undefined
@@ -421,6 +442,14 @@ export function createAgentStatusSession(
         const byId = { ...s.byId, [id]: { ...prev, hibernatedPane: next } }
         save(byId)
         return { byId }
+      }),
+
+    markBackgroundTask: (id) =>
+      set((s) => {
+        const prev = s.byId[id] ?? EMPTY
+        // Transient (see `backgroundTaskAt`) — no save(): a stamp restored from disk would exempt
+        // the node from Eco forever.
+        return { byId: { ...s.byId, [id]: { ...prev, backgroundTaskAt: Date.now() } } }
       }),
 
     markUnread: (id) =>
