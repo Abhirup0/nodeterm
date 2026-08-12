@@ -4,7 +4,9 @@
 // own RSS, because the host signal alone can't tell you YOU are the problem.
 // Consumers hang reclaim levers off onPressure; all levers must be idempotent — the monitor
 // re-fires a held severity at most once per RE_FIRE_FLOOR_MS.
-import { readMemInfo, type MemInfo } from './session-budget'
+import { hostMemReader, type MemInfo } from './session-budget'
+
+export { hostMemReader }
 
 export type PressureSeverity = 'warning' | 'critical'
 
@@ -13,35 +15,6 @@ export const RE_FIRE_FLOOR_MS = 60_000
 export const SELF_RSS_WARN_MB = 4096
 export const SELF_RSS_CRIT_MB = 8192
 
-/**
- * The DEFAULT host-memory reader — still silent on **darwin**, but no longer for the reason this
- * comment used to give.
- *
- * The original reason was that `readMemInfo` fell back to `os.freemem()` off Linux, which on darwin
- * counts only genuinely free pages — excluding inactive, purgeable and compressor pages, all of
- * which macOS hands back on demand. A healthy Mac idles at a few hundred MB "free", under BOTH
- * watermarks, so this monitor would have sat permanently CRITICAL on the primary desktop platform.
- * (The same reading had the session reaper culling idle detached sessions on every sweep — a
- * confirmed field symptom, reported as "my sessions keep disappearing".)
- *
- * That instrument is fixed: `readMemInfo` now reads `vm_stat` on darwin, VERIFIED on a real 24 GB
- * Mac (2026-08-12) — Activity Monitor's App 7.67 + Wired 2.95 + Compressed 8.38 = 19.00 GB against
- * our 19.1 GB, where the same machine read 23.9/24.0 before. So the REAPER's watermark is honest
- * there now, which is what closed the bug.
- *
- * **This leg stays silent anyway, and the verification is what sharpened the reason.** Available
- * BYTES is not macOS's pressure signal. That same capture had the machine at 82% used with 8.38 GB
- * compressed and 1.77 GB of swap in use — and macOS's own Memory Pressure graph was GREEN. A
- * watermark at 10%/5% available therefore fires in states the OS itself calls healthy, and the
- * critical one sweeps the reaper: we would cull sessions on a machine macOS says is fine. That is
- * the same class of mistake as the bug this started with, reached from the other direction.
- *
- * Follow-up (unchanged in shape, sharper in target): give this leg macOS's REAL pressure signal —
- * `kern.memorystatus_vm_pressure_level`, or the `memory_pressure` tool — rather than a byte count.
- */
-export function hostMemReader(platform: NodeJS.Platform = process.platform): () => MemInfo | null {
-  return platform === 'darwin' ? (): null => null : readMemInfo
-}
 
 export interface MemoryPressureMonitor {
   start(): void

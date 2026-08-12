@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   planReap,
   parseSessionList,
@@ -285,5 +287,47 @@ describe('createSessionReaper (service)', () => {
     })
     expect(await reaper.sweep({ pressure: 'pty' })).toBe(0)
     expect(w.calls.filter((c) => c.args[2] === 'kill-session')).toHaveLength(0)
+  })
+})
+
+describe('planReap with no memory signal (the darwin shape)', () => {
+  const idle = (name: string, hoursAgo: number): SessionInfo => ({
+    name,
+    clients: 0,
+    activitySec: 1_000_000 - hoursAgo * 3600
+  })
+
+  it('culls NOTHING on memory grounds when the reader reports null', () => {
+    // macOS: available BYTES is not the OS's pressure signal (measured: 82% used, 8.38 GB
+    // compressed, macOS's own graph GREEN). hostMemReader returns null there, and null must mean
+    // "no pressure signal", never "no memory". Absence of evidence may not cull a session.
+    const sessions = Array.from({ length: 20 }, (_, i) => idle(`nt-old-${i}`, 48))
+    const cfg = sessionBudgetConfig({}, 24576)
+    expect(planReap(sessions, null, 1_000_000, cfg)).toEqual([])
+  })
+
+  it('still culls past the detached-count cap without any memory signal', () => {
+    // The cap is not memory-based, so it survives — that is what keeps the reaper useful on macOS.
+    const sessions = Array.from({ length: 60 }, (_, i) => idle(`nt-old-${i}`, 48))
+    const cfg = sessionBudgetConfig({}, 24576)
+    expect(planReap(sessions, null, 1_000_000, cfg).length).toBeGreaterThan(0)
+  })
+})
+
+describe("the reaper's default memory reader", () => {
+  /**
+   * A SOURCE-level guard, deliberately, and here is why a behavioural one is not possible:
+   * `hostMemReader` differs from `readMemInfo` ONLY on darwin, and these tests run on Linux, where
+   * the two are the same function. Reverting the default to `readMemInfo` therefore leaves every
+   * behavioural test green — measured, not assumed.
+   *
+   * What it guards is the thing that actually broke: on macOS `readMemInfo` reports honest bytes,
+   * but available BYTES are not the OS's pressure signal (82% used with macOS's own graph GREEN,
+   * measured 2026-08-12), so a byte watermark culls sessions on a machine macOS says is fine.
+   */
+  it('defaults to hostMemReader, not readMemInfo', () => {
+    const src = readFileSync(join(__dirname, 'session-budget.ts'), 'utf8')
+    expect(src).toContain('opts.readMem ?? hostMemReader()')
+    expect(src).not.toContain('opts.readMem ?? readMemInfo')
   })
 })
