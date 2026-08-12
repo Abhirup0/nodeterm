@@ -14,18 +14,30 @@ export const SELF_RSS_WARN_MB = 4096
 export const SELF_RSS_CRIT_MB = 8192
 
 /**
- * The DEFAULT host-memory reader — platform-aware, because `readMemInfo`'s non-Linux fallback is
- * `os.freemem()`, and on **darwin** that is vm_stat's `free_count` alone: it excludes inactive,
- * purgeable and compressor pages, all of which macOS hands back on demand. A perfectly healthy
- * 16 GB Mac idles at a few hundred MB "free", i.e. under BOTH watermarks — the monitor would sit
- * permanently CRITICAL on the primary desktop platform, disposing every parked terminal and
- * sweeping the reaper once a minute forever. Per the repo rule, a guess must degrade to NOTHING
- * rather than to something wrong: on darwin the host leg is silent (`null` is explicitly "no
- * pressure signal", not "no pressure") and the self-RSS leg carries the monitor alone.
+ * The DEFAULT host-memory reader — still silent on **darwin**, but no longer for the reason this
+ * comment used to give.
  *
- * Follow-up: give macOS a REAL signal (the memory-pressure/compressor state, swap-in rate, or
- * Electron's `app.getAppMetrics`) and drop the special case — the platform is not un-measurable,
- * `os.freemem()` is simply the wrong instrument for it.
+ * The original reason was that `readMemInfo` fell back to `os.freemem()` off Linux, which on darwin
+ * counts only genuinely free pages — excluding inactive, purgeable and compressor pages, all of
+ * which macOS hands back on demand. A healthy Mac idles at a few hundred MB "free", under BOTH
+ * watermarks, so this monitor would have sat permanently CRITICAL on the primary desktop platform.
+ * (The same reading had the session reaper culling idle detached sessions on every sweep — a
+ * confirmed field symptom, reported as "my sessions keep disappearing".)
+ *
+ * That instrument is fixed: `readMemInfo` now reads `vm_stat` on darwin, VERIFIED on a real 24 GB
+ * Mac (2026-08-12) — Activity Monitor's App 7.67 + Wired 2.95 + Compressed 8.38 = 19.00 GB against
+ * our 19.1 GB, where the same machine read 23.9/24.0 before. So the REAPER's watermark is honest
+ * there now, which is what closed the bug.
+ *
+ * **This leg stays silent anyway, and the verification is what sharpened the reason.** Available
+ * BYTES is not macOS's pressure signal. That same capture had the machine at 82% used with 8.38 GB
+ * compressed and 1.77 GB of swap in use — and macOS's own Memory Pressure graph was GREEN. A
+ * watermark at 10%/5% available therefore fires in states the OS itself calls healthy, and the
+ * critical one sweeps the reaper: we would cull sessions on a machine macOS says is fine. That is
+ * the same class of mistake as the bug this started with, reached from the other direction.
+ *
+ * Follow-up (unchanged in shape, sharper in target): give this leg macOS's REAL pressure signal —
+ * `kern.memorystatus_vm_pressure_level`, or the `memory_pressure` tool — rather than a byte count.
  */
 export function hostMemReader(platform: NodeJS.Platform = process.platform): () => MemInfo | null {
   return platform === 'darwin' ? (): null => null : readMemInfo
