@@ -3,14 +3,21 @@
  * canvas nodes, the agent-status table, the subagent cards, and the node's own wiring/visibility)
  * and the pure policy in `terminal/hibernation-policy.ts`.
  *
- * It exists as its own tested function rather than as a `.map()` inside the sweep because two of
- * the four facts are SAFETY facts, and an untested inline expression is exactly where they rot:
+ * It exists as its own tested function rather than as a `.map()` inside the sweep because three of
+ * the facts it lifts are SAFETY facts, and an untested inline expression is exactly where they rot:
  *
  *  - **`recurring` is `!!loop`, dismissed or not.** A dismissed cron/schedule card keeps its entry
  *    precisely so this row stays true (see `agentStatus`'s `loop.dismissed`): the card is hidden,
  *    the job is not gone, and `/exit` would kill the CLI its wakeup lives in. Reading the render
  *    filter here — "no card, so nothing recurring" — silently cancels the job Eco mode was never
  *    allowed to touch. That hole is the reason this file has a test.
+ *  - **`liveBackgroundTask` is "a background shell was launched and no turn has started since".**
+ *    A Claude `Bash` with `run_in_background` runs INSIDE the CLI process and emits nothing while
+ *    it works, so `agentStatus.backgroundTaskAt` is the only evidence it exists; `/exit` kills it
+ *    with no output and no error. Note the coupling this depends on: a renderer reload drops
+ *    `backgroundTaskAt` AND `lastEventAt` together (both transient), which is safe only because Eco
+ *    is inert without an idle clock — that coupling is now load-bearing for two features, so
+ *    neither field may be persisted on its own.
  *  - **`liveSubagents` is "any card for this parent that is NOT done".** Claude launches subagents
  *    async and their completion is queued into the PARENT's transcript, which a dead parent CLI
  *    never reads. An unknown/absent state counts as LIVE — the conservative direction, and the
@@ -38,6 +45,9 @@ export interface HibernationStatusInput {
   /** Present = this node has a `/loop`, `/schedule` or `/cron` on it. Its `dismissed` flag is
    *  deliberately NOT consulted — see the header. */
   loop?: unknown
+  /** When this node last launched a background shell task, if no turn has started since — the
+   *  third safety fact this adapter exists for (see the header). Present at all = live task. */
+  backgroundTaskAt?: number
 }
 
 /** One subagent card, narrowed: whose it is, and whether it has finished. */
@@ -81,6 +91,7 @@ export function buildHibernationCandidates(
       remote: inputs.isRemote(n.id),
       recurring: !!st?.loop,
       liveSubagents: liveParents.has(n.id),
+      liveBackgroundTask: st?.backgroundTaskAt !== undefined,
       lastEventAt: st?.lastEventAt
     }
   })

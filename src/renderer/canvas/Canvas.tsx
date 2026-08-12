@@ -4343,7 +4343,10 @@ export function Canvas() {
         sessionId: byId[n.id]?.sessionId,
         // Registration is unconditional for every terminal node, so this says only "mounted and
         // wired", never "is an agent" — `agentId` above is what decides that.
-        wired: !!agentRestartFn(n.id)
+        wired: !!agentRestartFn(n.id),
+        // A background shell launched by this session is still running (no turn has started since):
+        // the exit line would kill it silently. Presence of the stamp is the whole signal.
+        backgroundTask: !!byId[n.id]?.backgroundTaskAt
       }))
     )
   }, [])

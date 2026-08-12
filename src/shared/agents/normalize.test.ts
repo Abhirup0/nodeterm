@@ -165,9 +165,9 @@ describe('normalizeClaude — background shell tasks', () => {
   })
 
   // The mutation guard: dropping the `tool_name` check, the `ev` check, or matching truthily
-  // instead of `=== true` each flips exactly one of these rows. The truthy-but-not-`true` row is
-  // what pins the strict compare — the two boolean rows below are both falsy, so on their own they
-  // would pass a `!!p.tool_input?.run_in_background` implementation too.
+  // instead of `=== true` each flips a row here — the truthy match flips two. Those two
+  // truthy-but-not-`true` rows are what pin the strict compare: the boolean rows below are both
+  // falsy, so on their own they would pass a `!!p.tool_input?.run_in_background` implementation.
   it('foreground Bash, false/absent/truthy-non-true flags, PostToolUse and other tools stay generic working', () => {
     for (const payload of [
       { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } },

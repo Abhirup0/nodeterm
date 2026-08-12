@@ -31,9 +31,32 @@ describe('buildHibernationCandidates', () => {
         remote: false,
         recurring: false,
         liveSubagents: false,
+        liveBackgroundTask: false,
         lastEventAt: IDLE
       }
     ])
+  })
+
+  it('liveBackgroundTask mirrors backgroundTaskAt presence', () => {
+    const rows = buildHibernationCandidates(
+      inputs({
+        nodes: [
+          { id: 'a', agentId: 'claude' },
+          { id: 'b', agentId: 'claude' }
+        ],
+        statusById: {
+          a: { state: 'done', sessionId: 'sid-a', lastEventAt: IDLE, backgroundTaskAt: 123 },
+          b: { state: 'done', sessionId: 'sid-b', lastEventAt: IDLE }
+        }
+      })
+    )
+    expect(rows.map((r) => [r.id, r.liveBackgroundTask])).toEqual([
+      ['a', true],
+      ['b', false]
+    ])
+    // …and end to end: a node with a live background shell is refused, however idle it looks.
+    expect(planHibernation([rows[0]], NOW, { enabled: true, idleMinutes: 30 })).toEqual([])
+    expect(planHibernation([rows[1]], NOW, { enabled: true, idleMinutes: 30 })).toEqual(['b'])
   })
 
   it('reads a DISMISSED cron entry as recurring — the card is hidden, the job is not gone', () => {
