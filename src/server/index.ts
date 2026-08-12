@@ -446,6 +446,10 @@ export async function startServer(
   // `shadowed` subtracts our own control-mode shadows from tmux's attached flag: a shadow is a real
   // tmux client but NOT a watcher, so a shadowed session must stay exactly as cullable as an idle
   // detached one (see PtyManager.shadowedTmuxSessions).
+  // `readMem: hostMemReader()` — same platform-aware reader as the memory-pressure monitor below.
+  // A Server Edition host is normally Linux, where this IS `readMemInfo`; the darwin branch matters
+  // for a Mac serving the browser UI, where available bytes are not the OS's pressure signal (see
+  // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
   const sessionReaper = createSessionReaper({
     tmuxBin: () => ptyManager.getTmuxBin(),
     shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)

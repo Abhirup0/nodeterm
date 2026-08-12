@@ -69,6 +69,28 @@ Retargeting the reaper is a separate change with separate risk (it would start k
 user is looking at). This feature adds **sight**, not policy: it shows the 31 GB and lets a human
 decide. The one thing it shares with the reaper is `readMemInfo` (§3).
 
+
+### The reaper does not cull on a byte watermark on macOS either
+
+Fixing `readMemInfo` made the bytes HONEST; it did not make them the right instrument. The same
+capture that verified the formula showed the machine at **82% used with macOS's own Memory Pressure
+graph GREEN** (8.38 GB compressed, 1.77 GB swap in use). A 10%-available watermark therefore fires
+in states the OS itself calls healthy — and the reaper's pressure trigger culls sessions.
+
+So `hostMemReader` (darwin ⇒ `null`) is the reaper's **default** reader, not something the shells
+inject. That is deliberate: a wiring line can be deleted with the whole suite green — measured twice
+on this branch — whereas a default cannot. `planReap` treats `null` as *no pressure signal*, so on
+macOS only the detached-COUNT cap can trigger a cull, and that is not memory-based at all.
+
+The reaper keeps its purpose on macOS: the count cap bounds accumulation, the pty-pressure monitor
+covers the resource that actually ran out, and this panel gives the user the visibility to cull
+deliberately. What it loses is the ability to cull on a signal that was telling it the wrong thing.
+
+**Guarded at the source, and honestly:** `hostMemReader` differs from `readMemInfo` ONLY on darwin,
+and CI runs on Linux where they are the same function — so reverting the default leaves every
+BEHAVIOURAL test green (measured). `session-budget.test.ts` therefore asserts the default in the
+source text, with that limitation written next to it.
+
 ## 3. `readMemInfo` has exactly one home
 
 It lives in `session-memory.ts`; `session-budget.ts` imports **and re-exports** it. Two features now

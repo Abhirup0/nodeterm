@@ -1532,6 +1532,19 @@ app.whenReady().then(async () => {
   // `shadowed` subtracts our own control-mode shadows from tmux's attached flag: a shadow is a real
   // tmux client but NOT a watcher, so a shadowed session must stay exactly as cullable as an idle
   // detached one (see PtyManager.shadowedTmuxSessions).
+  // `readMem: hostMemReader()` — the SAME platform-aware reader the memory-pressure monitor uses,
+  // and for the same reason. On darwin it returns null, so `planReap` sees no pressure signal and
+  // only the detached-count cap can trigger a cull.
+  //
+  // Available BYTES is not macOS's pressure signal. Measured on a 24 GB Mac (2026-08-12): 82% used,
+  // 8.38 GB compressed, 1.77 GB swap in use — and macOS's own Memory Pressure graph GREEN. A
+  // 10%-available watermark fires in states the OS itself calls healthy, so a byte trigger there
+  // culls sessions on a machine macOS says is fine. Fixing readMemInfo made the bytes HONEST; it
+  // did not make them the right instrument.
+  //
+  // This is not a regression of the reaper's purpose on macOS: the count cap still bounds
+  // accumulation, the pty-pressure monitor covers the resource that actually ran out, and the
+  // session-memory panel gives the user the visibility to cull deliberately.
   const sessionReaper = createSessionReaper({
     tmuxBin: () => ptyManager.getTmuxBin(),
     shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)

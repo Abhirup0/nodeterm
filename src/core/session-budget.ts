@@ -144,6 +144,36 @@ export function parseSessionList(stdout: string): SessionInfo[] {
   return out
 }
 
+/**
+ * The DEFAULT host-memory reader — still silent on **darwin**, but no longer for the reason this
+ * comment used to give.
+ *
+ * The original reason was that `readMemInfo` fell back to `os.freemem()` off Linux, which on darwin
+ * counts only genuinely free pages — excluding inactive, purgeable and compressor pages, all of
+ * which macOS hands back on demand. A healthy Mac idles at a few hundred MB "free", under BOTH
+ * watermarks, so this monitor would have sat permanently CRITICAL on the primary desktop platform.
+ * (The same reading had the session reaper culling idle detached sessions on every sweep — a
+ * confirmed field symptom, reported as "my sessions keep disappearing".)
+ *
+ * That instrument is fixed: `readMemInfo` now reads `vm_stat` on darwin, VERIFIED on a real 24 GB
+ * Mac (2026-08-12) — Activity Monitor's App 7.67 + Wired 2.95 + Compressed 8.38 = 19.00 GB against
+ * our 19.1 GB, where the same machine read 23.9/24.0 before. So the REAPER's watermark is honest
+ * there now, which is what closed the bug.
+ *
+ * **This leg stays silent anyway, and the verification is what sharpened the reason.** Available
+ * BYTES is not macOS's pressure signal. That same capture had the machine at 82% used with 8.38 GB
+ * compressed and 1.77 GB of swap in use — and macOS's own Memory Pressure graph was GREEN. A
+ * watermark at 10%/5% available therefore fires in states the OS itself calls healthy, and the
+ * critical one sweeps the reaper: we would cull sessions on a machine macOS says is fine. That is
+ * the same class of mistake as the bug this started with, reached from the other direction.
+ *
+ * Follow-up (unchanged in shape, sharper in target): give this leg macOS's REAL pressure signal —
+ * `kern.memorystatus_vm_pressure_level`, or the `memory_pressure` tool — rather than a byte count.
+ */
+export function hostMemReader(platform: NodeJS.Platform = process.platform): () => MemInfo | null {
+  return platform === 'darwin' ? (): null => null : readMemInfo
+}
+
 export interface SessionReaperOpts {
   /** Lazy tmux binary resolver (PtyManager resolves after init; null = tmux unavailable → no-op). */
   tmuxBin: () => string | null
@@ -218,7 +248,9 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
       const { stdout } = await runAsync(bin, args, { timeout: 15_000 })
       return stdout
     })
-  const readMem = opts.readMem ?? readMemInfo
+  // Platform-aware BY DEFAULT — not injected by the shells. A wiring line can be deleted with
+  // the suite green (measured); a default cannot. See hostMemReader for why darwin is silent.
+  const readMem = opts.readMem ?? hostMemReader()
   const env = opts.env ?? process.env
   const nowSec = opts.nowSec ?? ((): number => Math.floor(Date.now() / 1000))
   const log = opts.log ?? ((m: string): void => console.log(m))
