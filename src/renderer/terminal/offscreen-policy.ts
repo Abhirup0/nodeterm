@@ -8,7 +8,12 @@
  * REMOTE (SSH) nodes are excluded in v1: their spawn path runs the requireRemote/offline
  * machinery and a re-spawn while the ControlMaster is down would surface the offline overlay for
  * a node the user never touched. Follow-up once demand exists.
+ *
+ * "The tmux session keeps running and re-attach redraws" is the load-bearing sentence, and it is
+ * FALSE without tmux — where this release kills the shell and the agent CLI in it. See
+ * `shouldDeferReleaseForLiveWork`.
  */
+import { wouldKillLiveWork, type LiveWorkInput } from './live-work'
 import type { SessionSource } from '../session/session'
 
 export const OFFSCREEN_DISPOSE_MS_DEFAULT = 10 * 60_000
@@ -55,8 +60,52 @@ export function releaseStillEnabled(settingMinutes: number | undefined): boolean
 }
 
 /** How often a DEFERRED release re-asks. The hibernation sweep's own cadence, because that is
- *  exactly what the deferral is waiting for: one sweep after the node hibernates, the viewer goes. */
+ *  exactly what the deferral is waiting for: one sweep after the node hibernates, the viewer goes.
+ *  The live-work deferral below rides the same retry, and a minute suits it for the same kind of
+ *  reason — what it waits for is a human-scale event (an agent turn ending). */
 export const OFFSCREEN_DEFER_RETRY_MS = 60_000
+
+/**
+ * THE FOURTH KILL LEVER (issue #126). Defer this release — indefinitely — while disposing the
+ * terminal would destroy work that is still running.
+ *
+ * This module's whole premise is that a release is cheap: the node stays mounted, the tmux session
+ * keeps running, and the revive is a warm re-attach that redraws. Without tmux underneath none of
+ * that holds — the pty IS the shell — so releasing an offscreen agent node on a plain-shell setup
+ * terminates the CLI mid-turn and the node's restart machinery resumes it from wherever the kill
+ * landed. Panning away from a working agent is not a request to stop it.
+ *
+ * Expressed as a DEFERRAL rather than a refusal because this fire path already has exactly that
+ * shape and cadence (`shouldDeferReleaseForEco` → re-arm at `OFFSCREEN_DEFER_RETRY_MS`): every
+ * input is re-asked a minute later, so "protected" is a state the node LEAVES on its own the
+ * moment its agent goes idle, and the release then proceeds normally. No new timer, no new state,
+ * nothing to remember.
+ *
+ * UNCAPPED, and that is the one place it deliberately differs from the Eco deferral above. That
+ * one caps because it waits for a hibernation that may never come, and stranding a viewer forever
+ * for an event that cannot happen would be worse than the memory it saves. Here the thing waited
+ * for is the user's own session ending, and "give up and release anyway" IS the reported bug — a
+ * cap would just be the same kill with a delay in front of it. So no clock is an input at all.
+ *
+ * BE HONEST ABOUT WHAT THAT COSTS. `working` resolves within `WORKING_STALE_MS` even when the CLI
+ * dies without saying so: Canvas's 60-second `sweepStaleWorking` blanks a working entry that has
+ * gone that quiet, and this predicate reads that entry. (It works HERE because the node is still
+ * MOUNTED, so its store entry is intact — the park path cannot rely on the same sweep, which is
+ * why the park's snapshot ages itself out instead; see `live-work.ts`'s `parkedStateFloor`.)
+ * `waiting`/`blocked` has no such sweep, and legitimately so: a question held open for the user is
+ * not stale, it is waiting for them. A user who never answers therefore holds this node's viewer
+ * for as long as the app runs.
+ *
+ * That is accepted, because the exposure is bounded in the dimension that matters. It is not
+ * unbounded growth: it is at most one held viewer (~15 MB) per non-tmux node that is actually
+ * sitting on an unanswered prompt — a count the user creates by hand and can see on the canvas,
+ * where the badge is telling them the node needs them. Bounded by node count, not by time. The
+ * alternative is trading a bounded amount of memory for the user's running work, which is the
+ * trade this whole change exists to stop making.
+ */
+export function shouldDeferReleaseForLiveWork(i: LiveWorkInput): boolean {
+  return wouldKillLiveWork(i)
+}
 
 /**
  * PHASE 5 ORDERING: with Eco on, releasing an offscreen terminal's viewer WAITS for its agent to

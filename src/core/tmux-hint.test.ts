@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { findCommand, tmuxInstall } from './tmux-hint'
+import { findCommand, findFixedTmux, tmuxCandidatePaths, tmuxInstall } from './tmux-hint'
 
 describe('tmuxInstall', () => {
   it('darwin with brew: one-click brew install', () => {
@@ -48,5 +48,49 @@ describe('findCommand', () => {
 
   it('tolerates a missing PATH', () => {
     expect(findCommand('brew', {}, (p) => p === '/usr/local/bin/brew')).toBe(true)
+  })
+})
+
+describe('tmuxCandidatePaths / findFixedTmux', () => {
+  it('keeps the four historical paths first, in their historical order', () => {
+    expect(tmuxCandidatePaths('/Users/dev', 'dev').slice(0, 4)).toEqual([
+      '/opt/homebrew/bin/tmux',
+      '/usr/local/bin/tmux',
+      '/usr/bin/tmux',
+      '/bin/tmux'
+    ])
+  })
+
+  it('covers the package managers the four fixed paths missed (silent plain-shell fallback)', () => {
+    const paths = tmuxCandidatePaths('/Users/dev', 'dev')
+    expect(paths).toContain('/opt/local/bin/tmux') // MacPorts
+    expect(paths).toContain('/run/current-system/sw/bin/tmux') // NixOS system profile
+    expect(paths).toContain('/Users/dev/.nix-profile/bin/tmux') // nix single-user profile
+    expect(paths).toContain('/etc/profiles/per-user/dev/bin/tmux') // home-manager / nix-darwin
+    expect(paths).toContain('/home/linuxbrew/.linuxbrew/bin/tmux') // Linuxbrew
+  })
+
+  it('falls back to the home directory basename when no user name is known', () => {
+    expect(tmuxCandidatePaths('/home/ada')).toContain('/etc/profiles/per-user/ada/bin/tmux')
+    // No home at all (an odd/locked-down environment): the home-derived paths are simply absent,
+    // never emitted as `undefined/...`.
+    expect(tmuxCandidatePaths(null).some((p) => p.includes('undefined'))).toBe(false)
+    expect(tmuxCandidatePaths(null).some((p) => p.includes('.nix-profile'))).toBe(false)
+  })
+
+  it('returns the FIRST candidate that exists', () => {
+    const seen: string[] = []
+    const exists = (p: string): boolean => (seen.push(p), p === '/opt/local/bin/tmux')
+    expect(findFixedTmux(exists, '/Users/dev', 'dev')).toBe('/opt/local/bin/tmux')
+    expect(seen[0]).toBe('/opt/homebrew/bin/tmux') // ordered walk, homebrew still wins first
+    expect(findFixedTmux(() => false, '/Users/dev', 'dev')).toBeNull()
+  })
+
+  it('treats a throwing existsSync as "not here" rather than failing the whole probe', () => {
+    const exists = (p: string): boolean => {
+      if (p === '/opt/homebrew/bin/tmux') throw new Error('EPERM')
+      return p === '/usr/bin/tmux'
+    }
+    expect(findFixedTmux(exists, '/Users/dev', 'dev')).toBe('/usr/bin/tmux')
   })
 })
