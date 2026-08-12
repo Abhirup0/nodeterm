@@ -462,6 +462,14 @@ export interface BulkRestartCandidate {
    *  is unconditional for every terminal node, so this answers only "can I reach this pane", never
    *  "is this an agent" — `agentId` above is the one that decides that. */
   wired: boolean
+  /** Is a background shell task running inside this node's CLI (Claude's `Bash` with
+   *  `run_in_background`)? It dies with the CLI the exit line quits — silently, with no output and
+   *  no error — and the eligibility gate cannot see it: the node reports `done` the whole time.
+   *
+   *  Required, not optional: typecheck is what forces every call site to answer the question (the
+   *  `remote` / `liveBackgroundTask` precedent), and an omitted field would read as "no task" —
+   *  the one wrong direction. Fed from `agentStatus.backgroundTaskAt`. */
+  backgroundTask: boolean
 }
 
 export interface BulkRestartPlan {
@@ -489,6 +497,17 @@ export function planBulkRestart(candidates: BulkRestartCandidate[]): BulkRestart
       if (gate.reason === 'working') plan.skipped.working++
       else if (gate.reason === 'no-session') plan.skipped.noSession++
       // 'not-resumable' — never a target, see above.
+      continue
+    }
+    // AFTER the eligibility gate, so a node that was never a target stays uncounted whatever else
+    // is true of it — and BEFORE the wired check, because a live background task is the sharper
+    // fact: "no session" would send the user looking for a pane that is fine.
+    //
+    // Counted as `working`, not as a fifth part: the summary line is spec-frozen at four, and
+    // `'working'`'s documented meaning — "busy, try again in a moment" — is exactly what a running
+    // background task is.
+    if (c.backgroundTask) {
+      plan.skipped.working++
       continue
     }
     if (!c.wired) {

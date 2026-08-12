@@ -189,6 +189,23 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     expect(saved.n5.state).toBeUndefined()
   })
 
+  it('never persists `backgroundTaskAt` — a stale stamp would exempt a node from Eco forever', async () => {
+    // Same rationale as `lastEventAt`: after a relaunch nothing is running that we know of, and any
+    // turn's `working` would have cleared it anyway.
+    const store = memStorage()
+    vi.stubGlobal('localStorage', store)
+    const { useAgentStatus } = await import('./agentStatus')
+    useAgentStatus.getState().markBackgroundTask('n15')
+    expect(useAgentStatus.getState().byId['n15'].backgroundTaskAt).toBeTypeOf('number')
+    // The stamp alone is not durable, so it writes nothing at all…
+    expect(store.getItem('nodeterm.agentStatus')).toBeNull()
+    // …and it stays out of the file when a durable field does get written.
+    useAgentStatus.getState().setSessionId('n15', 'sess-2')
+    const saved = JSON.parse(store.getItem('nodeterm.agentStatus')!)
+    expect(saved.n15.sessionId).toBe('sess-2')
+    expect(saved.n15.backgroundTaskAt).toBeUndefined()
+  })
+
   it('stamps `lastEventAt` on a state transition only (same-state refresh keeps the idle clock)', async () => {
     vi.stubGlobal('localStorage', memStorage())
     const { useAgentStatus } = await import('./agentStatus')
