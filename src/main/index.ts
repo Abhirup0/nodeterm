@@ -22,6 +22,7 @@ import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
+import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
@@ -541,6 +542,8 @@ app.whenReady().then(async () => {
   settingsStore.init()
   settingsStore.registerIpc()
   sshStore.registerIpc()
+  // Custom-agent preview/expansion IPC (renderer has no process.env; expansion runs here).
+  registerAgentEnvIpc()
   ptyManager.init(() => settingsStore.get())
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
