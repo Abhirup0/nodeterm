@@ -427,10 +427,23 @@ macOS (the ps path never runs on Linux)
  5. Open the panel on a Mac: `defaultProcessTableReader` returns null there, so the whole table
     comes from `ps -eo pid,ppid,rss`. Rows must populate, and the totals must be plausible — BSD ps
     reports rss in kB, but confirm one known process against Activity Monitor before trusting it.
+    PARTIAL 2026-08-12: the units ARE kB, but `ps rss` and AM's "Memory" column measure different
+    things — WindowServer read 92,768 kB (90.6 MB) of RSS while AM showed 763.5 MB of footprint on
+    the same tick, an 8× gap for a compressed/IOKit-heavy process. The panel will understate such
+    processes; "plausible" must mean plausible-as-RSS, not AM-equal. Panel populate still unchecked.
  6. ~~macOS: check `parseVmStat` against Activity Monitor.~~ **DONE 2026-08-12** — 19.1 GB vs
     AM's 19.00 GB of parts on a 24 GB machine (was 23.9/24.0 before the fix). Still open on
     macOS: give the memory-PRESSURE monitor a real signal (`kern.memorystatus_vm_pressure_level`)
     rather than a byte watermark — the same capture showed 82% used with AM's pressure graph GREEN.
+    RE-VERIFIED independently 2026-08-12 (second session, shipping function imported via esbuild
+    bundle, vm_stat captured on the same tick as an AM screenshot): ours 18.87 GB used vs AM's
+    parts 7.23 + 2.99 + 8.66 = 18.88 GB — 0.05% off; AM's HEADLINE "Memory Used" was 19.70 GB,
+    0.83 GB (4.2%) above its own parts, confirming the header comment that the parts do not sum to
+    the headline on Apple Silicon. Same capture: `os.freemem()` said 0.10 GB. Page-size trap
+    mutation-verified: hard-coding 4096 against the machine's 16,384-byte pages under-reported used
+    memory exactly 4.00× (18.87 → 4.72 GB). The darwin reaper default is now also guarded by a
+    BEHAVIOURAL test (darwin-gated, mutation-verified on this machine: reverting the default to
+    `readMemInfo` reaps 8) — see session-budget.test.ts, which CI's source-text check stands in for.
  7. Open an SSH project: the panel must list THAT host's sessions and no local ones, and its header
     scope + the pill's title must read `user@host`.
  8. Open an SSH project BEFORE its ControlMaster is up. The pill must end on a NUMBER, not a
