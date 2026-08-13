@@ -172,9 +172,17 @@ project's nodes only.** The contract:
   sidebar (the sidebar no longer hoists the active project to the top). Both surfaces reorder
   via drag-drop through `reorderProject(draggedId, beforeId|null)` (null = to the end; tab
   strip empty area and sidebar body are the end-drop zones), persisted like any node reorder.
-  Sidebar collapse behavior is `settings.sidebarAutoCollapse` (default on = historical: a
-  project switch resets manual toggles and collapses inactive projects; off = everything
-  defaults to expanded and switches never touch the user's choices — `isGroupCollapsed`).
+  Sidebar disclosure is **persisted**, for group frames as well as projects:
+  `settings.sidebarCollapsedItems` maps `project:<id>` / `project:<id>:group:<groupId>` → collapsed
+  (`isGroupCollapsed`), and `settings.sidebarAutoCollapse` (default on) now only supplies the
+  DEFAULT for a project row nobody has toggled (on = active expanded / others collapsed, off =
+  everything expanded). **This deliberately replaced the old "a project switch resets every manual
+  toggle" effect** (2026-08, with the nested sidebar tree): a tree the user shaped by hand should
+  still be that shape after a restart, and one transient rule for projects plus a sticky one for
+  frames would have been two contracts in one list. `projectHeadClickAction` is unchanged — an
+  inactive project row switches, the active one toggles its own (now persisted) collapse — and
+  every write **prunes** keys that no longer address a live project/frame (`pruneCollapsedItems` /
+  `liveCollapseKeys`), because settings.json is forever and a canvas churns through group ids.
 - The bottom-left **canvas lock** freezes the CAMERA only (pan/zoom): nodes stay draggable,
   resizable and connectable while locked — the point is "stop the map sliding", not "freeze
   the work".
@@ -522,11 +530,30 @@ session.
   process/terminal-title status only.
 - **sticky** (`StickyNode.tsx`) — colored note, free text, collapsible. Has link handles:
   connect a sticky to any terminal node to attach the note as context (see Context Link).
-- **group** (`GroupNode.tsx`) — real React Flow parent/child frame; `groupSelectedNodes`
-  reparents children (`parentId` + `extent:'parent'`, relative positions), `ungroupNodes`
-  restores absolute. `nodeStatesToFlow` sorts parents first (React Flow requirement).
-  Visually: a dashed rounded frame in the group color with a floating label pill (color dot
-  + editable name) on the top border and ungroup/× top-right (on hover/selected). The
+- **group** (`GroupNode.tsx`) — real React Flow parent/child frame, and frames **nest** (2026-08):
+  a group may contain other groups to any depth. `groupSelectedNodes` wraps objects that share ONE
+  container — frames included — creating the wrapper inside that container; a mixed-container set,
+  or an ancestor selected together with its own descendant, is **refused** rather than scrambled
+  (positions are only comparable within one container, and the descendant would be torn out of the
+  ancestor being wrapped). Box-selection routinely catches both, so structural actions normalize
+  the selection to its subtree roots first (`selectedRootIds`). `ungroupNodes` promotes a frame's
+  direct children into **its own parent** (not to the root — that would move them by the whole
+  ancestor offset); `reparentNode` moves a node OR a whole frame subtree, keeps its **root-space**
+  position fixed (`rootPosition`, not the old add-one-parent's-origin math) and refuses a cycle;
+  `addSelectionToGroup` adds a selection to an existing frame; `reorderGroupWithinParent` reorders
+  a frame among its siblings, carrying its subtree. `nodeStatesToFlow`/`groupsFirst` emit frames
+  **depth-first from the root** — a flat "groups first" sort is not enough once two groups compare
+  equal — and that persisted order is also the downgrade contract (a pre-nesting build's stable
+  sort leaves it alone, so a nested tree still hydrates parent-first and renders there).
+  **A frame that gains a child bigger than itself is re-fitted, ancestors included**
+  (`fitGroupToChildren` up the chain): a wrapper created at `(minX-28, minY-62)` relative to its
+  parent is routinely negative, and `extent:'parent'` would make React Flow clamp it into an
+  inverted range — snapping the frame hundreds of px away and dragging the whole wrapped subtree
+  with it. Visually: a dashed rounded frame in the group color with a floating label pill (color
+  dot + editable name) on the top border and ungroup/× top-right (on hover/selected). **The pill
+  is the frame's `dragHandle`** and the frame body is `pointer-events: none` — a frame is a
+  background container, not a giant drag target, so its body passes clicks to the pane and an
+  outer frame cannot swallow the clicks meant for a frame drawn inside it. The
   `NodeResizer` line is hidden (`lineStyle` transparent) so it can't draw a sharp-cornered
   box; the selection ring is a `box-shadow` instead, which follows the same `border-radius`.
 - **editor** (`EditorNode.tsx`) — Monaco code editor for a `filePath`; reads/writes via
@@ -907,11 +934,13 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   control the desktop's canvas. The shim is generated source no compiler checks:
   `canvas-control-shim.test.ts` runs it for real (/bin/sh against a real hook server, port AND
   unix-socket transports) — keep it that way.
-  **Grouping verbs** (`group` / `ungroup` / `move` / `arrange` / `align`): `group` only wraps
-  **top-level** nodes into a new frame (children already in a frame are skipped — the reply says
-  how many + points at `move`); `ungroup --group <id>` dissolves a frame (nodes kept); `move
-  --nodes <id,id> [--group <id>]` reparents nodes INTO a frame (or `top`/`none`/omit → out to top
-  level) via `reparentNode` — the ONE way to move a node between frames, which `group` won't do.
+  **Grouping verbs** (`group` / `ungroup` / `move` / `arrange` / `align`): `group` wraps **sibling**
+  objects — nodes or frames — into a new frame in their shared container (a mixed-container set, or
+  an ancestor plus its descendant, is refused with that reason); `ungroup --group <id>` dissolves a
+  frame, promoting its direct children into the frame's own parent (nodes kept); `move
+  --nodes <id,id> [--group <id>]` reparents nodes OR whole frame subtrees INTO a frame (or
+  `top`/`none`/omit → out to top level) via `reparentNode` — the ONE way to move a node between
+  frames, which `group` won't do; a cycle (a frame into itself or its own descendant) is refused.
   `arrange`/`align` now run in ONE coordinate space: all top-level, OR all children of one frame
   (`commonParentId` decides; a mixed set is refused, not silently subset-arranged — the old
   behavior). When the ids are a frame's children, the frame is shrunk to hug the tidied layout

@@ -4958,7 +4958,20 @@ body,
   border: 1.5px dashed;
   border-radius: 14px;
   box-sizing: border-box;
-  cursor: grab;
+}
+
+/* A frame is a background CONTAINER, not a giant drag target. Its body passes pointer input
+   through to React Flow's pane (pan / rubber-band select), and — since frames nest — an outer
+   frame no longer swallows the clicks meant for a frame drawn inside it. The label pill, the
+   actions and the resize handles explicitly opt back in; the pill is also the node's
+   `dragHandle`, so dragging a frame means dragging its label. */
+.react-flow__node-group {
+  pointer-events: none !important;
+}
+.react-flow__node-group .group-node__label,
+.react-flow__node-group .group-node__actions,
+.react-flow__node-group .react-flow__resize-control {
+  pointer-events: auto;
 }
 
 /* Bound to a git worktree: a checkout, not a loose grouping. Solid, thicker border (the tint is
@@ -4995,6 +5008,10 @@ body,
   border: 1px solid var(--border);
   border-radius: 999px;
   user-select: none;
+  cursor: grab;
+}
+.group-node__label:active {
+  cursor: grabbing;
 }
 
 /* Zoomed far out (boost ≥ 2, toggled in Canvas.setGroupLabelBoost), the pill keeps only the
@@ -6424,6 +6441,13 @@ body,
   padding-left: 6px;
   border-left: 1px solid rgba(var(--tint-rgb), 0.08);
 }
+/* Sibling-reorder drop zones for group rows in the sessions tree (a thin accent rule marks
+   where the dragged frame would land). */
+.ss-subgroup__reorder-zone,
+.ss-subgroup__reorder-end { position: relative; height: 5px; }
+.ss-subgroup__reorder-end--root { margin-left: 15px; }
+.ss-subgroup__reorder-zone.is-drop-before::before,
+.ss-subgroup__reorder-end.is-drop-before::before { content: ''; position: absolute; top: 1px; left: 2px; right: 6px; height: 2px; border-radius: 1px; background: var(--accent); pointer-events: none; }
 .ss-subgroup__head { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
 .ss-subgroup__head:hover { background: var(--panel-header); }
 .ss-subgroup__dot { width: 7px; height: 7px; border-radius: 2px; flex: 0 0 auto; }
