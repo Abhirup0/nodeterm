@@ -31,6 +31,23 @@ describe('writeFilesToClipboard', () => {
     expect(writeFilesToClipboard('not-an-array', dependencies())).toBe(false)
   })
 
+  it('caps the selection, counting only the files it kept', () => {
+    const paths = (n: number): string[] => Array.from({ length: n }, (_, i) => `/tmp/f${i}`)
+    const at = dependencies()
+    // Exactly at the cap is still one copy, not a truncated one.
+    expect(writeFilesToClipboard(paths(64), at)).toBe(true)
+    expect(vi.mocked(at.writeBuffer).mock.calls[0][1].toString().match(/<string>/g)).toHaveLength(64)
+    // One over refuses outright — a partial pasteboard is worse than none, because the user
+    // cannot see which files it dropped.
+    expect(writeFilesToClipboard(paths(65), dependencies())).toBe(false)
+    // Duplicates are folded before the cap is charged, so 65 entries naming 64 files still fit.
+    const dupes = dependencies()
+    expect(writeFilesToClipboard([...paths(64), '/tmp/f0'], dupes)).toBe(true)
+    expect(vi.mocked(dupes.writeBuffer).mock.calls[0][1].toString().match(/<string>/g)).toHaveLength(
+      64
+    )
+  })
+
   it('fails closed when the OS clipboard write fails', () => {
     expect(
       writeFilesToClipboard(

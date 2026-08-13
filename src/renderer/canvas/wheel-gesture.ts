@@ -39,13 +39,19 @@ export class MacWheelGestureRouter {
     return false
   }
 
+  /**
+   * `overNativeScrollable` is a THUNK, not a boolean: the caller answers it with a DOM ancestor
+   * walk and this runs on every wheel packet (~120 Hz through a trackpad pan), so it must not be
+   * paid for the packets that never reach the question — a non-trackpad wheel is answered by
+   * `shouldPan` alone.
+   */
   destination(
     event: WheelGesture,
     mac: boolean,
-    overNativeScrollable: boolean,
+    overNativeScrollable: () => boolean,
     now = performance.now()
   ): MacWheelDestination {
     if (!this.shouldPan(event, mac, now)) return 'native'
-    return overNativeScrollable ? 'native' : 'flow-pan'
+    return overNativeScrollable() ? 'native' : 'flow-pan'
   }
 }

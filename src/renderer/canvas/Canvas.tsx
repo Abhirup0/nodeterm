@@ -2566,13 +2566,18 @@ export function Canvas() {
     const onWheel = (e: WheelEvent) => {
       if (canvasLocked) return
       if (!e.ctrlKey && !e.metaKey) {
-        const overNativeScrollable = !!(e.target as HTMLElement | null)?.closest('.nowheel')
+        // The ancestor walk is the expensive part of this handler at ~120 Hz, so it is memoized
+        // per packet AND never run for a packet no guard asks about (a plain wheel with wheelZoom
+        // off, which is the default, walks nothing at all).
+        const target = e.target as HTMLElement | null
+        let scroller: boolean | undefined
+        const overNativeScrollable = (): boolean => (scroller ??= !!target?.closest('.nowheel'))
         // A macOS trackpad's two-finger scroll pans the canvas outside native scroll surfaces;
         // inside them (terminal, Monaco, markdown) it scrolls that surface as before.
         if (wheelRouting.destination(e, isMac, overNativeScrollable) === 'flow-pan') return
-        if (overNativeScrollable) return
         // pinch (ctrl+wheel) / Cmd/Ctrl+scroll always zoom; plain wheel only when opted in
         if (!wheelZoom) return
+        if (overNativeScrollable()) return
       }
       e.preventDefault()
       e.stopPropagation()
@@ -4825,9 +4830,20 @@ export function Canvas() {
           return
         }
         // Nothing selected as text: copy the selected file-backed nodes as FILE REFERENCES, so
-        // Finder (or any file-aware app) pastes the actual files. Desktop/macOS only — the browser
-        // stub answers false and the banner says why.
-        const paths = selectedLocalFilePaths(nodesRef.current)
+        // Finder (or any file-aware app) pastes the actual files.
+        //
+        // Gated to where it can actually succeed, because the failure path raises a banner that
+        // stays until dismissed — and before this feature the keystroke was a silent no-op, which
+        // is what every other machine must keep getting. `writeFilesToClipboard` is darwin-gated
+        // in main and the browser bridge stub answers false, so on a non-mac renderer (desktop OR
+        // Server Edition) this branch could only ever produce that banner, wearing macOS-specific
+        // copy on a Linux box. The board is an opaque overlay over the canvas, so a copy there
+        // would act on a selection the user cannot see (the canvas-only-shortcut discipline).
+        const projects = useProjects.getState()
+        if (!isMac || isKanbanOpen(projects.activeProjectId)) return
+        const paths = selectedLocalFilePaths(nodesRef.current, {
+          projectIsRelay: !!projects.getProject(projects.activeProjectId ?? '')?.remote
+        })
         if (!paths.length) return
         e.preventDefault()
         void window.nodeTerminal.clipboard

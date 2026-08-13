@@ -28,6 +28,21 @@ describe('selectedLocalFilePaths', () => {
     ).toEqual(['/tmp/image.png', '/tmp/video.mp4', '/tmp/page.html'])
   })
 
+  it('copies nothing at all from a relay tab, whose paths describe the PEER disk', () => {
+    // Not "filters the remote ones out": in a relay tab EVERY path is the peer's, and the local
+    // statSync can silently match a same-named local file. The whole gesture is off.
+    expect(
+      selectedLocalFilePaths([node('image', 'editor', '/home/me/proj/src/x.ts')], {
+        projectIsRelay: true
+      })
+    ).toEqual([])
+    expect(
+      selectedLocalFilePaths([node('image', 'editor', '/home/me/proj/src/x.ts')], {
+        projectIsRelay: false
+      })
+    ).toEqual(['/home/me/proj/src/x.ts'])
+  })
+
   it('excludes unselected, remote, missing and non-file node kinds', () => {
     const unselected = node('unselected', 'editor', '/tmp/a')
     unselected.selected = false
