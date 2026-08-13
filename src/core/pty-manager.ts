@@ -53,6 +53,12 @@ import { claudeConfigDirFor } from './claude-config-dir'
 import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
 import { presenceHub } from './presence/hub'
+import {
+  codexLauncherDir,
+  forgetCodexThreadIdentitiesForNode,
+  installCodexLauncher
+} from './codex-identity-proxy'
+import { hasSharedIdentity, type AgentId } from '../shared/agents/config'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -1574,6 +1580,12 @@ export class PtyManager {
     // Ensure the login-shell PATH is resolved (prewarmed in init(); usually already settled)
     // so the session env below picks it up — awaiting keeps the event loop free either way.
     await resolveShellPath()
+    // Rewrite the launcher on every create: it is generated, so an app upgrade must not leave an
+    // old copy behind. Failure is not fatal — `installCodexLauncher` answers null, the caps probe
+    // says "no shared identity", and the launch line the renderer already chose is the bare CLI.
+    if (hasSharedIdentity((options.agentId ?? 'claude') as AgentId) && !options.sshRemote) {
+      installCodexLauncher()
+    }
     const sessionId = this.spawnSession(options, clientId, undefined)
     const spawned = this.sessions.get(sessionId)
     // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
@@ -1886,6 +1898,14 @@ export class PtyManager {
         ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude', permWaitSecs)
         : {}
     for (const [k, v] of Object.entries(hookEnv)) env[k] = v
+
+    // Shared-identity agents (SHARED_IDENTITY_CAPABLE — never `agentId === 'codex'`) reach their
+    // managed launcher by NAME, so its directory goes first on THIS session's PATH only. A plain
+    // terminal, and every other agent, sees the PATH it always saw. The launcher itself falls back
+    // to the bare CLI, so a session that gets the PATH but no identity is still a working session.
+    if (hasSharedIdentity((options.agentId ?? 'claude') as AgentId) && !options.sshRemote) {
+      env.PATH = `${codexLauncherDir()}${path.delimiter}${env.PATH ?? ''}`
+    }
 
     // Managed Claude account: the whole session runs under the account's private config
     // dir. The claude CLI then reads/writes credentials + transcripts there. Also strip
@@ -2998,6 +3018,15 @@ export class PtyManager {
     // OLD cwd's session, and the respawn is a cold start (`fresh`), so replaying it would paint the
     // pre-move terminal into the new one.
     await deleteScrollback(persistKey)
+    // Same hook, same reason as the snapshot above: this node's Codex thread records go with the
+    // session. Left behind they accumulate one file per thread forever, and the hook prelude keeps
+    // re-exporting a DELETED node's id into any tool shell that still carries that thread id.
+    //
+    // Like the snapshot, this also runs for a RECYCLE (the worktree move), where the node lives on
+    // — and that is fine rather than intended: a recycle respawns cold, so the next launch mints or
+    // re-binds a record immediately. Worth stating because the two intents share this line: only
+    // `delete` means "gone for good".
+    forgetCodexThreadIdentitiesForNode(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: end the REMOTE session.
       const ssh = findSsh()
