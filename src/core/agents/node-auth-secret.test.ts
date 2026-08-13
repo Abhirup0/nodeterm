@@ -106,4 +106,20 @@ describe('node-auth secret behind CorePlatform', () => {
     initPlatform(fakePlatform({ userDataDir: dir }))
     await expect(loadOrCreateNodeAuthSecret()).rejects.toThrow(/invalid|malformed/i)
   })
+
+  it('reject-then-retry: a rejected load clears the single-flight cache so a later healthy call succeeds', async () => {
+    // The whole fail-open series leans on this: if a rejection LEFT the rejected promise cached, the
+    // shell's catch would swallow it once and every subsequent boot-path retry would re-await the same
+    // dead promise — identity would stay wedged off for the life of the process. Prove the cache clears.
+    const file = path.join(dir, 'node-auth-key.bin')
+    fs.writeFileSync(file, Buffer.alloc(10), { mode: 0o600 })
+    initPlatform(fakePlatform({ userDataDir: dir }))
+    await expect(loadOrCreateNodeAuthSecret()).rejects.toThrow(/invalid|malformed/i)
+
+    // Heal the platform (remove the poisoned file) and retry — a fresh mint must now succeed.
+    fs.rmSync(file)
+    const secret = await loadOrCreateNodeAuthSecret()
+    expect(secret.byteLength).toBe(32)
+    expect(fs.existsSync(file)).toBe(true)
+  })
 })

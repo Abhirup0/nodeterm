@@ -47,3 +47,9 @@ describe('hookServer.buildPtyEnv — canvas control gate', () => {
     expect(hookServer.buildPtyEnv('n1', 'grok').NODETERM_NODE_ID).toBe('n1')
   })
 })
+
+describe('hookServer.setNodeAuthSecret — length guard', () => {
+  it('rejects a secret shorter than 32 bytes rather than arming a weak identity', () => {
+    expect(() => hookServer.setNodeAuthSecret(new Uint8Array(31))).toThrow(/invalid|secret/i)
+  })
+})

@@ -23,6 +23,7 @@ import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
+import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -416,6 +417,17 @@ export async function startServer(
     }
   }
   await hookServer.start()
+
+  // ---- Node identity (src/core/agents/node-auth-secret.ts) ------------------------------------
+  // First time the Server Edition arms node identity. Headless Linux has no OS keychain, so the
+  // secret is stored as raw 0600 bytes (node-auth-key.bin); the loader handles the at-rest format.
+  // FAIL OPEN and LOUD: if the secret can't be created/read, identity stays unavailable (legacy
+  // mode) and the hook server keeps serving — a throw here must never block boot or the hooks.
+  try {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+  } catch (error) {
+    console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
+  }
 
   // Context Link: core owns the whole feature (read handler, shim, skill, instruction blocks) and
   // writes everything under `dataDir`; what it needs from a shell is the link map. The desktop's

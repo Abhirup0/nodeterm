@@ -206,10 +206,35 @@ class HookServer {
     return createHmac('sha256', this.codexNodeAuthSecret).update(nodeId).digest('base64url')
   }
 
-  /** The shell injects a keychain-backed, restart-stable secret before any Codex PTY is created. */
-  setCodexNodeAuthSecret(secret: Uint8Array): void {
-    if (secret.byteLength < 32) throw new Error('Invalid NodeTerm Codex node-auth secret')
+  /**
+   * The shell injects a restart-stable node-auth secret before any identity-scoped PTY is created —
+   * sealed via safeStorage on the desktop, raw 0600 bytes on the Server Edition (see
+   * core/agents/node-auth-secret.ts). Called on BOTH shells at boot. Rejects a secret under 32
+   * bytes so a truncated/garbage load can never arm a weak identity.
+   */
+  setNodeAuthSecret(secret: Uint8Array): void {
+    if (secret.byteLength < 32) throw new Error('Invalid NodeTerm node-auth secret')
     this.codexNodeAuthSecret = Buffer.from(secret)
+  }
+
+  /**
+   * Thin alias kept for one release so anything still calling the #167-era name keeps working while
+   * both shells migrate to setNodeAuthSecret. A later task removes it.
+   */
+  setCodexNodeAuthSecret(secret: Uint8Array): void {
+    this.setNodeAuthSecret(secret)
+  }
+
+  /** True once a valid secret is set; false before, and after a failed load (nothing was set). The
+   *  later routing tasks gate every identity-scoped decision on this. */
+  identityAvailable(): boolean {
+    return !!this.codexNodeAuthSecret
+  }
+
+  /** The raw secret for the routing tasks that must derive/verify per-node capabilities themselves,
+   *  or null when identity is unavailable (legacy mode). Callers must handle null — never throw. */
+  nodeAuthSecretOrNull(): Buffer | null {
+    return this.codexNodeAuthSecret
   }
 
   hasCodexNodeAuth(): boolean {
