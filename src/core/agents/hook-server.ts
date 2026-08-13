@@ -378,6 +378,18 @@ class HookServer {
   ): Promise<void> {
     const verb = pathname.replace(/^\/codex-thread\//, '')
     const form = parseForm(await readBody(req))
+    // SAME HAND-OFF as /control/ and /context-link/, and for the same reason — this route needs it
+    // MOST. The receive phase is over, so the 2s slowloris guard has done its job; leaving it armed
+    // destroys the socket while the HANDLER is still working. `/codex-thread/start` mints a thread
+    // through a five-step conversation with the app-server (initialize, start, a turn, an
+    // interrupt, a fork, a delete) against a server that is typically COLD — the first codex node
+    // after boot is the common case, not the edge one. At 2s that fails every time, and it fails in
+    // the worst possible way: curl gives up, the launcher falls back to plain codex, and main goes
+    // on to create the thread and write a record for it — an orphan thread plus an orphan record
+    // per attempt. The client budget is deliberately set ABOVE the server's own (see
+    // CODEX_THREAD_START_TIMEOUT_MS / the launcher's --max-time) so the server is always the one
+    // that gives up first and can clean up after itself.
+    req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
     const nodeId = form.nodeId ?? ''
     if (!/^[A-Za-z0-9._-]+$/.test(nodeId)) {
       res.writeHead(400)
@@ -385,6 +397,19 @@ class HookServer {
       return
     }
     if (verb === 'fallback') {
+      // This is the ONE route that may be called without the per-node capability, because the
+      // commonest thing it reports is "there was no capability to present" — requiring one would
+      // silence it in exactly the case it exists for. That exemption is as narrow as it can be
+      // made: a report that DOES carry a token must have the right one, so only a tokenless caller
+      // is trusted on the nodeId it names. Without this a session holding the shared bearer could
+      // flag a sibling node as fallen back. Cosmetic (the flag is transient and downgrade-only),
+      // but a claim in a comment has to be true.
+      const token = req.headers['x-nodeterm-node-token']
+      if (token !== undefined && !this.codexNodeTokenMatches(nodeId, token)) {
+        res.writeHead(403)
+        res.end()
+        return
+      }
       // A reason is free text from a generated script we wrote; bound it and let the UI show it.
       const reason = (form.reason ?? '').slice(0, 64).replace(/[^A-Za-z0-9._-]/g, '') || 'unknown'
       this.codexIdentityListener?.({ nodeId, mode: 'plain', reason })

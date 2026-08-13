@@ -28,6 +28,7 @@ let started: Array<{ nodeId: string; cwd: string }> = []
 let bound: Array<{ nodeId: string; threadId: string }> = []
 let fallbacks: Array<{ nodeId: string; reason?: string }> = []
 let startAnswer: (() => string) | null = null
+let startDelayMs = 0
 let bindAnswer: (() => void) | null = null
 
 /** A stand-in for the real `codex`, which records how it was invoked and exits 0. */
@@ -54,6 +55,7 @@ beforeAll(async () => {
   hookServer.setCodexNodeAuthSecret(randomBytes(32))
   hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd }) => {
     started.push({ nodeId, cwd })
+    if (startDelayMs) await new Promise((r) => setTimeout(r, startDelayMs))
     if (!startAnswer) throw new Error('start refused')
     return startAnswer()
   })
@@ -78,6 +80,7 @@ beforeEach(() => {
   bound = []
   fallbacks = []
   startAnswer = () => 'thread-abc'
+  startDelayMs = 0
   bindAnswer = () => {}
   fs.writeFileSync(argvLog, '')
 })
@@ -203,7 +206,52 @@ describe('falls back to plain codex', () => {
   })
 })
 
+describe('a start handler that takes real time', () => {
+  // REGRESSION. `/codex-thread/start` mints a thread through a five-step conversation with an
+  // app-server that is typically COLD — the first codex node after boot. The route inherited the
+  // 2s slowloris guard (a RECEIVE-phase guard), so the socket was destroyed while the handler was
+  // still working: curl failed, the launcher fell back to plain codex, and the server went on to
+  // create the thread and write a record for it. An orphan thread and an orphan record, per
+  // attempt, in the most common case there is. A handler that resolves synchronously — which is
+  // what this suite used to have — cannot see any of that.
+  it('is waited for, and its thread is the one codex resumes', async () => {
+    startDelayMs = 3000
+    await callLauncher([])
+    expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc'])
+    expect(fallbacks).toEqual([])
+  }, 20_000)
+})
+
 describe('per-node capability (the authorization the shared bearer cannot give)', () => {
+  it('the fallback report is trusted only when it presents no token at all', async () => {
+    // The one route the capability is not required on — because the commonest thing it reports is
+    // that there was no capability to present. The exemption is exactly that narrow: a report that
+    // DOES carry a token must carry the right one, or a session holding only the shared bearer
+    // could flag a sibling node as fallen back.
+    const post = (nodeId: string, headers: Record<string, string>) =>
+      fetch(`http://127.0.0.1:${hookServer.getPort()}/codex-thread/fallback`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'x-nodeterm-hook-token': hookServer.getToken(),
+          ...headers
+        },
+        body: `nodeId=${nodeId}&reason=broker-unreachable`
+      })
+    expect((await post('node-1', {})).status).toBe(204)
+    expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'broker-unreachable' }])
+    const wrong = await post('node-1', {
+      'x-nodeterm-node-token': hookServer.codexNodeAuthToken('node-2')
+    })
+    expect(wrong.status).toBe(403)
+    expect(fallbacks).toHaveLength(1)
+    const right = await post('node-1', {
+      'x-nodeterm-node-token': hookServer.codexNodeAuthToken('node-1')
+    })
+    expect(right.status).toBe(204)
+    expect(fallbacks).toHaveLength(2)
+  })
+
   it("refuses a token minted for a SIBLING node, and falls back rather than binding it", async () => {
     await callLauncher(['resume', 'thread-xyz'], {
       NODETERM_CODEX_NODE_TOKEN: hookServer.codexNodeAuthToken('node-2')

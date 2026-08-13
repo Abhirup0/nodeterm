@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import {
   bindCodexThreadIdentity,
   codexLauncherDir,
+  forgetCodexThreadIdentitiesForNode,
   codexThreadIdentityRoot,
   installCodexLauncher,
   readCodexThreadIdentity,
@@ -115,5 +116,30 @@ describe('installCodexLauncher', () => {
     initPlatform(fakePlatform({ userDataDir: path.join(dir, 'file-not-a-dir') }))
     fs.writeFileSync(path.join(dir, 'file-not-a-dir'), 'x')
     expect(installCodexLauncher()).toBeNull()
+  })
+})
+
+describe('forgetting a permanently deleted node', () => {
+  it('removes every record naming it, and leaves the others alone', () => {
+    writeCodexThreadIdentity('thread-1', 'node-1', '/data/e')
+    writeCodexThreadIdentity('thread-2', 'node-1', '/data/e')
+    writeCodexThreadIdentity('thread-3', 'node-2', '/data/e')
+    forgetCodexThreadIdentitiesForNode('node-1')
+    expect(resolveCodexThreadNodeIdentity('thread-1')).toBeUndefined()
+    expect(resolveCodexThreadNodeIdentity('thread-2')).toBeUndefined()
+    // Without this the directory grows a file per thread forever, AND a dead node's record keeps
+    // re-exporting its node id into any tool shell still carrying that thread id.
+    expect(resolveCodexThreadNodeIdentity('thread-3')).toBe('node-2')
+  })
+
+  it('never deletes a record it does not trust, and never throws', () => {
+    writeCodexThreadIdentity('thread-1', 'node-1', '/data/e')
+    const file = path.join(codexThreadIdentityRoot(), 'thread-1')
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('node-1', 'node-2'))
+    forgetCodexThreadIdentitiesForNode('node-2')
+    expect(fs.existsSync(file)).toBe(true)
+    // A node deletion must never fail on this: no directory at all is simply nothing to forget.
+    fs.rmSync(codexThreadIdentityRoot(), { recursive: true, force: true })
+    expect(() => forgetCodexThreadIdentitiesForNode('node-1')).not.toThrow()
   })
 })

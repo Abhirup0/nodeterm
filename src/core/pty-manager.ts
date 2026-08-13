@@ -53,7 +53,11 @@ import { claudeConfigDirFor } from './claude-config-dir'
 import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
 import { presenceHub } from './presence/hub'
-import { codexLauncherDir, installCodexLauncher } from './codex-identity-proxy'
+import {
+  codexLauncherDir,
+  forgetCodexThreadIdentitiesForNode,
+  installCodexLauncher
+} from './codex-identity-proxy'
 import { hasSharedIdentity, type AgentId } from '../shared/agents/config'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -3014,6 +3018,10 @@ export class PtyManager {
     // OLD cwd's session, and the respawn is a cold start (`fresh`), so replaying it would paint the
     // pre-move terminal into the new one.
     await deleteScrollback(persistKey)
+    // Same hook, same reason: a permanently deleted node's Codex thread records must go with it.
+    // Left behind they accumulate one file per thread forever, and the hook prelude keeps
+    // re-exporting a dead node's id into any tool shell that still carries that thread id.
+    forgetCodexThreadIdentitiesForNode(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: end the REMOTE session.
       const ssh = findSsh()

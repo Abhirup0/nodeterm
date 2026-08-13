@@ -67,7 +67,10 @@ function safeIdentityRoot(): string | null {
   }
 }
 
-export function buildManagedScript(agentId: string, identityRoot = safeIdentityRoot()): string {
+export function buildManagedScript(
+  agentId: string,
+  identityRoot: string | null = safeIdentityRoot()
+): string {
   return [
     '#!/bin/sh',
     ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot)] : []),

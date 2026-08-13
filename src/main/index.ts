@@ -130,7 +130,7 @@ import {
   setCodexThreadIdentityAuthSecret,
   writeCodexThreadIdentity
 } from '../core/codex-identity-proxy'
-import { startCodexThread } from '../core/codex-session-name'
+import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
 import { loadOrCreateCodexNodeAuthSecret } from './codex-node-auth-secret'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import {
@@ -916,7 +916,11 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error('[codex-identity] unavailable; Codex nodes run plain codex:', error)
   }
-  // Installs the launcher and answers the renderer's construction-time question.
+  // Installs the launcher and publishes the construction-time answer. MUST stay after the secret
+  // above and before the window: it is what unblocks `codexIdentityCaps()`, which the renderer's
+  // first Codex launch line waits on. Reordering it later only delays that answer now (callers
+  // wait rather than being told "no"), but leaving it out entirely would stall them until their
+  // own timeout, so it is not optional.
   refreshCodexIdentityCaps()
   hookServer.setCodexIdentityListener((ev) => sendToMain(IPC.codexIdentity, ev))
   // A node still on a canvas is "live". A thread whose recorded owner is gone (node deleted, or a
@@ -929,6 +933,14 @@ app.whenReady().then(async () => {
     return threadId
   })
   hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint }) => {
+    // Ask the app-server whether this conversation exists BEFORE recording that a node owns it.
+    // The id reaching us is whatever the node persisted — it can be stale, or from a session that
+    // ran under plain codex and the shared server has never heard of. Binding it anyway writes a
+    // record and then execs `codex --remote unix:// resume <id>`, which dies with "no rollout
+    // found" AFTER exec, where nothing can fall back any more. Refusing here IS the fallback.
+    if (!(await codexThreadExists(threadId))) {
+      throw new Error('Codex thread is unknown to the shared app-server')
+    }
     bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive)
   })
   // SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a

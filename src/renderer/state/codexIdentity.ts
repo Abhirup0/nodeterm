@@ -67,7 +67,6 @@ export type CodexIdentityMode = 'shared' | 'plain'
 interface CodexIdentityState {
   byId: Record<string, { mode: CodexIdentityMode; reason?: string }>
   setMode(nodeId: string, mode: CodexIdentityMode, reason?: string): void
-  clear(nodeId: string): void
 }
 
 export const useCodexIdentity = create<CodexIdentityState>((set) => ({
@@ -77,13 +76,6 @@ export const useCodexIdentity = create<CodexIdentityState>((set) => ({
       const prev = s.byId[nodeId]
       if (prev?.mode === mode && prev.reason === reason) return s
       return { byId: { ...s.byId, [nodeId]: { mode, reason } } }
-    }),
-  clear: (nodeId) =>
-    set((s) => {
-      if (!(nodeId in s.byId)) return s
-      const byId = { ...s.byId }
-      delete byId[nodeId]
-      return { byId }
     })
 }))
 

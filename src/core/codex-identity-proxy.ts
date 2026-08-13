@@ -21,11 +21,30 @@
  * storage shape is one file per thread id; scoping adds a directory level above it without
  * changing anything this file promises.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs'
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync
+} from 'fs'
 import path from 'path'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { platform } from './platform'
-import { posixQuote } from '../shared/ssh'
+
+/**
+ * How long the SERVER gives itself to mint a thread (`startCodexThreadAt`'s default).
+ *
+ * The launcher's own curl budget is derived from this and is deliberately LARGER
+ * (`CODEX_THREAD_START_CLIENT_MAX_S`), so the server is always the side that gives up first.
+ * Get that ordering backwards and a slow app-server produces the worst outcome available: curl
+ * quits, the launcher falls back to plain codex, and the server carries on to create a thread and
+ * write a record for it that nothing will ever resume.
+ */
+export const CODEX_THREAD_START_TIMEOUT_MS = 20_000
+const CODEX_THREAD_START_CLIENT_MAX_S = CODEX_THREAD_START_TIMEOUT_MS / 1000 + 10
 
 const SAFE_NODE_ID = /^[A-Za-z0-9._-]+$/
 const SAFE_ENDPOINT = /^\/[A-Za-z0-9._/ -]+$/
@@ -193,13 +212,37 @@ export function bindCodexThreadIdentity(
   writeCodexThreadIdentity(threadId, nodeId, hookEndpoint, root)
 }
 
-/** Drop a node's record when the node is permanently deleted. Best effort. */
-export function forgetCodexThreadIdentity(threadId: string, root = codexThreadIdentityRoot()): void {
-  if (!SAFE_THREAD_ID.test(threadId)) return
+/**
+ * Drop every record naming `nodeId`, when that node is permanently deleted.
+ *
+ * Two reasons this is not just housekeeping. The directory would otherwise grow one file per
+ * thread forever, and — worse — a dead node's record keeps re-exporting its node id and hook
+ * endpoint into any tool shell that still carries the thread id, so a deleted node's identity
+ * outlives it. Keyed by node, not by thread, because the caller (`destroySession`) knows the node
+ * id and nothing else; the directory is one flat level, so the scan is a single readdir.
+ *
+ * Best effort throughout: a record we cannot read or remove must never fail a node deletion.
+ */
+export function forgetCodexThreadIdentitiesForNode(
+  nodeId: string,
+  root = codexThreadIdentityRoot()
+): void {
+  if (!SAFE_NODE_ID.test(nodeId)) return
+  let entries: string[]
   try {
-    unlinkSync(path.join(root, threadId))
+    entries = readdirSync(root)
   } catch {
-    /* nothing to forget */
+    return
+  }
+  for (const threadId of entries) {
+    if (!SAFE_THREAD_ID.test(threadId)) continue
+    // Reads through the signature check, so a record we do not trust is also one we do not delete.
+    if (readCodexThreadIdentity(threadId, root)?.nodeId !== nodeId) continue
+    try {
+      unlinkSync(path.join(root, threadId))
+    } catch {
+      /* nothing to forget */
+    }
   }
 }
 
@@ -280,7 +323,10 @@ nt_preflight() {
 }
 
 # Best effort, and never fatal: tell the desktop this node is running plain codex, so the UI can
-# say so without the user reading a log. Requires only the shared bearer — it names no sibling.
+# say so without the user reading a log. Sent WITHOUT the per-node capability on purpose — the
+# commonest thing it reports is that there was no capability to present. The server only trusts a
+# TOKENLESS report on the node it names (see handleCodexThread), so a session that does hold a
+# token cannot use this route to flag a sibling.
 nt_report_fallback() {
   [ -n "\${NODETERM_HOOK_PORT-}" ] || return 0
   [ -n "\${NODETERM_HOOK_TOKEN-}" ] || return 0
@@ -298,16 +344,21 @@ if [ -n "$nt_reason" ]; then
   exec codex "$@"
 fi
 
+# $1 is the client budget in seconds; the rest is curl's. Start gets a budget LARGER than the
+# server's own (CODEX_THREAD_START_TIMEOUT_MS) so the server, not curl, is what times out — a curl
+# that quits first leaves behind a thread and a record nothing will ever resume.
 nt_post() {
+  nt_budget=$1
+  shift
   printf 'header = "X-NodeTerm-Hook-Token: %s"\\nheader = "X-NodeTerm-Node-Token: %s"\\n' \\
     "$NODETERM_HOOK_TOKEN" "$NODETERM_CODEX_NODE_TOKEN" |
-    nt_hook_curl --silent --show-error --fail --max-time 10 --config - --request POST "$@"
+    nt_hook_curl --silent --show-error --fail --max-time "$nt_budget" --config - --request POST "$@"
 }
 
 if [ "\${1-}" = resume ]; then
   # Claim the caller-supplied thread for THIS node before Codex opens it. A refusal means another
   # live node owns it; two clients on one thread is worse than one plain session, so we fall back.
-  if nt_post --data-urlencode "nodeId=$NODETERM_NODE_ID" --data-urlencode "threadId=\${2-}" \\
+  if nt_post 20 --data-urlencode "nodeId=$NODETERM_NODE_ID" --data-urlencode "threadId=\${2-}" \\
       "http://localhost:\${NODETERM_HOOK_PORT-0}/codex-thread/bind" >/dev/null; then
     exec codex --remote unix:// "$@"
   fi
@@ -315,7 +366,7 @@ if [ "\${1-}" = resume ]; then
   exec codex "$@"
 fi
 
-nt_thread=$(nt_post --data-urlencode "nodeId=$NODETERM_NODE_ID" --data-urlencode "cwd=$PWD" \\
+nt_thread=$(nt_post ${CODEX_THREAD_START_CLIENT_MAX_S} --data-urlencode "nodeId=$NODETERM_NODE_ID" --data-urlencode "cwd=$PWD" \\
   "http://localhost:\${NODETERM_HOOK_PORT-0}/codex-thread/start") || nt_thread=''
 nt_thread=$(printf %s "$nt_thread" | tr -d '\\r\\n')
 case "$nt_thread" in
@@ -344,9 +395,4 @@ export function installCodexLauncher(): string | null {
   } catch {
     return null
   }
-}
-
-/** The launcher directory as a single POSIX-sh token, for embedding in generated scripts. */
-export function quotedCodexLauncherDir(): string {
-  return posixQuote(codexLauncherDir())
 }

@@ -16,12 +16,14 @@
 import { homedir } from 'os'
 import path from 'path'
 import { WebSocket } from 'ws'
+// Minting a thread is a multi-step conversation with a typically COLD server, so it needs a real
+// budget — and the hook route serving it must raise its socket guard to match (handleCodexThread).
+// Shared with the launcher's client budget so the two cannot drift apart.
+import { CODEX_THREAD_START_TIMEOUT_MS } from './codex-identity-proxy'
 
 const SAFE_THREAD_ID = /^[A-Za-z0-9._-]+$/
 const CACHE_MS = 3_000
 const REQUEST_TIMEOUT_MS = 2_000
-/** Minting a thread is a multi-step conversation with a cold server; it needs a real budget. */
-const START_TIMEOUT_MS = 20_000
 
 const names = new Map<string, { name: string | null; at: number }>()
 const inflight = new Map<string, Promise<string | null>>()
@@ -43,17 +45,6 @@ export function codexUnixWebSocketUrl(socketPath: string): string {
 
 function connectCodexAppServer(socketPath: string): WebSocket {
   return new WebSocket(codexUnixWebSocketUrl(socketPath), { perMessageDeflate: false })
-}
-
-/** Seed the name cache from a name we were handed out of band (a hook, a bind). */
-export function rememberCodexSessionName(
-  threadId: string,
-  name: unknown,
-  socketPath = defaultCodexAppServerSocket()
-): void {
-  if (!threadId) return
-  const value = typeof name === 'string' && name.trim() ? name.trim() : null
-  names.set(`${socketPath}\0${threadId}`, { name: value, at: Date.now() })
 }
 
 export function readCodexSessionNameAt(
@@ -122,6 +113,84 @@ export function readCodexSessionNameAt(
 }
 
 /**
+ * Does the shared app-server actually know this thread?
+ *
+ * The bind route writes a record claiming a node owns a conversation. Without this check ANY
+ * id the caller hands us binds happily — a stale session id, or one persisted from a
+ * plain-codex-era session that the app-server has never heard of — and the launcher then execs
+ * `codex --remote unix:// resume <id>`, which dies with "no rollout found" AFTER exec, where
+ * there is no fallback left. Asking first turns that dead node into an ordinary fallback.
+ *
+ * A server we cannot reach answers `false`, which is the safe direction here: refusing costs a
+ * plain codex session, accepting costs the node.
+ */
+export function codexThreadExistsAt(
+  socketPath: string,
+  threadId: string,
+  timeoutMs = REQUEST_TIMEOUT_MS
+): Promise<boolean> {
+  if (!SAFE_THREAD_ID.test(threadId)) return Promise.resolve(false)
+  return new Promise((resolve) => {
+    let settled = false
+    let ws: WebSocket
+    const finish = (exists: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try {
+        ws.close()
+      } catch {
+        /* the connection may never have opened */
+      }
+      resolve(exists)
+    }
+    const timer = setTimeout(() => finish(false), timeoutMs)
+    timer.unref?.()
+    try {
+      ws = connectCodexAppServer(socketPath)
+    } catch {
+      clearTimeout(timer)
+      resolve(false)
+      return
+    }
+    ws.once('open', () => {
+      ws.send(
+        JSON.stringify({
+          id: 1,
+          method: 'initialize',
+          params: { clientInfo: { name: 'nodeterm', version: '1' } }
+        })
+      )
+    })
+    ws.on('message', (raw) => {
+      let message: Record<string, any>
+      try {
+        message = JSON.parse(raw.toString())
+      } catch {
+        return
+      }
+      if (message.id === 1) {
+        if (message.error) return finish(false)
+        ws.send(JSON.stringify({ method: 'initialized' }))
+        ws.send(
+          JSON.stringify({ id: 2, method: 'thread/read', params: { threadId, includeTurns: false } })
+        )
+      } else if (message.id === 2) {
+        // The id must come back UNCHANGED: a server that answers with some other thread has not
+        // confirmed the one we asked about.
+        finish(!message.error && message.result?.thread?.id === threadId)
+      }
+    })
+    ws.once('error', () => finish(false))
+    ws.once('close', () => finish(false))
+  })
+}
+
+export function codexThreadExists(threadId: string): Promise<boolean> {
+  return codexThreadExistsAt(defaultCodexAppServerSocket(), threadId)
+}
+
+/**
  * Create one new, immediately RESUMABLE thread on the shared app-server and return its id.
  *
  * `thread/start` alone only creates app-server metadata: it deliberately does not materialize the
@@ -134,7 +203,7 @@ export function readCodexSessionNameAt(
 export function startCodexThreadAt(
   socketPath: string,
   cwd: string,
-  timeoutMs = START_TIMEOUT_MS
+  timeoutMs = CODEX_THREAD_START_TIMEOUT_MS
 ): Promise<string> {
   if (!path.isAbsolute(cwd) || cwd.includes('\0')) {
     return Promise.reject(new Error('Unsupported Codex thread cwd'))
@@ -329,9 +398,4 @@ export function readCodexSessionName(
   )
   inflight.set(key, request)
   return request
-}
-
-export function forgetCodexSessionNames(): void {
-  names.clear()
-  inflight.clear()
 }
