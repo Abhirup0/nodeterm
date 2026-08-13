@@ -53,8 +53,13 @@ function handle(ws: WebSocket): void {
 }
 
 beforeAll(async () => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-codex-appserver-'))
-  sock = path.join(dir, 'app-server-control.sock')
+  // Short prefix and short socket name ON PURPOSE. Unix socket paths are capped at `sun_path`
+  // (104 bytes on macOS), and macOS's `os.tmpdir()` is already ~49 of them
+  // (`/var/folders/ab/…/T/`); a descriptive prefix plus `app-server-control.sock` lands exactly on
+  // the limit and fails to bind on a developer's machine while passing in CI. Everything still
+  // lives inside the mkdtemp directory, so the path stays unpredictable.
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-cx-'))
+  sock = path.join(dir, 'as.sock')
   server = http.createServer()
   wss = new WebSocketServer({ server })
   wss.on('connection', handle)
@@ -90,7 +95,7 @@ describe('codexThreadExistsAt', () => {
     // this check runs immediately after it on the cold/reboot path. Without the retry, a daemon
     // that binds a beat late turns a legitimate resume into `thread-bind-refused` → plain codex:
     // a NEW way to lose shared identity on exactly the path the feature exists for.
-    const latePath = path.join(dir, 'late.sock')
+    const latePath = path.join(dir, 'lt.sock')
     const late = http.createServer()
     const lateWss = new WebSocketServer({ server: late })
     lateWss.on('connection', handle)
