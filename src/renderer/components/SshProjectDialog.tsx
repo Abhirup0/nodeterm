@@ -133,7 +133,11 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
         // outlived the dialog for the rest of the app run.
         connectBegunRef.current = true
         await window.nodeTerminal.sshProject.connect(browseIdRef.current, srv)
-        await list('~')
+        // Land in the machine's DEFAULT folder when it has one (Settings → Remote (SSH)); the
+        // point of configuring it is not to browse from `~` to the same place every time. Fall
+        // back to `~` if it no longer exists — a stale default must not dead-end the dialog.
+        const start = srv.remoteCwd?.trim() || '~'
+        await list(start).catch(() => list('~'))
         setStep('browse')
       } catch (err) {
         setError((err as Error)?.message || 'Could not connect to the server.')

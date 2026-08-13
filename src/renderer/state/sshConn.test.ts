@@ -106,3 +106,56 @@ describe('useSshConn — tri-state probe answer + remote version (tab-menu hint)
     expect(useSshConn.getState().getRemoteClaudeVersion('p1')).toBe('2.1.90 (Claude Code)')
   })
 })
+
+// A HOST ATTACHMENT — a remote node inside a canvas that is not that endpoint's SSH project —
+// has no project row anywhere. Its scope entry is the only record of how to reach the machine and
+// which canvas its nodes are on, so the reconnect coordinator reads it back out of here.
+describe('useSshConn — host attachments', () => {
+  const ATTACHMENT = {
+    conn: { host: 'devbox', user: 'corvin', port: 2222 },
+    hostKey: 'corvin@devbox',
+    remoteCwd: '/srv/app',
+    ownerProjectId: 'local-1'
+  }
+
+  it('answers the owning canvas for an attachment scope, and itself for an SSH project', () => {
+    const s = useSshConn.getState()
+    s.setConn('attached-local-1-deadbeef', { controlPath: '/tmp/a', attachment: ATTACHMENT })
+    s.setConn('ssh-project-1', { controlPath: '/tmp/b' })
+
+    expect(useSshConn.getState().ownerProjectId('attached-local-1-deadbeef')).toBe('local-1')
+    expect(useSshConn.getState().ownerProjectId('ssh-project-1')).toBe('ssh-project-1')
+    // Never undefined: an unknown scope answers itself, so a caller keyed on it still has an id.
+    expect(useSshConn.getState().ownerProjectId('nope')).toBe('nope')
+  })
+
+  it('an SSH project scope is not an attachment', () => {
+    useSshConn.getState().setConn('ssh-project-1', { controlPath: '/tmp/b' })
+    expect(useSshConn.getState().getAttachment('ssh-project-1')).toBeUndefined()
+  })
+
+  it('a RE-connect (bare IPC coordinates) keeps the routing facts', () => {
+    // The regression this guards: the reconnect loop heals the master, setConn overwrites the
+    // entry with what IPC returned, and the scope loses the only record of its endpoint — so the
+    // NEXT drop can never be reconnected, and the respawn goes to the wrong canvas.
+    const s = useSshConn.getState()
+    s.setConn('attached-local-1-deadbeef', { controlPath: '/tmp/a', attachment: ATTACHMENT })
+
+    s.setConn('attached-local-1-deadbeef', { controlPath: '/tmp/a2' })
+
+    const after = useSshConn.getState()
+    expect(after.getControlPath('attached-local-1-deadbeef')).toBe('/tmp/a2')
+    expect(after.getAttachment('attached-local-1-deadbeef')).toEqual(ATTACHMENT)
+  })
+
+  it('lists a project’s attachment scopes so its masters can be torn down with it', () => {
+    const s = useSshConn.getState()
+    s.setConn('a1', { controlPath: '/tmp/1', attachment: ATTACHMENT })
+    s.setConn('a2', { controlPath: '/tmp/2', attachment: { ...ATTACHMENT, hostKey: 'u@other' } })
+    s.setConn('a3', { controlPath: '/tmp/3', attachment: { ...ATTACHMENT, ownerProjectId: 'p2' } })
+    s.setConn('ssh-project-1', { controlPath: '/tmp/4' })
+
+    expect(useSshConn.getState().attachmentScopesOf('local-1').sort()).toEqual(['a1', 'a2'])
+    expect(useSshConn.getState().attachmentScopesOf('p2')).toEqual(['a3'])
+  })
+})

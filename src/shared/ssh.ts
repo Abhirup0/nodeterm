@@ -113,6 +113,54 @@ export function sshExtraArgsEnableLocalExec(extraArgs: string | undefined): bool
 export interface SshServer extends SshConnection {
   id: string
   label: string
+  /** Default remote folder for anything opened on this machine — the "New remote" dialog's
+   *  prefill, and the cwd of a node attached to this host from a LOCAL canvas project (which has
+   *  no `remoteCwd` of its own to inherit). Optional; absent means `~`. */
+  remoteCwd?: string
+}
+
+/**
+ * Stable live-connection scope for an SSH host ATTACHED to a canvas project — i.e. a remote node
+ * living in a project that is not itself that endpoint's SSH project.
+ *
+ * Scoped by project AND endpoint, so two projects attaching the same host get their own
+ * ControlMaster (and their own reconnect loop), and one project attaching two hosts gets two. The
+ * endpoint is FNV-1a hashed rather than embedded: this id reaches the filesystem as part of the
+ * ControlMaster socket path, where a raw `user@host:port` would both leak the inventory and blow
+ * the sun_path length budget on a long hostname.
+ */
+export function sshAttachmentId(projectId: string, conn: SshConnection): string {
+  const input = `${conn.user}\0${conn.host}\0${conn.port ?? 22}`
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `attached-${projectId}-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+/**
+ * Connection scope used by a remote node inside a project.
+ *
+ * An SSH PROJECT owns its ControlMaster under the project id — that is the whole of today's
+ * model, and this returns exactly that whenever the node's endpoint is the project's own. A
+ * remote node embedded in a LOCAL project (or in an SSH project pointed at a DIFFERENT host) owns
+ * a host attachment instead, under the stable project × endpoint id.
+ *
+ * Every consumer of that connection — spawn (`resolveSshRemote`), reconnect (`SshReconnector`),
+ * upload — must make the same choice, or a node resolves a master that was opened for someone
+ * else. Hence one function rather than the rule written out at each site.
+ */
+export function sshConnectionIdForProject(
+  projectId: string,
+  conn: SshConnection,
+  projectServer?: SshConnection
+): string {
+  const sameEndpoint =
+    projectServer?.host === conn.host &&
+    projectServer.user === conn.user &&
+    (projectServer.port ?? 22) === (conn.port ?? 22)
+  return sameEndpoint ? projectId : sshAttachmentId(projectId, conn)
 }
 
 /**

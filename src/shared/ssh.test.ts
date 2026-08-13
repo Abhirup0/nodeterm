@@ -9,6 +9,8 @@ import {
   remoteTmuxCommand,
   remoteTmuxConf,
   parseLsDirs,
+  sshAttachmentId,
+  sshConnectionIdForProject,
   sshHostKey
 } from './ssh'
 
@@ -20,6 +22,62 @@ describe('sshHostKey', () => {
     expect(sshHostKey({ host: 'h', user: 'u', port: 22 } as never)).toBe(
       sshHostKey({ host: 'h', user: 'u', port: 2222 } as never)
     )
+  })
+})
+
+describe('sshAttachmentId', () => {
+  it('shares one scope per project and endpoint without exposing the host in a filename', () => {
+    const a = sshAttachmentId('project-1', { host: 'ubuntu.lan', user: 'corvin', port: 22 })
+    expect(a).toBe(sshAttachmentId('project-1', { host: 'ubuntu.lan', user: 'corvin' }))
+    expect(a).not.toContain('ubuntu.lan')
+    expect(a).not.toBe(sshAttachmentId('project-2', { host: 'ubuntu.lan', user: 'corvin' }))
+    expect(a).not.toBe(sshAttachmentId('project-1', { host: 'ubuntu.lan', user: 'other' }))
+  })
+
+  it('separates two ports on the same host (two different sshd instances)', () => {
+    expect(sshAttachmentId('p', { host: 'h', user: 'u', port: 22 })).not.toBe(
+      sshAttachmentId('p', { host: 'h', user: 'u', port: 2222 })
+    )
+  })
+
+  it('is filesystem-safe: the ControlMaster socket path is built from it', () => {
+    expect(sshAttachmentId('p1', { host: 'a.very.long.hostname.example.com', user: 'u' })).toMatch(
+      /^attached-p1-[0-9a-f]{8}$/
+    )
+  })
+})
+
+describe('sshConnectionIdForProject', () => {
+  const ubuntu = { host: 'devbox', user: 'corvin', port: 2222 }
+
+  it('uses the project id when the project itself lives on that SSH endpoint', () => {
+    expect(sshConnectionIdForProject('project-1', ubuntu, { ...ubuntu })).toBe('project-1')
+  })
+
+  it('treats an omitted port as 22 on BOTH sides (same endpoint, one master)', () => {
+    const plain = { host: 'devbox', user: 'corvin' }
+    expect(sshConnectionIdForProject('p1', plain, { ...plain, port: 22 })).toBe('p1')
+    expect(sshConnectionIdForProject('p1', { ...plain, port: 22 }, plain)).toBe('p1')
+  })
+
+  it('uses the host attachment when a remote node lives in a local project', () => {
+    expect(sshConnectionIdForProject('project-1', ubuntu)).toBe(sshAttachmentId('project-1', ubuntu))
+  })
+
+  it("does not reuse an SSH project's connection for a node on another endpoint", () => {
+    expect(
+      sshConnectionIdForProject('project-1', ubuntu, {
+        host: 'another-host',
+        user: 'corvin',
+        port: 2222
+      })
+    ).toBe(sshAttachmentId('project-1', ubuntu))
+  })
+
+  it('never returns the project id for a node the project cannot serve', () => {
+    // The regression this guards: an attached node resolving the LOCAL project's (absent) master
+    // and, with no `sshRemote`, degrading into a local shell wearing the remote node's identity.
+    expect(sshConnectionIdForProject('local-project', ubuntu)).not.toBe('local-project')
   })
 })
 

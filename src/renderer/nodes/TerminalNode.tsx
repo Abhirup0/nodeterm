@@ -142,7 +142,7 @@ import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, reportsOwnCopy, resumeCommand, agentConfig, agentLaunchProgram } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { ensureActivePermissionMode } from '../state/permissionMode'
-import { buildSshArgs, type SshConnection } from '@shared/ssh'
+import { buildSshArgs, sshConnectionIdForProject, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
@@ -154,17 +154,36 @@ import { AgentMascot } from './AgentMascot'
  *  overlay it falls back to is cheap and self-healing, so waiting longer buys nothing. */
 export const SSH_REMOTE_WAIT_MS = 20000
 
-/** The active project's live ControlMaster path, if any. Lets the caller tell "we will resolve in
- *  a microtask" from "we are about to sit in the wait below" without duplicating the lookup. */
-export function currentControlPath(): string | undefined {
-  return useSshConn.getState().getControlPath(useProjects.getState().activeProjectId)
+/**
+ * Which connection scope a remote node in the ACTIVE project runs over: the project's own id when
+ * the project IS that SSH endpoint, otherwise the project × endpoint host attachment — a remote
+ * node living in a local canvas (or in an SSH project pointed at a different host).
+ *
+ * A node only ever exists in the active project's React Flow, so the active project is its owner.
+ */
+export function sshConnectionScope(conn: SshConnection): string {
+  const { activeProjectId, getProject } = useProjects.getState()
+  return sshConnectionIdForProject(activeProjectId, conn, getProject(activeProjectId)?.ssh?.server)
+}
+
+/** The live ControlMaster path a remote node would run over, if any. Lets the caller tell "we will
+ *  resolve in a microtask" from "we are about to sit in the wait below" without duplicating the
+ *  lookup. Without a `conn` it answers for the active project's own connection. */
+export function currentControlPath(conn?: SshConnection): string | undefined {
+  return useSshConn
+    .getState()
+    .getControlPath(conn ? sshConnectionScope(conn) : useProjects.getState().activeProjectId)
 }
 
 /**
- * Resolve the `sshRemote` create option for an SSH-project terminal: the owning project's live
+ * Resolve the `sshRemote` create option for a remote terminal: its connection scope's live
  * ControlMaster `controlPath` (set by Canvas's active-project effect on connect) plus the inline
  * connection and remote cwd. The controlPath may not be ready yet on a cold app load (child
  * effects run before the parent's connect resolves), so wait for it — briefly — before spawning.
+ *
+ * The scope is the OWNING PROJECT for an SSH project's own nodes and a HOST ATTACHMENT for a node
+ * whose endpoint isn't the project's — never a bare `activeProjectId`, which for an attached node
+ * would resolve the local project's (absent, or worse: a DIFFERENT host's) master.
  *
  * Returns undefined if no master appears within the window (connection failed). The caller must
  * then spawn NOTHING — see `PtyCreateOptions.requireRemote`: a create without `sshRemote` does
@@ -184,7 +203,7 @@ export async function resolveSshRemote(
     }
   | undefined
 > {
-  const projectId = useProjects.getState().activeProjectId
+  const projectId = sshConnectionScope(conn)
   let controlPath = useSshConn.getState().getControlPath(projectId)
   if (!controlPath) {
     controlPath = await new Promise<string | undefined>((resolve) => {
@@ -1390,7 +1409,10 @@ export function TerminalNode({
   // `respawnNonce` ourselves: a respawn before the master is back would just re-run the same
   // 20s wait and land right back here.
   const reconnectOffline = (): void => {
-    const projectId = useProjects.getState().activeProjectId
+    // The SCOPE, not the project: an attached node's master belongs to its host attachment, and
+    // retrying the local project's (nonexistent) connection would never bring this node back.
+    const conn = data.ssh as SshConnection | undefined
+    const projectId = conn ? sshConnectionScope(conn) : useProjects.getState().activeProjectId
     if (projectId) sshRetryHandler?.(projectId, [id])
   }
 
@@ -2296,10 +2318,11 @@ export function TerminalNode({
     // `ssh` as a LOCAL pty program. Only the latter sets shell:'ssh' + buildSshArgs.
     const sshRemoteTmux = !!data.sshRemoteTmux
     const localSsh = !!ssh && !sshRemoteTmux
-    // Owning project of an SSH-project terminal, captured at spawn time for the exit-255 drop
-    // report below (a node only exists in the active project's React Flow, so the active
-    // project is its owner — same assumption as resolveSshRemote).
-    const sshProjectId = sshRemoteTmux ? useProjects.getState().activeProjectId : null
+    // Connection SCOPE of a remote terminal, captured at spawn time for the exit-255 drop report
+    // below. Same choice `resolveSshRemote` makes: the owning project for an SSH project's own
+    // node, the host attachment for a node attached to another endpoint — so the reconnect
+    // coordinator re-establishes the master this node actually died on.
+    const sshProjectId = sshRemoteTmux && ssh ? sshConnectionScope(ssh) : null
     // Prefetch the persisted scrollback in parallel with the spawn so it's ready to replay the
     // instant the session resolves (a cold restart after a reboot recreates the tmux session
     // empty — see the `fresh` handling below). Cheap no-op ('') when there's no snapshot.
@@ -2328,7 +2351,7 @@ export function TerminalNode({
       // or an unreachable host, and a terminal that is silently blank for that long reads as
       // broken. Only when there is nothing to wait FOR is nothing printed (the common case: the
       // master is already up and this resolves in a microtask).
-      if (sshRemoteTmux && ssh && !currentControlPath()) {
+      if (sshRemoteTmux && ssh && !currentControlPath(ssh)) {
         // Drop the overlay for the duration of the attempt (this respawn IS the retry the user or
         // the coordinator asked for) so the line below is visible; it comes back if we fail.
         setCo(termKey, { offline: false })
@@ -3664,7 +3687,12 @@ export function TerminalNode({
       // Remote terminal: uploading over the ControlMaster takes seconds and pastes nothing until
       // it's done, so show an overlay while it runs — without it a drop looks like it silently did
       // nothing. (The upload + REMOTE-path resolution itself lives in the shared droppedPaths.)
-      const projectId = useProjects.getState().activeProjectId
+      // Uploads go over the master this node's PTY runs on — its scope, which for an attached
+      // node is the host attachment, not the (local) project.
+      const dropConn = data.ssh as SshConnection | undefined
+      const projectId = dropConn
+        ? sshConnectionScope(dropConn)
+        : useProjects.getState().activeProjectId
       if (uploadNoteTimer.current) clearTimeout(uploadNoteTimer.current)
       setUploadNote({
         text: `Uploading ${files.length === 1 ? files[0].name : `${files.length} files`}…`,

@@ -1,6 +1,8 @@
 import { create } from 'zustand'
+import type { SshConnection } from '@shared/ssh'
 
-/** Live connection coordinates for one SSH project, returned by `sshProject.connect`. */
+/** Live connection coordinates for one connection scope, returned by `sshProject.connect`.
+ *  A scope is an SSH PROJECT's id, or a host ATTACHMENT id — see `sshConnectionIdForProject`. */
 export interface SshConnInfo {
   /** ControlMaster socket path the project's terminals run their PTYs over. */
   controlPath: string
@@ -22,6 +24,26 @@ export interface SshConnInfo {
   /** The probed remote `claude --version` output (`null` = probe ran, claude not found). Feeds
    *  the tab menu's Auto hint; only present on a reused (already probed) connection. */
   remoteClaudeVersion?: string | null
+  /**
+   * Routing facts for a HOST ATTACHMENT — a remote node living in a project that is not that
+   * endpoint's own SSH project. An SSH project can re-derive all of this from `getProject(id)`;
+   * an attachment has no project row of its own, so its scope carries them. Absent on a plain
+   * SSH-project entry, which is how the two are told apart.
+   */
+  attachment?: SshAttachment
+}
+
+/** What an attachment scope needs in order to be RE-connected (the reconnect coordinator) and to
+ *  find the canvas its nodes are on (the respawn). Renderer-only: never persisted. */
+export interface SshAttachment {
+  /** The endpoint, snapshotted — the saved server may be edited or deleted underneath us. */
+  conn: SshConnection
+  /** `user@host` (`sshHostKey`) — for "am I already connected to this machine?" lookups. */
+  hostKey: string
+  /** Default remote folder for this attachment; `~` when the host has none configured. */
+  remoteCwd?: string
+  /** The LOCAL canvas project the attached nodes live on. */
+  ownerProjectId: string
 }
 
 /** What the remote probe has said so far — the tab menu's Auto hint reads differently for "not
@@ -30,11 +52,16 @@ export interface SshConnInfo {
 export type SshAutoPermAnswer = 'yes' | 'no' | 'unknown'
 
 /**
- * Transient map of SSH project id → its live connection info (ControlMaster `controlPath` +
+ * Transient map of CONNECTION SCOPE → its live connection info (ControlMaster `controlPath` +
  * optional remote `hookEndpointPath`) returned by `sshProject.connect`. Not persisted: it's
  * re-established on every launch by Canvas's active-project effect. A remote terminal node reads
- * its project's entry here to pass `sshRemote` into `transport.create`, so the PTY runs over the
- * project's master and (when present) the remote hook env is injected.
+ * its scope's entry here to pass `sshRemote` into `transport.create`, so the PTY runs over that
+ * master and (when present) the remote hook env is injected.
+ *
+ * A scope is USUALLY an SSH project's id. It is a host ATTACHMENT id (`sshAttachmentId`) when the
+ * node's endpoint is not its project's own — a remote node inside a LOCAL canvas. Both kinds live
+ * in this one map because everything downstream (connect, resolve, reconnect, disconnect) treats
+ * them identically; `attachment` is what distinguishes them.
  */
 interface SshConnState {
   byProject: Record<string, SshConnInfo>
@@ -53,6 +80,12 @@ interface SshConnState {
   getHookEndpointPath(projectId: string): string | undefined
   getTmuxConfPath(projectId: string): string | undefined
   getRemoteHome(projectId: string): string | undefined
+  /** The routing facts of a HOST ATTACHMENT scope; undefined for an SSH project's own scope
+   *  (which re-derives everything from its project row) and for anything not connected. */
+  getAttachment(scopeId: string): SshAttachment | undefined
+  /** The canvas project a connection scope's nodes live on: the owner for an attachment, the
+   *  scope itself for an SSH project. Never undefined — callers key React Flow off it. */
+  ownerProjectId(scopeId: string): string
   /** True ONLY when the remote CLI was probed and is known to accept `--permission-mode auto`.
    *  Not connected / never probed / older CLI all answer false (conservative — omit the flag). */
   supportsAutoPermissionMode(projectId: string): boolean
@@ -68,6 +101,9 @@ interface SshConnState {
    *  design means "unknown" should win until the next probe lands, never a stale "yes". */
   invalidateAutoPermissionMode(projectId: string): void
   clear(projectId: string): void
+  /** Every attachment scope a project owns. Used to tear its masters down when the project is
+   *  deleted — nothing else knows they exist (they have no project row). */
+  attachmentScopesOf(ownerProjectId: string): string[]
 }
 
 export const useSshConn = create<SshConnState>((set, get) => ({
@@ -76,7 +112,15 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   remoteClaudeVersionByProject: {},
   setConn(projectId, info) {
     set((s) => ({
-      byProject: { ...s.byProject, [projectId]: info },
+      byProject: {
+        ...s.byProject,
+        // A RE-connect returns bare IPC coordinates with no attachment block; keep the one the
+        // scope already had, or the reconnect that just healed the master would erase the only
+        // record of how to reach it (and which canvas its nodes are on).
+        [projectId]: info.attachment
+          ? info
+          : { ...info, attachment: s.byProject[projectId]?.attachment }
+      },
       // A reused (already probed) connection returns the answer with the connect result.
       autoPermByProject:
         info.claudeAutoPermissionMode === undefined
@@ -108,6 +152,12 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   },
   getRemoteHome(projectId) {
     return get().byProject[projectId]?.remoteHome
+  },
+  getAttachment(scopeId) {
+    return get().byProject[scopeId]?.attachment
+  },
+  ownerProjectId(scopeId) {
+    return get().byProject[scopeId]?.attachment?.ownerProjectId ?? scopeId
   },
   supportsAutoPermissionMode(projectId) {
     return get().autoPermByProject[projectId] === true
@@ -141,5 +191,10 @@ export const useSshConn = create<SshConnState>((set, get) => ({
       delete nextVersion[projectId]
       return { byProject: next, autoPermByProject: nextAuto, remoteClaudeVersionByProject: nextVersion }
     })
+  },
+  attachmentScopesOf(ownerProjectId) {
+    return Object.entries(get().byProject)
+      .filter(([, info]) => info.attachment?.ownerProjectId === ownerProjectId)
+      .map(([scopeId]) => scopeId)
   }
 }))
