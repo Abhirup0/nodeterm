@@ -1,10 +1,10 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { promises as fs } from 'fs'
 import { mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { appImagesDir, canvasImageTarget, projectImagesDir, saveCanvasImage } from './canvas-images'
-import { uploadsRoot } from './uploads'
+import { UPLOAD_MAX_BYTES, uploadsRoot } from './uploads'
 
 const png = Buffer.from('fake-png-bytes').toString('base64')
 
@@ -86,16 +86,81 @@ describe('saveCanvasImage', () => {
   })
 
   it('answers null for bytes it will not store, rather than throwing', async () => {
+    // null is the whole contract with the caller: it filters the path out and reports the loss,
+    // so a throw here would take the other images in the same drop down with it.
     expect(await saveCanvasImage({ projectCwd, userDataDir, name: 'a.png', dataBase64: '' })).toBe(
       null
     )
+    // Refused on the ENCODED length, before any decode — measuring it by allocating it is the
+    // exact thing the limit exists to prevent, so the test must not allocate the payload either.
     expect(
       await saveCanvasImage({
         projectCwd,
         userDataDir,
         name: 'a.png',
-        dataBase64: 'x'.repeat(64 * 1024 * 1024 * 2)
+        dataBase64: 'x'.repeat(Math.ceil(UPLOAD_MAX_BYTES * 1.4) + 1)
       })
     ).toBe(null)
+    // Nothing was left behind by either refusal.
+    await expect(fs.readdir(projectImagesDir(projectCwd))).rejects.toThrow()
+  })
+
+  it('falls back to the app folder when the project folder will not take the file', async () => {
+    // `.nodeterm` as a FILE reproduces ENOTDIR, which is the same shape as EACCES on a read-only
+    // checkout, a root-owned `.nodeterm`, or a read-only mount. Before the retry this lost the
+    // image silently — a regression against the pre-durability behavior, where the write went to
+    // userData and essentially could not fail.
+    await fs.writeFile(join(projectCwd, '.nodeterm'), 'not a directory')
+    const path = await saveCanvasImage({
+      projectCwd,
+      userDataDir,
+      name: 'shot.png',
+      dataBase64: png
+    })
+    expect(path).toBe(join(appImagesDir(userDataDir), 'shot.png'))
+    expect(await fs.readFile(path!, 'utf8')).toBe('fake-png-bytes')
+  })
+
+  it('does not resurrect a project folder that has been deleted', async () => {
+    await rm(projectCwd, { recursive: true, force: true })
+    const path = await saveCanvasImage({
+      projectCwd,
+      userDataDir,
+      name: 'shot.png',
+      dataBase64: png
+    })
+    // Saved app-locally, and — the point — `mkdir -p` did not recreate the folder the user removed.
+    expect(path).toBe(join(appImagesDir(userDataDir), 'shot.png'))
+    await expect(fs.stat(projectCwd)).rejects.toThrow()
+  })
+
+  it('leaves no truncated file behind when the write fails partway', async () => {
+    // `wx` creates the file and then writes it, so a disk that fills in between leaves a partial
+    // image holding a name — indistinguishable from a whole one to whoever reads it next.
+    const buf = Buffer.from('fake-png-bytes')
+    const real = fs.writeFile
+    // Faithful to the failure mode: the file IS created and partially written, and THEN the write
+    // fails. Rejecting without creating anything would leave nothing for the cleanup to remove and
+    // the assertion below would pass whether or not the cleanup exists.
+    const writeFile = vi
+      .spyOn(fs, 'writeFile')
+      .mockImplementationOnce(async (target, _data, options) => {
+        await real(target, 'partial', options)
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' })
+      })
+    const partial = join(projectImagesDir(projectCwd), 'shot.png')
+    const path = await saveCanvasImage({
+      projectCwd,
+      userDataDir,
+      name: 'shot.png',
+      dataBase64: buf.toString('base64')
+    })
+    writeFile.mockRestore()
+    // The project write failed, so it landed app-locally, whole...
+    expect(path).toBe(join(appImagesDir(userDataDir), 'shot.png'))
+    expect(await fs.readFile(path!, 'utf8')).toBe('fake-png-bytes')
+    // ...and the half-written project file was removed rather than left holding the name.
+    await expect(fs.readFile(partial, 'utf8')).rejects.toThrow()
+    await expect(fs.readdir(projectImagesDir(projectCwd))).resolves.toEqual([])
   })
 })

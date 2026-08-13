@@ -38,6 +38,7 @@ import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
 import { selectedLocalFilePaths } from './canvas-file-copy'
 import {
   canvasImagePasteArmedAfterKey,
+  canvasImportRefusal,
   guardedCanvasImagePlacements,
   isCanvasImageDropTarget
 } from './canvas-image-import'
@@ -2963,6 +2964,13 @@ export function Canvas() {
     async (files: File[], center: { x: number; y: number }, projectId: string) => {
       const images = canvasImageFiles(files)
       if (!images.length) return
+      // A relay tab writes here and reads on the peer, so the node could never render its own
+      // file — say so instead of creating it. Same fact, same source as the Cmd+C gate below.
+      const refusal = canvasImportRefusal(!!useProjects.getState().getProject(projectId)?.remote)
+      if (refusal) {
+        setCopyError(refusal)
+        return
+      }
       const placements = await guardedCanvasImagePlacements(
         // Into the PROJECT's own `.nodeterm/images/`, not the 7-day uploads staging area: the node
         // that names this file is persisted in project.json, so the file has to outlive a week and
@@ -2973,6 +2981,16 @@ export function Canvas() {
         center
       )
       placements.forEach(({ filePath, center: placement }) => openFile(filePath, placement))
+      // Unsaveable files are dropped silently one layer down, and core already retried in a second
+      // directory before giving up — so a shortfall here means the image is genuinely not on disk.
+      // Saying nothing would leave the user watching for a node that is never coming. (A project
+      // switch mid-save legitimately places nothing; that is the guard's job, not a failure.)
+      const lost = images.length - placements.length
+      if (lost > 0 && useProjects.getState().activeProjectId === projectId) {
+        setCopyError(
+          `Could not save ${lost === 1 ? 'the image' : `${lost} images`} — check that this project's folder is writable.`
+        )
+      }
     },
     [openFile]
   )

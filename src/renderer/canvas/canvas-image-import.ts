@@ -9,6 +9,26 @@ export function isCanvasImageDropTarget(target: EventTarget | null, wrap: Elemen
   )
 }
 
+/**
+ * Why a canvas image import cannot proceed, or null when it may. One rule, one message, so the
+ * drop path and the paste path cannot disagree about either.
+ *
+ * A RELAY TAB is refused because the two halves of the feature would land on different machines:
+ * the write is `window.nodeTerminal.files.saveCanvasImage` — the LOCAL preload, even in a relay
+ * tab — while `EditorNode` reads through the session api, i.e. the PEER's core. The bytes would sit
+ * on this disk and the node would ask the peer for that path, producing a node that can never
+ * render. Refusing is not a limitation dressed up as a feature: a clear message is strictly better
+ * than a broken node, and it is the same fact (`Project.remote`), read the same way, that already
+ * gates Cmd+C's file copy. Routing the write to the peer instead is a real feature — it also needs
+ * the Finder-drop shortcut bypassed, since a local OS path is just as unreadable over there — and
+ * no file write in this app crosses that boundary today.
+ */
+export function canvasImportRefusal(projectIsRelay: boolean): string | null {
+  return projectIsRelay
+    ? 'Images can’t be added to a remote tab’s canvas — the file would stay on this machine, where that canvas can’t read it.'
+    : null
+}
+
 export interface CanvasImagePlacement {
   filePath: string
   center: { x: number; y: number }

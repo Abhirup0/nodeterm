@@ -175,11 +175,10 @@ async function localFilesWithPaths(
     .filter((pair): pair is { file: File; path: string } => !!pair.path)
 }
 
-/** Resolve local/clipboard/browser files to raw local paths for non-terminal consumers. */
-export async function localPathsForFiles(
-  files: File[],
-  sink: UploadSink = uploadsSink
-): Promise<string[]> {
+/** Resolve local/clipboard/browser files to raw local paths for non-terminal consumers. `sink` is
+ *  required: only the caller knows how long the returned path has to stay true, and defaulting it
+ *  to the 7-day staging area is exactly the wrong answer for the one caller there is. */
+export async function localPathsForFiles(files: File[], sink: UploadSink): Promise<string[]> {
   return (await localFilesWithPaths(files, sink)).map((pair) => pair.path)
 }
 

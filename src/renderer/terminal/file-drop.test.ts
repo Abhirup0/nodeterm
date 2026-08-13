@@ -109,15 +109,20 @@ describe('localPathsForFiles', () => {
     expect(saveUpload).not.toHaveBeenCalled()
   })
 
-  it('reuses an Electron file path without shell escaping it', async () => {
+  it('reuses an Electron file path without shell escaping it, and never calls the sink', async () => {
+    const saveCanvasImage = vi.fn()
     vi.stubGlobal('window', {
       nodeTerminal: {
         getPathForFile: () => '/tmp/My image.png',
-        files: { saveUpload: vi.fn() }
+        files: { saveUpload: vi.fn(), saveCanvasImage }
       }
     })
     const file = new File(['png'], 'My image.png', { type: 'image/png' })
-    expect(await localPathsForFiles([file])).toEqual(['/tmp/My image.png'])
+    // A Finder drop already IS a file on this disk, so nothing is copied anywhere.
+    expect(await localPathsForFiles([file], canvasImageSink('project-a'))).toEqual([
+      '/tmp/My image.png'
+    ])
+    expect(saveCanvasImage).not.toHaveBeenCalled()
   })
 })
 

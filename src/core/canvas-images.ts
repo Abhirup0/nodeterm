@@ -37,19 +37,24 @@ export interface CanvasImageTarget {
 }
 
 /**
- * `projectCwd` is the project's LOCAL cwd, or undefined. Undefined covers three cases, and the
- * answer is the same for all of them because in each one there is no local directory that both
- * this machine can write and the image node can later read:
+ * `projectCwd` is the project's LOCAL cwd, or undefined. Undefined covers three cases:
  *
  *  • a cwd-less / inline canvas — there is no project folder at all;
- *  • an SSH project — `<cwd>` is a path on the REMOTE host, and `files.saveUpload` has always
- *    written on the machine the terminals run on, i.e. here. The image node itself reads locally
- *    (the canvas opens it without `sshFs`), so writing the bytes to the host would produce a node
- *    that cannot read its own file;
- *  • a relay tab — not in this machine's workspace index at all.
+ *  • an SSH project — `<cwd>` is a path on the REMOTE host, while this write happens here, on the
+ *    machine the terminals run on (as `files.saveUpload` always has). Writing to the host would be
+ *    wrong anyway: the canvas opens an image node WITHOUT `sshFs`, so the node reads through the
+ *    local fs and would not be able to read its own file. App-local is the coherent answer;
+ *  • a project whose folder has been DELETED — see `saveCanvasImage`, which collapses it into this
+ *    branch rather than letting `mkdir -p` resurrect a directory the user removed.
  *
- * None of these is an error, so none of them refuses: the image is still saved, just somewhere
- * that only this machine can see. The caller is told which happened via `inProject`.
+ * None of these is an error, so none refuses: the image is saved, it just cannot travel with the
+ * project. The caller is told which happened via `inProject`.
+ *
+ * A RELAY TAB is deliberately NOT in that list — it is refused before it reaches here (see
+ * `canvasImportRefusal` in renderer/canvas/canvas-image-import.ts). The reasoning above turns on
+ * the node reading through the same fs this wrote to, and for a relay tab that is FALSE: the write
+ * is the local preload's while `EditorNode` reads through the session api, i.e. the PEER's core.
+ * Saving here would produce a node that asks another machine for a path only this one has.
  */
 export function canvasImageTarget(
   projectCwd: string | undefined,
@@ -60,10 +65,50 @@ export function canvasImageTarget(
     : { dir: appImagesDir(userDataDir), inProject: false }
 }
 
+const isDir = async (p: string): Promise<boolean> => {
+  try {
+    return (await fs.stat(p)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * One write attempt into `dir`. Throws whatever the filesystem threw — the caller decides whether
+ * that is worth a second directory. Resolves null only when the name collided every allowed time.
+ */
+async function writeInto(dir: string, safe: string, buf: Buffer): Promise<string | null> {
+  await fs.mkdir(dir, { recursive: true })
+  for (let attempt = 1; attempt <= MAX_COLLISION_ATTEMPTS; attempt++) {
+    const target = join(dir, candidateName(safe, attempt))
+    try {
+      await fs.writeFile(target, buf, { flag: 'wx' })
+      return target
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') continue
+      // `wx` CREATED the file and then the write failed partway (a disk that filled between the
+      // two). Nothing distinguishes a truncated image from a whole one to the reader, and the
+      // name is now taken, so the remains are removed before the error propagates.
+      await fs.rm(target, { force: true }).catch(() => undefined)
+      throw err
+    }
+  }
+  return null
+}
+
+const tryWrite = async (dir: string, safe: string, buf: Buffer): Promise<string | null> => {
+  try {
+    return await writeInto(dir, safe, buf)
+  } catch {
+    return null
+  }
+}
+
 /**
  * Write base64 `data` into the project's image folder and resolve its ABSOLUTE path, or null when
- * it could not be written (too large, undecodable, unwritable, or a name that collided 200 times).
- * Never throws — the caller drops what it could not save, exactly like a failed drop.
+ * it could not be written anywhere (too large, undecodable, or every candidate directory refused).
+ * Never throws — the caller drops what it could not save, exactly like a failed drop, and tells
+ * the user (an image that silently never appears is the failure this must not have).
  *
  * The name is basenamed by `safeUploadName` before it is joined, so a pasted `../../.bashrc`
  * cannot escape the directory, and the write is an EXCLUSIVE create (`wx`) walked through
@@ -76,28 +121,31 @@ export async function saveCanvasImage(opts: {
   name: string
   dataBase64: string
 }): Promise<string | null> {
+  // Guard the ENCODED length first: decoding a hostile 2 GB string to measure it is the
+  // allocation this limit exists to prevent (same rule as core/uploads.ts).
+  const { dataBase64 } = opts
+  if (typeof dataBase64 !== 'string' || dataBase64.length > UPLOAD_MAX_BYTES * 1.4) return null
+  let buf: Buffer
   try {
-    // Guard the ENCODED length first: decoding a hostile 2 GB string to measure it is the
-    // allocation this limit exists to prevent (same rule as core/uploads.ts).
-    const { dataBase64 } = opts
-    if (typeof dataBase64 !== 'string' || dataBase64.length > UPLOAD_MAX_BYTES * 1.4) return null
-    const buf = Buffer.from(dataBase64, 'base64')
-    if (!buf.length || buf.length > UPLOAD_MAX_BYTES) return null
-
-    const { dir } = canvasImageTarget(opts.projectCwd, opts.userDataDir)
-    await fs.mkdir(dir, { recursive: true })
-    const safe = safeUploadName(opts.name)
-    for (let attempt = 1; attempt <= MAX_COLLISION_ATTEMPTS; attempt++) {
-      const target = join(dir, candidateName(safe, attempt))
-      try {
-        await fs.writeFile(target, buf, { flag: 'wx' })
-        return target
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err
-      }
-    }
-    return null
+    buf = Buffer.from(dataBase64, 'base64')
   } catch {
     return null
   }
+  if (!buf.length || buf.length > UPLOAD_MAX_BYTES) return null
+  const safe = safeUploadName(opts.name)
+
+  // A project folder that is GONE takes the app-local branch instead of the project one:
+  // `mkdir -p` would otherwise happily RESURRECT `<cwd>/.nodeterm/images` under a directory the
+  // user deleted, leaving a lone skeleton of a project behind as a side effect of a paste.
+  const cwd = opts.projectCwd && (await isDir(opts.projectCwd)) ? opts.projectCwd : undefined
+  const target = canvasImageTarget(cwd, opts.userDataDir)
+  const primary = await tryWrite(target.dir, safe, buf)
+  if (primary || !target.inProject) return primary
+
+  // The project folder exists but would not take the file: a read-only checkout or mount, a
+  // root-owned `.nodeterm`, `.nodeterm` present as a FILE (ENOTDIR), a full disk. Storing it
+  // app-locally costs the user only the ability to share it; refusing costs them the image. Note
+  // this retry is what keeps the durable-storage decision from being a REGRESSION — before it, the
+  // write went to userData, where it essentially could not fail.
+  return tryWrite(appImagesDir(opts.userDataDir), safe, buf)
 }

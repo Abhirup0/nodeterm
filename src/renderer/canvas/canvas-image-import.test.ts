@@ -2,9 +2,19 @@
 import { describe, expect, it } from 'vitest'
 import {
   canvasImagePasteArmedAfterKey,
+  canvasImportRefusal,
   guardedCanvasImagePlacements,
   isCanvasImageDropTarget
 } from './canvas-image-import'
+
+describe('canvasImportRefusal', () => {
+  it('refuses a relay tab, whose write and read land on different machines', () => {
+    // The write is the LOCAL preload's, the node reads through the peer's core — so the node could
+    // never render its own file. A message beats a broken node.
+    expect(canvasImportRefusal(true)).toMatch(/remote tab/i)
+    expect(canvasImportRefusal(false)).toBe(null)
+  })
+})
 
 describe('isCanvasImageDropTarget', () => {
   it('accepts the real pane and rejects flow-wrap overlays and nodes', () => {
