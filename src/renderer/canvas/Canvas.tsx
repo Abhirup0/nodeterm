@@ -196,6 +196,8 @@ import { isSafeQuickOpenRelPath } from '@shared/quick-open-filter'
  *  reached for inside it, so that helper stays testable without an Electron preload. */
 const sshConnect: SshConnectFn = (scopeId, conn, remoteCwd) =>
   window.nodeTerminal.sshProject.connect(scopeId, conn, remoteCwd)
+const sshDisconnect = (scopeId: string): Promise<unknown> =>
+  window.nodeTerminal.sshProject.disconnect(scopeId)
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
@@ -1740,7 +1742,8 @@ export function Canvas() {
           remoteCwd: attachment.remoteCwd,
           ownerProjectId: project.id
         },
-        sshConnect
+        sshConnect,
+        sshDisconnect
       )
     }
     loadingRef.current = true
@@ -7718,7 +7721,7 @@ export function Canvas() {
         // still reachable here. Reconnect it on its own loop (its master is its own) and leave git
         // routing alone: the owning project is local, or points somewhere else entirely.
         const attached = useSshConn.getState().getAttachment(scopeId)
-        if (attached) return connectHostAttachment(scopeId, attached, sshConnect)
+        if (attached) return connectHostAttachment(scopeId, attached, sshConnect, sshDisconnect)
         const projectId = scopeId
         const project = useProjects.getState().getProject(projectId)
         if (!project?.ssh) return false

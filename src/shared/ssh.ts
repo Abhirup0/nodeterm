@@ -169,7 +169,13 @@ export function sshConnectionIdForProject(
   conn: SshConnection,
   projectServer?: SshConnection
 ): string {
-  return projectServer?.host === conn.host ? projectId : sshAttachmentId(projectId, conn)
+  // `conn.host` is checked explicitly: a node whose binding lost its host (bad persisted data)
+  // must not match a LOCAL project's absent one through `undefined === undefined` and get served
+  // from a master that was never opened for it. Unroutable either way — but failing as an
+  // attachment ends at `requireRemote` refusing the spawn, which is the safe direction.
+  return conn.host && projectServer?.host === conn.host
+    ? projectId
+    : sshAttachmentId(projectId, conn)
 }
 
 /**

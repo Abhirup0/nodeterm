@@ -148,15 +148,36 @@ describe('connectHostAttachment', () => {
     expect(connect).toHaveBeenCalledTimes(1)
   })
 
-  it('short-circuits on a live master but still refreshes the record', async () => {
-    const connect = vi.fn(async () => ({ controlPath: '/tmp/other' }))
-    useSshConn.getState().setConn('a1', { controlPath: '/tmp/live' })
+  it('still dials when a controlPath is already cached — the reconnect path depends on it', async () => {
+    // The regression this guards: treating a cached path as "already connected". NOTHING in the
+    // renderer clears it when a connection drops, so the reconnect coordinator's connect dep
+    // would answer true forever after one success — no `-O check`, no redial — and the respawned
+    // ptys would run against a dead socket, which `ControlMaster=auto` silently turns into a
+    // DIRECT connection per node (the ~72k-logins/day pattern). Only main can tell a live master
+    // from a dead one, and its reuse branch costs one mux'd `-O check`.
+    const connect = vi.fn(async () => ({ controlPath: '/tmp/fresh' }))
+    useSshConn.getState().setConn('a1', { controlPath: '/tmp/stale-after-a-drop' })
 
     expect(await connectHostAttachment('a1', ATTACHMENT, connect)).toBe(true)
 
-    expect(connect).not.toHaveBeenCalled()
-    // A tab switch back adopts the live master; the NEXT drop still needs the endpoint on record.
+    expect(connect).toHaveBeenCalledTimes(1)
+    expect(useSshConn.getState().getControlPath('a1')).toBe('/tmp/fresh')
     expect(useSshConn.getState().getAttachment('a1')).toEqual(ATTACHMENT)
+  })
+
+  it('a dial that lands after the canvas was deleted is handed back, not recorded', async () => {
+    let release: (v: { controlPath: string }) => void
+    const connect = vi.fn(() => new Promise<{ controlPath: string }>((r) => (release = r)))
+    const disconnect = vi.fn(async () => {})
+
+    const pending = connectHostAttachment('a1', ATTACHMENT, connect, disconnect)
+    useSshConn.getState().clearAttachment('a1') // the project was deleted mid-dial
+    release!({ controlPath: '/tmp/cm' })
+
+    expect(await pending).toBe(false)
+    // Neither resurrected in the store nor leaked on the host.
+    expect(useSshConn.getState().getControlPath('a1')).toBeUndefined()
+    expect(disconnect).toHaveBeenCalledWith('a1')
   })
 
   it('dials each machine separately', async () => {

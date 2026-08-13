@@ -54,6 +54,21 @@ describe('sshConnectionIdForProject', () => {
     expect(sshConnectionIdForProject('project-1', ubuntu, { ...ubuntu })).toBe('project-1')
   })
 
+  it('a node with no host is never served from the project (unroutable fails safe)', () => {
+    // `undefined === undefined` would otherwise hand a hostless node a LOCAL project's id — a
+    // master that was never opened for it. Failing as an attachment ends at `requireRemote`.
+    // `undefined` specifically: a LOCAL project passes no server at all, so `projectServer?.host`
+    // is also undefined and the two compare EQUAL.
+    const hostless = { host: undefined, user: 'corvin' } as unknown as typeof ubuntu
+    expect(sshConnectionIdForProject('local-1', hostless)).not.toBe('local-1')
+    expect(sshConnectionIdForProject('local-1', hostless)).toBe(
+      sshAttachmentId('local-1', hostless)
+    )
+    // An empty host is just as unroutable.
+    const empty = { host: '', user: 'corvin' } as unknown as typeof ubuntu
+    expect(sshConnectionIdForProject('local-1', empty)).not.toBe('local-1')
+  })
+
   it('a LOCAL project has no binding, so every remote node on it is an attachment', () => {
     expect(sshConnectionIdForProject('local-1', ubuntu, undefined)).toBe(
       sshAttachmentId('local-1', ubuntu)

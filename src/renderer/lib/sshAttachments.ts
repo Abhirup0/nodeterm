@@ -88,22 +88,34 @@ const dialing = new Map<string, Promise<boolean>>()
  * 3. Concurrent callers share one dial. Every node on a machine calls this at spawn; without the
  *    in-flight map they would each open a master.
  *
- * Idempotent and safe to call on every spawn: a live `controlPath` short-circuits.
+ * It ALWAYS dials — a cached `controlPath` is deliberately not treated as "already connected".
+ * Nothing in the renderer clears that path when a connection drops, so a short-circuit on it made
+ * the reconnect coordinator a permanent no-op for attachments: after one successful connect it
+ * would answer `true` forever, and a sleep/wake respawn would run its pty against a dead socket
+ * under `ControlMaster=auto`, which silently falls back to a DIRECT connection per node — the
+ * ~72k-logins/day pattern documented on `SshProjectManager.startWatchdog`. Main is the thing that
+ * knows whether the master is alive: its connect coalesces per scope and reuse costs one mux'd
+ * `-O check`, which doubles as the keepalive that resets the ControlPersist counter. A redundant
+ * dial through main is cheap and self-healing; a skipped one is the failure above.
  */
 export function connectHostAttachment(
   scopeId: string,
   attachment: SshAttachment,
-  connect: SshConnectFn
+  connect: SshConnectFn,
+  disconnect?: (scopeId: string) => Promise<unknown>
 ): Promise<boolean> {
-  const store = useSshConn.getState()
-  // Registered even on the short-circuit path: an attachment adopted from an already-live master
-  // (a tab switch back) still needs its endpoint on record for the NEXT drop.
-  store.registerAttachment(scopeId, attachment)
-  if (store.getControlPath(scopeId)) return Promise.resolve(true)
+  useSshConn.getState().registerAttachment(scopeId, attachment)
   const inFlight = dialing.get(scopeId)
   if (inFlight) return inFlight
   const attempt = connect(scopeId, attachment.conn, attachment.remoteCwd)
     .then((info) => {
+      // The canvas was deleted while we were dialing: its teardown pass already ran, and writing
+      // the connection back now would resurrect a scope nothing owns — a live master that no
+      // delete path will ever visit again. Hand it straight back instead.
+      if (!useSshConn.getState().getAttachment(scopeId)) {
+        void disconnect?.(scopeId)
+        return false
+      }
       useSshConn.getState().setConn(scopeId, info)
       return true
     })

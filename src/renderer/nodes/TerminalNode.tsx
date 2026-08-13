@@ -221,7 +221,8 @@ export async function resolveSshRemote(
         remoteCwd: cwd,
         ownerProjectId: activeProjectId
       },
-      (scopeId, c, remoteCwd) => window.nodeTerminal.sshProject.connect(scopeId, c, remoteCwd)
+      (scopeId, c, remoteCwd) => window.nodeTerminal.sshProject.connect(scopeId, c, remoteCwd),
+      (scopeId) => window.nodeTerminal.sshProject.disconnect(scopeId)
     )
   }
   let controlPath = useSshConn.getState().getControlPath(projectId)
