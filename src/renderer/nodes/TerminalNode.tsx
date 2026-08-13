@@ -142,11 +142,12 @@ import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, reportsOwnCopy, resumeCommand, agentConfig, agentLaunchProgram } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { ensureActivePermissionMode } from '../state/permissionMode'
-import { buildSshArgs, sshConnectionIdForProject, type SshConnection } from '@shared/ssh'
+import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
+import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** How long a remote terminal waits for its project's ControlMaster before giving up and showing
  *  the offline overlay. Sized for the SLOW-but-fine case (a cold app load whose connect is still
@@ -203,7 +204,26 @@ export async function resolveSshRemote(
     }
   | undefined
 > {
+  const activeProjectId = useProjects.getState().activeProjectId
   const projectId = sshConnectionScope(conn)
+  // A HOST ATTACHMENT dials for itself, HERE, because nothing else will. Canvas's active-project
+  // effect pre-warms the attachments it can SEE in the stored canvas, but a node created at
+  // runtime — the remote account-login retry drops one into whatever tab is active — never
+  // appears in that pass, and would otherwise wait out the window under a scope no master exists
+  // for and then sit offline forever. Idempotent and deduped, so the pre-warm and every node on
+  // the machine collapse into one connect; the wait below is what actually blocks on it.
+  if (projectId !== activeProjectId) {
+    void connectHostAttachment(
+      projectId,
+      {
+        conn,
+        hostKey: sshHostKey(conn),
+        remoteCwd: cwd,
+        ownerProjectId: activeProjectId
+      },
+      (scopeId, c, remoteCwd) => window.nodeTerminal.sshProject.connect(scopeId, c, remoteCwd)
+    )
+  }
   let controlPath = useSshConn.getState().getControlPath(projectId)
   if (!controlPath) {
     controlPath = await new Promise<string | undefined>((resolve) => {

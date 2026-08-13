@@ -1,4 +1,5 @@
 import { sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
+import { useSshConn, type SshAttachment, type SshConnInfo } from '../state/sshConn'
 
 /** One host a project's canvas has REMOTE nodes on, other than the project's own endpoint. */
 export interface HostAttachment {
@@ -59,4 +60,64 @@ export function hostAttachmentsFor(
       })
   }
   return [...byScope.values()]
+}
+
+/** `window.nodeTerminal.sshProject.connect`, injected so this is testable without Electron. */
+export type SshConnectFn = (
+  scopeId: string,
+  conn: SshConnection,
+  remoteCwd?: string
+) => Promise<SshConnInfo>
+
+/** Dials in flight, keyed by scope: several nodes on one machine must produce ONE connect. */
+const dialing = new Map<string, Promise<boolean>>()
+
+/**
+ * Ensure an attachment's ControlMaster is up, and make sure the scope is REACHABLE either way.
+ *
+ * Three orderings this gets right, each of which was a live bug:
+ *
+ * 1. The attachment is registered BEFORE the dial. A first connect that fails is exactly what the
+ *    reconnect coordinator is for, and its `connect` dep has nowhere else to learn the endpoint —
+ *    recording on success only left a cold load against a sleeping host permanently offline, the
+ *    offline overlay's Reconnect included.
+ * 2. Also before the dial, because main emits `status:'connected'` from inside its connect — over
+ *    the same IPC pipe, so it ARRIVES BEFORE the invoke reply. The reconnector's `onConnected`
+ *    then maps scope → owning canvas through `ownerProjectId`, and a record written afterwards is
+ *    written too late: the respawn takes the "switched away" branch and never bumps the nonce.
+ * 3. Concurrent callers share one dial. Every node on a machine calls this at spawn; without the
+ *    in-flight map they would each open a master.
+ *
+ * Idempotent and safe to call on every spawn: a live `controlPath` short-circuits.
+ */
+export function connectHostAttachment(
+  scopeId: string,
+  attachment: SshAttachment,
+  connect: SshConnectFn
+): Promise<boolean> {
+  const store = useSshConn.getState()
+  // Registered even on the short-circuit path: an attachment adopted from an already-live master
+  // (a tab switch back) still needs its endpoint on record for the NEXT drop.
+  store.registerAttachment(scopeId, attachment)
+  if (store.getControlPath(scopeId)) return Promise.resolve(true)
+  const inFlight = dialing.get(scopeId)
+  if (inFlight) return inFlight
+  const attempt = connect(scopeId, attachment.conn, attachment.remoteCwd)
+    .then((info) => {
+      useSshConn.getState().setConn(scopeId, info)
+      return true
+    })
+    .catch(() => false)
+    // Cleared whatever happened: a failed dial must not poison the scope against the retry the
+    // reconnect coordinator is about to make.
+    .finally(() => {
+      dialing.delete(scopeId)
+    })
+  dialing.set(scopeId, attempt)
+  return attempt
+}
+
+/** Test seam only: forget in-flight dials between cases. */
+export function resetHostAttachmentDials(): void {
+  dialing.clear()
 }

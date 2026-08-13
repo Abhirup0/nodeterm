@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { useSshConn } from './sshConn'
 
 beforeEach(() => {
-  useSshConn.setState({ byProject: {}, autoPermByProject: {}, remoteClaudeVersionByProject: {} })
+  useSshConn.setState({
+    byProject: {},
+    attachments: {},
+    autoPermByProject: {},
+    remoteClaudeVersionByProject: {}
+  })
 })
 
 // If a project's SSH server gets repointed to a DIFFERENT host whose claude CLI is older, the
@@ -107,9 +112,9 @@ describe('useSshConn — tri-state probe answer + remote version (tab-menu hint)
   })
 })
 
-// A HOST ATTACHMENT — a remote node inside a canvas that is not that endpoint's SSH project —
-// has no project row anywhere. Its scope entry is the only record of how to reach the machine and
-// which canvas its nodes are on, so the reconnect coordinator reads it back out of here.
+// A HOST ATTACHMENT — a remote node inside a canvas that is not that endpoint's SSH project — has
+// no project row anywhere. The record here is the ONLY way back to the machine, and it is kept in
+// its own map (not on the connection) precisely so it survives a connect that never succeeded.
 describe('useSshConn — host attachments', () => {
   const ATTACHMENT = {
     conn: { host: 'devbox', user: 'corvin', port: 2222 },
@@ -120,7 +125,7 @@ describe('useSshConn — host attachments', () => {
 
   it('answers the owning canvas for an attachment scope, and itself for an SSH project', () => {
     const s = useSshConn.getState()
-    s.setConn('attached-local-1-deadbeef', { controlPath: '/tmp/a', attachment: ATTACHMENT })
+    s.registerAttachment('attached-local-1-deadbeef', ATTACHMENT)
     s.setConn('ssh-project-1', { controlPath: '/tmp/b' })
 
     expect(useSshConn.getState().ownerProjectId('attached-local-1-deadbeef')).toBe('local-1')
@@ -134,28 +139,48 @@ describe('useSshConn — host attachments', () => {
     expect(useSshConn.getState().getAttachment('ssh-project-1')).toBeUndefined()
   })
 
-  it('a RE-connect (bare IPC coordinates) keeps the routing facts', () => {
-    // The regression this guards: the reconnect loop heals the master, setConn overwrites the
-    // entry with what IPC returned, and the scope loses the only record of its endpoint — so the
-    // NEXT drop can never be reconnected, and the respawn goes to the wrong canvas.
+  it('a registered attachment survives with NO connection at all', () => {
+    // The regression this guards: recording the routing facts on the connect RESULT. A cold load
+    // against a sleeping host then has no endpoint on record, so the reconnect coordinator's
+    // connect dep returns false on every backoff step and the offline overlay's Reconnect is
+    // inert for the rest of the app run.
+    useSshConn.getState().registerAttachment('a1', ATTACHMENT)
+
+    expect(useSshConn.getState().getControlPath('a1')).toBeUndefined()
+    expect(useSshConn.getState().getAttachment('a1')).toEqual(ATTACHMENT)
+    expect(useSshConn.getState().ownerProjectId('a1')).toBe('local-1')
+  })
+
+  it('a RE-connect does not disturb the routing facts', () => {
     const s = useSshConn.getState()
-    s.setConn('attached-local-1-deadbeef', { controlPath: '/tmp/a', attachment: ATTACHMENT })
+    s.registerAttachment('a1', ATTACHMENT)
 
-    s.setConn('attached-local-1-deadbeef', { controlPath: '/tmp/a2' })
+    s.setConn('a1', { controlPath: '/tmp/a2' })
 
-    const after = useSshConn.getState()
-    expect(after.getControlPath('attached-local-1-deadbeef')).toBe('/tmp/a2')
-    expect(after.getAttachment('attached-local-1-deadbeef')).toEqual(ATTACHMENT)
+    expect(useSshConn.getState().getControlPath('a1')).toBe('/tmp/a2')
+    expect(useSshConn.getState().getAttachment('a1')).toEqual(ATTACHMENT)
   })
 
   it('lists a project’s attachment scopes so its masters can be torn down with it', () => {
     const s = useSshConn.getState()
-    s.setConn('a1', { controlPath: '/tmp/1', attachment: ATTACHMENT })
-    s.setConn('a2', { controlPath: '/tmp/2', attachment: { ...ATTACHMENT, hostKey: 'u@other' } })
-    s.setConn('a3', { controlPath: '/tmp/3', attachment: { ...ATTACHMENT, ownerProjectId: 'p2' } })
+    s.registerAttachment('a1', ATTACHMENT)
+    s.registerAttachment('a2', { ...ATTACHMENT, hostKey: 'u@other' })
+    s.registerAttachment('a3', { ...ATTACHMENT, ownerProjectId: 'p2' })
     s.setConn('ssh-project-1', { controlPath: '/tmp/4' })
 
     expect(useSshConn.getState().attachmentScopesOf('local-1').sort()).toEqual(['a1', 'a2'])
     expect(useSshConn.getState().attachmentScopesOf('p2')).toEqual(['a3'])
+  })
+
+  it('clearAttachment forgets both the routing facts and the connection', () => {
+    const s = useSshConn.getState()
+    s.registerAttachment('a1', ATTACHMENT)
+    s.setConn('a1', { controlPath: '/tmp/a' })
+
+    s.clearAttachment('a1')
+
+    expect(useSshConn.getState().getAttachment('a1')).toBeUndefined()
+    expect(useSshConn.getState().getControlPath('a1')).toBeUndefined()
+    expect(useSshConn.getState().attachmentScopesOf('local-1')).toEqual([])
   })
 })

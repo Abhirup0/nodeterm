@@ -113,9 +113,9 @@ export function sshExtraArgsEnableLocalExec(extraArgs: string | undefined): bool
 export interface SshServer extends SshConnection {
   id: string
   label: string
-  /** Default remote folder for anything opened on this machine — the "New remote" dialog's
-   *  prefill, and the cwd of a node attached to this host from a LOCAL canvas project (which has
-   *  no `remoteCwd` of its own to inherit). Optional; absent means `~`. */
+  /** Where browsing this machine STARTS: the folder the "New remote" project dialog opens at, and
+   *  the folder Test connection dials. It is a starting point, not an inherited default — a node's
+   *  cwd comes from the project or node it was created in, never from here. Absent means `~`. */
   remoteCwd?: string
 }
 
@@ -143,24 +143,33 @@ export function sshAttachmentId(projectId: string, conn: SshConnection): string 
  * Connection scope used by a remote node inside a project.
  *
  * An SSH PROJECT owns its ControlMaster under the project id — that is the whole of today's
- * model, and this returns exactly that whenever the node's endpoint is the project's own. A
- * remote node embedded in a LOCAL project (or in an SSH project pointed at a DIFFERENT host) owns
- * a host attachment instead, under the stable project × endpoint id.
+ * model, and this returns exactly that whenever the project's own binding already reaches the
+ * node's machine. A remote node embedded in a LOCAL project (or in an SSH project bound to a
+ * DIFFERENT machine) owns a host attachment instead, under the stable project × endpoint id.
  *
  * Every consumer of that connection — spawn (`resolveSshRemote`), reconnect (`SshReconnector`),
  * upload — must make the same choice, or a node resolves a master that was opened for someone
  * else. Hence one function rather than the rule written out at each site.
+ *
+ * ## Why the project's binding wins on a HOST match, user and port included
+ *
+ * A node's `ssh` is a SNAPSHOT persisted into the canvas, and an SSH project's canvas lives in
+ * `<remoteCwd>/.nodeterm/project.json` ON THE HOST — shared with everyone who opens that folder.
+ * So the `user` (and port) on a node is whoever created it, not whoever is reading it: alice's
+ * nodes say `alice@box`, and when bob opens the same project as `bob@box` every one of them would
+ * ask for a second master dialing `alice@box` — which fails for bob, or worse sits on an askpass
+ * prompt. The project's binding is the authority on how THIS user reaches that machine, so a node
+ * naming the same host is served by it.
+ *
+ * The cost is a deliberate one: inside an SSH project you cannot pin a node to a second ACCOUNT on
+ * the same host. A different machine still gets its own attachment, which is the case this is for.
  */
 export function sshConnectionIdForProject(
   projectId: string,
   conn: SshConnection,
   projectServer?: SshConnection
 ): string {
-  const sameEndpoint =
-    projectServer?.host === conn.host &&
-    projectServer.user === conn.user &&
-    (projectServer.port ?? 22) === (conn.port ?? 22)
-  return sameEndpoint ? projectId : sshAttachmentId(projectId, conn)
+  return projectServer?.host === conn.host ? projectId : sshAttachmentId(projectId, conn)
 }
 
 /**

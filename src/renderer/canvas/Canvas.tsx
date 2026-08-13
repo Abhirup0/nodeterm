@@ -56,7 +56,11 @@ import {
   useSharedGlyphActive
 } from './SharedGlyphLayer'
 import { SshReconnector } from '../lib/sshReconnect'
-import { hostAttachmentsFor } from '../lib/sshAttachments'
+import {
+  hostAttachmentsFor,
+  connectHostAttachment,
+  type SshConnectFn
+} from '../lib/sshAttachments'
 import { terminalKey } from '../terminal/terminal-config'
 import {
   setWebglGesture,
@@ -187,6 +191,11 @@ import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { isSafeQuickOpenRelPath } from '@shared/quick-open-filter'
+
+/** The real `sshProject.connect`, bound once. Passed into `connectHostAttachment` rather than
+ *  reached for inside it, so that helper stays testable without an Electron preload. */
+const sshConnect: SshConnectFn = (scopeId, conn, remoteCwd) =>
+  window.nodeTerminal.sshProject.connect(scopeId, conn, remoteCwd)
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
@@ -1715,28 +1724,24 @@ export function Canvas() {
     // HOST ATTACHMENTS: remote nodes on this canvas whose machine is not the project's own — every
     // remote node when the project is LOCAL. They have no project row to be connected from, so
     // their masters are opened here, alongside the project's, under the stable attachment scope
-    // their terminals resolve (`sshConnectionIdForProject`). Idempotent in main, so a tab switch
-    // back is a no-op; failures are silent by design — the node's own 20s wait then its offline
-    // overlay is the user-visible half, and `requireRemote` guarantees nothing starts locally.
+    // their terminals resolve (`sshConnectionIdForProject`). This is a PRE-WARM only: a node added
+    // at runtime dials for itself from `resolveSshRemote`, and `connectHostAttachment` collapses
+    // both into one connect. Failures are silent by design — the node's own 20s wait then its
+    // offline overlay is the user-visible half, and `requireRemote` guarantees nothing starts
+    // locally.
     // NOTE: git routing is deliberately NOT armed for an attachment. The project's own cwd is what
     // the Source Control panel is about, and an attached node must not repoint it at another host.
     for (const attachment of hostAttachmentsFor(project.id, project.nodes, project.ssh?.server)) {
-      window.nodeTerminal.sshProject
-        .connect(attachment.scopeId, attachment.conn, attachment.remoteCwd)
-        .then((info) =>
-          useSshConn.getState().setConn(attachment.scopeId, {
-            ...info,
-            attachment: {
-              conn: attachment.conn,
-              hostKey: attachment.hostKey,
-              remoteCwd: attachment.remoteCwd,
-              ownerProjectId: project.id
-            }
-          })
-        )
-        .catch(() => {
-          /* the node's offline overlay + the reconnect coordinator own the retry */
-        })
+      void connectHostAttachment(
+        attachment.scopeId,
+        {
+          conn: attachment.conn,
+          hostKey: attachment.hostKey,
+          remoteCwd: attachment.remoteCwd,
+          ownerProjectId: project.id
+        },
+        sshConnect
+      )
     }
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
@@ -7708,19 +7713,12 @@ export function Canvas() {
   useEffect(() => {
     const rec = new SshReconnector({
       connect: async (scopeId) => {
-        // A HOST ATTACHMENT has no project row to read its endpoint from — the scope carries it.
-        // Reconnect it on its own loop (its master is its own) and leave git routing alone: the
-        // owning project is local, or points somewhere else entirely.
+        // A HOST ATTACHMENT has no project row to read its endpoint from — `registerAttachment`
+        // put it on record before the first dial, precisely so a connect that never succeeded is
+        // still reachable here. Reconnect it on its own loop (its master is its own) and leave git
+        // routing alone: the owning project is local, or points somewhere else entirely.
         const attached = useSshConn.getState().getAttachment(scopeId)
-        if (attached) {
-          const info = await window.nodeTerminal.sshProject.connect(
-            scopeId,
-            attached.conn,
-            attached.remoteCwd
-          )
-          useSshConn.getState().setConn(scopeId, { ...info, attachment: attached })
-          return true
-        }
+        if (attached) return connectHostAttachment(scopeId, attached, sshConnect)
         const projectId = scopeId
         const project = useProjects.getState().getProject(projectId)
         if (!project?.ssh) return false
@@ -8087,7 +8085,7 @@ export function Canvas() {
           .killSessions(scopeId, nodeIds)
           .catch(() => {})
           .finally(() => void window.nodeTerminal.sshProject.disconnect(scopeId))
-        useSshConn.getState().clear(scopeId)
+        useSshConn.getState().clearAttachment(scopeId)
       }
       disposeRelayTabForProject(id)
       store.deleteProject(id)

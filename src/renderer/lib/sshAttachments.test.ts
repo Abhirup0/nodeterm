@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { sshAttachmentId, type SshConnection } from '@shared/ssh'
-import { hostAttachmentsFor, type AttachableNode } from './sshAttachments'
+import { useSshConn } from '../state/sshConn'
+import {
+  connectHostAttachment,
+  hostAttachmentsFor,
+  resetHostAttachmentDials,
+  type AttachableNode
+} from './sshAttachments'
 
 const DEVBOX: SshConnection = { host: 'devbox', user: 'corvin', port: 2222 }
 const OTHER: SshConnection = { host: 'other', user: 'corvin' }
@@ -63,5 +69,104 @@ describe('hostAttachmentsFor', () => {
     for (const scope of hostAttachmentsFor('local-1', [remote('n1', DEVBOX), remote('n2', OTHER)])) {
       expect(scope.scopeId).not.toBe('local-1')
     }
+  })
+})
+
+describe('connectHostAttachment', () => {
+  const ATTACHMENT = {
+    conn: DEVBOX,
+    hostKey: 'corvin@devbox',
+    remoteCwd: '/srv/app',
+    ownerProjectId: 'local-1'
+  }
+
+  beforeEach(() => {
+    resetHostAttachmentDials()
+    useSshConn.setState({
+      byProject: {},
+      attachments: {},
+      autoPermByProject: {},
+      remoteClaudeVersionByProject: {}
+    })
+  })
+
+  it('records the endpoint BEFORE dialing, not after it succeeds', async () => {
+    // Ordering, not end state: main emits `status:'connected'` from inside its connect, over the
+    // same IPC pipe, so that event lands BEFORE this promise resolves. Anything reading the scope
+    // at that moment — `ownerProjectId`, which decides whether respawn bumps the nonce or takes
+    // the "switched away" branch — must already find the record.
+    let seenDuringDial: unknown
+    const connect = vi.fn(async () => {
+      seenDuringDial = useSshConn.getState().getAttachment('a1')
+      return { controlPath: '/tmp/cm' }
+    })
+
+    await connectHostAttachment('a1', ATTACHMENT, connect)
+
+    expect(seenDuringDial).toEqual(ATTACHMENT)
+    expect(useSshConn.getState().ownerProjectId('a1')).toBe('local-1')
+  })
+
+  it('keeps the endpoint on record when the FIRST connect fails', async () => {
+    // A cold load against a sleeping host. The reconnect coordinator's connect dep reads the
+    // endpoint back out of the store; without this it returns false on every backoff step and
+    // the offline overlay's Reconnect is inert for the rest of the app run.
+    const connect = vi.fn(async () => {
+      throw new Error('ssh: connect to host devbox port 2222: Host is down')
+    })
+
+    await expect(connectHostAttachment('a1', ATTACHMENT, connect)).resolves.toBe(false)
+
+    expect(useSshConn.getState().getAttachment('a1')).toEqual(ATTACHMENT)
+    expect(useSshConn.getState().getControlPath('a1')).toBeUndefined()
+  })
+
+  it('a failed dial does not poison the scope against the retry', async () => {
+    const connect = vi
+      .fn<() => Promise<{ controlPath: string }>>()
+      .mockRejectedValueOnce(new Error('Host is down'))
+      .mockResolvedValueOnce({ controlPath: '/tmp/cm' })
+
+    expect(await connectHostAttachment('a1', ATTACHMENT, connect)).toBe(false)
+    expect(await connectHostAttachment('a1', ATTACHMENT, connect)).toBe(true)
+
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(useSshConn.getState().getControlPath('a1')).toBe('/tmp/cm')
+  })
+
+  it('collapses concurrent callers into ONE dial', async () => {
+    // Every node on the machine calls this at spawn, on top of Canvas's pre-warm.
+    const connect = vi.fn(async () => ({ controlPath: '/tmp/cm' }))
+
+    const all = await Promise.all([
+      connectHostAttachment('a1', ATTACHMENT, connect),
+      connectHostAttachment('a1', ATTACHMENT, connect),
+      connectHostAttachment('a1', ATTACHMENT, connect)
+    ])
+
+    expect(all).toEqual([true, true, true])
+    expect(connect).toHaveBeenCalledTimes(1)
+  })
+
+  it('short-circuits on a live master but still refreshes the record', async () => {
+    const connect = vi.fn(async () => ({ controlPath: '/tmp/other' }))
+    useSshConn.getState().setConn('a1', { controlPath: '/tmp/live' })
+
+    expect(await connectHostAttachment('a1', ATTACHMENT, connect)).toBe(true)
+
+    expect(connect).not.toHaveBeenCalled()
+    // A tab switch back adopts the live master; the NEXT drop still needs the endpoint on record.
+    expect(useSshConn.getState().getAttachment('a1')).toEqual(ATTACHMENT)
+  })
+
+  it('dials each machine separately', async () => {
+    const connect = vi.fn(async () => ({ controlPath: '/tmp/cm' }))
+
+    await Promise.all([
+      connectHostAttachment('a1', ATTACHMENT, connect),
+      connectHostAttachment('a2', { ...ATTACHMENT, conn: OTHER, hostKey: 'corvin@other' }, connect)
+    ])
+
+    expect(connect).toHaveBeenCalledTimes(2)
   })
 })

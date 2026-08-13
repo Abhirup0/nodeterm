@@ -196,8 +196,8 @@ export function SshSection({ isActive }: { isActive: boolean }): React.JSX.Eleme
                 }
               />
               <FieldRow
-                label="Default working directory"
-                description="Folder new terminals on this machine open in, including ones attached to a local canvas."
+                label="Default folder"
+                description="Where browsing this machine starts: the folder “New remote” opens at, and the one Test connection dials."
                 control={
                   <Input
                     className="w-72 font-mono"

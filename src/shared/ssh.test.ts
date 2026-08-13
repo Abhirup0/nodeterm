@@ -54,14 +54,28 @@ describe('sshConnectionIdForProject', () => {
     expect(sshConnectionIdForProject('project-1', ubuntu, { ...ubuntu })).toBe('project-1')
   })
 
-  it('treats an omitted port as 22 on BOTH sides (same endpoint, one master)', () => {
-    const plain = { host: 'devbox', user: 'corvin' }
-    expect(sshConnectionIdForProject('p1', plain, { ...plain, port: 22 })).toBe('p1')
-    expect(sshConnectionIdForProject('p1', { ...plain, port: 22 }, plain)).toBe('p1')
+  it('a LOCAL project has no binding, so every remote node on it is an attachment', () => {
+    expect(sshConnectionIdForProject('local-1', ubuntu, undefined)).toBe(
+      sshAttachmentId('local-1', ubuntu)
+    )
   })
 
   it('uses the host attachment when a remote node lives in a local project', () => {
     expect(sshConnectionIdForProject('project-1', ubuntu)).toBe(sshAttachmentId('project-1', ubuntu))
+  })
+
+  it('serves a node naming the same HOST from the project, whatever user it was saved with', () => {
+    // An SSH project's canvas lives in `<remoteCwd>/.nodeterm/project.json` ON THE HOST, shared
+    // with everyone who opens that folder — so a node's persisted `user` is whoever CREATED it.
+    // If alice's nodes sent bob off to open a second master as `alice@box`, bob's whole canvas
+    // would fail (or sit on an askpass prompt) the moment he opened the project.
+    expect(
+      sshConnectionIdForProject('project-1', { host: 'devbox', user: 'alice', port: 2222 }, ubuntu)
+    ).toBe('project-1')
+    // Same for a port saved from a setup that reaches the machine differently.
+    expect(
+      sshConnectionIdForProject('project-1', { host: 'devbox', user: 'corvin', port: 22 }, ubuntu)
+    ).toBe('project-1')
   })
 
   it("does not reuse an SSH project's connection for a node on another endpoint", () => {
