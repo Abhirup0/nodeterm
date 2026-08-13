@@ -86,7 +86,12 @@ export const CODEX_FALLBACK_REASONS: Record<string, string> = {
   'broker-unreachable': "nodeterm's hook server was unreachable",
   'node-token-unavailable': 'this build could not mint a node identity key',
   'thread-id-unavailable': 'the session id to resume was not usable',
-  'app-server-unavailable': 'this codex CLI has no shared app-server',
+  // Two different facts, and the single old string named only the first — "an older CLI" sent a
+  // reader looking for a version problem on a codex 0.146.0 whose real problem was its install
+  // channel. That is the misleading-error-message class this repo has lost diagnosis time to.
+  'app-server-unavailable': 'this codex CLI could not start its app-server (it may be too old)',
+  'codex-standalone-missing':
+    'this codex was installed without the standalone runtime the shared app-server needs (npm or snap install)',
   'thread-bind-refused': 'another live node already owns that conversation',
   'thread-start-failed': 'the shared app-server would not start a conversation'
 }

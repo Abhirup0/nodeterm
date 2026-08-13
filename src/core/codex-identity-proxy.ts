@@ -318,8 +318,25 @@ nt_preflight() {
   if [ "\${1-}" = resume ]; then
     case "\${2-}" in ''|*[!A-Za-z0-9._-]*) nt_fail thread-id-unavailable; return ;; esac
   fi
-  ${appServerStartCommand} || { nt_fail app-server-unavailable; return; }
-  return 0
+  # The authoritative check runs FIRST and unchanged; the stat below only decides WHICH reason to
+  # report. Ordering it the other way would let a codex that no longer needs the standalone runtime
+  # fall back on a stat we had no business trusting more than the command itself.
+  #
+  # Two different facts wore one name before: an older CLI with no app-server at all, and a current
+  # CLI installed off a channel that ships no standalone runtime (npm, snap) — where the daemon
+  # refuses with "managed standalone Codex install not found at
+  # <CODEX_HOME>/packages/standalone/current/codex". Caps normally keeps that second case away from
+  # here entirely, but the pane resolves CODEX_HOME from its OWN environment (§8.5) and an install
+  # can be removed after boot, so the launcher still has to be able to say which it hit.
+  if ${appServerStartCommand}; then
+    return 0
+  fi
+  if [ -x "\${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/codex" ]; then
+    nt_fail app-server-unavailable
+  else
+    nt_fail codex-standalone-missing
+  fi
+  return
 }
 
 # Best effort, and never fatal: tell the desktop this node is running plain codex, so the UI can

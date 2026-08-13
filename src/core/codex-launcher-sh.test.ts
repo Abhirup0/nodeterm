@@ -176,11 +176,43 @@ describe('falls back to plain codex', () => {
     })
   }
 
+  // Two facts wore one reason before, and the string named only the first ("an older CLI"), which
+  // sent a reader of a codex 0.146.0 node hunting for a version problem it did not have.
   it('an older codex with no app-server → plain codex, not a dead node', async () => {
-    const noServer = path.join(dir, 'nodeterm-codex-no-server')
+    const runtime = path.join(dir, '.codex', 'packages', 'standalone', 'current')
+    fs.mkdirSync(runtime, { recursive: true })
+    fs.writeFileSync(path.join(runtime, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    try {
+      const noServer = path.join(dir, 'nodeterm-codex-no-server')
+      fs.writeFileSync(noServer, buildCodexLauncherScript('false'), { mode: 0o755 })
+      await callLauncher(['hello'], {}, noServer)
+      expect(codexArgv()).toEqual(['hello'])
+      expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'app-server-unavailable' }])
+    } finally {
+      fs.rmSync(path.join(dir, '.codex'), { recursive: true, force: true })
+    }
+  })
+
+  it('an npm/snap codex with no standalone runtime → its own reason, not "an older CLI"', async () => {
+    // MEASURED: codex-cli 0.146.0 installed via npm answers `app-server daemon start` with
+    // "managed standalone Codex install not found at ~/.codex/packages/standalone/current/codex".
+    // The caps probe normally keeps this case away from the launcher entirely — but the pane
+    // resolves CODEX_HOME from its OWN environment (§8.5) and an install can be removed after boot.
+    const noServer = path.join(dir, 'nodeterm-codex-no-standalone')
     fs.writeFileSync(noServer, buildCodexLauncherScript('false'), { mode: 0o755 })
     await callLauncher(['hello'], {}, noServer)
     expect(codexArgv()).toEqual(['hello'])
+    expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'codex-standalone-missing' }])
+  })
+
+  it('honors CODEX_HOME when deciding which of the two it hit', async () => {
+    const home = path.join(dir, 'relocated-codex')
+    const runtime = path.join(home, 'packages', 'standalone', 'current')
+    fs.mkdirSync(runtime, { recursive: true })
+    fs.writeFileSync(path.join(runtime, 'codex'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    const noServer = path.join(dir, 'nodeterm-codex-relocated')
+    fs.writeFileSync(noServer, buildCodexLauncherScript('false'), { mode: 0o755 })
+    await callLauncher(['hello'], { CODEX_HOME: home }, noServer)
     expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'app-server-unavailable' }])
   })
 
