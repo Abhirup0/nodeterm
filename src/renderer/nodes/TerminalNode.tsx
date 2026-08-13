@@ -1154,18 +1154,30 @@ export function TerminalNode({
   editingTitleRef.current = editingTitle
   titleRef.current = data.title as string
   // "Move into worktree" affordance: shown only when this terminal is a child of a group that
-  // is bound to a worktree AND its current cwd differs from that worktree path (i.e. it's still
-  // running in the old folder). Reads the parent group from React Flow state (single source of
-  // truth); `parentId` is set by the group reparenting transforms.
+  // or one of its ancestor groups is bound to a worktree AND its current cwd differs from that
+  // worktree path (i.e. it's still running in the old folder). Reads the group chain from React
+  // Flow state (single source of truth); `parentId` is set by the group reparenting transforms.
   // A STALE group (its worktree directory was deleted outside the app) must NOT offer the move:
   // "move" destroys this node's tmux session — killing whatever is running in it — and respawns it
   // in the worktree path, which no longer exists. pty-manager would silently fall back to $HOME and
   // `data.cwd` would persist the dead path forever, which not even Unbind undoes. The chip already
   // says "· missing"; the ↪ must agree with it.
-  const parentWtPath = parentId
-    ? ((getNode(parentId) as CanvasNode | undefined)?.data.worktree?.path as string | undefined)
-    : undefined
-  const parentWtStale = useWorktrees((s) => (parentId ? s.staleGroupIds.includes(parentId) : false))
+  const parentWorktree = (() => {
+    const seen = new Set<string>()
+    let groupId = parentId
+    while (groupId && !seen.has(groupId)) {
+      seen.add(groupId)
+      const group = getNode(groupId) as CanvasNode | undefined
+      const path = group?.data.worktree?.path as string | undefined
+      if (path) return { groupId, path }
+      groupId = group?.parentId
+    }
+    return undefined
+  })()
+  const parentWtPath = parentWorktree?.path
+  const parentWtStale = useWorktrees((s) =>
+    parentWorktree ? s.staleGroupIds.includes(parentWorktree.groupId) : false
+  )
   // …and a session that runs on ANOTHER MACHINE must not offer it either. Worktrees are local-only
   // in v1, so ↪ would end this node's REMOTE tmux session and respawn it in a local path that does
   // not exist on the host. Both halves of "remote" are asked: the project (its terminals and its git

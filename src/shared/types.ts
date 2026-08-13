@@ -836,10 +836,14 @@ export interface Settings {
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
   defaultNodeHeight: number
-  /** Sessions sidebar: collapse inactive projects and re-focus the list on every project
-   *  switch (the historical behavior). Off = every project defaults to expanded and a
-   *  project switch never touches the user's expand/collapse choices. */
+  /** Sessions sidebar: the DEFAULT for a project row the user never toggled — on (historical)
+   *  keeps the active project expanded and collapses the others, off leaves everything expanded.
+   *  Explicit toggles live in `sidebarCollapsedItems` and always win. */
   sidebarAutoCollapse: boolean
+  /** Persisted disclosure choices for the sessions tree, keyed `project:<id>` and
+   *  `project:<id>:group:<groupId>` (true = collapsed). Pruned on every write against the live
+   *  tree, so a deleted frame or project cannot grow settings.json forever. */
+  sidebarCollapsedItems: Record<string, boolean>
   /** Fallback view for projects the user hasn't explicitly toggled (canvas or the kanban board).
    *  Personal machine-local preference; per-project explicit choices override it. */
   defaultProjectView: 'canvas' | 'kanban'
@@ -1047,6 +1051,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
+  sidebarCollapsedItems: {},
   defaultProjectView: 'canvas',
   panHoverDelay: 600,
   doubleClickFocus: true,
