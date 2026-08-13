@@ -14,12 +14,24 @@
  * `codexIdentityCaps` below for why waiting, rather than answering "no", is the only safe default
  * here.
  *
- * Three things have to be true, and none is knowable from the renderer:
+ * FOUR things have to be true, and none is knowable from the renderer:
  *  1. the hook server holds the per-node auth secret (no secret ⇒ no capability token ⇒ the
  *     launcher would fall back anyway, one process later),
  *  2. the generated launcher could actually be written (a read-only or full data dir is a real
- *     failure mode, and it is the one the renderer cannot see at all), and
- *  3. the installed `codex` accepts `--remote` — see `codexCliSupportsRemote`. This is the only
+ *     failure mode, and it is the one the renderer cannot see at all),
+ *  3. this INSTALL of codex can run a shared app-server at all — see
+ *     `codexManagedRuntimeInstalled`. This is the precondition the first cut got wrong: it asked
+ *     `--help` for a `--remote` flag, which an npm-installed codex 0.146.0 advertises perfectly
+ *     happily while `codex app-server daemon start` answers
+ *
+ *       Error: managed standalone Codex install not found at
+ *       ~/.codex/packages/standalone/current/codex
+ *
+ *     So on the mainstream install channel we wrote `nodeterm-codex` into the launch line and only
+ *     discovered at runtime that it could never work: a wasted curl round trip, a `plain codex`
+ *     chip, and a warning banner on the first fallback of EVERY node, forever, for a feature that
+ *     cannot function on that install. Noisily inert. Answered here it is genuinely inert, and
+ *  4. the installed `codex` accepts `--remote` — see `codexCliSupportsRemote`. This is the only
  *     one that cannot be recovered from at runtime: the launcher's preflight proves that
  *     `codex app-server daemon start` exits 0, and then EXECS. A CLI with an app-server but no
  *     `--remote` dies on a clap usage error after that exec, where there is no fallback left. So
@@ -30,15 +42,61 @@
  * than an accident.
  */
 import { execFile } from 'child_process'
+import { accessSync, constants } from 'fs'
+import path from 'path'
 import { promisify } from 'util'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import { type CodexIdentityCaps } from '../shared/types'
 import { installCodexLauncher, codexThreadIdentityAvailable } from './codex-identity-proxy'
+import { codexHome } from './usage/codex-usage'
 import { findInLoginPath } from './pty-manager'
 
 const execFileP = promisify(execFile)
 const PROBE_TIMEOUT_MS = 5000
+
+/**
+ * The fixed path `codex app-server daemon start` requires, under the CLI's own `CODEX_HOME`.
+ *
+ * Not a guess: the CLI names this exact path in the error it refuses with, and reports it as
+ * `managedCodexPath` in `codex app-server daemon stop`'s JSON. Its own words are "the daemon starts
+ * and updates app-server from that fixed path".
+ */
+export function codexManagedRuntimePath(home = codexHome()): string {
+  return path.join(home, 'packages', 'standalone', 'current', 'codex')
+}
+
+/**
+ * Can this install run a shared app-server? A STAT, and deliberately not `codex app-server daemon
+ * start`.
+ *
+ * The three candidates, and why this one:
+ *  - `codex app-server daemon start` is the authoritative answer, and it STARTS A DAEMON. This
+ *    probe runs once per app run at boot, on every machine with codex installed, including the
+ *    runs where no Codex node is ever opened. A capability probe must not create the very process
+ *    the feature exists to create lazily.
+ *  - `codex app-server daemon version` is read-only but connects to the control socket, so it
+ *    fails on a perfectly capable install whose daemon merely is not running yet — i.e. after
+ *    every boot. Fail-closed, but uselessly so: the probe runs ONCE, so it would pin the feature
+ *    off for the session on the machines it is meant to be on.
+ *  - `codex app-server daemon stop` prints the authoritative JSON (`managedCodexPath`,
+ *    `managedCodexVersion`) and exits 0 even when nothing is running — but it stops a RUNNING
+ *    daemon, which is the shared app-server every other node is attached to. Refused outright.
+ *
+ * So: the same fact, read the cheapest conclusive way, with no side effect and no spawn. Anything
+ * we cannot establish — a relocated home, a permission error, a layout we do not recognise —
+ * throws or misses and answers `false`, which is the bare `codex` this feature degrades to
+ * everywhere else. A wrong "no" costs only the shared app-server; a wrong "yes" costs a round trip
+ * and a banner on every node.
+ */
+export function codexManagedRuntimeInstalled(home = codexHome()): boolean {
+  try {
+    accessSync(codexManagedRuntimePath(home), constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
 
 /**
  * Pure: help text → does this CLI accept `--remote`?
@@ -85,19 +143,27 @@ let announce: ((c: CodexIdentityCaps) => void) | null = null
 
 /**
  * Compute the answer and publish it. Called once by the shell, AFTER the node-auth secret has been
- * set (or has definitively failed), because the secret is a third of what "shared" means.
+ * set (or has definitively failed), because the secret is one quarter of what "shared" means.
  *
  * Async because of the `--remote` probe, which is a login-shell lookup plus up to two `--help`
  * spawns. That cost is paid HERE — once, during boot, with nothing waiting on it but the first
  * Codex launch line — and never on the launch path itself, where it would be visible latency in
  * the pane every single time, to answer a question whose answer cannot change while the app runs.
+ *
+ * The install check runs FIRST and short-circuits the spawns: on an npm install it is a single
+ * failed stat, and there is nothing to learn from a help page about a flag we will never reach.
  */
 export async function refreshCodexIdentityCaps(
-  probeRemote: () => Promise<boolean> = probeRemoteFlag
+  probeRemote: () => Promise<boolean> = probeRemoteFlag,
+  probeAppServer: () => boolean | Promise<boolean> = codexManagedRuntimeInstalled
 ): Promise<CodexIdentityCaps> {
-  const remoteFlag = await probeRemote()
-  const launcher = remoteFlag && codexThreadIdentityAvailable() ? installCodexLauncher() : null
-  latest = { shared: !!launcher, launcherPath: launcher, remoteFlag }
+  const appServer = await Promise.resolve()
+    .then(() => probeAppServer())
+    .catch(() => false)
+  const remoteFlag = appServer ? await probeRemote() : false
+  const launcher =
+    appServer && remoteFlag && codexThreadIdentityAvailable() ? installCodexLauncher() : null
+  latest = { shared: !!launcher, launcherPath: launcher, remoteFlag, appServer }
   if (announce) {
     announce(latest)
     announce = null
