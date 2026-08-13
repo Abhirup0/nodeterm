@@ -1883,15 +1883,23 @@ export interface CodexIdentityCaps {
   launcherPath: string | null
   /** Does the installed `codex` accept `--remote`? Feature-detected from its own `--help`. The one
    *  precondition that cannot be recovered from at runtime: the launcher execs, and a CLI without
-   *  the flag dies on a usage error where no fallback is left. Unknown ⇒ false ⇒ plain codex. */
+   *  the flag dies on a usage error where no fallback is left. Unknown ⇒ false ⇒ plain codex, and
+   *  "not probed" counts as unknown: when `appServer` is false the help spawns are skipped, so this
+   *  reads false whatever the CLI's help page would have said. */
   remoteFlag: boolean
+  /** Can this INSTALL run a shared app-server at all? `codex app-server daemon start` needs the
+   *  standalone runtime the Codex installer manages; an npm (or snap) install has the `--remote`
+   *  flag in its help and no such runtime, so it can never serve a shared identity. Unknown ⇒
+   *  false ⇒ plain codex. */
+  appServer: boolean
 }
 
 /** The answer before the probe has run, and the one the Server Edition gives on purpose. */
 export const UNKNOWN_CODEX_IDENTITY_CAPS: CodexIdentityCaps = {
   shared: false,
   launcherPath: null,
-  remoteFlag: false
+  remoteFlag: false,
+  appServer: false
 }
 
 /** A Codex node's identity mode, as reported by the node's own launcher at spawn time.

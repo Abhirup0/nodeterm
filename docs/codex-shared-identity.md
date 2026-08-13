@@ -20,6 +20,35 @@ The node ↔ thread mapping is what makes that survivable. It has to outlive the
 sessions do: a running Codex client can outlive the Electron process that started it, and after a
 restart nothing in memory knows whose conversation is whose.
 
+### What it requires: an install channel, not a version
+
+`codex app-server daemon start` — the whole feature's foundation — runs the app-server out of a
+**standalone runtime the Codex installer manages**, at the fixed path
+`<CODEX_HOME>/packages/standalone/current/codex`. An install that does not put a runtime there
+cannot host a shared app-server **at any version**:
+
+```
+$ codex --version
+codex-cli 0.146.0
+$ codex app-server daemon start
+Error: managed standalone Codex install not found at /root/.codex/packages/standalone/current/codex
+
+This command requires the standalone install managed by the Codex installer, because the daemon
+starts and updates app-server from that fixed path.
+
+Install it with:
+  curl -fsSL https://chatgpt.com/codex/install.sh | sh
+```
+
+That is codex **0.146.0 installed via npm** — the mainstream channel, and the one
+`docs/troubleshooting-codex-snap.md` steers users toward. It is not an old CLI: its `--help` lists
+`--remote` and `--remote-auth-token-env`, `codex app-server daemon --help` lists every subcommand,
+and `codex app-server daemon stop` reports the requirement itself as JSON
+(`"managedCodexPath":"/root/.codex/packages/standalone/current/codex","managedCodexVersion":null`).
+
+So the population that gets a shared identity is **the standalone-installer channel**, and every
+other install runs plain `codex`. §3 is what makes that a quiet degrade instead of a noisy one.
+
 ## 2. The pieces
 
 | File | Job |
@@ -133,18 +162,47 @@ that is a later slice — so a launcher-named line there would be `command not f
 dead node this exists to prevent.) The default `false` means every call site that has not opted in
 emits today's command.
 
-`shared` is the AND of three things, and the third is the interesting one: the installed `codex`
-must accept **`--remote`**. That is the only precondition with no runtime recovery — the launcher's
-preflight proves `codex app-server daemon start` exits 0 and then **execs**, and a CLI with an
-app-server but no `--remote` dies on a clap usage error where no fallback is left. It is
-feature-detected from the CLI's own `--help` (and `codex resume --help` if the first does not say),
-never version-compared, for the same reason claude's `--session-id` is: an unrecognised flag does
-not degrade, it makes the CLI exit. Unknown — no CLI on the login PATH, a failed or timed-out
-spawn, help text that never mentions the flag — means **false**, i.e. plain codex. A wrong "yes"
-costs the node; a wrong "no" costs only the shared app-server. The probe runs **once per app run,
-inside `refreshCodexIdentityCaps()`, entirely off the launch path**: a per-launch probe would be
-visible latency in the pane every time, to answer a question whose answer cannot change while the
-app runs.
+`shared` is the AND of **four** things, and the last two are the interesting ones.
+
+**Can this install run an app-server at all?** (`appServer`, `codexManagedRuntimeInstalled`.) The
+question §1 poses, answered by a **stat** of `<CODEX_HOME>/packages/standalone/current/codex`. The
+first cut of this file asked a different question — does `--help` mention `--remote` — which an
+npm-installed codex 0.146.0 answers *yes* while `daemon start` refuses, so on the mainstream
+channel we wrote `nodeterm-codex` into every launch line and only found out at runtime: a wasted
+curl round trip, a `plain codex` chip, and the first-fallback banner, per node, forever, for a
+feature that cannot function there. The feature is meant to be **inert** off the standalone
+channel, not noisily inert.
+
+Why a stat, and not the authoritative command:
+
+| Candidate | Why not |
+| --- | --- |
+| `codex app-server daemon start` | It **starts a daemon**. The probe runs at boot on every machine with codex installed, including the runs where no Codex node is ever opened; a capability probe must not create the very process the feature exists to create lazily. |
+| `codex app-server daemon version` | Read-only, but it connects to the control socket, so it fails on a perfectly capable install whose daemon merely is not up yet — i.e. after every boot. The probe runs ONCE, so that pins the feature off for the session on exactly the machines it is for. |
+| `codex app-server daemon stop` | Prints the authoritative JSON (`managedCodexPath`, `managedCodexVersion`) and exits 0 even when nothing is running — but it **stops a running daemon**, which is the shared app-server every other node is attached to. |
+
+The path is not inferred: the CLI names it verbatim in its refusal and reports it as
+`managedCodexPath`. It is resolved through `codexHome()`, so `$CODEX_HOME` is honored (with §8.5's
+caveat that the pane may resolve it differently). Anything unestablished — a missing path, a
+non-executable file, a permission error, a layout we do not recognise — is **false**.
+
+**Does the installed `codex` accept `--remote`?** (`remoteFlag`, `codexCliSupportsRemote`.) The
+only precondition with no runtime recovery — the launcher's preflight proves `daemon start` exits 0
+and then **execs**, and a CLI with an app-server but no `--remote` dies on a clap usage error where
+no fallback is left. Feature-detected from the CLI's own `--help` (and `codex resume --help` if the
+first does not say), never version-compared, for the same reason claude's `--session-id` is: an
+unrecognised flag does not degrade, it makes the CLI exit.
+
+The install check runs **first** and short-circuits the help spawns: with no app-server to reach
+there is nothing to learn about a flag we will never use, so `remoteFlag` reads false there as
+"not probed" — unknown, like every other unknown in this file.
+
+Unknown anywhere in the chain — no CLI on the login PATH, a failed or timed-out spawn, no standalone
+runtime, help text that never mentions the flag — means **false**, i.e. plain codex. A wrong "yes"
+costs the node (or at minimum a banner on every one of them); a wrong "no" costs only the shared
+app-server. Both probes run **once per app run, inside `refreshCodexIdentityCaps()`, entirely off
+the launch path**: a per-launch probe would be visible latency in the pane every time, to answer a
+question whose answer cannot change while the app runs.
 
 Unlike claude's, this probe cannot compute anything until the shell hands the hook server its
 secret, so the shell **pushes** the answer in and an early caller **waits**. A sync getter would
@@ -177,9 +235,22 @@ The mode is **transient**, never persisted: it describes one launch of one proce
 | `broker-unreachable` | the hook server's coordinates are unusable |
 | `node-token-unavailable` | no per-node capability — usually no secure storage |
 | `thread-id-unavailable` | the session id to resume is not shaped like one |
-| `app-server-unavailable` | `codex app-server daemon start` failed — an older CLI |
+| `app-server-unavailable` | `daemon start` failed with a standalone runtime present — an older CLI, or a daemon that would not come up |
+| `codex-standalone-missing` | `daemon start` failed and there is no standalone runtime — an npm or snap install (§1), not a version problem |
 | `thread-bind-refused` | the thread is unknown to the server, or a live node already owns it |
 | `thread-start-failed` | the server would not mint a thread |
+
+The last two used to be one reason whose copy said *"an older CLI"*, which sent anyone reading it on
+a codex 0.146.0 node hunting for a version problem that did not exist — the
+misleading-error-message class this repo has lost diagnosis time to before. The launcher runs
+`daemon start` first, unchanged and authoritative, and only then stats
+`${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/codex` to decide **which** of the two it
+hit. That ordering matters: a stat that ran first would let a future codex that no longer needs the
+standalone runtime fall back on evidence we have no business trusting over the command itself.
+
+Caps normally keeps `codex-standalone-missing` away from the launcher entirely, so seeing it means
+something the boot probe could not: the standalone install was removed while the app was running,
+or the pane's `CODEX_HOME` differs from the desktop's (§8.5).
 
 ### What the fallback does NOT cover
 
@@ -266,6 +337,14 @@ PR #112, all still to be sliced.
 1. **Post-`exec` failures are unrecoverable** (§3). The `--remote` case is closed at caps time;
    what remains is §9.2 (the composed `resume <id> <prompt> --ask-for-approval never` line) and
    §9.3 (the persisted session id being the app-server's thread id).
+   - **The install-channel gate is a stat, not the command it stands for.**
+     `codexManagedRuntimeInstalled` asserts the standalone runtime exists at the path today's CLI
+     requires; it does not prove `daemon start` will succeed (a corrupt runtime, a wedged socket, a
+     sandbox that blocks the spawn all still fail at the launcher, correctly, as
+     `app-server-unavailable`). And should a future codex drop the standalone requirement, this
+     answers a wrong **no** — plain codex, the direction everything here degrades in, but it would
+     need re-measuring rather than assuming. The alternatives, and why none of them is cheaper
+     *and* conclusive, are the table in §3.
 2. **The launcher requires a hook PORT**, not a unix socket — it POSTs to
    `http://localhost:$NODETERM_HOOK_PORT`. Fine today (the desktop's hook server is a loopback TCP
    listener), but the Server Edition wiring will have to revisit it alongside `NODETERM_HOOK_SOCK`,
@@ -293,13 +372,19 @@ Everything below needs a machine with a logged-in `codex`. Items 1-3 are the ass
 implementation could not verify; a failure in any of them is a **dead node**, not a degrade, so they
 come first. Items 1, 2 and 5 fall out of a single capture run on one fresh node.
 
-1. **`codex --remote unix://` works, and the caps probe reads the flag correctly.** The flag's
-   PRESENCE is now answered per machine (`codexCliSupportsRemote`, §3), so a CLI without it gets a
-   plain-codex node instead of a dead one — but nothing has confirmed that the flag we detect is
-   the flag we then use. Run `codex --help` and check `--remote`'s argument form against the two
-   `exec` lines in the launcher; then open a fresh Codex node and confirm the pane shows a working
-   session rather than a clap usage error. Also confirm the negative: on a CLI without `--remote`
-   (or with the probe forced false), the node runs plain codex and says so.
+1. **`codex --remote unix://` works — the part the probe cannot answer by itself.**
+   What no longer needs a device: whether this machine gets a shared identity at all. Both halves
+   of that gate are answered per machine and pinned by tests — `codexManagedRuntimeInstalled`
+   (§1's install-channel requirement, **measured false** on codex-cli 0.146.0 installed via npm,
+   where `daemon start` refuses with "managed standalone Codex install not found") and
+   `codexCliSupportsRemote` (the flag's presence). An install that fails either runs plain codex,
+   silently, with no launcher ever named — so the negative case is closed on paper.
+   What still needs a machine on the **standalone-installer** channel: that the flag we detect is
+   the flag we then use. Check `--remote`'s argument form in `codex --help` against the two `exec`
+   lines in the launcher, open a fresh Codex node, and confirm the pane shows a working session
+   rather than a clap usage error. And confirm the whole gate one level up: on that machine the
+   node comes up **shared**, while on an npm install the same build opens a plain codex node with
+   **no chip and no banner at all** (not a `plain codex` chip — the launcher must never have run).
 2. **`codex resume <id> <prompt> --ask-for-approval never` accepts a positional prompt AND a global
    flag after the subcommand.** This is the composed line `createAgentNode` builds, and it is
    CLAUDE.md rule 5's grok-`--` lesson exactly: a `withPermissionMode` unit test passes while the

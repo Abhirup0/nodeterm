@@ -6,12 +6,16 @@ import { randomBytes } from 'node:crypto'
 import {
   codexCliSupportsRemote,
   codexIdentityCaps,
+  codexManagedRuntimeInstalled,
+  codexManagedRuntimePath,
   refreshCodexIdentityCaps,
   resetCodexIdentityCapsForTests
 } from './codex-identity-caps'
 
 /** Stand-in for the `codex --help` probe. Every test says explicitly what the CLI answered. */
 const remote = (yes: boolean) => () => Promise.resolve(yes)
+/** Stand-in for the managed-runtime stat — "can this INSTALL run an app-server at all?". */
+const appServer = (yes: boolean) => () => yes
 import {
   resetCodexThreadIdentityAuthSecret,
   setCodexThreadIdentityAuthSecret
@@ -39,7 +43,7 @@ afterEach(() => {
 describe('codexIdentityCaps', () => {
   it('says yes, and installs the launcher, once the secret is in and the CLI has --remote', async () => {
     setCodexThreadIdentityAuthSecret(randomBytes(32))
-    const caps = await refreshCodexIdentityCaps(remote(true))
+    const caps = await refreshCodexIdentityCaps(remote(true), appServer(true))
     expect(caps.shared).toBe(true)
     expect(fs.existsSync(caps.launcherPath as string)).toBe(true)
   })
@@ -47,8 +51,13 @@ describe('codexIdentityCaps', () => {
   it('says no without the secret, and installs nothing', () => {
     // Half-armed is the state to avoid: a launcher on PATH with no capability to present would
     // reach the routes, be refused, and fall back one process later. Better to never name it.
-    return refreshCodexIdentityCaps(remote(true)).then((caps) => {
-      expect(caps).toEqual({ shared: false, launcherPath: null, remoteFlag: true })
+    return refreshCodexIdentityCaps(remote(true), appServer(true)).then((caps) => {
+      expect(caps).toEqual({
+        shared: false,
+        launcherPath: null,
+        remoteFlag: true,
+        appServer: true
+      })
       expect(fs.existsSync(path.join(dir, 'codex-bin', 'nodeterm-codex'))).toBe(false)
     })
   })
@@ -58,8 +67,66 @@ describe('codexIdentityCaps', () => {
     // app-server but no --remote dies on a usage error where nothing can fall back. Answering it
     // here turns a dead node into a plain-codex node on every machine, not just the tester's.
     setCodexThreadIdentityAuthSecret(randomBytes(32))
-    const caps = await refreshCodexIdentityCaps(remote(false))
-    expect(caps).toEqual({ shared: false, launcherPath: null, remoteFlag: false })
+    const caps = await refreshCodexIdentityCaps(remote(false), appServer(true))
+    expect(caps).toEqual({
+      shared: false,
+      launcherPath: null,
+      remoteFlag: false,
+      appServer: true
+    })
+    expect(fs.existsSync(path.join(dir, 'codex-bin', 'nodeterm-codex'))).toBe(false)
+  })
+
+  // THE MEASURED CASE. codex-cli 0.146.0 installed via npm — the mainstream channel, and the one
+  // docs/troubleshooting-codex-snap.md steers users toward — advertises `--remote` in `codex --help`
+  // and in `codex resume --help`, and then answers `codex app-server daemon start` with
+  //   Error: managed standalone Codex install not found at ~/.codex/packages/standalone/current/codex
+  // Gating on the help text alone wrote `nodeterm-codex` into the launch line of every Codex node on
+  // such a machine: a wasted curl round trip, a `plain codex` chip, and the first-fallback warning
+  // banner, per node, forever, for a feature that cannot work there. Inert is fine; noisily inert is
+  // not, and this row is what keeps it inert.
+  it('says no on an npm install — `--remote` in help, no standalone runtime — and writes no launcher', async () => {
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    const caps = await refreshCodexIdentityCaps(remote(true), appServer(false))
+    expect(caps).toEqual({
+      shared: false,
+      launcherPath: null,
+      // Not probed: with no app-server to reach there is nothing to learn from a help page about a
+      // flag we will never use, and "unknown" is false here like everywhere else in this file.
+      remoteFlag: false,
+      appServer: false
+    })
+    expect(fs.existsSync(path.join(dir, 'codex-bin', 'nodeterm-codex'))).toBe(false)
+  })
+
+  it('does not even spawn the help probe when the install cannot run an app-server', async () => {
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    let asked = 0
+    await refreshCodexIdentityCaps(() => {
+      asked += 1
+      return Promise.resolve(true)
+    }, appServer(false))
+    expect(asked).toBe(0)
+  })
+
+  it('says no when the install probe itself fails or times out', async () => {
+    // Fail-closed is the whole contract: anything we could not establish means the bare `codex`
+    // this feature degrades to everywhere else, never an optimistic launcher path.
+    setCodexThreadIdentityAuthSecret(randomBytes(32))
+    const threw = await refreshCodexIdentityCaps(remote(true), () => {
+      throw new Error('stat failed')
+    })
+    expect(threw).toEqual({
+      shared: false,
+      launcherPath: null,
+      remoteFlag: false,
+      appServer: false
+    })
+    resetCodexIdentityCapsForTests()
+    const rejected = await refreshCodexIdentityCaps(remote(true), () =>
+      Promise.reject(new Error('probe timed out'))
+    )
+    expect(rejected.shared).toBe(false)
     expect(fs.existsSync(path.join(dir, 'codex-bin', 'nodeterm-codex'))).toBe(false)
   })
 
@@ -73,17 +140,41 @@ describe('codexIdentityCaps', () => {
     await Promise.resolve()
     expect(settled).toBe(false)
     setCodexThreadIdentityAuthSecret(randomBytes(32))
-    await refreshCodexIdentityCaps(remote(true))
+    await refreshCodexIdentityCaps(remote(true), appServer(true))
     expect((await asked).shared).toBe(true)
   })
 
   it('answers immediately once refreshed', async () => {
-    await refreshCodexIdentityCaps(remote(false))
+    await refreshCodexIdentityCaps(remote(false), appServer(true))
     expect(await codexIdentityCaps()).toEqual({
       shared: false,
       launcherPath: null,
-      remoteFlag: false
+      remoteFlag: false,
+      appServer: true
     })
+  })
+})
+
+describe('codexManagedRuntimeInstalled', () => {
+  // The path is not inferred: `codex app-server daemon start` names it verbatim in its refusal, and
+  // `codex app-server daemon stop` reports it as `managedCodexPath` in JSON.
+  it('is the fixed path the CLI itself names, under CODEX_HOME', () => {
+    expect(codexManagedRuntimePath('/somewhere/.codex')).toBe(
+      path.join('/somewhere/.codex', 'packages', 'standalone', 'current', 'codex')
+    )
+  })
+
+  it('answers yes only for an executable runtime at that path', () => {
+    // An npm install has ~/.codex (auth, config, sessions) and no `packages/` at all — which is
+    // exactly the shape measured on the machine this fix was written on.
+    expect(codexManagedRuntimeInstalled(dir)).toBe(false)
+    const runtime = codexManagedRuntimePath(dir)
+    fs.mkdirSync(path.dirname(runtime), { recursive: true })
+    fs.writeFileSync(runtime, '#!/bin/sh\nexit 0\n', { mode: 0o644 })
+    // Present but not executable is not a runtime the daemon can exec, so it is still no.
+    expect(codexManagedRuntimeInstalled(dir)).toBe(false)
+    fs.chmodSync(runtime, 0o755)
+    expect(codexManagedRuntimeInstalled(dir)).toBe(true)
   })
 })
 
