@@ -841,6 +841,10 @@ app.whenReady().then(async () => {
     const ref = sshFsRefFor(projectId)
     return ref ? sshFs.exists(ref, p) : Promise.resolve(false)
   })
+  ipcMain.handle(IPC.sshFsQuickOpen, (_e, projectId: string, cwd: string) => {
+    const ref = sshFsRefFor(projectId)
+    return ref ? sshFs.listQuickOpenFiles(ref, cwd) : Promise.resolve([])
+  })
 
   // Board-log: same CorePlatform registrar as the Server Edition (core/board-log-handlers.ts), with
   // a desktop router that adds SSH routing on top of the local-cwd/unsupported the server also does.

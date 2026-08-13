@@ -1286,6 +1286,8 @@ export interface SshFsApi {
   write(projectId: string, path: string, content: string): Promise<boolean>
   mkdir(projectId: string, path: string): Promise<boolean>
   exists(projectId: string, path: string): Promise<boolean>
+  /** ⌘K Quick Open index of the project's remoteCwd: root-relative `/`-paths ([] on failure). */
+  quickOpen(projectId: string, cwd: string): Promise<string[]>
 }
 
 export interface GitFileChange {

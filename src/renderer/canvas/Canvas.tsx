@@ -186,6 +186,7 @@ import { planHibernation, HIBERNATE_SWEEP_MS } from '../terminal/hibernation-pol
 import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
+import { isSafeQuickOpenRelPath } from '@shared/quick-open-filter'
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
@@ -3100,33 +3101,44 @@ export function Canvas() {
     }
   }, [hasProjects, kanbanOpen, placeCanvasImages, screenToFlowPosition, viewCenter, welcomeOpen])
 
-  // Load the quick-open file index when the palette opens.
+  // Load the quick-open file index when the palette opens. An SSH project indexes its remoteCwd
+  // over the ControlMaster (sshFs.quickOpen); the browser client's sshFs is a stub, so the catch
+  // fails open to an empty index there instead of surfacing an "unsupported" error.
   useEffect(() => {
     if (!paletteOpen) return
-    const cwd = useProjects.getState().getProject(activeProjectId ?? '')?.cwd
-    if (!cwd) {
+    const project = useProjects.getState().getProject(activeProjectId ?? '')
+    const cwd = project?.ssh?.remoteCwd ?? project?.cwd
+    if (!project || !cwd) {
       setFileIndex([])
       return
     }
     let cancelled = false
-    void window.nodeTerminal.files.quickOpen(cwd).then((files) => {
-      if (!cancelled) setFileIndex(prepareQuickOpenFiles(files))
-    })
+    const index = project.ssh
+      ? window.nodeTerminal.sshFs.quickOpen(project.id, cwd)
+      : window.nodeTerminal.files.quickOpen(cwd)
+    void index
+      .catch(() => [] as string[])
+      .then((files) => {
+        if (!cancelled) setFileIndex(prepareQuickOpenFiles(files))
+      })
     return () => {
       cancelled = true
     }
   }, [paletteOpen, activeProjectId])
 
   /** Open a quick-open file result by root-relative path: editor node for text/images,
-   *  OS default app for binaries (e.g. .dmg). */
+   *  OS default app for binaries (e.g. .dmg). On an SSH project everything opens as a canvas
+   *  node routed over `sshFs` (there is no OS to hand a remote path to). */
   const openProjectFile = useCallback(
     (relPath: string) => {
-      const cwd = useProjects.getState().getProject(activeProjectId ?? '')?.cwd
+      const project = useProjects.getState().getProject(activeProjectId ?? '')
+      const cwd = project?.ssh?.remoteCwd ?? project?.cwd
       if (!cwd) return
-      // relPath comes from the trusted local file index (always cwd-relative), so the
-      // `cwd + relPath` join needs no traversal guard in v1; a future remote/untrusted source would.
+      // An SSH project's index is remote-supplied, so guard the join against traversal.
+      if (!isSafeQuickOpenRelPath(relPath)) return
       const abs = `${cwd.replace(/\/$/, '')}/${relPath}`
-      if (opensInEditor(relPath)) openFile(abs)
+      if (project?.ssh) openFile(abs, undefined, true)
+      else if (opensInEditor(relPath)) openFile(abs)
       else window.nodeTerminal.shell.openPath(abs)
     },
     [activeProjectId, openFile]
