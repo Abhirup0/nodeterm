@@ -9,6 +9,23 @@ import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/nor
 export const NODETERM_HOOK_PROTOCOL_VERSION = '1'
 const SLOWLORIS_MS = 2000
 
+// Once the body is fully read the slowloris guard has done its job — it exists for the RECEIVE
+// phase (a client that dribbles bytes to pin a socket), not for the handler. But it is replaced
+// with a HIGHER ceiling, never removed: a confirmation-gated control verb legitimately parks
+// while the renderer waits for the user's answer, yet nothing may park forever. The desktop shell
+// bounds a control request at 120s (`pendingControl` in src/main/index.ts) — a bound that lives
+// OUTSIDE core, so a future core-side handler with no bound of its own would inherit an unbounded
+// socket if this were `setTimeout(0)`. 130s sits comfortably above that, so in the desktop the
+// handler's own timeout always wins and this only ever fires as a backstop.
+const CONTROL_CEILING_MS = 130_000
+
+// The context-link handler has no timeout of its own, and its remote leg reads over an SSH
+// ControlMaster that can wedge (ConnectTimeout only covers the connect). Race it so the agent
+// gets the same prose failure it would get from any other read error, instead of a session that
+// blocks indefinitely — pre-fix the 2s destroy at least unblocked the agent's curl.
+const CONTEXT_LINK_READ_MS = 30_000
+const CONTEXT_LINK_TIMEOUT_TEXT = 'Could not read linked context.'
+
 // Default seconds the managed permission hook holds for a phone/canvas answer before falling
 // through to Claude's interactive prompt (must stay under Claude's own hook timeout). Injected
 // into a claude session's env as NODETERM_PERM_WAIT_SECS when hook-reply approvals are enabled.
@@ -30,6 +47,24 @@ function readBody(req: IncomingMessage): Promise<string> {
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
     req.on('error', () => resolve(''))
   })
+}
+
+/**
+ * Resolve to `fallback` if `p` has not settled within `ms`. The timer is always cleared, so a
+ * losing race never holds the process open. There is nothing to cancel in a read already in
+ * flight, so a rejection must be swallowed either way — otherwise it surfaces as an unhandled
+ * rejection once the timeout has already answered. A rejection that loses no race therefore also
+ * yields `fallback`, which for the context-link route means the caller reads the same prose
+ * failure it gets from any other read error instead of a bare 204.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout
+  return Promise.race([
+    p.catch(() => fallback),
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), ms)
+    })
+  ]).finally(() => clearTimeout(timer))
 }
 
 // Parses application/x-www-form-urlencoded bodies (what the managed script posts).
@@ -149,6 +184,12 @@ class HookServer {
             await readBody(req),
             String(req.headers['content-type'] ?? '')
           )
+          // Body fully received: hand the socket from the receive-phase guard to the much larger
+          // handler ceiling. A destructive control verb parks here for as long as the user takes
+          // to answer the confirmation dialog, and the 2s guard used to destroy the socket mid-
+          // dialog — the caller saw "endpoint unreachable" while the dialog was still up, and a
+          // late confirm still delivered, so the agent was told nothing happened when it had.
+          req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
           const result = this.controlHandler
             ? await this.controlHandler({ verb, nodeId, args })
             : { ok: false, error: 'control unavailable' }
@@ -172,10 +213,18 @@ class HookServer {
             await readBody(req),
             String(req.headers['content-type'] ?? '')
           )
+          // Same hand-off as /control/: the receive phase is over, so raise the guard to the
+          // handler ceiling rather than dropping it. The effective bound here is the race below;
+          // the socket ceiling is only the backstop behind it.
+          req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
           // Always text: the caller is the sh shim, and the payload IS prose (a rendered
           // transcript). The handler owns the authorization — see context-link.ts.
           const text = this.contextLinkHandler
-            ? await this.contextLinkHandler({ verb, nodeId, args })
+            ? await withTimeout(
+                this.contextLinkHandler({ verb, nodeId, args }),
+                CONTEXT_LINK_READ_MS,
+                CONTEXT_LINK_TIMEOUT_TEXT
+              )
             : 'Context link is unavailable in this session.'
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
           res.end(`${text}\n`)
