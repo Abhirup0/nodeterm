@@ -25,6 +25,10 @@ const ROWS = {
     keywords: ['sidebar', 'sessions', 'collapse', 'expand', 'project', 'switch']
   },
   wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] },
+  trackpadPan: {
+    title: 'Trackpad scroll pans',
+    keywords: ['trackpad', 'pan', 'scroll', 'zoom', 'magic', 'mouse', 'two-finger', 'macos']
+  },
   dragMode: {
     title: 'Canvas left-drag',
     keywords: ['pan', 'drag', 'select', 'canvas', 'mouse', 'grab', 'figma', 'miro']
@@ -155,6 +159,21 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.wheelZoom}
               onChange={(v) => update({ wheelZoom: v })}
               ariaLabel="Scroll wheel zooms"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.trackpadPan}>
+        <FieldRow
+          label="Trackpad scroll pans"
+          description={hintLabel(
+            'macOS: a two-finger trackpad scroll pans the canvas even with wheel zoom on. Turn off if a precise-pixel mouse (Magic Mouse, MX) pans when you meant to zoom.'
+          )}
+          control={
+            <Switch
+              checked={settings.trackpadPan}
+              onChange={(v) => update({ trackpadPan: v })}
+              ariaLabel="Trackpad scroll pans"
             />
           }
         />

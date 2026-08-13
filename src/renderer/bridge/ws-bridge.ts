@@ -456,7 +456,13 @@ export function buildFilesApi(
     // Also real, and the direction that matters here: the browser holds the bytes, the terminal
     // runs on the server, so a pasted image only becomes nameable once the server has written it.
     saveUpload: (name, dataBase64) =>
-      client.request(IPC.filesSaveUpload, name, dataBase64) as Promise<string | null>
+      client.request(IPC.filesSaveUpload, name, dataBase64) as Promise<string | null>,
+    // Real too, and for the same reason: the browser holds the bytes and the project folder is on
+    // the server, so only the server can put a canvas image where the canvas will find it again.
+    saveCanvasImage: (projectId, name, dataBase64) =>
+      client.request(IPC.filesSaveCanvasImage, projectId, name, dataBase64) as Promise<
+        string | null
+      >
   }
 
   const context: ContextApi = {

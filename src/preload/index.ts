@@ -287,7 +287,8 @@ const api: NodeTerminalApi = {
   },
   clipboard: {
     // Route to the MAIN process: renderer-side `clipboard` access is deprecated in Electron.
-    writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text)
+    writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text),
+    writeFiles: (paths: string[]) => ipcRenderer.invoke(IPC.clipboardWriteFiles, paths)
   },
   shell: {
     reveal: (path: string) => ipcRenderer.send(IPC.shellReveal, path),
@@ -325,7 +326,9 @@ const api: NodeTerminalApi = {
     // already on this machine" (local project).
     downloadTicket: (p: string) => ipcRenderer.invoke(IPC.filesDownloadTicket, p),
     saveUpload: (name: string, dataBase64: string) =>
-      ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64)
+      ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64),
+    saveCanvasImage: (projectId: string, name: string, dataBase64: string) =>
+      ipcRenderer.invoke(IPC.filesSaveCanvasImage, projectId, name, dataBase64)
   },
   updates: {
     onAvailable: (listener) => {
