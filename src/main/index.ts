@@ -916,12 +916,14 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error('[codex-identity] unavailable; Codex nodes run plain codex:', error)
   }
-  // Installs the launcher and publishes the construction-time answer. MUST stay after the secret
-  // above and before the window: it is what unblocks `codexIdentityCaps()`, which the renderer's
-  // first Codex launch line waits on. Reordering it later only delays that answer now (callers
-  // wait rather than being told "no"), but leaving it out entirely would stall them until their
-  // own timeout, so it is not optional.
-  refreshCodexIdentityCaps()
+  // Probes the CLI for `--remote`, installs the launcher, and publishes the construction-time
+  // answer. MUST stay after the secret above and before the window: it is what unblocks
+  // `codexIdentityCaps()`, which the renderer's first Codex launch line waits on. NOT awaited —
+  // the probe is a login-shell lookup plus up to two `--help` spawns, and nothing in the boot
+  // chain should queue behind it; callers of `codexIdentityCaps()` wait for it instead of being
+  // told "no". Reordering it later only delays that answer; leaving it out would stall those
+  // callers until their own timeout, so it is not optional.
+  void refreshCodexIdentityCaps()
   hookServer.setCodexIdentityListener((ev) => sendToMain(IPC.codexIdentity, ev))
   // A node still on a canvas is "live". A thread whose recorded owner is gone (node deleted, or a
   // workspace that no longer holds it) is free to be re-claimed; one whose owner is still there is

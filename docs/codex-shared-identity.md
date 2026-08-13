@@ -77,6 +77,11 @@ thing it reports is *"there was no capability to present"*, so requiring one wou
 exactly the case it exists for. A report that **does** carry a token must carry the right one, so
 only a tokenless caller is trusted on the node id it names.
 
+A cold app-server is handled on both routes: `codex app-server daemon start` exiting 0 does not
+mean the control socket is accepting connections yet, so `waitForCodexAppServer` (3 × 200 ms)
+precedes the mint, and the bind check retries only when it could not REACH the server — a server
+that answered "I do not have that thread" is never retried, because that is an answer.
+
 If secure storage is unavailable the whole feature stays off — `codexIdentityCaps()` answers
 `shared: false`, every launch line stays the bare `codex`, and nothing is half-armed.
 
@@ -127,6 +132,19 @@ installed + armed launcher **and** the session is local. (An SSH host has no lau
 that is a later slice — so a launcher-named line there would be `command not found`, i.e. the exact
 dead node this exists to prevent.) The default `false` means every call site that has not opted in
 emits today's command.
+
+`shared` is the AND of three things, and the third is the interesting one: the installed `codex`
+must accept **`--remote`**. That is the only precondition with no runtime recovery — the launcher's
+preflight proves `codex app-server daemon start` exits 0 and then **execs**, and a CLI with an
+app-server but no `--remote` dies on a clap usage error where no fallback is left. It is
+feature-detected from the CLI's own `--help` (and `codex resume --help` if the first does not say),
+never version-compared, for the same reason claude's `--session-id` is: an unrecognised flag does
+not degrade, it makes the CLI exit. Unknown — no CLI on the login PATH, a failed or timed-out
+spawn, help text that never mentions the flag — means **false**, i.e. plain codex. A wrong "yes"
+costs the node; a wrong "no" costs only the shared app-server. The probe runs **once per app run,
+inside `refreshCodexIdentityCaps()`, entirely off the launch path**: a per-launch probe would be
+visible latency in the pane every time, to answer a question whose answer cannot change while the
+app runs.
 
 Unlike claude's, this probe cannot compute anything until the shell hands the hook server its
 secret, so the shell **pushes** the answer in and an early caller **waits**. A sync getter would
@@ -245,7 +263,9 @@ PR #112, all still to be sliced.
 
 ## 8. Known gaps
 
-1. **Post-`exec` failures are unrecoverable** (§3, and §9.1-9.3).
+1. **Post-`exec` failures are unrecoverable** (§3). The `--remote` case is closed at caps time;
+   what remains is §9.2 (the composed `resume <id> <prompt> --ask-for-approval never` line) and
+   §9.3 (the persisted session id being the app-server's thread id).
 2. **The launcher requires a hook PORT**, not a unix socket — it POSTs to
    `http://localhost:$NODETERM_HOOK_PORT`. Fine today (the desktop's hook server is a loopback TCP
    listener), but the Server Edition wiring will have to revisit it alongside `NODETERM_HOOK_SOCK`,
@@ -253,7 +273,14 @@ PR #112, all still to be sliced.
 3. **The node token rides tmux `-e` on the local path**, i.e. it is in the tmux session env like
    every other `NODETERM_*` value. Same exposure as the hook bearer already has; noted rather than
    changed, because changing it means changing how all of them are delivered.
-4. **`CODEX_HOME` is resolved twice**: the desktop resolves the app-server socket from the Electron
+4. **Two residual orphan classes**, both inherent rather than bugs, neither covered by the budget
+   ordering in §2. (a) A client that dies for a non-timeout reason — the pane killed, `tmux
+   kill-session`, Ctrl-C mid-mint — still leaves the handler to finish and write its record. That is
+   bounded now: §2's pruning removes it with the node, and the next launch mints a fresh thread
+   anyway. (b) An app-server that aborts mid-conversation can leave the seed and/or the forked
+   thread alive on ITS side, because the closing `thread/delete` may never be sent. Orphan
+   *threads* have no reaper anywhere — not here and not in codex.
+5. **`CODEX_HOME` is resolved twice**: the desktop resolves the app-server socket from the Electron
    process's environment, the pane resolves `--remote unix://` from its own. Identical unless a user
    sets `CODEX_HOME` in a shell rc only, in which case start succeeds and resume misses. Managed
    accounts make this explicit; until then it is a narrow, real mismatch.
@@ -266,11 +293,13 @@ Everything below needs a machine with a logged-in `codex`. Items 1-3 are the ass
 implementation could not verify; a failure in any of them is a **dead node**, not a degrade, so they
 come first. Items 1, 2 and 5 fall out of a single capture run on one fresh node.
 
-1. **`codex --remote unix://` exists on the installed CLI.** The preflight only proves
-   `codex app-server daemon start` exits 0 — it says nothing about the `--remote` flag. Run
-   `codex --help` and confirm `--remote` and its argument form; then open a fresh Codex node and
-   confirm the pane shows a working session rather than a clap usage error. If the flag differs,
-   the launcher's two `exec` lines are what change.
+1. **`codex --remote unix://` works, and the caps probe reads the flag correctly.** The flag's
+   PRESENCE is now answered per machine (`codexCliSupportsRemote`, §3), so a CLI without it gets a
+   plain-codex node instead of a dead one — but nothing has confirmed that the flag we detect is
+   the flag we then use. Run `codex --help` and check `--remote`'s argument form against the two
+   `exec` lines in the launcher; then open a fresh Codex node and confirm the pane shows a working
+   session rather than a clap usage error. Also confirm the negative: on a CLI without `--remote`
+   (or with the probe forced false), the node runs plain codex and says so.
 2. **`codex resume <id> <prompt> --ask-for-approval never` accepts a positional prompt AND a global
    flag after the subcommand.** This is the composed line `createAgentNode` builds, and it is
    CLAUDE.md rule 5's grok-`--` lesson exactly: a `withPermissionMode` unit test passes while the
@@ -297,6 +326,17 @@ come first. Items 1, 2 and 5 fall out of a single capture run on one fresh node.
    `<userDataDir>/codex-thread-nodes/` while other nodes' remain.
 9. **Two nodes, one thread.** Point a second node at a thread the first still owns (a `resume` with
    a copied id) and confirm it falls back to plain codex instead of both clients attaching.
-10. **A cold app-server.** Kill the app-server, then open a Codex node. This is the H1 case: confirm
-    it waits for the mint (which can take seconds) and comes up shared, rather than falling back
-    with `thread-start-failed` while an orphan thread is created behind it.
+10. **A cold app-server, on the START path.** Kill the app-server, then open a fresh Codex node.
+    Confirm it waits for the mint (which can take seconds) and comes up shared, rather than falling
+    back with `thread-start-failed` while an orphan thread is created behind it.
+11. **A cold app-server, on the RESUME/BIND path.** Kill the app-server, then cold-start an
+    EXISTING Codex node (restart the app, or reboot). Bind now makes a mandatory app-server round
+    trip, so a daemon whose socket binds a beat late would turn a legitimate resume into
+    `thread-bind-refused` → plain codex. `waitForCodexAppServer` is meant to absorb that; confirm
+    the node comes up shared and that a genuinely absent server still falls back promptly rather
+    than hanging.
+12. **`CODEX_HOME` set in a shell rc only** (§8.5). Put `export CODEX_HOME=…` in `~/.zshrc` (not in
+    the app's environment) and open a Codex node. The desktop resolves the app-server socket from
+    Electron's environment while the pane resolves `--remote unix://` from its own, so this is where
+    they diverge: confirm what actually happens — shared against the wrong home, or a start that
+    succeeds followed by a resume that misses.

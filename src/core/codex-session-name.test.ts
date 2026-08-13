@@ -13,7 +13,8 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import {
   codexThreadExistsAt,
   codexUnixWebSocketUrl,
-  readCodexSessionNameAt
+  readCodexSessionNameAt,
+  waitForCodexAppServer
 } from './codex-session-name'
 
 let dir = ''
@@ -79,7 +80,38 @@ describe('codexThreadExistsAt', () => {
   })
 
   it('refuses when the app-server is not running at all', async () => {
-    expect(await codexThreadExistsAt(path.join(dir, 'nope.sock'), 'thread-known', 500)).toBe(false)
+    expect(await codexThreadExistsAt(path.join(dir, 'nope.sock'), 'thread-known', 500, 1)).toBe(
+      false
+    )
+  })
+
+  it('waits out a daemon whose socket is still binding, instead of refusing a good resume', async () => {
+    // `codex app-server daemon start` exiting 0 does not mean the socket is listening yet, and
+    // this check runs immediately after it on the cold/reboot path. Without the retry, a daemon
+    // that binds a beat late turns a legitimate resume into `thread-bind-refused` → plain codex:
+    // a NEW way to lose shared identity on exactly the path the feature exists for.
+    const latePath = path.join(dir, 'late.sock')
+    const late = http.createServer()
+    const lateWss = new WebSocketServer({ server: late })
+    lateWss.on('connection', handle)
+    const listening = new Promise<void>((resolve) =>
+      setTimeout(() => late.listen(latePath, resolve), 250)
+    )
+    try {
+      expect(await codexThreadExistsAt(latePath, 'thread-known', 500)).toBe(true)
+    } finally {
+      await listening
+      await new Promise<void>((resolve) => lateWss.close(() => resolve()))
+      await new Promise<void>((resolve) => late.close(() => resolve()))
+    }
+  })
+
+  it('does NOT retry a server that answered — "I do not have it" is an answer', async () => {
+    // Retrying a definite no just delays it. Measured by the clock: three attempts with the
+    // default 200ms gap could not come back this fast.
+    const started = Date.now()
+    expect(await codexThreadExistsAt(sock, 'thread-from-a-past-life')).toBe(false)
+    expect(Date.now() - started).toBeLessThan(200)
   })
 
   it('refuses an id that is not shaped like one, without opening a socket', async () => {
@@ -93,6 +125,13 @@ describe('codexThreadExistsAt', () => {
     } finally {
       initializeFails = false
     }
+  })
+})
+
+describe('waitForCodexAppServer', () => {
+  it('answers true for a live socket and false for a dead one, without throwing', async () => {
+    expect(await waitForCodexAppServer(sock, 1)).toBe(true)
+    expect(await waitForCodexAppServer(path.join(dir, 'nope.sock'), 2, 10)).toBe(false)
   })
 })
 

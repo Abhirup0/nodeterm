@@ -22,6 +22,64 @@ import { WebSocket } from 'ws'
 import { CODEX_THREAD_START_TIMEOUT_MS } from './codex-identity-proxy'
 
 const SAFE_THREAD_ID = /^[A-Za-z0-9._-]+$/
+/**
+ * `codex app-server daemon start` exiting 0 does NOT mean its control socket is accepting
+ * connections yet — the daemon binds a beat later. Everything here runs immediately after that
+ * command, on the cold/reboot path this feature exists for, so a single failed connect must not be
+ * read as an answer. Three tries over ~600 ms: long enough for a daemon that is coming up, short
+ * enough that a daemon that is not there costs nothing worth noticing.
+ */
+const SOCKET_WAIT_ATTEMPTS = 3
+const SOCKET_WAIT_MS = 200
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    const t = setTimeout(resolve, ms)
+    t.unref?.()
+  })
+
+/** Resolve once the app-server's socket accepts a connection, or after the attempts run out. */
+export function waitForCodexAppServer(
+  socketPath: string,
+  attempts = SOCKET_WAIT_ATTEMPTS,
+  gapMs = SOCKET_WAIT_MS
+): Promise<boolean> {
+  const tryOnce = (): Promise<boolean> =>
+    new Promise((resolve) => {
+      let ws: WebSocket
+      let settled = false
+      const finish = (ok: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try {
+          ws.close()
+        } catch {
+          /* the connection may never have opened */
+        }
+        resolve(ok)
+      }
+      const timer = setTimeout(() => finish(false), REQUEST_TIMEOUT_MS)
+      timer.unref?.()
+      try {
+        ws = connectCodexAppServer(socketPath)
+      } catch {
+        clearTimeout(timer)
+        resolve(false)
+        return
+      }
+      ws.once('open', () => finish(true))
+      ws.once('error', () => finish(false))
+      ws.once('close', () => finish(false))
+    })
+  return (async () => {
+    for (let i = 0; i < attempts; i++) {
+      if (await tryOnce()) return true
+      if (i < attempts - 1) await delay(gapMs)
+    }
+    return false
+  })()
+}
 const CACHE_MS = 3_000
 const REQUEST_TIMEOUT_MS = 2_000
 
@@ -124,16 +182,16 @@ export function readCodexSessionNameAt(
  * A server we cannot reach answers `false`, which is the safe direction here: refusing costs a
  * plain codex session, accepting costs the node.
  */
-export function codexThreadExistsAt(
+function probeCodexThread(
   socketPath: string,
   threadId: string,
-  timeoutMs = REQUEST_TIMEOUT_MS
-): Promise<boolean> {
-  if (!SAFE_THREAD_ID.test(threadId)) return Promise.resolve(false)
+  timeoutMs: number
+): Promise<'yes' | 'no' | 'unreachable'> {
   return new Promise((resolve) => {
     let settled = false
+    let answered = false
     let ws: WebSocket
-    const finish = (exists: boolean): void => {
+    const finish = (result: 'yes' | 'no' | 'unreachable'): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
@@ -142,15 +200,15 @@ export function codexThreadExistsAt(
       } catch {
         /* the connection may never have opened */
       }
-      resolve(exists)
+      resolve(result)
     }
-    const timer = setTimeout(() => finish(false), timeoutMs)
+    const timer = setTimeout(() => finish(answered ? 'no' : 'unreachable'), timeoutMs)
     timer.unref?.()
     try {
       ws = connectCodexAppServer(socketPath)
     } catch {
       clearTimeout(timer)
-      resolve(false)
+      resolve('unreachable')
       return
     }
     ws.once('open', () => {
@@ -170,7 +228,10 @@ export function codexThreadExistsAt(
         return
       }
       if (message.id === 1) {
-        if (message.error) return finish(false)
+        answered = true
+        // A server that will not initialize is a definite NO, not a transient one: retrying a
+        // logged-out CLI just delays the same answer.
+        if (message.error) return finish('no')
         ws.send(JSON.stringify({ method: 'initialized' }))
         ws.send(
           JSON.stringify({ id: 2, method: 'thread/read', params: { threadId, includeTurns: false } })
@@ -178,12 +239,45 @@ export function codexThreadExistsAt(
       } else if (message.id === 2) {
         // The id must come back UNCHANGED: a server that answers with some other thread has not
         // confirmed the one we asked about.
-        finish(!message.error && message.result?.thread?.id === threadId)
+        finish(!message.error && message.result?.thread?.id === threadId ? 'yes' : 'no')
       }
     })
-    ws.once('error', () => finish(false))
-    ws.once('close', () => finish(false))
+    ws.once('error', () => finish(answered ? 'no' : 'unreachable'))
+    ws.once('close', () => finish(answered ? 'no' : 'unreachable'))
   })
+}
+
+/**
+ * Does the shared app-server actually know this thread?
+ *
+ * The bind route writes a record claiming a node owns a conversation. Without this check ANY
+ * id the caller hands us binds happily — a stale session id, or one persisted from a
+ * plain-codex-era session that the app-server has never heard of — and the launcher then execs
+ * `codex --remote unix:// resume <id>`, which dies with "no rollout found" AFTER exec, where
+ * there is no fallback left. Asking first turns that dead node into an ordinary fallback.
+ *
+ * A server we could not REACH is retried (the daemon may still be binding its socket — see
+ * SOCKET_WAIT_ATTEMPTS), because this check runs on the cold path and a not-yet-listening daemon
+ * would otherwise turn a perfectly good resume into a fallback. A server that ANSWERED is never
+ * retried: "I do not have that thread" is an answer, and asking again just delays it.
+ *
+ * Out of retries, the answer is `false` — the safe direction: refusing costs a plain codex
+ * session, accepting costs the node.
+ */
+export async function codexThreadExistsAt(
+  socketPath: string,
+  threadId: string,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  attempts = SOCKET_WAIT_ATTEMPTS,
+  gapMs = SOCKET_WAIT_MS
+): Promise<boolean> {
+  if (!SAFE_THREAD_ID.test(threadId)) return false
+  for (let i = 0; i < attempts; i++) {
+    const result = await probeCodexThread(socketPath, threadId, timeoutMs)
+    if (result !== 'unreachable') return result === 'yes'
+    if (i < attempts - 1) await delay(gapMs)
+  }
+  return false
 }
 
 export function codexThreadExists(threadId: string): Promise<boolean> {
@@ -200,10 +294,21 @@ export function codexThreadExists(threadId: string): Promise<boolean> {
  * that turn, and deleting the seed. The result is a thread with zero user turns and a valid
  * rollout, without the deprecated rollback API.
  */
-export function startCodexThreadAt(
+export async function startCodexThreadAt(
   socketPath: string,
   cwd: string,
   timeoutMs = CODEX_THREAD_START_TIMEOUT_MS
+): Promise<string> {
+  // Same cold-socket window as the bind check: `daemon start` has exited, the socket may still be
+  // binding. Bounded (~600 ms) and charged against the 20 s budget below, which has room for it.
+  await waitForCodexAppServer(socketPath)
+  return startCodexThreadOnce(socketPath, cwd, timeoutMs)
+}
+
+function startCodexThreadOnce(
+  socketPath: string,
+  cwd: string,
+  timeoutMs: number
 ): Promise<string> {
   if (!path.isAbsolute(cwd) || cwd.includes('\0')) {
     return Promise.reject(new Error('Unsupported Codex thread cwd'))

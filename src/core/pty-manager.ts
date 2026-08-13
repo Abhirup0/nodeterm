@@ -3018,9 +3018,14 @@ export class PtyManager {
     // OLD cwd's session, and the respawn is a cold start (`fresh`), so replaying it would paint the
     // pre-move terminal into the new one.
     await deleteScrollback(persistKey)
-    // Same hook, same reason: a permanently deleted node's Codex thread records must go with it.
-    // Left behind they accumulate one file per thread forever, and the hook prelude keeps
-    // re-exporting a dead node's id into any tool shell that still carries that thread id.
+    // Same hook, same reason as the snapshot above: this node's Codex thread records go with the
+    // session. Left behind they accumulate one file per thread forever, and the hook prelude keeps
+    // re-exporting a DELETED node's id into any tool shell that still carries that thread id.
+    //
+    // Like the snapshot, this also runs for a RECYCLE (the worktree move), where the node lives on
+    // — and that is fine rather than intended: a recycle respawns cold, so the next launch mints or
+    // re-binds a record immediately. Worth stating because the two intents share this line: only
+    // `delete` means "gone for good".
     forgetCodexThreadIdentitiesForNode(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: end the REMOTE session.

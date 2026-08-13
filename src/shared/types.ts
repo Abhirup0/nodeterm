@@ -1879,10 +1879,18 @@ export interface CodexIdentityCaps {
   shared: boolean
   /** Absolute path of the installed launcher, or null when it could not be written. */
   launcherPath: string | null
+  /** Does the installed `codex` accept `--remote`? Feature-detected from its own `--help`. The one
+   *  precondition that cannot be recovered from at runtime: the launcher execs, and a CLI without
+   *  the flag dies on a usage error where no fallback is left. Unknown ⇒ false ⇒ plain codex. */
+  remoteFlag: boolean
 }
 
 /** The answer before the probe has run, and the one the Server Edition gives on purpose. */
-export const UNKNOWN_CODEX_IDENTITY_CAPS: CodexIdentityCaps = { shared: false, launcherPath: null }
+export const UNKNOWN_CODEX_IDENTITY_CAPS: CodexIdentityCaps = {
+  shared: false,
+  launcherPath: null,
+  remoteFlag: false
+}
 
 /** A Codex node's identity mode, as reported by the node's own launcher at spawn time.
  *  `plain` carries the machine-readable reason the managed identity was unavailable. */
