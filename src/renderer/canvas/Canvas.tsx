@@ -56,6 +56,11 @@ import {
   useSharedGlyphActive
 } from './SharedGlyphLayer'
 import { SshReconnector } from '../lib/sshReconnect'
+import {
+  hostAttachmentsFor,
+  connectHostAttachment,
+  type SshConnectFn
+} from '../lib/sshAttachments'
 import { terminalKey } from '../terminal/terminal-config'
 import {
   setWebglGesture,
@@ -186,6 +191,13 @@ import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { isSafeQuickOpenRelPath } from '@shared/quick-open-filter'
+
+/** The real `sshProject.connect`, bound once. Passed into `connectHostAttachment` rather than
+ *  reached for inside it, so that helper stays testable without an Electron preload. */
+const sshConnect: SshConnectFn = (scopeId, conn, remoteCwd) =>
+  window.nodeTerminal.sshProject.connect(scopeId, conn, remoteCwd)
+const sshDisconnect = (scopeId: string): Promise<unknown> =>
+  window.nodeTerminal.sshProject.disconnect(scopeId)
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
@@ -1710,6 +1722,29 @@ export function Canvas() {
     } else {
       // Local active project: ensure all git ops run local (no stale remote from a prior SSH tab).
       void api.git.setActiveRemote(null)
+    }
+    // HOST ATTACHMENTS: remote nodes on this canvas whose machine is not the project's own — every
+    // remote node when the project is LOCAL. They have no project row to be connected from, so
+    // their masters are opened here, alongside the project's, under the stable attachment scope
+    // their terminals resolve (`sshConnectionIdForProject`). This is a PRE-WARM only: a node added
+    // at runtime dials for itself from `resolveSshRemote`, and `connectHostAttachment` collapses
+    // both into one connect. Failures are silent by design — the node's own 20s wait then its
+    // offline overlay is the user-visible half, and `requireRemote` guarantees nothing starts
+    // locally.
+    // NOTE: git routing is deliberately NOT armed for an attachment. The project's own cwd is what
+    // the Source Control panel is about, and an attached node must not repoint it at another host.
+    for (const attachment of hostAttachmentsFor(project.id, project.nodes, project.ssh?.server)) {
+      void connectHostAttachment(
+        attachment.scopeId,
+        {
+          conn: attachment.conn,
+          hostKey: attachment.hostKey,
+          remoteCwd: attachment.remoteCwd,
+          ownerProjectId: project.id
+        },
+        sshConnect,
+        sshDisconnect
+      )
     }
     loadingRef.current = true
     const flow = nodeStatesToFlow(project.nodes)
@@ -7680,7 +7715,14 @@ export function Canvas() {
   const sshReconnectorRef = useRef<SshReconnector | null>(null)
   useEffect(() => {
     const rec = new SshReconnector({
-      connect: async (projectId) => {
+      connect: async (scopeId) => {
+        // A HOST ATTACHMENT has no project row to read its endpoint from — `registerAttachment`
+        // put it on record before the first dial, precisely so a connect that never succeeded is
+        // still reachable here. Reconnect it on its own loop (its master is its own) and leave git
+        // routing alone: the owning project is local, or points somewhere else entirely.
+        const attached = useSshConn.getState().getAttachment(scopeId)
+        if (attached) return connectHostAttachment(scopeId, attached, sshConnect, sshDisconnect)
+        const projectId = scopeId
         const project = useProjects.getState().getProject(projectId)
         if (!project?.ssh) return false
         const ssh = project.ssh
@@ -7693,7 +7735,9 @@ export function Canvas() {
         useSshConn.getState().setConn(projectId, info)
         return true
       },
-      respawn: (projectId, nodeIds) => {
+      respawn: (scopeId, nodeIds) => {
+        // The nodes live on the OWNING canvas, which for an attachment is not the scope id.
+        const projectId = useSshConn.getState().ownerProjectId(scopeId)
         if (useProjects.getState().activeProjectId !== projectId) {
           // The project was switched away between the drop and the reconnect: nothing is mounted,
           // and any park is holding the DEAD pty (the node unmount-parked before the master came
@@ -8030,6 +8074,21 @@ export function Canvas() {
           .catch(() => {})
           .finally(() => void window.nodeTerminal.sshProject.disconnect(id))
         useSshConn.getState().clear(id)
+      }
+      // Host attachments this project owns: nothing else knows they exist (no project row), so
+      // deleting the canvas is the only chance to tear their masters down. Same order as above —
+      // kill the remote sessions over the live master, then drop it.
+      for (const scopeId of useSshConn.getState().attachmentScopesOf(id)) {
+        const nodeIds = project
+          ? hostAttachmentsFor(id, project.nodes, project.ssh?.server).find(
+              (a) => a.scopeId === scopeId
+            )?.nodeIds ?? []
+          : []
+        void window.nodeTerminal.sshProject
+          .killSessions(scopeId, nodeIds)
+          .catch(() => {})
+          .finally(() => void window.nodeTerminal.sshProject.disconnect(scopeId))
+        useSshConn.getState().clearAttachment(scopeId)
       }
       disposeRelayTabForProject(id)
       store.deleteProject(id)
