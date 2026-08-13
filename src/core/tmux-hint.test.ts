@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { findCommand, findFixedTmux, tmuxCandidatePaths, tmuxInstall } from './tmux-hint'
+import {
+  bundledTmuxPath,
+  findCommand,
+  findFixedTmux,
+  tmuxCandidatePaths,
+  tmuxInstall
+} from './tmux-hint'
 
 describe('tmuxInstall', () => {
   it('darwin with brew: one-click brew install', () => {
@@ -92,5 +98,53 @@ describe('tmuxCandidatePaths / findFixedTmux', () => {
       return p === '/usr/bin/tmux'
     }
     expect(findFixedTmux(exists, '/Users/dev', 'dev')).toBe('/usr/bin/tmux')
+  })
+})
+
+describe('bundledTmuxPath', () => {
+  const PACKAGED = '/Applications/nodeterm.app/Contents/Resources'
+
+  it('packaged: resolves <Resources>/bin/tmux when the shipped binary is there', () => {
+    expect(
+      bundledTmuxPath({
+        resourcesPath: PACKAGED,
+        repoRoot: '/Users/dev/nodeterm',
+        exists: (p) => p === `${PACKAGED}/bin/tmux`
+      })
+    ).toBe(`${PACKAGED}/bin/tmux`)
+  })
+
+  it('dev: falls back to the repo artifact when the Electron Resources dir has no tmux', () => {
+    // In `electron-vite dev` process.resourcesPath points INSIDE node_modules/electron — it never
+    // holds our binary, so a dev run must find the one scripts/build-tmux.mjs produced instead.
+    const seen: string[] = []
+    const found = bundledTmuxPath({
+      resourcesPath: '/repo/node_modules/electron/dist/Electron.app/Contents/Resources',
+      repoRoot: '/repo',
+      exists: (p) => (seen.push(p), p === '/repo/resources/bin/tmux')
+    })
+    expect(found).toBe('/repo/resources/bin/tmux')
+    // Packaged location is still probed FIRST — the dev path is the fallback, not the other way.
+    expect(seen[0]).toBe(
+      '/repo/node_modules/electron/dist/Electron.app/Contents/Resources/bin/tmux'
+    )
+  })
+
+  it('neither present: null — a checkout that never ran the build script behaves exactly as before', () => {
+    expect(
+      bundledTmuxPath({ resourcesPath: PACKAGED, repoRoot: '/repo', exists: () => false })
+    ).toBeNull()
+    // Server Edition / any shell with neither a Resources dir nor a repo root: nothing to offer.
+    expect(bundledTmuxPath({ exists: () => true })).toBeNull()
+  })
+
+  it('treats a throwing exists as "not here" rather than failing the whole probe', () => {
+    const exists = (p: string): boolean => {
+      if (p.startsWith(PACKAGED)) throw new Error('EPERM')
+      return p === '/repo/resources/bin/tmux'
+    }
+    expect(bundledTmuxPath({ resourcesPath: PACKAGED, repoRoot: '/repo', exists })).toBe(
+      '/repo/resources/bin/tmux'
+    )
   })
 })

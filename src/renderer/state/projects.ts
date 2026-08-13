@@ -52,6 +52,8 @@ interface ProjectsState {
   /** Replaces one project's data wholesale (external file change). Keeps activeProjectId. */
   replaceProject(project: Project): void
   renameProject(id: string, name: string): void
+  /** Sets a project's sidebar/monogram accent color. No-op for an unknown id. */
+  setProjectColor(id: string, color: string): void
   setProjectCwd(id: string, cwd: string): void
   /** Grey (or un-grey) a project tab as "unavailable" WITHOUT dropping it — runtime-only, never
    *  persisted (see the toWorkspace tripwire). Set true when a relay tab's socket drops (Stage 4
@@ -223,6 +225,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   renameProject(id, name) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, name } : p))
+    }))
+  },
+
+  setProjectColor(id, color) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? { ...p, color } : p))
     }))
   },
 

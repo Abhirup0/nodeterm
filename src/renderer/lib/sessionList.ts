@@ -50,20 +50,46 @@ export function isGroupCollapsed(
   return autoCollapse ? !isActive : false
 }
 
+/** What a left-click on a project header in the sessions sidebar does. */
+export type ProjectHeadAction = 'switch' | 'toggle-collapse'
+
+/**
+ * A project header's click does exactly ONE of two things, and never both.
+ *
+ * - An INACTIVE project **switches** to that project and leaves `overrides` alone. Touching
+ *   collapse here would be dead-or-wrong under both settings: with `sidebarAutoCollapse` ON
+ *   the sidebar's own effect wipes every override on the `activeProjectId` change, so any
+ *   toggle written here is clobbered a tick later (and unnecessary — the newly active project
+ *   is expanded by default); with it OFF, writing one would discard the user's explicit
+ *   choice, contradicting the documented "off = switches never touch the user's choices".
+ * - The ACTIVE project **toggles its own collapse** — the pre-existing behavior of the whole
+ *   header, kept so the row has no dead zone. It sets a normal override, which is transient
+ *   under auto-collapse (dropped at the next switch) and sticky without it, exactly like the
+ *   chevron button.
+ *
+ * The chevron is the escape hatch either way: it toggles collapse on ANY row (it
+ * stops propagation), so an inactive project can be peeked into without switching.
+ */
+export function projectHeadClickAction(isActive: boolean): ProjectHeadAction {
+  return isActive ? 'toggle-collapse' : 'switch'
+}
+
 /**
  * Header badges for a project group: how many sessions need the user right now
- * (waiting/blocked) and how many finished unseen. Mirrors the row glyph's precedence —
- * an attention session is never double-counted as unread, and a working one isn't
- * unread yet (a new turn is running; the old mark resurfaces when it ends).
+ * (waiting/blocked), how many finished unseen, and how many are actively working right now.
+ * Mirrors the row glyph's precedence — an attention session is never double-counted as unread,
+ * and a working one isn't unread yet (a new turn is running; the old mark resurfaces when it ends).
  */
-export function projectSignalCounts(group: SessionGroup): { attention: number; unread: number } {
+export function projectSignalCounts(group: SessionGroup): { attention: number; unread: number; working: number } {
   let attention = 0
   let unread = 0
+  let working = 0
   for (const s of [...group.ungrouped, ...group.groups.flatMap((b) => b.sessions)]) {
     if (s.statusKind === 'attention') attention++
     else if (s.unread && s.statusKind !== 'working') unread++
+    if (s.statusKind === 'working') working++
   }
-  return { attention, unread }
+  return { attention, unread, working }
 }
 
 export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
@@ -78,6 +104,17 @@ export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
     default:
       return 'idle'
   }
+}
+
+/**
+ * Resolves the Cmd/Ctrl+N project shortcut: N is 1-based, matches sidebar/store array order.
+ * Only 1-9 are addressable — out of range (including an empty or short project list) is null,
+ * a silent no-op at the call site rather than a wraparound or error.
+ */
+export function projectIdAtIndex(projects: { id: string }[], oneBasedIndex: number): string | null {
+  if (oneBasedIndex < 1 || oneBasedIndex > 9) return null
+  const project = projects[oneBasedIndex - 1]
+  return project ? project.id : null
 }
 
 export interface SessionRowVM {

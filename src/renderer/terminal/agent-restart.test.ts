@@ -757,9 +757,9 @@ describe('restartEligibility — grok', () => {
 
   it('keeps a busy grok node out of the bulk run', () => {
     const plan = planBulkRestart([
-      { id: 'idle', agentId: 'grok', state: 'done', sessionId: 'sid-1', wired: true },
-      { id: 'busy', agentId: 'grok', state: 'working', sessionId: 'sid-2', wired: true },
-      { id: 'prompt', agentId: 'grok', state: 'blocked', sessionId: 'sid-3', wired: true }
+      { id: 'idle', agentId: 'grok', state: 'done', sessionId: 'sid-1', wired: true, backgroundTask: false },
+      { id: 'busy', agentId: 'grok', state: 'working', sessionId: 'sid-2', wired: true, backgroundTask: false },
+      { id: 'prompt', agentId: 'grok', state: 'blocked', sessionId: 'sid-3', wired: true, backgroundTask: false }
     ])
     expect(plan.runnable).toEqual(['idle'])
     expect(plan.skipped).toEqual({ working: 2, noSession: 0 })
@@ -834,9 +834,9 @@ describe('restartEligibility — gemini', () => {
 
   it('keeps a busy gemini node out of the bulk run', () => {
     const plan = planBulkRestart([
-      { id: 'idle', agentId: 'gemini', state: 'done', sessionId: 'sid-1', wired: true },
-      { id: 'busy', agentId: 'gemini', state: 'working', sessionId: 'sid-2', wired: true },
-      { id: 'prompt', agentId: 'gemini', state: 'blocked', sessionId: 'sid-3', wired: true }
+      { id: 'idle', agentId: 'gemini', state: 'done', sessionId: 'sid-1', wired: true, backgroundTask: false },
+      { id: 'busy', agentId: 'gemini', state: 'working', sessionId: 'sid-2', wired: true, backgroundTask: false },
+      { id: 'prompt', agentId: 'gemini', state: 'blocked', sessionId: 'sid-3', wired: true, backgroundTask: false }
     ])
     expect(plan.runnable).toEqual(['idle'])
     expect(plan.skipped).toEqual({ working: 2, noSession: 0 })
@@ -1041,6 +1041,7 @@ describe('planBulkRestart', () => {
     state: 'waiting',
     sessionId: `sid-${over.id}`,
     wired: true,
+    backgroundTask: false,
     ...over
   })
 
@@ -1076,6 +1077,36 @@ describe('planBulkRestart', () => {
   it('keeps canvas order', () => {
     const plan = planBulkRestart([cand({ id: 'z' }), cand({ id: 'm' }), cand({ id: 'a' })])
     expect(plan.runnable).toEqual(['z', 'm', 'a'])
+  })
+
+  it('bulk restart files a background-task node under the working skips', () => {
+    // A background shell dies with the CLI the exit line quits, and nothing about it is visible to
+    // the eligibility gate — the node reports `done` for as long as the task runs.
+    const plan = planBulkRestart([
+      cand({ id: 'a', state: 'done', backgroundTask: true }),
+      cand({ id: 'b', state: 'done', backgroundTask: false })
+    ])
+    expect(plan.runnable).toEqual(['b'])
+    expect(plan.skipped.working).toBe(1)
+    expect(plan.skipped.noSession).toBe(0)
+  })
+
+  it('leaves a NOT-RESUMABLE background-task node uncounted, as today', () => {
+    // The eligibility gate runs first, so a node the action never claimed stays out of the counts
+    // whatever else is true of it — the background check may not turn a non-target into a skip.
+    const plan = planBulkRestart([
+      cand({ id: 'shell', agentId: undefined, backgroundTask: true }),
+      cand({ id: 'oc', agentId: 'opencode', backgroundTask: true })
+    ])
+    expect(plan.runnable).toEqual([])
+    expect(plan.skipped).toEqual({ working: 0, noSession: 0 })
+  })
+
+  it('files a background task under working even when the node is unwired', () => {
+    // Ordering guard: the background check sits BEFORE the wired check, so a parked node with a
+    // live task reads as busy rather than as "no session".
+    const plan = planBulkRestart([cand({ id: 'a', wired: false, backgroundTask: true })])
+    expect(plan.skipped).toEqual({ working: 1, noSession: 0 })
   })
 })
 

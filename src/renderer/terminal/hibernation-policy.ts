@@ -21,6 +21,12 @@
  *  - **Never a node with live subagents.** Claude launches subagents async: the completion of an
  *    async-launched subagent is queued into the PARENT's transcript, and a dead parent CLI never
  *    reads it. Hibernating the parent orphans every subagent still running under it.
+ *  - **Never a node with a live BACKGROUND TASK.** A Claude `Bash` launched with
+ *    `run_in_background` runs inside the CLI process, so `/exit` kills it silently — no output, no
+ *    error, no record. And no hook fires while it runs, so a node whose only activity is a long
+ *    background job looks EXACTLY like the target profile (`done`, offscreen, idle for hours): the
+ *    stamp the launch left behind (`agentStatus.backgroundTaskAt`, cleared at the next turn start)
+ *    is the only signal there is.
  *  - **Unknown idle is NOT idle.** A candidate with no `lastEventAt` (no hook event has ever been
  *    seen for it in this run) is never eligible — the same rule as pendingLaunch's "an unknown
  *    dependency state is not satisfied". Guessing here costs the user a live session.
@@ -73,6 +79,10 @@ export interface HibernationCandidate {
   recurring: boolean
   /** Any non-done subagent card whose parent is this node (from `state/agentNodes.ts`). */
   liveSubagents: boolean
+  /** A background shell task is running inside this node's CLI (from `agentStatus.backgroundTaskAt`
+   *  — set on the launch hook, cleared at the next turn start). Required, like `remote`: typecheck
+   *  is what forces every call site to answer, and an omitted field would read as "no task". */
+  liveBackgroundTask: boolean
   /** When this node's last hook event landed. Absent = never seen ⇒ never eligible. */
   lastEventAt?: number
 }
@@ -106,6 +116,7 @@ export function planHibernation(
         c.state === 'done' &&
         !c.recurring &&
         !c.liveSubagents &&
+        !c.liveBackgroundTask &&
         restartEligibility(c.agentId, c.state, c.sessionId).ok &&
         // `?? Infinity`: no event ever seen ⇒ the difference is -Infinity ⇒ never eligible.
         nowMs - (c.lastEventAt ?? Infinity) >= idleMs

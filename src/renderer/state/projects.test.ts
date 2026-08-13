@@ -180,3 +180,16 @@ describe('openSshProject', () => {
     expect(other.id).not.toBe(first.id)
   })
 })
+
+describe('setProjectColor', () => {
+  it('updates the project color', () => {
+    const p = useProjects.getState().addProject('demo', '/tmp/demo')
+    useProjects.getState().setProjectColor(p.id, '#ff453a')
+    expect(useProjects.getState().getProject(p.id)?.color).toBe('#ff453a')
+  })
+
+  it('ignores unknown project ids', () => {
+    useProjects.getState().setProjectColor('nope', '#ff453a')
+    expect(useProjects.getState().projects).toHaveLength(0)
+  })
+})

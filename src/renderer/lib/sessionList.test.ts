@@ -2,9 +2,13 @@ import { describe, it, expect } from 'vitest'
 import {
   buildSessionList,
   sessionStatusKind,
+  projectIdAtIndex,
   isGroupCollapsed,
+  projectHeadClickAction,
   projectSignalCounts,
-  type ProjectInput
+  type ProjectInput,
+  type SessionRowVM,
+  type SessionGroup
 } from './sessionList'
 import type { AgentNodeStatus } from '../state/agentStatus'
 
@@ -31,6 +35,28 @@ describe('sessionStatusKind', () => {
   })
 })
 
+describe('projectIdAtIndex', () => {
+  const list = [{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }]
+
+  it('maps a 1-based index to the project at that position', () => {
+    expect(projectIdAtIndex(list, 1)).toBe('p1')
+    expect(projectIdAtIndex(list, 3)).toBe('p3')
+  })
+
+  it('returns null past the end of the list', () => {
+    expect(projectIdAtIndex(list, 4)).toBeNull()
+  })
+
+  it('returns null for index 0 or above 9', () => {
+    expect(projectIdAtIndex(list, 0)).toBeNull()
+    expect(projectIdAtIndex(list, 10)).toBeNull()
+  })
+
+  it('returns null for an empty project list', () => {
+    expect(projectIdAtIndex([], 1)).toBeNull()
+  })
+})
+
 describe('isGroupCollapsed', () => {
   it('defaults to expanded for the active project and collapsed for the rest', () => {
     expect(isGroupCollapsed({}, 'p1', true)).toBe(false)
@@ -46,6 +72,30 @@ describe('isGroupCollapsed', () => {
     expect(isGroupCollapsed({}, 'p1', true, false)).toBe(false)
     expect(isGroupCollapsed({}, 'p2', false, false)).toBe(false) // inactive stays expanded
     expect(isGroupCollapsed({ p2: true }, 'p2', false, false)).toBe(true) // user collapsed
+  })
+})
+
+describe('projectHeadClickAction', () => {
+  it('switches to an inactive project and toggles the active one (never both, never nothing)', () => {
+    expect(projectHeadClickAction(false)).toBe('switch')
+    // No dead zone: the active row still does what the whole header used to do.
+    expect(projectHeadClickAction(true)).toBe('toggle-collapse')
+  })
+
+  it('needs no collapse write on a switch: the target expands from the DEFAULT', () => {
+    // With autoCollapse ON the sidebar wipes every override on the activeProjectId change, so
+    // a toggle written by the click would be clobbered a tick later anyway — and is pointless,
+    // because the newly active project is expanded by the default rule.
+    expect(projectHeadClickAction(false)).toBe('switch')
+    expect(isGroupCollapsed({}, 'p2', true)).toBe(false)
+  })
+
+  it("with autoCollapse off, a switch leaves the target's explicit collapse choice alone", () => {
+    // Documented contract: "off = switches never touch the user's choices". The click writes no
+    // override, so a project the user collapsed by hand stays collapsed after switching to it.
+    const overrides = { p2: true }
+    expect(projectHeadClickAction(false)).toBe('switch')
+    expect(isGroupCollapsed(overrides, 'p2', true, false)).toBe(true)
   })
 })
 
@@ -140,6 +190,29 @@ describe('buildSessionList', () => {
 })
 
 describe('projectSignalCounts', () => {
+  const group = (sessions: Partial<SessionRowVM>[]): SessionGroup => ({
+    projectId: 'p1',
+    projectName: 'P',
+    projectColor: '#111',
+    isActive: false,
+    groups: [],
+    ungrouped: sessions.map((s, i) => ({
+      id: `s${i}`,
+      title: `s${i}`,
+      color: '#888',
+      isAgent: false,
+      statusKind: 'idle' as const,
+      stateLabel: 'Idle',
+      unread: false,
+      usesContext: false,
+      ...s
+    }))
+  })
+
+  // Restored from before the working badge: the original a–f matrix. It pins the row-glyph
+  // PRECEDENCE (attention beats unread, a working session is not yet unread) across both
+  // ungrouped and grouped sessions, which the narrower fixtures below do not reach. The working
+  // count is asserted alongside it rather than replacing it.
   it('counts attention and unread across ungrouped and grouped sessions', () => {
     const proj: ProjectInput[] = [
       {
@@ -165,7 +238,9 @@ describe('projectSignalCounts', () => {
       e: { unread: true, state: 'working' }
     }
     const [g] = buildSessionList(proj, null, 'p1', status, '')
-    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2 })
+    // `e` is the load-bearing one: it is the single working session AND carries an unread mark,
+    // so it must land in `working` and NOT in `unread`.
+    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2, working: 1 })
   })
 
   it('returns zeros for a quiet project', () => {
@@ -176,6 +251,44 @@ describe('projectSignalCounts', () => {
       {},
       ''
     )
-    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 0 })
+    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 0, working: 0 })
+  })
+
+  it('counts working sessions alongside attention/unread', () => {
+    const g = group([
+      { statusKind: 'working' },
+      { statusKind: 'working' },
+      { statusKind: 'attention' },
+      { statusKind: 'idle' }
+    ])
+    expect(projectSignalCounts(g)).toEqual({ attention: 1, unread: 0, working: 2 })
+  })
+
+  it('working is 0 when nothing is running, and unread is counted when not working', () => {
+    const g = group([{ statusKind: 'idle' }, { statusKind: 'done', unread: true }])
+    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 1, working: 0 })
+  })
+
+  it('drives through buildSessionList: counts grouped sessions, attention wins over unread, working is not double-counted as unread', () => {
+    const proj: ProjectInput[] = [
+      {
+        id: 'p1',
+        name: 'Alpha',
+        color: '#111',
+        nodes: [
+          node('g1', { kind: 'group', title: 'Frontend', color: '#abc' }),
+          node('a1', { agentId: 'claude', parentId: 'g1' }), // attention + unread -> attention only
+          node('a2', { agentId: 'claude', parentId: 'g1' }), // working + unread -> working only
+          node('t1') // ungrouped, idle
+        ]
+      }
+    ]
+    const status: Record<string, AgentNodeStatus> = {
+      a1: { unread: true, state: 'blocked', agentId: 'claude', session: 'blocked task', sessionId: 'sess-a1' },
+      a2: { unread: true, state: 'working', agentId: 'claude', session: 'working task', sessionId: 'sess-a2' }
+    }
+    const [p1] = buildSessionList(proj, null, 'p1', status, '')
+    expect(p1.groups[0].sessions.map((s) => s.id)).toEqual(['a1', 'a2']) // sanity: sessions really live under group.groups
+    expect(projectSignalCounts(p1)).toEqual({ attention: 1, unread: 0, working: 1 })
   })
 })
