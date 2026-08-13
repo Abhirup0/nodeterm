@@ -9,6 +9,16 @@ import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileCo
 import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS, GROK_HOOK_EVENTS } from '@shared/agents/hook-events'
 import { GROK_HOOK_FILE, isSafeRemoteGrokHome } from '../../core/agents/grok-paths'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
+
+/**
+ * Remote hook scripts get NO Codex thread-identity root.
+ *
+ * The default root is THIS machine's data dir, and baking it into a script written to someone
+ * else's host puts a path like `/Users/<you>/Library/Application Support/…` on that host — inert
+ * (nothing there can read it) but a needless leak of the desktop's layout. Shared identity for SSH
+ * hosts is a later slice; when it lands, this becomes the REMOTE host's root, not null.
+ */
+const REMOTE_IDENTITY_ROOT = null
 import { buildManagedHookCommand, mergeManagedHook, type HookSettings } from '../../core/agents/hooks/install-helper'
 import {
   buildCodexHooksAndTrust,
@@ -131,7 +141,7 @@ export class RemoteHooks {
         const config = `${home}/${t.config}`
         await this.r.run(
           childArgs(conn, controlPath, `mkdir -p ${remoteDir}/agent-hooks && cat > ${script} && chmod 755 ${script}`),
-          buildManagedScript(t.agentId)
+          buildManagedScript(t.agentId, REMOTE_IDENTITY_ROOT)
         )
         const { stdout: cfgRaw } = await this.r.run(childArgs(conn, controlPath, `cat ${config} 2>/dev/null || echo '{}'`))
         let cfg: HookSettings = {}
@@ -187,7 +197,7 @@ export class RemoteHooks {
           controlPath,
           `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
         ),
-        buildManagedScript('codex')
+        buildManagedScript('codex', REMOTE_IDENTITY_ROOT)
       )
       const command = buildCodexManagedCommand(script)
       const codexHome = `${home}/.codex`
@@ -286,7 +296,7 @@ export class RemoteHooks {
           controlPath,
           `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
         ),
-        buildManagedScript('grok')
+        buildManagedScript('grok', REMOTE_IDENTITY_ROOT)
       )
       // `|| echo '{}'` fires ONLY when the file is missing — still the read that distinguishes a
       // missing file from an unreadable one. An unreadable one is then HEALED, not preserved: this
@@ -337,7 +347,7 @@ export class RemoteHooks {
       // Idempotently (re)write the shared hook script — setup() may not have run (fail-open) yet.
       await this.r.run(
         childArgs(conn, controlPath, `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`),
-        buildManagedScript('claude')
+        buildManagedScript('claude', REMOTE_IDENTITY_ROOT)
       )
       const { stdout: cfgRaw } = await this.r.run(
         childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)

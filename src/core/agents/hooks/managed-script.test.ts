@@ -92,6 +92,26 @@ describe('buildManagedScript', () => {
     })
   })
 
+  describe('the Codex thread-identity prelude', () => {
+    // It is prepended for EVERY agent, not just codex — the generated scripts all change. That is
+    // intended: the block is inert without CODEX_THREAD_ID, which no other agent's tool shell
+    // sets, and one builder beats a codex-only fork of it. (Its behavior is exercised for real
+    // under /bin/sh in core/codex-thread-identity-sh.test.ts.)
+    it('is present in every agent script when an identity root is known', () => {
+      for (const agent of ['claude', 'codex', 'gemini', 'grok', 'opencode']) {
+        expect(buildManagedScript(agent, '/data/codex-thread-nodes')).toContain(
+          "nt_codex_map='/data/codex-thread-nodes'/\"$CODEX_THREAD_ID\""
+        )
+      }
+    })
+
+    it('is omitted entirely when there is no identity root, leaving the legacy script', () => {
+      const legacy = buildManagedScript('claude', null as unknown as string)
+      expect(legacy).not.toContain('CODEX_THREAD_ID')
+      expect(legacy.split('\n')[1]).toBe('if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then')
+    })
+  })
+
   describe('endpoint failover (dead-primary retry against a live sibling endpoint)', () => {
     it('lists the three known candidate endpoint files', () => {
       expect(s).toContain('"$HOME/.nodeterm-server/hook-endpoint.env"')
