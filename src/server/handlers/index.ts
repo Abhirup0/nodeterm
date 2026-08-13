@@ -20,7 +20,12 @@ import { IPC } from '../../shared/ipc'
  *  routing on desktop, which the server edition does not have (terminals are local). */
 export function registerCoreHandlers(
   platform: ServerPlatform,
-  deps: { getSettings: () => Settings; downloadTickets?: DownloadTickets }
+  deps: {
+    getSettings: () => Settings
+    downloadTickets?: DownloadTickets
+    /** See fs-handlers' dep of the same name — the canvas-image write directory. */
+    localProjectCwd?: (projectId: string) => string | undefined
+  }
 ): { gitService: GitService } {
   // Explorer downloads: mint a one-shot ticket over this (authenticated) channel; the transfer
   // itself is a plain HTTP GET the browser performs (src/server/download.ts). Statting here keeps
@@ -38,7 +43,8 @@ export function registerCoreHandlers(
           const token = downloadTickets.issue(p, dir)
           return { url: `${DOWNLOAD_PATH}?t=${encodeURIComponent(token)}`, name: downloadName(p, dir) }
         }
-      : undefined
+      : undefined,
+    localProjectCwd: deps.localProjectCwd
   })
 
   const gitService = new GitService()

@@ -34,6 +34,14 @@ import {
   wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
+import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
+import { selectedLocalFilePaths } from './canvas-file-copy'
+import {
+  canvasImagePasteArmedAfterKey,
+  canvasImportRefusal,
+  guardedCanvasImagePlacements,
+  isCanvasImageDropTarget
+} from './canvas-image-import'
 import {
   SharedGlyphLayer,
   flushOpaqueNodeIds,
@@ -204,6 +212,14 @@ import {
 import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
 import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@shared/scm-scope'
 import { hintLabel } from '@shared/platform-utils'
+import {
+  canvasImageFiles,
+  canvasImageSink,
+  clipboardImages,
+  localPathsForFiles,
+  pasteHasText,
+  pastedFiles
+} from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
 import { activeSessionApi } from '../session/session'
 import {
@@ -679,6 +695,10 @@ export function Canvas() {
   // `nodeterm:toast` when neither the Clipboard API nor execCommand can copy — typically a
   // non-secure context (plain http over a LAN). It must be seen, not swallowed.
   const [copyError, setCopyError] = useState<string | null>(null)
+  // Cmd+V only drops an image on the canvas when the LAST pointer press was on the pane itself —
+  // otherwise a paste aimed at a panel or a dialog would spawn a node behind it. See
+  // canvas-image-import.ts for the arming rules.
+  const canvasImagePasteArmedRef = useRef(false)
   // Result of a worktree operation (merge / remove). These used to be `window.alert`s — a modal
   // that blocks the whole app to say "Merged feat into main." Shown as a strip in the existing
   // top-banner column instead; an 'info' one fades itself out, an 'error' stays until dismissed.
@@ -2536,20 +2556,37 @@ export function Canvas() {
   // zoom to the cursor. React Flow's own zoomOnPinch / zoomActivationKeyCode are disabled so
   // this is the single source of zoom (no double-zoom on the open canvas).
   //
-  // With settings.wheelZoom on, a PLAIN wheel zooms too (mouse-first workflow; scroll-to-pan
-  // is disabled on <ReactFlow> in that mode) — except inside a `nowheel` node body (focused
-  // xterm scrollback, Monaco, markdown/chat panes), which keeps its own scrolling. The hover
-  // guard overlay is NOT nowheel, so an unfocused terminal still zooms under the cursor.
+  // With settings.wheelZoom on, a PLAIN mouse wheel zooms too (mouse-first workflow) — except
+  // inside a `nowheel` node body (focused xterm scrollback, Monaco, markdown/chat panes), which
+  // keeps its own scrolling. The hover guard overlay is NOT nowheel, so an unfocused terminal
+  // still zooms under the cursor. On macOS a two-finger TRACKPAD scroll keeps panning even with
+  // wheelZoom on: Chromium reports both devices as an unmodified pixel-wheel, so
+  // MacWheelGestureRouter tells them apart (and stays sticky for the length of one physical
+  // gesture) and hands trackpad packets back to React Flow's own panOnScroll.
   const wheelZoom = settings.wheelZoom
+  // The escape hatch, resolved ONCE: the router and React Flow's panOnScroll below must agree, or
+  // a gesture neither of them pans is a gesture that does nothing.
+  const trackpadRouting = trackpadRoutingEnabled(isMac, settings.trackpadPan)
   useEffect(() => {
     const wrap = flowWrapRef.current
     if (!wrap) return
+    const wheelRouting = new MacWheelGestureRouter()
     const onWheel = (e: WheelEvent) => {
       if (canvasLocked) return
       if (!e.ctrlKey && !e.metaKey) {
+        // The ancestor walk is the expensive part of this handler at ~120 Hz, so it is memoized
+        // per packet AND never run for a packet no guard asks about (a plain wheel with wheelZoom
+        // off, which is the default, walks nothing at all).
+        const target = e.target as HTMLElement | null
+        let scroller: boolean | undefined
+        const overNativeScrollable = (): boolean => (scroller ??= !!target?.closest('.nowheel'))
+        // A macOS trackpad's two-finger scroll pans the canvas outside native scroll surfaces;
+        // inside them (terminal, Monaco, markdown) it scrolls that surface as before.
+        if (wheelRouting.destination(e, trackpadRouting, overNativeScrollable) === 'flow-pan')
+          return
         // pinch (ctrl+wheel) / Cmd/Ctrl+scroll always zoom; plain wheel only when opted in
         if (!wheelZoom) return
-        if ((e.target as HTMLElement | null)?.closest('.nowheel')) return
+        if (overNativeScrollable()) return
       }
       e.preventDefault()
       e.stopPropagation()
@@ -2566,7 +2603,7 @@ export function Canvas() {
     }
     wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
     return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
-  }, [getViewport, setViewport, wheelZoom, canvasLocked])
+  }, [getViewport, setViewport, wheelZoom, trackpadRouting, canvasLocked])
 
   // Double-clicking EMPTY canvas pulls back to the overview zoom — the inverse of the node
   // double-click, which frames one node. A fixed zoom, not "the camera the last focus came from":
@@ -2951,6 +2988,117 @@ export function Canvas() {
     },
     [setNodes, markDirty, viewCenter]
   )
+
+  // Reuse the same path resolver as terminal file paste/drop, then feed the existing Open-file
+  // node path. Desktop Finder drops retain their real path; clipboard/browser blobs are saved in
+  // NodeTerm's managed upload directory first. Multiple images fan out diagonally from the cursor.
+  const placeCanvasImages = useCallback(
+    async (files: File[], center: { x: number; y: number }, projectId: string) => {
+      const images = canvasImageFiles(files)
+      if (!images.length) return
+      // A relay tab writes here and reads on the peer, so the node could never render its own
+      // file — say so instead of creating it. Same fact, same source as the Cmd+C gate below.
+      const refusal = canvasImportRefusal(!!useProjects.getState().getProject(projectId)?.remote)
+      if (refusal) {
+        setCopyError(refusal)
+        return
+      }
+      const placements = await guardedCanvasImagePlacements(
+        // Into the PROJECT's own `.nodeterm/images/`, not the 7-day uploads staging area: the node
+        // that names this file is persisted in project.json, so the file has to outlive a week and
+        // travel to whoever clones the repo.
+        () => localPathsForFiles(images, canvasImageSink(projectId)),
+        projectId,
+        () => useProjects.getState().activeProjectId,
+        center
+      )
+      placements.forEach(({ filePath, center: placement }) => openFile(filePath, placement))
+      // Unsaveable files are dropped silently one layer down, and core already retried in a second
+      // directory before giving up — so a shortfall here means the image is genuinely not on disk.
+      // Saying nothing would leave the user watching for a node that is never coming. (A project
+      // switch mid-save legitimately places nothing; that is the guard's job, not a failure.)
+      const lost = images.length - placements.length
+      if (lost > 0 && useProjects.getState().activeProjectId === projectId) {
+        setCopyError(
+          `Could not save ${lost === 1 ? 'the image' : `${lost} images`} — check that this project's folder is writable.`
+        )
+      }
+    },
+    [openFile]
+  )
+
+  // Drop or paste an image onto empty canvas → an image preview node. Registered on `window`
+  // (not the wrapper) because a paste has no drop target, and gated by isCanvasImageDropTarget so
+  // panels, dialogs and node bodies keep their own drop/paste behavior.
+  useEffect(() => {
+    const wrap = flowWrapRef.current
+    if (!wrap) return
+    const editableTarget = (target: EventTarget | null): boolean => {
+      const element = target instanceof Element ? target : null
+      return !!element?.closest(
+        'input, textarea, select, button, [contenteditable], [role="dialog"], .monaco-editor, .xterm, .react-flow__node'
+      )
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      canvasImagePasteArmedRef.current = isCanvasImageDropTarget(event.target, wrap)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      canvasImagePasteArmedRef.current = canvasImagePasteArmedAfterKey(
+        canvasImagePasteArmedRef.current,
+        event
+      )
+    }
+    const onDragOver = (event: DragEvent) => {
+      if (!isCanvasImageDropTarget(event.target, wrap)) return
+      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    }
+    const onDrop = (event: DragEvent) => {
+      if (!isCanvasImageDropTarget(event.target, wrap)) return
+      const images = canvasImageFiles(Array.from(event.dataTransfer?.files ?? []))
+      if (!images.length) return
+      event.preventDefault()
+      event.stopPropagation()
+      const center = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      const projectId = useProjects.getState().activeProjectId
+      if (projectId) void placeCanvasImages(images, center, projectId)
+    }
+    const onPaste = (event: ClipboardEvent) => {
+      if (!canvasImagePasteArmedRef.current || !hasProjects || welcomeOpen || kanbanOpen) return
+      if (document.querySelector('[role="dialog"], .usage-popover')) return
+      if (editableTarget(event.target)) return
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      const center = viewCenter()
+      if (!center) return
+      const files = canvasImageFiles(pastedFiles(event.clipboardData))
+      if (files.length) {
+        event.preventDefault()
+        event.stopPropagation()
+        void placeCanvasImages(files, center, projectId)
+        return
+      }
+      // A screenshot can arrive with an empty clipboardData when Chromium filters the paste
+      // target. Ordinary text must remain untouched; only the image-only case uses async read().
+      if (pasteHasText(event.clipboardData)) return
+      void clipboardImages().then((images) => {
+        if (images.length) void placeCanvasImages(images, center, projectId)
+      })
+    }
+    window.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    window.addEventListener('paste', onPaste)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+      window.removeEventListener('paste', onPaste)
+    }
+  }, [hasProjects, kanbanOpen, placeCanvasImages, screenToFlowPosition, viewCenter, welcomeOpen])
 
   // Load the quick-open file index when the palette opens.
   useEffect(() => {
@@ -4732,11 +4880,47 @@ export function Canvas() {
           switchProject(targetId)
         }
       } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'c') {
-        // Copy the current page selection (e.g. markdown view) to the clipboard.
+        // Native text selection wins (markdown, editor and terminal keep their normal copy path).
         const tag = (document.activeElement?.tagName || '').toLowerCase()
-        if (tag === 'input' || tag === 'textarea') return
+        if (
+          tag === 'input' ||
+          tag === 'textarea' ||
+          document.activeElement?.getAttribute('contenteditable') === 'true' ||
+          document.activeElement?.closest('.monaco-editor, .xterm')
+        )
+          return
         const sel = window.getSelection?.()?.toString()
-        if (sel) window.nodeTerminal.clipboard.writeText(sel)
+        if (sel) {
+          window.nodeTerminal.clipboard.writeText(sel)
+          return
+        }
+        // Nothing selected as text: copy the selected file-backed nodes as FILE REFERENCES, so
+        // Finder (or any file-aware app) pastes the actual files.
+        //
+        // Gated to where it can actually succeed, because the failure path raises a banner that
+        // stays until dismissed — and before this feature the keystroke was a silent no-op, which
+        // is what every other machine must keep getting. `writeFilesToClipboard` is darwin-gated
+        // in main and the browser bridge stub answers false, so on a non-mac renderer (desktop OR
+        // Server Edition) this branch could only ever produce that banner, wearing macOS-specific
+        // copy on a Linux box. The board is an opaque overlay over the canvas, so a copy there
+        // would act on a selection the user cannot see (the canvas-only-shortcut discipline).
+        const projects = useProjects.getState()
+        if (!isMac || isKanbanOpen(projects.activeProjectId)) return
+        const paths = selectedLocalFilePaths(nodesRef.current, {
+          projectIsRelay: !!projects.getProject(projects.activeProjectId ?? '')?.remote
+        })
+        if (!paths.length) return
+        e.preventDefault()
+        void window.nodeTerminal.clipboard
+          .writeFiles(paths)
+          .then((copied) => {
+            setCopyError(
+              copied
+                ? null
+                : 'Copy failed — only existing local files can be copied from the macOS desktop app.'
+            )
+          })
+          .catch(() => setCopyError('Copy failed — the system clipboard is unavailable.'))
       }
     }
     window.addEventListener('keydown', onKey)
@@ -8388,7 +8572,7 @@ export function Canvas() {
                 ? [0, 1]
                 : [1]
           }
-          panOnScroll={canvasLocked ? false : !wheelZoom}
+          panOnScroll={canvasLocked ? false : trackpadRouting || !wheelZoom}
           zoomOnScroll={false}
           zoomOnPinch={false}
           // Off: a pane double-click is the overview-zoom gesture (see PANE_OVERVIEW_ZOOM) and a
