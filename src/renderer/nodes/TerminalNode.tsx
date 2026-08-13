@@ -1678,14 +1678,36 @@ export function TerminalNode({
       const canvases = term.element ? Array.from(term.element.querySelectorAll('canvas')) : null
       try {
         webgl.dispose()
-      } catch {
-        // already disposed via context loss
+      } catch (err) {
+        // A second dispose after onContextLoss already ran is a silent no-op — a THROW here is
+        // never that. The addon's dispose is ALSO its put-xterm-back-on-a-DOM-renderer path (a
+        // disposable registered at activate), so a throw aborts the restore and would leave the
+        // terminal with NO renderer at all: zero canvases, zero `.xterm-rows`, a permanently
+        // black node no repaint can reach. Seen in the field as the zoom-out blackout when
+        // addon-webgl 0.19.0's dispose guard read xterm-5.6 internals (`_core._store`) on the
+        // 5.5 core and crashed on EVERY release. The renderer-less check below is the heal; the
+        // warn is its field trace.
+        console.warn('[nodeterm] webgl dispose threw mid-release', err)
       }
       webgl = null
       loseWebglContexts(canvases)
       // A dispose that died midway leaves its (now context-lost, permanently BLACK) canvas
       // attached OVER the DOM rows — sweep it before the repaint (see the safety-net note).
       verifyCleanDomState('release')
+      // The other way a dispose dies midway: canvases already gone but the DOM renderer never
+      // installed (the throw above). `verifyCleanDomState` cannot see that state — it keys on
+      // stray canvases, and here there are none — so probe for the renderer's row container
+      // directly and rebuild what the addon's aborted restore owed. Skipped while a glyph
+      // attachment owns the screen (no rows there by design, and `setRenderer` would dispose
+      // the glyph addon — see the both-renderers invariant).
+      if (!disposed && !glyphAttach && term.element && !term.element.querySelector('.xterm-rows')) {
+        if (restoreDomRenderer()) {
+          console.warn('[nodeterm] healed a renderer-less webgl release: DOM renderer restored')
+        } else {
+          escalateRespawn('webgl release left no renderer and the DOM restore failed')
+          return
+        }
+      }
       // The DOM renderer that replaced the addon starts from an EMPTY row container, and this
       // release almost always runs while the node is HIDDEN — the swap's own refresh defers
       // behind xterm's pause flag, which is exactly where it can be lost. Re-arm it explicitly.
