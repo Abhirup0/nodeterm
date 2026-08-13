@@ -232,7 +232,9 @@ const api: NodeTerminalApi = {
     write: (projectId: string, path: string, content: string) =>
       ipcRenderer.invoke(IPC.sshFsWrite, projectId, path, content),
     mkdir: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsMkdir, projectId, p),
-    exists: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsExists, projectId, p)
+    exists: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsExists, projectId, p),
+    quickOpen: (projectId: string, cwd: string) =>
+      ipcRenderer.invoke(IPC.sshFsQuickOpen, projectId, cwd)
   },
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),

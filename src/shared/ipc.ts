@@ -247,6 +247,7 @@ export const IPC = {
   sshFsWrite: 'sshFs:write',
   sshFsMkdir: 'sshFs:mkdir',
   sshFsExists: 'sshFs:exists',
+  sshFsQuickOpen: 'sshFs:quick-open',
   sshProjectStatus: 'ssh-project:status',
   /** main → renderer: an SSH project's identity file is passphrase-protected and the ssh-agent
    *  does not hold the key (or the last answer was wrong), so show a prompt.
