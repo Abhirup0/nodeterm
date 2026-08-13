@@ -59,7 +59,6 @@ import { SshReconnector } from '../lib/sshReconnect'
 import { terminalKey } from '../terminal/terminal-config'
 import {
   setWebglGesture,
-  setWebglZoom,
   releaseAllHiddenGrants,
   WEBGL_GESTURE_SETTLE_MS
 } from '../terminal/webgl-budget'
@@ -1754,9 +1753,6 @@ export function Canvas() {
       setViewport(project.viewport)
       setZoomPct(Math.round(project.viewport.zoom * 100))
       setGroupLabelBoost(project.viewport.zoom)
-      // A project can load already zoomed way out (saved viewport) — seed the WebGL zoom gate
-      // before the mount-time IntersectionObserver reports make every node request a context.
-      setWebglZoom(project.viewport.zoom)
       // Seed the shared glyph camera from the same viewport: `onMove` only fires once the user
       // actually pans, so without this a project that loads scrolled away would draw its grids
       // against the previous project's camera until the first gesture.
@@ -5632,9 +5628,6 @@ export function Canvas() {
           zoomRafRef.current = null
           setZoomPct(Math.round(viewportRef.current.zoom * 100))
           setGroupLabelBoost(viewportRef.current.zoom)
-          // Feed the WebGL budget's zoom gate (suspend GPU rendering when zoomed way out).
-          // Idempotent + hysteresis inside; per-frame call cost is a float compare.
-          setWebglZoom(viewportRef.current.zoom)
         })
       }
     },
