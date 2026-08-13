@@ -22,6 +22,37 @@ const EXT_BY_TYPE: Record<string, string> = {
   'text/plain': 'txt'
 }
 
+const CANVAS_IMAGE_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'bmp',
+  'ico',
+  'svg',
+  'avif'
+])
+const CANVAS_IMAGE_MIME = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+  'image/x-icon',
+  'image/svg+xml',
+  'image/avif'
+])
+
+/** Only image files become canvas preview nodes; other dropped files keep the existing no-op. */
+export function canvasImageFiles(files: File[]): File[] {
+  return files.filter((file) => {
+    if (CANVAS_IMAGE_MIME.has(file.type.toLowerCase())) return true
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
+    return CANVAS_IMAGE_EXTENSIONS.has(ext)
+  })
+}
+
 /** The name to store a file under. Clipboard bytes usually have none, so one is generated from
  *  the MIME type + a timestamp — recognizable in a prompt and unique enough to read back. */
 export function uploadNameFor(file: { name: string; type: string }): string {
@@ -116,6 +147,18 @@ async function localPathFor(file: File): Promise<string | null> {
   return window.nodeTerminal.files.saveUpload(uploadNameFor(file), data).catch(() => null)
 }
 
+async function localFilesWithPaths(files: File[]): Promise<Array<{ file: File; path: string }>> {
+  const local = await Promise.all(files.map((f) => localPathFor(f).catch(() => null)))
+  return files
+    .map((file, i) => ({ file, path: local[i] }))
+    .filter((pair): pair is { file: File; path: string } => !!pair.path)
+}
+
+/** Resolve local/clipboard/browser files to raw local paths for non-terminal consumers. */
+export async function localPathsForFiles(files: File[]): Promise<string[]> {
+  return (await localFilesWithPaths(files)).map((pair) => pair.path)
+}
+
 /**
  * Resolve dropped/pasted files to terminal-pasteable paths. For an SSH-project terminal a local
  * path is useless on the host, so each file is uploaded over the project's ControlMaster and its
@@ -126,10 +169,7 @@ export async function droppedPaths(
   files: File[],
   opts: { sshRemoteTmux: boolean; projectId: string }
 ): Promise<string[]> {
-  const local = await Promise.all(files.map((f) => localPathFor(f).catch(() => null)))
-  const pairs = files
-    .map((f, i) => ({ file: f, path: local[i] }))
-    .filter((p): p is { file: File; path: string } => !!p.path)
+  const pairs = await localFilesWithPaths(files)
   if (!opts.sshRemoteTmux) return pairs.map((p) => escapeDroppedPath(p.path))
   const uploaded = await Promise.all(
     pairs.map((p) =>

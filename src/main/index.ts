@@ -2,10 +2,12 @@ import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile } from 'fs/promises'
+import { statSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, safeStorage, shell, systemPreferences } from 'electron'
 import { IPC } from '../shared/ipc'
+import { writeFilesToClipboard } from './clipboard-files'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import type { RemoteLogExec } from '../core/board-log'
@@ -645,6 +647,13 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.clipboardWrite, (_e, text: string) => {
     if (typeof text === 'string') clipboard.writeText(text)
   })
+  ipcMain.handle(IPC.clipboardWriteFiles, (_e, paths: unknown) =>
+    writeFilesToClipboard(paths, {
+      platform: process.platform,
+      isFile: (path) => statSync(path).isFile(),
+      writeBuffer: (format, buffer) => clipboard.writeBuffer(format, buffer)
+    })
+  )
 
   // Dock badge: number of Claude nodes with unread output (macOS only). '' clears it.
   ipcMain.on(IPC.appSetBadge, (_e, count: number) => {

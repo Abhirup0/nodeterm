@@ -47,6 +47,8 @@ export const IPC = {
   /** Write text to the system clipboard from the MAIN process. Renderer-side `clipboard` access is
    *  deprecated in Electron; the renderer sends this instead (fire-and-forget). */
   clipboardWrite: 'clipboard:write',
+  /** Copy local files as file references (not bytes/text) to the macOS system clipboard. */
+  clipboardWriteFiles: 'clipboard:write-files',
   appNotify: 'app:notify',
   appOpenNotificationSettings: 'app:open-notification-settings',
   appFocusNode: 'app:focus-node',

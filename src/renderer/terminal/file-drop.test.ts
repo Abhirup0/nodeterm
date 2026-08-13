@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import {
+  canvasImageFiles,
   clipboardImages,
   escapeDroppedPath,
+  localPathsForFiles,
   pasteHasText,
   pastedFiles,
   uploadNameFor
@@ -58,6 +60,30 @@ describe('pastedFiles', () => {
   it('answers empty for a text paste, which is xterm s to handle', () => {
     expect(pastedFiles(clipboard({}))).toEqual([])
     expect(pastedFiles(null)).toEqual([])
+  })
+})
+
+describe('canvasImageFiles', () => {
+  it('keeps MIME images and known image extensions only', () => {
+    const png = new File(['png'], 'shot.png', { type: 'image/png' })
+    const avif = new File(['avif'], 'photo.AVIF')
+    const text = new File(['hello'], 'notes.txt', { type: 'text/plain' })
+    expect(canvasImageFiles([png, avif, text])).toEqual([png, avif])
+  })
+})
+
+describe('localPathsForFiles', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('reuses an Electron file path without shell escaping it', async () => {
+    vi.stubGlobal('window', {
+      nodeTerminal: {
+        getPathForFile: () => '/tmp/My image.png',
+        files: { saveUpload: vi.fn() }
+      }
+    })
+    const file = new File(['png'], 'My image.png', { type: 'image/png' })
+    expect(await localPathsForFiles([file])).toEqual(['/tmp/My image.png'])
   })
 })
 

@@ -672,6 +672,8 @@ export interface DialogApi {
 
 export interface ClipboardApi {
   writeText(text: string): void
+  /** Copy local files so Finder and other file-aware macOS apps can paste them. */
+  writeFiles(paths: string[]): Promise<boolean>
 }
 
 export interface ShellApi {
@@ -861,8 +863,9 @@ export interface Settings {
    * tmux's buffer, and it never reached the browser.
    */
   terminalMiddleClickPaste: boolean
-  /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). Trades away scroll-to-pan,
-   *  so it's opt-in — best for mouse users; trackpads keep two-finger pan when off. */
+  /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). On macOS a two-finger trackpad
+   *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
+   *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map

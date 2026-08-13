@@ -165,7 +165,9 @@ export function buildStubApi(): Omit<
           return
         }
         copyViaExecCommand(text)
-      }
+      },
+      // A browser cannot place host-local file references on the viewer's OS clipboard.
+      writeFiles: async (): Promise<boolean> => false
     },
     shell: {
       // no filesystem-reveal in a browser; intentionally inert (see docs/SERVER.md)
