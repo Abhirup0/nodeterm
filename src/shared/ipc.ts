@@ -218,6 +218,8 @@ export const IPC = {
   filesDownloadTicket: 'files:download-ticket',
   /** Persist pasted/dropped bytes that have no path here, and answer their absolute path. */
   filesSaveUpload: 'files:save-upload',
+  /** Write a canvas image into the project's own `.nodeterm/images/` (see core/canvas-images.ts). */
+  filesSaveCanvasImage: 'files:save-canvas-image',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',
   sshList: 'ssh:list',

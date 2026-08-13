@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MacWheelGestureRouter } from './wheel-gesture'
+import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
 
 const gesture = (
   deltaY: number,
@@ -57,6 +57,24 @@ describe('MacWheelGestureRouter', () => {
     // ...but the packet still classified the device, so continuing the same gesture off the
     // scroller pans the canvas instead of falling back to the mouse-notch (zoom) path.
     expect(router.destination(gesture(75), true, no, 1100)).toBe('flow-pan')
+  })
+
+  it('hands every gesture back to the zoom path once the escape hatch is engaged', () => {
+    // trackpadPan off: `mac` is false for the router whatever machine this is, so nothing is
+    // ever routed to flow-pan and settings.wheelZoom alone decides — the pre-router behavior.
+    expect(trackpadRoutingEnabled(true, true)).toBe(true)
+    expect(trackpadRoutingEnabled(true, false)).toBe(false)
+    expect(trackpadRoutingEnabled(false, true)).toBe(false)
+
+    const hatch = trackpadRoutingEnabled(true, false)
+    const router = new MacWheelGestureRouter()
+    // A precise-pixel MOUSE (Magic Mouse, MX Master) emits exactly what a trackpad emits, so it
+    // classifies as one — this is the user's only way back to wheel zoom, and it must hold for a
+    // whole gesture, not just its first packet.
+    expect(router.destination(gesture(6.25), hatch, no, 1000)).toBe('native')
+    expect(router.destination(gesture(4.5), hatch, no, 1050)).toBe('native')
+    expect(router.destination(gesture(75), hatch, yes, 1100)).toBe('native')
+    expect(router.shouldPan(gesture(6.25), hatch, 1150)).toBe(false)
   })
 
   it('keeps pinch, Cmd-wheel, line-mode wheel and other platforms off the override', () => {

@@ -784,7 +784,12 @@ app.whenReady().then(async () => {
   // The Explorer/Editor fs surface: ONE registrar (core/fs-handlers.ts) shared by this shell and
   // the Server Edition, over the same pure core/fs-ops — so local, browser and peer filesystem
   // behaviour cannot drift. Registered on the platform, so a remote tab's Explorer/editor works.
-  registerFsHandlers(corePlatform)
+  // `localProjectCwd` is how a canvas image finds the project's own `.nodeterm/images/`. It
+  // answers undefined for an SSH project (its cwd is on the host, and the image node reads
+  // locally) and for a relay tab (not in this index at all) — both take the app-local fallback.
+  registerFsHandlers(corePlatform, {
+    localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
+  })
 
   const githubSecret = new ElectronGitHubSecretStore(app.getPath('userData'), safeStorage)
   const github = registerGitHubIntegration({

@@ -34,7 +34,7 @@ import {
   wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
-import { MacWheelGestureRouter } from './wheel-gesture'
+import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
 import { selectedLocalFilePaths } from './canvas-file-copy'
 import {
   canvasImagePasteArmedAfterKey,
@@ -213,6 +213,7 @@ import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@sh
 import { hintLabel } from '@shared/platform-utils'
 import {
   canvasImageFiles,
+  canvasImageSink,
   clipboardImages,
   localPathsForFiles,
   pasteHasText,
@@ -2559,6 +2560,9 @@ export function Canvas() {
   // MacWheelGestureRouter tells them apart (and stays sticky for the length of one physical
   // gesture) and hands trackpad packets back to React Flow's own panOnScroll.
   const wheelZoom = settings.wheelZoom
+  // The escape hatch, resolved ONCE: the router and React Flow's panOnScroll below must agree, or
+  // a gesture neither of them pans is a gesture that does nothing.
+  const trackpadRouting = trackpadRoutingEnabled(isMac, settings.trackpadPan)
   useEffect(() => {
     const wrap = flowWrapRef.current
     if (!wrap) return
@@ -2574,7 +2578,8 @@ export function Canvas() {
         const overNativeScrollable = (): boolean => (scroller ??= !!target?.closest('.nowheel'))
         // A macOS trackpad's two-finger scroll pans the canvas outside native scroll surfaces;
         // inside them (terminal, Monaco, markdown) it scrolls that surface as before.
-        if (wheelRouting.destination(e, isMac, overNativeScrollable) === 'flow-pan') return
+        if (wheelRouting.destination(e, trackpadRouting, overNativeScrollable) === 'flow-pan')
+          return
         // pinch (ctrl+wheel) / Cmd/Ctrl+scroll always zoom; plain wheel only when opted in
         if (!wheelZoom) return
         if (overNativeScrollable()) return
@@ -2594,7 +2599,7 @@ export function Canvas() {
     }
     wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
     return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
-  }, [getViewport, setViewport, wheelZoom, canvasLocked])
+  }, [getViewport, setViewport, wheelZoom, trackpadRouting, canvasLocked])
 
   // Double-clicking EMPTY canvas pulls back to the overview zoom — the inverse of the node
   // double-click, which frames one node. A fixed zoom, not "the camera the last focus came from":
@@ -2959,7 +2964,10 @@ export function Canvas() {
       const images = canvasImageFiles(files)
       if (!images.length) return
       const placements = await guardedCanvasImagePlacements(
-        () => localPathsForFiles(images),
+        // Into the PROJECT's own `.nodeterm/images/`, not the 7-day uploads staging area: the node
+        // that names this file is persisted in project.json, so the file has to outlive a week and
+        // travel to whoever clones the repo.
+        () => localPathsForFiles(images, canvasImageSink(projectId)),
         projectId,
         () => useProjects.getState().activeProjectId,
         center
@@ -8401,7 +8409,7 @@ export function Canvas() {
                 ? [0, 1]
                 : [1]
           }
-          panOnScroll={canvasLocked ? false : isMac || !wheelZoom}
+          panOnScroll={canvasLocked ? false : trackpadRouting || !wheelZoom}
           zoomOnScroll={false}
           zoomOnPinch={false}
           // Off: a pane double-click is the overview-zoom gesture (see PANE_OVERVIEW_ZOOM) and a

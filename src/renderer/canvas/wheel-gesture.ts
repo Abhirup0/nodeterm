@@ -4,6 +4,20 @@ type WheelGesture = Pick<WheelEvent, 'ctrlKey' | 'metaKey' | 'deltaMode' | 'delt
 
 export type MacWheelDestination = 'flow-pan' | 'native'
 
+/**
+ * Whether the trackpad override is live at all — the `mac` argument every method below takes.
+ *
+ * Two reasons it must be one named expression rather than an `isMac &&` at each call site: the
+ * router and React Flow's own `panOnScroll` have to agree exactly (disagreeing means a gesture
+ * that neither of them pans), and `trackpadPan` is the user's ESCAPE HATCH. Turning it off
+ * restores the pre-router behavior on macOS — `wheelZoom` alone decides, and a plain wheel zooms.
+ * That is the recourse for a precise-pixel MOUSE (Magic Mouse, MX Master), whose deltas are
+ * indistinguishable from a trackpad's here: it classifies as a trackpad and would otherwise have
+ * no way back to wheel zoom.
+ */
+export const trackpadRoutingEnabled = (mac: boolean, trackpadPan: boolean): boolean =>
+  mac && trackpadPan
+
 const TRACKPAD_SEQUENCE_MS = 500
 const MOUSE_WHEEL_NOTCH = 120
 const LARGE_PIXEL_DELTA = 40

@@ -326,7 +326,9 @@ const api: NodeTerminalApi = {
     // already on this machine" (local project).
     downloadTicket: (p: string) => ipcRenderer.invoke(IPC.filesDownloadTicket, p),
     saveUpload: (name: string, dataBase64: string) =>
-      ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64)
+      ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64),
+    saveCanvasImage: (projectId: string, name: string, dataBase64: string) =>
+      ipcRenderer.invoke(IPC.filesSaveCanvasImage, projectId, name, dataBase64)
   },
   updates: {
     onAvailable: (listener) => {

@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import {
   canvasImageFiles,
+  canvasImageSink,
   clipboardImages,
   escapeDroppedPath,
   localPathsForFiles,
@@ -74,6 +75,39 @@ describe('canvasImageFiles', () => {
 
 describe('localPathsForFiles', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it('routes pathless canvas bytes to the project image store, not the uploads staging area', async () => {
+    const saveUpload = vi.fn()
+    const saveCanvasImage = vi.fn().mockResolvedValue('/proj/.nodeterm/images/pasted.png')
+    // The suite runs on the node environment, which has no FileReader; only the base64 handoff
+    // matters here, so the read is the smallest stand-in that produces one.
+    vi.stubGlobal(
+      'FileReader',
+      class {
+        onload: (() => void) | null = null
+        onerror: (() => void) | null = null
+        result: string | null = null
+        readAsDataURL(): void {
+          this.result = 'data:image/png;base64,cG5n'
+          this.onload?.()
+        }
+      }
+    )
+    vi.stubGlobal('window', {
+      nodeTerminal: {
+        // A clipboard screenshot: no OS path, so the sink is the only thing that decides where it
+        // lands — and a canvas node outlives the 7-day uploads sweep.
+        getPathForFile: () => null,
+        files: { saveUpload, saveCanvasImage }
+      }
+    })
+    const file = new File(['png'], 'pasted.png', { type: 'image/png' })
+    expect(await localPathsForFiles([file], canvasImageSink('project-a'))).toEqual([
+      '/proj/.nodeterm/images/pasted.png'
+    ])
+    expect(saveCanvasImage).toHaveBeenCalledWith('project-a', 'pasted.png', expect.any(String))
+    expect(saveUpload).not.toHaveBeenCalled()
+  })
 
   it('reuses an Electron file path without shell escaping it', async () => {
     vi.stubGlobal('window', {

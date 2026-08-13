@@ -724,6 +724,15 @@ export interface FilesApi {
    * (too large, unwritable); callers drop that file the way a failed drop does.
    */
   saveUpload(name: string, dataBase64: string): Promise<string | null>
+  /**
+   * Persist raw bytes (base64) as a CANVAS image and resolve its ABSOLUTE path. Unlike
+   * `saveUpload` the file is durable: a canvas image node is persisted in `project.json`, so its
+   * file cannot live in a staging area that is swept after a week. The directory is derived from
+   * `projectId` on the receiving side — the caller never names a path — and is the project's own
+   * git-shared `.nodeterm/images/` when it has a local cwd, else a durable app-local folder.
+   * Resolves null when it could not be written; callers drop that file like a failed drop.
+   */
+  saveCanvasImage(projectId: string, name: string, dataBase64: string): Promise<string | null>
 }
 
 export interface MediaApi {
@@ -867,6 +876,10 @@ export interface Settings {
    *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
    *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
+  /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
+   *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
+   *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
+  trackpadPan: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map
    *  directly (grab cursor), for mouse users who pan constantly; box-select then moves to
@@ -1055,6 +1068,7 @@ export const DEFAULT_SETTINGS: Settings = {
   doubleClickFocus: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
+  trackpadPan: true,
   canvasDragMode: 'select',
   browserMemorySaver: true,
   accent: '#0a84ff',
