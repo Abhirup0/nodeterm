@@ -126,6 +126,7 @@ import { isHidden } from '../lib/ui-visibility'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../lib/projectJump'
 import { useSettings } from '../state/settings'
+import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
 import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
@@ -138,7 +139,7 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, reportsOwnCopy, resumeCommand, agentConfig } from '@shared/agents/config'
+import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, reportsOwnCopy, resumeCommand, agentConfig, agentLaunchProgram } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
@@ -1221,6 +1222,9 @@ export function TerminalNode({
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  // Transient, per-launch: what this node's Codex launcher reported it actually got. Undefined for
+  // every non-codex node and for a codex node whose launcher never spoke.
+  const codexIdentity = useCodexIdentity((s) => s.byId[id])
   // --- Eco / hibernation wake (see terminal/hibernation-policy.ts) ---
   // A hibernated node's CLI was asked to `/exit` while nobody was looking; its tmux session, pane
   // and scrollback are untouched, and the conversation comes back with the provider's own
@@ -2681,7 +2685,14 @@ export function TerminalNode({
           // relaunched empty while their transcripts sat on disk, unreachable.
           const st = useAgentStatus.getState().byId[id]
           const priorId = st?.sessionId || data.agentSessionId
-          const base = (priorId && resumeCommand(agentId, priorId)) || agentConfig(agentId)?.launchCmd
+          // Shared-identity agents resume THROUGH their launcher, so the cold-restored node
+          // re-claims its own thread instead of joining as an anonymous client. `data.ssh` is what
+          // keeps a remote node on the bare command (no launcher on the host).
+          const shared = codexSharedIdentity(data.ssh || data.sshRemoteTmux)
+          const base =
+            (priorId && resumeCommand(agentId, priorId, shared)) ||
+            (agentConfig(agentId) &&
+              agentLaunchProgram(agentId, agentConfig(agentId)!.launchCmd, shared))
           // Re-resolve the mode at relaunch: it's a property of how a session is launched, not
           // a persisted property of the node, so the current setting wins after a reboot. `base`
           // is always freshly built here — never a command string read back from node data — so
@@ -2847,6 +2858,11 @@ export function TerminalNode({
         // Same funnel, same await, same reasoning as the restart closure above: the permission
         // mode is a property of how a session is LAUNCHED, so it is re-resolved now (a wake can be
         // hours after the exit, and days after the node was created).
+        // Deliberately the BARE command, with no shared-identity launcher: this types into a pane
+        // that already exists, and a tmux session created before the launcher was installed does
+        // not carry its directory on PATH — naming it there would be `command not found` where a
+        // plain `codex resume` works. A restarted codex node therefore rejoins as a plain client
+        // until its next cold start. Fail open, same rule as everywhere else in this feature.
         const base = resumeCommand(agentId, agentSessionId)
         // Refused BEFORE anything is written. `performResumePhase` gates on this same bare command
         // and would refuse too — but the KILL_LINE below is ours, so leaving this check to it
@@ -3960,6 +3976,18 @@ export function TerminalNode({
         {status?.session && status.session !== data.title && (
           <span className="term-node__session" title={status.session}>
             {status.session}
+          </span>
+        )}
+        {/* The fallback, made visible. A Codex node that could not get a managed shared identity
+            runs a perfectly good plain `codex` — but the user has to be able to SEE that it did,
+            without reading a log, so the chip states it and its tooltip says why. Absent (and the
+            node byte-identical to before this feature) whenever identity is shared or unknown. */}
+        {codexIdentity?.mode === 'plain' && (
+          <span
+            className="node-account-chip node-account-chip--warning"
+            title={codexFallbackText(codexIdentity.reason)}
+          >
+            plain codex
           </span>
         )}
         {accountChip && (

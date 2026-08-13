@@ -16,6 +16,7 @@
 
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_CODEX_IDENTITY_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
   type NotifyPayload,
@@ -256,6 +257,13 @@ export function buildStubApi(): Omit<
       // measure" — the one honest answer, and never mistakable for "nothing is using memory".
       read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
       host: () => Promise.resolve(null)
+    },
+    codex: {
+      // Overridden by the real WS-backed namespace in ws-bridge. The stub's answer is the same
+      // one the Server Edition gives on purpose (see server/handlers/index.ts): no shared
+      // identity, so every Codex launch line stays the bare `codex`.
+      identityCaps: () => Promise.resolve(UNKNOWN_CODEX_IDENTITY_CAPS),
+      onIdentity: noopUnsub
     },
     claude: {
       // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the

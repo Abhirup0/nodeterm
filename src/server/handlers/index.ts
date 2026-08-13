@@ -7,6 +7,8 @@ import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
+import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
+import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
 import {
   setMirrorUsageProvider,
@@ -67,6 +69,22 @@ export function registerCoreHandlers(
   // claude CLI is the one that will run the terminal nodes. Warm it so the first call is cached.
   registerClaudeCliIpc()
   void claudeCliCaps()
+
+  // ---- Codex shared identity: a DELIBERATE degrade, not an omission ----------------------------
+  // The Server Edition answers "no shared identity", so every Codex node here launches the bare
+  // `codex` it always did — a working node with its own app-server, just without the shared one.
+  //
+  // The blocker is the secret, not the plumbing: the per-node capability that closes the identity
+  // routes' authorization hole is keychain-backed on the desktop (Electron `safeStorage`, see
+  // src/main/codex-node-auth-secret.ts) and there is no equivalent on a headless Linux host. The
+  // only way to arm this here is a secret at rest in the data dir, which is a security decision
+  // this slice is not entitled to make quietly. Wiring it up is exactly three calls at this spot —
+  // `hookServer.setCodexNodeAuthSecret(secret)`, `setCodexThreadIdentityAuthSecret(secret)`,
+  // `refreshCodexIdentityCaps()` — plus the same two `setCodexThread*Handler` registrations
+  // src/main/index.ts makes; everything they call already lives in src/core and boots from
+  // CorePlatform. Until that secret question is answered, saying "no" here is what keeps the
+  // browser's Codex nodes identical to what they are today rather than half-armed.
+  registerCodexIdentityIpc(() => UNKNOWN_CODEX_IDENTITY_CAPS)
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not

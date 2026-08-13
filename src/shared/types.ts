@@ -1873,6 +1873,36 @@ export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   sessionIdFlag: false
 }
 
+/** Whether a Codex node launched on this machine right now would get a managed shared identity.
+ *  Fed by core/codex-identity-caps.ts; the unknown answer is `false`, i.e. plain `codex`. */
+export interface CodexIdentityCaps {
+  shared: boolean
+  /** Absolute path of the installed launcher, or null when it could not be written. */
+  launcherPath: string | null
+}
+
+/** The answer before the probe has run, and the one the Server Edition gives on purpose. */
+export const UNKNOWN_CODEX_IDENTITY_CAPS: CodexIdentityCaps = { shared: false, launcherPath: null }
+
+/** A Codex node's identity mode, as reported by the node's own launcher at spawn time.
+ *  `plain` carries the machine-readable reason the managed identity was unavailable. */
+export interface CodexIdentityEvent {
+  nodeId: string
+  mode: 'shared' | 'plain'
+  reason?: string
+}
+
+/** The Codex-specific surface. Small on purpose: everything else a Codex node needs already goes
+ *  through the shared agent/pty APIs. */
+export interface CodexApi {
+  /** Would a Codex node launched right now get a managed shared identity on this machine?
+   *  Never rejects — the unknown answer is `{ shared: false }`, i.e. plain `codex`. */
+  identityCaps(): Promise<CodexIdentityCaps>
+  /** Fires when a Codex node's launcher reports its identity mode. `plain` is the fallback, and
+   *  this event is what stops that fallback being silent. Returns unsubscribe. */
+  onIdentity(listener: (e: CodexIdentityEvent) => void): () => void
+}
+
 export interface ClaudeApi {
   /** Capabilities of the local Claude CLI (memoized in the shell; safe to call repeatedly).
    *  Never rejects — an unknown version resolves to the fail-open caps. */
@@ -2146,6 +2176,7 @@ export interface NodeTerminalApi {
   sessionMemory: SessionMemoryApi
   context: ContextApi
   canvas: CanvasApi
+  codex: CodexApi
   claude: ClaudeApi
   chat: ChatApi
   claudeAccounts: ClaudeAccountsApi

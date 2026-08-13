@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
-import { randomUUID, timingSafeEqual } from 'crypto'
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { platform } from '../platform'
-import { canControlCanvas, type AgentId } from '../../shared/agents/config'
+import { canControlCanvas, hasSharedIdentity, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
+import type { CodexIdentityEvent } from '../../shared/types'
 
 export const NODETERM_HOOK_PROTOCOL_VERSION = '1'
 const SLOWLORIS_MS = 2000
@@ -125,7 +126,20 @@ class HookServer {
   private contextLinkHandler:
     | ((req: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<string>)
     | null = null
+  /**
+   * The shared-identity spine's handlers (see core/codex-identity-proxy.ts). Both are injected by
+   * the shell, and BOTH routes below additionally require a per-node capability — see
+   * `codexNodeAuthToken`.
+   */
+  private codexThreadStartHandler:
+    | ((req: { nodeId: string; cwd: string; hookEndpoint: string }) => Promise<string>)
+    | null = null
+  private codexThreadBindHandler:
+    | ((req: { nodeId: string; threadId: string; hookEndpoint: string }) => Promise<void>)
+    | null = null
+  private codexIdentityListener: ((e: CodexIdentityEvent) => void) | null = null
   private endpointPath = ''
+  private codexNodeAuthSecret: Buffer | null = null
 
   endpointFilePath(): string {
     if (!this.endpointPath) this.endpointPath = path.join(platform().userDataDir, 'hook-endpoint.env')
@@ -160,6 +174,48 @@ class HookServer {
     this.contextLinkHandler = cb
   }
 
+  setCodexThreadStartHandler(cb: NonNullable<HookServer['codexThreadStartHandler']>): void {
+    this.codexThreadStartHandler = cb
+  }
+
+  setCodexThreadBindHandler(cb: NonNullable<HookServer['codexThreadBindHandler']>): void {
+    this.codexThreadBindHandler = cb
+  }
+
+  /** Where a node's identity mode goes on its way to the UI (both shells forward it). */
+  setCodexIdentityListener(cb: (e: CodexIdentityEvent) => void): void {
+    this.codexIdentityListener = cb
+  }
+
+  /**
+   * Mint the capability a Codex process must present for node-scoped identity operations.
+   *
+   * THIS IS THE SECURITY FIX. The global hook bearer proves only "this request came from some
+   * NodeTerm-spawned session"; it cannot prove WHICH session. Every identity route takes a
+   * caller-supplied `nodeId`, so with the shared bearer alone any agent session could bind ITS
+   * OWN codex thread to a SIBLING node — reparenting another node's status, and (through the hook
+   * prelude, which re-exports the recorded node id and endpoint) aiming that node's hook traffic.
+   * This token is HMAC(secret, nodeId): stable across app restarts, scoped to one node, injected
+   * only into that node's session env, and never written to the shared endpoint file that every
+   * session can read.
+   */
+  codexNodeAuthToken(nodeId: string): string {
+    if (!/^[A-Za-z0-9._-]+$/.test(nodeId)) return ''
+    if (!this.codexNodeAuthSecret)
+      throw new Error('NodeTerm Codex node authentication is unavailable')
+    return createHmac('sha256', this.codexNodeAuthSecret).update(nodeId).digest('base64url')
+  }
+
+  /** The shell injects a keychain-backed, restart-stable secret before any Codex PTY is created. */
+  setCodexNodeAuthSecret(secret: Uint8Array): void {
+    if (secret.byteLength < 32) throw new Error('Invalid NodeTerm Codex node-auth secret')
+    this.codexNodeAuthSecret = Buffer.from(secret)
+  }
+
+  hasCodexNodeAuth(): boolean {
+    return !!this.codexNodeAuthSecret
+  }
+
   async start(): Promise<void> {
     if (this.server) return
     this.token = randomUUID()
@@ -178,6 +234,10 @@ class HookServer {
         }
         req.setTimeout(SLOWLORIS_MS, () => req.destroy())
         const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
+        if (reqUrl.pathname.startsWith('/codex-thread/')) {
+          await this.handleCodexThread(reqUrl.pathname, req, res)
+          return
+        }
         if (reqUrl.pathname.startsWith('/control/')) {
           const verb = decodeURIComponent(reqUrl.pathname.replace(/^\/control\//, ''))
           const { nodeId, args } = parseControlBody(
@@ -289,6 +349,105 @@ class HookServer {
     return a.length === b.length && timingSafeEqual(a, b)
   }
 
+  private codexNodeTokenMatches(nodeId: string, provided: string | string[] | undefined): boolean {
+    if (typeof provided !== 'string') return false
+    let expected = ''
+    try {
+      expected = this.codexNodeAuthToken(nodeId)
+    } catch {
+      return false
+    }
+    if (!expected) return false
+    const a = Buffer.from(provided)
+    const b = Buffer.from(expected)
+    return a.length === b.length && timingSafeEqual(a, b)
+  }
+
+  /**
+   * `/codex-thread/{start,bind,fallback}`.
+   *
+   * start/bind are the identity spine and require the per-node capability on top of the shared
+   * bearer. `fallback` deliberately does NOT: it is the launcher telling us it gave up and is
+   * running plain codex, it grants nothing, and requiring a token there would silence the report
+   * in exactly the case (no token) it exists to surface.
+   */
+  private async handleCodexThread(
+    pathname: string,
+    req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<void> {
+    const verb = pathname.replace(/^\/codex-thread\//, '')
+    const form = parseForm(await readBody(req))
+    const nodeId = form.nodeId ?? ''
+    if (!/^[A-Za-z0-9._-]+$/.test(nodeId)) {
+      res.writeHead(400)
+      res.end()
+      return
+    }
+    if (verb === 'fallback') {
+      // A reason is free text from a generated script we wrote; bound it and let the UI show it.
+      const reason = (form.reason ?? '').slice(0, 64).replace(/[^A-Za-z0-9._-]/g, '') || 'unknown'
+      this.codexIdentityListener?.({ nodeId, mode: 'plain', reason })
+      res.writeHead(204)
+      res.end()
+      return
+    }
+    if (verb !== 'start' && verb !== 'bind') {
+      res.writeHead(404)
+      res.end()
+      return
+    }
+    if (!this.codexNodeTokenMatches(nodeId, req.headers['x-nodeterm-node-token'])) {
+      res.writeHead(403)
+      res.end()
+      return
+    }
+    if (verb === 'start') {
+      const cwd = form.cwd ?? ''
+      if (!path.isAbsolute(cwd)) {
+        res.writeHead(400)
+        res.end()
+        return
+      }
+      try {
+        if (!this.codexThreadStartHandler) throw new Error('start handler unavailable')
+        const threadId = await this.codexThreadStartHandler({
+          nodeId,
+          cwd,
+          hookEndpoint: this.endpointFilePath()
+        })
+        if (!/^[A-Za-z0-9._-]+$/.test(threadId)) throw new Error('invalid thread id')
+        this.codexIdentityListener?.({ nodeId, mode: 'shared' })
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(`${threadId}\n`)
+      } catch {
+        res.writeHead(503)
+        res.end()
+      }
+      return
+    }
+    const threadId = form.threadId ?? ''
+    if (!/^[A-Za-z0-9._-]+$/.test(threadId)) {
+      res.writeHead(400)
+      res.end()
+      return
+    }
+    try {
+      if (!this.codexThreadBindHandler) throw new Error('bind handler unavailable')
+      await this.codexThreadBindHandler({
+        nodeId,
+        threadId,
+        hookEndpoint: this.endpointFilePath()
+      })
+      this.codexIdentityListener?.({ nodeId, mode: 'shared' })
+      res.writeHead(204)
+      res.end()
+    } catch {
+      res.writeHead(409)
+      res.end()
+    }
+  }
+
   // The managed script sources this file at invocation to get the LIVE port/token.
   // tmux sessions outlive the app, so env-baked coords go stale after a restart.
   private writeEndpointFile(): void {
@@ -321,7 +480,12 @@ class HookServer {
       NODETERM_NODE_ID: nodeId,
       NODETERM_AGENT_ID: agentId,
       ...(permWaitSecs > 0 ? { NODETERM_PERM_WAIT_SECS: String(permWaitSecs) } : {}),
-      ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {})
+      ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {}),
+      // The per-node capability for the identity routes. Gated by the CAPABILITY LIST, never by
+      // `agentId === 'codex'`. No secret ⇒ no token ⇒ the launcher falls back to plain codex.
+      ...(hasSharedIdentity(agentId) && this.codexNodeAuthSecret
+        ? { NODETERM_CODEX_NODE_TOKEN: this.codexNodeAuthToken(nodeId) }
+        : {})
     }
   }
 

@@ -124,6 +124,14 @@ import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
+import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
+import {
+  bindCodexThreadIdentity,
+  setCodexThreadIdentityAuthSecret,
+  writeCodexThreadIdentity
+} from '../core/codex-identity-proxy'
+import { startCodexThread } from '../core/codex-session-name'
+import { loadOrCreateCodexNodeAuthSecret } from './codex-node-auth-secret'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import {
   isSafeLocalTranscriptPath,
@@ -548,6 +556,7 @@ app.whenReady().then(async () => {
     process.platform === 'darwin' ? systemPreferences.askForMediaAccess('microphone') : true
   )
   registerClaudeCliIpc()
+  registerCodexIdentityIpc()
   // Warm the `claude --version` probe now (it spawns a login shell + node, ~sub-second) so the
   // renderer's first `claude.cliCaps()` — awaited on the launch path of a cold-restored agent
   // node — resolves from cache instead of racing the probe into a conservative "no auto".
@@ -894,6 +903,34 @@ app.whenReady().then(async () => {
   // listeners (setListener/setRawListener/setControlHandler) attach later, which the server
   // tolerates — early hook POSTs are simply dropped, never mis-routed.
   await hookServer.start()
+  // ---- Codex shared identity (src/core/codex-identity-proxy.ts) -------------------------------
+  // One keychain-backed secret does two jobs: it mints the per-node capability the identity routes
+  // require (closing the "shared bearer can name any sibling node" hole) and it signs the thread →
+  // node records the hook prelude reads back. If secure storage is unavailable the whole feature
+  // stays OFF — `codexIdentityCaps()` then answers `shared: false`, every launch line stays the
+  // bare `codex`, and nothing is half-armed.
+  try {
+    const codexNodeAuthSecret = await loadOrCreateCodexNodeAuthSecret()
+    hookServer.setCodexNodeAuthSecret(codexNodeAuthSecret)
+    setCodexThreadIdentityAuthSecret(codexNodeAuthSecret)
+  } catch (error) {
+    console.error('[codex-identity] unavailable; Codex nodes run plain codex:', error)
+  }
+  // Installs the launcher and answers the renderer's construction-time question.
+  refreshCodexIdentityCaps()
+  hookServer.setCodexIdentityListener((ev) => sendToMain(IPC.codexIdentity, ev))
+  // A node still on a canvas is "live". A thread whose recorded owner is gone (node deleted, or a
+  // workspace that no longer holds it) is free to be re-claimed; one whose owner is still there is
+  // not, and the launcher then falls back rather than putting two clients on one conversation.
+  const codexNodeIsLive = (nodeId: string): boolean => !!workspaceStore.getNode(nodeId)
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint }) => {
+    const threadId = await startCodexThread(cwd)
+    writeCodexThreadIdentity(threadId, nodeId, hookEndpoint)
+    return threadId
+  })
+  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint }) => {
+    bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive)
+  })
   // SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
   // passphrase-protected identity file's prompt back through the app instead of failing auth.
   // MUST NOT be fatal: binding a unix socket under ~/.nodeterm can fail for filesystem reasons
