@@ -2,10 +2,12 @@ import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile } from 'fs/promises'
+import { statSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, safeStorage, shell, systemPreferences } from 'electron'
 import { IPC } from '../shared/ipc'
+import { writeFilesToClipboard } from './clipboard-files'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import type { RemoteLogExec } from '../core/board-log'
@@ -645,6 +647,13 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.clipboardWrite, (_e, text: string) => {
     if (typeof text === 'string') clipboard.writeText(text)
   })
+  ipcMain.handle(IPC.clipboardWriteFiles, (_e, paths: unknown) =>
+    writeFilesToClipboard(paths, {
+      platform: process.platform,
+      isFile: (path) => statSync(path).isFile(),
+      writeBuffer: (format, buffer) => clipboard.writeBuffer(format, buffer)
+    })
+  )
 
   // Dock badge: number of Claude nodes with unread output (macOS only). '' clears it.
   ipcMain.on(IPC.appSetBadge, (_e, count: number) => {
@@ -775,7 +784,12 @@ app.whenReady().then(async () => {
   // The Explorer/Editor fs surface: ONE registrar (core/fs-handlers.ts) shared by this shell and
   // the Server Edition, over the same pure core/fs-ops — so local, browser and peer filesystem
   // behaviour cannot drift. Registered on the platform, so a remote tab's Explorer/editor works.
-  registerFsHandlers(corePlatform)
+  // `localProjectCwd` is how a canvas image finds the project's own `.nodeterm/images/`. It
+  // answers undefined for an SSH project (its cwd is on the host, and the image node reads
+  // locally) and for a relay tab (not in this index at all) — both take the app-local fallback.
+  registerFsHandlers(corePlatform, {
+    localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
+  })
 
   const githubSecret = new ElectronGitHubSecretStore(app.getPath('userData'), safeStorage)
   const github = registerGitHubIntegration({
