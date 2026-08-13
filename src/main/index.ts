@@ -1073,14 +1073,21 @@ app.whenReady().then(async () => {
   let pushHasPairedPhone = false
   const refreshPushIdentity = async (): Promise<void> => {
     try {
-      pushHostKeyB64 = publicKeyToB64((await loadOrCreateKeyPair()).publicKey)
-    } catch {
-      // Keyring locked / transient read error: keep the last-known key (never clobber identity).
-    }
-    try {
       pushHasPairedPhone = (await loadApprovedDevices()).pubkeys.length > 0
     } catch {
       pushHasPairedPhone = false
+    }
+    // No paired destination means no host-mode push can be sent. Avoid touching macOS
+    // Safe Storage at boot in that state: locally signed development builds otherwise trigger
+    // a Keychain ACL prompt even though there is nobody to notify.
+    if (!pushHasPairedPhone) {
+      pushHostKeyB64 = null
+      return
+    }
+    try {
+      pushHostKeyB64 = publicKeyToB64((await loadOrCreateKeyPair()).publicKey)
+    } catch {
+      // Keyring locked / transient read error: keep the last-known key (never clobber identity).
     }
   }
   void refreshPushIdentity()
