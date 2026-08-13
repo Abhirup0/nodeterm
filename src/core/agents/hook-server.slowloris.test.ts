@@ -57,7 +57,10 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-describe('hook server: the slowloris guard is receive-phase only', () => {
+// Concurrent: the two routes are independent, and each has to sit out the guard in real time.
+// Run serially this file parks for 2 x HANDLER_PARK_MS of pure wall clock, which is dead weight
+// on every suite run and needless scheduling pressure on the other files sharing the machine.
+describe.concurrent('hook server: the slowloris guard is receive-phase only', () => {
   it('/control/ survives a handler that parks longer than the guard', async () => {
     const res = await post('/control/write', 'nodeId=n1&arg.node=n2&arg.text=hi')
     expect(res.status).toBe(200)
