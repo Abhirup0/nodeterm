@@ -191,6 +191,7 @@ import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useTeamAccessEvents } from '../state/teamAccess'
 import { useAgentNodes } from '../state/agentNodes'
 import { SubagentNode } from '../nodes/SubagentNode'
@@ -692,9 +693,10 @@ export function Canvas() {
   // told here rather than being left with a note their teammates never see. Dismissible; re-armed
   // by the next refused cast (the publisher keeps retrying that node, so it syncs once trimmed).
   const [syncNote, setSyncNote] = useState<string | null>(null)
-  // Copy-to-clipboard failure (browser build only): the bridge clipboard stub dispatches
-  // `nodeterm:toast` when neither the Clipboard API nor execCommand can copy — typically a
-  // non-secure context (plain http over a LAN). It must be seen, not swallowed.
+  // A transient warning banner. Two producers, both of which must be SEEN rather than swallowed:
+  // a copy-to-clipboard failure (browser build only — the bridge clipboard stub dispatches
+  // `nodeterm:toast` when neither the Clipboard API nor execCommand can copy, typically a
+  // non-secure context over a LAN), and a Codex node reporting that it fell back to plain codex.
   const [copyError, setCopyError] = useState<string | null>(null)
   // Cmd+V only drops an image on the canvas when the LAST pointer press was on the pane itself —
   // otherwise a paste aimed at a panel or a dialog would spawn a node behind it. See
@@ -949,6 +951,20 @@ export function Canvas() {
     }
     window.addEventListener('nodeterm:toast', onToast)
     return () => window.removeEventListener('nodeterm:toast', onToast)
+  }, [])
+  // A Codex node's launcher reporting what it actually got. The 'plain' case is the fallback, and
+  // this is what stops it being silent: the node keeps a chip (see TerminalNode's header) and the
+  // FIRST fallback per node also raises a toast, because a chip on a node you are not looking at
+  // teaches nothing. Deliberately NOT written into the pane — text pushed into an agent's terminal
+  // is prompt injection, which this repo forbids.
+  useEffect(() => {
+    const seen = new Set<string>()
+    return window.nodeTerminal.codex.onIdentity((e) => {
+      useCodexIdentity.getState().setMode(e.nodeId, e.mode, e.reason)
+      if (e.mode !== 'plain' || seen.has(e.nodeId)) return
+      seen.add(e.nodeId)
+      setCopyError(codexFallbackText(e.reason))
+    })
   }, [])
   // Terminal node id awaiting confirmation to move into its group's worktree.
   const [moveTarget, setMoveTargetState] = useState<string | null>(null)

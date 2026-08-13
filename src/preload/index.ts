@@ -424,6 +424,14 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.canvasMut, handler)
     }
   },
+  codex: {
+    identityCaps: () => ipcRenderer.invoke(IPC.codexIdentityCaps),
+    onIdentity: (listener) => {
+      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+      ipcRenderer.on(IPC.codexIdentity, handler)
+      return () => ipcRenderer.removeListener(IPC.codexIdentity, handler)
+    }
+  },
   claude: {
     cliCaps: () => ipcRenderer.invoke(IPC.claudeCliCaps),
     readTranscript: (sessionId, cwd, accountId, nodeId) =>

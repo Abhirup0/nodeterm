@@ -47,9 +47,33 @@
 // NEEDS YOU badge flips to working immediately rather than lingering until the agent's next hook. The
 // whole branch is a NO-OP when the env var is absent (a user's own terminals, older
 // nodeterm, non-claude agents), so behavior is bit-for-bit legacy there.
-export function buildManagedScript(agentId: string): string {
+/**
+ * `identityRoot` is where the Codex thread → node records live (`codexThreadIdentityRoot()`).
+ * It is a PARAMETER because this builder is also called from tests that never boot a platform,
+ * and because the prelude has to bake the path in — the shell it runs in has no idea where the
+ * app's data dir is. Undefined (no platform yet) ⇒ no prelude, i.e. today's script exactly.
+ *
+ * The prelude is prepended for EVERY agent, not just codex. It is inert without `CODEX_THREAD_ID`,
+ * which no other agent's tool shell sets, and one builder beats a codex-only fork of it.
+ */
+import { codexThreadIdentityResolverSh } from '../../codex-thread-identity-sh'
+import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
+
+function safeIdentityRoot(): string | null {
+  try {
+    return codexThreadIdentityRoot()
+  } catch {
+    return null
+  }
+}
+
+export function buildManagedScript(
+  agentId: string,
+  identityRoot: string | null = safeIdentityRoot()
+): string {
   return [
     '#!/bin/sh',
+    ...(identityRoot ? [codexThreadIdentityResolverSh(identityRoot)] : []),
     'if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then',
     '  . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :',
     'fi',

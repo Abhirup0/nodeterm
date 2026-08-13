@@ -39,6 +39,11 @@ export const IPC = {
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
   claudeCliCaps: 'claude-cli:caps',
+  /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
+  codexIdentityCaps: 'codex-identity:caps',
+  /** main/server → renderer: a Codex node's identity mode changed ('shared' | 'plain'). The
+   *  'plain' events are what make the launcher's fallback visible instead of silent. */
+  codexIdentity: 'codex-identity:event',
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
