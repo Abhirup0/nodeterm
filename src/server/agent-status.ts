@@ -29,7 +29,14 @@ import type { ServerPlatform } from './platform-server'
 /** The narrow surface of the hook server this module needs — injectable for tests. */
 export interface HookLike {
   setListener(cb: (e: NormalizedAgentEvent) => void): void
-  setRawListener(cb: (agentId: string, nodeId: string, payload: Record<string, unknown>) => void): void
+  setRawListener(
+    cb: (
+      agentId: string,
+      nodeId: string,
+      payload: Record<string, unknown>,
+      meta: { verified: boolean }
+    ) => void
+  ): void
 }
 
 export interface WireAgentStatusOptions {
@@ -158,7 +165,12 @@ export function wireAgentStatus(
   }
 
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
-  hooks.setRawListener((agentId, nodeId, payload) => {
+  // nodeId → did its LAST hook POST carry a token this instance minted for it. Recorded only;
+  // nothing reads it yet, and nothing here may branch on it (a `false` is the ordinary case for any
+  // client that predates the token — see HookEventMeta). The desktop shell keeps the same map.
+  const nodeVerified = new Map<string, boolean>()
+  hooks.setRawListener((agentId, nodeId, payload, meta) => {
+    if (nodeId) nodeVerified.set(nodeId, meta.verified)
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
       // Everything the claude path does below hangs off `transcript_path`, and grok has none.

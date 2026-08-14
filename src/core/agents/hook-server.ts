@@ -7,6 +7,7 @@ import { canControlCanvas, hasSharedIdentity, type AgentId } from '../../shared/
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import type { CodexIdentityEvent } from '../../shared/types'
 import { nodeTokenDir } from './node-token-files'
+import { verifyNodeToken } from './node-auth-token'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -111,12 +112,37 @@ export function parseControlBody(
   }
 }
 
+/**
+ * What the hook server knows about the POST an event arrived on, beyond the event itself.
+ *
+ * `verified` = the caller presented a per-node token THIS instance minted for THAT node id. It is
+ * a LABEL, nothing more: `false` is the overwhelmingly common, entirely legitimate case (any client
+ * that predates the token, the phone, a cross-instance failover), so nothing may gate behaviour on
+ * it. A later task makes the label useful; until then, false must cost a caller nothing.
+ */
+export interface HookEventMeta {
+  verified: boolean
+}
+
 class HookServer {
   private server: Server | null = null
   private port = 0
   private token = ''
   private listener: ((e: NormalizedAgentEvent) => void) | null = null
-  private rawListener: ((agentId: string, nodeId: string, payload: Record<string, unknown>) => void) | null = null
+  private rawListener:
+    | ((
+        agentId: string,
+        nodeId: string,
+        payload: Record<string, unknown>,
+        meta: HookEventMeta
+      ) => void)
+    | null = null
+  /**
+   * Nodes that have presented a token this instance minted for THAT node id. In memory only and
+   * deliberately so: it is a record of what happened on this process's socket, not a durable claim,
+   * and a restart must re-earn it. Bounded by the number of node ids that ever post here.
+   */
+  private provenNodes = new Set<string>()
   private controlHandler:
     | ((cmd: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<{
         ok: boolean
@@ -166,8 +192,22 @@ class HookServer {
 
   // Raw payload listener: receives the parsed (un-normalized) hook JSON. Drives the
   // contextTail/subagentTail features, which need transcript_path (not in NormalizedAgentEvent).
-  setRawListener(cb: (agentId: string, nodeId: string, payload: Record<string, unknown>) => void): void {
+  // `meta` carries what the transport knows about the caller (see HookEventMeta).
+  setRawListener(
+    cb: (
+      agentId: string,
+      nodeId: string,
+      payload: Record<string, unknown>,
+      meta: HookEventMeta
+    ) => void
+  ): void {
     this.rawListener = cb
+  }
+
+  /** Has this node ever posted with a token this instance minted for it? Read by the routing task
+   *  that consumes the label; never a gate on /hook/* itself. */
+  isNodeProven(nodeId: string): boolean {
+    return this.provenNodes.has(nodeId)
   }
 
   setControlHandler(cb: NonNullable<HookServer['controlHandler']>): void {
@@ -327,6 +367,28 @@ class HookServer {
         const agentId = decodeURIComponent(reqUrl.pathname.replace(/^\/hook\//, ''))
         const form = parseForm(await readBody(req))
         const nodeId = form.nodeId ?? ''
+        // Identity is a LABEL here, not a gate. The three-way verdict maps to:
+        //   forged  — our own kid with a mac that is not this node's ⇒ 403. Nothing legitimate can
+        //             produce it (only a holder of a token for ANOTHER node, or a mutation of one),
+        //             so it is the single case this route refuses.
+        //   legacy  — no token, or another instance's kid. THE COMMON CASE, and it must keep
+        //             behaving exactly as it did before this label existed: 204, listeners fired.
+        //             Every client that predates the token, the phone, and the documented
+        //             cross-instance failover land here. Do not gate this on identityAvailable(),
+        //             on the agent, or on anything else — the fail-open is the contract.
+        //   verified — the caller holds this node's token; remember the node and pass the flag on.
+        const verdict = verifyNodeToken(
+          this.nodeAuthSecretOrNull(),
+          nodeId,
+          req.headers['x-nodeterm-node-token']
+        )
+        if (verdict === 'forged') {
+          res.writeHead(403)
+          res.end()
+          return
+        }
+        const verified = verdict === 'verified'
+        if (verified) this.provenNodes.add(nodeId)
         if (agentId && nodeId && form.payload) {
           let payload: Record<string, unknown> = {}
           try {
@@ -346,9 +408,9 @@ class HookServer {
           if (form.nodeterm_answered) payload.nodeterm_answered = form.nodeterm_answered
           // Raw listener first: it drives the transcript-tailing features (which need
           // transcript_path). Inside the try so a throwing raw listener still ends 204.
-          this.rawListener?.(agentId, nodeId, payload)
+          this.rawListener?.(agentId, nodeId, payload, { verified })
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
-          if (normalized && this.listener) this.listener(normalized)
+          if (normalized && this.listener) this.listener({ ...normalized, verified })
         }
         res.writeHead(204)
         res.end()
