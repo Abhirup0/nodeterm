@@ -13,6 +13,7 @@ import {
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
+import { collisionSeed, derivedProjectId } from '../shared/project-id'
 import { appendProjectNode, type RemoteNodeInput } from './project-node-append'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
@@ -32,6 +33,15 @@ const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PRO
 interface ProjectFileRead {
   file: ProjectFileV1
   raw: string
+}
+
+/** One index entry paired with the project loadV3 built from it (and, for a local ref, the file it
+ *  was built from). The uniqueness pass needs all three: it re-keys the project the renderer sees,
+ *  the entry that persists that identity, and the project.json the id was wrongly read from. */
+interface LoadedEntry {
+  entry: IndexEntryV3
+  project: Project
+  file?: ProjectFileV1
 }
 
 let tmpSeq = 0
@@ -199,47 +209,153 @@ export class WorkspaceStore {
   private async loadV3(index: WorkspaceIndexV3, sideline: boolean): Promise<Workspace> {
     for (const entry of index.entries) entry.localApprovalId ||= randomUUID()
     this.index = index
-    const projects: Project[] = []
+    const built: LoadedEntry[] = []
     for (const e of index.entries) {
       if (e.project) {
         // Inline projects are stored verbatim in the index (no fileToProject pass), so apply the
         // same kanban shape guard here — a v1/hand-edited board would otherwise crash the render.
         const { kanban, ...rest } = e.project
-        projects.push(validKanban(kanban) ? e.project : rest)
+        built.push({ entry: e, project: validKanban(kanban) ? e.project : rest })
       } else if (e.cwd) {
         if (sideline) await sweepStaleTmp(projectFilePath(e.cwd))
         const read = await this.readProjectFile(e.cwd, sideline)
         if (read) {
-          const p = read.file
+          const p = this.entryKeyed(e, read.file)
           this.revs.set(p.id, p.rev)
           this.lastWritten.set(projectFilePath(e.cwd), read.raw)
-          projects.push(
-            fileToProject(p, { cwd: e.cwd, closed: e.closed, localExec: this.execOverlay(e, p) })
-          )
+          built.push({
+            entry: e,
+            file: p,
+            project: fileToProject(p, {
+              cwd: e.cwd,
+              closed: e.closed,
+              localExec: this.execOverlay(e, p)
+            })
+          })
         } else {
           this.deferExecMigration(e)
-          projects.push(unavailableProject(e))
+          built.push({ entry: e, project: unavailableProject(e) })
         }
       } else if (e.ssh) {
         if (e.cache) {
           this.revs.set(e.id, e.cache.rev)
-          projects.push(
-            fileToProject(e.cache, {
+          built.push({
+            entry: e,
+            project: fileToProject(e.cache, {
               ssh: e.ssh,
               closed: e.closed,
               localExec: this.execOverlay(e, e.cache)
             })
-          )
+          })
         } else {
           this.deferExecMigration(e)
-          projects.push(unavailableProject(e))
+          built.push({ entry: e, project: unavailableProject(e) })
         }
       }
     }
+    await this.repairDuplicateIds(built, sideline)
+    const projects = built.map((b) => b.project)
     const active = projects.some((p) => p.id === index.activeProjectId && !p.unavailable)
       ? index.activeProjectId
       : (projects.find((p) => !p.closed && !p.unavailable)?.id ?? '')
     return { version: 2, activeProjectId: active, projects }
+  }
+
+  /**
+   * The project file as it must be USED: keyed by the INDEX ENTRY's id, not by the id the file
+   * carries. The generalisation of the ssh branch's DIFFERENT-lineage rule (see `reconcileSsh`:
+   * "a re-added folder, a second machine, a git checkout … Adoption re-keys the file to OUR entry
+   * id") to the local-folder branch, which never got it.
+   *
+   * `<cwd>/.nodeterm/project.json` is a SHARED document — the migration banner asks users to commit
+   * it so the canvas travels with the repo — so its `id` is not evidence of identity: `git worktree
+   * add`, a branch checkout, `reset --hard` or a `stash pop` re-materialise one committed id into a
+   * SECOND folder, and both tabs then answer to it. The index entry is machine-local and per-folder,
+   * so it is the only id that can be trusted to be OURS and unique.
+   *
+   * The file's CONTENT is adopted unchanged (nodes keep their ids — they are tmux session names —
+   * so terminals reattach); only the key changes. `lastWritten` still records the RAW on-disk bytes,
+   * which is what marks the file for a re-key on the next save: its id no longer matches the
+   * candidate splitWorkspace builds, so `sameProjectContent` sees a change and rewrites it.
+   */
+  private entryKeyed(e: IndexEntryV3, f: ProjectFileV1): ProjectFileV1 {
+    return f.id === e.id ? f : { ...f, id: e.id }
+  }
+
+  /**
+   * The backstop: after every entry is loaded, no two projects may still share an id.
+   *
+   * `entryKeyed` fixes a file that drifted from ITS entry, but it cannot fix a store that is
+   * ALREADY corrupt — once two entries were saved under one id (both folders' files carried it at
+   * the last save), the entry ids agree with the files and with each other, and nothing downstream
+   * notices: `splitWorkspace` dedupes by CWD, so both entries survive every save; `commitCanvas`
+   * maps by id, so the active canvas is written into BOTH projects and the next save flushes it
+   * into the other folder's project.json. That is silent cross-folder data loss on every autosave,
+   * so the repair cannot wait for the user to notice — and it must be persisted, or every restart
+   * re-inherits the same corrupt index.
+   *
+   * First holder keeps the id; the rest are re-keyed by `derivedProjectId`, which is DETERMINISTIC
+   * in (id, folder) — a random id would rewrite the user's project.json (and every teammate's git
+   * diff) on every boot, whereas this converges: the second load finds no collision at all.
+   *
+   * Loud on purpose (one line per repaired project, naming the folder): this edits files in the
+   * user's own repo, and a silent repair of someone's data is worse than a noisy one.
+   */
+  private async repairDuplicateIds(built: LoadedEntry[], sideline: boolean): Promise<void> {
+    const seen = new Set<string>()
+    let repaired = false
+    for (const b of built) {
+      if (!seen.has(b.project.id)) {
+        seen.add(b.project.id)
+        continue
+      }
+      const old = b.project.id
+      const seed = collisionSeed({
+        cwd: b.entry.cwd,
+        ssh: b.entry.ssh,
+        name: b.project.name
+      })
+      const next = derivedProjectId(old, seed, (id) => seen.has(id) || built.some((o) => o.project.id === id))
+      seen.add(next)
+      repaired = true
+      console.warn(
+        `[workspace] two projects claimed the project id "${old}" — a git-shared ` +
+          `.nodeterm/project.json copied into a second folder (worktree/checkout). Re-keyed ` +
+          `${b.entry.cwd ?? b.entry.ssh?.remoteCwd ?? `inline canvas "${b.project.name}"`} to "${next}".`
+      )
+      b.entry.id = next
+      b.project = { ...b.project, id: next }
+      if (b.entry.project) b.entry.project = { ...b.entry.project, id: next }
+      if (b.entry.cache) {
+        b.entry.cache = { ...b.entry.cache, id: next }
+        this.revs.set(next, b.entry.cache.rev)
+      }
+      if (!b.file || !b.entry.cwd) continue
+      this.revs.set(next, b.file.rev)
+      // Read-only loads (the relay blob a phone can trigger) repair in memory only — the caller
+      // must never see a duplicate id, but a probe may not write to disk. Same rule as `sideline`.
+      if (!sideline) continue
+      // Bumped rev: the re-keyed file has genuinely diverged from the copy it was cloned from, and
+      // must outrank it wherever the two meet again.
+      const rekeyed: ProjectFileV1 = { ...b.file, id: next, rev: b.file.rev + 1 }
+      const filePath = projectFilePath(b.entry.cwd)
+      const content = serializeProjectFile(rekeyed)
+      try {
+        await writeAtomic(filePath, content)
+        this.lastWritten.set(filePath, content)
+        this.revs.set(next, rekeyed.rev)
+        b.file = rekeyed
+      } catch {
+        // Read-only folder / unmounted disk: the in-memory repair still stands for this run, and
+        // the next save (or the next load) retries it. Never fail a load over it.
+      }
+    }
+    // The re-keyed ENTRIES are the half that makes the repair survive a restart — without this the
+    // next boot reads the old index and repairs again (harmlessly, but forever).
+    if (!repaired || !sideline) return
+    try {
+      await writeAtomic(this.indexPath, JSON.stringify(this.index))
+    } catch { /* the next save writes it anyway */ }
   }
 
   /**
@@ -479,9 +595,12 @@ export class WorkspaceStore {
     if (!e?.cwd) return null
     const read = await this.readProjectFile(e.cwd, false)
     if (!read) return null
-    this.revs.set(read.file.id, read.file.rev)
+    // The watcher's re-read after a git checkout is exactly where a foreign id arrives; the project
+    // must come back under OUR entry id or `replaceProject` (which matches by id) silently drops it.
+    const file = this.entryKeyed(e, read.file)
+    this.revs.set(file.id, file.rev)
     this.lastWritten.set(projectFilePath(e.cwd), read.raw)
-    return fileToProject(read.file, { cwd: e.cwd, closed: e.closed, localExec: e.localExec })
+    return fileToProject(file, { cwd: e.cwd, closed: e.closed, localExec: e.localExec })
   }
 
   /** Maps a watched file path back to its project and re-reads it. */
@@ -630,7 +749,9 @@ export class WorkspaceStore {
           const f = JSON.parse(raw) as ProjectFileV1
           // Node cwds are stored portable ("./sub"); resolve them the way `fileToProject` does, so
           // a caller sees the same absolute paths the desktop's renderer would have handed it.
-          out.push({ id: f.id, nodes: resolveNodes(f.nodes, e.cwd), bridges: f.bridges })
+          // Keyed by the ENTRY id (see `entryKeyed`) — the map's consumers look projects up by the
+          // id the renderer knows, which is never the git-shared file's.
+          out.push({ id: e.id, nodes: resolveNodes(f.nodes, e.cwd), bridges: f.bridges })
         } catch {
           // Corrupt cached content: skip this entry, keep scanning the others.
         }
@@ -702,7 +823,7 @@ export class WorkspaceStore {
     // appendProjectNode only returns a string it produced from a valid ProjectFileV1, so this parse
     // cannot realistically fail — but a throw here would turn a landed write into a `false`.
     try {
-      const parsed = JSON.parse(updated) as ProjectFileV1
+      const parsed = this.entryKeyed(e, JSON.parse(updated) as ProjectFileV1)
       this.revs.set(parsed.id, parsed.rev)
       platform().broadcast(
         IPC.workspaceExternalChange,

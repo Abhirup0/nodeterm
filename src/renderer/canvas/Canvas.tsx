@@ -3346,9 +3346,16 @@ export function Canvas() {
   const cloneRepo = useCallback(() => setCloneDialogOpen(true), [])
 
   const onRepoCloned = useCallback(
-    (clonedPath: string, name: string) => {
+    async (clonedPath: string, name: string) => {
       commitActiveToStore()
-      const project = useProjects.getState().addProject(name, clonedPath)
+      // A cloned repo may SHIP its canvas: `.nodeterm/project.json` is a git-shared file (the
+      // migration banner asks users to commit it). Minting a brand-new empty project for the folder
+      // both ignored that canvas and pointed a fresh id at a file that already had one — the exact
+      // id/file mismatch this fix is about. Same probe→adopt path as "Open folder…".
+      const probed = await api.workspace.probeFolder(clonedPath)
+      const project = probed
+        ? useProjects.getState().adoptProject({ ...probed, closed: false })
+        : useProjects.getState().addProject(name, clonedPath)
       useProjects.getState().setActive(project.id)
       // The welcome screen stays up behind the clone dialog; dismiss it now that a
       // project actually exists (no-op when the dialog was opened elsewhere).

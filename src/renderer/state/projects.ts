@@ -9,6 +9,7 @@ import type {
   Viewport,
   Workspace
 } from '@shared/types'
+import { collisionSeed, derivedProjectId } from '@shared/project-id'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
 
 interface ProjectsState {
@@ -178,6 +179,31 @@ function repositionState(
   }
 }
 
+/**
+ * Defense in depth for the ONE invariant this store cannot survive without: no two projects share
+ * an id. Every mutator here (`commitCanvas`, `deleteProject`, `closeProject`, `renameNode`, …)
+ * either maps by id — writing one canvas into BOTH projects — or filters by id, hitting both. The
+ * tab bar keys its children by id, which is how the bug announced itself: ~1500 React "two children
+ * with the same key" warnings.
+ *
+ * The store in main repairs the persisted index and re-keys the file (see
+ * `WorkspaceStore.repairDuplicateIds`); this is the renderer's own guard for anything that reaches
+ * hydrate some other way (a relay `projects.list` blob, a downgraded/older host). It uses the SAME
+ * derivation, so when both run they agree on the id rather than fighting over it.
+ */
+function withUniqueIds(projects: Project[]): Project[] {
+  const seen = new Set<string>()
+  return projects.map((p) => {
+    if (!seen.has(p.id)) {
+      seen.add(p.id)
+      return p
+    }
+    const id = derivedProjectId(p.id, collisionSeed(p), (c) => seen.has(c))
+    seen.add(id)
+    return { ...p, id }
+  })
+}
+
 /** Returns `projects` with one project's nodes transformed; other projects untouched. */
 function mapProjectNodes(
   projects: Project[],
@@ -193,7 +219,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   reloadNonce: 0,
 
   hydrate(ws) {
-    set({ projects: ws.projects, activeProjectId: ws.activeProjectId })
+    set({ projects: withUniqueIds(ws.projects), activeProjectId: ws.activeProjectId })
   },
 
   requestReload() {
@@ -250,8 +276,14 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     const taken = get().projects.some((p) => p.id === project.id)
     // A copied folder carries the original's project id; derive a fresh one. Node ids are
     // deliberately kept (they are tmux session names — see the spec's accepted limitation).
+    // Deterministic in (id, folder), not random: adopting the same folder twice must land on the
+    // same id, so the store's own repair and this path never disagree about what a tab is called.
     const adopted = taken
-      ? { ...project, id: `${project.id}-${Math.random().toString(36).slice(2, 8)}` }
+      ? {
+          ...project,
+          id: derivedProjectId(project.id, collisionSeed(project), (c) =>
+            get().projects.some((p) => p.id === c))
+        }
       : project
     set((s) => ({ projects: [...s.projects, adopted], activeProjectId: adopted.id }))
     return adopted
