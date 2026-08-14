@@ -509,6 +509,14 @@ export function remoteTmuxPtyArgs(
 ): string[] {
   let cmd = remoteTmuxCommand({ sessionId, remoteCwd, program, programArgs, socket: RMT_TMUX_SOCKET, confPath })
   if (extraEnv.length)
-    cmd = cmd.replace('new-session -A ', `new-session -A ${extraEnv.map(posixQuote).join(' ')} `)
+    // The replacement is a FUNCTION, not a string. This is load-bearing and not a style choice:
+    // in a STRING replacement `$'`, `` $` ``, `$&` and `$$` are expansion patterns, and `$'`
+    // splices the text FOLLOWING the match — `-s '<session>' -c '<cwd>' '<program>' '<args>'` —
+    // straight INSIDE the single-quoted token being built. That inverts the quote parity of that
+    // copy and un-quotes everything `remoteTmuxCommand` had carefully quoted, so an agent id of
+    // `claude$'` plus a project cwd of `/srv/app;id;#` (both from the same `.nodeterm/project.json`)
+    // was remote code execution EVEN WITH the posixQuote above. A function replacement is never
+    // pattern-expanded, so the quoted bytes land verbatim. See control-master.injection.test.ts.
+    cmd = cmd.replace('new-session -A ', () => `new-session -A ${extraEnv.map(posixQuote).join(' ')} `)
   return ['-t', ...childArgs(conn, controlPath, cmd)]
 }

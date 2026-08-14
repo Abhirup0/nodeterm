@@ -49,6 +49,30 @@ function dirnameOf(p: string): string {
   return i > 0 ? p.slice(0, i) : '/'
 }
 
+/**
+ * The remote opencode instructions path, as a `{ prelude, pathExpr }` pair for
+ * `mergeRemoteInstructions`.
+ *
+ * opencode is XDG-respecting and the DESKTOP's `$XDG_CONFIG_HOME` says nothing about the host, so
+ * this one target must stay expandable BY THE REMOTE SHELL — it cannot be a `posixQuote`d literal
+ * like its codex/gemini siblings. That is what made it dangerous: the obvious spelling,
+ * `"${XDG_CONFIG_HOME:-<remoteHome>/.config}/…"`, interpolates the host-reported `$HOME` inside
+ * DOUBLE quotes, where `$` and backticks are still live — so a `$HOME` of `/home/u$(id)` (which
+ * `isSafeRemoteHome` accepts, and should: it is a legal path) executed on the host.
+ *
+ * The fix binds the untrusted half to a shell VARIABLE first. A parameter expansion's RESULT is
+ * not re-expanded, so `"$NT_H"` is inert no matter what bytes it holds, while
+ * `${XDG_CONFIG_HOME:-…}` keeps its fallback semantics. Verified against real `/bin/sh`: the
+ * payload never runs, and the whole expression stays ONE argument (ARGC=1) with the variable set,
+ * unset, and holding a space.
+ */
+export function openCodeInstructionsTarget(remoteHome: string): { prelude: string; pathExpr: string } {
+  return {
+    prelude: `NT_H=${posixQuote(remoteHome)}; `,
+    pathExpr: `"\${XDG_CONFIG_HOME:-$NT_H/.config}/opencode/AGENTS.md"`
+  }
+}
+
 export interface RemoteRunner {
   /** Run one ssh child command (over the master); optional stdin written to the child. */
   run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
@@ -416,13 +440,15 @@ export class RemoteHooks {
       // the desktop merges into their global instruction files. The opencode path is expanded by
       // the REMOTE shell (it is XDG-respecting and the local value says nothing about the host).
       const block = buildCanvasControlInstructions(shim)
-      const targets = [
-        posixQuote(`${remoteHome}/.codex/AGENTS.md`),
-        posixQuote(`${remoteHome}/.gemini/GEMINI.md`),
-        `"\${XDG_CONFIG_HOME:-${remoteHome}/.config}/opencode/AGENTS.md"`
+      // codex/gemini are plain quoted literals; opencode must stay shell-expandable and so
+      // carries a prelude that binds the untrusted $HOME to a variable (see the helper).
+      const targets: { pathExpr: string; prelude?: string }[] = [
+        { pathExpr: posixQuote(`${remoteHome}/.codex/AGENTS.md`) },
+        { pathExpr: posixQuote(`${remoteHome}/.gemini/GEMINI.md`) },
+        openCodeInstructionsTarget(remoteHome)
       ]
-      for (const target of targets) {
-        await this.mergeRemoteInstructions(conn, controlPath, target, block, mergeCanvasControlBlock)
+      for (const t of targets) {
+        await this.mergeRemoteInstructions(conn, controlPath, t.pathExpr, block, mergeCanvasControlBlock, t.prelude)
       }
     } catch {
       /* fail-open: the remote agent simply runs without canvas control */
@@ -478,13 +504,15 @@ export class RemoteHooks {
         buildContextLinkSkillBody(shim)
       )
       const block = buildLinkedContextInstructions(shim)
-      const targets = [
-        posixQuote(`${remoteHome}/.codex/AGENTS.md`),
-        posixQuote(`${remoteHome}/.gemini/GEMINI.md`),
-        `"\${XDG_CONFIG_HOME:-${remoteHome}/.config}/opencode/AGENTS.md"`
+      // codex/gemini are plain quoted literals; opencode must stay shell-expandable and so
+      // carries a prelude that binds the untrusted $HOME to a variable (see the helper).
+      const targets: { pathExpr: string; prelude?: string }[] = [
+        { pathExpr: posixQuote(`${remoteHome}/.codex/AGENTS.md`) },
+        { pathExpr: posixQuote(`${remoteHome}/.gemini/GEMINI.md`) },
+        openCodeInstructionsTarget(remoteHome)
       ]
-      for (const target of targets) {
-        await this.mergeRemoteInstructions(conn, controlPath, target, block, mergeInstructionsBlock)
+      for (const t of targets) {
+        await this.mergeRemoteInstructions(conn, controlPath, t.pathExpr, block, mergeInstructionsBlock, t.prelude)
       }
     } catch {
       /* fail-open: the remote agent simply runs without context link */
@@ -543,22 +571,27 @@ export class RemoteHooks {
   /** Read-merge-write one marker-delimited instructions block at a remote path EXPRESSION
    *  (already quoted / shell-expandable). Everything outside the markers is preserved — including
    *  the OTHER feature's block, which is why the merge function is a parameter: canvas control and
-   *  context link own different markers in the same files. */
+   *  context link own different markers in the same files.
+   *
+   *  `prelude` is shell prepended to BOTH commands — it exists so a caller can bind an untrusted
+   *  value (the host-reported `$HOME`) to a shell VARIABLE once and then refer to it as `$NT_H`
+   *  inside an expression that must stay shell-expandable. See `openCodeInstructionsTarget`. */
   private async mergeRemoteInstructions(
     conn: SshConnection,
     controlPath: string,
     pathExpr: string,
     block: string,
-    merge: (existing: string, block: string) => string
+    merge: (existing: string, block: string) => string,
+    prelude = ''
   ): Promise<void> {
     try {
       const { stdout: existing } = await this.r.run(
-        childArgs(conn, controlPath, `cat ${pathExpr} 2>/dev/null || true`)
+        childArgs(conn, controlPath, `${prelude}cat ${pathExpr} 2>/dev/null || true`)
       )
       const merged = merge(existing, block)
       if (merged === existing) return
       await this.r.run(
-        childArgs(conn, controlPath, `mkdir -p "$(dirname ${pathExpr})" && cat > ${pathExpr}`),
+        childArgs(conn, controlPath, `${prelude}mkdir -p "$(dirname ${pathExpr})" && cat > ${pathExpr}`),
         merged
       )
     } catch {
@@ -608,7 +641,12 @@ export class RemoteHooks {
       const { config: next, changed } = ensureFullscreenTui(cfg)
       if (!changed) return // key already present (any value) → never overwrite the user's `/tui`
       await this.r.run(
-        childArgs(conn, controlPath, `mkdir -p $(dirname ${posixQuote(config)}) && cat > ${posixQuote(config)}`),
+        // `$(dirname …)` QUOTED, like the other three sites. Unquoted, a home with a space
+        // (`/Users/Enes Kirca`) word-splits the substitution into two mkdir args — measured
+        // ARGC=2 — so junk directories are created, the correctly-quoted `cat >` then fails, and
+        // the catch below swallows it. Symptom: fullscreen-TUI silently never written for any
+        // macOS user whose home has a space in it.
+        childArgs(conn, controlPath, `mkdir -p "$(dirname ${posixQuote(config)})" && cat > ${posixQuote(config)}`),
         JSON.stringify(next, null, 2)
       )
     } catch {
