@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
-import { createHmac, randomUUID, timingSafeEqual } from 'crypto'
+import { randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { platform } from '../platform'
@@ -7,7 +7,7 @@ import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import type { CodexIdentityEvent } from '../../shared/types'
 import { nodeTokenDir } from './node-token-files'
-import { verifyNodeToken } from './node-auth-token'
+import { isSafeNodeId, verifyNodeToken } from './node-auth-token'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -159,7 +159,7 @@ class HookServer {
   /**
    * The shared-identity spine's handlers (see core/codex-identity-proxy.ts). Both are injected by
    * the shell, and BOTH routes below additionally require a per-node capability — see
-   * `codexNodeAuthToken`.
+   * `nodeTokenVerified`.
    */
   private codexThreadStartHandler:
     | ((req: { nodeId: string; cwd: string; hookEndpoint: string }) => Promise<string>)
@@ -169,7 +169,7 @@ class HookServer {
     | null = null
   private codexIdentityListener: ((e: CodexIdentityEvent) => void) | null = null
   private endpointPath = ''
-  private codexNodeAuthSecret: Buffer | null = null
+  private nodeAuthSecret: Buffer | null = null
 
   endpointFilePath(): string {
     if (!this.endpointPath) this.endpointPath = path.join(platform().userDataDir, 'hook-endpoint.env')
@@ -232,25 +232,6 @@ class HookServer {
   }
 
   /**
-   * Mint the capability a Codex process must present for node-scoped identity operations.
-   *
-   * THIS IS THE SECURITY FIX. The global hook bearer proves only "this request came from some
-   * NodeTerm-spawned session"; it cannot prove WHICH session. Every identity route takes a
-   * caller-supplied `nodeId`, so with the shared bearer alone any agent session could bind ITS
-   * OWN codex thread to a SIBLING node — reparenting another node's status, and (through the hook
-   * prelude, which re-exports the recorded node id and endpoint) aiming that node's hook traffic.
-   * This token is HMAC(secret, nodeId): stable across app restarts, scoped to one node, injected
-   * only into that node's session env, and never written to the shared endpoint file that every
-   * session can read.
-   */
-  codexNodeAuthToken(nodeId: string): string {
-    if (!/^[A-Za-z0-9._-]+$/.test(nodeId)) return ''
-    if (!this.codexNodeAuthSecret)
-      throw new Error('NodeTerm Codex node authentication is unavailable')
-    return createHmac('sha256', this.codexNodeAuthSecret).update(nodeId).digest('base64url')
-  }
-
-  /**
    * The shell injects a restart-stable node-auth secret before any identity-scoped PTY is created —
    * sealed via safeStorage on the desktop, raw 0600 bytes on the Server Edition (see
    * core/agents/node-auth-secret.ts). Called on BOTH shells at boot. Rejects a secret under 32
@@ -258,36 +239,24 @@ class HookServer {
    */
   setNodeAuthSecret(secret: Uint8Array): void {
     if (secret.byteLength < 32) throw new Error('Invalid NodeTerm node-auth secret')
-    this.codexNodeAuthSecret = Buffer.from(secret)
-  }
-
-  /**
-   * Thin alias kept for one release so anything still calling the #167-era name keeps working while
-   * both shells migrate to setNodeAuthSecret. A later task removes it.
-   */
-  setCodexNodeAuthSecret(secret: Uint8Array): void {
-    this.setNodeAuthSecret(secret)
+    this.nodeAuthSecret = Buffer.from(secret)
   }
 
   /** True once a valid secret is set; false before, and after a failed load (nothing was set). The
    *  later routing tasks gate every identity-scoped decision on this. */
   identityAvailable(): boolean {
-    return !!this.codexNodeAuthSecret
+    return !!this.nodeAuthSecret
   }
 
   /** The raw secret for the routing tasks that must derive/verify per-node capabilities themselves,
    *  or null when identity is unavailable (legacy mode). Callers must handle null — never throw. */
   nodeAuthSecretOrNull(): Buffer | null {
-    return this.codexNodeAuthSecret
-  }
-
-  hasCodexNodeAuth(): boolean {
-    return !!this.codexNodeAuthSecret
+    return this.nodeAuthSecret
   }
 
   /** Test seam only: this server is a module singleton, so its secret otherwise leaks across tests. */
   clearNodeAuthSecretForTests(): void {
-    this.codexNodeAuthSecret = null
+    this.nodeAuthSecret = null
   }
 
   async start(): Promise<void> {
@@ -463,18 +432,20 @@ class HookServer {
     return a.length === b.length && timingSafeEqual(a, b)
   }
 
-  private codexNodeTokenMatches(nodeId: string, provided: string | string[] | undefined): boolean {
-    if (typeof provided !== 'string') return false
-    let expected = ''
-    try {
-      expected = this.codexNodeAuthToken(nodeId)
-    } catch {
-      return false
-    }
-    if (!expected) return false
-    const a = Buffer.from(provided)
-    const b = Buffer.from(expected)
-    return a.length === b.length && timingSafeEqual(a, b)
+  /**
+   * The identity routes' gate: ONE derivation, the same `verifyNodeToken` /hook/* is labelled by.
+   *
+   * These routes are STRICT — only `verified` proceeds. `legacy` (no token, an empty header,
+   * another instance's kid, no secret at all) is refused here, deliberately and unlike /hook/*:
+   * they were strict from the day they existed, so there is no upgrade population to protect. A
+   * session that predates the per-node capability has no launcher that calls `/codex-thread/*` at
+   * all; failing it open would buy nothing and hand back the authorization hole the capability
+   * exists to close (any session holding the shared bearer binding its own codex thread to a
+   * SIBLING node — reparenting that node's status and, through the hook prelude which re-exports
+   * the recorded node id and endpoint, aiming that node's hook traffic).
+   */
+  private nodeTokenVerified(nodeId: string, provided: string | string[] | undefined): boolean {
+    return verifyNodeToken(this.nodeAuthSecretOrNull(), nodeId, provided) === 'verified'
   }
 
   /**
@@ -505,7 +476,9 @@ class HookServer {
     // that gives up first and can clean up after itself.
     req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
     const nodeId = form.nodeId ?? ''
-    if (!/^[A-Za-z0-9._-]+$/.test(nodeId)) {
+    // `isSafeNodeId`, not a local regex: the same predicate the token derivation and the token
+    // FILE path use, so an id one of them would refuse can never reach the other two.
+    if (!isSafeNodeId(nodeId)) {
       res.writeHead(400)
       res.end()
       return
@@ -519,7 +492,7 @@ class HookServer {
       // flag a sibling node as fallen back. Cosmetic (the flag is transient and downgrade-only),
       // but a claim in a comment has to be true.
       const token = req.headers['x-nodeterm-node-token']
-      if (token !== undefined && !this.codexNodeTokenMatches(nodeId, token)) {
+      if (token !== undefined && !this.nodeTokenVerified(nodeId, token)) {
         res.writeHead(403)
         res.end()
         return
@@ -536,7 +509,7 @@ class HookServer {
       res.end()
       return
     }
-    if (!this.codexNodeTokenMatches(nodeId, req.headers['x-nodeterm-node-token'])) {
+    if (!this.nodeTokenVerified(nodeId, req.headers['x-nodeterm-node-token'])) {
       res.writeHead(403)
       res.end()
       return
@@ -638,13 +611,9 @@ class HookServer {
       // proves WHICH node is calling, so a sibling uid reading it off /proc/<pid>/cmdline could
       // bind its own codex thread to that node — the exact reparenting this capability exists to
       // prevent. It reaches the client through the 0600 token file instead (nodeTokenDir(), keyed
-      // by $NODETERM_NODE_ID and advertised in the endpoint file).
-      //
-      // The launcher (core/codex-identity-proxy.ts) still reads the ENV var and is not yet wired to
-      // the file — that retrofit is its own task. Until then a codex node finds no capability, its
-      // preflight reports `node-token-unavailable`, and it execs plain codex: shared identity is
-      // INERT, not broken. That is the fallback this launcher was built around, and an inert
-      // feature is a straight trade against a live cross-uid credential leak.
+      // by $NODETERM_NODE_ID and advertised in the endpoint file) — where the launcher
+      // (core/codex-identity-proxy.ts) reads it, exactly as the managed script and both sh shims
+      // do, so shared identity is LIVE with no credential in anyone's argv.
     }
   }
 

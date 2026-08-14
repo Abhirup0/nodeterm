@@ -14,8 +14,9 @@
  * re-exports both into the agent's environment. An attacker who could write one of these files
  * could aim a session's hook traffic at a node (or an endpoint) of their choosing. Every record
  * therefore carries an HMAC over (threadId, nodeId, endpoint) keyed by the same restart-stable
- * secret the hook server uses to mint per-node capabilities (`src/main/codex-node-auth-secret.ts`).
- * Unsigned/mis-signed records are ignored, not repaired.
+ * secret the hook server uses to mint per-node capabilities
+ * (`src/core/agents/node-auth-secret.ts` — sealed via safeStorage on the desktop, raw 0600 bytes on
+ * the Server Edition). Unsigned/mis-signed records are ignored, not repaired.
  *
  * ACCOUNT SCOPING is deliberately absent here: managed Codex accounts are a later slice. The
  * storage shape is one file per thread id; scoping adds a directory level above it without
@@ -282,6 +283,7 @@ export function buildCodexLauncherScript(
 # identity must still be a working node.
 
 nt_reason=''
+nt_node_token=''
 nt_fail() { nt_reason=$1; return 1; }
 
 nt_hook_curl() { curl "$@"; }
@@ -311,9 +313,22 @@ nt_preflight() {
   . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || { nt_fail broker-unreachable; return; }
   case "\${NODETERM_HOOK_PORT-}" in ''|*[!0-9]*) nt_fail broker-unreachable; return ;; esac
   case "\${NODETERM_HOOK_TOKEN-}" in ''|*[!A-Za-z0-9-]*) nt_fail broker-unreachable; return ;; esac
-  # The per-node capability. Absent => this build/shell has no managed identity to give.
-  case "\${NODETERM_CODEX_NODE_TOKEN-}" in
-    ''|*[!A-Za-z0-9_-]*) nt_fail node-token-unavailable; return ;;
+  # The PER-NODE capability, read the way every other client reads it: the endpoint file (v2,
+  # sourced just above) advertises the directory, and the token is one 0600 file in it named for
+  # THIS node id — a lookup by name, never a scan, so a session can only ever present its own. It
+  # is deliberately NOT an env var any more: that channel put the credential on the tmux \`-e\`
+  # argv, world-readable on a stock Linux, and the credential's whole job is to prove WHICH node
+  # is calling. \$NODETERM_CODEX_NODE_TOKEN survives only as a one-release fallback for a session
+  # spawned by the previous build, which carries the var and has no file yet.
+  if [ -n "\${NODETERM_NODE_TOKEN_DIR-}" ]; then
+    nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID" 2>/dev/null) || nt_node_token=''
+  fi
+  [ -n "$nt_node_token" ] || nt_node_token="\${NODETERM_CODEX_NODE_TOKEN-}"
+  # The '.' IS the token: the wire shape is kid.mac (one derivation shared with /hook/*). A gate
+  # without the dot rejects every token this app mints and degrades every codex node to plain
+  # codex — silently, because falling back is what this script is built to do.
+  case "$nt_node_token" in
+    ''|*[!A-Za-z0-9._-]*) nt_fail node-token-unavailable; return ;;
   esac
   if [ "\${1-}" = resume ]; then
     case "\${2-}" in ''|*[!A-Za-z0-9._-]*) nt_fail thread-id-unavailable; return ;; esac
@@ -368,7 +383,7 @@ nt_post() {
   nt_budget=$1
   shift
   printf 'header = "X-NodeTerm-Hook-Token: %s"\\nheader = "X-NodeTerm-Node-Token: %s"\\n' \\
-    "$NODETERM_HOOK_TOKEN" "$NODETERM_CODEX_NODE_TOKEN" |
+    "$NODETERM_HOOK_TOKEN" "$nt_node_token" |
     nt_hook_curl --silent --show-error --fail --max-time "$nt_budget" --config - --request POST "$@"
 }
 

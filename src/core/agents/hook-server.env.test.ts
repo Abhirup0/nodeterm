@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { hookServer } from './hook-server'
+import { nodeAuthToken } from './node-auth-token'
 import { initPlatform, resetPlatformForTests } from '../platform'
 import { fakePlatform } from '../platform-fake'
 
@@ -86,7 +87,7 @@ describe('hookServer.buildPtyEnv — no credential in the tmux -e argv (the §2.
    */
   it('emits no PER-NODE capability either, for a shared-identity agent with identity armed', () => {
     expect(hookServer.identityAvailable()).toBe(true)
-    const minted = hookServer.codexNodeAuthToken('n1')
+    const minted = nodeAuthToken(hookServer.nodeAuthSecretOrNull()!, 'n1')
     expect(minted).toBeTruthy() // the value that must NOT be reachable via /proc/<pid>/cmdline
     const env = hookServer.buildPtyEnv('n1', 'codex')
     expect(Object.keys(env).filter((k) => /token/i.test(k))).toEqual([])
