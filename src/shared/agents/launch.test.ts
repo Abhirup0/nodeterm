@@ -56,6 +56,19 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       assembleLaunchCommand({ agentId: 'opencode', initialPrompt: 'fix it' }, ENV).command
     ).toBe("opencode --prompt 'fix it'")
   })
+  it('Copilot keeps an initial prompt interactive', () => {
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'copilot',
+          initialPrompt: 'fix it',
+          sessionId: 'abc-123',
+          sessionIdFlagSupported: true
+        },
+        ENV
+      ).command
+    ).toBe("copilot --interactive 'fix it' --session-id=abc-123")
+  })
   it('adds a safely quoted model override after the ordinary Claude launch flags', () => {
     expect(
       assembleLaunchCommand(
@@ -68,6 +81,17 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
         ENV
       ).command
     ).toBe("claude 'fix' --permission-mode plan --model 'anthropic/claude-sonnet-4'")
+  })
+})
+
+describe('assembleResumeCommand — Copilot', () => {
+  it('uses Copilot resume grammar while leaving a gateway model to the environment', () => {
+    expect(
+      assembleResumeCommand(
+        { agentId: 'copilot', sessionId: 'abc-123', model: 'openai/gpt-5.5' },
+        ENV
+      ).command
+    ).toBe('copilot --resume=abc-123')
   })
 })
 

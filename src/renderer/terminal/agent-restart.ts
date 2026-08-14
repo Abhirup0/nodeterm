@@ -38,7 +38,8 @@ const EXIT_SEQUENCES: Record<string, string> = {
   claude: '/exit',
   codex: '/quit',
   grok: '/quit',
-  gemini: '/quit'
+  gemini: '/quit',
+  copilot: '/exit'
 }
 
 export function exitSequence(agentId: string): string | null {
@@ -79,6 +80,18 @@ export function restartEligibility(
   // Without a provider session id there is nothing to resume into.
   if (!sessionId) return { ok: false, reason: 'no-session' }
   return { ok: true }
+}
+
+/**
+ * Prefer the live hook-reported id, then the caller-chosen id persisted on the node. Copilot and
+ * modern Claude can start with a minted id before their first hook lands; making each menu/closure
+ * rediscover this fallback separately would make one of them offer a restart that the other
+ * refuses. `restartEligibility` remains the interpolation guard for the chosen value.
+ */
+export function restartSessionId(live: unknown, persisted: unknown): string | undefined {
+  if (typeof live === 'string' && live.trim()) return live.trim()
+  if (typeof persisted === 'string' && persisted.trim()) return persisted.trim()
+  return undefined
 }
 
 export type RestartOutcome = 'restarted' | 'exit-timeout' | 'not-eligible'

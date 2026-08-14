@@ -2,11 +2,15 @@
 // Design: an open AgentId string, a declarative config record, and
 // capabilities expressed as const membership lists (not a capability object).
 
-export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'grok'
+export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'grok' | 'copilot'
 // Open type — custom agents are any string ('custom:<uuid>'). Never restrict the set.
 export type AgentId = BuiltinAgentId | (string & {})
 
-export type PromptInjectionMode = 'argv' | 'flag-prompt' | 'stdin-after-start'
+export type PromptInjectionMode =
+  | 'argv'
+  | 'flag-prompt'
+  | 'flag-interactive'
+  | 'stdin-after-start'
 
 export interface AgentConfig {
   label: string // menu + node title, e.g. 'Claude Code'
@@ -35,7 +39,8 @@ export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = [
   'codex',
   'gemini',
   'opencode',
-  'grok'
+  'grok',
+  'copilot'
 ]
 
 export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
@@ -82,15 +87,25 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     promptInjectionMode: 'argv',
     argvPromptSeparator: '--',
     expectedProcess: 'grok'
+  },
+  copilot: {
+    label: 'GitHub Copilot',
+    color: '#8957e5',
+    launchCmd: 'copilot',
+    // `--prompt` is explicitly non-interactive and exits after one response. The installed
+    // 1.0.80 CLI's `--interactive <prompt>` starts the ordinary TUI and submits the prompt there.
+    promptInjectionMode: 'flag-interactive',
+    expectedProcess: 'copilot'
   }
 }
 
-// Capabilities = const membership lists. A custom agent is in no list, so it
-// automatically gets only spawn + terminal-title + process status.
-export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
-export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
-// Agents whose session id we MINT at launch (`--session-id <uuid>`) instead of learning it from
-// hook events. Claude only: it is the one CLI here that accepts a caller-chosen id.
+// Capabilities = const builtin membership lists. A custom agent resolves through its declared
+// base harness (capabilityAgentId); one with no base automatically gets only spawn + terminal-title
+// + process status.
+export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
+export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
+// Agents whose session id we MINT at launch (`--session-id <uuid>`) instead of learning it only
+// from hook events. Each member must have a measured caller-chosen-id grammar below.
 //
 // Why it matters: everything that resumes a conversation — cold restore after a reboot, the
 // session reaper's recovery path, the ⌘M transcript view — needs the id, and the id used to
@@ -105,7 +120,11 @@ export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'
 // clear/fork/compact), so hooks remain the only way to TRACK an id after launch. What minting
 // guarantees is that a node always has SOME resumable id, so the worst case degrades from "the
 // conversation is gone" to "continuity since the last /clear is gone".
-export const SESSION_ID_CAPABLE = ['claude'] as const
+export const SESSION_ID_CAPABLE = ['claude', 'copilot'] as const
+// Claude's flag is version-gated and comes from the Claude CLI probe. Copilot's installed 1.0.80
+// binary and current official reference accept `--session-id=<uuid>`, so it does not borrow an
+// unrelated Claude probe result. Custom agents resolve through their declared base harness.
+export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
@@ -173,7 +192,7 @@ export const SHARED_IDENTITY_CAPABLE = ['codex'] as const
 // RemoteHooks.installCanvasControl. Membership here is what sets NODETERM_CANVAS_CONTROL in the
 // session env (hook-server's buildPtyEnv, remoteHookEnvArgs), i.e. what makes the shim anything
 // other than a no-op.
-export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
+export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
 // claude and grok share the flag SPELLING and the value vocabulary
 // (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own
@@ -196,8 +215,8 @@ export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 
 export const PERMISSION_MODE_CAPABLE = ['claude', 'grok', 'gemini', 'codex'] as const
 // Agents whose harness accepts a per-launch model override and whose gateway protocol we know how
 // to configure. Custom agents inherit this through `capabilityAgentId`, like every other harness
-// capability — the renderer never maintains its own Claude/Codex allowlist.
-export const MODEL_SWITCH_CAPABLE = ['claude', 'codex'] as const
+// capability — the renderer never maintains its own Claude/Codex/Copilot allowlist.
+export const MODEL_SWITCH_CAPABLE = ['claude', 'codex', 'copilot'] as const
 // Agents whose own CLI already tells the user when it copies, so nodeterm must not say it again.
 // Claude Code captures the mouse itself and prints its own line — "copied N chars to tmux buffer ·
 // paste with prefix + ]" — which makes our copy pill a second message for one gesture. Membership
@@ -260,6 +279,10 @@ const includes = (list: readonly string[], id: AgentId): boolean =>
 export const hasHooks = (id: AgentId): boolean => includes(AGENT_HOOK_TARGETS, id)
 export const canResume = (id: AgentId): boolean => includes(RESUMABLE_AGENTS, id)
 export const mintsSessionId = (id: AgentId): boolean => includes(SESSION_ID_CAPABLE, id)
+/** Is the caller-chosen session-id flag available for this effective base harness? */
+export const supportsSessionIdFlag = (id: AgentId, claudeFlagSupported: boolean): boolean =>
+  includes(UNCONDITIONAL_SESSION_ID_CAPABLE, id) ||
+  (mintsSessionId(id) && capabilityAgentId(id) === 'claude' && claudeFlagSupported)
 export const canSubagent = (id: AgentId): boolean => includes(SUBAGENT_CAPABLE, id)
 export const canRecur = (id: AgentId): boolean => includes(RECURRING_CAPABLE, id)
 export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)
@@ -345,7 +368,9 @@ export function withSessionId(cmd: string, id: AgentId, sessionId: string): stri
   if (!mintsSessionId(id)) return cmd
   const sid = sessionId.trim()
   if (!sid || !SAFE_SESSION_ID.test(sid)) return cmd
-  return `${cmd} --session-id ${sid}`
+  return capabilityAgentId(id) === 'copilot'
+    ? `${cmd} --session-id=${sid}`
+    : `${cmd} --session-id ${sid}`
 }
 
 /**
@@ -403,6 +428,8 @@ export function resumeCommandWith(
       return `${launchCmd} resume ${sid}`
     case 'opencode':
       return `${launchCmd} --session ${sid}`
+    case 'copilot':
+      return `${launchCmd} --resume=${sid}`
     case 'claude':
     case 'gemini':
     case 'grok':

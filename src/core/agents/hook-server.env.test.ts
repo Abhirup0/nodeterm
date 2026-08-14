@@ -12,6 +12,7 @@ import { hookServer } from './hook-server'
 import { nodeAuthToken } from './node-auth-token'
 import { initPlatform, resetPlatformForTests } from '../platform'
 import { fakePlatform } from '../platform-fake'
+import { CANVAS_CONTROL_CAPABLE } from '../../shared/agents/config'
 
 let dir = ''
 
@@ -38,8 +39,8 @@ describe('hookServer.buildPtyEnv — canvas control gate', () => {
     expect(hookServer.buildPtyEnv('n1', 'grok').NODETERM_CANVAS_CONTROL).toBe('1')
   })
 
-  it('arms it for the other capable builtins too', () => {
-    for (const id of ['claude', 'codex', 'gemini', 'opencode'])
+  it('arms it for every capable builtin', () => {
+    for (const id of CANVAS_CONTROL_CAPABLE)
       expect(hookServer.buildPtyEnv('n1', id).NODETERM_CANVAS_CONTROL, id).toBe('1')
   })
 

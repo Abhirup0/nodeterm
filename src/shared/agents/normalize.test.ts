@@ -1,9 +1,85 @@
 import { describe, it, expect } from 'vitest'
-import { normalizeClaude, normalizeCodex, normalizeFor, type RawHookEnvelope } from './normalize'
+import {
+  normalizeClaude,
+  normalizeCodex,
+  normalizeCopilot,
+  normalizeFor,
+  type RawHookEnvelope
+} from './normalize'
 
 function env(payload: Record<string, unknown>): RawHookEnvelope {
   return { nodeId: 'n1', agentId: 'claude', payload }
 }
+
+function copilotEnv(payload: Record<string, unknown>): RawHookEnvelope {
+  return { nodeId: 'n1', agentId: 'copilot', payload }
+}
+
+describe('normalizeCopilot', () => {
+  it('maps session boundaries and captures the CLI session id', () => {
+    expect(normalizeCopilot(copilotEnv({ hook_event_name: 'SessionStart', session_id: 's1' }))).toEqual({
+      nodeId: 'n1',
+      agentId: 'copilot',
+      sessionId: 's1',
+      kind: 'session',
+      sessionPhase: 'start'
+    })
+    expect(normalizeCopilot(copilotEnv({ hook_event_name: 'SessionEnd', session_id: 's1' }))).toMatchObject({
+      kind: 'session',
+      sessionPhase: 'end'
+    })
+  })
+
+  it('maps turn and tool lifecycle without treating a failed tool as a finished turn', () => {
+    expect(
+      normalizeCopilot(copilotEnv({ hook_event_name: 'UserPromptSubmit', prompt: 'fix it' }))
+    ).toMatchObject({ state: 'working', newTurn: true, task: 'fix it' })
+    for (const hook_event_name of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
+      expect(normalizeCopilot(copilotEnv({ hook_event_name })), hook_event_name).toMatchObject({
+        state: 'working'
+      })
+    }
+    expect(
+      normalizeCopilot(
+        copilotEnv({ hook_event_name: 'Stop', last_assistant_message: 'finished' })
+      )
+    ).toMatchObject({ state: 'done', lastMessage: 'finished' })
+  })
+
+  it('maps only the documented needs-user notifications', () => {
+    expect(
+      normalizeCopilot(
+        copilotEnv({
+          hook_event_name: 'Notification',
+          notification_type: 'permission_prompt',
+          message: 'Approve command?'
+        })
+      )
+    ).toMatchObject({ state: 'blocked', lastMessage: 'Approve command?' })
+    expect(
+      normalizeCopilot(
+        copilotEnv({
+          hook_event_name: 'Notification',
+          notification_type: 'elicitation_dialog',
+          message: 'Which option?'
+        })
+      )
+    ).toMatchObject({ state: 'waiting', lastMessage: 'Which option?' })
+    for (const notification_type of ['agent_idle', 'agent_completed', 'unknown_future_type']) {
+      expect(
+        normalizeCopilot(copilotEnv({ hook_event_name: 'Notification', notification_type })),
+        notification_type
+      ).toBeNull()
+    }
+  })
+
+  it('routes through the shared dispatcher', () => {
+    expect(normalizeFor('copilot', copilotEnv({ hook_event_name: 'Stop' }))).toMatchObject({
+      agentId: 'copilot',
+      state: 'done'
+    })
+  })
+})
 
 describe('normalizeClaude — turn-end signals', () => {
   it('Stop → done, not interrupted', () => {

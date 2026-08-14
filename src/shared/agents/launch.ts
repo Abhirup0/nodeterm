@@ -108,11 +108,17 @@ export function assembleLaunchCommand(
     ? shellSingleQuote(inputs.initialPrompt.replace(/\s+/g, ' ').trim())
     : null
   const sep = eff.argvPromptSeparator
-  const isFlagPrompt = eff.promptInjectionMode === 'flag-prompt'
+  const promptFlag =
+    eff.promptInjectionMode === 'flag-prompt'
+      ? '--prompt'
+      : eff.promptInjectionMode === 'flag-interactive'
+        ? '--interactive'
+        : null
+  const isFlagPrompt = !!promptFlag
   const usesSep = !!promptArg && !!sep && !isFlagPrompt
   const withPrompt = promptArg
     ? isFlagPrompt
-      ? `${baseCmd} --prompt ${promptArg}`
+      ? `${baseCmd} ${promptFlag} ${promptArg}`
       : `${baseCmd} ${promptArg}`
     : baseCmd
 

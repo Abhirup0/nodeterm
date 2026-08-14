@@ -69,6 +69,31 @@ describe('agent mappings', () => {
     expect(modelGatewayEnv(gateway, 'gemini')).toEqual({})
   })
 
+  it('maps Copilot BYOK through the protocol route and separates model id from wire id', () => {
+    expect(modelGatewayEnv(gateway, 'copilot', 'anthropic/claude-sonnet-4.6')).toEqual({
+      COPILOT_PROVIDER_BASE_URL: 'https://bifrost.example.test/anthropic',
+      COPILOT_PROVIDER_TYPE: 'anthropic',
+      COPILOT_PROVIDER_API_KEY: 'vk-secret',
+      COPILOT_PROVIDER_MODEL_ID: 'claude-sonnet-4.6',
+      COPILOT_PROVIDER_WIRE_MODEL: 'anthropic/claude-sonnet-4.6'
+    })
+    expect(modelGatewayEnv(gateway, 'copilot', 'openai/gpt-5.5')).toEqual({
+      COPILOT_PROVIDER_BASE_URL: 'https://bifrost.example.test/openai/v1',
+      COPILOT_PROVIDER_TYPE: 'openai',
+      COPILOT_PROVIDER_API_KEY: 'vk-secret',
+      COPILOT_PROVIDER_MODEL_ID: 'gpt-5.5',
+      COPILOT_PROVIDER_WIRE_MODEL: 'openai/gpt-5.5',
+      COPILOT_PROVIDER_WIRE_API: 'responses'
+    })
+  })
+
+  it('does not activate Copilot BYOK until a model is selected', () => {
+    expect(modelGatewayEnv(gateway, 'copilot')).toEqual({})
+    expect(withAgentModel('copilot --resume=abc', 'copilot', 'openai/gpt-5.5')).toBe(
+      'copilot --resume=abc'
+    )
+  })
+
   it('quotes model ids and refuses unsupported/control-bearing values', () => {
     expect(withAgentModel('codex resume abc', 'codex', "openai/o'model")).toBe(
       "codex resume abc --model 'openai/o'\\''model'"
@@ -94,6 +119,7 @@ describe('agent mappings', () => {
     ]
     expect(modelsForAgent(models, 'claude').map((m) => m.id)).toEqual(all)
     expect(modelsForAgent(models, 'codex').map((m) => m.id)).toEqual(all)
+    expect(modelsForAgent(models, 'copilot').map((m) => m.id)).toEqual(all)
     expect(modelsForAgent(models, 'gemini')).toEqual([])
   })
 
@@ -109,6 +135,26 @@ describe('agent mappings', () => {
       expect(withAgentModel('proxy', 'custom:proxy', 'anthropic/claude-opus')).toBe(
         "proxy --model 'anthropic/claude-opus'"
       )
+    } finally {
+      setCustomAgentBaseResolver(null)
+    }
+  })
+
+  it('inherits Copilot BYOK grammar through a custom base agent without a frontend exception', () => {
+    setCustomAgentBaseResolver((id: AgentId): BuiltinAgentId | undefined =>
+      id === 'custom:copilot-proxy' ? 'copilot' : undefined
+    )
+    try {
+      expect(
+        modelGatewayEnv(gateway, 'custom:copilot-proxy', 'openai/gpt-5.5')
+      ).toMatchObject({
+        COPILOT_PROVIDER_TYPE: 'openai',
+        COPILOT_PROVIDER_MODEL_ID: 'gpt-5.5',
+        COPILOT_PROVIDER_WIRE_MODEL: 'openai/gpt-5.5'
+      })
+      expect(
+        withAgentModel('copilot-wrapper', 'custom:copilot-proxy', 'openai/gpt-5.5')
+      ).toBe('copilot-wrapper')
     } finally {
       setCustomAgentBaseResolver(null)
     }

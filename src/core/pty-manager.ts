@@ -2008,11 +2008,12 @@ export class PtyManager {
     // benefits from the one-click gateway by default, but env values it explicitly declares still
     // win exactly as they did before this feature. Remote values travel through tmux `-e` below;
     // do not leak them into the local ssh client process environment.
-    const gatewayEnv = modelGatewayEnv(
-      this.getSettings().modelGateway,
-      options.agentId ?? 'claude',
-      options.agentModel
-    )
+    // A plain terminal has no agentId and must never receive provider credentials. The hook env's
+    // historical Claude fallback does not apply here: gateway access is an explicit agent
+    // capability, not a terminal default.
+    const gatewayEnv = options.agentId
+      ? modelGatewayEnv(this.getSettings().modelGateway, options.agentId, options.agentModel)
+      : {}
     if (!options.sshRemote) {
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
     }

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
+  BUILTIN_AGENT_IDS,
   setCustomAgentBaseResolver,
   type AgentId,
   type BuiltinAgentId
@@ -14,7 +15,7 @@ afterEach(() => setCustomAgentBaseResolver(null))
 
 describe('AgentIcon custom-agent inheritance', () => {
   it('renders the exact base harness icon for inheriting custom agents', () => {
-    const bases: BuiltinAgentId[] = ['claude', 'codex', 'gemini', 'opencode', 'grok']
+    const bases: BuiltinAgentId[] = [...BUILTIN_AGENT_IDS]
     setCustomAgentBaseResolver((id) => {
       const base = id.startsWith('custom:') ? id.slice('custom:'.length) : ''
       return bases.includes(base as BuiltinAgentId) ? (base as BuiltinAgentId) : undefined

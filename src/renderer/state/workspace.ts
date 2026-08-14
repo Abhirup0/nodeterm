@@ -1,7 +1,7 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
 import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
-import { agentConfig, mintsSessionId } from '@shared/agents/config'
+import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
@@ -375,7 +375,8 @@ export function createAgentNode(
   // learning its id from hooks exactly as before. Inheritance-aware: a custom agent with
   // baseAgent:'claude' mints an id too (capabilityAgentId resolves it to claude).
   const cliCaps = claudeCliCapsNow()
-  const mintedSessionId = mintsSessionId(agentId) && cliCaps.sessionIdFlag ? uuid() : undefined
+  const sessionIdFlagSupported = supportsSessionIdFlag(agentId, cliCaps.sessionIdFlag)
+  const mintedSessionId = sessionIdFlagSupported ? uuid() : undefined
   // Command assembly is delegated to the ONE shared builder (src/shared/agents/launch.ts), used by
   // fresh launch AND cold-restore resume, so a custom agent's baseAgent/args/expansion are applied
   // identically in both paths. The renderer has no process.env, so expansion here runs against an
@@ -394,7 +395,7 @@ export function createAgentNode(
       initialPrompt,
       permissionMode,
       sessionId: mintedSessionId,
-      sessionIdFlagSupported: cliCaps.sessionIdFlag,
+      sessionIdFlagSupported,
       // A SHARED_IDENTITY_CAPABLE agent (codex) launches through its managed launcher when this
       // machine actually has one — otherwise the bare CLI, byte-identical to before. `codexSharedIdentity`
       // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).

@@ -161,7 +161,7 @@ function codexMascot(): HTMLElement {
   el.style.backgroundImage = `url(${codexPet})`
   return el
 }
-/** An asset brand mark (gemini/opencode), breathing: a background-image span. These marks carry their
+/** An asset brand mark (gemini/opencode/copilot), breathing: a background-image span. These marks carry their
  *  own fills, so unlike grok's they cannot be drawn as an inline `currentColor` path — the bloom is
  *  the strip's label colour rather than their own ink (see lib/brandPulse.ts). */
 function brandPulseMascot(src: string, size: number): HTMLElement {
@@ -179,7 +179,7 @@ function brandPulseMascot(src: string, size: number): HTMLElement {
 function workingMascot(agentId?: string): Element {
   if (agentId === 'claude' && CLAUDE_MASCOT.src) return quadrantMascot(CLAUDE_MASCOT, 'claude')
   if (agentId === 'codex') return codexMascot()
-  // grok, gemini and opencode breathe their own brand mark instead of walking a critter — the SAME
+  // grok, gemini, opencode and copilot breathe their own brand mark instead of walking a critter — the SAME
   // decision the canvas badge makes (lib/brandPulse.ts, shared precisely so one agent is never two
   // different things on two surfaces). This renderer stays React-free, so it draws the plan itself.
   const plan = brandPulsePlan(agentId, HUD_QUADRANT_H)

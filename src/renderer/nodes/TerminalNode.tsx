@@ -111,6 +111,7 @@ import {
   registerAgentHibernate,
   registerAgentRestart,
   restartEligibility,
+  restartSessionId,
   RESTART_EXIT_TIMEOUT_MS,
   type ExitPhaseOutcome,
   type ResumePhaseOutcome
@@ -2857,12 +2858,13 @@ export function TerminalNode({
       id,
       guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean) => {
         const st = useAgentStatus.getState().byId[id]
-        const agentSessionId = st?.sessionId
+        const currentNode = getNode(id)
+        const agentSessionId = restartSessionId(st?.sessionId, currentNode?.data.agentSessionId)
         // `data.agentId` can change after a successful same-base swap while this deliberately
         // long-lived terminal effect stays mounted. Read the node NOW instead of trusting the
         // value captured when the pane attached, or a later plain Restart would silently reopen
         // the old agent again.
-        const sourceAgentId = createdAgentId(getNode(id)?.data)
+        const sourceAgentId = createdAgentId(currentNode?.data)
         const gate = restartEligibility(sourceAgentId, st?.state, agentSessionId)
         if (!gate.ok || !sourceAgentId || !agentSessionId || !restartTarget())
           return 'not-eligible'

@@ -253,6 +253,64 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     )
   })
 
+  it('maps a selected Copilot model into its BYOK environment, never a model flag', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.init(() => ({
+      ...DEFAULT_SETTINGS,
+      modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-secret' }
+    }))
+    m.registerIpc()
+
+    await create(80, 24, 'copilot-gateway-node', {
+      agentId: 'copilot',
+      agentModel: 'openai/gpt-5.5'
+    })
+
+    expect(spawnArgs[0].env).toMatchObject({
+      COPILOT_PROVIDER_BASE_URL: 'https://bifrost.example.test/openai/v1',
+      COPILOT_PROVIDER_TYPE: 'openai',
+      COPILOT_PROVIDER_API_KEY: 'vk-secret',
+      COPILOT_PROVIDER_MODEL_ID: 'gpt-5.5',
+      COPILOT_PROVIDER_WIRE_MODEL: 'openai/gpt-5.5',
+      COPILOT_PROVIDER_WIRE_API: 'responses'
+    })
+    expect(spawnArgs[0].args).toEqual(
+      expect.arrayContaining([
+        '-e',
+        'COPILOT_PROVIDER_MODEL_ID=gpt-5.5',
+        '-e',
+        'COPILOT_PROVIDER_WIRE_MODEL=openai/gpt-5.5'
+      ])
+    )
+    expect(spawnArgs[0].args.join(' ')).not.toContain('--model')
+  })
+
+  it('never exposes gateway credentials to a plain terminal', async () => {
+    const inherited = process.env.ANTHROPIC_AUTH_TOKEN
+    process.env.ANTHROPIC_AUTH_TOKEN = 'preexisting-shell-token'
+    try {
+      const { PtyManager } = await import('./pty-manager')
+      const m = new PtyManager()
+      m.init(() => ({
+        ...DEFAULT_SETTINGS,
+        modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-secret' }
+      }))
+      m.registerIpc()
+
+      await create(80, 24, 'plain-terminal')
+
+      // Plain shells still inherit the user's ordinary process environment; the gateway neither
+      // overwrites it nor emits an explicit tmux session value.
+      expect(spawnArgs[0].env.ANTHROPIC_AUTH_TOKEN).toBe('preexisting-shell-token')
+      expect(spawnArgs[0].args.join(' ')).not.toContain('vk-secret')
+      expect(spawnArgs[0].args.join(' ')).not.toContain('bifrost.example.test')
+    } finally {
+      if (inherited === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN
+      else process.env.ANTHROPIC_AUTH_TOKEN = inherited
+    }
+  })
+
   // ── `fresh` drives scrollback replay + agent resume: it must still be computed from tmux ──
   it('fresh:false on a WARM reattach (tmux session already exists) — no cold restore', async () => {
     await tmuxManager()

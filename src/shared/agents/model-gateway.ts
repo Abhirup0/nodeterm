@@ -92,13 +92,14 @@ export function modelsForAgent(models: GatewayModel[], agentId: AgentId): Gatewa
 
 /**
  * Environment applied to a terminal session before custom-agent env (custom values still win).
- * Model selection itself stays a quoted CLI flag for Claude/Codex; the environment contains only
- * the gateway route and credential, so a restart command never exposes the API key in the pane.
+ * Claude/Codex model selection stays a quoted CLI flag. Copilot's BYOK protocol instead carries
+ * its internal + wire model ids in environment variables. Credentials never enter a restart
+ * command, so none are exposed in the pane.
  */
 export function modelGatewayEnv(
   settings: ModelGatewaySettings,
   agentId: AgentId,
-  _model?: string
+  model?: string
 ): Record<string, string> {
   const routes = modelGatewayRoutes(settings.baseUrl)
   const key = settings.apiKey.trim()
@@ -114,6 +115,30 @@ export function modelGatewayEnv(
         OPENAI_BASE_URL: routes.openai,
         OPENAI_API_KEY: key
       }
+    case 'copilot': {
+      // Copilot's BYOK mode requires a model at startup. Keep an ordinary Copilot node on GitHub's
+      // own routing until the user actually selects one; otherwise merely configuring a gateway
+      // would activate an incomplete provider and make every new Copilot node fail to launch.
+      const wireModel = normalizedAgentModel(agentId, model)
+      if (!wireModel) return {}
+      const slash = wireModel.indexOf('/')
+      const provider = slash > 0 ? wireModel.slice(0, slash).toLowerCase() : ''
+      const modelId = slash > 0 ? wireModel.slice(slash + 1) : wireModel
+      const anthropic = provider === 'anthropic'
+      return {
+        COPILOT_PROVIDER_BASE_URL: anthropic ? routes.anthropic : routes.openai,
+        COPILOT_PROVIDER_TYPE: anthropic ? 'anthropic' : 'openai',
+        COPILOT_PROVIDER_API_KEY: key,
+        // Bifrost needs the provider-prefixed wire id; Copilot's internal catalogue wants the
+        // unprefixed well-known id for token limits/tool strategy. Its official BYOK grammar
+        // explicitly supports separating these two values.
+        COPILOT_PROVIDER_MODEL_ID: modelId,
+        COPILOT_PROVIDER_WIRE_MODEL: wireModel,
+        ...(!anthropic && /^gpt-5(?:[.-]|$)/i.test(modelId)
+          ? { COPILOT_PROVIDER_WIRE_API: 'responses' }
+          : {})
+      }
+    }
     default:
       return {}
   }
@@ -136,5 +161,9 @@ export function normalizedAgentModel(agentId: AgentId, model: string | undefined
 export function withAgentModel(cmd: string, agentId: AgentId, model: string | undefined): string {
   const value = normalizedAgentModel(agentId, model)
   if (!value) return cmd
+  // Copilot receives the model through COPILOT_PROVIDER_MODEL_ID/WIRE_MODEL. Appending --model
+  // would collapse those two distinct values back together and send the unrecognized
+  // provider-prefixed Bifrost id through Copilot's internal catalogue.
+  if (capabilityAgentId(agentId) === 'copilot') return cmd
   return `${cmd} --model ${shellSingleQuote(value)}`
 }

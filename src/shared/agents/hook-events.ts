@@ -73,6 +73,28 @@ export const GEMINI_HOOK_EVENTS = [
 ] as const
 
 /**
+ * GitHub Copilot CLI hook events (→ normalizeCopilot). Copilot uses the same PascalCase event
+ * names as Claude but a different config-file shape, so the subscription list stays shared while
+ * its installer lives in core/agents/hooks/copilot.ts.
+ *
+ * `PermissionRequest` is deliberately absent. Copilot documents that hook as a decision hook that
+ * can alter the permission result, whereas nodeterm only observes status. Its `Notification`
+ * event carries the closed `permission_prompt` / `elicitation_dialog` signals we need without
+ * participating in authorization. `ErrorOccurred` is also omitted: recoverable API/tool errors
+ * can occur before a turn continues, so treating one as a terminal state would clear RUNNING early.
+ */
+export const COPILOT_HOOK_EVENTS = [
+  'SessionStart',
+  'UserPromptSubmit',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'Stop',
+  'Notification',
+  'SessionEnd'
+] as const
+
+/**
  * Grok hook events (→ normalizeGrok). Grok's shipped 1.0.0 docs list fourteen
  * (`~/.grok/docs/user-guide/10-hooks.md:84-101`); nine are subscribed — the ones `normalizeGrok` has
  * a mapping for. The other five are left off deliberately: PermissionDenied is a post-decision event

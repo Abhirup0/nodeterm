@@ -640,7 +640,7 @@ Monaco is wired in `renderer/editor/monaco-setup.ts` (language workers bundled v
 `?worker` — no CDN; CSP `worker-src` allows them). Markdown rendering is shared in
 `renderer/lib/markdown.ts` (`marked` + DOMPurify sanitize).
 
-## Agent support (Claude / Codex / Gemini / opencode / Grok / custom)
+## Agent support (Claude / Codex / Gemini / Copilot / opencode / Grok / custom)
 
 The app is a pluggable multi-agent system: Claude Code is one builtin of
 several. Extra terminal-node behavior is driven per agent by a registry + capability lists, a
@@ -650,7 +650,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
 `nodeterm.agentStatus`, migrated once from the legacy `nodeterm.claudeStatus` key).
 
 - **Agent registry + capabilities** — `src/shared/agents/config.ts` holds `AGENT_CONFIG`
-  (claude/codex/gemini/opencode/grok: id, label, spawn command, color, `promptInjectionMode`, …) keyed
+  (claude/codex/gemini/copilot/opencode/grok: id, label, spawn command, color, `promptInjectionMode`, …) keyed
   by an **open** `AgentId`
   type (so custom ids fit). Capabilities are membership lists, not flags:
   `AGENT_HOOK_TARGETS`, `RESUMABLE_AGENTS`, `SUBAGENT_CAPABLE`, `RECURRING_CAPABLE`,
@@ -667,10 +667,11 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   sync is **split in two** — `TITLE_READ_CAPABLE = claude/grok/gemini` (read) ⊇ `RENAME_CAPABLE =
   claude/grok` (write), because gemini names its own sessions but has no rename command;
   **Context Link** spans four builtins
-  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode`, NOT grok). UI gates
-  on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings, `customAgents`) are in
-  no capability list: spawn + terminal-title + process status only. Per-agent write-ups:
-  **`docs/grok-agent.md`**, **`docs/gemini-agent.md`** (there is none for codex — its approval mapping
+  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode`, NOT grok/copilot). UI gates
+  on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings,
+  `customAgents`) inherit the declared `baseAgent` harness through `capabilityAgentId`; a custom
+  agent with no base remains spawn + terminal-title + process status only. Per-agent write-ups:
+  **`docs/grok-agent.md`**, **`docs/gemini-agent.md`**, **`docs/copilot-agent.md`** (there is none for codex — its approval mapping
   and every value's reasoning live in `src/shared/agents/approval-mode.ts`);
   the distilled rules are **Adding a new agent** at the end of this section.
 - **Model gateway / switcher** — `settings.modelGateway` stores one Bifrost-compatible root +
@@ -678,7 +679,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   routes, env vars, compatible models and safely quoted model flags. It derives `/v1/models`,
   `/openai/v1` and `/anthropic`; discovery runs in core (`agent:discover-models`) so browser CORS
   cannot block the Server Edition and the key never enters a terminal command. Support is a
-  capability (`MODEL_SWITCH_CAPABLE = claude/codex`) resolved through `capabilityAgentId`, so a
+  capability (`MODEL_SWITCH_CAPABLE = claude/codex/copilot`) resolved through `capabilityAgentId`, so a
   custom agent with a supported `baseAgent` inherits it automatically — the settings UI and canvas
   menu carry no agent allowlist. A model switch cleanly exits the CLI and RECYCLES the tmux session
   before cold-resume: an existing shell may predate the gateway setting, and tmux env changes do
@@ -832,7 +833,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   own gate adds one beside claude's.
 - **State via each agent's hooks → shared 4-state model** — detection uses the agent's own
   hooks, **not** output parsing. `src/shared/agents/normalize.ts` has per-agent normalizers
-  (`normalizeClaude`/`normalizeCodex`/`normalizeGemini`/`normalizeOpencode`/`normalizeGrok`) that map each agent's native hook
+  (`normalizeClaude`/`normalizeCodex`/`normalizeGemini`/`normalizeCopilot`/`normalizeOpencode`/`normalizeGrok`) that map each agent's native hook
   events to a `NormalizedAgentEvent` over the shared `AgentState` (`working | waiting | blocked
   | done`) plus subagent/recurring/session kinds. Canvas's listener consumes
   `NormalizedAgentEvent` from `agent:status`, drives the `agentStatus` store, fires throttled
@@ -1017,7 +1018,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   the session id already known from hooks; `lib/claudeBranch.ts` is the fallback that parses
   `pty.capture` output when the id isn't known. The source node stays on the new branch.
 - **Canvas control (manage-nodeterm-canvas)** — agents in `CANVAS_CONTROL_CAPABLE`
-  (claude/codex/gemini/opencode/grok) can create/organize/control canvas nodes from inside their
+  (claude/codex/gemini/copilot/opencode/grok) can create/organize/control canvas nodes from inside their
   session: a POSIX **sh+curl** shim (`nodeterm.sh`, `CONTROL_SHIM_SCRIPT` in
   `main/canvas-control-core.ts` — the Electron-as-Node CLI is retired) POSTs
   **form-urlencoded** (`nodeId` + `arg.<flag>` fields; `curl --data-urlencode` is the only
@@ -1026,7 +1027,8 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   reply (sh has no JSON parser). Env-gated on `NODETERM_CANVAS_CONTROL` (set by
   `buildPtyEnv`/`remoteHookEnvArgs` per `canControlCanvas`). Discovery: claude gets a
   `skills/manage-nodeterm-canvas/SKILL.md` (system `~/.claude` + each managed account dir);
-  codex/gemini/opencode get a marker block (`<!-- nodeterm:manage-canvas:start/end -->`); **grok needs
+  codex/gemini/opencode plus Copilot's `copilot-instructions.md` get a marker block
+  (`<!-- nodeterm:manage-canvas:start/end -->`); **grok needs
   no installer at all** — it scans `~/.claude/skills` by default for Claude compat, so membership alone
   (which sets `NODETERM_CANVAS_CONTROL`) is the whole wiring. That premise rests on grok's shipped
   docs and is **unverified** (`grok inspect --json` never run); if it does not hold, grok takes the

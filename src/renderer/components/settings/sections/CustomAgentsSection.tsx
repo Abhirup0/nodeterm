@@ -24,7 +24,12 @@ const ROWS = {
 }
 const ENTRIES = Object.values(ROWS)
 
-const INJECTION_MODES: PromptInjectionMode[] = ['argv', 'flag-prompt', 'stdin-after-start']
+const INJECTION_MODES: PromptInjectionMode[] = [
+  'argv',
+  'flag-prompt',
+  'flag-interactive',
+  'stdin-after-start'
+]
 
 export function CustomAgentsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const customAgents = useSettings((s) => s.settings.customAgents)

@@ -190,7 +190,10 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                 <circle cx="12" cy="12" r="3" />
                 <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
               </svg>
-              <span>AI agents are first-class nodes — Claude, Codex, Gemini, opencode</span>
+              <span>
+                AI agents are first-class nodes —{' '}
+                {BUILTIN_AGENT_IDS.map((id) => AGENT_CONFIG[id].label).join(', ')}
+              </span>
             </div>
             <div className="onb-prop">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">

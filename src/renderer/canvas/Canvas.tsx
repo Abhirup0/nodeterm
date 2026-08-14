@@ -203,6 +203,7 @@ import {
   guardConcurrentRestart,
   planBulkRestart,
   restartEligibility,
+  restartSessionId,
   settleRestart,
   summarizeBulkRestart,
   type BulkRestartPlan,
@@ -5372,7 +5373,8 @@ export function Canvas() {
             const n = nodesRef.current.find((x) => x.id === ids[0])
             const st = useAgentStatus.getState().byId[ids[0]]
             const sourceAgentId = restartAgentIdOf(n)
-            const gate = restartEligibility(sourceAgentId, st?.state, st?.sessionId)
+            const sessionId = restartSessionId(st?.sessionId, n?.data.agentSessionId)
+            const gate = restartEligibility(sourceAgentId, st?.state, sessionId)
             const settings = useSettings.getState().settings
             const variants = sourceAgentId
               ? reopenVariants(sourceAgentId, settings.customAgents, settings.disabledAgents)
@@ -6490,7 +6492,7 @@ export function Canvas() {
           if (!depAgent || !hasHooks(depAgent)) {
             reply({
               ok: false,
-              error: `${verb}: --after ${depId} is not an agent session that reports when it is done — only claude/codex/gemini nodes can be waited on`
+              error: `${verb}: --after ${depId} is not an agent session that reports when it is done`
             })
             return null
           }
@@ -6610,8 +6612,8 @@ export function Canvas() {
           }
           case 'open-claude':
           case 'open-agent': {
-            // open-claude is the legacy fixed-agent form; open-agent takes any builtin
-            // (claude/codex/gemini) or custom agent id — resolveAgent falls back for the rest.
+            // open-claude is the legacy fixed-agent form; open-agent takes any builtin or custom
+            // agent id — resolveAgent is the single registry/base-harness resolver for both.
             const agentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
             const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
             // --group parents the new node(s) into an existing group frame; a worktree-bound

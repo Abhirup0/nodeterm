@@ -769,6 +769,12 @@ describe('createAgentNode prompt injection', () => {
     const n = createAgentNode('opencode', 0, undefined, undefined, "rerank the results")
     expect(n.data.initialCommand).toBe("opencode --prompt 'rerank the results'")
   })
+  it('uses --interactive for Copilot so the prompted session stays open', () => {
+    const n = createAgentNode('copilot', 0, undefined, undefined, 'fix the bug')
+    expect(n.data.initialCommand).toContain("copilot --interactive 'fix the bug'")
+    expect(n.data.initialCommand).toContain('--session-id=')
+    expect(n.data.initialCommand).not.toContain('--prompt')
+  })
   it('shell-quotes a flag-prompt safely', () => {
     const n = createAgentNode('opencode', 0, undefined, undefined, "it's tricky")
     expect(n.data.initialCommand).toBe("opencode --prompt 'it'\\''s tricky'")
