@@ -9,6 +9,8 @@ import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileCo
 import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS, GROK_HOOK_EVENTS } from '@shared/agents/hook-events'
 import { GROK_HOOK_FILE, isSafeRemoteGrokHome } from '../../core/agents/grok-paths'
 import { isSafeNodeId } from '../../core/agents/node-auth-token'
+import { hookServer } from '../../core/agents/hook-server'
+import { curlHeaderConfigLine } from '../../core/agents/hook-curl-config-sh'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 
 /**
@@ -267,6 +269,11 @@ export class RemoteHooks {
    * SWEEPS: an earlier connect's file for that id is precisely the token its colliding twin would
    * read, so leaving it in place is the attack the local `node-token-service` sweeps for.
    *
+   * Fail-open does NOT mean fail-silent: a node whose write did not land has no token to present,
+   * and the trust-on-first-proof latch lives at the DESKTOP and is keyed by node id, so leaving it
+   * armed over a token that is not there is a permanent 403 (invariant 7). Every failure path here
+   * therefore calls `hookServer.forgetProvenNode`.
+   *
    * KNOWN LIMITATION — the dir is flat, i.e. per HOST ACCOUNT, not per nodeterm instance. Two
    * instances driving the same host+user (two desktops sharing a deploy account, or a desktop
    * whose SSH project points at a host that also runs a headless Server Edition under the same
@@ -319,16 +326,36 @@ export class RemoteHooks {
       if (mk.code !== 0) return // no dir ⇒ no files; the nodes stay `legacy`
       for (const { id, token } of writes) {
         const file = posixQuote(`${dir}/${id}`)
+        // TMP + RENAME, the same shape the local writer uses, and for a reason that is not
+        // cosmetic: `cat > <file>` TRUNCATES before the write can fail, so a host that is out of
+        // quota or disk left the node holding an EMPTY token file. An empty header reads as
+        // `legacy`, and a node still latched at the desktop then takes a hard 403 on every
+        // canvas-control call for the rest of the session. Writing beside the file and renaming
+        // means a failure costs the node nothing it already had.
+        const tmp = posixQuote(`${dir}/.${id}.tmp`)
+        let wrote = false
         try {
-          await this.r.run(
-            // `cat >` TRUNCATES an existing file and keeps its old mode, so the chmod is not
-            // redundant with the umask: it is what re-narrows a file some earlier state left wide.
-            childArgs(conn, controlPath, `umask 077; cat > ${file} && chmod 600 ${file}`),
+          // chmod on the TMP, so the mode is right before the name exists; `mv` within one dir is
+          // a rename, which carries the tmp's 0600 over whatever the destination's mode was.
+          const w = await this.r.run(
+            childArgs(
+              conn,
+              controlPath,
+              `umask 077; cat > ${tmp} && chmod 600 ${tmp} && mv -f ${tmp} ${file} || { rm -f ${tmp}; exit 1; }`
+            ),
             `${token}\n` // newline-terminated: the client reads it with `head -n 1`
           )
+          // The runner RESOLVES on a non-zero exit — a failed write is a `code`, not a throw, and
+          // reading only the throw is how this failure stayed invisible.
+          wrote = w.code === 0
         } catch {
           /* fail-open per node: one unwritable token must not cost the others theirs */
         }
+        // INVARIANT 7 — a node with no token must not stay latched. Every other path that takes a
+        // token away releases the latch (`sweepToken` in node-token-service); this one silently did
+        // not, and the desktop's latch is instance-global, so a remote node whose write failed was
+        // refused permanently with advice to restart that could not help.
+        if (!wrote) hookServer.forgetProvenNode(id)
       }
     } catch {
       /* fail-open: an identity file must never be able to fail a connect */
@@ -805,13 +832,14 @@ export class RemoteHooks {
         // it there. `nodeId=verify` is kept in the body only so an OLDER desktop's script and this
         // one send the same bytes; the route reads nothing.
         `--config - http://localhost/verify --data nodeId=verify`
-      // A curl config file's double-quoted value understands backslash escapes, so the token is
-      // escaped for it. Today's bearer is a `randomUUID()` (hex + dashes) and cannot contain
-      // either character — the escaping is here so that stays true if the mint ever changes.
-      const header = token.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+      // ONE COPY OF THE QUOTING RULE. This used to build its own `header = "…"` line, escaping `\`
+      // and `"` and ignoring the two line breaks — a second, weaker version of the rule that
+      // `hook-curl-config-sh.ts` states for the generated sh clients. `curlHeaderConfigLine` is
+      // that same rule for a config file WE write; a rule with two copies is a rule where one copy
+      // is wrong.
       const r = await this.r.run(
         childArgs(conn, controlPath, cmd),
-        `header = "x-nodeterm-hook-token: ${header}"\n`
+        curlHeaderConfigLine('x-nodeterm-hook-token', token)
       )
       return r.code === 0 && r.stdout.trim() === '204'
     } catch {

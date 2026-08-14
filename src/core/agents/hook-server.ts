@@ -15,6 +15,7 @@ import {
   CONTEXT_LINK_POLICY_VERB,
   IDENTITY_REFUSED_NOTE,
   IDENTITY_RESTART_NOTE,
+  IDENTITY_UNMINTABLE_NOTE,
   type IdentityDecision
 } from './node-identity-policy'
 
@@ -152,6 +153,8 @@ class HookServer {
    * and a restart must re-earn it. Bounded by the number of node ids that ever post here.
    */
   private provenNodes = new Set<string>()
+  /** Node ids the materialiser refuses to mint for (see `markNodeIdentityUnmintable`). */
+  private unmintableNodes = new Set<string>()
   private controlHandler:
     | ((cmd: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<{
         ok: boolean
@@ -246,6 +249,39 @@ class HookServer {
    */
   forgetProvenNode(nodeId: string): void {
     this.provenNodes.delete(nodeId)
+  }
+
+  /**
+   * Node ids the materialiser has REFUSED to mint for, and will keep refusing until a file on disk
+   * changes — today, the members of a case-folding collision group (`node-token-service.ts`).
+   *
+   * It exists only to pick the right refusal SENTENCE. `IDENTITY_REFUSED_NOTE` tells the user to
+   * restart the node to pick up an identity; for these nodes there is nothing to pick up, so that
+   * advice sends them round a loop while the only other signal is a `console.warn` in a log they
+   * are not reading. The other unmintable population — an id outside `isSafeNodeId`, which reaches
+   * the canvas because `fileToProject` does not validate ids out of `project.json` — needs no
+   * registration: this server can see it in the id itself.
+   *
+   * Marked/cleared rather than recomputed because the collision is a property of the whole CANVAS,
+   * which the hook server has no view of.
+   */
+  markNodeIdentityUnmintable(nodeId: string): void {
+    this.unmintableNodes.add(nodeId)
+  }
+
+  /** The twin left the canvas (or the id was fixed): this node can be minted for again. */
+  clearNodeIdentityUnmintable(nodeId: string): void {
+    this.unmintableNodes.delete(nodeId)
+  }
+
+  /**
+   * Which refusal sentence this node should hear. `IDENTITY_UNMINTABLE_NOTE` names the real cause
+   * and deliberately does NOT advise a restart; see it for why that distinction is worth a Set.
+   */
+  private identityRefusalNote(nodeId: string): string {
+    return !isSafeNodeId(nodeId) || this.unmintableNodes.has(nodeId)
+      ? IDENTITY_UNMINTABLE_NOTE
+      : IDENTITY_REFUSED_NOTE
   }
 
   setControlHandler(cb: NonNullable<HookServer['controlHandler']>): void {
@@ -381,12 +417,16 @@ class HookServer {
           if (decision === 'refuse') {
             // The route's own refusal shape, so the sh shim (which prints any non-200 body to
             // stderr and exits 1) shows the sentence and nothing else.
+            // Which sentence: a node in a case-folding collision group, or with an id
+            // `isSafeNodeId` refuses, can NEVER pick up an identity, and telling it to restart is
+            // an instruction to loop forever. See `identityRefusalNote`.
+            const note = this.identityRefusalNote(nodeId)
             if (wantsText) {
               res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-              res.end(`${IDENTITY_REFUSED_NOTE}\n`)
+              res.end(`${note}\n`)
             } else {
               res.writeHead(403, { 'content-type': 'application/json' })
-              res.end(JSON.stringify({ ok: false, error: IDENTITY_REFUSED_NOTE }))
+              res.end(JSON.stringify({ ok: false, error: note }))
             }
             return
           }
@@ -438,7 +478,7 @@ class HookServer {
             // into "Could not read linked context (nodeterm unreachable)", which would be a lie and
             // tells it nothing it can act on. A sentence it can act on is the better failure.
             res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
-            res.end(`${IDENTITY_REFUSED_NOTE}\n`)
+            res.end(`${this.identityRefusalNote(nodeId)}\n`)
             return
           }
           // Always text: the caller is the sh shim, and the payload IS prose (a rendered
@@ -630,13 +670,15 @@ class HookServer {
     if (verb === 'fallback') {
       // This is the ONE route that may be called without the per-node capability, because the
       // commonest thing it reports is "there was no capability to present" — requiring one would
-      // silence it in exactly the case it exists for. That exemption is as narrow as it can be
-      // made: a report that DOES carry a token must have the right one, so only a tokenless caller
-      // is trusted on the nodeId it names. Without this a session holding the shared bearer could
-      // flag a sibling node as fallen back. Cosmetic (the flag is transient and downgrade-only),
-      // but a claim in a comment has to be true.
-      const token = req.headers['x-nodeterm-node-token']
-      if (token !== undefined && !this.nodeTokenVerified(nodeId, token)) {
+      // silence it in exactly the case it exists for. So only `forged` is refused here, the same
+      // rule /hook/* follows and the one the per-route table documents.
+      //
+      // It used to refuse anything that was not `verified`, which caught the CROSS-INSTANCE
+      // FAILOVER: another instance's token is `legacy`, and invariant 3 says a foreign kid is
+      // never refused anywhere. That check also bought nothing it was meant to buy — a hostile
+      // sibling wanting to flag another node as fallen back simply omits the header, which was
+      // always accepted — so it only ever silenced a legitimate report.
+      if (verifyNodeToken(this.nodeAuthSecretOrNull(), nodeId, req.headers['x-nodeterm-node-token']) === 'forged') {
         res.writeHead(403)
         res.end()
         return

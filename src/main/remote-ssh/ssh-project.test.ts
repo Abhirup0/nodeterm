@@ -2008,8 +2008,10 @@ describe('SshProjectManager — per-node tokens on the host', () => {
     await mgr.connect('p1', conn)
     await settle()
     const cmds = run.mock.calls.map(([a]) => (a as string[]).join(' '))
-    expect(cmds.some((c) => c.includes("cat > '/home/u/.nodeterm/node-tokens/node-1'"))).toBe(true)
-    expect(cmds.some((c) => c.includes("cat > '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
+    // tmp + rename (`cat >` truncates, so writing straight at the file leaves an EMPTY token
+    // behind when the host is out of quota or disk — see RemoteHooks.writeNodeTokens).
+    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-1.tmp' '/home/u/.nodeterm/node-tokens/node-1'"))).toBe(true)
+    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-2.tmp' '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
     // never on a command line — the host's process table is readable by its other users.
     expect(cmds.some((c) => c.includes('mac-of-node-1'))).toBe(false)
     const write = run.mock.calls.find(([a]) =>
@@ -2052,7 +2054,7 @@ describe('SshProjectManager — per-node tokens on the host', () => {
     run.mockClear()
     await mgr.writeNodeTokenForNode(controlPath, 'node-9')
     const cmds = run.mock.calls.map(([a]) => (a as string[]).join(' '))
-    expect(cmds.some((c) => c.includes("cat > '/home/u/.nodeterm/node-tokens/node-9'"))).toBe(true)
+    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-9.tmp' '/home/u/.nodeterm/node-tokens/node-9'"))).toBe(true)
     // an unknown control path is a no-op, not a throw
     run.mockClear()
     await expect(mgr.writeNodeTokenForNode('/nope.sock', 'node-9')).resolves.toBeUndefined()

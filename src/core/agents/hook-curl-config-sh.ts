@@ -20,6 +20,27 @@
  */
 
 /**
+ * THE ESCAPING RULE, ONCE. A curl config file is LINE-based and its quoted values understand
+ * backslash escapes, so exactly four characters could end a header line and start a directive of
+ * their own: `"`, `\`, LF and CR. All four are STRIPPED from a value before it is written.
+ *
+ * Stripping (rather than escaping) is safe here because none can occur in a value we send — the
+ * per-node token is `kid.mac` over `[A-Za-z0-9._-]`, the bearer is a `randomUUID()` — so nothing
+ * legitimate is altered, and a value that somehow acquired one still cannot break out of its line.
+ *
+ * Two emitters read this list and no third may invent its own: `headerLine` (POSIX sh, for the
+ * generated clients) and `curlHeaderConfigLine` (Node, for a config file this process writes
+ * itself). A rule with two copies is a rule where one copy is wrong — which is how the SSH tunnel
+ * probe ended up ESCAPING two of the four and ignoring the line breaks entirely.
+ */
+const CURL_CONFIG_STRIP = ['\\', '"', '\n', '\r'] as const
+
+/** The same four characters as a `tr -d` set, single-quoted in sh (`tr` reads its own escapes). */
+const TR_STRIP_SET = CURL_CONFIG_STRIP.map((c) =>
+  c === '\\' ? '\\\\' : c === '\n' ? '\\n' : c === '\r' ? '\\r' : c
+).join('')
+
+/**
  * One `header = "<name>: <value>"` line for a curl config file, emitted by `printf` so the value
  * is read from its sh variable AT CALL TIME (callers such as the managed script's failover re-read
  * their token between POSTs, and the emitter must see the current value, not one captured once).
@@ -28,7 +49,21 @@
  * inside double quotes here, so it is never word-split or globbed.
  */
 function headerLine(name: string, valueRef: string): string {
-  return `  printf 'header = "${name}: %s"\\n' "$(printf %s "${valueRef}" | tr -d '\\\\"\\n\\r')"`
+  return `  printf 'header = "${name}: %s"\\n' "$(printf %s "${valueRef}" | tr -d '${TR_STRIP_SET}')"`
+}
+
+/**
+ * The same rule for a config file NODE writes and pipes to curl itself — today the SSH tunnel probe
+ * in `main/remote-ssh/remote-hooks.ts`, which is on the far side of a `ssh` child and so cannot use
+ * the sh emitter above.
+ *
+ * Newline-terminated, because a curl config file is line-based and an unterminated last line is a
+ * directive curl may or may not read depending on its version.
+ */
+export function curlHeaderConfigLine(name: string, value: string): string {
+  let v = value
+  for (const c of CURL_CONFIG_STRIP) v = v.split(c).join('')
+  return `header = "${name}: ${v}"\n`
 }
 
 /**

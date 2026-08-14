@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { RemoteHooks, isSafeRemoteHome } from './remote-hooks'
+import { hookServer } from '../../core/agents/hook-server'
 
 const conn = { host: 'h', user: 'u' }
 
@@ -517,7 +518,10 @@ describe('RemoteHooks.writeNodeTokens', () => {
       }
     const writes = calls.filter((c) => c.cmd.includes('cat >'))
     expect(writes).toHaveLength(2)
-    expect(writes[0].cmd).toContain("cat > '/home/u/.nodeterm/node-tokens/node-1'")
+    // tmp + rename, the local writer's shape: `cat >` truncates, so writing straight at the file
+    // leaves an EMPTY token behind when the host is out of quota or disk.
+    expect(writes[0].cmd).toContain("cat > '/home/u/.nodeterm/node-tokens/.node-1.tmp'")
+    expect(writes[0].cmd).toContain("mv -f '/home/u/.nodeterm/node-tokens/.node-1.tmp' '/home/u/.nodeterm/node-tokens/node-1'")
     // ...and the token is on stdin, newline-terminated (the client reads it with `head -n 1`).
     expect(writes[0].stdin).toBe(`${mint('node-1')}\n`)
     expect(writes.at(-1)?.stdin).toBe(`${mint('node-2')}\n`)
@@ -557,7 +561,7 @@ describe('RemoteHooks.writeNodeTokens', () => {
       return { code: 0, stdout: '' }
     })
     await new RemoteHooks({ run }).writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1', 'node-2'], mint)
-    expect(calls.some((c) => c.includes("cat > '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
+    expect(calls.some((c) => c.includes("node-tokens/node-2'"))).toBe(true)
   })
 
   it('an unsafe node id reaches no path and no command AT ALL', async () => {
@@ -588,6 +592,48 @@ describe('RemoteHooks.writeNodeTokens', () => {
     expect(calls).toHaveLength(0)
   })
 
+  /**
+   * INVARIANT 7 — a sweep releases the latch. Every OTHER path that takes a token away calls
+   * `hookServer.forgetProvenNode` (`sweepToken` in node-token-service); this one did not, and the
+   * latch is instance-global and keyed by node id, so a remote node whose write did not land was
+   * refused permanently at the desktop — told to restart to pick up an identity that is not on the
+   * host to pick up.
+   *
+   * The failure is a `code`, not a throw: the runner RESOLVES on a non-zero exit, which is why
+   * reading only the `catch` left this invisible.
+   */
+  describe('a write that does not land releases the latch', () => {
+    it('un-proves the node when the host exits non-zero', async () => {
+      const forget = vi.spyOn(hookServer, 'forgetProvenNode')
+      const run = vi.fn(async (args: string[]) => ({
+        code: args.join(' ').includes('cat >') ? 1 : 0,
+        stdout: ''
+      }))
+      await new RemoteHooks({ run }).writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint)
+      expect(forget).toHaveBeenCalledWith('node-1')
+      forget.mockRestore()
+    })
+
+    it('un-proves the node when the runner throws', async () => {
+      const forget = vi.spyOn(hookServer, 'forgetProvenNode')
+      const run = vi.fn(async (args: string[]) => {
+        if (args.join(' ').includes('cat >')) throw new Error('EACCES')
+        return { code: 0, stdout: '' }
+      })
+      await new RemoteHooks({ run }).writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint)
+      expect(forget).toHaveBeenCalledWith('node-1')
+      forget.mockRestore()
+    })
+
+    it('leaves a node whose write DID land alone — the latch is what protects it', async () => {
+      const forget = vi.spyOn(hookServer, 'forgetProvenNode')
+      const { rh } = tokenHarness()
+      await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint)
+      expect(forget).not.toHaveBeenCalled()
+      forget.mockRestore()
+    })
+  })
+
   it('sweeps a token the minter REFUSES (case-fold collision) instead of leaving it on the host', async () => {
     // The refusal is the local sweep's remote twin: a file an earlier connect wrote for a
     // colliding id is exactly the token its twin would read.
@@ -595,8 +641,8 @@ describe('RemoteHooks.writeNodeTokens', () => {
     const refusing = (id: string): string => (id === 'Node-1' ? '' : mint(id))
     await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['Node-1', 'node-2'], refusing)
     expect(calls.some((c) => c.cmd.includes("rm -f '/home/u/.nodeterm/node-tokens/Node-1'"))).toBe(true)
-    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/Node-1'"))).toBe(false)
-    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
+    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/.Node-1.tmp'"))).toBe(false)
+    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/.node-2.tmp'"))).toBe(true)
   })
 })
 

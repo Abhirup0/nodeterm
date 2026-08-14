@@ -23,6 +23,7 @@ import { initNodeTokens, refreshNodeTokens, sweepNodeToken } from './node-token-
 import {
   IDENTITY_REFUSED_NOTE,
   IDENTITY_RESTART_NOTE,
+  IDENTITY_UNMINTABLE_NOTE,
   NODE_IDENTITY_STRICT_AFTER,
   TOLERANT_CONTROL_VERBS
 } from './node-identity-policy'
@@ -486,6 +487,83 @@ describe('a swept token must also release the latch', () => {
     expect((await hookEvent('n-relatch', nodeAuthToken(SECRET, 'n-relatch'))).status).toBe(204)
     expect(hookServer.isNodeProven('n-relatch')).toBe(true)
     expect((await control('open-terminal', 'n-relatch')).status).toBe(403)
+  })
+})
+
+/**
+ * The refusal that told a node to restart to pick up an identity that cannot exist.
+ *
+ * Two populations can never hold a token, however many times they are restarted: a case-folding
+ * collision group (refused by design — on APFS they would share one file) and a node id outside
+ * `isSafeNodeId`, which reaches the canvas because `fileToProject` does not validate ids read out
+ * of `project.json`. Before the cutoff they get the warning window; after it every mutation is
+ * refused forever, and `IDENTITY_REFUSED_NOTE` sent them round a restart loop while the only real
+ * signal was a `console.warn` in the main-process log.
+ */
+describe('a node that can NEVER have an identity is told so, and not told to restart', () => {
+  beforeEach(() => {
+    hookServer.setIdentityClockForTests(() => PAST_CUTOFF)
+  })
+
+  it('names the cause for a case-folding collision group, on both dialects', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    initNodeTokens({ canvases: () => [{ nodes: [{ id: 'Dup-1' }, { id: 'dup-1' }] }] })
+    try {
+      const text = await control('open-terminal', 'Dup-1')
+      expect(text.status).toBe(403)
+      expect((await text.text()).trim()).toBe(IDENTITY_UNMINTABLE_NOTE)
+      // Both members of the set, not just the one that lost the race to the shared file.
+      const json = await control('open-terminal', 'dup-1', undefined, 'application/json')
+      expect(json.status).toBe(403)
+      expect(await json.json()).toEqual({ ok: false, error: IDENTITY_UNMINTABLE_NOTE })
+      expect(controlCalls).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('names it for an id `isSafeNodeId` refuses, with nothing registered at all', async () => {
+    // No materialiser pass has ever seen this id — the server reads the impossibility off the id.
+    for (const nodeId of ['has space', 'a/b', '..', 'x'.repeat(129), '']) {
+      const res = await control('open-terminal', nodeId)
+      expect(res.status, nodeId).toBe(403)
+      expect((await res.text()).trim(), nodeId).toBe(IDENTITY_UNMINTABLE_NOTE)
+    }
+    expect(controlCalls).toEqual([])
+  })
+
+  it('does not say "Restart", because restarting is the thing that cannot work', () => {
+    expect(IDENTITY_UNMINTABLE_NOTE).not.toContain('Restart')
+    expect(IDENTITY_REFUSED_NOTE).toContain('Restart')
+  })
+
+  it('keeps the ordinary sentence for an ordinary node — the one a restart DOES fix', async () => {
+    const res = await control('open-terminal', 'n-ordinary-refusal')
+    expect(res.status).toBe(403)
+    expect((await res.text()).trim()).toBe(IDENTITY_REFUSED_NOTE)
+  })
+
+  it('goes back to the ordinary sentence once the twin leaves the canvas', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let twinned = true
+    initNodeTokens({
+      canvases: () => [{ nodes: twinned ? [{ id: 'Gone-1' }, { id: 'gone-1' }] : [{ id: 'Gone-1' }] }]
+    })
+    try {
+      expect((await (await control('open-terminal', 'Gone-1')).text()).trim()).toBe(
+        IDENTITY_UNMINTABLE_NOTE
+      )
+      // The twin is removed from `project.json`; the next persist re-materialises the survivor.
+      twinned = false
+      refreshNodeTokens()
+      expect(existsSync(join(nodeTokenDir(), 'Gone-1'))).toBe(true)
+      // There IS an identity to pick up now, so the advice to restart is true again.
+      expect((await (await control('open-terminal', 'Gone-1')).text()).trim()).toBe(
+        IDENTITY_REFUSED_NOTE
+      )
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 

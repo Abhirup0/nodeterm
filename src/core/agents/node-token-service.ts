@@ -1,9 +1,31 @@
 import { hookServer } from './hook-server'
 import { nodeAuthToken, isSafeNodeId } from './node-auth-token'
-import { writeNodeTokenFile, sweepNodeTokenFile, materialisedNodes } from './node-token-files'
+import { writeNodeTokenFile, sweepNodeTokenFile, nodeTokenFilePresent } from './node-token-files'
 
 type Canvases = () => Array<{ id?: string; nodes: Array<{ id: string }> }>
 let canvases: Canvases = () => []
+
+/**
+ * Node ids this run has SEEN on a canvas. The orphan sweep's only source of authority.
+ *
+ * A token file outlives its node whenever the node leaves the canvas by any path that does not go
+ * through `ptyManager.destroy(intent:'delete')` — a project removed, a canvas edited elsewhere, a
+ * `project.json` rewritten by hand — so `node-tokens/` grows one 0600 file per dead id, forever.
+ *
+ * The tempting fix, "delete every file whose id is not in `canvasNodeIds()`", is WRONG here and it
+ * is worth writing down why: `workspaceStore.persistedCanvases()` is explicitly a view of what has
+ * been READ this run ("a project whose file has never been read this run is simply absent"). Its
+ * absence from that list is not evidence that a node is gone — and sweeping a live node's token
+ * un-proves it and drops it to `legacy`, which after the cutoff is a node that cannot drive the
+ * canvas at all.
+ *
+ * So the sweep only ever removes an id it has positively OBSERVED on a canvas earlier this run and
+ * that has since disappeared. Positive evidence in, positive evidence out. `initNodeTokens` starts
+ * it empty, so the BOOT pass — the one most likely to run against a half-loaded index — sweeps
+ * nothing and only records. What this cannot reclaim is a file orphaned by a PREVIOUS run; that
+ * needs an authoritative enumeration of every canvas, which this shell does not have.
+ */
+const seenNodeIds = new Set<string>()
 
 /**
  * The token FILENAME has to stay the bare node id: the client is `sh` + `curl`, it holds only
@@ -80,12 +102,22 @@ function sweepToken(nodeId: string): void {
   hookServer.forgetProvenNode(nodeId)
 }
 
-/** Loud on purpose: this is the only signal that a node is on `legacy` for a reason. */
-function warnCollision(group: readonly string[]): void {
+/**
+ * Announce a refusal, twice — once to whoever reads the main-process log, and once to the hook
+ * server, which is the only place a HUMAN can be told.
+ *
+ * The console.warn was the whole signal before, and it is the wrong one: the person who hits this
+ * is an agent's user watching a canvas-control call get refused, and the sentence they were shown
+ * (`IDENTITY_REFUSED_NOTE`) told them to restart the node to pick up an identity. These nodes can
+ * never pick one up — that is what a refusal MEANS here — so the advice is a loop. Marking the
+ * whole group unmintable is what lets the routes say the true thing instead.
+ */
+function refuseIdentityFor(group: readonly string[]): void {
   console.warn(
     '[node-identity] refusing per-node tokens: these node ids collide when case-folded and would ' +
       `share one file on a case-insensitive filesystem — ${group.join(', ')}`
   )
+  for (const id of group) hookServer.markNodeIdentityUnmintable(id)
 }
 
 function canvasNodeIds(): string[] {
@@ -95,15 +127,25 @@ function canvasNodeIds(): string[] {
 }
 
 /**
- * `materialisedNodes()` is exactly the right key for the short-circuit: it holds the ids this RUN
- * has written a readable file for, and the token is DERIVED from (secret, nodeId) — neither input
- * can change without a restart — so a second write produces byte-identical content. `force` is the
- * boot sweep's door past it, for a run that wants the files re-asserted regardless.
+ * The short-circuit: skip an id whose file this run already wrote AND that is still on disk. The
+ * token is DERIVED from (secret, nodeId) — neither input can change without a restart — so a second
+ * write produces byte-identical content, and re-deriving it on every persist cost a ~375-node
+ * workspace ~2000 synchronous syscalls per save.
+ *
+ * `nodeTokenFilePresent`, not the bare Set: a Set that is never re-checked against the filesystem
+ * turns an out-of-band `rm -rf node-tokens/` into a permanent 403 for every proven node (see it).
+ * `force` is the boot sweep's door past the whole check.
  *
  * `sweepNodeTokenFile` deletes from that Set, so a deleted-and-recreated node re-materialises.
  */
 function materialiseOne(secret: Buffer, nodeId: string, force: boolean): void {
-  if (!force && materialisedNodes().has(nodeId)) return
+  // Reaching here means this id is NOT in a colliding group on this pass, so whatever refused it
+  // before no longer holds — the twin left the canvas, or the id was fixed. Cleared before the
+  // short-circuit, because the short-circuit is the steady state and the mark must not outlive the
+  // condition that set it. An id `isSafeNodeId` refuses needs no clearing: the hook server reads
+  // that off the id itself.
+  hookServer.clearNodeIdentityUnmintable(nodeId)
+  if (!force && nodeTokenFilePresent(nodeId)) return
   const token = nodeAuthToken(secret, nodeId)
   if (token) writeNodeTokenFile(nodeId, token)
 }
@@ -117,6 +159,10 @@ function materialiseOne(secret: Buffer, nodeId: string, force: boolean): void {
  */
 export function initNodeTokens(deps: { canvases: Canvases }): void {
   canvases = deps.canvases
+  // A new provider is a new world: nothing observed under the old one is evidence about this one.
+  // It also means the boot pass records without sweeping, which is what keeps a workspace index
+  // that is still loading from costing every live node its token.
+  seenNodeIds.clear()
   refreshNodeTokens({ force: true })
 }
 
@@ -128,7 +174,7 @@ export function ensureNodeToken(nodeId: string, opts?: { force?: boolean }): voi
   // its canvas has been persisted.
   const group = collidingGroups([...canvasNodeIds(), nodeId]).get(nodeId)
   if (group) {
-    warnCollision(group)
+    refuseIdentityFor(group)
     for (const id of group) sweepToken(id)
     return
   }
@@ -164,7 +210,7 @@ export function remoteNodeTokenMinter(): ((nodeId: string) => string) | null {
   return (nodeId: string): string => {
     const group = collidingGroups([...canvasNodeIds(), nodeId]).get(nodeId)
     if (group) {
-      warnCollision(group)
+      refuseIdentityFor(group)
       // The latch is keyed by node id and is instance-global — an SSH node proves itself over the
       // same hook server — so a refusal here has to release it too, or the remote node is stranded
       // exactly as a local one would be. The FILE lives on the host and the caller sweeps it there;
@@ -203,6 +249,23 @@ export function ensureRemoteNodeToken(controlPath: string, nodeId: string): void
 }
 
 /**
+ * Delete the token of every node we WATCHED leave a canvas, and release its latch with it.
+ *
+ * Only ids in `seenNodeIds` are candidates — see there for why absence from `canvasNodeIds()` is
+ * not on its own evidence that a node is gone. `sweepToken`, not `sweepNodeTokenFile`: a departed
+ * node may have proved itself while it was still here, and a latch outliving the token it was
+ * earned with is a permanent 403 on the id if it ever comes back.
+ */
+function sweepDepartedNodes(live: ReadonlySet<string>): void {
+  for (const id of seenNodeIds) {
+    if (live.has(id)) continue
+    seenNodeIds.delete(id)
+    sweepToken(id)
+  }
+  for (const id of live) seenNodeIds.add(id)
+}
+
+/**
  * Wired to `onPersist`, which fires on every canvas LOAD and every canvas SAVE. Rewriting every
  * token for every node in every project there cost a ~375-node workspace ~2000 synchronous syscalls
  * on the Electron main thread per save — plus one `console.warn` per node per save when the token
@@ -213,9 +276,10 @@ export function refreshNodeTokens(opts?: { force?: boolean }): void {
   const secret = hookServer.nodeAuthSecretOrNull()
   if (!secret) return
   const ids = canvasNodeIds()
+  sweepDepartedNodes(new Set(ids))
   const colliding = collidingGroups(ids)
   for (const group of new Set(colliding.values())) {
-    warnCollision(group)
+    refuseIdentityFor(group)
     // Sweep, don't merely skip: an earlier pass may have written one of these before its twin
     // appeared on the canvas, and that surviving file is the token the twin would read. `sweepToken`
     // (not `sweepNodeTokenFile`) because that same earlier pass may already have let the node PROVE

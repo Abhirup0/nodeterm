@@ -169,6 +169,30 @@ describe('node token service — writes once, not on every persist', () => {
     expect(ino('node-1')).not.toBe(was)
   })
 
+  /**
+   * The short-circuit is a "we wrote it" cache, and before this it was never re-checked against the
+   * filesystem. Anything that removes `node-tokens/` while the app runs — a cleanup tool, a user
+   * tidying their data dir, a sync client — therefore made every later refresh a no-op: live
+   * sessions present an empty header, and every already-PROVEN node takes a hard 403 for the rest
+   * of the run.
+   */
+  it('re-writes a token file deleted out of band, instead of trusting the cache forever', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => canvases })
+    fs.rmSync(nodeTokenDir(), { recursive: true, force: true })
+    refreshNodeTokens() // an ordinary persist, no `force`
+    expect(fs.readdirSync(nodeTokenDir()).sort()).toEqual(['node-1', 'node-2', 'node-3'])
+  })
+
+  it('still writes once, not twice, when the file IS there — the stat is not a rewrite', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => canvases })
+    const was = ino('node-1')
+    refreshNodeTokens()
+    refreshNodeTokens()
+    expect(ino('node-1')).toBe(was)
+  })
+
   it('re-materialises a swept id, so a deleted-then-recreated node is not left on legacy', async () => {
     hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
     ensureNodeToken('node-1')
@@ -241,5 +265,57 @@ describe('node token service — the remote (SSH) minter', () => {
     })
     expect(() => ensureRemoteNodeToken('/cm.sock', 'node-1')).not.toThrow()
     setRemoteNodeTokenWriter(null)
+  })
+})
+
+/**
+ * A token file outlives its node whenever the node leaves the canvas by a path that does not go
+ * through `ptyManager.destroy(intent:'delete')` — a project removed, a canvas edited elsewhere, a
+ * hand-rewritten `project.json` — so the dir grows one 0600 file per dead id, forever.
+ *
+ * The sweep's authority is deliberately narrow: an id has to have been OBSERVED on a canvas earlier
+ * this run. `persistedCanvases()` is a view of what has been READ this run, so an id's absence from
+ * it is not evidence a node is gone — and sweeping a live node's token un-proves it and drops it to
+ * `legacy`, which after the cutoff is a node that cannot drive the canvas at all.
+ */
+describe('node token service — a node that leaves the canvas takes its token with it', () => {
+  it('sweeps the file and releases the latch for an id that was there and now is not', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    let live = [{ id: 'stays' }, { id: 'departs' }]
+    initNodeTokens({ canvases: () => [{ nodes: live }] })
+    expect(fs.readdirSync(nodeTokenDir()).sort()).toEqual(['departs', 'stays'])
+
+    // A departed node may have proved itself while it was still here, and a latch outliving the
+    // token it was earned with is a permanent 403 on that id if it ever comes back.
+    const forget = vi.spyOn(hookServer, 'forgetProvenNode')
+
+    live = [{ id: 'stays' }]
+    refreshNodeTokens()
+    expect(fs.readdirSync(nodeTokenDir())).toEqual(['stays'])
+    expect(forget).toHaveBeenCalledWith('departs')
+    forget.mockRestore()
+  })
+
+  it('never sweeps an id it has not seen on a canvas this run', async () => {
+    // A file from a PREVIOUS run, for a node on a project this run has not read yet. Deleting it
+    // because it is missing from `canvasNodeIds()` would strand that node the moment its project
+    // loads — the exact bug the narrow authority exists to avoid.
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => [{ nodes: [{ id: 'known' }] }] })
+    fs.writeFileSync(path.join(nodeTokenDir(), 'from-a-project-not-loaded-yet'), 'tok\n', { mode: 0o600 })
+    refreshNodeTokens()
+    expect(fs.readdirSync(nodeTokenDir()).sort()).toEqual([
+      'from-a-project-not-loaded-yet',
+      'known'
+    ])
+  })
+
+  it('sweeps nothing on the BOOT pass, however empty the index still is', async () => {
+    // `initNodeTokens` runs before the desktop's workspace has necessarily been read. Starting the
+    // observed set empty is what stops a half-loaded index from costing every live node its token.
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => [{ nodes: [{ id: 'node-1' }] }] })
+    initNodeTokens({ canvases: () => [] })
+    expect(fs.readdirSync(nodeTokenDir())).toEqual(['node-1'])
   })
 })

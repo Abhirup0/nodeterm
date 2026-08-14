@@ -1,4 +1,4 @@
-import { mkdirSync, chmodSync, writeFileSync, renameSync, rmSync } from 'fs'
+import { mkdirSync, chmodSync, existsSync, writeFileSync, renameSync, rmSync } from 'fs'
 import path from 'path'
 import { platform } from '../platform'
 import { isSafeNodeId } from './node-auth-token'
@@ -67,6 +67,28 @@ export function sweepNodeTokenFile(nodeId: string): void {
 /** Which nodes this run believes have a readable token. Read by the migration latch later. */
 export function materialisedNodes(): ReadonlySet<string> {
   return materialised
+}
+
+/**
+ * Is this node's token file BOTH written by us this run AND still on disk?
+ *
+ * The Set alone is a "we wrote it" cache that is never re-checked, and that is a stranding bug the
+ * moment anything else touches the dir: remove `node-tokens/` while the app runs (a cleanup tool, a
+ * user tidying their data dir, a sync client) and every later `refreshNodeTokens()` short-circuits,
+ * writes nothing, and every live session presents an empty header — which for an already-PROVEN
+ * node is a hard 403 for the rest of the run, with no path back short of a restart.
+ *
+ * One `existsSync` per node per persist closes it and keeps the short-circuit's whole point (which
+ * was to stop a per-persist re-derive + tmp + rename + chmod storm, ~2000 syscalls on a 375-node
+ * workspace). A stat is not a write.
+ */
+export function nodeTokenFilePresent(nodeId: string): boolean {
+  if (!materialised.has(nodeId) || !isSafeNodeId(nodeId)) return false
+  try {
+    return existsSync(path.join(nodeTokenDir(), nodeId))
+  } catch {
+    return false // unreadable dir ⇒ re-assert, the fail-open direction everywhere else takes
+  }
 }
 
 export function resetNodeTokenFilesForTests(): void {

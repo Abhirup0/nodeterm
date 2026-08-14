@@ -119,6 +119,31 @@ export const IDENTITY_REFUSED_NOTE =
   'one up.'
 
 /**
+ * The refusal for a node that can NEVER have an identity, however many times it is restarted.
+ *
+ * Two populations land here, and both are permanent until a FILE is edited:
+ *
+ *  - a node whose id case-folds onto another id on the same canvas. The materialiser refuses tokens
+ *    for the whole colliding set on purpose (`node-token-service.ts`) — on APFS they would be one
+ *    file, and that is the hijack.
+ *  - a node whose id is outside `[A-Za-z0-9._-]`, or `.`/`..`/empty/over-length. `fileToProject`
+ *    does not validate ids read out of `project.json`, so such an id reaches the canvas intact and
+ *    `nodeAuthToken` returns '' for it forever.
+ *
+ * Giving those `IDENTITY_REFUSED_NOTE` is the worst kind of wrong answer: it names an action
+ * ("Restart this node… to pick one up") that is guaranteed not to work, so the user restarts in a
+ * loop while the only real signal — a `console.warn` in the main-process log — sits somewhere they
+ * will never look. This sentence names the cause instead, refuses to advise a restart, and points
+ * at both real ways out: fix the id, or use the escape hatch, which does release this.
+ */
+export const IDENTITY_UNMINTABLE_NOTE =
+  'NodeTerm could not confirm which node sent this command, so it did not run — and this node can ' +
+  'never present an identity, so restarting it will not help: its node id is invalid, or it ' +
+  "collides with another node id in this project's project.json when letter case is ignored. Fix " +
+  'the duplicate or invalid id there, or turn off Settings → Agents → "Require verified node ' +
+  'identity for canvas control".'
+
+/**
  * Control verbs that an unproven, unverified caller may still run after the cutoff.
  *
  * `list` is the whole bucket: it leaks the shape of the canvas — node ids, titles, which agent is
