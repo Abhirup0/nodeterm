@@ -49,7 +49,7 @@ describe('RemoteHooks.setup', () => {
     // reverse forward binds the ABSOLUTE remote socket (no unexpanded ~).
     expect(joined.some((j) => j.includes('-O forward') && j.includes('/home/u/.nodeterm/hook-p1.sock:127.0.0.1:51234'))).toBe(true)
     // endpoint file written to the absolute PER-PROJECT path, with the absolute sock + token.
-    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/hook-endpoint-p1.env'))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/hook-endpoint-p1.env'`))).toBe(true)
     expect(
       calls.some(
         (c) =>
@@ -58,8 +58,8 @@ describe('RemoteHooks.setup', () => {
       )
     ).toBe(true)
     // managed script written to the absolute path + config merged with the guarded command.
-    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/agent-hooks/claude.sh'))).toBe(true)
-    expect(joined.some((j) => j.includes('cat > /home/u/.claude/settings.json'))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/agent-hooks/claude.sh'`))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.claude/settings.json'`))).toBe(true)
     expect(calls.some((c) => (c.stdin ?? '').includes('--unix-socket'))).toBe(true)
     // The merged command guards on the script still existing — a removed ~/.nodeterm must not
     // make every prompt fail the hook (a non-zero UserPromptSubmit hook blocks the prompt).
@@ -168,8 +168,44 @@ describe('RemoteHooks.setup', () => {
     expect(b?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env')
     // the browse writes ITS OWN endpoint file, never the real project's.
     const joined = calls.map((c) => c.args.join(' '))
-    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env'))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env'`))).toBe(true)
     expect(joined.some((j) => j.includes('hook-endpoint-proj.env'))).toBe(false)
+  })
+})
+
+/**
+ * SECURITY — the remote `$HOME` is a HOST ANSWER, i.e. data, not truth. `setup()` splices it into
+ * `mkdir -p <remoteDir> && rm -f <sock>` and into every `cat > <config>`, and those are remote
+ * SHELL LINES. A `$HOME` carrying a newline therefore appends a second command; a `$HOME` carrying
+ * a space silently breaks the install (the unquoted `mkdir` word-splits). Two layers, matching the
+ * fix in `remoteTmuxPtyArgs`: validate the answer, then quote every path built from it. Same
+ * fail-open direction the surrounding code already takes — an unusable answer returns null and the
+ * host simply runs without hooks.
+ */
+describe('RemoteHooks.setup — a hostile remote $HOME', () => {
+  it('returns null and interpolates NOTHING when $HOME carries a newline', async () => {
+    const { rh, conn, runs } = harness({ responses: { $HOME: '/home/u\nid > /tmp/pwned' } })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res).toBeNull()
+    // Nothing beyond the probe itself may have run — no forward, no mkdir, no write.
+    expect(runs.some((r) => r.cmd.includes('id > /tmp/pwned'))).toBe(false)
+    expect(runs.some((r) => r.cmd.includes('mkdir'))).toBe(false)
+    expect(runs.some((r) => r.cmd.includes('-O forward'))).toBe(false)
+  })
+
+  it('quotes every path it builds from $HOME, so a home with a space still installs', async () => {
+    const { rh, conn, runs } = harness({ responses: { $HOME: '/Users/Enes K' } })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res?.endpointPath).toBe('/Users/Enes K/.nodeterm/hook-endpoint-p1.env')
+    const joined = runs.map((r) => r.cmd)
+    expect(joined.some((j) => j.includes(`mkdir -p '/Users/Enes K/.nodeterm'`))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/Users/Enes K/.nodeterm/hook-endpoint-p1.env'`))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/Users/Enes K/.claude/settings.json'`))).toBe(true)
+    // No path derived from $HOME survives UNQUOTED in any remote SHELL LINE (the last argv element
+    // of an ssh child is the command the remote shell parses; the `-R` forward spec is an ssh
+    // OPTION, not a shell word, so it is excluded by construction).
+    const shellLines = runs.map((r) => r.args[r.args.length - 1])
+    expect(shellLines.some((line) => /(?<!')\/Users\/Enes K/.test(line))).toBe(false)
   })
 })
 

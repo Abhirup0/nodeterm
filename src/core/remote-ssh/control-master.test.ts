@@ -244,7 +244,11 @@ describe('remoteTmuxPtyArgs', () => {
       '-e', 'NODETERM_NODE_ID=nt-x'
     ])
     const cmd = args[args.length - 1]
-    expect(cmd).toContain('new-session -A -e NODETERM_HOOK_ENDPOINT=/r/ep.env -e NODETERM_NODE_ID=nt-x -s')
+    // Each token is posix-quoted: this is ONE remote shell line, and the pair values carry the raw
+    // node id (see control-master.injection.test.ts for the injection this closes).
+    expect(cmd).toContain(
+      `new-session -A '-e' 'NODETERM_HOOK_ENDPOINT=/r/ep.env' '-e' 'NODETERM_NODE_ID=nt-x' -s`
+    )
   })
   it('threads confPath to remoteTmuxCommand as a `-f` source before new-session', () => {
     const args = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], '/home/u/.nodeterm/tmux.conf')
