@@ -53,3 +53,22 @@ describe('hookServer.setNodeAuthSecret — length guard', () => {
     expect(() => hookServer.setNodeAuthSecret(new Uint8Array(31))).toThrow(/invalid|secret/i)
   })
 })
+
+describe('hookServer.buildPtyEnv — no credential in the tmux -e argv (the §2.1 regression guard)', () => {
+  it('emits no bearer token and no port — they leaked through /proc/<pid>/cmdline', () => {
+    const env = hookServer.buildPtyEnv('n1', 'claude')
+    expect(env).not.toHaveProperty('NODETERM_HOOK_TOKEN')
+    expect(env).not.toHaveProperty('NODETERM_HOOK_PORT')
+    // The tmux `-e` argv is built by flattening this map — assert the live token never appears in it.
+    const argv = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+    expect(argv.join(' ')).not.toContain(hookServer.getToken())
+  })
+
+  it('still carries the non-credential wiring: endpoint file path, node id, agent id, version', () => {
+    const env = hookServer.buildPtyEnv('n1', 'claude')
+    expect(env.NODETERM_HOOK_ENDPOINT).toBeTruthy()
+    expect(env.NODETERM_NODE_ID).toBe('n1')
+    expect(env.NODETERM_AGENT_ID).toBe('claude')
+    expect(env.NODETERM_HOOK_VERSION).toBe('2')
+  })
+})

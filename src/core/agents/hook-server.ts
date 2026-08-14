@@ -539,8 +539,14 @@ class HookServer {
   buildPtyEnv(nodeId: string, agentId: AgentId, permWaitSecs = 0): Record<string, string> {
     if (this.port <= 0 || !this.token) return {}
     return {
-      NODETERM_HOOK_PORT: String(this.port),
-      NODETERM_HOOK_TOKEN: this.token,
+      // NO NODETERM_HOOK_TOKEN, NO NODETERM_HOOK_PORT — measured 2026-08-13: these ride the tmux
+      // `-e` argv into a long-lived tmux CLIENT process whose /proc/<pid>/cmdline is mode 444 on a
+      // stock Linux (no hidepid), so any unprivileged local user read a live app-wide bearer and
+      // could drive canvas control — including `open-terminal --cmd`, which is NOT in the
+      // confirm-gated DESTRUCTIVE set. Every client already sources the 0600 endpoint file FIRST
+      // and prefers it, so nothing legitimate loses anything: the only regression surface is a
+      // session whose endpoint file is unreadable AND whose env held a good token, a state that
+      // means the data dir has vanished and the hook is meant to be inert anyway.
       NODETERM_HOOK_VERSION: NODETERM_HOOK_PROTOCOL_VERSION,
       NODETERM_HOOK_ENDPOINT: this.endpointFilePath(),
       NODETERM_NODE_ID: nodeId,
