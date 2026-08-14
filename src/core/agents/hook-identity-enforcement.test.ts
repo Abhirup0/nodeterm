@@ -24,6 +24,7 @@ import {
   IDENTITY_REFUSED_NOTE,
   IDENTITY_RESTART_NOTE,
   IDENTITY_UNMINTABLE_NOTE,
+  IDENTITY_UNMINTABLE_WARN_NOTE,
   NODE_IDENTITY_STRICT_AFTER,
   TOLERANT_CONTROL_VERBS
 } from './node-identity-policy'
@@ -459,11 +460,13 @@ describe('a swept token must also release the latch', () => {
     expect(existsSync(join(nodeTokenDir(), 'Term-1'))).toBe(false)
 
     // 3. The live session has nothing left to read, so its next call is tokenless. It must land
-    //    back in the warning window, not on a permanent 403.
+    //    back in the warning window, not on a permanent 403 — and it must be told the truth about
+    //    WHY, because this node cannot mint until `project.json` changes. This assertion used to
+    //    read `IDENTITY_RESTART_NOTE`, which is the loop measured in the field.
     expect(hookServer.isNodeProven('Term-1')).toBe(false)
     const res = await control('open-terminal', 'Term-1')
     expect(res.status).toBe(200)
-    expect((await res.text()).startsWith(IDENTITY_RESTART_NOTE)).toBe(true)
+    expect((await res.text()).startsWith(IDENTITY_UNMINTABLE_WARN_NOTE)).toBe(true)
     expect(controlCalls).toEqual([{ verb: 'open-terminal', nodeId: 'Term-1' }])
     warn.mockRestore()
   })
@@ -564,6 +567,84 @@ describe('a node that can NEVER have an identity is told so, and not told to res
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+/**
+ * THE WINDOW IS WHERE THAT SENTENCE WAS NEEDED, AND IT WAS THE ONE PLACE IT COULD NOT REACH.
+ *
+ * Measured against a real hook server on 2026-08-14: node `Term-X`, a refused case-fold collision
+ * member, was handed `IDENTITY_RESTART_NOTE` — "Restart this node… to pick one up" — for a node
+ * that has nothing to pick up. `controlPolicy` answers `allow-with-warning` for exactly this
+ * population until 2026-10-13, and the warn branch emitted one fixed string, so the unmintable
+ * wording only ever appeared AFTER the cutoff (or for a latched node). For the whole warning
+ * window — the entire period the note exists to serve — its audience got the restart loop instead.
+ */
+describe('an unmintable node during the warning window, where the loop actually happens', () => {
+  const collide = (a: string, b: string): void => {
+    initNodeTokens({ canvases: () => [{ nodes: [{ id: a }, { id: b }] }] })
+  }
+
+  it('runs the command AND names the cause instead of advising a restart', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      collide('Warn-1', 'warn-1')
+      const res = await control('open-terminal', 'Warn-1')
+      // `allow-with-warning`, not a refusal: the window's promise is that the command still runs,
+      // and an unmintable node is not a suspect — it is a node whose project.json is wrong.
+      expect(res.status).toBe(200)
+      expect(controlCalls).toEqual([{ verb: 'open-terminal', nodeId: 'Warn-1' }])
+      const body = await res.text()
+      expect(body.startsWith(IDENTITY_UNMINTABLE_WARN_NOTE)).toBe(true)
+      expect(body).toContain('did open-terminal')
+      expect(body).not.toContain(IDENTITY_RESTART_NOTE)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('says it in the JSON dialect too, in the `warning` field a legacy client parses', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      collide('Warn-2', 'warn-2')
+      const res = await control('open-terminal', 'Warn-2', undefined, 'application/json')
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({
+        ok: true,
+        message: 'did open-terminal',
+        warning: IDENTITY_UNMINTABLE_WARN_NOTE
+      })
+      expect(controlCalls).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('says it for an id `isSafeNodeId` refuses, which no materialiser pass has ever seen', async () => {
+    // The `project.json` provenance case: `fileToProject` does not validate ids, so a shared repo
+    // can put a space (or a slash, or `..`) on the canvas and `nodeAuthToken` returns '' forever.
+    for (const nodeId of ['has space', 'a/b', '..']) {
+      const res = await control('open-terminal', nodeId)
+      expect(res.status, nodeId).toBe(200)
+      expect((await res.text()).startsWith(IDENTITY_UNMINTABLE_WARN_NOTE), nodeId).toBe(true)
+    }
+  })
+
+  it('leaves the ORDINARY unproven node on the restart line — that is the common case', async () => {
+    const res = await control('open-terminal', 'n-ordinary-warning')
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    expect(body.startsWith(IDENTITY_RESTART_NOTE)).toBe(true)
+    expect(body).not.toContain(IDENTITY_UNMINTABLE_WARN_NOTE)
+  })
+
+  it('never tells anyone to Restart, and still names the deadline', () => {
+    // The whole point of the pair: no capitalised imperative, because that action cannot work…
+    expect(IDENTITY_UNMINTABLE_WARN_NOTE).not.toContain('Restart')
+    // …and the same date as the ordinary note, because the same cutoff ends the same window.
+    expect(IDENTITY_UNMINTABLE_WARN_NOTE).toContain('2026-10-13')
+    // It ran; a sentence copied from the refusal would say the opposite of what just happened.
+    expect(IDENTITY_UNMINTABLE_WARN_NOTE).not.toContain('did not run')
   })
 })
 

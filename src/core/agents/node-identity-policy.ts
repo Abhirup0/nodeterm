@@ -135,13 +135,38 @@ export const IDENTITY_REFUSED_NOTE =
  * loop while the only real signal — a `console.warn` in the main-process log — sits somewhere they
  * will never look. This sentence names the cause instead, refuses to advise a restart, and points
  * at both real ways out: fix the id, or use the escape hatch, which does release this.
+ *
+ * It is one of a PAIR: this is the refusal, `IDENTITY_UNMINTABLE_WARN_NOTE` is the same cause said
+ * during the warning window, where the command ran. The two differ in one clause and share the
+ * rest, because the cause and the way out do not depend on which side of the cutoff you are on.
  */
+const UNMINTABLE_CAUSE =
+  'this node can never present an identity, so restarting it will not help: its node id is ' +
+  "invalid, or it collides with another node id in this project's project.json when letter case " +
+  'is ignored. Fix the duplicate or invalid id there, or turn off Settings → Agents → "Require ' +
+  'verified node identity for canvas control".'
+
 export const IDENTITY_UNMINTABLE_NOTE =
-  'NodeTerm could not confirm which node sent this command, so it did not run — and this node can ' +
-  'never present an identity, so restarting it will not help: its node id is invalid, or it ' +
-  "collides with another node id in this project's project.json when letter case is ignored. Fix " +
-  'the duplicate or invalid id there, or turn off Settings → Agents → "Require verified node ' +
-  'identity for canvas control".'
+  'NodeTerm could not confirm which node sent this command, so it did not run — and ' +
+  UNMINTABLE_CAUSE
+
+/**
+ * The same cause during the WARNING WINDOW, where the command still ran.
+ *
+ * This sentence is the whole reason the unmintable case needed a second one. `IDENTITY_UNMINTABLE_
+ * NOTE` is a refusal and says "so it did not run"; the window is `allow-with-warning`, so pasting
+ * the refusal on top of a reply that plainly DID run swaps one false sentence for another. And
+ * `IDENTITY_RESTART_NOTE` — what these nodes got until now — is the exact loop the unmintable
+ * wording exists to break, delivered for the entire window the note was written to serve: the user
+ * restarts, the node still cannot mint, the note comes back unchanged.
+ *
+ * It keeps `IDENTITY_RESTART_NOTE`'s closing clause verbatim, because the deadline is the same one
+ * and it is the part that makes the advice urgent: on the cutoff this stops being a note.
+ */
+export const IDENTITY_UNMINTABLE_WARN_NOTE =
+  'NodeTerm could not confirm which node sent this command, so it ran unverified — and ' +
+  UNMINTABLE_CAUSE +
+  ` From ${STRICT_DATE} commands from a session without an identity are refused.`
 
 /**
  * Control verbs that an unproven, unverified caller may still run after the cutoff.

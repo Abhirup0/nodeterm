@@ -16,6 +16,7 @@ import {
   IDENTITY_REFUSED_NOTE,
   IDENTITY_RESTART_NOTE,
   IDENTITY_UNMINTABLE_NOTE,
+  IDENTITY_UNMINTABLE_WARN_NOTE,
   type IdentityDecision
 } from './node-identity-policy'
 
@@ -275,13 +276,36 @@ class HookServer {
   }
 
   /**
+   * Can this node id NEVER hold a token, however often it is restarted?
+   *
+   * Two sources, and neither is recomputed here: the collision set the materialiser registers, and
+   * the id itself — `isSafeNodeId` is precisely the predicate `nodeAuthToken` refuses on, so an id
+   * it rejects mints '' forever.
+   */
+  private identityUnmintable(nodeId: string): boolean {
+    return !isSafeNodeId(nodeId) || this.unmintableNodes.has(nodeId)
+  }
+
+  /**
    * Which refusal sentence this node should hear. `IDENTITY_UNMINTABLE_NOTE` names the real cause
    * and deliberately does NOT advise a restart; see it for why that distinction is worth a Set.
    */
   private identityRefusalNote(nodeId: string): string {
-    return !isSafeNodeId(nodeId) || this.unmintableNodes.has(nodeId)
-      ? IDENTITY_UNMINTABLE_NOTE
-      : IDENTITY_REFUSED_NOTE
+    return this.identityUnmintable(nodeId) ? IDENTITY_UNMINTABLE_NOTE : IDENTITY_REFUSED_NOTE
+  }
+
+  /**
+   * The same choice for the WARNING WINDOW, and the reason the unmintable sentence is reachable at
+   * all before the cutoff.
+   *
+   * An unmintable node is `allow-with-warning` for the whole window — `controlPolicy` cannot see
+   * that it is unmintable, and would not change its verdict if it could, because running is the
+   * right answer there. So the window was the ONE period in which these nodes were guaranteed to be
+   * told to "Restart this node… to pick one up", which is the loop `IDENTITY_UNMINTABLE_NOTE` was
+   * written to end. The note was unreachable exactly while it was needed.
+   */
+  private identityWarningNote(nodeId: string): string {
+    return this.identityUnmintable(nodeId) ? IDENTITY_UNMINTABLE_WARN_NOTE : IDENTITY_RESTART_NOTE
   }
 
   setControlHandler(cb: NonNullable<HookServer['controlHandler']>): void {
@@ -433,7 +457,9 @@ class HookServer {
           const result = this.controlHandler
             ? await this.controlHandler({ verb, nodeId, args })
             : { ok: false, error: 'control unavailable' }
-          const warn = decision === 'allow-with-warning'
+          // Which note, not whether: an unmintable node warned with the restart line is sent round
+          // the same loop the refusal path already knows better than to send it round.
+          const note = decision === 'allow-with-warning' ? this.identityWarningNote(nodeId) : ''
           // The POSIX-sh shim asks for text/plain: it has no JSON parser, so the server does the
           // rendering the Node CLI used to do client-side. Everything else keeps the JSON shape.
           if (wantsText) {
@@ -441,14 +467,14 @@ class HookServer {
               ? result.message ?? JSON.stringify(result.result ?? {})
               : result.error ?? 'control request failed'
             res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/plain; charset=utf-8' })
-            res.end(warn ? `${IDENTITY_RESTART_NOTE}\n${text}\n` : `${text}\n`)
+            res.end(note ? `${note}\n${text}\n` : `${text}\n`)
             return
           }
           res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' })
           // A field, not a prefix: the JSON dialect is a STRUCTURED reply a legacy client parses,
           // and folding the note into `message` would either hide `result` (text rendering falls
           // back to it only when `message` is absent) or corrupt a field somebody reads.
-          res.end(JSON.stringify(warn ? { ...result, warning: IDENTITY_RESTART_NOTE } : result))
+          res.end(JSON.stringify(note ? { ...result, warning: note } : result))
           return
         }
         if (reqUrl.pathname.startsWith('/context-link/')) {

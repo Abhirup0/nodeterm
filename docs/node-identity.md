@@ -236,6 +236,14 @@ the handler never runs. The date is the owner's rule — *the second minor relea
 shipping release, whichever is later* — resolved to a concrete instant. A tightening with no date is
 a tightening that never happens.
 
+**Two sentences, because two populations.** The ordinary unverified node is told to restart to pick
+one up (`IDENTITY_RESTART_NOTE`) — that is the common case and the restart works. A node that can
+**never** mint (a case-fold collision member, or an id outside `isSafeNodeId` arriving from a shared
+`project.json`) is told the cause instead and is never advised to restart, in the window
+(`IDENTITY_UNMINTABLE_WARN_NOTE`) as well as after it (`IDENTITY_UNMINTABLE_NOTE`). The window is
+where that matters most: it is the *whole period* those nodes still work, so a restart loop there
+costs them the only time they had to fix the id.
+
 The cutoff is read through **`isStrictInstant`**, not a bare `>=`. A machine clock more than
 `NODE_IDENTITY_CLOCK_HORIZON_MS` (2 years) past the cutoff is not believed and the window stays open:
 a VM restored from a snapshot or a board with a bad RTC would otherwise enter strict mode on day one,
@@ -253,6 +261,15 @@ nodes that have **never** proven themselves. A node proves itself automatically 
 managed hook script presents the header, and the boot sweep materialises a token file for every
 persisted node — so a live Claude node is typically latched **within seconds of app start**. From
 that moment, a tokenless caller naming it gets a hard 403, today, with no grace and no date.
+
+**What makes a node `verified` is the SCRIPT, not the file.** Measured: a valid token file read by a
+managed hook script from a build that predates the header is still `legacy` — the file only counts
+once something sends it. Locally that is covered without a restart, because the boot-time hook
+install rewrites the script in the same start-up that runs the boot sweep. **An SSH host's script is
+rewritten only by `RemoteHooks.setup`, which runs on CONNECT**, so the remote nodes of a project that
+is already connected stay `legacy` until that project reconnects — for a long-lived SSH project, that
+can be a long time. Before the cutoff it costs them nothing but the note; on 2026-10-13 it becomes a
+refusal, so "reconnect the SSH project" is part of this upgrade even though "restart the node" is not.
 
 ### ⚠ …and the latch is not a defence against an attacker
 
