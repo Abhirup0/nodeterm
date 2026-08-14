@@ -47,6 +47,10 @@ export const IPC = {
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
+  /** main → renderer: ⌘/Ctrl+0 ("actual size"). Intercepted in `before-input-event` because
+   *  Electron's default View menu binds that accelerator to `resetZoom`, which resets the WINDOW's
+   *  page zoom rather than the canvas's. */
+  appZoomActualSize: 'app:zoom-actual-size',
   appCloseWindow: 'app:close-window',
   appFocusWindow: 'app:focus-window',
   /** Write text to the system clipboard from the MAIN process. Renderer-side `clipboard` access is

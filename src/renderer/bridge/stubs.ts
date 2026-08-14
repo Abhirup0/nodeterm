@@ -333,6 +333,9 @@ export function buildStubApi(): Omit<
     },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,
+    // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the
+    // renderer's own keydown handler is the whole path there.
+    onZoomActualSize: noopUnsub,
     closeWindow: noop,
     // Best-effort: a browser tab can't force itself frontmost the way the desktop BrowserWindow
     // can, but `window.focus()` still helps when the page is merely blurred (not another OS app).
