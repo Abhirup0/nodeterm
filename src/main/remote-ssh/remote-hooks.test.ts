@@ -130,8 +130,26 @@ describe('RemoteHooks.setup', () => {
     expect(joined.filter((j) => j.includes('-O forward')).length).toBe(2)
     // The retry clears our own possibly-registered spec before rebinding.
     expect(joined.some((j) => j.includes('-O cancel'))).toBe(true)
-    // The verify curl runs on the HOST through the sock with the fresh token.
-    expect(joined.some((j) => j.includes('--unix-socket') && j.includes('x-nodeterm-hook-token: tok'))).toBe(true)
+    // The verify curl runs on the HOST through the sock, reading the fresh token off stdin.
+    const probes = calls.filter((c) => c.cmd.includes('--unix-socket') && c.cmd.includes('%{http_code}'))
+    expect(probes).toHaveLength(2)
+    for (const p of probes) expect(p.stdin).toBe('header = "x-nodeterm-hook-token: tok"\n')
+  })
+
+  it('never puts the hook bearer on the remote probe command line', async () => {
+    // A remote command line is argv on BOTH ends: anything here is readable in the host's `ps` by
+    // every other user on that host, for as long as the curl lives. The bearer therefore rides
+    // stdin (`curl --config -`), which is the whole point of this probe's shape.
+    const secret = 'b3ar3r-9f2c-4a71-8e05-c0ffee000001'
+    const { rh, calls } = harness()
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: secret, version: '1' })
+    expect(res).not.toBeNull()
+    // Not one ARGUMENT of any ssh child command mentions it — not the probe, not anything else.
+    for (const c of calls) for (const a of c.args) expect(a).not.toContain(secret)
+    // ...and the probe still presents it, over stdin, as a curl config header.
+    const probe = calls.find((c) => c.cmd.includes('%{http_code}'))
+    expect(probe?.cmd).toContain('--config -')
+    expect(probe?.stdin).toBe(`header = "x-nodeterm-hook-token: ${secret}"\n`)
   })
 
   it('refuses to advertise a tunnel that never verifies — no endpoint file, null result', async () => {

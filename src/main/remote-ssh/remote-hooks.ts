@@ -773,6 +773,22 @@ export class RemoteHooks {
    * managed hook script uses, run ON the host. `000`/curl-fail = the listener's target is dead
    * (a stale forward from a previous run). No `payload` field is sent, so the server records
    * nothing (its listener path needs one).
+   *
+   * THE BEARER GOES ON STDIN, NEVER ARGV. This used to send `-H 'x-nodeterm-hook-token: <token>'`
+   * on the curl command line — and a remote command line is argv on BOTH ends: for as long as that
+   * curl lives, every OTHER user on the host can read the app-wide hook bearer out of `ps` /
+   * `/proc/<pid>/cmdline`. It is the same leak already measured and closed on the local side (the
+   * tmux `-e` channel), just pointed at someone else's machine. `curl --config -` reads options
+   * from stdin, where `header = "..."` sets the same header with nothing to see in the process
+   * table; `codex-identity-proxy.ts` already uses this exact idiom, and the runner already writes
+   * stdin (the endpoint-file write does).
+   *
+   * There is deliberately NO argv fallback for a curl too old for `--config` (it has had it since
+   * the 1990s): a fallback that puts the token back on argv would simply undo this. The probe
+   * failing is already a designed state — an unverified tunnel means remote agents run without
+   * hooks, loudly warned — and that is strictly better than leaking the bearer.
+   *
+   * What counts as SUCCESS is unchanged: exit 0 and a body of exactly `204`.
    */
   private async verifyTunnel(
     conn: SshConnection,
@@ -788,8 +804,15 @@ export class RemoteHooks {
         // effect of sending no payload; the identity label on `/hook/*` would have started judging
         // it there. `nodeId=verify` is kept in the body only so an OLDER desktop's script and this
         // one send the same bytes; the route reads nothing.
-        `-H ${posixQuote(`x-nodeterm-hook-token: ${token}`)} http://localhost/verify --data nodeId=verify`
-      const r = await this.r.run(childArgs(conn, controlPath, cmd))
+        `--config - http://localhost/verify --data nodeId=verify`
+      // A curl config file's double-quoted value understands backslash escapes, so the token is
+      // escaped for it. Today's bearer is a `randomUUID()` (hex + dashes) and cannot contain
+      // either character — the escaping is here so that stays true if the mint ever changes.
+      const header = token.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+      const r = await this.r.run(
+        childArgs(conn, controlPath, cmd),
+        `header = "x-nodeterm-hook-token: ${header}"\n`
+      )
       return r.code === 0 && r.stdout.trim() === '204'
     } catch {
       return false
