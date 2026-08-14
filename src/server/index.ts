@@ -24,6 +24,7 @@ import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
+import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -425,6 +426,9 @@ export async function startServer(
   // mode) and the hook server keeps serving — a throw here must never block boot or the hooks.
   try {
     hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    // Materialise a token file for every persisted node so an already-running session becomes
+    // verified at its next hook event with no restart. No-ops into legacy mode without a secret.
+    initNodeTokens({ canvases: () => workspaceStore.persistedCanvases() })
   } catch (error) {
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }
@@ -441,7 +445,10 @@ export async function startServer(
   })
   // Every load()/save() is a canvas change as far as links are concerned: a browser drawing a
   // bridge edge reaches us as the workspace save it triggers.
-  workspaceStore.onPersist = () => void contextLink.refresh()
+  workspaceStore.onPersist = () => {
+    contextLink.refresh()
+    refreshNodeTokens()
+  }
   // Nothing has read the workspace index yet — the desktop gets its first load from the renderer,
   // and this shell may never have one. Read it once so links are live before any browser connects.
   // Read-only: boot must not sideline a conflict-marked project.json (that stays a renderer/probe

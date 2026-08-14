@@ -132,6 +132,7 @@ import {
 } from '../core/codex-identity-proxy'
 import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
+import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import {
   isSafeLocalTranscriptPath,
@@ -273,7 +274,10 @@ const workspaceWatcher = new WorkspaceWatcher({
     })
   }
 })
-workspaceStore.onPersist = () => workspaceWatcher.sync()
+workspaceStore.onPersist = () => {
+  workspaceWatcher.sync()
+  refreshNodeTokens()
+}
 const gitService = new GitService()
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
@@ -919,6 +923,10 @@ app.whenReady().then(async () => {
     hookServer.setNodeAuthSecret(nodeAuthSecret)
     // Keep signing bound codex thread records with the same secret so they keep verifying.
     setCodexThreadIdentityAuthSecret(nodeAuthSecret)
+    // Materialise a token file for every node in every persisted project. This is what makes the
+    // upgrade invisible: an already-running session becomes verified at its next hook event, no
+    // restart. Safe if the secret is absent — the service no-ops into legacy mode.
+    initNodeTokens({ canvases: () => workspaceStore.persistedCanvases() })
   } catch (error) {
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }

@@ -58,6 +58,7 @@ import {
   forgetCodexThreadIdentitiesForNode,
   installCodexLauncher
 } from './codex-identity-proxy'
+import { ensureNodeToken, sweepNodeToken } from './agents/node-token-service'
 import { hasSharedIdentity, type AgentId } from '../shared/agents/config'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -1893,6 +1894,10 @@ export class PtyManager {
       this.getSettings().hookReplyApprovals && (options.agentId ?? 'claude') === 'claude'
         ? PERM_WAIT_SECS_DEFAULT
         : 0
+    // Materialise this node's token BEFORE the session exists, so the very first hook event the
+    // agent fires can already read it. Local sessions only: a remote node's token is written on the
+    // HOST (see remote-hooks), because the host is where its hook script runs.
+    if (options.persistKey && !options.sshRemote) ensureNodeToken(options.persistKey)
     const hookEnv =
       options.persistKey && !options.sshRemote
         ? hookServer.buildPtyEnv(options.persistKey, options.agentId ?? 'claude', permWaitSecs)
@@ -3027,6 +3032,9 @@ export class PtyManager {
     // re-binds a record immediately. Worth stating because the two intents share this line: only
     // `delete` means "gone for good".
     forgetCodexThreadIdentitiesForNode(persistKey)
+    // The node's per-node capability goes with it, same hook, same reason. A recycle re-mints on the
+    // next cold launch, so sweeping there is harmless.
+    sweepNodeToken(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: end the REMOTE session.
       const ssh = findSsh()

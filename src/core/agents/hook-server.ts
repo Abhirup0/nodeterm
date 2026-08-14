@@ -245,6 +245,11 @@ class HookServer {
     return !!this.codexNodeAuthSecret
   }
 
+  /** Test seam only: this server is a module singleton, so its secret otherwise leaks across tests. */
+  clearNodeAuthSecretForTests(): void {
+    this.codexNodeAuthSecret = null
+  }
+
   async start(): Promise<void> {
     if (this.server) return
     this.token = randomUUID()
