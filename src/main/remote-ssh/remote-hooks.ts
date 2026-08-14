@@ -58,6 +58,26 @@ export interface RemoteRunner {
 const REMOTE_HOME_MAX = 4096
 
 /**
+ * Every character that is live shell syntax at this file's `$HOME` interpolation sites, plus
+ * every control character. It is a DENYLIST on purpose - see `isSafeRemoteHome`.
+ *
+ *  - C0 (u0000-u001f) and C1 (u007f-u009f) controls: \n / \r are command
+ *    separators, \t is IFS, NUL truncates. U+2028/U+2029 are not shell-special but are
+ *    line breaks everywhere else (logs, JSON) and no real path holds one.
+ *  - Quote and expansion characters: single quote, double quote, backtick, $ and \\.
+ *    `$(...)` and backticks are command substitution.
+ *  - `;&|<>(){}` - separators, pipes, redirections, subshells, brace expansion.
+ *  - `*?[]` - globs; a star in the path makes `mkdir -p` reach a directory we never named.
+ *  - `!#` - history expansion and comments.
+ *
+ * The class is written with \u ESCAPES, never raw bytes: a source file carrying a literal
+ * NUL is skipped in silence by git, grep and ripgrep (this repo has lost two files to that).
+ *
+ * NOT here, deliberately: every letter on earth. That was the bug.
+ */
+const REMOTE_HOME_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029'"`$\\;&|<>(){}[\]*?!#]/
+
+/**
  * Is a host-reported `$HOME` safe to build remote commands from?
  *
  * `printf %s "$HOME"` returns DATA, not truth, and this file interpolates the answer into remote
@@ -65,11 +85,29 @@ const REMOTE_HOME_MAX = 4096
  * newline is therefore a command separator, and one holding `$(…)`/backticks is a substitution, on
  * a host we are running as the user. A host can set `$HOME` to whatever it likes.
  *
- * Deliberately far narrower than "what a filesystem allows": ordinary path characters only. The
- * cost of a false rejection is fail-open (no per-node token → `legacy`, the designed state; or, in
- * `setup`, no hooks at all — which is why the rejection is LOUD there), and the cost of a false
- * acceptance is remote code execution. A host whose home directory contains a non-ASCII character
- * is refused by that trade, which is the known and accepted price.
+ * THE SHAPE MATTERS. This used to be an allowlist — `/^[\w./ -]+$/` — and `\w` in JavaScript is
+ * `[A-Za-z0-9_]`, always, with or without the `u` flag; there is no switch that widens it. So
+ * `/home/josé`, `/home/gökhan`, `/Users/山田` and every other home directory whose owner does not
+ * spell their name in ASCII was judged "not a plain path". The consequence was total and silent for those
+ * users: `setup` refused, so no status badges, no context meter, no subagent cards, on every SSH
+ * host they own — the exact fail-open-in-silence class this file has been bitten by twice, this
+ * time aimed squarely at non-English users. An allowlist of LETTERS can only ever be a list of
+ * the alphabets its author happened to think of.
+ *
+ * So it enumerates what is DANGEROUS instead (`REMOTE_HOME_UNSAFE`), which is a closed set: shell
+ * metacharacters and control characters. Anything else — any script's letters, spaces (macOS
+ * `/Users/First Last` is ordinary), dots, dashes, underscores — is just a path. It must also be
+ * ABSOLUTE: a relative answer would build relative remote paths against whatever cwd the exec
+ * channel lands in, and `../..` stops being interesting the moment `/` is required up front.
+ *
+ * A single quote stays refused even though `posixQuote` handles it correctly (it closes, escapes
+ * and reopens: `o'brien` → `'o'\''brien'`, which round-trips byte-for-byte through /bin/sh).
+ * Correct quoting is no help at the sites that do not quote at all, and those are the sites this
+ * value reaches.
+ *
+ * A space is accepted here because it is not injection, but note that the unquoted sites above
+ * would still WORD-SPLIT it (`mkdir -p /Users/First Last/.nodeterm` makes two directories). That
+ * predates this predicate and is unchanged by it; quoting those sites is the real fix.
  *
  * It judges the EXACT string the caller holds — leading/trailing whitespace is a rejection, not
  * something quietly stripped (same rule as `isSafeRemoteGrokHome`): trimming here would return
@@ -80,7 +118,9 @@ export function isSafeRemoteHome(home: string): boolean {
     typeof home === 'string' &&
     home.length > 0 &&
     home.length <= REMOTE_HOME_MAX &&
-    /^[\w./ -]+$/.test(home)
+    home.startsWith('/') &&
+    home === home.trim() &&
+    !REMOTE_HOME_UNSAFE.test(home)
   )
 }
 

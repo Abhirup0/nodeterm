@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { RemoteHooks } from './remote-hooks'
+import { RemoteHooks, isSafeRemoteHome } from './remote-hooks'
 
 const conn = { host: 'h', user: 'u' }
 
@@ -589,5 +589,77 @@ describe('RemoteHooks.setup — the host $HOME is data, not truth', () => {
     expect(res).toBeNull()
     // Only the $HOME probe itself ran — nothing interpolated the answer.
     expect(calls).toHaveLength(1)
+  })
+
+  // The counterpart to the refusal above, and the reason this predicate was rewritten: a home
+  // directory named in a non-ASCII script is a NORMAL home, and the old allowlist turned it into a
+  // total, silent loss of every remote hook for that user.
+  it('installs hooks for a host whose $HOME is not spelled in ASCII', async () => {
+    const { rh, calls } = harness({ responses: { 'printf %s "$HOME"': '/home/gökhan' } })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res?.endpointPath).toBe('/home/gökhan/.nodeterm/hook-endpoint-p1.env')
+    const joined = calls.map((c) => c.args.join(' '))
+    expect(joined.some((j) => j.includes('cat > /home/gökhan/.claude/settings.json'))).toBe(true)
+  })
+})
+
+describe('isSafeRemoteHome', () => {
+  // Every one of these is somebody's actual home directory. A predicate that rejects any of them
+  // costs that user every status badge, the context meter and every subagent card, silently.
+  const REAL_HOMES = [
+    '/home/user',
+    '/Users/First Last', // macOS full-name accounts are ordinary
+    '/home/josé',
+    '/home/müller',
+    '/home/gökhan',
+    '/Users/山田',
+    '/home/пользователь',
+    '/home/user.name',
+    '/home/user-name',
+    '/home/user_name',
+    '/var/services/homes/user', // Synology DSM
+    '/data/data/com.termux/files/home', // Termux
+    `/home/${'a'.repeat(4000)}`
+  ]
+  it.each(REAL_HOMES)('accepts %s', (home) => {
+    expect(isSafeRemoteHome(home)).toBe(true)
+  })
+
+  // `$HOME` is interpolated into remote command lines, several still unquoted, so each of these
+  // would be live shell on a host we are logged into as the user.
+  const ATTACKS: [string, string][] = [
+    ['embedded newline', '/home/u\ntouch /tmp/pwn'],
+    ['carriage return', '/home/u\rtouch /tmp/pwn'],
+    ['NUL', '/home/u\u0000/x'],
+    ['tab (IFS)', '/home/u\tx'],
+    ['line separator', '/home/u\u2028x'],
+    ['command chain', '/home/u; rm -rf /'],
+    ['command substitution', '/home/$(id)'],
+    ['backtick substitution', '/home/`id`'],
+    ['single quote', "/home/u'; id; :'"],
+    ['double quote', '/home/u"x'],
+    ['backslash', '/home/u\\x'],
+    ['variable expansion', '/home/$USER'],
+    ['pipe', '/home/u | id'],
+    ['background', '/home/u & id'],
+    ['redirection', '/home/u > /etc/passwd'],
+    ['subshell', '/home/(u)'],
+    ['brace expansion', '/home/{a,b}'],
+    ['glob', '/home/*'],
+    ['relative traversal', '../..'],
+    ['relative', 'home/user'],
+    ['tilde', '~/x'],
+    ['empty', ''],
+    ['leading space', ' /home/u'],
+    ['trailing space', '/home/u '],
+    ['over the ceiling', `/home/${'a'.repeat(5000)}`]
+  ]
+  it.each(ATTACKS)('rejects %s', (_label, home) => {
+    expect(isSafeRemoteHome(home)).toBe(false)
+  })
+
+  it('rejects a non-string without throwing', () => {
+    expect(isSafeRemoteHome(undefined as unknown as string)).toBe(false)
+    expect(isSafeRemoteHome(null as unknown as string)).toBe(false)
   })
 })
