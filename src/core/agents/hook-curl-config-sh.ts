@@ -7,20 +7,62 @@
  * where the hook clients are installed for remote agent nodes. The per-node token exists precisely
  * to answer "which node is calling?"; a co-tenant who scrapes one out of the process table can
  * impersonate that node, and the app-wide bearer alongside it is the key to the whole hook API.
- * So both headers are written into a curl config file on stdin (`--config -`) instead, the same
+ * So the headers are written into a curl config file on stdin (`--config -`) instead, the same
  * way `usage/remote-claude-usage.ts` and the codex launcher in `codex-identity-proxy.ts` already
  * do it. There is deliberately no argv fallback for an ancient curl: `--config` has been there
  * since the 1990s, and a silent downgrade to argv would be the leak wearing a compatibility hat.
  *
- * ONE COPY, THREE CLIENTS: the managed hook script, the canvas-control shim and the context-link
- * shim all send the same two headers. They used to carry three copies of the header lines; three
- * copies of an escaping rule is how one of them stays wrong.
- *
- * `nt_node_token` is the caller's variable (each client reads it from the token dir the endpoint
- * file advertises, keyed by its own node id) — it is read here, not passed, because the failover
- * in the managed script RE-READS it between POSTs and the helper must see the current value.
+ * ONE COPY OF THE ESCAPING RULE, FOUR CLIENTS: the managed hook script, the canvas-control shim
+ * and the context-link shim all send the same two hook headers (`HOOK_CURL_HEADERS_SH` below);
+ * the SSH askpass helper in `main/remote-ssh/ssh-askpass.ts` sends a different, single header and
+ * builds its own emitter from `curlHeaderConfigSh`. They all go through `headerLine`, because four
+ * copies of a quoting rule is how one of them stays wrong.
  */
-export const HOOK_CURL_HEADERS_SH = `# Both credentials go to curl on STDIN as a config file, never in argv: a command line is
+
+/**
+ * One `header = "<name>: <value>"` line for a curl config file, emitted by `printf` so the value
+ * is read from its sh variable AT CALL TIME (callers such as the managed script's failover re-read
+ * their token between POSTs, and the emitter must see the current value, not one captured once).
+ *
+ * `valueRef` is the sh expression holding the value, e.g. `$NODETERM_HOOK_TOKEN` — it is expanded
+ * inside double quotes here, so it is never word-split or globbed.
+ */
+function headerLine(name: string, valueRef: string): string {
+  return `  printf 'header = "${name}: %s"\\n' "$(printf %s "${valueRef}" | tr -d '\\\\"\\n\\r')"`
+}
+
+/**
+ * Build a POSIX-sh function that writes a curl config file (for `curl --config -`) carrying
+ * `headers`, to be piped into curl. `note` is the client-specific comment placed above it.
+ *
+ * The quoting rule lives here and nowhere else: a curl config file is LINE-based and its quoted
+ * values understand backslash escapes, so four characters could end a header line and start a
+ * directive of their own — `"`, `\`, and the two line breaks. All four are stripped from a value
+ * before it is written.
+ */
+export function curlHeaderConfigSh(
+  fnName: string,
+  headers: { name: string; valueRef: string }[],
+  note: string
+): string {
+  return [
+    note,
+    `${fnName}() {`,
+    ...headers.map((h) => headerLine(h.name, h.valueRef)),
+    '}'
+  ].join('\n')
+}
+
+export const HOOK_CURL_HEADERS_SH = curlHeaderConfigSh(
+  'nt_hook_headers',
+  [
+    { name: 'X-Nodeterm-Hook-Token', valueRef: '$NODETERM_HOOK_TOKEN' },
+    // The caller's variable (each client reads it from the token dir the endpoint file advertises,
+    // keyed by its own node id) — read here, not passed, because the failover in the managed
+    // script RE-READS it between POSTs and the emitter must see the current value.
+    { name: 'X-Nodeterm-Node-Token', valueRef: '$nt_node_token' }
+  ],
+  `# Both credentials go to curl on STDIN as a config file, never in argv: a command line is
 # world-readable through \`ps\` / /proc/<pid>/cmdline for the life of the process, locally and on
 # every SSH host, so an argv header hands the app-wide bearer — and this node's own capability —
 # to any co-tenant who looks at the process table. Reading another node's token out of \`ps\` is
@@ -34,8 +76,5 @@ export const HOOK_CURL_HEADERS_SH = `# Both credentials go to curl on STDIN as a
 # value that somehow acquired one still could not break out of its own header line.
 #
 # An EMPTY value keeps the legacy contract exactly as \`-H\` did: curl sends no header at all when
-# there is nothing after the colon, and the server reads absent and empty identically as \`legacy\`.
-nt_hook_headers() {
-  printf 'header = "X-Nodeterm-Hook-Token: %s"\\n' "$(printf %s "$NODETERM_HOOK_TOKEN" | tr -d '\\\\"\\n\\r')"
-  printf 'header = "X-Nodeterm-Node-Token: %s"\\n' "$(printf %s "$nt_node_token" | tr -d '\\\\"\\n\\r')"
-}`
+# there is nothing after the colon, and the server reads absent and empty identically as \`legacy\`.`
+)
