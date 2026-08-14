@@ -1,6 +1,6 @@
 import { hookServer } from './hook-server'
 import { nodeAuthToken, isSafeNodeId } from './node-auth-token'
-import { writeNodeTokenFile, sweepNodeTokenFile } from './node-token-files'
+import { writeNodeTokenFile, sweepNodeTokenFile, materialisedNodes } from './node-token-files'
 
 type Canvases = () => Array<{ nodes: Array<{ id: string }> }>
 let canvases: Canvases = () => []
@@ -75,7 +75,16 @@ function canvasNodeIds(): string[] {
   return ids
 }
 
-function materialiseOne(secret: Buffer, nodeId: string): void {
+/**
+ * `materialisedNodes()` is exactly the right key for the short-circuit: it holds the ids this RUN
+ * has written a readable file for, and the token is DERIVED from (secret, nodeId) — neither input
+ * can change without a restart — so a second write produces byte-identical content. `force` is the
+ * boot sweep's door past it, for a run that wants the files re-asserted regardless.
+ *
+ * `sweepNodeTokenFile` deletes from that Set, so a deleted-and-recreated node re-materialises.
+ */
+function materialiseOne(secret: Buffer, nodeId: string, force: boolean): void {
+  if (!force && materialisedNodes().has(nodeId)) return
   const token = nodeAuthToken(secret, nodeId)
   if (token) writeNodeTokenFile(nodeId, token)
 }
@@ -89,10 +98,10 @@ function materialiseOne(secret: Buffer, nodeId: string): void {
  */
 export function initNodeTokens(deps: { canvases: Canvases }): void {
   canvases = deps.canvases
-  refreshNodeTokens()
+  refreshNodeTokens({ force: true })
 }
 
-export function ensureNodeToken(nodeId: string): void {
+export function ensureNodeToken(nodeId: string, opts?: { force?: boolean }): void {
   const secret = hookServer.nodeAuthSecretOrNull()
   if (!secret) return // legacy everywhere, write nothing
   // The spawn path must apply the same refusal as the sweep, or a hostile pair would simply be
@@ -104,14 +113,21 @@ export function ensureNodeToken(nodeId: string): void {
     for (const id of group) sweepNodeTokenFile(id)
     return
   }
-  materialiseOne(secret, nodeId)
+  materialiseOne(secret, nodeId, opts?.force ?? false)
 }
 
 export function sweepNodeToken(nodeId: string): void {
   sweepNodeTokenFile(nodeId)
 }
 
-export function refreshNodeTokens(): void {
+/**
+ * Wired to `onPersist`, which fires on every canvas LOAD and every canvas SAVE. Rewriting every
+ * token for every node in every project there cost a ~375-node workspace ~2000 synchronous syscalls
+ * on the Electron main thread per save — plus one `console.warn` per node per save when the token
+ * dir is unwritable — for a value that is derived and cannot have changed. `materialiseOne` skips
+ * anything already on disk this run, so the steady state is a scan and no I/O at all.
+ */
+export function refreshNodeTokens(opts?: { force?: boolean }): void {
   const secret = hookServer.nodeAuthSecretOrNull()
   if (!secret) return
   const ids = canvasNodeIds()
@@ -124,6 +140,6 @@ export function refreshNodeTokens(): void {
   }
   for (const id of new Set(ids)) {
     if (colliding.has(id)) continue
-    materialiseOne(secret, id)
+    materialiseOne(secret, id, opts?.force ?? false)
   }
 }

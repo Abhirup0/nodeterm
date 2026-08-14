@@ -137,3 +137,40 @@ describe('node token service — case-folding node id collisions', () => {
     expect(nodeIdFoldKey('KELVIN')).toBe(nodeIdFoldKey('kelvin')) // U+212A KELVIN SIGN
   })
 })
+
+/**
+ * `refreshNodeTokens` is wired to `onPersist`, which fires on every canvas load AND save, so a
+ * ~375-node workspace paid ~2000 synchronous syscalls on the main thread per save to rewrite bytes
+ * that cannot change. The inode is the assertion rather than mtime: the writer is tmp+rename, so a
+ * real rewrite always lands a NEW inode (the tmp is allocated while the old file still exists),
+ * which no clock resolution can blur.
+ */
+describe('node token service — writes once, not on every persist', () => {
+  const ino = (id: string) => fs.statSync(path.join(nodeTokenDir(), id)).ino
+
+  it('does not touch the file again for an id already materialised this run', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => canvases })
+    const before = canvases.flatMap((c) => c.nodes).map((n) => [n.id, ino(n.id)] as const)
+    refreshNodeTokens() // what every save costs
+    ensureNodeToken('node-1') // ...and what every spawn costs
+    for (const [id, was] of before) expect(ino(id), id).toBe(was)
+  })
+
+  it('rewrites anyway under `force` — the boot sweep re-asserts what is on disk', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    ensureNodeToken('node-1')
+    const was = ino('node-1')
+    ensureNodeToken('node-1', { force: true })
+    expect(ino('node-1')).not.toBe(was)
+  })
+
+  it('re-materialises a swept id, so a deleted-then-recreated node is not left on legacy', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    ensureNodeToken('node-1')
+    sweepNodeToken('node-1')
+    expect(fs.existsSync(path.join(nodeTokenDir(), 'node-1'))).toBe(false)
+    ensureNodeToken('node-1')
+    expect(fs.existsSync(path.join(nodeTokenDir(), 'node-1'))).toBe(true)
+  })
+})

@@ -3032,9 +3032,15 @@ export class PtyManager {
     // re-binds a record immediately. Worth stating because the two intents share this line: only
     // `delete` means "gone for good".
     forgetCodexThreadIdentitiesForNode(persistKey)
-    // The node's per-node capability goes with it, same hook, same reason. A recycle re-mints on the
-    // next cold launch, so sweeping there is harmless.
-    sweepNodeToken(persistKey)
+    // The node's per-node capability goes with it — but ONLY on a delete, unlike the two above.
+    // The token is derived from the NODE id, and a recycle keeps the node: the file on disk stays
+    // exactly correct across a worktree move, so sweeping it would delete a valid credential and
+    // open a window (kill → respawn → first hook event) in which the node cannot prove itself.
+    // Under the trust-on-first-proof latch that window is not merely a downgrade to `legacy` — a
+    // node that has already proven itself and then presents nothing is refused. Re-minting right
+    // after the sweep would close most of it, but it depends on respawn ordering and still leaves a
+    // gap; not sweeping leaves none, and there is nothing stale to clean up.
+    if (intent === 'delete') sweepNodeToken(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: end the REMOTE session.
       const ssh = findSsh()
