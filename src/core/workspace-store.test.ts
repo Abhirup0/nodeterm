@@ -360,6 +360,46 @@ describe('unavailable projects never overwrite real data on save', () => {
     const after = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
     expect(after.entries[0].cache).toEqual(cache) // good offline cache survived verbatim
   })
+
+  // The rest of the entry's MACHINE-LOCAL half has the same problem as the cache: a placeholder
+  // carries none of it (its viewport is the {0,0,1} of an empty stand-in canvas, its nodes are
+  // gone), so an index rewrite while a folder is briefly unmounted would forget where the user was
+  // looking, which account this project runs on, and their own custom shell — none of which is
+  // recoverable from the project file, because none of it is IN the project file any more.
+  it('save() of an unavailable ref keeps the entry\'s camera, account and exec values', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({
+      cwd: projRoot,
+      viewport: { x: -640, y: 55, zoom: 1.75 },
+      defaultAccountId: 'acct-7',
+      nodes: [{
+        id: 'term-1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 },
+        title: 't', color: '#fff', group: null, shell: '/bin/zsh'
+      }]
+    })]))
+    const readEntry = async () =>
+      JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')).entries[0]
+    expect(await readEntry()).toMatchObject({
+      viewport: { x: -640, y: 55, zoom: 1.75 },
+      defaultAccountId: 'acct-7',
+      localExec: { 'term-1': { shell: '/bin/zsh' } }
+    })
+
+    // The folder goes away: the next load hands the renderer a grey placeholder, and the renderer
+    // hands it straight back to save().
+    await fs.rm(projRoot, { recursive: true, force: true })
+    const store2 = new WorkspaceStore()
+    const loaded = await store2.load()
+    expect(loaded.projects[0].unavailable).toBe(true)
+    expect(loaded.projects[0].viewport).toEqual({ x: 0, y: 0, zoom: 1 }) // the placeholder's
+    await store2.save(loaded)
+
+    expect(await readEntry()).toMatchObject({
+      viewport: { x: -640, y: 55, zoom: 1.75 },
+      defaultAccountId: 'acct-7',
+      localExec: { 'term-1': { shell: '/bin/zsh' } }
+    })
+  })
 })
 
 describe('probeFolder', () => {
@@ -1299,9 +1339,10 @@ describe('a git-shared project.json must not give two folders one project id', (
     expect(fileA.id).toBe(fileB.id)
   })
 
-  // The repair writes each project file first and the index last, so a crash (or a kill, or a power
-  // loss) between them leaves a re-keyed file under an un-re-keyed index. The deterministic
-  // derivation is what makes that survivable: the next load derives the SAME id again.
+  // The repair is one index write now, so there is no half-applied state to crash into — but the
+  // property that made the old two-write repair survivable still has to hold, because a lost index
+  // write leaves the SAME collision on disk: the derivation is deterministic, so the next load
+  // derives the same ids again rather than inventing new ones.
   it('survives a crash mid-repair (file re-keyed, index write lost) and converges on the same ids', async () => {
     await seedCollision()
     const indexBefore = await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8')

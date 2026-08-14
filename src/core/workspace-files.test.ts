@@ -134,8 +134,8 @@ describe('splitWorkspace', () => {
     expect(index.entries[1].id).not.toBe('dup')
     expect(files.size).toBe(2)
     // Neither file names a project any more — only the folder they sit in does.
-    expect(files.get('/a/foo')!.id).not.toBe('dup')
-    expect(files.get('/a/bar')!.id).not.toBe(index.entries[1].id)
+    expect(files.get('/a/foo')!.id).toBe(legacyFileId('first'))
+    expect(files.get('/a/bar')!.id).toBe(legacyFileId('second'))
     expect(files.get('/a/foo')!.nodes.map((n) => n.id)).toEqual(['term-a'])
     expect(files.get('/a/bar')!.nodes.map((n) => n.id)).toEqual(['term-b'])
   })
@@ -436,5 +436,41 @@ describe('framingViewport', () => {
     // A child's position is relative to its frame, so it can't anchor the camera.
     expect(framingViewport([node({ parentId: 'group-1', position: { x: 10, y: 10 } })]))
       .toEqual({ x: 0, y: 0, zoom: 1 })
+  })
+
+  // This value is written into the user's COMMITTED file on every save. The field it replaced was
+  // the user's own viewport and could not be poisoned by node data; this one can, so a corrupt or
+  // hand-edited position must not reach the file as NaN — which JSON.stringify writes as `null`,
+  // and which a reader then hands to React Flow as a camera.
+  it('a corrupt node position never reaches the file (no NaN, and the good axis still counts)', () => {
+    const corrupt = [
+      { ...node({ id: 'bad' }), position: { x: null, y: 75 } as unknown as { x: number; y: number } },
+      node({ id: 'ok', position: { x: 300, y: 900 } })
+    ]
+    expect(framingViewport(corrupt)).toEqual({ x: 80 - 300, y: 80 - 75, zoom: 1 })
+    // …and what actually lands on disk: JSON.stringify turns NaN into `null`, so the round trip
+    // is the assertion that matters (the node's own corrupt position is preserved verbatim —
+    // this file is not the place to silently rewrite the user's data).
+    const written = JSON.parse(
+      serializeProjectFile(projectToFile(project({ nodes: corrupt }), 1, 'now'))
+    ) as ProjectFileV1
+    expect(Number.isFinite(written.viewport!.x)).toBe(true)
+    expect(Number.isFinite(written.viewport!.y)).toBe(true)
+    expect(written.viewport).toEqual({ x: -220, y: 5, zoom: 1 })
+  })
+
+  it('every position corrupt (or missing) falls back to the origin, never NaN', () => {
+    const junk = [
+      { ...node({ id: 'a' }), position: undefined as unknown as { x: number; y: number } },
+      { ...node({ id: 'b' }), position: { x: 'left', y: NaN } as unknown as { x: number; y: number } }
+    ]
+    expect(framingViewport(junk)).toEqual({ x: 0, y: 0, zoom: 1 })
+  })
+
+  // It runs inside projectToFile → splitWorkspace → save(), so a throw here fails the WHOLE save,
+  // not one node. `Math.min(...nodes.map(…))` overflowed the call stack around 200k arguments.
+  it('a canvas far past the argument limit still frames (a loop, not a spread)', () => {
+    const many = Array.from({ length: 250_000 }, (_, i) => node({ id: `t${i}`, position: { x: i + 5, y: i + 9 } }))
+    expect(framingViewport(many)).toEqual({ x: 75, y: 71, zoom: 1 })
   })
 })

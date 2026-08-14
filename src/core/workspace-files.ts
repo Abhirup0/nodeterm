@@ -254,13 +254,29 @@ export function fileToProject(
  * Without it a shared canvas whose nodes live at x=4000 opened onto empty space — the file no
  * longer carries the author's camera, so the default {0,0,1} would have been a blank screen and
  * "commit it to share the canvas" would have been a lie.
+ *
+ * A plain loop with a finiteness guard per AXIS, not `Math.min(...map())`, because this now runs
+ * inside `projectToFile` — i.e. inside every `save()` — where the old shape had two ways to ruin
+ * one: a hand-edited/corrupt `position` made `Math.min` return NaN, which `JSON.stringify` writes
+ * into the COMMITTED file as `"x": null` (a field that used to be the user's own viewport and
+ * could not be poisoned by node data), and spreading a large enough node array blows the call
+ * stack, which would now fail the whole save rather than one node.
  */
 export function framingViewport(nodes: CanvasNodeState[]): Viewport {
-  const rooted = nodes.filter((n) => !n.parentId)
-  if (!rooted.length) return { x: 0, y: 0, zoom: 1 }
-  const minX = Math.min(...rooted.map((n) => n.position.x))
-  const minY = Math.min(...rooted.map((n) => n.position.y))
-  return { x: 80 - minX, y: 80 - minY, zoom: 1 }
+  let minX = Infinity
+  let minY = Infinity
+  for (const n of nodes) {
+    // A child's position is relative to its frame, so it cannot anchor the camera.
+    if (n.parentId) continue
+    const pos = n.position as { x?: unknown; y?: unknown } | undefined
+    if (typeof pos?.x === 'number' && Number.isFinite(pos.x) && pos.x < minX) minX = pos.x
+    if (typeof pos?.y === 'number' && Number.isFinite(pos.y) && pos.y < minY) minY = pos.y
+  }
+  return {
+    x: Number.isFinite(minX) ? 80 - minX : 0,
+    y: Number.isFinite(minY) ? 80 - minY : 0,
+    zoom: 1
+  }
 }
 
 /**
