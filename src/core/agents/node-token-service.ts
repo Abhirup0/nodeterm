@@ -61,6 +61,25 @@ function collidingGroups(ids: Iterable<string>): Map<string, string[]> {
   return colliding
 }
 
+/**
+ * Every sweep in this file goes through here, and never through `sweepNodeTokenFile` directly.
+ *
+ * Taking a node's token away and LEAVING it in the trust-on-first-proof latch is the one way this
+ * feature can strand a live session: the latch refuses an unverified caller immediately, on both
+ * sides of the cutoff, so a node that proved itself and then had its file swept gets a hard 403 on
+ * every canvas-control call for the rest of the session — with a sentence telling it to restart to
+ * pick up an identity there is no longer one to pick up. The realistic sequence is exactly the
+ * collision case below: `Term-1` boots alone, materialises, proves itself; a shared `project.json`
+ * later puts `term-1` on the canvas; the next persist refuses the whole set and sweeps both files.
+ *
+ * The refusal itself is right — those nodes belong on `legacy`, the designed fail-open state — so
+ * the fix is to put them all the way back on it, latch included.
+ */
+function sweepToken(nodeId: string): void {
+  sweepNodeTokenFile(nodeId)
+  hookServer.forgetProvenNode(nodeId)
+}
+
 /** Loud on purpose: this is the only signal that a node is on `legacy` for a reason. */
 function warnCollision(group: readonly string[]): void {
   console.warn(
@@ -110,14 +129,14 @@ export function ensureNodeToken(nodeId: string, opts?: { force?: boolean }): voi
   const group = collidingGroups([...canvasNodeIds(), nodeId]).get(nodeId)
   if (group) {
     warnCollision(group)
-    for (const id of group) sweepNodeTokenFile(id)
+    for (const id of group) sweepToken(id)
     return
   }
   materialiseOne(secret, nodeId, opts?.force ?? false)
 }
 
 export function sweepNodeToken(nodeId: string): void {
-  sweepNodeTokenFile(nodeId)
+  sweepToken(nodeId)
 }
 
 /** The node ids of ONE persisted canvas. The remote materialiser is per SSH project, not global:
@@ -146,6 +165,11 @@ export function remoteNodeTokenMinter(): ((nodeId: string) => string) | null {
     const group = collidingGroups([...canvasNodeIds(), nodeId]).get(nodeId)
     if (group) {
       warnCollision(group)
+      // The latch is keyed by node id and is instance-global — an SSH node proves itself over the
+      // same hook server — so a refusal here has to release it too, or the remote node is stranded
+      // exactly as a local one would be. The FILE lives on the host and the caller sweeps it there;
+      // only the latch is ours to clear.
+      hookServer.forgetProvenNode(nodeId)
       return ''
     }
     return nodeAuthToken(secret, nodeId)
@@ -193,8 +217,10 @@ export function refreshNodeTokens(opts?: { force?: boolean }): void {
   for (const group of new Set(colliding.values())) {
     warnCollision(group)
     // Sweep, don't merely skip: an earlier pass may have written one of these before its twin
-    // appeared on the canvas, and that surviving file is the token the twin would read.
-    for (const id of group) sweepNodeTokenFile(id)
+    // appeared on the canvas, and that surviving file is the token the twin would read. `sweepToken`
+    // (not `sweepNodeTokenFile`) because that same earlier pass may already have let the node PROVE
+    // itself, and a latch outliving the token is a permanent 403 — see the helper.
+    for (const id of group) sweepToken(id)
   }
   for (const id of new Set(ids)) {
     if (colliding.has(id)) continue

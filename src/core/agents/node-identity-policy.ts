@@ -22,20 +22,69 @@
  *     same situation is a refusal. The date is in the source, not in a comment saying "later":
  *     a tightening with no date is a tightening that never happens.
  */
+import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
 import type { NodeTokenVerdict } from './node-auth-token'
 
 /**
  * When an unverified mutation stops executing and starts being refused.
  *
- * The owner's rule was "the second minor release OR 60 days after the shipping release, whichever
- * is LATER", resolved here to the concrete instant that rule lands on. Resolved, not computed: a
- * date the code can print is a date a user can plan around, and a rule that has to be re-derived
- * from a release calendar is a rule that quietly never fires. Also in docs/node-identity.md.
+ * Built from the ONE date string in `@shared/node-identity` — the Settings row prints that same
+ * string, and the renderer cannot import this file. See there for where the date comes from.
  */
-export const NODE_IDENTITY_STRICT_AFTER = new Date('2026-10-13T00:00:00Z')
+export const NODE_IDENTITY_STRICT_AFTER = new Date(`${NODE_IDENTITY_STRICT_DATE}T00:00:00Z`)
 
-/** The date as the user reads it. Derived, so the sentence and the constant cannot drift apart. */
-const STRICT_DATE = NODE_IDENTITY_STRICT_AFTER.toISOString().slice(0, 10)
+const STRICT_DATE = NODE_IDENTITY_STRICT_DATE
+
+/**
+ * How far past the cutoff the LOCAL CLOCK may read before the cutoff stops being believed at all.
+ *
+ * The cutoff is compared against `Date.now()`, and a machine clock is not evidence. A VM restored
+ * from a snapshot, a board whose RTC came up wrong, or a clock somebody set forward on purpose can
+ * put a perfectly ordinary install years into the future — and it then enters strict mode on day
+ * one, with no warning window, refusing every unverified mutation with a sentence naming a date
+ * that has "already passed". The symptom reads as "the token is broken", so nobody looks at the
+ * clock, and the escape hatch is the last place they think to go.
+ *
+ * There is no way to tell that case apart from an install genuinely still running years after the
+ * cutoff: an old binary can run forever, so `now` far ahead of anything in this source proves
+ * nothing on its own. Since the two are indistinguishable, the tie is broken by which mistake is
+ * worse — and the whole series fails OPEN by design, so the answer is to keep the window open.
+ *
+ * That costs almost nothing, because **the cutoff is not the security boundary — the latch is.**
+ * Trust on first proof refuses an unverified caller for a node that has ever proven itself,
+ * immediately, on both sides of the cutoff and regardless of this clamp. What the cutoff governs is
+ * only the population that has NEVER proven anything, i.e. exactly the pre-token sessions the
+ * warning window exists for, and fail-open is that population's designed state.
+ *
+ * Two years, because that is comfortably longer than the upgrade population survives (tmux sessions
+ * and un-updated installs do not last it out) and comfortably shorter than the clock skews that
+ * actually occur, which are measured in decades (an RTC default year, an epoch reset, a licence
+ * clock set forward).
+ *
+ * The same reasoning as `license.ts`'s rollback anchor, pointed the other way: there, the clock
+ * direction the USER benefits from (setting it back to revive an expired token) is the one that is
+ * refused, via `Math.max(Date.now(), lastSeen)`. Here the direction a user benefits from is setting
+ * the clock BACK to dodge the cutoff — and that buys them nothing worth defending, because
+ * `hookIdentityStrict: false` grants exactly the same thing with one click. So there is no security
+ * to trade away by disbelieving a clock that reads absurdly far forward; there is only a silent
+ * day-one lockout to remove.
+ */
+export const NODE_IDENTITY_CLOCK_HORIZON_MS = 2 * 365 * 24 * 60 * 60 * 1000
+
+/**
+ * Is `now` an instant at which the dated cutoff should be enforced?
+ *
+ * Clamped at BOTH ends: before the cutoff the window is open (the point of the window), and beyond
+ * `NODE_IDENTITY_CLOCK_HORIZON_MS` past it the clock is not believed and the window is open again.
+ * Exported so the clamp is testable as a rule rather than only through `controlPolicy`'s table.
+ */
+export function isStrictInstant(now: Date): boolean {
+  const t = now.getTime()
+  const cutoff = NODE_IDENTITY_STRICT_AFTER.getTime()
+  // NaN (an invalid Date from a broken injected clock) fails both comparisons ⇒ not strict, which
+  // is the fail-open direction this whole file takes.
+  return t >= cutoff && t < cutoff + NODE_IDENTITY_CLOCK_HORIZON_MS
+}
 
 /**
  * Prefixed onto the reply of an unverified mutation that STILL RAN.
@@ -134,6 +183,8 @@ export function controlPolicy({
   }
   if (proven) return 'refuse'
   if (TOLERANT_CONTROL_VERBS.has(verb)) return 'allow'
-  const strict = override ?? now.getTime() >= NODE_IDENTITY_STRICT_AFTER.getTime()
+  // `isStrictInstant`, not a bare `>=`: a machine clock years ahead of the cutoff would otherwise
+  // put this install in strict mode on day one with no warning window at all. See the constant.
+  const strict = override ?? isStrictInstant(now)
   return strict ? 'refuse' : 'allow-with-warning'
 }

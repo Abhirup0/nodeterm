@@ -12,12 +12,14 @@
 //  - the dated window: an unverified mutation EXECUTES and carries the restart line until
 //    2026-10-13, and is refused with the same shape afterwards.
 //  - `write`/`close` keep their user confirmation whatever the token says.
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { mkdtempSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
+import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { hookServer } from './hook-server'
 import { nodeAuthToken } from './node-auth-token'
+import { nodeTokenDir } from './node-token-files'
+import { initNodeTokens, refreshNodeTokens, sweepNodeToken } from './node-token-service'
 import {
   IDENTITY_REFUSED_NOTE,
   IDENTITY_RESTART_NOTE,
@@ -340,6 +342,70 @@ describe('both shells wire the escape hatch', () => {
       expect(src, rel).toContain('setIdentityStrictOverride')
       expect(src, rel).toContain('hookIdentityStrict')
     }
+  })
+})
+
+/**
+ * Sweeping a node's token WITHOUT releasing the latch is the one way this feature can kill a live
+ * node outright: the latch refuses an unverified caller immediately, on both sides of the cutoff,
+ * so the node gets a hard 403 on every canvas-control call for the rest of the session — advised to
+ * restart to pick up an identity there is no longer one to pick up.
+ *
+ * The collision case is the realistic one, and it is a sequence, not a state: the refusal in
+ * `node-token-service.ts` is what keeps a fold-collision from becoming a hijack, but it fires the
+ * moment the twin appears, which can be long after the first node materialised AND proved itself.
+ */
+describe('a swept token must also release the latch', () => {
+  it('un-proves a node whose case-folding twin turns up and gets the whole set refused', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let hostile = false
+    // 1. The node is alone on the canvas, so it gets a token file…
+    initNodeTokens({
+      canvases: () => [
+        { nodes: hostile ? [{ id: 'Term-1' }, { id: 'term-1' }] : [{ id: 'Term-1' }] }
+      ]
+    })
+    expect(existsSync(join(nodeTokenDir(), 'Term-1'))).toBe(true)
+    // …and its session proves itself with it.
+    expect((await hookEvent('Term-1', nodeAuthToken(SECRET, 'Term-1'))).status).toBe(204)
+    expect(hookServer.isNodeProven('Term-1')).toBe(true)
+
+    // 2. A shared `project.json` puts the case-variant twin on the canvas. Both are refused tokens
+    //    and both files are swept — correctly: on APFS they are one file, and leaving either is the
+    //    hijack. Those nodes belong on `legacy`.
+    hostile = true
+    refreshNodeTokens()
+    expect(existsSync(join(nodeTokenDir(), 'Term-1'))).toBe(false)
+
+    // 3. The live session has nothing left to read, so its next call is tokenless. It must land
+    //    back in the warning window, not on a permanent 403.
+    expect(hookServer.isNodeProven('Term-1')).toBe(false)
+    const res = await control('open-terminal', 'Term-1')
+    expect(res.status).toBe(200)
+    expect((await res.text()).startsWith(IDENTITY_RESTART_NOTE)).toBe(true)
+    expect(controlCalls).toEqual([{ verb: 'open-terminal', nodeId: 'Term-1' }])
+    warn.mockRestore()
+  })
+
+  it('un-proves a node whose token is swept on delete, closing the re-create gap', async () => {
+    // Delete/re-create reuses the id: A6 sweeps the file and rewrites it, and a shell reading in
+    // that gap is tokenless while the node is still latched from before the delete.
+    initNodeTokens({ canvases: () => [{ nodes: [{ id: 'n-recreate' }] }] })
+    expect((await hookEvent('n-recreate', nodeAuthToken(SECRET, 'n-recreate'))).status).toBe(204)
+    expect(hookServer.isNodeProven('n-recreate')).toBe(true)
+    sweepNodeToken('n-recreate')
+    expect(hookServer.isNodeProven('n-recreate')).toBe(false)
+    expect((await control('open-terminal', 'n-recreate')).status).toBe(200)
+  })
+
+  it('re-earns the latch on the very next valid event — releasing it costs nothing', async () => {
+    initNodeTokens({ canvases: () => [{ nodes: [{ id: 'n-relatch' }] }] })
+    expect((await hookEvent('n-relatch', nodeAuthToken(SECRET, 'n-relatch'))).status).toBe(204)
+    sweepNodeToken('n-relatch')
+    expect(hookServer.isNodeProven('n-relatch')).toBe(false)
+    expect((await hookEvent('n-relatch', nodeAuthToken(SECRET, 'n-relatch'))).status).toBe(204)
+    expect(hookServer.isNodeProven('n-relatch')).toBe(true)
+    expect((await control('open-terminal', 'n-relatch')).status).toBe(403)
   })
 })
 

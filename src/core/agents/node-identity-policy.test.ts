@@ -7,9 +7,12 @@ import {
   CONTEXT_LINK_POLICY_VERB,
   IDENTITY_REFUSED_NOTE,
   IDENTITY_RESTART_NOTE,
+  isStrictInstant,
+  NODE_IDENTITY_CLOCK_HORIZON_MS,
   NODE_IDENTITY_STRICT_AFTER,
   TOLERANT_CONTROL_VERBS
 } from './node-identity-policy'
+import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
 
 const BEFORE = new Date('2026-09-01T00:00:00Z')
 const AFTER = new Date('2026-11-01T00:00:00Z')
@@ -23,6 +26,14 @@ describe('the cutoff is a dated commitment, not a "later"', () => {
 
   it('puts that date in the sentence the user reads', () => {
     expect(IDENTITY_RESTART_NOTE).toContain('2026-10-13')
+  })
+
+  it('is built from the ONE date string the Settings row also prints', () => {
+    // The renderer cannot import this module, so the date lives in @shared and both sides derive
+    // from it. A Settings page promising a different cutoff than the server enforces would be the
+    // worst possible version of this feature.
+    expect(NODE_IDENTITY_STRICT_DATE).toBe('2026-10-13')
+    expect(NODE_IDENTITY_STRICT_AFTER.toISOString().slice(0, 10)).toBe(NODE_IDENTITY_STRICT_DATE)
   })
 
   it('names the action in both sentences, so the user is told what to do', () => {
@@ -132,6 +143,51 @@ describe('controlPolicy', () => {
           expect(controlPolicy({ verdict: 'legacy', proven: true, verb, now })).toBe('refuse')
         }
       }
+    })
+  })
+
+  describe('a machine clock that is not to be believed', () => {
+    // A VM restored from a snapshot, a board whose RTC came up wrong, a clock somebody set forward:
+    // the cutoff is read against `Date.now()`, so any of them puts an ordinary install into strict
+    // mode on day one, with no warning window at all and a refusal naming a date "already past".
+    // Nothing distinguishes that from an install genuinely still running years later — so the tie
+    // goes to the fail-open direction the rest of this file takes.
+    const cutoff = NODE_IDENTITY_STRICT_AFTER.getTime()
+    const wayAhead = new Date(cutoff + NODE_IDENTITY_CLOCK_HORIZON_MS + 1)
+
+    it('enforces normally right up to the horizon', () => {
+      expect(isStrictInstant(new Date(cutoff))).toBe(true)
+      expect(isStrictInstant(new Date(cutoff + NODE_IDENTITY_CLOCK_HORIZON_MS - 1))).toBe(true)
+    })
+
+    it('stops believing the clock past the horizon and keeps the window open', () => {
+      expect(isStrictInstant(wayAhead)).toBe(false)
+      expect(isStrictInstant(new Date('2038-01-01T00:00:00Z'))).toBe(false)
+      expect(
+        controlPolicy({ verdict: 'legacy', proven: false, verb: MUTATION, now: wayAhead })
+      ).toBe('allow-with-warning')
+    })
+
+    it('does not disarm the LATCH, which is the actual security boundary here', () => {
+      // The clamp only ever relaxes the DATE. A node that has proven itself is still refused when
+      // an unverified caller turns up for it — that is what makes the clamp cheap.
+      expect(controlPolicy({ verdict: 'legacy', proven: true, verb: MUTATION, now: wayAhead })).toBe(
+        'refuse'
+      )
+      expect(controlPolicy({ verdict: 'forged', proven: false, verb: TOLERANT, now: wayAhead })).toBe(
+        'refuse'
+      )
+    })
+
+    it('still lets an explicit `true` enforce, wherever the clock thinks it is', () => {
+      // The clamp disbelieves the CLOCK, not the user. Someone who asked for strict gets strict.
+      expect(
+        controlPolicy({ verdict: 'legacy', proven: false, verb: MUTATION, now: wayAhead, override: true })
+      ).toBe('refuse')
+    })
+
+    it('treats an invalid Date as not-strict rather than throwing', () => {
+      expect(isStrictInstant(new Date('nonsense'))).toBe(false)
     })
   })
 

@@ -228,6 +228,26 @@ class HookServer {
     return this.provenNodes.has(nodeId)
   }
 
+  /**
+   * Drop a node from the latch — called whenever its token file is SWEPT
+   * (`node-token-service.ts`), local or remote.
+   *
+   * The latch says "this node can authenticate, so a caller that cannot is not it". Sweeping the
+   * token takes that ability away, and a latch left standing over a node that no longer has a token
+   * to read is a hard 403 on every canvas-control call for the life of the session, with no window
+   * and no advice that works. The two ways in are both real: a case-folding collision (a hostile or
+   * merely careless `project.json` adds `term-1` beside a `Term-1` that had already proven itself,
+   * and the whole colliding set is refused tokens by design), and a node deleted and re-created
+   * with the same id.
+   *
+   * Un-proving is cheap to get wrong in the other direction and it does not matter: the node
+   * re-proves on its very next hook event carrying a valid token, which is the same ceremony a
+   * restart performs. Fail-open is the designed state of this whole series.
+   */
+  forgetProvenNode(nodeId: string): void {
+    this.provenNodes.delete(nodeId)
+  }
+
   setControlHandler(cb: NonNullable<HookServer['controlHandler']>): void {
     this.controlHandler = cb
   }
