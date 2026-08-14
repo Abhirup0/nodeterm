@@ -3,7 +3,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'crypto'
 import { writeFileSync, mkdirSync } from 'fs'
 import path from 'path'
 import { platform } from '../platform'
-import { canControlCanvas, hasSharedIdentity, type AgentId } from '../../shared/agents/config'
+import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import type { CodexIdentityEvent } from '../../shared/types'
 import { nodeTokenDir } from './node-token-files'
@@ -632,12 +632,19 @@ class HookServer {
       NODETERM_NODE_ID: nodeId,
       NODETERM_AGENT_ID: agentId,
       ...(permWaitSecs > 0 ? { NODETERM_PERM_WAIT_SECS: String(permWaitSecs) } : {}),
-      ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {}),
-      // The per-node capability for the identity routes. Gated by the CAPABILITY LIST, never by
-      // `agentId === 'codex'`. No secret ⇒ no token ⇒ the launcher falls back to plain codex.
-      ...(hasSharedIdentity(agentId) && this.codexNodeAuthSecret
-        ? { NODETERM_CODEX_NODE_TOKEN: this.codexNodeAuthToken(nodeId) }
-        : {})
+      ...(canControlCanvas(agentId) ? { NODETERM_CANVAS_CONTROL: '1' } : {})
+      // NO NODETERM_CODEX_NODE_TOKEN either. The per-node capability is the same class of leak as
+      // the app-wide bearer above, and a worse one to reason about: it is the credential that
+      // proves WHICH node is calling, so a sibling uid reading it off /proc/<pid>/cmdline could
+      // bind its own codex thread to that node — the exact reparenting this capability exists to
+      // prevent. It reaches the client through the 0600 token file instead (nodeTokenDir(), keyed
+      // by $NODETERM_NODE_ID and advertised in the endpoint file).
+      //
+      // The launcher (core/codex-identity-proxy.ts) still reads the ENV var and is not yet wired to
+      // the file — that retrofit is its own task. Until then a codex node finds no capability, its
+      // preflight reports `node-token-unavailable`, and it execs plain codex: shared identity is
+      // INERT, not broken. That is the fallback this launcher was built around, and an inert
+      // feature is a straight trade against a live cross-uid credential leak.
     }
   }
 

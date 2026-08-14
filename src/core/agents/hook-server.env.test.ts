@@ -20,9 +20,14 @@ beforeAll(async () => {
   initPlatform(fakePlatform({ userDataDir: dir }))
   // buildPtyEnv returns {} until the server has a port and a token.
   await hookServer.start()
+  // ...and the per-node capability branch is dead code until a node-auth secret is armed. Without
+  // this line the argv-leak guard below passes for the wrong reason: it asserts the absence of a
+  // key the code was never going to emit.
+  hookServer.setNodeAuthSecret(new Uint8Array(32).fill(7))
 })
 
 afterAll(() => {
+  hookServer.clearNodeAuthSecretForTests() // module singleton — otherwise it leaks into other files
   hookServer.stop()
   fs.rmSync(dir, { recursive: true, force: true })
 })
@@ -70,5 +75,25 @@ describe('hookServer.buildPtyEnv — no credential in the tmux -e argv (the §2.
     expect(env.NODETERM_NODE_ID).toBe('n1')
     expect(env.NODETERM_AGENT_ID).toBe('claude')
     expect(env.NODETERM_HOOK_VERSION).toBe('2')
+  })
+
+  /**
+   * The PER-NODE capability is the same class of leak as the app-wide bearer above and needs its own
+   * assertion, on an agent that can actually trigger the emitting branch: `claude` is not in
+   * SHARED_IDENTITY_CAPABLE, so the case above never reaches the mint at all. Both preconditions —
+   * a capable agent AND an armed secret — are asserted here, because a guard that reads green while
+   * its subject is unreachable is worse than no guard.
+   */
+  it('emits no PER-NODE capability either, for a shared-identity agent with identity armed', () => {
+    expect(hookServer.identityAvailable()).toBe(true)
+    const minted = hookServer.codexNodeAuthToken('n1')
+    expect(minted).toBeTruthy() // the value that must NOT be reachable via /proc/<pid>/cmdline
+    const env = hookServer.buildPtyEnv('n1', 'codex')
+    expect(Object.keys(env).filter((k) => /token/i.test(k))).toEqual([])
+    const argv = Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+    expect(argv.join(' ')).not.toContain(minted)
+    // ...while the rest of the codex wiring is untouched, so the launcher still reaches the shell.
+    expect(env.NODETERM_AGENT_ID).toBe('codex')
+    expect(env.NODETERM_HOOK_ENDPOINT).toBeTruthy()
   })
 })
