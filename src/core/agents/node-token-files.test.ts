@@ -25,11 +25,13 @@ describe('node token files', () => {
   it('writes 0600 files inside a 0700 dir and records materialisation', () => {
     expect(writeNodeTokenFile('node-1', 'kid.mac')).toBe(true)
     expect(fs.statSync(nodeTokenDir()).mode & 0o777).toBe(0o700)
-    // One descriptor for both assertions: stat-then-read is a check-then-use race (CodeQL
-    // js/file-system-race), and the fd is the stronger assertion anyway — it proves the mode and
-    // the contents belong to the SAME inode, which is the whole point of a 0600 credential file.
-    const f = path.join(nodeTokenDir(), 'node-1')
-    const fd = fs.openSync(f, 'r')
+    // Derive the path from THIS test's mkdtemp root rather than through `nodeTokenDir()`. Same
+    // path either way — `platform().userDataDir` is `dir` — but resolving it through module-level
+    // platform state loses the mkdtemp provenance, and a file operation on a temp path with no
+    // visible mkdtemp behind it is `js/insecure-temporary-file`. One descriptor for both
+    // assertions, because stat-then-read is a check-then-use race and the fd also proves the mode
+    // and the contents belong to the SAME inode — the whole point of a 0600 credential file.
+    const fd = fs.openSync(path.join(dir, 'node-tokens', 'node-1'), 'r')
     try {
       expect(fs.fstatSync(fd).mode & 0o777).toBe(0o600)
       expect(fs.readFileSync(fd, 'utf8')).toBe('kid.mac\n')
