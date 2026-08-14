@@ -8,6 +8,7 @@ import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, t
 import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
 import { findExecutableSync, shellPathNow } from '../../core/exec-path'
+import { isSafeRemoteHome } from '../../core/remote-safety'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
 import { allowMediaPath } from '../media-protocol'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
@@ -546,8 +547,13 @@ export class SshProjectManager {
         // unresolved home just disables the remote context meter / subagent transcript / search.
         let remoteHome: string | undefined
         try {
+          // Validated, not merely non-empty: this string is interpolated into remote command
+          // lines (the tmux.conf write below) and into the tmux `-e CLAUDE_CONFIG_DIR=…` pair the
+          // PTY manager builds, so a host answer carrying a newline would be a command separator.
+          // Same fail-open direction as the catch — an unusable answer just disables the features
+          // that need an absolute remote home. See `isSafeRemoteHome`.
           const r = await this.r.run(childArgs(conn, controlPath, 'printf %s "$HOME"'))
-          if (r.code === 0 && r.stdout.trim()) remoteHome = r.stdout.trim()
+          if (r.code === 0 && isSafeRemoteHome(r.stdout.trim())) remoteHome = r.stdout.trim()
         } catch {
           // fail-open
         }
@@ -737,7 +743,7 @@ export class SshProjectManager {
       let home = c.remoteHome
       if (!home) {
         const r = await this.r.run(childArgs(c.conn, c.controlPath, 'printf %s "$HOME"'))
-        if (r.code === 0 && r.stdout.trim()) home = r.stdout.trim()
+        if (r.code === 0 && isSafeRemoteHome(r.stdout.trim())) home = r.stdout.trim()
       }
       if (!home) return null
       const token = `${Date.now().toString(36)}${(this.uploadSeq++).toString(36)}`

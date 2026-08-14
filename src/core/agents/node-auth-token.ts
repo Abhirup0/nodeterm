@@ -17,28 +17,24 @@ import { createHmac, timingSafeEqual } from 'crypto'
  * per-node relay capability, a per-project one) without one being a valid other. #167 hashed the
  * bare nodeId; it is retrofitted onto this derivation in a later task.
  */
-export const NODE_ID_CHARSET = /^[A-Za-z0-9._-]+$/
 const KID_CONTEXT = 'nt-node-auth-kid-v1'
 const MAC_PREFIX = 'nt-node-auth-v1|'
-const MAX_NODE_ID = 128
 
 /**
- * The charset alone is NOT enough: `.` and `..` both MATCH `NODE_ID_CHARSET`, and this id is also a
- * path segment under the token dir (`<tokenDir>/<nodeId>`). A `..` there would resolve to the token
- * dir's PARENT. The nodeId is attacker-controlled — it arrives from `project.json`, which travels in
- * cloned/shared repos — so refuse `.` and `..` by name, refuse empty, refuse over-length, BEFORE the
- * id ever reaches a hash or a path join.
+ * ONE predicate for a node id, shared with the remote-shell boundary (`PtyManager.create`,
+ * `RemoteHooks`) rather than re-declared here.
+ *
+ * It is the same rule for the same reason on both sides: the charset alone is NOT enough, because
+ * `.` and `..` both match `[A-Za-z0-9._-]` and this id is also a path segment under the token dir
+ * (`<tokenDir>/<nodeId>`) — a `..` there resolves to the token dir's PARENT. The nodeId is
+ * attacker-controlled (it arrives from `project.json`, which travels in cloned and shared repos),
+ * so it is refused before it ever reaches a hash, a path join, or a remote command line.
+ *
+ * Re-exported because the identity code reads better importing its own guard, and because two
+ * copies of a validation rule is how they drift.
  */
-export function isSafeNodeId(id: string): boolean {
-  return (
-    typeof id === 'string' &&
-    id.length > 0 &&
-    id.length <= MAX_NODE_ID &&
-    id !== '.' &&
-    id !== '..' &&
-    NODE_ID_CHARSET.test(id)
-  )
-}
+export { isSafeNodeId } from '../remote-safety'
+import { isSafeNodeId } from '../remote-safety'
 
 export function nodeAuthKid(secret: Buffer): string {
   return createHmac('sha256', secret).update(KID_CONTEXT).digest('base64url').slice(0, 8)

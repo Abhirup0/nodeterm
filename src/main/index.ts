@@ -483,6 +483,17 @@ function createWindow(): BrowserWindow {
       // selected it asks us to close the window (the standard behavior).
       event.preventDefault()
       win.webContents.send(IPC.appCloseNode)
+    } else if (input.code === 'Digit0' && !input.shift && !input.alt) {
+      // Repurpose Cmd/Ctrl+0 the same way. We never call `Menu.setApplicationMenu`, so Electron
+      // installs its DEFAULT menu, whose View → Actual Size binds this accelerator to `resetZoom`
+      // — the window's page zoom, not the canvas's. A menu accelerator is handled before the page
+      // sees the key, so without this the renderer's Digit0 branch would simply never run on the
+      // desktop. `before-input-event`'s preventDefault suppresses both the menu item and the page
+      // event, so exactly one thing happens: the canvas goes to 100%.
+      event.preventDefault()
+      // Auto-repeat is dropped here rather than in the renderer, so a held chord cannot restart
+      // the 200ms zoom tween — the same rule `zoomShortcutChord` applies to the keydown path.
+      if (!input.isAutoRepeat) win.webContents.send(IPC.appZoomActualSize)
     }
   })
 

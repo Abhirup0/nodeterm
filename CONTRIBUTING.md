@@ -100,6 +100,13 @@ three times.
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.
 
+**A new keyboard chord has to survive the shells, not just the renderer.** Electron's default
+application menu is live (we never replace it) and owns ⌘0, ⌘M, ⌘W, ⌘Q, ⌘R and friends — a menu
+accelerator is handled before the page, so your `keydown` branch simply never runs. Steal it back in
+`main/index.ts`'s `before-input-event` and forward it, like the three already there. Browsers own a
+different set. And any chord that reaches the canvas needs the two refusals every canvas shortcut
+here has: not while the kanban board covers it, not while the user is typing.
+
 **Comments explain WHY, and name the failure they prevent.** The codebase is deliberately dense with
 reasoning. A comment that restates the code is noise; one that says "do not simplify this back,
 here is what broke" is the point.
