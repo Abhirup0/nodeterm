@@ -141,7 +141,21 @@ import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
 import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
-import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, reportsOwnCopy, agentConfig } from '@shared/agents/config'
+import {
+  hasHooks,
+  canRecur,
+  canContextLink,
+  hasUsage,
+  canChat,
+  canResume,
+  canRename,
+  canReadTitle,
+  createdAgentId,
+  reportsOwnCopy,
+  agentConfig,
+  capabilityAgentId,
+  type AgentId
+} from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleResumeCommand } from '@shared/agents/launch'
 import { ensureActivePermissionMode } from '../state/permissionMode'
@@ -2832,11 +2846,30 @@ export function TerminalNode({
     }
     const unregisterRestart = registerAgentRestart(
       id,
-      guardConcurrentRestart(id, async () => {
+      guardConcurrentRestart(id, async (targetAgentId?: AgentId) => {
         const st = useAgentStatus.getState().byId[id]
         const agentSessionId = st?.sessionId
-        const gate = restartEligibility(agentId, st?.state, agentSessionId)
-        if (!gate.ok || !agentId || !agentSessionId || !restartTarget()) return 'not-eligible'
+        // `data.agentId` can change after a successful same-base swap while this deliberately
+        // long-lived terminal effect stays mounted. Read the node NOW instead of trusting the
+        // value captured when the pane attached, or a later plain Restart would silently reopen
+        // the old agent again.
+        const sourceAgentId = createdAgentId(getNode(id)?.data)
+        const gate = restartEligibility(sourceAgentId, st?.state, agentSessionId)
+        if (!gate.ok || !sourceAgentId || !agentSessionId || !restartTarget())
+          return 'not-eligible'
+        const target = targetAgentId ?? sourceAgentId
+        const settings = useSettings.getState().settings
+        const builtinTarget = agentConfig(target)
+        const customTarget = builtinTarget
+          ? undefined
+          : settings.customAgents.find((c) => c.id === target)
+        // Session ids are provider-specific. A stale context menu (or settings edit while it is
+        // open) must never feed a Claude id to Codex, nor launch a custom agent that was deleted.
+        if (
+          (!builtinTarget && !customTarget) ||
+          capabilityAgentId(target) !== capabilityAgentId(sourceAgentId)
+        )
+          return 'not-eligible'
         // Built HERE, not inside the choreography: the shared assembly builder is the single funnel
         // for every CLI launch path (shared/agents/launch.ts) and the mode is a renderer-side, async
         // read — exactly as the cold-restore relaunch above does it. Without it a canvas running
@@ -2844,20 +2877,28 @@ export function TerminalNode({
         // Re-resolved at call time for the same reason as there: the mode is a property of how a
         // session is launched, not of the node. Inheritance-aware: a custom agent's baseAgent/args
         // are re-applied so a restart of a claude-base proxy resumes correctly.
-        const customAgent = agentConfig(agentId)
-          ? undefined
-          : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
-        const { command } = assembleResumeCommand(
+        // Launch-command / args substitutions must use the host that owns this pane. `api` is
+        // session-scoped, so a relay tab asks its host rather than expanding against this Mac.
+        const launchEnv = customTarget
+          ? await api.agent.envSnapshot().catch(() => ({}))
+          : {}
+        const { command, missingEnv } = assembleResumeCommand(
           {
-            agentId,
-            customAgent,
+            agentId: target,
+            customAgent: customTarget,
             sessionId: agentSessionId,
-            permissionMode: await ensureActivePermissionMode(agentId)
+            permissionMode: await ensureActivePermissionMode(target)
           },
-          {}
+          launchEnv
         )
+        // Never type a knowingly mangled launch line (for example `--token ''`) into the pane.
+        // Settings already surfaces these missing names in its preview; a stale menu after an env
+        // change degrades to the ordinary not-eligible notice and leaves the shell untouched.
+        if (missingEnv.length) return 'not-eligible'
         return performRestartResume({
-          agentId,
+          // Source and target were proven to share one capability base above, so this resolves to
+          // the same exit + resume grammar while the explicit command selects the target binary.
+          agentId: target,
           sessionId: agentSessionId,
           io: restartIo,
           // An unusable session id leaves this undefined and performRestartResume refuses the

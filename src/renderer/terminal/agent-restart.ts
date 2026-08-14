@@ -4,7 +4,13 @@
  * model list without losing the conversation. Kept free of DOM/IPC so the node menu, the bulk
  * filter and the restart choreography can all share exactly one set of rules.
  */
-import { canResume, canResumeWith, capabilityAgentId, resumeCommand } from '../../shared/agents/config'
+import {
+  canResume,
+  canResumeWith,
+  capabilityAgentId,
+  resumeCommand,
+  type AgentId
+} from '../../shared/agents/config'
 import { isShellCommand } from '@shared/agents/pane'
 import {
   DELIVERY_ATTEMPTS,
@@ -385,15 +391,15 @@ const inFlight = new Set<string>()
  * does not count — so a doubled request is neither counted twice as restarted nor reported as a
  * failure the user could act on. (The alternative, a fifth outcome, would break that frozen line.)
  */
-export function guardConcurrentRestart<T extends string>(
+export function guardConcurrentRestart<T extends string, Args extends unknown[]>(
   nodeId: string,
-  fn: () => Promise<T>
-): () => Promise<T | 'not-eligible'> {
-  return async () => {
+  fn: (...args: Args) => Promise<T>
+): (...args: Args) => Promise<T | 'not-eligible'> {
+  return async (...args: Args) => {
     if (inFlight.has(nodeId)) return 'not-eligible'
     inFlight.add(nodeId)
     try {
-      return await fn()
+      return await fn(...args)
     } finally {
       // Released on rejection too: a transport that threw once must not leave the node
       // permanently un-restartable for the rest of the app's run.
@@ -403,17 +409,19 @@ export function guardConcurrentRestart<T extends string>(
 }
 
 // ── Node registry (same park-surviving pattern as TerminalNode's restartSubs) ────────────
-const restartFns = new Map<string, () => Promise<RestartOutcome>>()
+export type AgentRestartFn = (targetAgentId?: AgentId) => Promise<RestartOutcome>
+
+const restartFns = new Map<string, AgentRestartFn>()
 
 /** Register a node's restart closure; returns an unregister that is inert if superseded. */
-export function registerAgentRestart(nodeId: string, fn: () => Promise<RestartOutcome>): () => void {
+export function registerAgentRestart(nodeId: string, fn: AgentRestartFn): () => void {
   restartFns.set(nodeId, fn)
   return () => {
     if (restartFns.get(nodeId) === fn) restartFns.delete(nodeId)
   }
 }
 
-export function agentRestartFn(nodeId: string): (() => Promise<RestartOutcome>) | undefined {
+export function agentRestartFn(nodeId: string): AgentRestartFn | undefined {
   return restartFns.get(nodeId)
 }
 

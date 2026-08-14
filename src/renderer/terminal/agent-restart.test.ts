@@ -958,6 +958,18 @@ describe('guardConcurrentRestart', () => {
     await expect(guarded()).rejects.toThrow('ipc died')
     expect(runs).toBe(2)
   })
+
+  it('forwards arguments while keeping the same per-node lock', async () => {
+    const seen: string[] = []
+    const guarded = guardConcurrentRestart('n-args', async (target?: string) => {
+      seen.push(target ?? 'same')
+      return 'restarted' as const
+    })
+
+    expect(await guarded('custom:claude')).toBe('restarted')
+    expect(await guarded()).toBe('restarted')
+    expect(seen).toEqual(['custom:claude', 'same'])
+  })
 })
 
 describe('agent restart registry', () => {
@@ -977,6 +989,17 @@ describe('agent restart registry', () => {
     const fn = async (): Promise<RestartOutcome> => 'restarted'
     registerAgentRestart('n2', fn)()
     expect(agentRestartFn('n2')).toBeUndefined()
+  })
+
+  it('forwards an optional target agent to the registered restart', async () => {
+    let seen: string | undefined
+    registerAgentRestart('n3', async (targetAgentId) => {
+      seen = targetAgentId
+      return 'restarted'
+    })
+
+    expect(await agentRestartFn('n3')?.('custom:claude')).toBe('restarted')
+    expect(seen).toBe('custom:claude')
   })
 })
 

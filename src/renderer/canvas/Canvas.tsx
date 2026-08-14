@@ -143,6 +143,7 @@ import {
   type AddHandlers
 } from '../lib/addMenuSpec'
 import { transferConversationItems } from '../lib/transferItems'
+import { reopenVariants } from '../lib/reopenVariants'
 import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
@@ -557,7 +558,7 @@ const minimapNodeColor = (n: Node): string =>
  *  restart on the strength of the wider one would get a row whose closure refuses every click.
  *  Anything that is not a terminal (a sticky, an editor) is undefined, which `restartEligibility`
  *  reads as `not-resumable`. */
-const restartAgentIdOf = (n: Node | undefined): string | undefined =>
+const restartAgentIdOf = (n: Node | undefined): AgentId | undefined =>
   !n || n.type !== 'terminal' ? undefined : createdAgentId(n.data)
 
 /** One canvas node as a board card, or null when this kind is not a card at all (a group frame, an
@@ -4640,12 +4641,13 @@ export function Canvas() {
   // time, so a stale menu cannot force a restart onto a session that just went busy); all that is
   // left here is telling the user how it went. Up to ~6s of exit polling plus the echo-verified
   // resume line, hence the await before the notice.
-  const restartAgentNode = useCallback(async (nodeId: string) => {
+  const restartAgentNode = useCallback(async (nodeId: string, targetAgentId?: AgentId) => {
     const fn = agentRestartFn(nodeId)
     if (!fn) return // node unmounted between opening the menu and clicking
+    const action = targetAgentId ? 'Reopen' : 'Restart'
     let outcome: RestartOutcome
     try {
-      outcome = await fn()
+      outcome = await fn(targetAgentId)
     } catch {
       // The transport under the restart threw (a relay socket still CONNECTING rejects the very
       // first write). Unhandled, this rejection made the action a silent no-op — the user clicked
@@ -4653,15 +4655,39 @@ export function Canvas() {
       // the message sends them to look rather than claiming either.
       setNotice({
         kind: 'error',
-        text: 'Restart failed: this session could not be reached. Check the pane before retrying.'
+        text: `${action} failed: this session could not be reached. Check the pane before retrying.`
       })
       return
     }
+    if (outcome === 'restarted' && targetAgentId) {
+      // The pane now runs the target variant. Persist that identity so its icon/capabilities and
+      // every later plain Restart describe what is actually in the pane. The provider session id
+      // stays unchanged, so choosing the original variant later reverses this cleanly.
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId && n.type === 'terminal'
+            ? { ...n, data: { ...n.data, agentId: targetAgentId } }
+            : n
+        )
+      )
+      markDirty()
+    }
+    const targetLabel =
+      targetAgentId == null
+        ? undefined
+        : (agentConfig(targetAgentId)?.label ??
+          useSettings.getState().settings.customAgents.find((c) => c.id === targetAgentId)?.label ??
+          targetAgentId)
     // 'info' fades itself out; anything that did NOT restart is left on screen to be read and
     // dismissed — the pane is untouched either way (nothing is ever killed).
     setNotice(
       outcome === 'restarted'
-        ? { kind: 'info', text: 'Agent restarted — conversation resumed.' }
+        ? {
+            kind: 'info',
+            text: targetLabel
+              ? `Session reopened as ${targetLabel} — conversation resumed.`
+              : 'Agent restarted — conversation resumed.'
+          }
         : outcome === 'exit-timeout'
           ? {
               kind: 'error',
@@ -4670,7 +4696,7 @@ export function Canvas() {
               // Nothing is ever force-killed, so the pane is exactly as the CLI left it — which is
               // what the user has to go and look at.
               text:
-                'Restart failed: the pane did not return to a shell in time, so the CLI was not ' +
+                `${action} failed: the pane did not return to a shell in time, so the CLI was not ` +
                 'relaunched. Nothing was killed — check the pane.'
             }
           : {
@@ -4682,12 +4708,12 @@ export function Canvas() {
               // know when the CLI has quit), or a restart of this node was already in flight (the
               // per-node action and the bulk one can reach the same node).
               text:
-                'Restart skipped: this session is busy, already restarting, not attached ' +
+                `${action} skipped: this session is busy, already restarting, not attached ` +
                 '(closed, ended, or nothing to resume), or its pane cannot be watched without ' +
                 'persistent tmux sessions. Nothing was written to the pane.'
             }
     )
-  }, [])
+  }, [setNodes, markDirty])
 
   // Who the bulk restart would act on, right now: the ACTIVE project's canvas (nodesRef holds
   // exactly that). Read fresh at every call — agent state and session ids arrive asynchronously.
@@ -5297,7 +5323,12 @@ export function Canvas() {
         ? (() => {
             const n = nodesRef.current.find((x) => x.id === ids[0])
             const st = useAgentStatus.getState().byId[ids[0]]
-            const gate = restartEligibility(restartAgentIdOf(n), st?.state, st?.sessionId)
+            const sourceAgentId = restartAgentIdOf(n)
+            const gate = restartEligibility(sourceAgentId, st?.state, st?.sessionId)
+            const settings = useSettings.getState().settings
+            const variants = sourceAgentId
+              ? reopenVariants(sourceAgentId, settings.customAgents, settings.disabledAgents)
+              : []
             // 'not-resumable' is permanent (a plain shell, opencode, a custom CLI with no exit
             // command) — no row at all. The other two are temporary, so the row stays and says
             // what to wait for instead of disappearing and teaching nothing.
@@ -5324,7 +5355,27 @@ export function Canvas() {
                 disabled: !!why,
                 hint: why ?? 'Quits the CLI and relaunches it with --resume (same conversation).',
                 onClick: () => void restartAgentNode(ids[0])
-              }
+              },
+              ...(variants.length
+                ? ([
+                    {
+                      type: 'submenu',
+                      label: 'Reopen session as',
+                      icon: <IconSwitch />,
+                      children: variants.map(
+                        (variant): MenuItem => ({
+                          label: variant.label,
+                          icon: <AgentIcon agentId={variant.id} />,
+                          disabled: !!why,
+                          hint:
+                            why ??
+                            `Quits this CLI and resumes the same session as ${variant.label}.`,
+                          onClick: () => void restartAgentNode(ids[0], variant.id)
+                        })
+                      )
+                    }
+                  ] as MenuItem[])
+                : [])
             ] as MenuItem[]
           })()
         : []),
