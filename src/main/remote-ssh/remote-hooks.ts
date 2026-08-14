@@ -8,6 +8,7 @@
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
 import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS, GROK_HOOK_EVENTS } from '@shared/agents/hook-events'
 import { GROK_HOOK_FILE, isSafeRemoteGrokHome } from '../../core/agents/grok-paths'
+import { isSafeRemoteHome } from '../../core/remote-safety'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 
 /**
@@ -46,6 +47,30 @@ import { posixQuote, type SshConnection } from '../../shared/ssh'
 function dirnameOf(p: string): string {
   const i = p.lastIndexOf('/')
   return i > 0 ? p.slice(0, i) : '/'
+}
+
+/**
+ * The remote opencode instructions path, as a `{ prelude, pathExpr }` pair for
+ * `mergeRemoteInstructions`.
+ *
+ * opencode is XDG-respecting and the DESKTOP's `$XDG_CONFIG_HOME` says nothing about the host, so
+ * this one target must stay expandable BY THE REMOTE SHELL — it cannot be a `posixQuote`d literal
+ * like its codex/gemini siblings. That is what made it dangerous: the obvious spelling,
+ * `"${XDG_CONFIG_HOME:-<remoteHome>/.config}/…"`, interpolates the host-reported `$HOME` inside
+ * DOUBLE quotes, where `$` and backticks are still live — so a `$HOME` of `/home/u$(id)` (which
+ * `isSafeRemoteHome` accepts, and should: it is a legal path) executed on the host.
+ *
+ * The fix binds the untrusted half to a shell VARIABLE first. A parameter expansion's RESULT is
+ * not re-expanded, so `"$NT_H"` is inert no matter what bytes it holds, while
+ * `${XDG_CONFIG_HOME:-…}` keeps its fallback semantics. Verified against real `/bin/sh`: the
+ * payload never runs, and the whole expression stays ONE argument (ARGC=1) with the variable set,
+ * unset, and holding a space.
+ */
+export function openCodeInstructionsTarget(remoteHome: string): { prelude: string; pathExpr: string } {
+  return {
+    prelude: `NT_H=${posixQuote(remoteHome)}; `,
+    pathExpr: `"\${XDG_CONFIG_HOME:-$NT_H/.config}/opencode/AGENTS.md"`
+  }
 }
 
 export interface RemoteRunner {
@@ -91,8 +116,14 @@ export class RemoteHooks {
     try {
       // 0. resolve the remote $HOME once → build all remote paths absolute (no unexpanded ~).
       const { code, stdout } = await this.r.run(childArgs(conn, controlPath, 'printf %s "$HOME"'))
+      // Trim at the READ site (`printf %s` emits no newline, but a login-shell banner or a shell
+      // wrapper can add one), then VALIDATE: every path below is spliced into a remote SHELL LINE,
+      // so a `$HOME` carrying a newline would append a second command to it. The host's answer is
+      // data, not truth. Fail-open in the direction this whole method already takes — an unusable
+      // answer means no hooks, never a half-built remote path. (Layer two is the quoting below;
+      // both are needed: the validator bounds what can arrive, the quoting bounds what it can do.)
       const home = stdout.trim()
-      if (code !== 0 || !home) return null // fail-open: nothing else would work
+      if (code !== 0 || !isSafeRemoteHome(home)) return null // fail-open: nothing else would work
       const remoteDir = `${home}/.nodeterm`
       const sock = `${remoteDir}/hook-${projectId}.sock`
       // PER-PROJECT endpoint file. The sock is already per-project, but the endpoint file used to
@@ -117,7 +148,9 @@ export class RemoteHooks {
           // Our own spec may already be registered (a reconnect this run) — clear it first.
           await this.r.run(hookForwardCancelArgs(conn, controlPath, sock, hook.port)).catch(() => {})
         }
-        await this.r.run(childArgs(conn, controlPath, `mkdir -p ${remoteDir} && rm -f ${sock}`))
+        await this.r.run(
+          childArgs(conn, controlPath, `mkdir -p ${posixQuote(remoteDir)} && rm -f ${posixQuote(sock)}`)
+        )
         const fwd = await this.r.run(hookForwardArgs(conn, controlPath, sock, hook.port))
         if (fwd.code !== 0) continue
         verified = await this.verifyTunnel(conn, controlPath, sock, hook.token)
@@ -132,7 +165,7 @@ export class RemoteHooks {
       // 2. remote endpoint file (0600 via umask) — written only after the tunnel proved live,
       // so sessions are never pointed at a socket that answers nothing.
       await this.r.run(
-        childArgs(conn, controlPath, `umask 077; cat > ${endpoint}`),
+        childArgs(conn, controlPath, `umask 077; cat > ${posixQuote(endpoint)}`),
         remoteEndpointFileContents(sock, hook.token, hook.version)
       )
       // 3. install the managed hook for each JSON agent (script + merged config).
@@ -140,10 +173,16 @@ export class RemoteHooks {
         const script = `${remoteDir}/agent-hooks/${t.agentId}.sh`
         const config = `${home}/${t.config}`
         await this.r.run(
-          childArgs(conn, controlPath, `mkdir -p ${remoteDir}/agent-hooks && cat > ${script} && chmod 755 ${script}`),
+          childArgs(
+            conn,
+            controlPath,
+            `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
+          ),
           buildManagedScript(t.agentId, REMOTE_IDENTITY_ROOT)
         )
-        const { stdout: cfgRaw } = await this.r.run(childArgs(conn, controlPath, `cat ${config} 2>/dev/null || echo '{}'`))
+        const { stdout: cfgRaw } = await this.r.run(
+          childArgs(conn, controlPath, `cat ${posixQuote(config)} 2>/dev/null || echo '{}'`)
+        )
         let cfg: HookSettings = {}
         try {
           cfg = JSON.parse(cfgRaw || '{}') as HookSettings
@@ -152,7 +191,10 @@ export class RemoteHooks {
         }
         const merged = mergeManagedHook(cfg, buildManagedHookCommand(script), t.events)
         await this.r.run(
-          childArgs(conn, controlPath, `mkdir -p $(dirname ${config}) && cat > ${config}`),
+          // `$(dirname …)` is itself QUOTED (same reason as installGrokRemote): a home with a
+          // space would otherwise word-split into two mkdir args, the directory would never be
+          // created, and the correctly-quoted `cat >` would then fail — silently, fail-open.
+          childArgs(conn, controlPath, `mkdir -p "$(dirname ${posixQuote(config)})" && cat > ${posixQuote(config)}`),
           JSON.stringify(merged, null, 2)
         )
       }
@@ -398,13 +440,15 @@ export class RemoteHooks {
       // the desktop merges into their global instruction files. The opencode path is expanded by
       // the REMOTE shell (it is XDG-respecting and the local value says nothing about the host).
       const block = buildCanvasControlInstructions(shim)
-      const targets = [
-        posixQuote(`${remoteHome}/.codex/AGENTS.md`),
-        posixQuote(`${remoteHome}/.gemini/GEMINI.md`),
-        `"\${XDG_CONFIG_HOME:-${remoteHome}/.config}/opencode/AGENTS.md"`
+      // codex/gemini are plain quoted literals; opencode must stay shell-expandable and so
+      // carries a prelude that binds the untrusted $HOME to a variable (see the helper).
+      const targets: { pathExpr: string; prelude?: string }[] = [
+        { pathExpr: posixQuote(`${remoteHome}/.codex/AGENTS.md`) },
+        { pathExpr: posixQuote(`${remoteHome}/.gemini/GEMINI.md`) },
+        openCodeInstructionsTarget(remoteHome)
       ]
-      for (const target of targets) {
-        await this.mergeRemoteInstructions(conn, controlPath, target, block, mergeCanvasControlBlock)
+      for (const t of targets) {
+        await this.mergeRemoteInstructions(conn, controlPath, t.pathExpr, block, mergeCanvasControlBlock, t.prelude)
       }
     } catch {
       /* fail-open: the remote agent simply runs without canvas control */
@@ -460,13 +504,15 @@ export class RemoteHooks {
         buildContextLinkSkillBody(shim)
       )
       const block = buildLinkedContextInstructions(shim)
-      const targets = [
-        posixQuote(`${remoteHome}/.codex/AGENTS.md`),
-        posixQuote(`${remoteHome}/.gemini/GEMINI.md`),
-        `"\${XDG_CONFIG_HOME:-${remoteHome}/.config}/opencode/AGENTS.md"`
+      // codex/gemini are plain quoted literals; opencode must stay shell-expandable and so
+      // carries a prelude that binds the untrusted $HOME to a variable (see the helper).
+      const targets: { pathExpr: string; prelude?: string }[] = [
+        { pathExpr: posixQuote(`${remoteHome}/.codex/AGENTS.md`) },
+        { pathExpr: posixQuote(`${remoteHome}/.gemini/GEMINI.md`) },
+        openCodeInstructionsTarget(remoteHome)
       ]
-      for (const target of targets) {
-        await this.mergeRemoteInstructions(conn, controlPath, target, block, mergeInstructionsBlock)
+      for (const t of targets) {
+        await this.mergeRemoteInstructions(conn, controlPath, t.pathExpr, block, mergeInstructionsBlock, t.prelude)
       }
     } catch {
       /* fail-open: the remote agent simply runs without context link */
@@ -525,22 +571,27 @@ export class RemoteHooks {
   /** Read-merge-write one marker-delimited instructions block at a remote path EXPRESSION
    *  (already quoted / shell-expandable). Everything outside the markers is preserved — including
    *  the OTHER feature's block, which is why the merge function is a parameter: canvas control and
-   *  context link own different markers in the same files. */
+   *  context link own different markers in the same files.
+   *
+   *  `prelude` is shell prepended to BOTH commands — it exists so a caller can bind an untrusted
+   *  value (the host-reported `$HOME`) to a shell VARIABLE once and then refer to it as `$NT_H`
+   *  inside an expression that must stay shell-expandable. See `openCodeInstructionsTarget`. */
   private async mergeRemoteInstructions(
     conn: SshConnection,
     controlPath: string,
     pathExpr: string,
     block: string,
-    merge: (existing: string, block: string) => string
+    merge: (existing: string, block: string) => string,
+    prelude = ''
   ): Promise<void> {
     try {
       const { stdout: existing } = await this.r.run(
-        childArgs(conn, controlPath, `cat ${pathExpr} 2>/dev/null || true`)
+        childArgs(conn, controlPath, `${prelude}cat ${pathExpr} 2>/dev/null || true`)
       )
       const merged = merge(existing, block)
       if (merged === existing) return
       await this.r.run(
-        childArgs(conn, controlPath, `mkdir -p "$(dirname ${pathExpr})" && cat > ${pathExpr}`),
+        childArgs(conn, controlPath, `${prelude}mkdir -p "$(dirname ${pathExpr})" && cat > ${pathExpr}`),
         merged
       )
     } catch {
@@ -590,7 +641,12 @@ export class RemoteHooks {
       const { config: next, changed } = ensureFullscreenTui(cfg)
       if (!changed) return // key already present (any value) → never overwrite the user's `/tui`
       await this.r.run(
-        childArgs(conn, controlPath, `mkdir -p $(dirname ${posixQuote(config)}) && cat > ${posixQuote(config)}`),
+        // `$(dirname …)` QUOTED, like the other three sites. Unquoted, a home with a space
+        // (`/Users/Enes Kirca`) word-splits the substitution into two mkdir args — measured
+        // ARGC=2 — so junk directories are created, the correctly-quoted `cat >` then fails, and
+        // the catch below swallows it. Symptom: fullscreen-TUI silently never written for any
+        // macOS user whose home has a space in it.
+        childArgs(conn, controlPath, `mkdir -p "$(dirname ${posixQuote(config)})" && cat > ${posixQuote(config)}`),
         JSON.stringify(next, null, 2)
       )
     } catch {

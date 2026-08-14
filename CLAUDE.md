@@ -1425,6 +1425,18 @@ again; the grace window was never the thing that was wrong.
   pan = middle-drag or trackpad two-finger (`panOnScroll`, `zoomOnScroll:false`); pinch
   zoom. Right mouse is free for the context menu.
 - **Delete** (Delete/Backspace) opens `ConfirmDialog` before removing selected nodes.
+- **Zoom chords** (`renderer/lib/zoomShortcut.ts`): **⌘/Ctrl+0 → `zoomTo100`** (actual size — what
+  the browser AND Electron's default View menu already mean by that key) and **Shift+1 → `fitAll`**
+  (the Figma/tldraw/Excalidraw "zoom to fit"). Matched on `e.code`, like the project-jump chord,
+  which excludes `Digit0` so the two can never collide. The module is a PURE decision because both
+  chords move the camera and a camera move here is not read-only — `onMove` → `markDirty` persists
+  the viewport and casts it to the team session — so it refuses while the kanban board is up and
+  while focus is in a text surface (input/textarea/contenteditable/Monaco/xterm, where Shift+1 is
+  just the `!` key), and on auto-repeat (both actions animate; a held chord would restart the tween).
+  Desktop ⌘0 does NOT arrive as a keydown: the default menu's `resetZoom` accelerator wins, so
+  `main/index.ts` intercepts it in `before-input-event` and forwards `app:zoom-actual-size`, which
+  re-asks the same refusals. Server Edition needs no intercept (no menu; Chrome/Firefox hand ⌘0 to
+  the page) and stubs the subscription.
 - **"Go to node" (`goToNode`)** — the one camera-travel path (notification click, sessions
   sidebar, ⌘K jump, presence travel, minimap double-click, double-click focus). It frames the node
   with `fitView({nodes:[{id}]})` **only when React Flow has MEASURED it**: `getFitViewNodes` filters
@@ -1637,7 +1649,11 @@ again; the grace window was never the thing that was wrong.
 - **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab
   bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a rounded pill of project
   tabs. Cmd+M is intercepted in `main/index.ts` `before-input-event` (else macOS minimizes)
-  and forwarded to the renderer via `app:toggle-markdown`.
+  and forwarded to the renderer via `app:toggle-markdown`; Cmd+W (`app:close-node`) and Cmd+0
+  (`app:zoom-actual-size`) are taken back from the same default menu the same way. We never call
+  `Menu.setApplicationMenu`, so Electron's DEFAULT menu is live and owns every accelerator in it —
+  a chord that collides with one never reaches the renderer at all
+  (`main/menu-accelerator-intercepts.test.ts` pins the three we steal).
 - **Theme**: macOS dark palette as CSS tokens in `styles.css` `:root` (`--accent` = systemBlue,
   label/separator opacities, SF font stack). Canvas background is black with dot grid.
 

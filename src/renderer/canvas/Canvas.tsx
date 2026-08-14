@@ -150,6 +150,12 @@ import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
 import { liveProjectJumpTarget, projectJumpDigit } from '../lib/projectJump'
+import {
+  liveZoomShortcutAction,
+  liveZoomShortcutContext,
+  zoomShortcutAllowed,
+  zoomShortcutChord
+} from '../lib/zoomShortcut'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
@@ -4940,6 +4946,18 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
+      } else if (zoomShortcutChord(e) !== null) {
+        // ⌘/Ctrl+0 = back to 100%, Shift+1 = fit everything. `liveZoomShortcutAction` is the
+        // whole decision (see `lib/zoomShortcut.ts`), and the ⌘0 desktop route below asks the same
+        // one, so the two paths can never disagree about when the chord is allowed to move the
+        // camera. A null answer means "leave the key alone" — no `preventDefault`, which is what
+        // keeps Shift+1 typing a `!` wherever the user is actually typing.
+        const action = liveZoomShortcutAction(e)
+        if (action) {
+          e.preventDefault()
+          if (action === 'zoom-100') zoomTo100()
+          else fitAll()
+        }
       } else if (projectJumpDigit(e) !== null) {
         // Cmd/Ctrl+1-9 jumps to the Nth project — but only when the app actually owns the key
         // (desktop shell, and the digit addresses an open project). `liveProjectJumpTarget`
@@ -4996,7 +5014,22 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleSessionsPin, switchProject])
+  }, [toggleSessionsPin, switchProject, fitAll, zoomTo100])
+
+  // ⌘/Ctrl+0 on the DESKTOP never reaches the keydown handler above: Electron's default View menu
+  // binds the accelerator to `resetZoom`, and a menu accelerator is handled before the page sees
+  // the key. `main/index.ts` intercepts it in `before-input-event` — exactly as it already does for
+  // ⌘M (else macOS minimizes) and ⌘W — and forwards it here, so the chord zooms the CANVAS to 100%
+  // instead of resetting the WINDOW's page zoom, which is not what a canvas app's user means by
+  // "actual size". The forwarded signal carries no event, so the refusals are re-asked here from
+  // the same module rather than re-derived. Server Edition has no menu and no intercept: there the
+  // keydown branch above is the whole path (the browser's own ⌘0 means the same thing, so the two
+  // agree rather than fight, and the bridge stubs this subscription out).
+  useEffect(() => {
+    return window.nodeTerminal.onZoomActualSize(() => {
+      if (zoomShortcutAllowed(liveZoomShortcutContext())) zoomTo100()
+    })
+  }, [zoomTo100])
 
   // Apply the accent color as a CSS variable.
   useEffect(() => {

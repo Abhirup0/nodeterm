@@ -2209,6 +2209,10 @@ export interface NodeTerminalApi {
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
   onCloseNode(listener: () => void): () => void
+  /** Fires when the user presses Cmd/Ctrl+0 (zoom the canvas back to 100%). Desktop only: the
+   *  key is intercepted in main because Electron's default View menu owns the accelerator. In the
+   *  Server Edition the renderer's own keydown handler sees the key and this is a no-op stub. */
+  onZoomActualSize(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
   closeWindow(): void
   /** Bring the app window to the foreground (show + OS focus). Called after a file is DROPPED

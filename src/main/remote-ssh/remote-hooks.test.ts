@@ -1,5 +1,7 @@
+import { execFileSync } from 'child_process'
 import { describe, expect, it, vi } from 'vitest'
-import { RemoteHooks } from './remote-hooks'
+import { RemoteHooks, openCodeInstructionsTarget } from './remote-hooks'
+import { isSafeRemoteHome } from '../../core/remote-safety'
 
 const conn = { host: 'h', user: 'u' }
 
@@ -49,7 +51,7 @@ describe('RemoteHooks.setup', () => {
     // reverse forward binds the ABSOLUTE remote socket (no unexpanded ~).
     expect(joined.some((j) => j.includes('-O forward') && j.includes('/home/u/.nodeterm/hook-p1.sock:127.0.0.1:51234'))).toBe(true)
     // endpoint file written to the absolute PER-PROJECT path, with the absolute sock + token.
-    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/hook-endpoint-p1.env'))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/hook-endpoint-p1.env'`))).toBe(true)
     expect(
       calls.some(
         (c) =>
@@ -58,8 +60,8 @@ describe('RemoteHooks.setup', () => {
       )
     ).toBe(true)
     // managed script written to the absolute path + config merged with the guarded command.
-    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/agent-hooks/claude.sh'))).toBe(true)
-    expect(joined.some((j) => j.includes('cat > /home/u/.claude/settings.json'))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/agent-hooks/claude.sh'`))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.claude/settings.json'`))).toBe(true)
     expect(calls.some((c) => (c.stdin ?? '').includes('--unix-socket'))).toBe(true)
     // The merged command guards on the script still existing — a removed ~/.nodeterm must not
     // make every prompt fail the hook (a non-zero UserPromptSubmit hook blocks the prompt).
@@ -168,8 +170,115 @@ describe('RemoteHooks.setup', () => {
     expect(b?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env')
     // the browse writes ITS OWN endpoint file, never the real project's.
     const joined = calls.map((c) => c.args.join(' '))
-    expect(joined.some((j) => j.includes('cat > /home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env'))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env'`))).toBe(true)
     expect(joined.some((j) => j.includes('hook-endpoint-proj.env'))).toBe(false)
+  })
+})
+
+/**
+ * SECURITY — the remote `$HOME` is a HOST ANSWER, i.e. data, not truth. `setup()` splices it into
+ * `mkdir -p <remoteDir> && rm -f <sock>` and into every `cat > <config>`, and those are remote
+ * SHELL LINES. A `$HOME` carrying a newline therefore appends a second command; a `$HOME` carrying
+ * a space silently breaks the install (the unquoted `mkdir` word-splits). Two layers, matching the
+ * fix in `remoteTmuxPtyArgs`: validate the answer, then quote every path built from it. Same
+ * fail-open direction the surrounding code already takes — an unusable answer returns null and the
+ * host simply runs without hooks.
+ */
+describe('RemoteHooks.setup — a hostile remote $HOME', () => {
+  it('returns null and interpolates NOTHING when $HOME carries a newline', async () => {
+    const { rh, conn, runs } = harness({ responses: { $HOME: '/home/u\nid > /tmp/pwned' } })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res).toBeNull()
+    // Nothing beyond the probe itself may have run — no forward, no mkdir, no write.
+    expect(runs.some((r) => r.cmd.includes('id > /tmp/pwned'))).toBe(false)
+    expect(runs.some((r) => r.cmd.includes('mkdir'))).toBe(false)
+    expect(runs.some((r) => r.cmd.includes('-O forward'))).toBe(false)
+  })
+
+  it('quotes every path it builds from $HOME, so a home with a space still installs', async () => {
+    const { rh, conn, runs } = harness({ responses: { $HOME: '/Users/Enes K' } })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res?.endpointPath).toBe('/Users/Enes K/.nodeterm/hook-endpoint-p1.env')
+    const joined = runs.map((r) => r.cmd)
+    expect(joined.some((j) => j.includes(`mkdir -p '/Users/Enes K/.nodeterm'`))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/Users/Enes K/.nodeterm/hook-endpoint-p1.env'`))).toBe(true)
+    expect(joined.some((j) => j.includes(`cat > '/Users/Enes K/.claude/settings.json'`))).toBe(true)
+    // No path derived from $HOME survives UNQUOTED in any remote SHELL LINE (the last argv element
+    // of an ssh child is the command the remote shell parses; the `-R` forward spec is an ssh
+    // OPTION, not a shell word, so it is excluded by construction).
+    const shellLines = runs.map((r) => r.args[r.args.length - 1])
+    expect(shellLines.some((line) => /(?<!')\/Users\/Enes K/.test(line))).toBe(false)
+  })
+})
+
+/**
+ * SECURITY — the opencode instructions target is the ONE remote path that must stay
+ * shell-expandable (`$XDG_CONFIG_HOME` belongs to the HOST), so it cannot be a quoted literal like
+ * its codex/gemini siblings. Written the obvious way it interpolated the host-reported `$HOME`
+ * inside DOUBLE quotes, where `$` and backticks are still live — and `isSafeRemoteHome` accepts
+ * `/home/u$(id)`, correctly, because that is a legal path. Executed through a real `/bin/sh`: the
+ * expression must stay ONE argument and must never run anything.
+ */
+describe('RemoteHooks — the opencode XDG path expression', () => {
+  const HOSTILE = '/home/u$(id)`id`;id;#'
+
+  /** `set --` so the shell reports how many WORDS the expression became, and what the first is. */
+  const probe = (home: string, env: Record<string, string> = {}): string => {
+    const { prelude, pathExpr } = openCodeInstructionsTarget(home)
+    return execFileSync('/bin/sh', ['-c', `${prelude}set -- ${pathExpr}; echo "ARGC=$#|$1"`], {
+      encoding: 'utf8',
+      env: { PATH: '/usr/bin:/bin', ...env }
+    }).trim()
+  }
+
+  it('a hostile $HOME stays inert and the expression stays ONE word (real /bin/sh)', () => {
+    expect(isSafeRemoteHome(HOSTILE), 'a legal path — the validator is not the defence here').toBe(true)
+    expect(probe(HOSTILE)).toBe(`ARGC=1|${HOSTILE}/.config/opencode/AGENTS.md`)
+  })
+
+  it("still honours the HOST's $XDG_CONFIG_HOME, including one containing a space", () => {
+    expect(probe('/home/u', { XDG_CONFIG_HOME: '/o p/cfg' })).toBe('ARGC=1|/o p/cfg/opencode/AGENTS.md')
+    expect(probe('/home/u')).toBe('ARGC=1|/home/u/.config/opencode/AGENTS.md')
+  })
+
+  for (const [what, install] of [
+    ['canvas control', (rh: RemoteHooks, c: typeof conn) => rh.installCanvasControl(c, '/s.sock', HOSTILE)],
+    ['context link', (rh: RemoteHooks, c: typeof conn) => rh.installContextLink(c, '/s.sock', HOSTILE)]
+  ] as const) {
+    it(`${what} routes the opencode target through that safe form`, async () => {
+      const { rh, conn: c, runs } = harness()
+      await install(rh, c)
+      const lines = runs
+        .map((r) => r.args[r.args.length - 1])
+        .filter((l) => l.includes('opencode/AGENTS.md'))
+      expect(lines.length).toBeGreaterThan(0)
+      for (const line of lines) {
+        // The untrusted half is bound to a single-quoted shell variable; it never appears raw
+        // inside the double-quoted expansion, where `$`/backticks would still be live.
+        expect(line).toContain(`NT_H='${HOSTILE}'`)
+        expect(line).toContain('"${XDG_CONFIG_HOME:-$NT_H/.config}/opencode/AGENTS.md"')
+        expect(line).not.toContain(`{XDG_CONFIG_HOME:-${HOSTILE}`)
+      }
+    })
+  }
+})
+
+describe('RemoteHooks.ensureFullscreenTui — the fourth $(dirname …) site', () => {
+  it('quotes the substitution, so a home with a space gets ONE mkdir argument', async () => {
+    // Unquoted, `$(dirname '/Users/Enes Kirca/.claude/settings.json')` word-splits into two mkdir
+    // args (measured ARGC=2): junk directories, then the quoted `cat >` fails and the catch
+    // swallows it — fullscreen-TUI silently never written for any macOS user with a spaced home.
+    const { rh, conn: c, runs } = harness({ responses: { 'settings.json': '{}' } })
+    await rh.ensureFullscreenTui(c, '/s.sock', '/Users/Enes Kirca')
+    const write = runs.map((r) => r.args[r.args.length - 1]).find((l) => l.includes('mkdir -p'))
+    expect(write).toBeTruthy()
+    expect(write).toContain(`mkdir -p "$(dirname '/Users/Enes Kirca/.claude/settings.json')"`)
+    const argc = execFileSync(
+      '/bin/sh',
+      ['-c', `set -- "$(dirname '/Users/Enes Kirca/.claude/settings.json')"; echo "ARGC=$#|$1"`],
+      { encoding: 'utf8' }
+    ).trim()
+    expect(argc).toBe('ARGC=1|/Users/Enes Kirca/.claude')
   })
 })
 
@@ -351,7 +460,10 @@ describe('RemoteHooks.installCanvasControl', () => {
     // the desktop's XDG_CONFIG_HOME says nothing about the host's.
     expect(joined.some((j) => j.includes('/home/u/.codex/AGENTS.md'))).toBe(true)
     expect(joined.some((j) => j.includes('/home/u/.gemini/GEMINI.md'))).toBe(true)
-    expect(joined.some((j) => j.includes('${XDG_CONFIG_HOME:-/home/u/.config}/opencode/AGENTS.md'))).toBe(true)
+    // …with the remote $HOME bound to a shell variable first, so it is never live inside the
+    // double-quoted expansion (see "the opencode XDG path expression" below).
+    expect(joined.some((j) => j.includes(`NT_H='/home/u'`))).toBe(true)
+    expect(joined.some((j) => j.includes('${XDG_CONFIG_HOME:-$NT_H/.config}/opencode/AGENTS.md'))).toBe(true)
     expect(calls.some((c) => (c.stdin ?? '').includes('nodeterm:manage-canvas:start'))).toBe(true)
     // no unexpanded tilde survives in any remote path.
     expect(joined.some((j) => j.includes('~/'))).toBe(false)
