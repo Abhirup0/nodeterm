@@ -156,6 +156,15 @@ if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then
   . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :
 fi
 
+# The PER-NODE capability: the endpoint file (v2) advertises the directory, the token is one file
+# in it named for THIS node id — a lookup by name, never a scan, so a session can only ever present
+# its own. Missing (pre-v2 endpoint, a node whose token was never materialised) leaves it empty,
+# which the server reads as legacy — the request still goes, exactly as before.
+nt_node_token=""
+if [ -n "$NODETERM_NODE_TOKEN_DIR" ] && [ -n "$NODETERM_NODE_ID" ]; then
+  nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID" 2>/dev/null)
+fi
+
 nt_verb="list"
 if [ $# -gt 0 ]; then nt_verb="$1"; shift; fi
 
@@ -183,12 +192,14 @@ if [ -n "$NODETERM_HOOK_SOCK" ]; then
     --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/context-link/$nt_verb" \\
     -H "Accept: text/plain" \\
     -H "X-Nodeterm-Hook-Token: \${NODETERM_HOOK_TOKEN}" \\
+    -H "X-Nodeterm-Node-Token: \${nt_node_token}" \\
     --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
 elif [ -n "$NODETERM_HOOK_PORT" ]; then
   nt_code=$(curl -sS -o "$nt_out" -w '%{http_code}' -X POST \\
     "http://127.0.0.1:\${NODETERM_HOOK_PORT}/context-link/$nt_verb" \\
     -H "Accept: text/plain" \\
     -H "X-Nodeterm-Hook-Token: \${NODETERM_HOOK_TOKEN}" \\
+    -H "X-Nodeterm-Node-Token: \${nt_node_token}" \\
     --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
 else
   rm -f "$nt_out"

@@ -242,6 +242,99 @@ describe('canvas-control shim over a unix socket', () => {
   })
 })
 
+// The per-node token (task A10). The shim's job is only to PRESENT it: read the file the endpoint
+// advertises, keyed by this node's id, and put it on every request — on BOTH transports.
+//
+// One environment fact, stated once: curl DROPS a header whose value is empty (`-H "X: ${empty}"`
+// sends nothing at all). That is the contract we want — absent and empty are the same `legacy` to
+// the server — so "empty header" below is read as `headers[...] ?? ''`.
+describe('canvas-control shim presents the per-node token', () => {
+  const seen: { path: string; nodeToken: string }[] = []
+  let tcp: import('node:http').Server
+  let unix: import('node:http').Server
+  let tcpPort = 0
+  let sock = ''
+  let tokenDir = ''
+
+  beforeAll(async () => {
+    const http = await import('node:http')
+    const handler = (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): void => {
+      req.resume()
+      req.on('end', () => {
+        seen.push({
+          path: req.url ?? '',
+          nodeToken: String(req.headers['x-nodeterm-node-token'] ?? '')
+        })
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('ok\n')
+      })
+    }
+    tcp = http.createServer(handler)
+    unix = http.createServer(handler)
+    await new Promise<void>((r) => tcp.listen(0, '127.0.0.1', r))
+    tcpPort = (tcp.address() as { port: number }).port
+    sock = path.join(dir, 'token-probe.sock')
+    await new Promise<void>((r) => unix.listen(sock, r))
+    tokenDir = path.join(dir, 'node-tokens')
+    fs.mkdirSync(tokenDir, { recursive: true })
+    fs.writeFileSync(path.join(tokenDir, 'node-1'), 'CANVAS-NODE-TOKEN\n', { mode: 0o600 })
+  })
+
+  afterAll(() => {
+    tcp.close()
+    unix.close()
+  })
+
+  it('sends it over the TCP branch when the file exists', async () => {
+    seen.length = 0
+    await callShim(['list'], { NODETERM_HOOK_PORT: String(tcpPort), NODETERM_NODE_TOKEN_DIR: tokenDir })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: 'CANVAS-NODE-TOKEN' }])
+  })
+
+  it('sends it over the unix-socket branch too (the SSH path)', async () => {
+    seen.length = 0
+    await callShim(['list'], {
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_SOCK: sock,
+      NODETERM_NODE_TOKEN_DIR: tokenDir
+    })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: 'CANVAS-NODE-TOKEN' }])
+  })
+
+  it('reads the dir out of the endpoint file, not only the env', async () => {
+    seen.length = 0
+    const endpoint = path.join(dir, 'token-endpoint.env')
+    fs.writeFileSync(
+      endpoint,
+      `NODETERM_HOOK_PORT=${tcpPort}\nNODETERM_HOOK_TOKEN=whatever\nNODETERM_HOOK_VERSION=2\nNODETERM_NODE_TOKEN_DIR=${tokenDir}\n`
+    )
+    await callShim(['list'], {
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_TOKEN: '',
+      NODETERM_HOOK_ENDPOINT: endpoint
+    })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: 'CANVAS-NODE-TOKEN' }])
+  })
+
+  it('still calls, with an empty token, when no token file exists', async () => {
+    seen.length = 0
+    const empty = path.join(dir, 'no-tokens')
+    fs.mkdirSync(empty, { recursive: true })
+    await callShim(['list'], { NODETERM_HOOK_PORT: String(tcpPort), NODETERM_NODE_TOKEN_DIR: empty })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: '' }])
+  })
+
+  it('never presents ANOTHER node\'s token file — the path is keyed by $NODETERM_NODE_ID', async () => {
+    seen.length = 0
+    await callShim(['list'], {
+      NODETERM_HOOK_PORT: String(tcpPort),
+      NODETERM_NODE_TOKEN_DIR: tokenDir,
+      NODETERM_NODE_ID: 'node-9'
+    })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: '' }])
+  })
+})
+
 describe('parseControlBody', () => {
   it('reads the shim dialect: nodeId plus arg.<name> fields', () => {
     expect(

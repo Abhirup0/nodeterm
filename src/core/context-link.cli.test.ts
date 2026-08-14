@@ -4,7 +4,7 @@
 // for the behavior it inherited, plus the remote (SSH) case the old shape could not express.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFile } from 'node:child_process'
-import { mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -250,5 +250,87 @@ describe('context-link CLI', () => {
     const out = await shimRun('node-Z', ['transcript', '--node', 'node-B'])
     expect(out).toContain('No linked nodes')
     expect(out).not.toContain('deploy the app')
+  })
+})
+
+// The per-node token (task A10). Same shape as every other client: read the file the endpoint
+// advertises, keyed by this node's id, present it on BOTH transports.
+//
+// curl DROPS a header whose value is empty (`-H "X: ${empty}"` sends nothing at all) — which is
+// the contract we want, since the server reads absent and empty identically as `legacy`. So
+// "empty token" below is read as `headers[...] ?? ''`.
+describe('context-link shim presents the per-node token', () => {
+  const seen: { path: string; nodeToken: string }[] = []
+  let tcp: import('node:http').Server
+  let unix: import('node:http').Server
+  let tcpPort = 0
+  let sock = ''
+  let tokenDir = ''
+
+  beforeAll(async () => {
+    const http = await import('node:http')
+    const handler = (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): void => {
+      req.resume()
+      req.on('end', () => {
+        seen.push({ path: req.url ?? '', nodeToken: String(req.headers['x-nodeterm-node-token'] ?? '') })
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end('ok\n')
+      })
+    }
+    tcp = http.createServer(handler)
+    unix = http.createServer(handler)
+    await new Promise<void>((r) => tcp.listen(0, '127.0.0.1', r))
+    tcpPort = (tcp.address() as { port: number }).port
+    sock = join(dir, 'ctx-token-probe.sock')
+    await new Promise<void>((r) => unix.listen(sock, r))
+    tokenDir = join(dir, 'node-tokens')
+    mkdirSync(tokenDir, { recursive: true })
+    writeFileSync(join(tokenDir, 'node-A'), 'CONTEXT-NODE-TOKEN\n', { mode: 0o600 })
+  })
+
+  afterAll(() => {
+    tcp.close()
+    unix.close()
+  })
+
+  function probe(nodeId: string, env: Record<string, string>): Promise<unknown> {
+    return run('/bin/sh', [shim, 'list'], {
+      env: { PATH: process.env.PATH ?? '', NODETERM_NODE_ID: nodeId, NODETERM_HOOK_TOKEN: 'x', ...env }
+    })
+  }
+
+  it('sends it over the TCP branch when the file exists', async () => {
+    seen.length = 0
+    await probe('node-A', { NODETERM_HOOK_PORT: String(tcpPort), NODETERM_NODE_TOKEN_DIR: tokenDir })
+    expect(seen).toEqual([{ path: '/context-link/list', nodeToken: 'CONTEXT-NODE-TOKEN' }])
+  })
+
+  it('sends it over the unix-socket branch too (the SSH path)', async () => {
+    seen.length = 0
+    await probe('node-A', { NODETERM_HOOK_SOCK: sock, NODETERM_NODE_TOKEN_DIR: tokenDir })
+    expect(seen).toEqual([{ path: '/context-link/list', nodeToken: 'CONTEXT-NODE-TOKEN' }])
+  })
+
+  it('reads the dir out of the endpoint file, not only the env', async () => {
+    seen.length = 0
+    const endpoint = join(dir, 'ctx-token-endpoint.env')
+    writeFileSync(
+      endpoint,
+      `NODETERM_HOOK_PORT=${tcpPort}\nNODETERM_HOOK_TOKEN=whatever\nNODETERM_HOOK_VERSION=2\nNODETERM_NODE_TOKEN_DIR=${tokenDir}\n`
+    )
+    await probe('node-A', { NODETERM_HOOK_ENDPOINT: endpoint })
+    expect(seen).toEqual([{ path: '/context-link/list', nodeToken: 'CONTEXT-NODE-TOKEN' }])
+  })
+
+  it('still reads, with an empty token, when no token file exists', async () => {
+    seen.length = 0
+    await probe('node-A', { NODETERM_HOOK_PORT: String(tcpPort), NODETERM_NODE_TOKEN_DIR: join(dir, 'nope') })
+    expect(seen).toEqual([{ path: '/context-link/list', nodeToken: '' }])
+  })
+
+  it('never presents ANOTHER node\'s token file — the path is keyed by $NODETERM_NODE_ID', async () => {
+    seen.length = 0
+    await probe('node-Z', { NODETERM_HOOK_PORT: String(tcpPort), NODETERM_NODE_TOKEN_DIR: tokenDir })
+    expect(seen).toEqual([{ path: '/context-link/list', nodeToken: '' }])
   })
 })
