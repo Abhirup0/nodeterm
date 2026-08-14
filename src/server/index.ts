@@ -424,6 +424,9 @@ export async function startServer(
   // secret is stored as raw 0600 bytes (node-auth-key.bin); the loader handles the at-rest format.
   // FAIL OPEN and LOUD: if the secret can't be created/read, identity stays unavailable (legacy
   // mode) and the hook server keeps serving — a throw here must never block boot or the hooks.
+  // Same escape hatch as the desktop, wired OUTSIDE the try for the same reason: it is not part of
+  // arming the secret, and a headless host in legacy mode is where it is most likely to be needed.
+  hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
   try {
     hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
     // Materialise a token file for every persisted node so an already-running session becomes

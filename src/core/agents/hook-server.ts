@@ -6,9 +6,17 @@ import { platform } from '../platform'
 import { canControlCanvas, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import type { CodexIdentityEvent } from '../../shared/types'
+import type { NodeTokenVerdict } from './node-auth-token'
 import { nodeTokenDir } from './node-token-files'
-import { isSafeNodeId, verifyNodeToken } from './node-auth-token'
+import { isForeignKidToken, isSafeNodeId, verifyNodeToken } from './node-auth-token'
 import { isSafeThreadId } from '../codex-identity-proxy'
+import {
+  controlPolicy,
+  CONTEXT_LINK_POLICY_VERB,
+  IDENTITY_REFUSED_NOTE,
+  IDENTITY_RESTART_NOTE,
+  type IdentityDecision
+} from './node-identity-policy'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -171,6 +179,15 @@ class HookServer {
   private codexIdentityListener: ((e: CodexIdentityEvent) => void) | null = null
   private endpointPath = ''
   private nodeAuthSecret: Buffer | null = null
+  /**
+   * `settings.hookIdentityStrict`, read LIVE (a getter, not a snapshot) so flipping it in Settings
+   * takes effect on the next request rather than the next launch. `undefined` — the default, and
+   * what an un-wired shell gets — means "follow NODE_IDENTITY_STRICT_AFTER".
+   */
+  private identityStrict: () => boolean | undefined = () => undefined
+  /** The clock the cutoff is read against. A seam, so a suite can stand on either side of a DATE
+   *  without touching the machine's own. */
+  private identityNow: () => Date = () => new Date()
 
   endpointFilePath(): string {
     if (!this.endpointPath) this.endpointPath = path.join(platform().userDataDir, 'hook-endpoint.env')
@@ -260,6 +277,22 @@ class HookServer {
     this.nodeAuthSecret = null
   }
 
+  /**
+   * The escape hatch, injected by the shell from `settings.hookIdentityStrict`.
+   *
+   * `undefined` follows the dated constant. `true` opts in early. `false` keeps the warning window
+   * open past the cutoff AND releases the trust-on-first-proof latch — so a user whose upgrade goes
+   * wrong gets their canvas back without downgrading the app. Never releases `forged`.
+   */
+  setIdentityStrictOverride(read: () => boolean | undefined): void {
+    this.identityStrict = read
+  }
+
+  /** Test seam only: see `identityNow`. */
+  setIdentityClockForTests(now: () => Date): void {
+    this.identityNow = now
+  }
+
   async start(): Promise<void> {
     if (this.server) return
     this.token = randomUUID()
@@ -312,21 +345,50 @@ class HookServer {
           // dialog — the caller saw "endpoint unreachable" while the dialog was still up, and a
           // late confirm still delivered, so the agent was told nothing happened when it had.
           req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
+          const wantsText = String(req.headers.accept ?? '').includes('text/plain')
+          // IDENTITY, and it runs BEFORE the handler: the promise of a refusal is that nothing
+          // happened, and a check after the handler is a check that happened too late.
+          const { verdict, decision } = this.identityGate(
+            nodeId,
+            verb,
+            req.headers['x-nodeterm-node-token']
+          )
+          if (verdict === 'forged') {
+            res.writeHead(403)
+            res.end()
+            return
+          }
+          if (decision === 'refuse') {
+            // The route's own refusal shape, so the sh shim (which prints any non-200 body to
+            // stderr and exits 1) shows the sentence and nothing else.
+            if (wantsText) {
+              res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+              res.end(`${IDENTITY_REFUSED_NOTE}\n`)
+            } else {
+              res.writeHead(403, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: IDENTITY_REFUSED_NOTE }))
+            }
+            return
+          }
           const result = this.controlHandler
             ? await this.controlHandler({ verb, nodeId, args })
             : { ok: false, error: 'control unavailable' }
+          const warn = decision === 'allow-with-warning'
           // The POSIX-sh shim asks for text/plain: it has no JSON parser, so the server does the
           // rendering the Node CLI used to do client-side. Everything else keeps the JSON shape.
-          if (String(req.headers.accept ?? '').includes('text/plain')) {
+          if (wantsText) {
             const text = result.ok
               ? result.message ?? JSON.stringify(result.result ?? {})
               : result.error ?? 'control request failed'
             res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/plain; charset=utf-8' })
-            res.end(`${text}\n`)
+            res.end(warn ? `${IDENTITY_RESTART_NOTE}\n${text}\n` : `${text}\n`)
             return
           }
           res.writeHead(result.ok ? 200 : 400, { 'content-type': 'application/json' })
-          res.end(JSON.stringify(result))
+          // A field, not a prefix: the JSON dialect is a STRUCTURED reply a legacy client parses,
+          // and folding the note into `message` would either hide `result` (text rendering falls
+          // back to it only when `message` is absent) or corrupt a field somebody reads.
+          res.end(JSON.stringify(warn ? { ...result, warning: IDENTITY_RESTART_NOTE } : result))
           return
         }
         if (reqUrl.pathname.startsWith('/context-link/')) {
@@ -339,6 +401,26 @@ class HookServer {
           // handler ceiling rather than dropping it. The effective bound here is the race below;
           // the socket ceiling is only the backstop behind it.
           req.setTimeout(CONTROL_CEILING_MS, () => req.destroy())
+          // Same latch as /control/, and every verb here is a READ, so it is presented to the
+          // policy as the tolerant verb: an unproven legacy caller keeps its transcript.
+          const gate = this.identityGate(
+            nodeId,
+            CONTEXT_LINK_POLICY_VERB,
+            req.headers['x-nodeterm-node-token']
+          )
+          if (gate.verdict === 'forged') {
+            res.writeHead(403)
+            res.end()
+            return
+          }
+          if (gate.decision === 'refuse') {
+            // PROSE, not a 403. The agent explicitly asked for a read; the shim turns any non-200
+            // into "Could not read linked context (nodeterm unreachable)", which would be a lie and
+            // tells it nothing it can act on. A sentence it can act on is the better failure.
+            res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
+            res.end(`${IDENTITY_REFUSED_NOTE}\n`)
+            return
+          }
           // Always text: the caller is the sh shim, and the payload IS prose (a rendered
           // transcript). The handler owns the authorization — see context-link.ts.
           const text = this.contextLinkHandler
@@ -447,6 +529,47 @@ class HookServer {
    */
   private nodeTokenVerified(nodeId: string, provided: string | string[] | undefined): boolean {
     return verifyNodeToken(this.nodeAuthSecretOrNull(), nodeId, provided) === 'verified'
+  }
+
+  /**
+   * The identity gate for `/control/*` and `/context-link/*` — one call site for the verdict, the
+   * latch and the policy, so the two routes cannot drift into two different rules.
+   *
+   * Both halves of the answer come back: the routes agree on the POLICY but not on the SHAPE of a
+   * refusal (a 403 on control, prose on context-link), and `forged` is a bare 403 on both — it is
+   * an attack signal, and handing it "restart this node" would be advice to an attacker and a lie
+   * to nobody else.
+   */
+  private identityGate(
+    nodeId: string,
+    verb: string,
+    presented: string | string[] | undefined
+  ): { verdict: NodeTokenVerdict; decision: IdentityDecision } {
+    const secret = this.nodeAuthSecretOrNull()
+    // NO SECRET ⇒ NO GATE, ever. This instance cannot mint a token, so nothing can be `verified`,
+    // so a policy that warns or refuses `legacy` here would warn or refuse EVERY caller on the
+    // machine — and the advice it would give ("restart this node to pick up an identity") is
+    // advice that cannot work, because there is no identity to pick up. This is the state a
+    // desktop lands in when safeStorage is unavailable and the state a Server Edition lands in
+    // when the key file cannot be created; both must keep working exactly as they did.
+    if (!secret) return { verdict: 'legacy', decision: 'allow' }
+    const verdict = verifyNodeToken(secret, nodeId, presented)
+    // Proof is earned on ANY route that can present a valid token, not just /hook/*: a session's
+    // first act may well be a canvas-control call.
+    if (verdict === 'verified') this.provenNodes.add(nodeId)
+    return {
+      verdict,
+      decision: controlPolicy({
+        verdict,
+        // A FOREIGN kid is the documented cross-instance failover. It never proved this node (only
+        // `verified` adds to the set) and it must never be caught by the latch either, or the
+        // first day a second instance exists is the day failover stops working.
+        proven: this.provenNodes.has(nodeId) && !isForeignKidToken(secret, presented),
+        verb,
+        now: this.identityNow(),
+        override: this.identityStrict()
+      })
+    }
   }
 
   /**

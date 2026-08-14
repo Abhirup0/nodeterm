@@ -918,6 +918,10 @@ app.whenReady().then(async () => {
   // unavailable the load rejects and we FAIL OPEN — identity stays unavailable (legacy mode),
   // `codexIdentityCaps()` answers `shared: false`, every launch line stays the bare `codex`, and
   // nothing is half-armed. Never throws up the boot path.
+  // The escape hatch for per-route enforcement, read LIVE so flipping it in Settings takes effect
+  // on the next request. Wired OUTSIDE the try: it is not part of arming the secret, and a machine
+  // running in legacy mode is precisely one whose owner may need it.
+  hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
   try {
     const nodeAuthSecret = await loadOrCreateNodeAuthSecret()
     hookServer.setNodeAuthSecret(nodeAuthSecret)

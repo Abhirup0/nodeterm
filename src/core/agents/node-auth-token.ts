@@ -54,6 +54,26 @@ export function nodeAuthToken(secret: Buffer, nodeId: string): string {
 export type NodeTokenVerdict = 'verified' | 'legacy' | 'forged'
 
 /**
+ * Does the presented token carry ANOTHER instance's kid?
+ *
+ * `verifyNodeToken` deliberately folds this into `legacy` — for a LABEL, "we cannot judge this" is
+ * the whole answer. A policy that latches on proof needs the distinction back: a node this instance
+ * has proven, contacted by a caller holding a second instance's token, is the documented
+ * cross-instance failover, not an impostor, and must not trip the latch. Same cheap plain compare
+ * `verifyNodeToken` uses for the kid: it is a routing decision over non-secret bytes.
+ */
+export function isForeignKidToken(
+  secret: Buffer | null,
+  presented: string | string[] | undefined
+): boolean {
+  if (!secret) return false
+  if (typeof presented !== 'string' || presented === '') return false
+  const dot = presented.indexOf('.')
+  if (dot <= 0) return false
+  return presented.slice(0, dot) !== nodeAuthKid(secret)
+}
+
+/**
  * Three-way, not two-way. `legacy` is NOT a failure — it is "we cannot judge this", and per-route
  * policy decides what that means (a missing token, or another instance's kid during the documented
  * cross-instance failover). `forged` — our kid with a bad mac — is the ONLY unambiguous attack
