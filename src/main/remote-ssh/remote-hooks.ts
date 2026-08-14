@@ -614,7 +614,12 @@ export class RemoteHooks {
     try {
       const cmd =
         `curl -s -m 5 -o /dev/null -w '%{http_code}' -X POST --unix-socket ${posixQuote(sock)} ` +
-        `-H ${posixQuote(`x-nodeterm-hook-token: ${token}`)} http://localhost/hook/verify --data nodeId=verify`
+        // `/verify` — the probe's OWN route, which answers 204 on the bearer alone and takes no
+        // node identity at all. It used to POST `/hook/verify`, where it 204'd only as a side
+        // effect of sending no payload; the identity label on `/hook/*` would have started judging
+        // it there. `nodeId=verify` is kept in the body only so an OLDER desktop's script and this
+        // one send the same bytes; the route reads nothing.
+        `-H ${posixQuote(`x-nodeterm-hook-token: ${token}`)} http://localhost/verify --data nodeId=verify`
       const r = await this.r.run(childArgs(conn, controlPath, cmd))
       return r.code === 0 && r.stdout.trim() === '204'
     } catch {

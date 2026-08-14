@@ -308,6 +308,24 @@ class HookServer {
         }
         req.setTimeout(SLOWLORIS_MS, () => req.destroy())
         const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
+        // THE TUNNEL PROBE. `RemoteHooks.verifyTunnel` curls this through the reverse socket and
+        // requires exactly 204 before it will write the remote endpoint file or install a single
+        // hook script. It proves ONE thing — the socket reaches this server — and it must answer on
+        // the bearer alone, with no node identity of any kind, permanently: the caller is the
+        // desktop itself, `verify` is not a node id, and a 403 here would silently cost that host
+        // its whole remote hook + skill install.
+        //
+        // Until this route existed, `/hook/verify` 204'd only because the probe sends no `payload`
+        // field and fell out of the generic branch — a coincidence that the identity label on
+        // `/hook/*` would have turned into a 403 for any probe carrying a token. `/hook/verify`
+        // therefore stays answering forever: a host connected by an older desktop still has that
+        // path baked into the script on its disk.
+        if (reqUrl.pathname === '/verify' || reqUrl.pathname === '/hook/verify') {
+          await readBody(req) // drain, so the probe's body is never left unread on the socket
+          res.writeHead(204)
+          res.end()
+          return
+        }
         if (reqUrl.pathname.startsWith('/codex-thread/')) {
           await this.handleCodexThread(reqUrl.pathname, req, res)
           return
