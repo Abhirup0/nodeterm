@@ -4672,14 +4672,21 @@ export function Canvas() {
   const restartAgentNode = useCallback(async (
     nodeId: string,
     targetAgentId?: AgentId,
-    targetModel?: string
+    targetModel?: string,
+    restartShell?: boolean
   ) => {
     const fn = agentRestartFn(nodeId)
     if (!fn) return // node unmounted between opening the menu and clicking
-    const action = targetModel ? 'Model switch' : targetAgentId ? 'Reopen' : 'Restart'
+    const action = restartShell
+      ? 'Restart'
+      : targetModel
+        ? 'Model switch'
+        : targetAgentId
+          ? 'Reopen'
+          : 'Restart'
     let outcome: RestartOutcome
     try {
-      outcome = await fn(targetAgentId, targetModel)
+      outcome = await fn(targetAgentId, targetModel, restartShell)
     } catch {
       // The transport under the restart threw (a relay socket still CONNECTING rejects the very
       // first write). Unhandled, this rejection made the action a silent no-op — the user clicked
@@ -5402,6 +5409,20 @@ export function Canvas() {
                 disabled: !!why,
                 hint: why ?? 'Quits the CLI and relaunches it with --resume (same conversation).',
                 onClick: () => void restartAgentNode(ids[0])
+              },
+              // Restart agent AND shell: same quit + relaunch, but RECYCLES the tmux session so a
+              // FRESH shell spawns — re-sourcing the user's profile/env (a change to .zshrc, or an
+              // env var set after this node was created), which typing the resume line into the
+              // existing shell never picks up. Same eligibility gate as Restart; the cold-restore
+              // auto-resume on the fresh spawn relaunches the agent with --resume <sid>.
+              {
+                label: 'Restart agent and shell',
+                icon: <IconPower />,
+                disabled: !!why,
+                hint:
+                  why ??
+                  'Quits the CLI, respawns a fresh shell (picks up env/profile changes), then resumes.',
+                onClick: () => void restartAgentNode(ids[0], undefined, undefined, true)
               },
               ...(variants.length
                 ? ([

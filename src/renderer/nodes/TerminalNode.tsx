@@ -2855,7 +2855,7 @@ export function TerminalNode({
     }
     const unregisterRestart = registerAgentRestart(
       id,
-      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string) => {
+      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string, restartShell?: boolean) => {
         const st = useAgentStatus.getState().byId[id]
         const agentSessionId = st?.sessionId
         // `data.agentId` can change after a successful same-base swap while this deliberately
@@ -2904,6 +2904,30 @@ export function TerminalNode({
           updateNodeData(id, (node) => ({
             agentId: target,
             agentModel: selectedModel,
+            respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
+          }))
+          return 'restarted'
+        }
+        // "Restart agent and shell": same quit + recycle as a model switch, but the agent and model
+        // are UNCHANGED — the point is a FRESH shell that re-sources the user's profile/env (a
+        // change to .zshrc, or an env var set after this node was created), which typing the resume
+        // line into the existing shell never picks up. The respawn's cold-restore auto-resume
+        // relaunches the agent (`--resume <sid>`), so the conversation continues in the fresh shell.
+        // Relay sessions are excluded for the same reason a model switch is: their shell env belongs
+        // to another core/settings store, and recycling here would respawn against this Mac's env.
+        if (restartShell) {
+          if (session.source === 'relay') return 'not-eligible'
+          const exited = await performExitPhase({
+            agentId: target,
+            sessionId: agentSessionId,
+            io: restartIo,
+            paneCommand: () => api.pty.paneCommand(id),
+            isLive: restartTarget
+          })
+          if (exited !== 'exited') return exited
+          transport.recycle(id)
+          updateNodeData(id, (node) => ({
+            agentId: target,
             respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
           }))
           return 'restarted'

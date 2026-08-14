@@ -409,9 +409,22 @@ export function guardConcurrentRestart<T extends string, Args extends unknown[]>
 }
 
 // ── Node registry (same park-surviving pattern as TerminalNode's restartSubs) ────────────
+// The closure's optional args select what kind of restart:
+//  - no args                  → plain "Restart agent": quit + resume the SAME agent in the SAME shell.
+//  - `targetAgentId`          → "Reopen session as <variant>": quit + resume the SAME session id
+//                               under a same-base agent's binary (the id is harness-portable within
+//                               a base; see lib/reopenVariants.ts).
+//  - `targetModel`            → switch the gateway model: quit + RECYCLE the tmux session so a fresh
+//                               shell spawns with the new gateway env, then the agent auto-resumes.
+//  - `restartShell: true`     → "Restart agent and shell": quit + RECYCLE for a FRESH shell (picks up
+//                               profile/env changes the same-shell restart cannot) keeping the SAME
+//                               agent + model, then the agent auto-resumes. The recycle-after-exit
+//                               mechanism is the one a model switch already uses, exposed as its own
+//                               action for the "I changed my .zshrc" case.
 export type AgentRestartFn = (
   targetAgentId?: AgentId,
-  targetModel?: string
+  targetModel?: string,
+  restartShell?: boolean
 ) => Promise<RestartOutcome>
 
 const restartFns = new Map<string, AgentRestartFn>()
