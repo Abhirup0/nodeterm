@@ -35,7 +35,15 @@ describe('node token files', () => {
     for (const bad of ['../evil', '..', '.', 'a b', 'a/b']) {
       expect(writeNodeTokenFile(bad, 'kid.mac'), bad).toBe(false)
     }
-    const entries = fs.existsSync(nodeTokenDir()) ? fs.readdirSync(nodeTokenDir()) : []
+    // Read once and treat "no dir" as "no entries", rather than exists-then-read: the two-step is a
+    // check-then-use race (CodeQL js/file-system-race), and here it also reads worse — a refused id
+    // must leave the dir either empty or absent, and both are the same assertion.
+    let entries: string[] = []
+    try {
+      entries = fs.readdirSync(nodeTokenDir())
+    } catch {
+      /* dir was never created — that is the passing shape too */
+    }
     expect(entries).toEqual([])
     // Prove nothing escaped the token dir into userDataDir.
     expect(fs.existsSync(path.join(dir, 'evil'))).toBe(false)
