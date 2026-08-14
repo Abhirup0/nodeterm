@@ -25,6 +25,7 @@ import {
 } from './config'
 import { withPermissionMode } from './approval-mode'
 import { resolveAgentConfig } from './custom-agent'
+import { withAgentModel } from './model-gateway'
 
 export interface LaunchInputs {
   agentId: AgentId
@@ -34,6 +35,8 @@ export interface LaunchInputs {
   initialPrompt?: string
   /** Permission mode to start in. `undefined` = no flag (the agent's own default). */
   permissionMode?: AgentPermissionMode
+  /** Per-node model override, applied through the effective base harness. */
+  model?: string
   /** A minted session id for FIRST launch (claude-base only, when the CLI supports `--session-id`).
    *  Ignored on resume. */
   sessionId?: string
@@ -53,6 +56,8 @@ export interface ResumeInputs {
   /** The provider session id to resume (live hook id, or the minted id persisted on the node). */
   sessionId?: string
   permissionMode?: AgentPermissionMode
+  /** Per-node model override, applied through the effective base harness. */
+  model?: string
   /** Should a SHARED_IDENTITY_CAPABLE agent (codex) name its managed launcher on resume? Same
    *  semantics as `LaunchInputs.sharedIdentity`. */
   sharedIdentity?: boolean
@@ -118,9 +123,9 @@ export function assembleLaunchCommand(
     // Session-id minting: claude-base + CLI supports the flag. On resume this branch is never
     // taken (assembleResumeCommand does not pass sessionId).
     if (inputs.sessionId && mintsSessionId(capId) && inputs.sessionIdFlagSupported) {
-      return withSessionId(withMode, capId, inputs.sessionId)
+      return withAgentModel(withSessionId(withMode, capId, inputs.sessionId), capId, inputs.model)
     }
-    return withMode
+    return withAgentModel(withMode, capId, inputs.model)
   }
 
   const command = usesSep ? `${flagged(baseCmd)} ${sep} ${promptArg}` : flagged(withPrompt)
@@ -150,8 +155,9 @@ export function assembleResumeCommand(
 
   const resumeBase = inputs.sessionId ? resumeCommandWith(baseCmd, capId, inputs.sessionId) : null
   const base = resumeBase ?? baseCmd
-  const command = inputs.permissionMode
+  const withMode = inputs.permissionMode
     ? withPermissionMode(base, capId, inputs.permissionMode)
     : base
+  const command = withAgentModel(withMode, capId, inputs.model)
   return { command, missingEnv: [...m1, ...m2] }
 }

@@ -56,6 +56,19 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       assembleLaunchCommand({ agentId: 'opencode', initialPrompt: 'fix it' }, ENV).command
     ).toBe("opencode --prompt 'fix it'")
   })
+  it('adds a safely quoted model override after the ordinary Claude launch flags', () => {
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'claude',
+          initialPrompt: 'fix',
+          permissionMode: 'plan',
+          model: 'anthropic/claude-sonnet-4'
+        },
+        ENV
+      ).command
+    ).toBe("claude 'fix' --permission-mode plan --model 'anthropic/claude-sonnet-4'")
+  })
 })
 
 describe('assembleLaunchCommand — custom agents', () => {
@@ -92,6 +105,19 @@ describe('assembleLaunchCommand — custom agents', () => {
     expect(r.command).toContain("'read the handoff file'")
     expect(r.command).not.toContain('--prompt')
   })
+  it('a base-agent proxy inherits model-switch command grammar', () => {
+    setCustomAgentBaseResolver((id) => (id === 'custom:proxy' ? 'claude' : undefined))
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'custom:proxy',
+          customAgent: { ...claudeProxy, args: '' },
+          model: 'anthropic/claude-opus'
+        },
+        ENV
+      ).command
+    ).toBe("claude-wopr --model 'anthropic/claude-opus'")
+  })
   it('expands ${env:…} in args and reports missing vars', () => {
     setCustomAgentBaseResolver((id) => (id === 'custom:proxy' ? 'claude' : undefined))
     const r = assembleLaunchCommand(
@@ -117,6 +143,14 @@ describe('assembleResumeCommand', () => {
     expect(assembleResumeCommand({ agentId: 'codex', sessionId: 'abc-123' }, ENV).command).toBe(
       'codex resume abc-123'
     )
+  })
+  it('puts the model flag in the measured Codex resume grammar', () => {
+    expect(
+      assembleResumeCommand(
+        { agentId: 'codex', sessionId: 'abc-123', model: 'openai/gpt-5' },
+        ENV
+      ).command
+    ).toBe("codex resume abc-123 --model 'openai/gpt-5'")
   })
   it('falls back to the bare launch command when there is no session id', () => {
     expect(assembleResumeCommand({ agentId: 'claude' }, ENV).command).toBe('claude')

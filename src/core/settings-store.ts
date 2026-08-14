@@ -9,12 +9,13 @@ import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
  * `{ ...DEFAULT_SETTINGS, ...saved }` shallow merge is right for top-level keys (a missing key
  * picks up the default), but WRONG for nested objects: an old `settings.json` that has a
  * `speech` object without a newly-added key (e.g. `shortcut`) would have its whole `speech`
- * object override the default one-for-one, silently dropping the new key. `speech` is merged
- * one level deeper so old files still pick up new nested defaults.
+ * object override the default one-for-one, silently dropping the new key. Nested settings are
+ * merged one level deeper so old files still pick up new defaults.
  */
 function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   const merged = { ...DEFAULT_SETTINGS, ...saved }
   merged.speech = { ...DEFAULT_SETTINGS.speech, ...saved?.speech }
+  merged.modelGateway = { ...DEFAULT_SETTINGS.modelGateway, ...saved?.modelGateway }
   // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
   // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch

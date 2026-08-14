@@ -5,6 +5,52 @@
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import { assembleLaunchCommand, type LaunchInputs } from '../shared/agents/launch'
+import {
+  modelGatewayRoutes,
+  parseGatewayModels,
+  type ModelDiscoveryResult,
+  type ModelGatewaySettings
+} from '../shared/agents/model-gateway'
+
+const DISCOVERY_TIMEOUT_MS = 10_000
+
+/**
+ * Query model discovery from core rather than the renderer: gateways commonly omit browser CORS,
+ * and the API key should never be interpolated into a terminal command. Every failure is returned
+ * as data so opening Settings or a context menu cannot create an unhandled rejection.
+ */
+async function discoverModels(settings: ModelGatewaySettings): Promise<ModelDiscoveryResult> {
+  const routes = modelGatewayRoutes(settings?.baseUrl ?? '')
+  const apiKey = settings?.apiKey?.trim() ?? ''
+  if (!routes) return { models: [], error: 'Enter a valid HTTP(S) gateway URL.' }
+  if (!apiKey) return { models: [], error: 'Enter an API key.' }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS)
+  try {
+    const response = await fetch(routes.discovery, {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      signal: controller.signal
+    })
+    if (!response.ok) {
+      return { models: [], error: `Model discovery failed (HTTP ${response.status}).` }
+    }
+    const models = parseGatewayModels(await response.json())
+    return models.length
+      ? { models }
+      : { models: [], error: 'The gateway returned no usable models.' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'AbortError'
+    return {
+      models: [],
+      error: timedOut
+        ? 'Model discovery timed out.'
+        : `Model discovery failed: ${err instanceof Error ? err.message : 'unknown error'}`
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 /** A string-only snapshot of `process.env` (undefined entries omitted), for `${env:VAR}` expansion
  *  in the renderer's preview. */
@@ -22,5 +68,8 @@ export function registerAgentEnvIpc(): void {
   platform().handle(IPC.envSnapshot, () => envSnapshot())
   platform().handle(IPC.agentPreviewCommand, (inputs: LaunchInputs) =>
     assembleLaunchCommand(inputs, envSnapshot())
+  )
+  platform().handle(IPC.agentDiscoverModels, (settings: ModelGatewaySettings) =>
+    discoverModels(settings)
   )
 }

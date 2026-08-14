@@ -158,6 +158,7 @@ import {
 } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleResumeCommand } from '@shared/agents/launch'
+import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
 import { hintLabel } from '@shared/platform-utils'
@@ -2429,6 +2430,7 @@ export function TerminalNode({
           cwd: data.cwd,
           persistKey: id,
           agentId: data.agentId,
+          agentModel: data.agentModel,
           accountId: data.accountId,
           sshRemote,
           // Belt AND braces: the guard above cannot see a `ssh` executable that has gone missing,
@@ -2792,7 +2794,14 @@ export function TerminalNode({
             ? undefined
             : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
           const { command: cmd } = assembleResumeCommand(
-            { agentId, customAgent, sessionId: priorId || undefined, permissionMode: mode, sharedIdentity: shared },
+            {
+              agentId,
+              customAgent,
+              sessionId: priorId || undefined,
+              permissionMode: mode,
+              model: data.agentModel,
+              sharedIdentity: shared
+            },
             {}
           )
           if (cmd) writeWhenShellReady(cmd) // same shell-startup race as initialCommand
@@ -2846,7 +2855,7 @@ export function TerminalNode({
     }
     const unregisterRestart = registerAgentRestart(
       id,
-      guardConcurrentRestart(id, async (targetAgentId?: AgentId) => {
+      guardConcurrentRestart(id, async (targetAgentId?: AgentId, targetModel?: string) => {
         const st = useAgentStatus.getState().byId[id]
         const agentSessionId = st?.sessionId
         // `data.agentId` can change after a successful same-base swap while this deliberately
@@ -2870,6 +2879,35 @@ export function TerminalNode({
           capabilityAgentId(target) !== capabilityAgentId(sourceAgentId)
         )
           return 'not-eligible'
+        const selectedModel = targetModel
+          ? normalizedAgentModel(target, targetModel)
+          : normalizedAgentModel(
+              target,
+              getNode(id)?.data.agentModel as string | undefined
+            )
+        // A model switch must rebuild the terminal session, not merely type a new command into its
+        // existing shell: URL/key env was fixed when that shell was spawned and may have been
+        // configured AFTER this node was created. Recycling after a clean CLI exit gives the new
+        // shell the current gateway env without ever exposing the key in the pane. Relay sessions
+        // belong to another core/settings store, so a local gateway must never be pushed into one.
+        if (targetModel) {
+          if (!selectedModel || session.source === 'relay') return 'not-eligible'
+          const exited = await performExitPhase({
+            agentId: target,
+            sessionId: agentSessionId,
+            io: restartIo,
+            paneCommand: () => api.pty.paneCommand(id),
+            isLive: restartTarget
+          })
+          if (exited !== 'exited') return exited
+          transport.recycle(id)
+          updateNodeData(id, (node) => ({
+            agentId: target,
+            agentModel: selectedModel,
+            respawnNonce: ((node.data.respawnNonce as number | undefined) ?? 0) + 1
+          }))
+          return 'restarted'
+        }
         // Built HERE, not inside the choreography: the shared assembly builder is the single funnel
         // for every CLI launch path (shared/agents/launch.ts) and the mode is a renderer-side, async
         // read — exactly as the cold-restore relaunch above does it. Without it a canvas running
@@ -2887,7 +2925,8 @@ export function TerminalNode({
             agentId: target,
             customAgent: customTarget,
             sessionId: agentSessionId,
-            permissionMode: await ensureActivePermissionMode(target)
+            permissionMode: await ensureActivePermissionMode(target),
+            model: selectedModel ?? undefined
           },
           launchEnv
         )

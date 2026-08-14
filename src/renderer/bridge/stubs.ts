@@ -277,7 +277,8 @@ export function buildStubApi(): Omit<
       // (Server Edition) ws-bridge overrides this with the real handler; the stub returns an empty
       // env + unexpanded command so the preview degrades to "unavailable" rather than throwing.
       envSnapshot: () => Promise.resolve({}),
-      previewCommand: U('agent.previewCommand')
+      previewCommand: U('agent.previewCommand'),
+      discoverModels: () => Promise.resolve({ models: [], error: 'Model discovery is unavailable.' })
     },
     chat: {
       readTranscript: U('chat.readTranscript')

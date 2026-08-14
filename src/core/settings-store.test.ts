@@ -85,6 +85,20 @@ describe('SettingsStore nested-default merge', () => {
     expect(store.get().speech).toEqual(DEFAULT_SETTINGS.speech)
   })
 
+  it('fills missing model-gateway fields without losing a saved endpoint', () => {
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ modelGateway: { baseUrl: 'https://bifrost.example.test' } }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().modelGateway).toEqual({
+      baseUrl: 'https://bifrost.example.test',
+      apiKey: ''
+    })
+  })
+
   it("defaults everything when settings.json does not exist", () => {
     const store = new SettingsStore()
     store.init()

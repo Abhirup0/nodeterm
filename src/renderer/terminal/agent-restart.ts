@@ -409,7 +409,10 @@ export function guardConcurrentRestart<T extends string, Args extends unknown[]>
 }
 
 // ── Node registry (same park-surviving pattern as TerminalNode's restartSubs) ────────────
-export type AgentRestartFn = (targetAgentId?: AgentId) => Promise<RestartOutcome>
+export type AgentRestartFn = (
+  targetAgentId?: AgentId,
+  targetModel?: string
+) => Promise<RestartOutcome>
 
 const restartFns = new Map<string, AgentRestartFn>()
 

@@ -12,6 +12,7 @@ import {
   canResume,
   canSubagent,
   canTransferFrom,
+  canSwitchModel,
   createdAgentId,
   hasHooks,
   hasPermissionMode,
@@ -31,6 +32,16 @@ describe('CONTEXT_LINK_CAPABLE', () => {
   })
   it('custom agents cannot', () => {
     expect(canContextLink('custom:abc')).toBe(false)
+  })
+})
+
+describe('MODEL_SWITCH_CAPABLE', () => {
+  it('is centralized on the base harness capability', () => {
+    expect(canSwitchModel('claude')).toBe(true)
+    expect(canSwitchModel('codex')).toBe(true)
+    for (const id of ['gemini', 'opencode', 'grok', 'custom:plain'] as const) {
+      expect(canSwitchModel(id), id).toBe(false)
+    }
   })
 })
 

@@ -228,6 +228,31 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     fs.rmSync(cwd, { recursive: true, force: true })
   })
 
+  it('injects the shared gateway into both the PTY and its tmux session environment', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.init(() => ({
+      ...DEFAULT_SETTINGS,
+      modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-secret' }
+    }))
+    m.registerIpc()
+
+    await create(80, 24, 'gateway-node', { agentId: 'claude' })
+
+    expect(spawnArgs[0].env.ANTHROPIC_BASE_URL).toBe(
+      'https://bifrost.example.test/anthropic'
+    )
+    expect(spawnArgs[0].env.ANTHROPIC_AUTH_TOKEN).toBe('vk-secret')
+    expect(spawnArgs[0].args).toEqual(
+      expect.arrayContaining([
+        '-e',
+        'ANTHROPIC_BASE_URL=https://bifrost.example.test/anthropic',
+        '-e',
+        'ANTHROPIC_AUTH_TOKEN=vk-secret'
+      ])
+    )
+  })
+
   // ── `fresh` drives scrollback replay + agent resume: it must still be computed from tmux ──
   it('fresh:false on a WARM reattach (tmux session already exists) — no cold restore', async () => {
     await tmuxManager()

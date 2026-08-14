@@ -93,6 +93,8 @@ export interface NodeData {
   highScore?: number
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** Model selected for this node through the shared model gateway. */
+  agentModel?: string
   /**
    * Claude nodes only: the managed Claude account (config-dir isolated) this node runs under.
    * Persisted so cold-restore resume reads the transcript from the right account dir.
@@ -1274,6 +1276,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         commitOid: n.commitOid,
         highScore: n.highScore,
         agentId,
+        agentModel: n.agentModel,
         accountId: n.accountId,
         agentSessionId: n.agentSessionId,
         pendingLaunch: n.pendingLaunch,
@@ -1339,6 +1342,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         commitOid: n.data.commitOid,
         highScore: n.data.highScore,
         agentId: n.data.agentId,
+        agentModel: n.data.agentModel,
         accountId: n.data.accountId,
         agentSessionId: n.data.agentSessionId,
         pendingLaunch: n.data.pendingLaunch,

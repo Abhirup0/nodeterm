@@ -439,7 +439,8 @@ const api: NodeTerminalApi = {
   },
   agent: {
     envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),
-    previewCommand: (inputs) => ipcRenderer.invoke(IPC.agentPreviewCommand, inputs)
+    previewCommand: (inputs) => ipcRenderer.invoke(IPC.agentPreviewCommand, inputs),
+    discoverModels: (settings) => ipcRenderer.invoke(IPC.agentDiscoverModels, settings)
   },
   chat: {
     readTranscript: (sessionId, cwd, accountId, nodeId) =>

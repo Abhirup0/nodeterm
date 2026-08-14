@@ -75,6 +75,7 @@ import { clearNode as clearNodeAgentStatus } from './agent-status-mirror'
 import { hasSharedIdentity, setCustomAgentBaseResolver, type AgentId } from '../shared/agents/config'
 import { findCustomAgent } from '../shared/agents/custom-agent'
 import { applyCustomAgentEnv, customAgentEnvArgs } from './custom-agent-env'
+import { modelGatewayEnv } from '../shared/agents/model-gateway'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -2002,6 +2003,20 @@ export class PtyManager {
       for (const k of AUTH_ENV_STRIP) delete env[k]
     }
 
+    // Shared model gateway: resolve through the node's BASE harness in one shared mapping, then
+    // apply it before custom-agent env. That precedence is intentional: an inheriting custom agent
+    // benefits from the one-click gateway by default, but env values it explicitly declares still
+    // win exactly as they did before this feature. Remote values travel through tmux `-e` below;
+    // do not leak them into the local ssh client process environment.
+    const gatewayEnv = modelGatewayEnv(
+      this.getSettings().modelGateway,
+      options.agentId ?? 'claude',
+      options.agentModel
+    )
+    if (!options.sshRemote) {
+      for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
+    }
+
     // Custom-agent env: merged LAST so it wins over hook + account + PATH/LANG env (required for
     // the proxy use case — the user's ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL must beat whatever
     // the account path set). ${env:VAR} is expanded against the live process env. Only the LOCAL
@@ -2102,6 +2117,10 @@ export class PtyManager {
       )
       for (const w of remoteCustomEnv.warnings) console.warn(w)
       const remoteCustomEnvArgs = remoteCustomEnv.args.flatMap((kv) => ['-e', kv])
+      const remoteGatewayEnvArgs = Object.entries(gatewayEnv).flatMap(([k, v]) => [
+        '-e',
+        `${k}=${v}`
+      ])
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -2113,7 +2132,12 @@ export class PtyManager {
         // place a foreign value is most at home.
         reqShell,
         options.shellArgs,
-        [...hookExtraEnv, ...remoteAccountEnv, ...remoteCustomEnvArgs],
+        [
+          ...hookExtraEnv,
+          ...remoteAccountEnv,
+          ...remoteGatewayEnvArgs,
+          ...remoteCustomEnvArgs
+        ],
         // Source nodeterm's remote tmux.conf via `-f` (written on connect, Task 2) so a cold-start
         // session gets mouse/clipboard/scrollback. Fail-open: undefined → remote tmux host defaults.
         options.sshRemote.tmuxConfPath
@@ -2142,6 +2166,12 @@ export class PtyManager {
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
+      // The shared tmux server outlives the app, so the gateway cannot rely on the tmux client's
+      // inherited process env. Emit only the centrally-mapped keys explicitly; read their FINAL
+      // values from `env` so a custom agent override retains last-write precedence.
+      const gatewayEnvArgs = Object.keys(gatewayEnv).flatMap((key) =>
+        typeof env[key] === 'string' ? ['-e', `${key}=${env[key]}`] : []
+      )
       const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',
@@ -2154,6 +2184,7 @@ export class PtyManager {
         ...pathEnvArgs,
         ...langEnvArgs,
         ...accountEnvArgs,
+        ...gatewayEnvArgs,
         '-c',
         cwd,
         '-s',

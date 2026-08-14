@@ -991,15 +991,15 @@ describe('agent restart registry', () => {
     expect(agentRestartFn('n2')).toBeUndefined()
   })
 
-  it('forwards an optional target agent to the registered restart', async () => {
-    let seen: string | undefined
-    registerAgentRestart('n3', async (targetAgentId) => {
-      seen = targetAgentId
+  it('forwards optional target agent and model to the registered restart', async () => {
+    let seen: [string | undefined, string | undefined] | undefined
+    registerAgentRestart('n3', async (targetAgentId, targetModel) => {
+      seen = [targetAgentId, targetModel]
       return 'restarted'
     })
 
-    expect(await agentRestartFn('n3')?.('custom:claude')).toBe('restarted')
-    expect(seen).toBe('custom:claude')
+    expect(await agentRestartFn('n3')?.('custom:claude', 'openai/gpt-5')).toBe('restarted')
+    expect(seen).toEqual(['custom:claude', 'openai/gpt-5'])
   })
 })
 

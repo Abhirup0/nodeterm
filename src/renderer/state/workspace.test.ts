@@ -574,12 +574,21 @@ describe('accountId serialization', () => {
       position: { x: 0, y: 0 },
       width: 600,
       height: 400,
-      data: { title: 'T', color: '#888', group: null, agentId: 'claude', accountId: 'a1' }
+      data: {
+        title: 'T',
+        color: '#888',
+        group: null,
+        agentId: 'claude',
+        agentModel: 'openai/gpt-5',
+        accountId: 'a1'
+      }
     } as unknown as CanvasNode
     const states = flowToNodeStates([node])
     expect(states[0].accountId).toBe('a1')
+    expect(states[0].agentModel).toBe('openai/gpt-5')
     const back = nodeStatesToFlow(states)
     expect(back[0].data.accountId).toBe('a1')
+    expect(back[0].data.agentModel).toBe('openai/gpt-5')
   })
   it('leaves accountId undefined when unset', () => {
     const node = {

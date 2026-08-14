@@ -656,7 +656,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   `AGENT_HOOK_TARGETS`, `RESUMABLE_AGENTS`, `SUBAGENT_CAPABLE`, `RECURRING_CAPABLE`,
   `BRANCH_CAPABLE`, `CONTEXT_LINK_CAPABLE`, `USAGE_CAPABLE`, `CHAT_CAPABLE`,
   `TRANSFER_SOURCE_CAPABLE`, `RENAME_CAPABLE`, `TITLE_READ_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
-  `PERMISSION_MODE_CAPABLE`, with helpers (`hasHooks`,
+  `PERMISSION_MODE_CAPABLE`, `MODEL_SWITCH_CAPABLE`, with helpers (`hasHooks`,
   `canBranch`, `canContextLink`, `canChat`, `canRename`, `canReadTitle`, `hasPermissionMode`, …).
   Branch and the ⌘M **ChatPanel** transcript view (`CHAT_CAPABLE` / `canChat` — since the SDK chat
   node was removed, 2026-07, this is all `canChat` now gates) stay **Claude-only** purely by
@@ -673,6 +673,20 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   **`docs/grok-agent.md`**, **`docs/gemini-agent.md`** (there is none for codex — its approval mapping
   and every value's reasoning live in `src/shared/agents/approval-mode.ts`);
   the distilled rules are **Adding a new agent** at the end of this section.
+- **Model gateway / switcher** — `settings.modelGateway` stores one Bifrost-compatible root +
+  virtual key; `shared/agents/model-gateway.ts` is the ONE mapping from a base harness to derived
+  routes, env vars, compatible models and safely quoted model flags. It derives `/v1/models`,
+  `/openai/v1` and `/anthropic`; discovery runs in core (`agent:discover-models`) so browser CORS
+  cannot block the Server Edition and the key never enters a terminal command. Support is a
+  capability (`MODEL_SWITCH_CAPABLE = claude/codex`) resolved through `capabilityAgentId`, so a
+  custom agent with a supported `baseAgent` inherits it automatically — the settings UI and canvas
+  menu carry no agent allowlist. A model switch cleanly exits the CLI and RECYCLES the tmux session
+  before cold-resume: an existing shell may predate the gateway setting, and tmux env changes do
+  not retroactively change that shell's environment. Recreating it guarantees the current URL/key
+  applies without typing a secret into the pane. Ordinary Restart stays in-place. Custom-agent env
+  is still merged last and may override the shared mapping. Desktop and Server Edition use the
+  same core handler; relay tabs deliberately do not apply this machine's gateway to another core.
+  Mobile needs a settings/model-picker surface before it can expose the feature.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE` and `CANVAS_CONTROL_CAPABLE`; NOT in
   `USAGE_CAPABLE` / `CONTEXT_LINK_CAPABLE` / `SUBAGENT_CAPABLE` (each blocked on a fixture that needs a
@@ -1347,6 +1361,15 @@ principle. Per-agent write-ups: `docs/grok-agent.md`, `docs/gemini-agent.md`.
 16. **Write the device checklist for what you could not run.** Every unverified claim becomes a
     numbered item; group the ones that fall out of a single capture run. `docs/grok-agent.md` §9 and
     `docs/gemini-agent.md` §9 are the format.
+17. **Extend the base harness mapping, never a frontend allowlist.** Model support is
+    `MODEL_SWITCH_CAPABLE` plus the protocol/env/flag leaf in `shared/agents/model-gateway.ts`.
+    Frontends call `canSwitchModel` / `modelsForAgent`; they never spell Claude, Codex or a custom
+    id themselves. This makes `baseAgent:'claude'` inherit discovery, filtering, environment and
+    command grammar as one unit instead of four copies that drift.
+18. **A model switch must refresh the shell environment without printing the key.** An already-live
+    shell does not inherit a later `tmux set-environment`, and prefixing the resume line with
+    `KEY=secret` leaks it into the pane/history. Exit the idle CLI, recycle the persistent session,
+    and let cold restore resume with the new model under the newly injected environment.
 
 ## Session memory (the RAM pill + the per-session panel)
 

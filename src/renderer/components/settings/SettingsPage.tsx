@@ -26,6 +26,7 @@ import { SshSection } from './sections/SshSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { PrivacySection } from './sections/PrivacySection'
 import { GitHubIssuesSection } from './sections/GitHubIssuesSection'
+import { ModelGatewaySection } from './sections/ModelGatewaySection'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -81,6 +82,7 @@ export function SettingsPage({
             <UsageSection isActive={active === 'usage'} />
             <AccountsSection isActive={active === 'accounts'} />
             <CustomAgentsSection isActive={active === 'custom-agents'} />
+            <ModelGatewaySection isActive={active === 'model-gateway'} />
             <NotificationsSection isActive={active === 'notifications'} />
             <CommitSection isActive={active === 'commit'} />
             <TmuxSection isActive={active === 'tmux'} />

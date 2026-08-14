@@ -144,6 +144,8 @@ import {
 } from '../lib/addMenuSpec'
 import { transferConversationItems } from '../lib/transferItems'
 import { reopenVariants } from '../lib/reopenVariants'
+import { modelsForAgent } from '@shared/agents/model-gateway'
+import { useModelGateway } from '../state/modelGateway'
 import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
@@ -261,6 +263,7 @@ import {
   canBranch,
   canRename,
   canContextLink,
+  canSwitchModel,
   createdAgentId,
   resumeCommand,
   AGENT_CONFIG,
@@ -701,7 +704,8 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
 export function Canvas() {
   // This canvas's core api (a context read — stable for the session, no store subscription).
   // For the local session it IS window.nodeTerminal, so every call resolves identically.
-  const { api } = useSession()
+  const session = useSession()
+  const { api } = session
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
@@ -1023,6 +1027,30 @@ export function Canvas() {
   const [mergeTarget, setMergeTargetState] = useState<MergeState | null>(null)
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
+  const gatewayModels = useModelGateway((s) => s.models)
+  const gatewayStatus = useModelGateway((s) => s.status)
+  const gatewayError = useModelGateway((s) => s.error)
+  const discoverModels = useModelGateway((s) => s.discover)
+  const clearModels = useModelGateway((s) => s.clear)
+
+  // Prime the context-menu catalogue after hydration and refresh it after a gateway edit. Debounce
+  // keystrokes so entering a URL/key does not issue one authenticated request per character. The
+  // global preload is deliberate: gateway settings belong to this app instance, never to a relay
+  // tab whose terminals and secrets live on another machine.
+  useEffect(() => {
+    const gateway = settings.modelGateway
+    if (!gateway.baseUrl.trim() || !gateway.apiKey.trim()) {
+      clearModels()
+      return
+    }
+    const timer = setTimeout(() => void discoverModels(gateway), 500)
+    return () => clearTimeout(timer)
+  }, [
+    settings.modelGateway.baseUrl,
+    settings.modelGateway.apiKey,
+    discoverModels,
+    clearModels
+  ])
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
   /**
@@ -4641,13 +4669,17 @@ export function Canvas() {
   // time, so a stale menu cannot force a restart onto a session that just went busy); all that is
   // left here is telling the user how it went. Up to ~6s of exit polling plus the echo-verified
   // resume line, hence the await before the notice.
-  const restartAgentNode = useCallback(async (nodeId: string, targetAgentId?: AgentId) => {
+  const restartAgentNode = useCallback(async (
+    nodeId: string,
+    targetAgentId?: AgentId,
+    targetModel?: string
+  ) => {
     const fn = agentRestartFn(nodeId)
     if (!fn) return // node unmounted between opening the menu and clicking
-    const action = targetAgentId ? 'Reopen' : 'Restart'
+    const action = targetModel ? 'Model switch' : targetAgentId ? 'Reopen' : 'Restart'
     let outcome: RestartOutcome
     try {
-      outcome = await fn(targetAgentId)
+      outcome = await fn(targetAgentId, targetModel)
     } catch {
       // The transport under the restart threw (a relay socket still CONNECTING rejects the very
       // first write). Unhandled, this rejection made the action a silent no-op — the user clicked
@@ -4659,14 +4691,21 @@ export function Canvas() {
       })
       return
     }
-    if (outcome === 'restarted' && targetAgentId) {
+    if (outcome === 'restarted' && (targetAgentId || targetModel)) {
       // The pane now runs the target variant. Persist that identity so its icon/capabilities and
       // every later plain Restart describe what is actually in the pane. The provider session id
       // stays unchanged, so choosing the original variant later reverses this cleanly.
       setNodes((ns) =>
         ns.map((n) =>
           n.id === nodeId && n.type === 'terminal'
-            ? { ...n, data: { ...n.data, agentId: targetAgentId } }
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  ...(targetAgentId ? { agentId: targetAgentId } : {}),
+                  ...(targetModel ? { agentModel: targetModel } : {})
+                }
+              }
             : n
         )
       )
@@ -4684,9 +4723,11 @@ export function Canvas() {
       outcome === 'restarted'
         ? {
             kind: 'info',
-            text: targetLabel
-              ? `Session reopened as ${targetLabel} — conversation resumed.`
-              : 'Agent restarted — conversation resumed.'
+            text: targetModel
+              ? `Switched to ${targetModel} — conversation resumed.`
+              : targetLabel
+                ? `Session reopened as ${targetLabel} — conversation resumed.`
+                : 'Agent restarted — conversation resumed.'
           }
         : outcome === 'exit-timeout'
           ? {
@@ -5329,6 +5370,12 @@ export function Canvas() {
             const variants = sourceAgentId
               ? reopenVariants(sourceAgentId, settings.customAgents, settings.disabledAgents)
               : []
+            const switchCapable = !!sourceAgentId && canSwitchModel(sourceAgentId)
+            const compatibleModels = sourceAgentId && session.source !== 'relay'
+              ? modelsForAgent(gatewayModels, sourceAgentId)
+              : []
+            const currentModel =
+              typeof n?.data.agentModel === 'string' ? n.data.agentModel : undefined
             // 'not-resumable' is permanent (a plain shell, opencode, a custom CLI with no exit
             // command) — no row at all. The other two are temporary, so the row stays and says
             // what to wait for instead of disappearing and teaching nothing.
@@ -5375,6 +5422,43 @@ export function Canvas() {
                       )
                     }
                   ] as MenuItem[])
+                : []),
+              ...(switchCapable
+                ? compatibleModels.length
+                  ? ([
+                      {
+                        type: 'submenu',
+                        label: currentModel ? `Switch model (${currentModel})` : 'Switch model',
+                        icon: <IconSwitch />,
+                        children: compatibleModels.map(
+                          (model): MenuItem => ({
+                            label: `${model.id === currentModel ? '✓ ' : ''}${model.id}`,
+                            disabled: !!why || model.id === currentModel,
+                            hint:
+                              model.id === currentModel
+                                ? 'This node is already using this model.'
+                                : why ??
+                                  `Restarts the terminal session and resumes this conversation with ${model.id}.`,
+                            onClick: () =>
+                              void restartAgentNode(ids[0], undefined, model.id)
+                          })
+                        )
+                      }
+                    ] as MenuItem[])
+                  : ([
+                      {
+                        label: 'Switch model',
+                        icon: <IconSwitch />,
+                        disabled: true,
+                        hint:
+                          session.source === 'relay'
+                            ? 'Configure the model gateway on the machine hosting this relay session.'
+                            : gatewayStatus === 'loading'
+                              ? 'Discovering models…'
+                              : gatewayError ||
+                                'Configure a URL and API key in Settings → Model gateway.'
+                      }
+                    ] as MenuItem[])
                 : [])
             ] as MenuItem[]
           })()
@@ -5396,7 +5480,11 @@ export function Canvas() {
     toggleMarkdown,
     reloadTerminals,
     restartAgentNode,
-    deleteNodes
+    deleteNodes,
+    gatewayModels,
+    gatewayStatus,
+    gatewayError,
+    session.source
   ])
 
   /** "New <agent>" creation entries shared by the pane and group context menus.

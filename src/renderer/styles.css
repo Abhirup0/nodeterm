@@ -2826,6 +2826,8 @@ body,
      the row's remaining width — size it to its content so long account labels don't wrap. */
   width: max-content;
   max-width: 320px;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
 }
 .ctx-submenu .ctx-item {
   /* Keep the label and its default ✓ on one line (labels ellipsize past max-width). */

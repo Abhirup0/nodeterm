@@ -8,6 +8,10 @@ import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
+import type {
+  ModelDiscoveryResult,
+  ModelGatewaySettings
+} from './agents/model-gateway'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -27,6 +31,8 @@ export interface PtyCreateOptions {
    * real value in a later phase.
    */
   agentId?: AgentId
+  /** Per-node model override. Applied through the node's base harness on launch/cold restore. */
+  agentModel?: string
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
   /**
@@ -224,6 +230,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** Model selected for this agent node through the shared model gateway. */
+  agentModel?: string
   /** Set while this node is armed but not yet launched — see PendingLaunch. */
   pendingLaunch?: PendingLaunch
   /**
@@ -1007,6 +1015,8 @@ export interface Settings {
   soundVolume: number
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** One Bifrost-compatible endpoint/key used by every model-switch-capable base harness. */
+  modelGateway: ModelGatewaySettings
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
@@ -1152,6 +1162,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEffects: true,
   soundVolume: 0.5,
   customAgents: [],
+  modelGateway: { baseUrl: '', apiKey: '' },
   claudeAccounts: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.
@@ -2043,10 +2054,13 @@ export interface AgentApi {
     agentId: AgentId
     customAgent?: CustomAgent
     initialPrompt?: string
+    model?: string
     permissionMode?: AgentPermissionMode
     sessionId?: string
     sessionIdFlagSupported?: boolean
   }): Promise<{ command: string; missingEnv: string[] }>
+  /** Query the configured gateway's OpenAI-compatible `/v1/models` endpoint. Never rejects. */
+  discoverModels(settings: ModelGatewaySettings): Promise<ModelDiscoveryResult>
 }
 
 export interface HandoffApi {

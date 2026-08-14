@@ -53,6 +53,8 @@ export const IPC = {
    *  live preview in Settings → Custom agents. Payload: `LaunchInputs`; resolves
    *  `{ command, missingEnv }`. */
   agentPreviewCommand: 'agent:preview-command',
+  /** Renderer → core: fetch a Bifrost/OpenAI-compatible model catalogue without browser CORS. */
+  agentDiscoverModels: 'agent:discover-models',
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
