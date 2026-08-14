@@ -31,6 +31,18 @@ describe('buildManagedScript', () => {
     expect(s).not.toContain('if [ -z "$NODETERM_HOOK_TOKEN" ] || [ -z "$NODETERM_NODE_ID" ]; then')
   })
 
+  // The executed tests below cover the request POST on both transports and the failover leg; this
+  // one covers the FOURTH block too — the backgrounded "answered" POST, which fires only after a
+  // phone/canvas answer file appears and is therefore hard to reach under /bin/sh. All four must
+  // read their credentials from a config on stdin; none may name a token header in argv.
+  it('never names a credential header on curl\'s command line, in any POST block', () => {
+    expect(s).not.toContain('-H "X-Nodeterm-Hook-Token')
+    expect(s).not.toContain('-H "X-Nodeterm-Node-Token')
+    expect((s.match(/\n *curl -sS/g) ?? []).length).toBe(4)
+    expect((s.match(/\n *nt_hook_headers \|/g) ?? []).length).toBe(4)
+    expect((s.match(/--config -/g) ?? []).length).toBe(4)
+  })
+
   describe('deterministic hook-reply approvals (PermissionRequest wait branch)', () => {
     it('gates the wait branch on NODETERM_PERM_WAIT_SECS > 0', () => {
       expect(s).toContain('[ -n "$NODETERM_PERM_WAIT_SECS" ] && [ "$NODETERM_PERM_WAIT_SECS" -gt 0 ]')
@@ -179,6 +191,54 @@ describe('buildManagedScript', () => {
   })
 })
 
+/**
+ * A stand-in `curl` that records BOTH channels of every invocation: its argv (`$*`) and whatever
+ * it was fed on stdin (the `--config -` file). One log, three line kinds per call:
+ *
+ *   ARGV <the command line>
+ *   CFG  <each line of the config read from stdin>
+ *   END
+ *
+ * Recording stdin is the point. A test that only inspected argv could not tell "the credential
+ * moved to stdin" from "the credential was dropped"; a test that only inspected the server could
+ * not tell "sent on stdin" from "sent on the command line". Both together pin the fix.
+ */
+function fakeCurlScript(log: string, tail = ''): string {
+  return [
+    '#!/bin/sh',
+    `printf 'ARGV %s\\n' "$*" >> ${JSON.stringify(log)}`,
+    `sed 's/^/CFG /' >> ${JSON.stringify(log)}`,
+    `printf 'END\\n' >> ${JSON.stringify(log)}`,
+    tail,
+    'exit 0',
+    ''
+  ].join('\n')
+}
+
+interface CurlCall {
+  /** The command line, exactly as `ps` would show it. */
+  argv: string
+  /** The curl config file curl read from stdin. */
+  cfg: string
+}
+
+function curlCalls(log: string): CurlCall[] {
+  const out: CurlCall[] = []
+  let argv = ''
+  let cfg: string[] = []
+  for (const line of readFileSync(log, 'utf8').split('\n')) {
+    if (line.startsWith('ARGV ')) {
+      argv = line.slice(5)
+      cfg = []
+    } else if (line.startsWith('CFG ')) {
+      cfg.push(line.slice(4))
+    } else if (line === 'END') {
+      out.push({ argv, cfg: cfg.join('\n') })
+    }
+  }
+  return out
+}
+
 // Generated shell no compiler checks: run it for real against a fake $HOME + a fake curl, the
 // same discipline as the canvas-control shim and the remote-usage command. This is the ONLY thing
 // that proves the glob candidate actually expands (a quoted pattern passes every string assertion
@@ -225,7 +285,7 @@ describe('buildManagedScript endpoint failover, executed under /bin/sh', () => {
       // Fake curl: log every invocation, fail the unix-socket transport (dead tunnel), succeed on TCP.
       writeFileSync(
         join(bin, 'curl'),
-        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$*" in *--unix-socket*) exit 7 ;; esac\nexit 0\n`,
+        fakeCurlScript(log, 'case "$*" in *--unix-socket*) exit 7 ;; esac'),
         { encoding: 'utf8', mode: 0o755 }
       )
       const script = join(dir, 'claude.sh')
@@ -244,22 +304,35 @@ describe('buildManagedScript endpoint failover, executed under /bin/sh', () => {
         }
       })
       expect(res.status).toBe(0)
-      const calls = readFileSync(log, 'utf8').trim().split('\n')
+      const calls = curlCalls(log)
       expect(calls).toHaveLength(2)
       // 1st: the dead primary over its socket. 2nd: the retry against the live project's endpoint.
-      expect(calls[0]).toContain('--unix-socket')
-      expect(calls[0]).toContain('dead-token')
-      expect(calls[1]).toContain('http://127.0.0.1:45999/hook/claude')
-      expect(calls[1]).toContain('live-token')
-      expect(calls[1]).toContain('nodeId=node-1')
+      expect(calls[0].argv).toContain('--unix-socket')
+      expect(calls[1].argv).toContain('http://127.0.0.1:45999/hook/claude')
+      expect(calls[1].argv).toContain('nodeId=node-1')
       // The dead transport must not survive into the retry (SOCK/PORT are cleared before sourcing).
-      expect(calls[1]).not.toContain('--unix-socket')
+      expect(calls[1].argv).not.toContain('--unix-socket')
+      // BOTH credentials arrive on stdin as a curl config, and NEITHER is on the command line —
+      // on the failover leg as much as the primary one. `ps` on a shared host is readable by every
+      // other account, and a leaked per-node token is a leaked node identity.
+      expect(calls[0].cfg).toContain('header = "X-Nodeterm-Hook-Token: dead-token"')
+      expect(calls[1].cfg).toContain('header = "X-Nodeterm-Hook-Token: live-token"')
+      for (const c of calls) {
+        for (const secret of [
+          'dead-token',
+          'live-token',
+          'PRIMARY-NODE-TOKEN',
+          'FALLBACK-NODE-TOKEN'
+        ]) {
+          expect(c.argv).not.toContain(secret)
+        }
+      }
       // The per-node token follows the ENDPOINT, not the process: the primary POST carries the
       // primary dir's token, and the retry carries the FALLBACK dir's — a stale token dir would
       // send our kid to an instance that cannot judge it.
-      expect(calls[0]).toContain('X-Nodeterm-Node-Token: PRIMARY-NODE-TOKEN')
-      expect(calls[1]).toContain('X-Nodeterm-Node-Token: FALLBACK-NODE-TOKEN')
-      expect(calls[1]).not.toContain('PRIMARY-NODE-TOKEN')
+      expect(calls[0].cfg).toContain('header = "X-Nodeterm-Node-Token: PRIMARY-NODE-TOKEN"')
+      expect(calls[1].cfg).toContain('header = "X-Nodeterm-Node-Token: FALLBACK-NODE-TOKEN"')
+      expect(calls[1].cfg).not.toContain('PRIMARY-NODE-TOKEN')
     }
   )
 
@@ -288,11 +361,10 @@ describe('buildManagedScript endpoint failover, executed under /bin/sh', () => {
       'NODETERM_HOOK_PORT=45999\nNODETERM_HOOK_TOKEN=live-token\nNODETERM_HOOK_VERSION=1\n',
       'utf8'
     )
-    writeFileSync(
-      join(bin, 'curl'),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$*" in *--unix-socket*) exit 7 ;; esac\nexit 0\n`,
-      { encoding: 'utf8', mode: 0o755 }
-    )
+    writeFileSync(join(bin, 'curl'), fakeCurlScript(log, 'case "$*" in *--unix-socket*) exit 7 ;; esac'), {
+      encoding: 'utf8',
+      mode: 0o755
+    })
     const script = join(dir, 'claude2.sh')
     writeFileSync(script, buildManagedScript('claude'), { encoding: 'utf8', mode: 0o755 })
     const res = spawnSync('sh', [script], {
@@ -307,11 +379,18 @@ describe('buildManagedScript endpoint failover, executed under /bin/sh', () => {
       }
     })
     expect(res.status).toBe(0)
-    const calls = readFileSync(log, 'utf8').trim().split('\n')
+    const calls = curlCalls(log)
     expect(calls).toHaveLength(2)
-    expect(calls[0]).toContain('X-Nodeterm-Node-Token: PRIMARY-ONLY-TOKEN')
-    expect(calls[1]).toContain('live-token')
-    expect(calls[1]).not.toContain('PRIMARY-ONLY-TOKEN')
+    expect(calls[0].cfg).toContain('header = "X-Nodeterm-Node-Token: PRIMARY-ONLY-TOKEN"')
+    expect(calls[1].cfg).toContain('header = "X-Nodeterm-Hook-Token: live-token"')
+    // Nothing was carried over — and neither leg put a credential on the command line.
+    expect(calls[1].cfg).toContain('header = "X-Nodeterm-Node-Token: "')
+    expect(calls[1].cfg).not.toContain('PRIMARY-ONLY-TOKEN')
+    for (const c of calls) {
+      for (const secret of ['dead-token', 'live-token', 'PRIMARY-ONLY-TOKEN']) {
+        expect(c.argv).not.toContain(secret)
+      }
+    }
   })
 })
 
@@ -446,6 +525,60 @@ describe('managed script presents the per-node token', () => {
     const tokens = tokenDirWith('tokens-other', { 'node-other': nodeAuthToken(SECRET, 'node-other') })
     expect(await runHook(newHome('home-other'), { NODETERM_NODE_TOKEN_DIR: tokens })).toBe(0)
     expect(raws).toEqual([{ nodeId: NODE, verified: false }])
+  })
+
+  // The leak this fix closes: both credentials used to ride on `curl -H …`, i.e. on a command
+  // line, and a command line is world-readable through `ps` / /proc/<pid>/cmdline for the life of
+  // the process — locally AND on every SSH host, where this exact script is installed. A co-tenant
+  // who scrapes another node's token out of the process table can impersonate that node, which is
+  // the one thing the per-node token exists to stop.
+  //
+  // The shim is a PASSTHROUGH: it records argv + stdin and then runs the real curl, so one case
+  // proves the leak is gone AND that delivery still works (the server's own verdict below). A test
+  // that only checked the server would pass with the leak fully intact.
+  it.skipIf(!shAvailable)('sends both credentials on stdin, never on curl\'s command line', async () => {
+    const realCurl = spawnSync('sh', ['-c', 'command -v curl'], { encoding: 'utf8' }).stdout.trim()
+    const bin = join(dir, 'argv-bin')
+    mkdirSync(bin, { recursive: true })
+    const argvLog = join(dir, 'argv-curl.argv')
+    const stdinLog = join(dir, 'argv-curl.stdin')
+    writeFileSync(
+      join(bin, 'curl'),
+      [
+        '#!/bin/sh',
+        `printf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}`,
+        // Only a curl told to read its config from stdin gets a reader, so a regression that put
+        // the headers back on argv fails on the assertions below rather than blocking on a stdin
+        // nobody closes.
+        'case "$*" in',
+        `  *"--config -"*) tee -a ${JSON.stringify(stdinLog)} | ${JSON.stringify(realCurl)} "$@" ;;`,
+        `  *) ${JSON.stringify(realCurl)} "$@" </dev/null ;;`,
+        'esac',
+        ''
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o755 }
+    )
+    // Truncated up front: a regression must fail on the assertions, not on a missing file.
+    writeFileSync(argvLog, '')
+    writeFileSync(stdinLog, '')
+    const token = nodeAuthToken(SECRET, NODE)
+    const tokens = tokenDirWith('tokens-argv', { [NODE]: token })
+    expect(
+      await runHook(newHome('home-argv'), {
+        NODETERM_NODE_TOKEN_DIR: tokens,
+        PATH: `${bin}:${process.env.PATH ?? ''}`
+      })
+    ).toBe(0)
+    // Delivery is unchanged: the server still verified this node from the header it received.
+    expect(raws).toEqual([{ nodeId: NODE, verified: true }])
+    const argv = readFileSync(argvLog, 'utf8')
+    const stdin = readFileSync(stdinLog, 'utf8')
+    expect(argv).not.toContain(token)
+    expect(argv).not.toContain(hookServer.getToken())
+    expect(argv).not.toContain('X-Nodeterm-Node-Token')
+    expect(argv).not.toContain('X-Nodeterm-Hook-Token')
+    expect(stdin).toContain(`header = "X-Nodeterm-Hook-Token: ${hookServer.getToken()}"`)
+    expect(stdin).toContain(`header = "X-Nodeterm-Node-Token: ${token}"`)
   })
 
   // THE failover subtlety: after adopting another instance's endpoint file, the token must be
