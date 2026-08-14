@@ -25,9 +25,17 @@ describe('node token files', () => {
   it('writes 0600 files inside a 0700 dir and records materialisation', () => {
     expect(writeNodeTokenFile('node-1', 'kid.mac')).toBe(true)
     expect(fs.statSync(nodeTokenDir()).mode & 0o777).toBe(0o700)
+    // One descriptor for both assertions: stat-then-read is a check-then-use race (CodeQL
+    // js/file-system-race), and the fd is the stronger assertion anyway — it proves the mode and
+    // the contents belong to the SAME inode, which is the whole point of a 0600 credential file.
     const f = path.join(nodeTokenDir(), 'node-1')
-    expect(fs.statSync(f).mode & 0o777).toBe(0o600)
-    expect(fs.readFileSync(f, 'utf8')).toBe('kid.mac\n')
+    const fd = fs.openSync(f, 'r')
+    try {
+      expect(fs.fstatSync(fd).mode & 0o777).toBe(0o600)
+      expect(fs.readFileSync(fd, 'utf8')).toBe('kid.mac\n')
+    } finally {
+      fs.closeSync(fd)
+    }
     expect([...materialisedNodes()]).toEqual(['node-1'])
   })
 
