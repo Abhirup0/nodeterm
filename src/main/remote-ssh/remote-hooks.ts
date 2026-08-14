@@ -8,6 +8,7 @@
 import { childArgs, hookForwardArgs, hookForwardCancelArgs, remoteEndpointFileContents } from '../../core/remote-ssh/control-master'
 import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS, GROK_HOOK_EVENTS } from '@shared/agents/hook-events'
 import { GROK_HOOK_FILE, isSafeRemoteGrokHome } from '../../core/agents/grok-paths'
+import { isSafeNodeId } from '../../core/agents/node-auth-token'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 
 /**
@@ -53,6 +54,36 @@ export interface RemoteRunner {
   run: (args: string[], stdin?: string) => Promise<{ code: number; stdout: string }>
 }
 
+/** Generous ceiling on a host-reported `$HOME` — longer than any real path, short enough to bound. */
+const REMOTE_HOME_MAX = 4096
+
+/**
+ * Is a host-reported `$HOME` safe to build remote commands from?
+ *
+ * `printf %s "$HOME"` returns DATA, not truth, and this file interpolates the answer into remote
+ * command lines — several of them still UNQUOTED (`mkdir -p ${remoteDir}`). A `$HOME` holding a
+ * newline is therefore a command separator, and one holding `$(…)`/backticks is a substitution, on
+ * a host we are running as the user. A host can set `$HOME` to whatever it likes.
+ *
+ * Deliberately far narrower than "what a filesystem allows": ordinary path characters only. The
+ * cost of a false rejection is fail-open (no per-node token → `legacy`, the designed state; or, in
+ * `setup`, no hooks at all — which is why the rejection is LOUD there), and the cost of a false
+ * acceptance is remote code execution. A host whose home directory contains a non-ASCII character
+ * is refused by that trade, which is the known and accepted price.
+ *
+ * It judges the EXACT string the caller holds — leading/trailing whitespace is a rejection, not
+ * something quietly stripped (same rule as `isSafeRemoteGrokHome`): trimming here would return
+ * `true` about a value whose embedded newline is still on the command line the caller then builds.
+ */
+export function isSafeRemoteHome(home: string): boolean {
+  return (
+    typeof home === 'string' &&
+    home.length > 0 &&
+    home.length <= REMOTE_HOME_MAX &&
+    /^[\w./ -]+$/.test(home)
+  )
+}
+
 // Per-agent remote install targets (JSON-settings agents merged via mergeManagedHook). Codex
 // is installed separately (installCodexRemote) because it needs a hooks.json merge PLUS a
 // config.toml trust write — see that method. Grok is separate too (installGrokRemote): its config
@@ -93,6 +124,17 @@ export class RemoteHooks {
       const { code, stdout } = await this.r.run(childArgs(conn, controlPath, 'printf %s "$HOME"'))
       const home = stdout.trim()
       if (code !== 0 || !home) return null // fail-open: nothing else would work
+      // The host's answer is interpolated into every remote path below, several of them still
+      // unquoted — so a `$HOME` that is not a plain path is refused OUTRIGHT rather than escaped
+      // case by case. LOUD, because unlike the rest of this file's fail-open steps the user loses
+      // hooks entirely and there would otherwise be nothing anywhere saying why.
+      if (!isSafeRemoteHome(home)) {
+        console.warn(
+          '[remote-hooks] the host reported a $HOME that is not a plain path — refusing to build ' +
+            'remote commands from it; this host runs without status hooks'
+        )
+        return null
+      }
       const remoteDir = `${home}/.nodeterm`
       const sock = `${remoteDir}/hook-${projectId}.sock`
       // PER-PROJECT endpoint file. The sock is already per-project, but the endpoint file used to
@@ -163,6 +205,93 @@ export class RemoteHooks {
       return { endpointPath: endpoint }
     } catch {
       return null // fail-open: agent runs without hooks
+    }
+  }
+
+  /**
+   * Materialise this instance's per-node tokens ON THE HOST — `<home>/.nodeterm/node-tokens/<id>`,
+   * 0600 in a 0700 dir, exactly the layout the endpoint file already advertises as
+   * `NODETERM_NODE_TOKEN_DIR` and the managed script already reads (`head -n 1 "$DIR/$NODE_ID"`).
+   * Nothing wrote it before this, which is why every remote node was permanently `legacy`.
+   *
+   * THE INVARIANT — a credential NEVER rides an ssh command line. The host's process table is
+   * readable by its OTHER users (`ps` shows full argv), and a remote command line is argv on both
+   * ends. So the token goes on STDIN, as the endpoint-file write above already does, and only the
+   * (non-secret) path is interpolated. Do not "simplify" this into `printf %s <token> > file`.
+   *
+   * Fail-open per node AND overall. A connect that died over an identity file would be a far worse
+   * regression than an unverified remote node: a node with no token file presents an empty header,
+   * which the server reads as `legacy` — the designed state, not an outage.
+   *
+   * `mint` returning '' is a REFUSAL (no secret, or the case-fold collision guard), and a refusal
+   * SWEEPS: an earlier connect's file for that id is precisely the token its colliding twin would
+   * read, so leaving it in place is the attack the local `node-token-service` sweeps for.
+   *
+   * KNOWN LIMITATION — the dir is flat, i.e. per HOST ACCOUNT, not per nodeterm instance. Two
+   * instances driving the same host+user (two desktops sharing a deploy account, or a desktop
+   * whose SSH project points at a host that also runs a headless Server Edition under the same
+   * $HOME) mint with DIFFERENT secrets and overwrite each other's files. The loser's sessions then
+   * present a token carrying the winner's kid, which `verifyNodeToken` reads as `legacy` — never as
+   * another node, and never as `forged`. So the cost is a silent drop to the fail-open state, not a
+   * mis-verification. Scoping the dir as `node-tokens/<kid>/<id>` would close it and needs NO client
+   * change (the client uses whatever dir the endpoint file names) — it is left out here only to keep
+   * the remote layout identical to the local one; see the task A11 report.
+   */
+  async writeNodeTokens(
+    conn: SshConnection,
+    controlPath: string,
+    home: string,
+    nodeIds: readonly string[],
+    mint: (nodeId: string) => string
+  ): Promise<void> {
+    try {
+      if (!isSafeRemoteHome(home)) return
+      const dir = `${home}/.nodeterm/node-tokens`
+      // Gate BEFORE any path join: the ids come from `project.json`, which travels in shared and
+      // cloned repos, and `..` under the token dir resolves to its PARENT. De-duplicated so a
+      // canvas listing one node twice is one write, not two.
+      const ids = [...new Set(nodeIds)].filter((id) => isSafeNodeId(id))
+      // Mint FIRST, so a set with nothing to do costs no round-trip at all (and an all-unsafe
+      // list costs not one remote command).
+      const writes: { id: string; token: string }[] = []
+      const sweeps: string[] = []
+      for (const id of ids) {
+        let token = ''
+        try {
+          token = mint(id)
+        } catch {
+          token = '' // a minter that throws is a refusal, not a crashed connect
+        }
+        if (token) writes.push({ id, token })
+        else sweeps.push(id)
+      }
+      for (const id of sweeps) {
+        await this.r
+          .run(childArgs(conn, controlPath, `rm -f ${posixQuote(`${dir}/${id}`)}`))
+          .catch(() => {})
+      }
+      if (!writes.length) return
+      // `umask 077` so the dir is 0700 the moment it exists; `chmod 700` because an EXISTING dir
+      // keeps its old mode (the same belt-and-braces the local writer applies).
+      const mk = await this.r.run(
+        childArgs(conn, controlPath, `umask 077; mkdir -p ${posixQuote(dir)} && chmod 700 ${posixQuote(dir)}`)
+      )
+      if (mk.code !== 0) return // no dir ⇒ no files; the nodes stay `legacy`
+      for (const { id, token } of writes) {
+        const file = posixQuote(`${dir}/${id}`)
+        try {
+          await this.r.run(
+            // `cat >` TRUNCATES an existing file and keeps its old mode, so the chmod is not
+            // redundant with the umask: it is what re-narrows a file some earlier state left wide.
+            childArgs(conn, controlPath, `umask 077; cat > ${file} && chmod 600 ${file}`),
+            `${token}\n` // newline-terminated: the client reads it with `head -n 1`
+          )
+        } catch {
+          /* fail-open per node: one unwritable token must not cost the others theirs */
+        }
+      }
+    } catch {
+      /* fail-open: an identity file must never be able to fail a connect */
     }
   }
 

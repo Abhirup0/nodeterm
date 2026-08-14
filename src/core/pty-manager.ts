@@ -58,7 +58,7 @@ import {
   forgetCodexThreadIdentitiesForNode,
   installCodexLauncher
 } from './codex-identity-proxy'
-import { ensureNodeToken, sweepNodeToken } from './agents/node-token-service'
+import { ensureNodeToken, ensureRemoteNodeToken, sweepNodeToken } from './agents/node-token-service'
 import { hasSharedIdentity, type AgentId } from '../shared/agents/config'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -1959,6 +1959,14 @@ export class PtyManager {
     const remoteSsh = options.sshRemote && options.persistKey ? findSsh() : null
     if (options.sshRemote && options.persistKey && remoteSsh) {
       file = remoteSsh
+      // The remote twin of the local `ensureNodeToken` above: materialise THIS node's token on the
+      // host before the attach. The connect path writes one for every node the canvas had AT
+      // CONNECT; a node created afterwards would otherwise wait for the next reconnect — for a
+      // long-lived SSH project, forever — and spend that whole time on `legacy`.
+      // Fire-and-forget and fail-open by construction (see ensureRemoteNodeToken): the hook script
+      // re-reads the file at every event, so a token that lands a moment after the attach is in
+      // time for everything that matters, and one that never lands costs only the verified label.
+      ensureRemoteNodeToken(options.sshRemote.controlPath, options.persistKey)
       // Route this ssh child's agent lookups at the APP-PRIVATE ssh-agent when main is running one
       // (published via env because core cannot import main's ssh-agent.ts). Matters when the
       // ControlMaster is down: `childArgs` uses `ControlMaster=auto`, so this child authenticates

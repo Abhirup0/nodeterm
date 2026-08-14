@@ -466,3 +466,128 @@ describe('RemoteHooks.installContextLink', () => {
     await expect(new RemoteHooks({ run }).installContextLink(conn, '/s.sock', '/home/u')).resolves.toBeUndefined()
   })
 })
+
+/**
+ * The per-node token files ON THE HOST. Until this existed, `control-master.ts` advertised
+ * `$HOME/.nodeterm/node-tokens` in the endpoint file and NOTHING ever wrote it, so every remote
+ * node was permanently `legacy`.
+ */
+describe('RemoteHooks.writeNodeTokens', () => {
+  /** A stand-in for `nodeAuthToken(secret, id)` — the shape matters (kid.mac), not the bytes. */
+  const mint = (id: string): string => `kid12345.mac-of-${id}`
+
+  function tokenHarness(opts: { code?: number; throws?: boolean } = {}) {
+    const calls: { args: string[]; stdin?: string; cmd: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      const cmd = args.join(' ')
+      calls.push({ args, stdin, cmd })
+      if (opts.throws) throw new Error('ssh died')
+      return { code: opts.code ?? 0, stdout: '' }
+    })
+    return { rh: new RemoteHooks({ run }), calls, run }
+  }
+
+  it('writes every token through STDIN — a credential never rides an ssh command line', async () => {
+    const { rh, calls } = tokenHarness()
+    await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1', 'node-2'], mint)
+    // THE INVARIANT: the host's process table is readable by its other users, so not one arg of
+    // not one child ssh may contain a token — not the write, not the mkdir, not anything.
+    for (const c of calls)
+      for (const a of c.args) {
+        expect(a).not.toContain('mac-of-node-1')
+        expect(a).not.toContain('mac-of-node-2')
+      }
+    const writes = calls.filter((c) => c.cmd.includes('cat >'))
+    expect(writes).toHaveLength(2)
+    expect(writes[0].cmd).toContain("cat > '/home/u/.nodeterm/node-tokens/node-1'")
+    // ...and the token is on stdin, newline-terminated (the client reads it with `head -n 1`).
+    expect(writes[0].stdin).toBe(`${mint('node-1')}\n`)
+    expect(writes.at(-1)?.stdin).toBe(`${mint('node-2')}\n`)
+  })
+
+  it('creates the dir and each file under umask 077 (0700 dir, 0600 files)', async () => {
+    const { rh, calls } = tokenHarness()
+    await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint)
+    const mkdir = calls.find((c) => c.cmd.includes('mkdir -p'))
+    expect(mkdir?.cmd).toContain('umask 077')
+    expect(mkdir?.cmd).toContain("'/home/u/.nodeterm/node-tokens'")
+    for (const w of calls.filter((c) => c.cmd.includes('cat >'))) expect(w.cmd).toContain('umask 077')
+  })
+
+  it('fails open when the host refuses (exit 1) — the connect is never at risk', async () => {
+    const { rh, calls } = tokenHarness({ code: 1 })
+    await expect(
+      rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint)
+    ).resolves.toBeUndefined()
+    // A dir we could not create is not a dir we write tokens into.
+    expect(calls.some((c) => c.cmd.includes('cat >'))).toBe(false)
+  })
+
+  it('fails open when the runner throws', async () => {
+    const { rh } = tokenHarness({ throws: true })
+    await expect(
+      rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint)
+    ).resolves.toBeUndefined()
+  })
+
+  it('fails open per node: one unwritable token does not cost the others theirs', async () => {
+    const calls: string[] = []
+    const run = vi.fn(async (args: string[]) => {
+      const cmd = args.join(' ')
+      calls.push(cmd)
+      if (cmd.includes('node-1')) throw new Error('EACCES')
+      return { code: 0, stdout: '' }
+    })
+    await new RemoteHooks({ run }).writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1', 'node-2'], mint)
+    expect(calls.some((c) => c.includes("cat > '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
+  })
+
+  it('an unsafe node id reaches no path and no command AT ALL', async () => {
+    // A hostile project.json supplies these; `..` under the token dir resolves to its PARENT.
+    const { rh, calls } = tokenHarness()
+    await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['../x', '..', '.', 'a b', ''], mint)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('still serves the safe ids when a hostile one rides along', async () => {
+    const { rh, calls } = tokenHarness()
+    await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['../x', 'node-1'], mint)
+    const writes = calls.filter((c) => c.cmd.includes('cat >'))
+    expect(writes).toHaveLength(1)
+    expect(writes[0].cmd).toContain("node-tokens/node-1'")
+    expect(calls.every((c) => !c.cmd.includes('../x'))).toBe(true)
+  })
+
+  it('refuses a host $HOME that is not a plain path — no interpolation, fail open', async () => {
+    // `printf %s "$HOME"` is the host's answer, i.e. DATA. A newline in it is a command separator
+    // in every `mkdir -p ${remoteDir}` this file builds.
+    const { rh, calls } = tokenHarness()
+    await rh.writeNodeTokens(conn, '/s.sock', '/home/u\ntouch /tmp/pwn', ['node-1'], mint)
+    expect(calls).toHaveLength(0)
+    await rh.writeNodeTokens(conn, '/s.sock', '/home/$(id)', ['node-1'], mint)
+    expect(calls).toHaveLength(0)
+    await rh.writeNodeTokens(conn, '/s.sock', '', ['node-1'], mint)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('sweeps a token the minter REFUSES (case-fold collision) instead of leaving it on the host', async () => {
+    // The refusal is the local sweep's remote twin: a file an earlier connect wrote for a
+    // colliding id is exactly the token its twin would read.
+    const { rh, calls } = tokenHarness()
+    const refusing = (id: string): string => (id === 'Node-1' ? '' : mint(id))
+    await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['Node-1', 'node-2'], refusing)
+    expect(calls.some((c) => c.cmd.includes("rm -f '/home/u/.nodeterm/node-tokens/Node-1'"))).toBe(true)
+    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/Node-1'"))).toBe(false)
+    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
+  })
+})
+
+describe('RemoteHooks.setup — the host $HOME is data, not truth', () => {
+  it('refuses a $HOME carrying shell syntax and installs nothing', async () => {
+    const { rh, calls } = harness({ responses: { 'printf %s "$HOME"': '/home/u\ntouch /tmp/pwn' } })
+    const res = await rh.setup('p1', conn, '/s.sock', { port: 51234, token: 'tok', version: '1' })
+    expect(res).toBeNull()
+    // Only the $HOME probe itself ran — nothing interpolated the answer.
+    expect(calls).toHaveLength(1)
+  })
+})

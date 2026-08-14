@@ -2,7 +2,7 @@ import { hookServer } from './hook-server'
 import { nodeAuthToken, isSafeNodeId } from './node-auth-token'
 import { writeNodeTokenFile, sweepNodeTokenFile, materialisedNodes } from './node-token-files'
 
-type Canvases = () => Array<{ nodes: Array<{ id: string }> }>
+type Canvases = () => Array<{ id?: string; nodes: Array<{ id: string }> }>
 let canvases: Canvases = () => []
 
 /**
@@ -118,6 +118,64 @@ export function ensureNodeToken(nodeId: string, opts?: { force?: boolean }): voi
 
 export function sweepNodeToken(nodeId: string): void {
   sweepNodeTokenFile(nodeId)
+}
+
+/** The node ids of ONE persisted canvas. The remote materialiser is per SSH project, not global:
+ *  a host only ever needs tokens for the nodes that actually run there. */
+export function nodeIdsForCanvas(projectId: string): string[] {
+  const ids: string[] = []
+  for (const c of canvases()) if (c.id === projectId) for (const n of c.nodes ?? []) ids.push(n.id)
+  return [...new Set(ids)]
+}
+
+/**
+ * A minting function for the REMOTE materialiser (`RemoteHooks.writeNodeTokens`), or null when this
+ * instance has no secret at all — which is the whole "legacy everywhere" mode, and the caller then
+ * spends no ssh round-trips discovering it one node at a time.
+ *
+ * The secret is captured ONCE and the closure reused for the whole pass, so every token in one
+ * connect comes from one secret (a rotation mid-pass would otherwise write a mixed dir, half of it
+ * unverifiable). '' is a refusal the caller sweeps for — and the case-fold refusal is applied HERE,
+ * not left to the remote side: an APFS host would otherwise let a hostile `project.json` bypass the
+ * local guard simply by putting the colliding pair on an SSH project.
+ */
+export function remoteNodeTokenMinter(): ((nodeId: string) => string) | null {
+  const secret = hookServer.nodeAuthSecretOrNull()
+  if (!secret) return null
+  return (nodeId: string): string => {
+    const group = collidingGroups([...canvasNodeIds(), nodeId]).get(nodeId)
+    if (group) {
+      warnCollision(group)
+      return ''
+    }
+    return nodeAuthToken(secret, nodeId)
+  }
+}
+
+/**
+ * The SPAWN-time leg of the remote materialiser: a node created AFTER its project connected has no
+ * token on the host until the next reconnect, which for a long-lived SSH project is "never".
+ *
+ * It is a registered writer rather than a direct call because the mechanism lives in main
+ * (`SshProjectManager` owns the ControlMaster runner) while the spawn happens in core, and core
+ * must keep building without electron. Unregistered — the Server Edition, every test — it is a
+ * no-op, which is the correct behavior there too.
+ */
+type RemoteNodeTokenWriter = (controlPath: string, nodeId: string) => void
+let remoteWriter: RemoteNodeTokenWriter | null = null
+
+export function setRemoteNodeTokenWriter(writer: RemoteNodeTokenWriter | null): void {
+  remoteWriter = writer
+}
+
+/** Fire-and-forget, fail-open: a token that cannot be written costs the node `legacy`, never its
+ *  terminal. Nothing here may throw into a pty spawn. */
+export function ensureRemoteNodeToken(controlPath: string, nodeId: string): void {
+  try {
+    remoteWriter?.(controlPath, nodeId)
+  } catch {
+    /* fail-open */
+  }
 }
 
 /**

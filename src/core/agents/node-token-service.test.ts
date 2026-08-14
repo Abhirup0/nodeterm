@@ -12,7 +12,11 @@ import {
   ensureNodeToken,
   sweepNodeToken,
   refreshNodeTokens,
-  nodeIdFoldKey
+  nodeIdFoldKey,
+  nodeIdsForCanvas,
+  remoteNodeTokenMinter,
+  setRemoteNodeTokenWriter,
+  ensureRemoteNodeToken
 } from './node-token-service'
 
 let dir = ''
@@ -172,5 +176,70 @@ describe('node token service — writes once, not on every persist', () => {
     expect(fs.existsSync(path.join(nodeTokenDir(), 'node-1'))).toBe(false)
     ensureNodeToken('node-1')
     expect(fs.existsSync(path.join(nodeTokenDir(), 'node-1'))).toBe(true)
+  })
+})
+
+/**
+ * The REMOTE (SSH) materialiser's half. The host is a different filesystem with a different
+ * writer, but it must be judged by the SAME rules — otherwise a hostile `project.json` bypasses
+ * the local guards simply by living on an SSH project.
+ */
+describe('node token service — the remote (SSH) minter', () => {
+  it('returns null when there is no secret, so a connect spends no round-trips at all', () => {
+    hookServer.clearNodeAuthSecretForTests()
+    initNodeTokens({ canvases: () => canvases })
+    expect(remoteNodeTokenMinter()).toBeNull()
+  })
+
+  it('mints the same token the local writer would file, without touching the local disk', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => canvases })
+    const before = fs.readFileSync(path.join(nodeTokenDir(), 'node-1'), 'utf8')
+    const mint = remoteNodeTokenMinter()!
+    expect(`${mint('node-1')}\n`).toBe(before)
+  })
+
+  it('refuses a case-folding collision on the remote path too (empty ⇒ the caller sweeps)', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => [{ id: 'p1', nodes: [{ id: 'Node-1' }, { id: 'node-1' }] }] })
+    const mint = remoteNodeTokenMinter()!
+    expect(mint('Node-1')).toBe('')
+    expect(mint('node-1')).toBe('')
+    expect(mint('node-7')).not.toBe('')
+  })
+
+  it('refuses an unsafe id', async () => {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    initNodeTokens({ canvases: () => canvases })
+    const mint = remoteNodeTokenMinter()!
+    expect(mint('..')).toBe('')
+    expect(mint('../x')).toBe('')
+  })
+
+  it('nodeIdsForCanvas returns one project’s node ids, de-duplicated, and nothing for a stranger', () => {
+    initNodeTokens({
+      canvases: () => [
+        { id: 'p1', nodes: [{ id: 'node-1' }, { id: 'node-1' }, { id: 'node-2' }] },
+        { id: 'p2', nodes: [{ id: 'node-3' }] }
+      ]
+    })
+    expect(nodeIdsForCanvas('p1')).toEqual(['node-1', 'node-2'])
+    expect(nodeIdsForCanvas('p2')).toEqual(['node-3'])
+    expect(nodeIdsForCanvas('nope')).toEqual([])
+  })
+
+  it('the spawn-path writer is a no-op until one is registered, and never throws', () => {
+    setRemoteNodeTokenWriter(null)
+    expect(() => ensureRemoteNodeToken('/cm.sock', 'node-1')).not.toThrow()
+    const seen: string[][] = []
+    setRemoteNodeTokenWriter((cp, id) => seen.push([cp, id]))
+    ensureRemoteNodeToken('/cm.sock', 'node-1')
+    expect(seen).toEqual([['/cm.sock', 'node-1']])
+    // a writer that throws must not reach the pty spawn that called it
+    setRemoteNodeTokenWriter(() => {
+      throw new Error('ssh gone')
+    })
+    expect(() => ensureRemoteNodeToken('/cm.sock', 'node-1')).not.toThrow()
+    setRemoteNodeTokenWriter(null)
   })
 })
