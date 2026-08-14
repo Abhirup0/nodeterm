@@ -103,6 +103,68 @@ describe('splitWorkspace', () => {
     expect(index.entries[1].project!.unavailable).toBeUndefined()
   })
 
+  it('two DIFFERENT folders under one id → two entries, two files, neither clobbering the other', () => {
+    // The last-resort guard for a duplicate id that reached save without going through the
+    // store's load repair (a hand-edited index, a runtime collision). Keying only by cwd let both
+    // entries keep the id, and every id-keyed lookup downstream resolved to the first one.
+    const collided: Workspace = {
+      version: 2, activeProjectId: 'dup',
+      projects: [
+        project({ id: 'dup', name: 'first', cwd: '/a/foo', nodes: [node({ id: 'term-a' })] }),
+        project({ id: 'dup', name: 'second', cwd: '/a/bar', nodes: [node({ id: 'term-b' })] })
+      ]
+    }
+    const { index, files } = splitWorkspace(collided, () => 1, '2026-07-11T00:00:00.000Z')
+    expect(index.entries).toHaveLength(2)
+    expect(index.entries[0].id).toBe('dup') // first holder keeps it
+    expect(index.entries[1].id).not.toBe('dup')
+    expect(files.size).toBe(2)
+    expect(files.get('/a/foo')!.id).toBe('dup')
+    expect(files.get('/a/bar')!.id).toBe(index.entries[1].id)
+    expect(files.get('/a/foo')!.nodes.map((n) => n.id)).toEqual(['term-a'])
+    expect(files.get('/a/bar')!.nodes.map((n) => n.id)).toEqual(['term-b'])
+  })
+
+  it('the re-key is deterministic (same input, same index) — a save loop must not churn the file', () => {
+    const collided: Workspace = {
+      version: 2, activeProjectId: 'dup',
+      projects: [project({ id: 'dup', cwd: '/a/foo' }), project({ id: 'dup', cwd: '/a/bar' })]
+    }
+    const once = splitWorkspace(collided, () => 1, '2026-07-11T00:00:00.000Z')
+    const twice = splitWorkspace(collided, () => 1, '2026-07-11T00:00:00.000Z')
+    expect(twice.index.entries[1].id).toBe(once.index.entries[1].id)
+  })
+
+  it('same id AND same cwd still takes the inline escape hatch (no second file)', () => {
+    const collided: Workspace = {
+      version: 2, activeProjectId: 'dup',
+      projects: [
+        project({ id: 'dup', name: 'first', cwd: '/a/foo' }),
+        project({ id: 'dup', name: 'second', cwd: '/a/foo' })
+      ]
+    }
+    const { index, files } = splitWorkspace(collided, () => 1, '2026-07-11T00:00:00.000Z')
+    expect(files.size).toBe(1)
+    expect(index.entries[1].project).toBeTruthy()
+    expect(index.entries[1].id).not.toBe('dup')
+    expect(index.entries[1].project!.id).toBe(index.entries[1].id)
+  })
+
+  it('two ssh entries under one id get distinct ids and distinct caches', () => {
+    const sshOf = (remoteCwd: string) => ({ server: { host: 'h', user: 'u' } as any, remoteCwd })
+    const collided: Workspace = {
+      version: 2, activeProjectId: 'dup',
+      projects: [
+        project({ id: 'dup', name: 'first', ssh: sshOf('~/one') }),
+        project({ id: 'dup', name: 'second', ssh: sshOf('~/two') })
+      ]
+    }
+    const { index } = splitWorkspace(collided, () => 1, '2026-07-11T00:00:00.000Z')
+    expect(index.entries[0].id).toBe('dup')
+    expect(index.entries[1].id).not.toBe('dup')
+    expect(index.entries[1].cache!.id).toBe(index.entries[1].id)
+  })
+
   it('never persists the runtime unavailable flag inline', () => {
     const { index } = splitWorkspace(
       { version: 2, activeProjectId: 'x', projects: [project({ id: 'x', unavailable: true })] },

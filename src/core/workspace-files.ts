@@ -1,5 +1,6 @@
 import path from 'path'
 import type { AgentPermissionMode } from '../shared/agents/config'
+import { collisionSeed, derivedProjectId } from '../shared/project-id'
 import {
   applyLocalNodeExec,
   localNodeExec,
@@ -177,11 +178,24 @@ export function splitWorkspace(
 ): { index: WorkspaceIndexV3; files: Map<string, ProjectFileV1> } {
   const entries: IndexEntryV3[] = []
   const files = new Map<string, ProjectFileV1>()
-  for (const p of ws.projects) {
+  const seenIds = new Set<string>()
+  for (const incoming of ws.projects) {
     // A relay tab is a LIVE connection to another machine's project, not a workspace on this
     // disk — it has no disk representation at all. Drop it entirely (no ref, no inline, no
     // cache) BEFORE the unavailable handling, so it leaks in none of the branches below.
-    if (p.remote) continue
+    if (incoming.remote) continue
+    // Two entries may never share an id. The index is keyed by it — which folder's project.json a
+    // save writes, and every id-keyed lookup that reads the index back (ssh control paths,
+    // board-log + approval routing, presence, agent status) resolves only the FIRST match. The
+    // load-time repair (WorkspaceStore.repairDuplicateIds) is where a corrupt store is normally
+    // healed; this is the last resort for a duplicate that reaches save some other way — a
+    // hand-edited index, a runtime collision — and it uses the same deterministic derivation, so
+    // both paths agree on the id instead of fighting over it.
+    const id = seenIds.has(incoming.id)
+      ? derivedProjectId(incoming.id, collisionSeed(incoming), (candidate) => seenIds.has(candidate))
+      : incoming.id
+    seenIds.add(id)
+    const p = id === incoming.id ? incoming : { ...incoming, id }
     const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
     if (p.unavailable) {
       // Placeholder (folder missing / server unreachable at load): its nodes:[] is not real
