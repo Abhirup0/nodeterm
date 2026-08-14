@@ -26,6 +26,7 @@ import {
   NODE_IDENTITY_STRICT_AFTER,
   TOLERANT_CONTROL_VERBS
 } from './node-identity-policy'
+import { CONTEXT_LINK_VERBS } from '../context-link-render'
 import { initPlatform, resetPlatformForTests } from '../platform'
 import { fakePlatform } from '../platform-fake'
 
@@ -267,6 +268,85 @@ describe('a foreign kid', () => {
     expect(res.status).toBe(200)
     expect((await res.text()).startsWith(IDENTITY_RESTART_NOTE)).toBe(true)
     expect(controlCalls).toEqual([{ verb: 'open-terminal', nodeId: 'n-foreign2' }])
+  })
+})
+
+/**
+ * THE COUNTER-CLAIM, PINNED. Three places in this series used to describe the latch as the feature's
+ * security boundary. It is not one, and the difference matters enough to spend a test on: someone
+ * reading `controlPolicy` alone will re-derive the stronger claim, because the table really does say
+ * `legacy + latched → refuse`.
+ *
+ * What that table cannot show is who gets to be `legacy`. `verifyNodeToken` reads a token whose
+ * `kid` is not ours as FOREIGN ⇒ `legacy`, and invariant 3 requires a foreign kid to never prove and
+ * never latch (or the cross-instance failover dies the day a second instance exists). The attacker
+ * chooses the kid. So a token made of arbitrary characters is admitted for a latched victim node,
+ * while the honest tokenless caller for that same node is refused.
+ *
+ * The behaviour below is CORRECT and must not be "fixed" — the only hardening that would change it
+ * is `node-tokens/<kid>/<nodeId>` (see `writeNodeTokens`), which removes the reason a foreign kid
+ * has to be admitted at all. This test exists so the false claim cannot come back.
+ */
+describe('an invented kid is admitted — the latch is not an adversary boundary', () => {
+  // Eight arbitrary characters, a dot, an arbitrary tail: the wire shape, none of the substance.
+  // Nothing derives it, nothing on this machine ever held it.
+  const INVENTED = 'AAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
+
+  it('is not a token this instance could ever mint, and is not `forged` either', async () => {
+    // Sanity, so the probe below cannot pass for the boring reason that it accidentally IS a token.
+    expect(INVENTED).not.toBe(nodeAuthToken(SECRET, 'n-invented'))
+    // `forged` would be a 403 on /hook/* — the whole point is that a foreign kid is not judgeable,
+    // so it lands on the fail-open verdict instead.
+    expect((await hookEvent('n-invented', INVENTED)).status).toBe(204)
+    expect(hookServer.isNodeProven('n-invented')).toBe(false)
+  })
+
+  for (const [when, clock] of [
+    ['during the window', IN_WINDOW],
+    ['after the cutoff', PAST_CUTOFF]
+  ] as const) {
+    it(`walks past the latch into /control/list ${when}, as the victim node`, async () => {
+      hookServer.setIdentityClockForTests(() => clock)
+      const node = `n-invented-list-${when.replace(/\s/g, '-')}`
+      // Arm the latch for real: the victim proves itself with this instance's own token.
+      expect((await hookEvent(node, nodeAuthToken(SECRET, node))).status).toBe(204)
+      expect(hookServer.isNodeProven(node)).toBe(true)
+      // The honest tokenless caller is refused — this is the latch working as designed…
+      expect((await control('list', node)).status).toBe(403)
+      expect(controlCalls).toEqual([])
+      // …and the attacker, who simply made a kid up, is not.
+      const res = await control('list', node, INVENTED)
+      expect(res.status).toBe(200)
+      expect(controlCalls).toEqual([{ verb: 'list', nodeId: node }])
+    })
+
+    it(`reads EVERY context-link verb for a latched victim ${when}`, async () => {
+      hookServer.setIdentityClockForTests(() => clock)
+      const node = `n-invented-ctx-${when.replace(/\s/g, '-')}`
+      expect((await hookEvent(node, nodeAuthToken(SECRET, node))).status).toBe(204)
+      // Tokenless gets the refusal sentence instead of the transcript.
+      expect((await contextLink('transcript', node)).status).toBe(200)
+      expect(contextCalls).toEqual([])
+
+      // Every verb the route actually serves, not a hand-picked one: a verb added later must be
+      // covered by this claim too, or the doc it pins goes quietly out of date.
+      for (const verb of CONTEXT_LINK_VERBS) {
+        const res = await contextLink(verb, node, INVENTED)
+        expect(res.status, verb).toBe(200)
+        // The rendered transcript itself — not the refusal prose. This is the leak.
+        expect(await res.text(), verb).toContain('the linked transcript')
+      }
+      expect(contextCalls).toEqual(CONTEXT_LINK_VERBS.map((verb) => ({ verb, nodeId: node })))
+    })
+  }
+
+  it('buys nothing extra on a MUTATION after the cutoff — that much the cutoff does hold', async () => {
+    // The escape is bounded: `legacy` is still refused for mutations past the date, invented kid or
+    // not. What the invented kid defeats is the LATCH, i.e. the tolerant bucket and the window.
+    hookServer.setIdentityClockForTests(() => PAST_CUTOFF)
+    const res = await control('open-terminal', 'n-invented-mutation', INVENTED)
+    expect(res.status).toBe(403)
+    expect(controlCalls).toEqual([])
   })
 })
 

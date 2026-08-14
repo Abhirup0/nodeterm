@@ -50,11 +50,19 @@ const STRICT_DATE = NODE_IDENTITY_STRICT_DATE
  * nothing on its own. Since the two are indistinguishable, the tie is broken by which mistake is
  * worse — and the whole series fails OPEN by design, so the answer is to keep the window open.
  *
- * That costs almost nothing, because **the cutoff is not the security boundary — the latch is.**
- * Trust on first proof refuses an unverified caller for a node that has ever proven itself,
- * immediately, on both sides of the cutoff and regardless of this clamp. What the cutoff governs is
- * only the population that has NEVER proven anything, i.e. exactly the pre-token sessions the
- * warning window exists for, and fail-open is that population's designed state.
+ * That costs almost nothing, and it is worth being exact about WHY, because the obvious reason is
+ * false. **Neither the cutoff nor the latch is a boundary against an attacker.** The latch protects
+ * against a MISTAKE — a session that silently stopped presenting its token. It cannot protect
+ * against an adversary, because an adversary picks the `kid`: a made-up `kid` is a FOREIGN kid,
+ * which invariant 3 requires to be `legacy` and never latched (or cross-instance failover dies), so
+ * an invented token walks past the latch AND the cutoff into `/control/list` and every
+ * `/context-link/*` read. Measured against the real server and pinned in
+ * `hook-identity-enforcement.test.ts` ("an invented kid is admitted"); see docs/node-identity.md.
+ *
+ * So the clamp is cheap for a smaller and more honest reason: what it relaxes is only the
+ * population that has NEVER proven anything, i.e. exactly the pre-token sessions the warning window
+ * exists for, and fail-open is that population's designed state. It relaxes the DATE and nothing
+ * else — `forged` and the latch are untouched by it.
  *
  * Two years, because that is comfortably longer than the upgrade population survives (tmux sessions
  * and un-updated installs do not last it out) and comfortably shorter than the clock skews that

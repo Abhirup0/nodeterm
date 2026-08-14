@@ -168,9 +168,14 @@ describe('controlPolicy', () => {
       ).toBe('allow-with-warning')
     })
 
-    it('does not disarm the LATCH, which is the actual security boundary here', () => {
+    it('relaxes only the DATE — the latch and `forged` are untouched by it', () => {
       // The clamp only ever relaxes the DATE. A node that has proven itself is still refused when
       // an unverified caller turns up for it — that is what makes the clamp cheap.
+      //
+      // NOT because the latch is a security boundary: it is not, and this suite must not be read
+      // as saying so. The latch catches a MISTAKE (a session that stopped presenting its token);
+      // an attacker invents a `kid`, which is FOREIGN, which is `legacy`, which never latches by
+      // invariant 3. See `hook-identity-enforcement.test.ts` → "an invented kid is admitted".
       expect(controlPolicy({ verdict: 'legacy', proven: true, verb: MUTATION, now: wayAhead })).toBe(
         'refuse'
       )

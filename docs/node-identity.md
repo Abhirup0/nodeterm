@@ -75,9 +75,21 @@ every remote curl reads its header from stdin via `curl --config -`) and that th
 
 ### What the design is trying to buy
 
-Turning **"any session on this machine can act as any node, by default"** into **"a session can act
-as another node only if it deliberately goes and harvests that node's credential."** That is a real
-change in default posture and a real reduction in blast radius. It is not isolation.
+Turning **"any session on this machine can act as any node, by default"** into **"a session that
+wants to act as another node has to do something deliberate about it."** That is a real change in
+default posture and a real reduction in blast radius. It is not isolation, and the qualifier is doing
+work — *deliberate* means different things per route:
+
+- On the routes that demand `verified` — `/codex-thread/{start,bind}`, and every `/control/*`
+  mutation once the cutoff passes — it means **harvesting that node's token file** off the disk.
+- On `/hook/*` it means nothing at all: a tokenless POST naming any node is accepted forever, by
+  contract (invariant 2).
+- On `/control/list` and `/context-link/*` it means **inventing a `kid`**. A made-up kid is a
+  *foreign* kid, therefore `legacy`, therefore never caught by the latch (invariant 3) — see the
+  latch warning below, which is pinned by a test.
+
+What actually went away is the *accident*: the credential no longer falls out of the process table
+into every account on the machine.
 
 ## What this does NOT fix
 
@@ -104,8 +116,12 @@ over-trusts it.
   host+user (two desktops on a shared deploy account) mint with different secrets and overwrite each
   other's files. The loser's sessions then present a foreign `kid`, which reads as `legacy` — never
   as another node, never as `forged`. The cost is a silent drop to the fail-open state, not a
-  mis-verification. `node-tokens/<kid>/<id>` would close it and needs no client change; see the
-  `writeNodeTokens` doc comment.
+  mis-verification — **but only until the cutoff.** From 2026-10-13 `legacy` is a refusal for every
+  `/control/*` mutation, so the loser does not degrade gracefully any more: it loses remote canvas
+  control outright, silently, on a date nobody will connect to the symptom.
+  `node-tokens/<kid>/<id>` would close it and needs no client change; see the `writeNodeTokens` doc
+  comment. It is also the only hardening that would give the trust-on-first-proof latch any teeth —
+  see the latch warning below.
 
 ### Rotation, honestly
 
@@ -232,9 +248,38 @@ managed hook script presents the header, and the boot sweep materialises a token
 persisted node — so a live Claude node is typically latched **within seconds of app start**. From
 that moment, a tokenless caller naming it gets a hard 403, today, with no grace and no date.
 
-That is intentional (a session that could authenticate and suddenly cannot is exactly the case worth
-refusing), but it means the mitigations against *stranding* a live node are what make the feature
-shippable, not the window:
+### ⚠ …and the latch is not a defence against an attacker
+
+**It catches a MISTAKE — a session that silently stopped presenting its token — and nothing else.**
+Do not re-derive a stronger claim from the code; this one is measured against the real hook server
+and pinned by a named test (`hook-identity-enforcement.test.ts`, *"an invented kid is admitted — the
+latch is not an adversary boundary"*).
+
+The probe: send `X-Nodeterm-Node-Token: AAAAAAAA.BBBB…` — eight arbitrary characters, a dot, an
+arbitrary tail. Nothing about it is ours, which is exactly the point: the `kid` does not match this
+instance's, so `verifyNodeToken` calls it **foreign**, therefore `legacy`, and invariant 3 says a
+foreign kid never proves and is never caught by the latch. The latch simply does not apply. That
+caller reaches `/control/list` and **every** `/context-link/*` verb as a latched victim node, on both
+sides of the cutoff, and is handed the victim's rendered transcript.
+
+**This is unavoidable and it is correct.** Invariant 3 requires a foreign kid to be admitted, or
+cross-instance failover dies the day a second instance appears — and the attacker is the one who
+chooses the kid, so there is no version of "judge the foreign kid" that an attacker cannot step
+around. Anyone who can set the header can present an unjudgeable one, and the app-wide bearer is all
+it takes to set the header. So: the latch is a good bug-catcher and worth keeping; it is not a
+boundary, and neither is the dated cutoff (the same probe walks past both).
+
+**The real hardening, if it is ever wanted.** Scope the remote token dir as
+`node-tokens/<kid>/<nodeId>` (already sketched in `writeNodeTokens`' own doc comment). The *only*
+scenario the foreign-kid escape exists for is two instances sharing one host account overwriting
+each other's flat token dir. Remove that overwrite and a foreign kid stops being a legitimate state,
+at which point it can be judged and the latch acquires the teeth this section says it does not have.
+
+### Stranding is the cost the latch actually charges
+
+Refusing a proven node the instant it stops presenting a token is intentional, but it is also the one
+way this feature can kill a live session outright. These are what pay that down — they are what make
+the latch shippable, not the window:
 
 - every token sweep releases the latch (collision refusal, delete/re-create, remote refusal);
 - the clock clamp;
@@ -316,3 +361,10 @@ fail-open state.
    | Clock implausibly far ahead | Window stays open (`isStrictInstant`) |
    | Hook handler throws | Still 204 |
    | `forged` | **The one fail-closed case.** 403, every route, no prose |
+
+   **Every row that lands on `legacy` is only fail-OPEN until 2026-10-13.** On and after the cutoff
+   `legacy` is a refusal for every `/control/*` mutation, so a degradation nobody notices today
+   becomes a node that cannot drive the canvas at all — e.g. two instances sharing one remote host
+   account overwrite each other's token dir (§What this does NOT fix) and the loser loses remote
+   canvas control outright, on a date nobody will connect to the symptom. Each `legacy` row is a
+   thing to fix *before* the date, not a permanently safe landing.
