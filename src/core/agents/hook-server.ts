@@ -6,8 +6,12 @@ import { platform } from '../platform'
 import { canControlCanvas, hasSharedIdentity, type AgentId } from '../../shared/agents/config'
 import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/normalize'
 import type { CodexIdentityEvent } from '../../shared/types'
+import { nodeTokenDir } from './node-token-files'
 
-export const NODETERM_HOOK_PROTOCOL_VERSION = '1'
+// v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
+// rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
+// is free; it is a marker a client can key on.
+export const NODETERM_HOOK_PROTOCOL_VERSION = '2'
 const SLOWLORIS_MS = 2000
 
 // Once the body is fully read the slowloris guard has done its job — it exists for the RECEIVE
@@ -506,7 +510,14 @@ class HookServer {
       mkdirSync(path.dirname(p), { recursive: true })
       writeFileSync(
         p,
-        `NODETERM_HOOK_PORT=${this.port}\nNODETERM_HOOK_TOKEN=${this.token}\nNODETERM_HOOK_VERSION=${NODETERM_HOOK_PROTOCOL_VERSION}\n`,
+        `NODETERM_HOOK_PORT=${this.port}\n` +
+          `NODETERM_HOOK_TOKEN=${this.token}\n` +
+          `NODETERM_HOOK_VERSION=${NODETERM_HOOK_PROTOCOL_VERSION}\n` +
+          // Where clients read their PER-NODE capability from, keyed by $NODETERM_NODE_ID.
+          // Advertised (not compiled in) so a failover that sources ANOTHER instance's endpoint
+          // file also picks up THAT instance's token dir: it then finds a token that instance can
+          // verify, or none — never a mismatched one.
+          `NODETERM_NODE_TOKEN_DIR=${nodeTokenDir()}\n`,
         // 0o600: this file holds the bearer token — owner read/write only so another local user
         // can't read it and forge hook events.
         { encoding: 'utf8', mode: 0o600 }

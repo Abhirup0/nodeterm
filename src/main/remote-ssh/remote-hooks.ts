@@ -133,7 +133,7 @@ export class RemoteHooks {
       // so sessions are never pointed at a socket that answers nothing.
       await this.r.run(
         childArgs(conn, controlPath, `umask 077; cat > ${endpoint}`),
-        remoteEndpointFileContents(sock, hook.token, hook.version)
+        remoteEndpointFileContents(sock, hook.token, hook.version, `${remoteDir}/node-tokens`)
       )
       // 3. install the managed hook for each JSON agent (script + merged config).
       for (const t of AGENT_TARGETS) {
