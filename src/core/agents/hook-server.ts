@@ -8,6 +8,7 @@ import { normalizeFor, type NormalizedAgentEvent } from '../../shared/agents/nor
 import type { CodexIdentityEvent } from '../../shared/types'
 import { nodeTokenDir } from './node-token-files'
 import { isSafeNodeId, verifyNodeToken } from './node-auth-token'
+import { isSafeThreadId } from '../codex-identity-proxy'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -528,7 +529,9 @@ class HookServer {
           cwd,
           hookEndpoint: this.endpointFilePath()
         })
-        if (!/^[A-Za-z0-9._-]+$/.test(threadId)) throw new Error('invalid thread id')
+        // Same predicate the record store gates on, so a thread id the store would refuse can
+        // never be handed back to a launcher that will then `resume` it.
+        if (!isSafeThreadId(threadId)) throw new Error('invalid thread id')
         this.codexIdentityListener?.({ nodeId, mode: 'shared' })
         res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(`${threadId}\n`)
@@ -539,7 +542,10 @@ class HookServer {
       return
     }
     const threadId = form.threadId ?? ''
-    if (!/^[A-Za-z0-9._-]+$/.test(threadId)) {
+    // `isSafeThreadId`, not a local regex — the twin of the `isSafeNodeId` gate above and for the
+    // same reason. This id is caller-supplied and becomes a PATH SEGMENT under the record store;
+    // the bare charset the route used to carry accepts `.` and `..`.
+    if (!isSafeThreadId(threadId)) {
       res.writeHead(400)
       res.end()
       return

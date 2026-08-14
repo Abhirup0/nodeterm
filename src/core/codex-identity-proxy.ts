@@ -49,7 +49,33 @@ const CODEX_THREAD_START_CLIENT_MAX_S = CODEX_THREAD_START_TIMEOUT_MS / 1000 + 1
 
 const SAFE_NODE_ID = /^[A-Za-z0-9._-]+$/
 const SAFE_ENDPOINT = /^\/[A-Za-z0-9._/ -]+$/
-const SAFE_THREAD_ID = /^[A-Za-z0-9._-]+$/
+const THREAD_ID_CHARSET = /^[A-Za-z0-9._-]+$/
+const MAX_THREAD_ID = 128
+
+/**
+ * The one predicate for a thread id — the twin of `isSafeNodeId` (core/agents/node-auth-token.ts),
+ * for the same reason and against the same trap.
+ *
+ * The charset alone is NOT enough: `.` and `..` both MATCH `THREAD_ID_CHARSET`, and a thread id is
+ * a PATH SEGMENT under `codexThreadIdentityRoot()` (`<root>/<threadId>`, plus the `.<threadId>.…`
+ * tmp file beside it) as well as a signed field in the record. A `..` there resolves to the record
+ * dir's PARENT. The id is caller-supplied — it arrives on `/codex-thread/bind` as a form field and
+ * from a node's persisted state — so refuse `.` and `..` by name, refuse empty, refuse
+ * over-length, BEFORE the id ever reaches a path join or a hash.
+ *
+ * Exported and shared deliberately: the hook routes and `codex-session-name.ts` used to carry
+ * their own copies of the bare charset, and two copies of a rule is how one of them stays wrong.
+ */
+export function isSafeThreadId(id: string): boolean {
+  return (
+    typeof id === 'string' &&
+    id.length > 0 &&
+    id.length <= MAX_THREAD_ID &&
+    id !== '.' &&
+    id !== '..' &&
+    THREAD_ID_CHARSET.test(id)
+  )
+}
 
 let identityAuthSecret: Buffer | null = null
 
@@ -108,7 +134,7 @@ export function validCodexIdentity(nodeId: string, hookEndpoint: string): boolea
 }
 
 function identityFile(threadId: string, root = codexThreadIdentityRoot()): string {
-  if (!SAFE_THREAD_ID.test(threadId)) throw new Error('Invalid NodeTerm Codex thread identity')
+  if (!isSafeThreadId(threadId)) throw new Error('Invalid NodeTerm Codex thread identity')
   return path.join(root, threadId)
 }
 
@@ -131,7 +157,7 @@ export function readCodexThreadIdentity(
   threadId: string,
   root = codexThreadIdentityRoot()
 ): CodexThreadIdentity | undefined {
-  if (!SAFE_THREAD_ID.test(threadId)) return undefined
+  if (!isSafeThreadId(threadId)) return undefined
   let raw: string
   try {
     raw = readFileSync(path.join(root, threadId), 'utf8')
@@ -163,7 +189,7 @@ export function writeCodexThreadIdentity(
   hookEndpoint: string,
   root = codexThreadIdentityRoot()
 ): void {
-  if (!SAFE_THREAD_ID.test(threadId) || !validCodexIdentity(nodeId, hookEndpoint)) {
+  if (!isSafeThreadId(threadId) || !validCodexIdentity(nodeId, hookEndpoint)) {
     throw new Error('Invalid NodeTerm Codex thread identity')
   }
   const signature = identitySignature(threadId, nodeId, hookEndpoint)
@@ -202,7 +228,7 @@ export function bindCodexThreadIdentity(
   isNodeLive: (nodeId: string) => boolean,
   root = codexThreadIdentityRoot()
 ): void {
-  if (!SAFE_THREAD_ID.test(threadId) || !validCodexIdentity(nodeId, hookEndpoint)) {
+  if (!isSafeThreadId(threadId) || !validCodexIdentity(nodeId, hookEndpoint)) {
     throw new Error('Invalid NodeTerm Codex thread identity')
   }
   const existing = readCodexThreadIdentity(threadId, root)
@@ -236,7 +262,7 @@ export function forgetCodexThreadIdentitiesForNode(
     return
   }
   for (const threadId of entries) {
-    if (!SAFE_THREAD_ID.test(threadId)) continue
+    if (!isSafeThreadId(threadId)) continue
     // Reads through the signature check, so a record we do not trust is also one we do not delete.
     if (readCodexThreadIdentity(threadId, root)?.nodeId !== nodeId) continue
     try {
