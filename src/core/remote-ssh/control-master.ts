@@ -6,7 +6,7 @@ import { createHash } from 'crypto'
 import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
 import { TMUX_SOCKET } from '../tmux-naming'
 import { canControlCanvas } from '../../shared/agents/config'
-import { bracketedInjection } from '../paste-injection'
+import { bracketedInjection, sanitizePasteText } from '../paste-injection'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
@@ -226,6 +226,10 @@ export function parseRemoteSessionNames(stdout: string): string[] {
  * Otherwise the legacy two-step send runs, joined with `&&`, not `;`: Enter only fires if the
  * text send actually succeeded, so a failed text send can never leave a lone Enter to submit
  * whatever was already composed in a live agent prompt.
+ *
+ * BOTH branches run the payload through `sanitizePasteText` — the same one function the local
+ * path calls — so the remote and local deliveries cannot drift on the rule that keeps a payload
+ * from escaping its paste frame and being read as key input. Drift is how that survived here.
  */
 export function remoteTmuxSendKeysArgs(
   conn: SshConnection,
@@ -236,7 +240,7 @@ export function remoteTmuxSendKeysArgs(
 ): string[] {
   const tmux = `tmux -L ${RMT_TMUX_SOCKET}`
   const framed = `${tmux} send-keys -t ${sessionId} -l -- ${posixQuote(bracketedInjection(text, enter))}`
-  let legacy = `${tmux} send-keys -t ${sessionId} -l -- ${posixQuote(text)}`
+  let legacy = `${tmux} send-keys -t ${sessionId} -l -- ${posixQuote(sanitizePasteText(text))}`
   if (enter) legacy += ` && ${tmux} send-keys -t ${sessionId} Enter`
   const cmd = `if [ "$(${tmux} display-message -p -t ${sessionId} '#{bracket_paste_flag}' 2>/dev/null)" = 1 ]; then ${framed}; else ${legacy}; fi`
   return childArgs(conn, controlPath, cmd)

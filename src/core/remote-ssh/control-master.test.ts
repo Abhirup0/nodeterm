@@ -182,6 +182,17 @@ describe('remoteTmuxSendKeysArgs', () => {
     const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', '-not-an-option', false)
     expect(args[args.length - 1]).toContain(`${TMUX} send-keys -t nt-x -l -- '-not-an-option'`)
   })
+  // SECURITY: a payload carrying the paste-END marker would close the frame early and turn the
+  // rest into key input. BOTH branches sanitize — which one runs is decided by a probe of the
+  // RECEIVER, so the payload must not become keys just because the target never asked for
+  // bracketed paste. `paste-injection.realtty.test.ts` proves the framed body against a real bash.
+  it('strips a payload ESC from BOTH branches — the frame is the only structure left', () => {
+    const cmd = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'a\x1b[201~\rid\r', true).slice(-1)[0]
+    expect(cmd).toContain(`${TMUX} send-keys -t nt-x -l -- '\x1b[200~a[201~\rid\r\x1b[201~\r'`)
+    expect(cmd).toContain(`${TMUX} send-keys -t nt-x -l -- 'a[201~\rid\r' && ${TMUX} send-keys -t nt-x Enter`)
+    // Only the frame's own two escapes survive anywhere in the remote line.
+    expect(cmd.split('\x1b')).toHaveLength(3)
+  })
 })
 
 describe('remoteCapturePaneArgs', () => {
