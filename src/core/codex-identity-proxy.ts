@@ -344,12 +344,17 @@ nt_preflight() {
   # THIS node id — a lookup by name, never a scan, so a session can only ever present its own. It
   # is deliberately NOT an env var any more: that channel put the credential on the tmux \`-e\`
   # argv, world-readable on a stock Linux, and the credential's whole job is to prove WHICH node
-  # is calling. \$NODETERM_CODEX_NODE_TOKEN survives only as a one-release fallback for a session
-  # spawned by the previous build, which carries the var and has no file yet.
+  # is calling.
+  #
+  # There is deliberately NO \$NODETERM_CODEX_NODE_TOKEN fallback. One shipped, for a session the
+  # previous build spawned, and it could never have worked: that build's value is the OLD
+  # derivation — base64url(HMAC(secret, nodeId)), no dot — which the current verifier reads as a
+  # foreign kid, i.e. \`legacy\`, and /codex-thread/{start,bind} demand \`verified\`. So it 403s and
+  # the launcher degrades anyway, one round-trip later. A pre-upgrade codex session runs plain
+  # codex until it is relaunched; that is the honest behaviour, not a regression from the fallback.
   if [ -n "\${NODETERM_NODE_TOKEN_DIR-}" ]; then
     nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID" 2>/dev/null) || nt_node_token=''
   fi
-  [ -n "$nt_node_token" ] || nt_node_token="\${NODETERM_CODEX_NODE_TOKEN-}"
   # The '.' IS the token: the wire shape is kid.mac (one derivation shared with /hook/*). A gate
   # without the dot rejects every token this app mints and degrades every codex node to plain
   # codex — silently, because falling back is what this script is built to do.

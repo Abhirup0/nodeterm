@@ -1787,12 +1787,12 @@ app.whenReady().then(async () => {
     return isSafeRemoteTranscriptPath(abs, remoteHome) ? abs : undefined
   }
   const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
-  // nodeId → did its LAST hook POST carry a token this instance minted for it. Recorded only;
-  // nothing reads it yet, and nothing here may branch on it (a `false` is the ordinary case for any
-  // client that predates the token — see HookEventMeta). The Server Edition keeps the same map.
-  const nodeVerified = new Map<string, boolean>()
-  hookServer.setRawListener((agentId, nodeId, payload, meta) => {
-    if (nodeId) nodeVerified.set(nodeId, meta.verified)
+  // `meta` carries the per-node `verified` flag and is deliberately UNUSED here: A13 moved
+  // enforcement into the hook server, which refuses before a listener is ever called. This shell
+  // used to keep a `nodeVerified` map written on every event and read by nothing. The parameter
+  // stays because the flag is part of the listener contract and both shells must take it
+  // (invariant 4, pinned by hook-verified-parity.test.ts); a second copy of the answer is not.
+  hookServer.setRawListener((agentId, nodeId, payload, _meta) => {
     if (agentId === 'grok') {
       // This branch records two associations, neither of which grok's envelope states outright.
       // Everything the claude path does below hangs off `transcript_path`, and grok has none.

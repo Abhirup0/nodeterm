@@ -12,7 +12,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
-import { randomBytes } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import { buildCodexLauncherScript } from './codex-identity-proxy'
 import { hookServer } from './agents/hook-server'
 import { nodeAuthKid, nodeAuthToken } from './agents/node-auth-token'
@@ -297,20 +297,28 @@ describe('the per-node capability, over the file channel', () => {
     expect(fallbacks).toEqual([])
   })
 
-  it('prefers the FILE over a stale env var left over from a pre-upgrade session', async () => {
-    // Charset-valid but wrong. If the env var won, the route would 403 and the node would degrade.
+  it('is unmoved by a stale env var left over from a pre-upgrade session', async () => {
+    // Charset-valid but minted for the WRONG node. If anything still read that variable, the route
+    // would 403 and this node would degrade to plain codex.
     await callLauncher([], { NODETERM_CODEX_NODE_TOKEN: nodeAuthToken(SECRET, 'node-2') })
     expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
     expect(fallbacks).toEqual([])
   })
 
-  it('still honors the env var for one release, when no file was materialised', async () => {
-    // A session spawned by the previous build carries the var and has no token file yet.
+  it('ignores NODETERM_CODEX_NODE_TOKEN entirely — the "one release" fallback was never real', async () => {
+    // The fallback shipped for "a session spawned by the previous build", and the test that
+    // certified it fed a NEW-format token into the OLD variable — an input the previous build never
+    // produced. What that build actually set is base64url(HMAC(secret, nodeId)) with NO dot, which
+    // the current verifier reads as a foreign kid ⇒ `legacy` ⇒ 403 on /codex-thread/{start,bind}.
+    // So the fallback bought one wasted round-trip and the same degrade. A pre-upgrade session runs
+    // plain codex until it is relaunched.
     sweepNodeTokenFile('node-1')
     fs.rmSync(path.join(nodeTokenDir(), 'node-1'), { force: true })
-    await callLauncher([], { NODETERM_CODEX_NODE_TOKEN: nodeAuthToken(SECRET, 'node-1') })
-    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
-    expect(fallbacks).toEqual([])
+    const oldFormat = createHmac('sha256', SECRET).update('node-1').digest('base64url')
+    expect(oldFormat).not.toContain('.') // the shape the previous build actually wrote
+    await callLauncher([], { NODETERM_CODEX_NODE_TOKEN: oldFormat })
+    expect(started).toEqual([])
+    expect(fallbacks).toEqual([{ nodeId: 'node-1', reason: 'node-token-unavailable' }])
   })
 
   it('a missing token file and no env var → node-token-unavailable → plain codex', async () => {

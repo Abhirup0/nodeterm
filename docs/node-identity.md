@@ -181,7 +181,7 @@ The bearer is required everywhere; this table is about the *node* token on top o
 | `/control/list` | Accepted unless the node is latched | 403 | Tolerant: leaks canvas shape, changes nothing. |
 | `/control/<mutation>` | Warned during the window, refused after the cutoff, refused immediately if latched | 403 | Refusal happens **before** the handler. `write`/`close` still ask the human. |
 | `/codex-thread/{start,bind}` | **Refused** (403) | 403 | Strict from the day they existed — no upgrade population to protect. |
-| `/codex-thread/fallback` | Accepted **when tokenless** | 403 | A report that carries a token must carry the right one. |
+| `/codex-thread/fallback` | **Always accepted** | 403 | It reports a DEGRADE and grants nothing; refusing it would silence it in exactly the tokenless case it exists for. |
 
 **Why `/hook/*` never 403s a missing token.** It is the fail-open contract, and it is load-bearing
 rather than timid. The legitimate tokenless callers are real and permanent: the **phone** (it injects
@@ -190,6 +190,12 @@ unjudgeable, not hostile), every session that predates the feature, and any futu
 there does not degrade a feature — it silently stops an agent's status, context meter and approvals,
 and the managed script's `curl -sS` has no `--fail`, so a 403 exits 0 and the node goes dark with no
 error anywhere. `forged` is the single exception because nothing legitimate can produce it.
+
+**A pre-upgrade codex session degrades to plain codex until it is relaunched.** Its launcher reads
+the per-node capability from an env var this build no longer sets, and the value the previous build
+put there is the OLD derivation (`base64url(HMAC(secret, nodeId))`, no dot), which the current
+verifier reads as `legacy` — a 403 on `/codex-thread/{start,bind}`. There is no compat path and no
+useful one to write: relaunching the node is the fix, and it takes one restart.
 
 **Why `/context-link/*` refuses with prose and a 200.** The shim turns any non-200 into "Could not
 read linked context (nodeterm unreachable)". That would be a lie, and it tells the agent nothing it
