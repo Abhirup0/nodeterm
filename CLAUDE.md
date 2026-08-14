@@ -135,7 +135,16 @@ Persistence has two layers:
   `core/workspace-watcher.ts` → silent reload, or a Reload/Keep-mine conflict bar when dirty.
   Unreadable refs render as greyed **unavailable** tabs (never dropped); corrupt project files
   are set aside as `project.json.corrupt-<ts>`. "Open folder…" adopts an existing
-  `.nodeterm/project.json` (fresh project id on collision; node ids — tmux names — kept).
+  `.nodeterm/project.json` — the probe MINTS the project id (node ids — tmux names — kept), and
+  re-opening the folder is answered by the cwd lookup, not a second adoption.
+  **The shared file carries content, not identity**: no project `id`, no `viewport`, no
+  `defaultAccountId` — those are machine-local and ride the index entry (`IndexEntryV3`), beside
+  `localApprovalId`/`localExec`. Two folders holding the same committed canvas (worktree, branch
+  checkout) are two independent projects, and the committed file is byte-identical on every
+  machine. The file still carries a machine-INDEPENDENT legacy `id` (`legacyFileId`, derived from
+  the canvas name) for one release, because a pre-change build sidelines an id-less file to
+  `.corrupt-<ts>` inside the user's repo; it is ignored on read. Residual: node ids are still
+  shared, so two worktrees still attach the same tmux sessions.
   **SSH mirror safety** (the ".nodeterm reset itself" bug — 12 fresh project ids and 45 orphaned
   tmux sessions in one field report): remote writes are atomic (`cat > f.tmp && mv`, `sshWriteArgs`);
   a mirror is never blind-written before the entry has read-compared the server file once
