@@ -168,6 +168,55 @@ describe('SshProjectManager', () => {
     expect(calls.some((c) => c.args.join(' ').includes(`source-file '/home/u/.nodeterm/tmux.conf'`))).toBe(true)
   })
 
+  /**
+   * SECURITY — the remote `$HOME` is a HOST ANSWER, i.e. data. Both places `ssh-project` reads it
+   * validate it (`isSafeRemoteHome`) before it becomes a remote path: `connect`, where it steers
+   * the tmux.conf write AND is retained as `remoteHome` (which the PTY manager then splices into a
+   * tmux `-e CLAUDE_CONFIG_DIR=…` pair), and `uploadFile`, which resolves it on demand.
+   *
+   * These two sites had NO test in the first version of this fix — reverting them left the suite
+   * green, which made the mutation claim wrong. That is what these pin.
+   */
+  const mgrWithHome = (home: string) => {
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      return args.join(' ').includes('printf %s') ? { code: 0, stdout: home } : { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    return { mgr, calls }
+  }
+
+  it('connect REFUSES a remote $HOME carrying a newline (no path built, nothing retained)', async () => {
+    const { mgr, calls } = mgrWithHome('/home/u\nid > /tmp/pwned')
+    const { tmuxConfPath } = await mgr.connect('p1', conn)
+    // Fail-open: the features needing an absolute home are off, the connection itself still works.
+    expect(tmuxConfPath).toBeUndefined()
+    expect(mgr.remoteHomeFor('p1')).toBeUndefined()
+    // and the hostile bytes reached no remote command line.
+    expect(calls.some((c) => c.args.join(' ').includes('id > /tmp/pwned'))).toBe(false)
+  })
+
+  it('connect ACCEPTS a home with a space (the validator must not break real macOS homes)', async () => {
+    const { mgr } = mgrWithHome('/Users/Enes Kirca')
+    const { tmuxConfPath } = await mgr.connect('p1', conn)
+    expect(tmuxConfPath).toBe('/Users/Enes Kirca/.nodeterm/tmux.conf')
+    expect(mgr.remoteHomeFor('p1')).toBe('/Users/Enes Kirca')
+  })
+
+  it('uploadFile REFUSES a probed $HOME carrying a newline', async () => {
+    const { mgr } = mgrWithHome('/home/u\nid')
+    await mgr.connect('p1', conn) // connect also refuses it, so upload must re-probe and refuse too
+    expect(await mgr.uploadFile('p1', '/local/f.png', 'f.png')).toBeNull()
+  })
+
   it('connect leaves tmuxConfPath undefined when the remote conf write fails (no -f to a missing conf)', async () => {
     // The runner resolves (does not throw) on a non-zero remote exit. Fail the `cat >`/mkdir write
     // with code 1 while letting the $HOME probe succeed so remoteHome resolves, this isolates the

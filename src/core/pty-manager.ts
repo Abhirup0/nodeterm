@@ -52,6 +52,7 @@ import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-
 import { claudeConfigDirFor } from './claude-config-dir'
 import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
 import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
+import { NODE_ID_MAX, isSafeNodeId } from './remote-safety'
 import { presenceHub } from './presence/hub'
 import {
   codexLauncherDir,
@@ -1415,6 +1416,26 @@ export class PtyManager {
   private async create(clientId: ClientId, options: PtyCreateOptions): Promise<PtyCreateResult> {
     const key = options.persistKey
     if (!key) return this.spawnNew(clientId, options)
+    // SECURITY — the choke point for the node id. Every session spawn (local tmux, plain shell,
+    // SSH remote) goes through here, `pty:create` validates its payload nowhere, and node ids come
+    // from `.nodeterm/project.json` — a file that travels in a cloned/shared repo and is written on
+    // remote hosts. The id reaches a REMOTE SHELL verbatim as `NODETERM_NODE_ID=<key>`; quoting at
+    // that splice (`remoteTmuxPtyArgs`) is the primary fix and this is the second layer, so a
+    // future splice that forgets to quote is not instantly exploitable.
+    //
+    // FAILURE DIRECTION — refuse, don't sanitise. Nothing legitimate is refused: every id the app
+    // mints comes from `nextId()` (`<prefix>-<base36>-<counter>`) or `uuid()`, both inside
+    // `[A-Za-z0-9._-]`. And sanitising would be worse than a refusal here rather than merely
+    // safer-looking: `NODETERM_NODE_ID` is a CROSS-BOUNDARY CONTRACT — Canvas.tsx keys
+    // `agentStatus.byId` off the raw node id — so a silently rewritten id would report status for a
+    // node that does not exist, i.e. a terminal that looks fine and is permanently dark. A thrown
+    // error surfaces in the pane where someone can read it.
+    if (!isSafeNodeId(key))
+      throw new Error(
+        `Refusing to open this terminal: its node id is not a safe id (allowed: letters, digits, ` +
+          `dot, dash, underscore; max ${NODE_ID_MAX}). A project file with an id like this cannot be ` +
+          `trusted — it is how a shared or cloned repo would smuggle a command onto a remote host.`
+      )
     // Co-attach: a live session for this node id already exists in THIS process (another client,
     // or this client's own second view). Subscribe to it instead of spawning a second tmux client
     // — `-D` would otherwise kick the first viewer off.
