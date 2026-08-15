@@ -185,6 +185,7 @@ import { sshFs } from '../terminal/ssh-fs'
 import {
   agentHibernateFns,
   agentRestartFn,
+  guardConcurrentRestart,
   planBulkRestart,
   restartEligibility,
   settleRestart,
@@ -6985,16 +6986,36 @@ export function Canvas() {
               requestedBy: srcTitle,
               onConfirm: async () => {
                 setConfirm(null)
-                try {
-                  const ok = await api.pty.sendText(args.node, args.text ?? '')
-                  reply({
-                    ok,
-                    message: ok ? 'sent' : 'failed',
-                    error: ok ? undefined : 'sendText failed'
-                  })
-                } catch (e) {
-                  reply({ ok: false, error: String(e) })
+                // The SAME per-node lock the restart, hibernate-exit and wake-resume runs take.
+                // Its doc comment spells out why they take it: a second write arriving while a
+                // line sits un-submitted in the pane is spliced into that line. Every other
+                // `api.pty.sendText` caller was outside the lock, this one included, so a
+                // confirmed `write` could land in the middle of a hibernate exit's blind
+                // KILL_LINE + `/exit` (agent-restart.ts) or into an echo-verified launch line
+                // still waiting on its verification (command-delivery.ts). The dialog makes that
+                // rare, not impossible — the human confirms on their own clock, not the pane's.
+                let thrown: string | null = null
+                const outcome = await guardConcurrentRestart(args.node, async () => {
+                  try {
+                    const ok = await api.pty.sendText(args.node, args.text ?? '')
+                    return ok ? ('sent' as const) : ('failed' as const)
+                  } catch (e) {
+                    thrown = String(e)
+                    return 'failed' as const
+                  }
+                })()
+                if (outcome === 'not-eligible') {
+                  // A distinct, retryable refusal rather than a corrupted pane. `not-eligible` is
+                  // the guard's own word for "that node is mid-run"; the run holding it will
+                  // finish and the agent can send again.
+                  reply({ ok: false, error: 'target is busy with a restart or wake — try again' })
+                  return
                 }
+                reply({
+                  ok: outcome === 'sent',
+                  message: outcome === 'sent' ? 'sent' : 'failed',
+                  error: outcome === 'sent' ? undefined : (thrown ?? 'sendText failed')
+                })
               },
               onCancel: () => reply({ ok: false, error: 'denied by user' })
             })
