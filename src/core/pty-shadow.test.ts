@@ -423,14 +423,17 @@ describe('control-mode shadow clients for released sessions', () => {
     await m.shadowAttach('node-1')
 
     const NOW = 1_000_000
-    const OLD = NOW - 100_000 // well past the 6h grace window
+    const OLD = NOW - 100_000 // well past the 6h grace window: no PANE OUTPUT since then
+    // `#{session_activity}` stays FRESH, the shape a live host always has — the reaper gates on
+    // last pane output now, not on when a client last attached. See SessionInfo.activitySec.
+    const FRESH = NOW - 60
     const listings: Record<string, string> = {
       // `nt-node-1` reads as attached because our shadow IS a real tmux client; `nt-node-9` is a
       // genuinely attached session (somebody is looking at it) and must survive.
-      'node-terminal': `nt-node-1|1|${OLD}\nnt-node-9|1|${OLD}`,
+      'node-terminal': `nt-node-1|1|${FRESH}|${OLD}\nnt-node-9|1|${FRESH}|${OLD}`,
       // The SAME NAME on the SSH-remote socket, attached for real. Shadows only ever live on the
       // local socket, so the exclusion must not follow the name across sockets.
-      'nodeterm-rmt': `nt-node-1|1|${OLD}`
+      'nodeterm-rmt': `nt-node-1|1|${FRESH}|${OLD}`
     }
     const killed: Array<{ socket: string; target: string }> = []
     const reaper = createSessionReaper({
@@ -469,7 +472,8 @@ describe('control-mode shadow clients for released sessions', () => {
     await m.shadowAttach('node-2')
 
     const NOW = 1_000_000
-    const OLD = NOW - 100_000
+    const OLD = NOW - 100_000 // no PANE OUTPUT since then
+    const FRESH = NOW - 60 // …while `#{session_activity}` stays fresh, as it always is in production
     const killed: string[] = []
     let listings = 0
     const reaper = createSessionReaper({
@@ -485,7 +489,7 @@ describe('control-mode shadow clients for released sessions', () => {
         // must never name it. nt-node-2 is shadow-only when the plan is made and gains a real
         // client before the kill — precisely what the kill-time re-verify exists for.
         const nodeTwo = listings++ === 0 ? 1 : 2
-        return `nt-node-1|2|${OLD}\nnt-node-2|${nodeTwo}|${OLD}`
+        return `nt-node-1|2|${FRESH}|${OLD}\nnt-node-2|${nodeTwo}|${FRESH}|${OLD}`
       },
       readMem: () => ({ availableMb: 100, totalMb: 8000 }), // under the watermark: real pressure
       env: {},

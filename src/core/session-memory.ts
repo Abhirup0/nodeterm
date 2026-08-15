@@ -220,15 +220,82 @@ export function parseVmStat(text: string, totalBytes: number): MemInfo | null {
   return { availableMb, totalMb }
 }
 
+/**
+ * Parse `/proc/meminfo`. `MemAvailable`/`MemTotal` are REQUIRED (without them there is no reading
+ * at all); swap is optional and reported only when BOTH halves are present.
+ *
+ * Swap is read from the meminfo text already in hand rather than from a second file: the watermark
+ * and the swap term must describe the same instant, and two reads a syscall apart can disagree
+ * about a host that is actively swapping — which is precisely the host this term exists for.
+ *
+ * `SwapTotal: 0` is a real answer (a host with swap disabled) and is passed through as `0`, where
+ * every consumer's `swapTotalMb > 0` guard turns the term off. A MISSING SwapTotal is a different
+ * fact — a /proc we do not understand — and yields `undefined`, i.e. no signal.
+ */
+export function parseMemInfoText(text: string): MemInfo | null {
+  const kb = (label: string): number | null => {
+    const m = new RegExp(`^${label}:\\s+(\\d+)\\s*kB`, 'm').exec(text)
+    return m ? Number(m[1]) : null
+  }
+  const avail = kb('MemAvailable')
+  const total = kb('MemTotal')
+  if (avail === null || total === null) return null
+  const swapTotal = kb('SwapTotal')
+  const swapFree = kb('SwapFree')
+  const out: MemInfo = {
+    availableMb: Math.round(avail / 1024),
+    totalMb: Math.round(total / 1024)
+  }
+  // Both or neither: a SwapFree without a SwapTotal cannot be turned into a ratio, and half a
+  // reading is worse than none — it would be a number a consumer could divide by zero with.
+  if (swapTotal !== null && swapFree !== null) {
+    out.swapTotalMb = Math.round(swapTotal / 1024)
+    out.swapFreeMb = Math.round(swapFree / 1024)
+  }
+  return out
+}
+
+/**
+ * Parse `/proc/pressure/memory` into the two `avg60` figures.
+ *
+ * Shape (Linux >= 4.20, PSI compiled in):
+ *   some avg10=0.00 avg60=0.00 avg300=0.18 total=29288181130
+ *   full avg10=0.00 avg60=0.00 avg300=0.15 total=25621111809
+ *
+ * `avg60` rather than `avg10` on purpose: the reaper sweeps every ten minutes, and a 10-second
+ * window is noise at that cadence — a single compile spiking avg10 must not be read as a host in
+ * trouble. `avg300` is the other direction: it stays elevated long after the host recovered, and
+ * would keep reaping through the recovery.
+ *
+ * A line we cannot parse yields `undefined` for that figure, not 0 — a zero here means "measured,
+ * no stall", which is the opposite of "did not measure".
+ */
+export function parsePsiMemory(text: string): { psiSomeAvg60?: number; psiFullAvg60?: number } {
+  const avg60 = (kind: 'some' | 'full'): number | undefined => {
+    const m = new RegExp(`^${kind}\\s[^\\n]*?\\bavg60=(\\d+(?:\\.\\d+)?)`, 'm').exec(text)
+    if (!m) return undefined
+    const n = Number(m[1])
+    return Number.isFinite(n) ? n : undefined
+  }
+  const some = avg60('some')
+  const full = avg60('full')
+  return {
+    ...(some !== undefined ? { psiSomeAvg60: some } : {}),
+    ...(full !== undefined ? { psiFullAvg60: full } : {})
+  }
+}
+
 export function readMemInfo(): MemInfo | null {
   try {
-    const text = fs.readFileSync('/proc/meminfo', 'utf8')
-    const avail = /MemAvailable:\s+(\d+)\s*kB/.exec(text)
-    const total = /MemTotal:\s+(\d+)\s*kB/.exec(text)
-    if (avail && total) {
-      return {
-        availableMb: Math.round(Number(avail[1]) / 1024),
-        totalMb: Math.round(Number(total[1]) / 1024)
+    const base = parseMemInfoText(fs.readFileSync('/proc/meminfo', 'utf8'))
+    if (base) {
+      // PSI is a SEPARATE, OPTIONAL read: it is absent on pre-4.20 kernels, on kernels built
+      // without CONFIG_PSI, and inside some containers. Its absence must cost the caller nothing —
+      // the memory reading it decorates is already complete and correct without it.
+      try {
+        return { ...base, ...parsePsiMemory(fs.readFileSync('/proc/pressure/memory', 'utf8')) }
+      } catch {
+        return base
       }
     }
   } catch {

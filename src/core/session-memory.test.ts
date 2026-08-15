@@ -420,3 +420,103 @@ describe('collectSessionMemory on darwin', () => {
     })
   )
 })
+
+import { parseMemInfoText, parsePsiMemory, readMemInfo } from './session-memory'
+
+/** A verbatim excerpt of the production host's /proc/meminfo, 2026-08-15 (62.7 GB, swap 74% spent). */
+const MEMINFO = `MemTotal:       65697400 kB
+MemFree:         4154020 kB
+MemAvailable:   13804628 kB
+Buffers:          412300 kB
+Cached:          9216440 kB
+SwapCached:       501232 kB
+SwapTotal:       8388604 kB
+SwapFree:        2192260 kB
+Dirty:               736 kB
+`
+
+const PSI = `some avg10=0.00 avg60=1.25 avg300=0.18 total=29288181130
+full avg10=0.00 avg60=0.75 avg300=0.15 total=25621111809
+`
+
+describe('parseMemInfoText', () => {
+  it('reads the required pair and the optional swap pair from ONE snapshot', () => {
+    expect(parseMemInfoText(MEMINFO)).toEqual({
+      availableMb: 13481,
+      totalMb: 64158,
+      swapTotalMb: 8192,
+      swapFreeMb: 2141
+    })
+  })
+
+  it('MemAvailable/MemTotal are required — a /proc we do not understand yields NO reading', () => {
+    // Not a partial object: a reading missing its primary field would be a number the watermark
+    // could still compare against, which is the "wrong number presented as a fact" failure.
+    expect(parseMemInfoText(MEMINFO.replace(/MemAvailable:.*\n/, ''))).toBeNull()
+    expect(parseMemInfoText(MEMINFO.replace(/MemTotal:.*\n/, ''))).toBeNull()
+    expect(parseMemInfoText('garbage')).toBeNull()
+  })
+
+  it('swap is OMITTED, not zeroed, when the kernel does not report it', () => {
+    // The distinction the swap term depends on: `undefined` means "did not measure" and disables
+    // the term, whereas `0` would read as "swap totally exhausted" and could only ever reap MORE.
+    const noSwap = parseMemInfoText(MEMINFO.replace(/SwapTotal:.*\n/, '').replace(/SwapFree:.*\n/, ''))
+    expect(noSwap).toEqual({ availableMb: 13481, totalMb: 64158 })
+    expect(noSwap).not.toHaveProperty('swapTotalMb')
+    expect(noSwap).not.toHaveProperty('swapFreeMb')
+  })
+
+  it('half a swap reading is no swap reading (a free without a total cannot be a ratio)', () => {
+    const half = parseMemInfoText(MEMINFO.replace(/SwapTotal:.*\n/, ''))
+    expect(half).not.toHaveProperty('swapFreeMb')
+  })
+
+  it('a swapless host reports a real zero TOTAL, which every consumer guard turns off', () => {
+    const off = parseMemInfoText(MEMINFO.replace(/SwapTotal:.*/, 'SwapTotal:             0 kB').replace(/SwapFree:.*/, 'SwapFree:              0 kB'))
+    expect(off).toMatchObject({ swapTotalMb: 0, swapFreeMb: 0 })
+  })
+})
+
+describe('parsePsiMemory', () => {
+  it('reads avg60 from both lines', () => {
+    expect(parsePsiMemory(PSI)).toEqual({ psiSomeAvg60: 1.25, psiFullAvg60: 0.75 })
+  })
+
+  it('takes avg60 specifically — not avg10 and not avg300', () => {
+    // The cadence argument: the reaper sweeps every 10 minutes, so avg10 is noise and avg300 stays
+    // elevated through a recovery. Distinct values in every column make a mix-up visible.
+    const distinct = 'some avg10=11.00 avg60=22.00 avg300=33.00 total=1\nfull avg10=44.00 avg60=55.00 avg300=66.00 total=2\n'
+    expect(parsePsiMemory(distinct)).toEqual({ psiSomeAvg60: 22, psiFullAvg60: 55 })
+  })
+
+  it('does not confuse the some line for the full line', () => {
+    expect(parsePsiMemory('some avg10=0.00 avg60=9.00 avg300=0.00 total=1\n')).toEqual({ psiSomeAvg60: 9 })
+  })
+
+  it('an unreadable or absent PSI file yields NO figures, never zeros', () => {
+    expect(parsePsiMemory('')).toEqual({})
+    expect(parsePsiMemory('garbage')).toEqual({})
+    expect(parsePsiMemory('some avg10=0.00 avg300=0.18 total=1\n')).toEqual({})
+  })
+})
+
+describe('readMemInfo on this Linux host (integration)', () => {
+  const onLinux = it.skipIf(process.platform !== 'linux')
+
+  onLinux('carries swap alongside the available/total pair', () => {
+    const m = readMemInfo()
+    expect(m).not.toBeNull()
+    expect(m!.totalMb).toBeGreaterThan(0)
+    // Swap is not guaranteed configured, but if the kernel reports a total it must report a free.
+    if (m!.swapTotalMb !== undefined) {
+      expect(m!.swapFreeMb).toBeDefined()
+      expect(m!.swapFreeMb!).toBeLessThanOrEqual(m!.swapTotalMb!)
+    }
+  })
+
+  onLinux('PSI is optional and never breaks the reading', () => {
+    const m = readMemInfo()
+    expect(m).not.toBeNull()
+    if (m!.psiFullAvg60 !== undefined) expect(m!.psiFullAvg60).toBeGreaterThanOrEqual(0)
+  })
+})
