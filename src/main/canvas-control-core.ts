@@ -62,19 +62,20 @@ const VERBS: ControlVerb[] = [
 ]
 
 /**
- * The confirm-gated set. It MOVED to `src/shared/control-verbs.ts` and is re-exported here so
- * main-side callers read the same one the gate does.
+ * MOVED to `src/shared/control-verbs.ts` — read that file's header before trusting this set for
+ * anything. It is re-exported here so main-side callers are unchanged.
  *
- * WHERE IT IS ENFORCED: `Canvas.tsx`'s `switch (verb)` — `case 'write'` and `case 'close'` read
+ * WHERE IT IS READ: `Canvas.tsx`'s `switch (verb)` — `case 'write'` and `case 'close'` call
  * `isDestructiveVerb(verb)` before their `confirmBusy()` refusal. That is the only consumer, and
- * until it existed this set gated nothing at all: it lived in `src/main`, which the renderer
- * cannot import, so the actual confirm was hand-written per case and adding a verb to the set
- * changed no behaviour — while `TOLERANT_CONTROL_VERBS`' doc comment, `hook-server.ts`'s
- * `buildPtyEnv` note and `docs/node-identity.md` (twice, including invariant 6) all told a reader
- * it was what decided.
+ * until it existed the set was read by nothing but its own unit test: it lived here in `src/main`,
+ * which the renderer cannot import, while `TOLERANT_CONTROL_VERBS`' doc comment, `hook-server.ts`'s
+ * `buildPtyEnv` note and `docs/node-identity.md:65` all named it as the confirm-gated set.
  *
- * A verb that needs gating is added to the shared set, not by hand-writing a third confirm block;
- * `src/renderer/canvas/control-destructive.test.ts` fails if the two disagree again.
+ * Two things it still is NOT, both spelled out in the shared file: adding a verb here does not
+ * gate it (each case hand-writes its own `setConfirm`), and it is not the complete list of
+ * actions a human confirms (`close-worktree --mode remove` is confirmed and is not in it). What
+ * the shared home buys is a drift alarm — `control-destructive.test.ts` fails when the set and the
+ * dispatch stop agreeing.
  */
 export { isDestructiveVerb, DESTRUCTIVE_VERBS } from '../shared/control-verbs'
 

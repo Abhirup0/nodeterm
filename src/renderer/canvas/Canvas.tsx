@@ -6970,11 +6970,13 @@ export function Canvas() {
             // aimed at THIS harmless prompt into a deletion. `confirmBusy` covers every confirm
             // state, not just `confirm`. Reject instead.
             //
-            // `isDestructiveVerb` is read here rather than assumed: the set is the authority on
-            // which verbs are confirm-gated, and until this line it was a security-shaped constant
-            // that gated nothing — every reader of invariant 6 or TOLERANT_CONTROL_VERBS' doc
-            // comment believed adding a verb to it gated that verb. Reading it is what makes the
-            // set true.
+            // `isDestructiveVerb` is read here rather than restated: until this line the set was
+            // read by nothing but its own unit test, while TOLERANT_CONTROL_VERBS' doc comment,
+            // hook-server's buildPtyEnv note and docs/node-identity.md:65 all named it as the
+            // confirm-gated set. Reading it is what ties the two together — it does not make the
+            // dialog below conditional on the set, and adding a verb to the set would not give
+            // that verb a dialog. See `src/shared/control-verbs.ts` for what this does and does
+            // not buy.
             if (isDestructiveVerb(verb) && confirmBusy()) {
               reply({ ok: false, error: 'a confirmation is already pending — try again' })
               return

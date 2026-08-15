@@ -31,7 +31,9 @@ describe('localTmuxSendKeysArgs', () => {
     expect(args).toEqual(['-L', 'sock', 'send-keys', '-t', 'nt-x', '-l', '--', 'hello'])
   })
   it('puts `--` immediately before the body, whatever the body is', () => {
-    for (const body of ['-R', '-K', '--', '-l', '-N 3', '\x1b[200~x\x1b[201~\r']) {
+    // Every payload here exits 0 as a FLAG on tmux 3.4 — i.e. was accepted, typed nothing, and let
+    // the caller believe it had been delivered. `-R` additionally resets the pane display.
+    for (const body of ['-R', '-K', '-l', '--', '-H', '-F', '-N 3', '\x1b[200~x\x1b[201~\r']) {
       const args = localTmuxSendKeysArgs(TMUX_SOCKET, 'nt-x', body)
       expect(args[args.length - 2]).toBe('--')
       expect(args[args.length - 1]).toBe(body)

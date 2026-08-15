@@ -27,11 +27,17 @@ export function isSessionName(target: string): boolean {
  * SECURITY — the literal-text `send-keys` argv for a LOCAL pane, with option parsing ENDED.
  *
  * `-l` means "these are literal characters", but it does NOT stop tmux reading further arguments
- * as options. A payload beginning with `-` is therefore taken as flags, and several of them exit
- * 0: `-R` (reset terminal state), `-K`, `-l`, `--`. The delivery then reported SUCCESS having
- * typed nothing — and `sendText`'s legacy branch went on to send its Enter, submitting whatever
- * the human had already composed in that pane. An agent's `write --text -R` was a remote "press
- * Enter on whatever is half-typed in that terminal" with no text of its own to show the approver.
+ * as options. A payload beginning with `-` is therefore taken as flags, and on tmux 3.4 every one
+ * of `-R  -K  -l  --  -H  -F  -N 3` exits 0 while typing nothing. The delivery then reported
+ * SUCCESS — and `sendText`'s legacy branch went on to send its Enter, submitting whatever the
+ * human had already composed in that pane. An agent's `write --text -R` was a remote "press Enter
+ * on whatever is half-typed in that terminal" with no text of its own to show the approver, and
+ * `-R` resets the pane DISPLAY as well, so the line being submitted had just been wiped off the
+ * screen while readline still held it.
+ *
+ * The other direction of the same bug is the everyday one: any legitimate text starting with `-`
+ * — a dictation insert, a note push, a `/rename` of a title beginning with a dash — was silently
+ * not typed at all.
  *
  * `--` is the whole fix, and the remote path (`remoteTmuxSendKeysArgs`) has always had it — its
  * doc comment even says why. Only the local path was missing it. This function exists so the two

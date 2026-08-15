@@ -3,9 +3,14 @@
 // `paste-injection.realtty.test.ts` proves what the framed BODY does to a reader. This file proves
 // what the ARGV does to tmux, which is a different parser and had a different hole: `send-keys -l`
 // does not stop option parsing, so a payload beginning with `-` was consumed by tmux as FLAGS.
-// `-R`, `-K`, `-l` and `--` are all accepted flags that exit 0, so the delivery reported success,
-// typed nothing at all — and then sent its Enter anyway, submitting whatever the human had already
-// composed in that pane.
+// Measured on tmux 3.4, every one of `-R  -K  -l  --  -H  -F  -N 3` exits 0 while typing nothing,
+// so the delivery reported success — and then sent its Enter anyway, submitting whatever the human
+// had already composed in that pane.
+//
+// `-R` is the worst of them and the reason the harm is not merely "the write was dropped": it
+// RESETS THE PANE DISPLAY, so the composed line is wiped from the screen while readline still
+// holds it. The human sees an empty prompt; the Enter that follows submits the line they can no
+// longer see.
 //
 // The remote counterpart (`remoteTmuxSendKeysArgs`) has carried `--` since it was written; the
 // local one never did. Same rule, one implementation missing it — the drift `sanitizePasteText`'s
@@ -26,6 +31,17 @@ import { sanitizePasteText } from './paste-injection'
 const SOCKET = `nt-sendkeys-test-${process.pid}`
 const SESSION = 'probe'
 
+/**
+ * The socket lives in the test's OWN temp dir, not `/tmp/tmux-<uid>/`.
+ *
+ * `kill-server` stops the server but does not unlink the socket file, so a per-pid socket name in
+ * the shared dir leaves one stale entry behind per run, forever. Pointing `TMUX_TMPDIR` at `work`
+ * makes `afterAll`'s `rm -rf` the one cleanup path for everything this file created.
+ */
+function tmuxEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, TMUX_TMPDIR: work }
+}
+
 function findTmux(): string | null {
   for (const c of ['/usr/bin/tmux', '/usr/local/bin/tmux', '/opt/homebrew/bin/tmux', '/bin/tmux']) {
     if (fs.existsSync(c)) return c
@@ -38,7 +54,7 @@ let work: string
 
 /** `tmux <args>`, throwing on a non-zero exit exactly as `PtyManager`'s `runAsync` would. */
 function tmux(args: string[]): string {
-  return execFileSync(TMUX as string, args, { encoding: 'utf8' })
+  return execFileSync(TMUX as string, args, { encoding: 'utf8', env: tmuxEnv() })
 }
 
 /** Type `body` into the probe pane the way the HARNESS does it — always safely quoted. */
@@ -66,7 +82,10 @@ function drain(tag: string): void {
 function freshPane(): void {
   try {
     // Quiet: on the first run there is no server yet and tmux says so on stderr.
-    execFileSync(TMUX as string, ['-L', SOCKET, 'kill-session', '-t', SESSION], { stdio: 'ignore' })
+    execFileSync(TMUX as string, ['-L', SOCKET, 'kill-session', '-t', SESSION], {
+      stdio: 'ignore',
+      env: tmuxEnv()
+    })
   } catch {
     // no session yet
   }
