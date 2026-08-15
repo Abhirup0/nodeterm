@@ -4,7 +4,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { IPC } from '../shared/ipc'
 import { ServerPlatform } from './platform-server'
-import { registerServerGitHubControl, ServerGitHubSecretStore } from './github-control'
+import {
+  registerServerGitHubControl,
+  ServerGitHubSecretStore,
+  ServerSecretStore
+} from './github-control'
 
 let userDataDir: string
 
@@ -18,6 +22,19 @@ afterEach(async () => {
 })
 
 describe('ServerGitHubSecretStore', () => {
+  it('keeps feature-specific owner-only secret files isolated', async () => {
+    const github = new ServerGitHubSecretStore(userDataDir)
+    const gateway = new ServerSecretStore(userDataDir, 'model-gateway-key.json')
+    await github.save('github-secret')
+    await gateway.save('gateway-secret')
+
+    expect(await github.readForHost()).toBe('github-secret')
+    expect(await gateway.readForHost()).toBe('gateway-secret')
+    expect((await fs.stat(path.join(userDataDir, 'model-gateway-key.json'))).mode & 0o777).toBe(
+      0o600
+    )
+  })
+
   it('stores the token atomically at mode 0600 and reports restricted storage', async () => {
     const store = new ServerGitHubSecretStore(userDataDir)
     await store.save('github_pat_secret')
