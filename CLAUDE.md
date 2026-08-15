@@ -422,6 +422,60 @@ session (you can't keep a live OS process across a reboot):
   --resume`) when known, else the bare `launchCmd`. The one-shot `data.initialCommand` still wins
   on the very first open, so the agent is never double-launched.
 
+### We have our own VT emulator — check it before asking tmux
+
+xterm.js is not just a renderer. It parses the pane's output stream, so it **tracks DECSET modes
+itself** and exposes them as public API (`term.modes`, `@xterm/xterm/typings/xterm.d.ts:1865`) —
+bracketed paste, application-cursor, mouse tracking, origin mode, and the rest. We already read one
+of them: `term.modes.mouseTrackingMode` decides whether a click means "follow this file link"
+(`src/renderer/terminal/file-links.ts:341`).
+
+But `PtyManager.bracketPasteRequested` asks **tmux** for the same class of fact, via
+`#{bracket_paste_flag}` — and that format **first shipped in tmux 3.7** (2026-06-26). Ubuntu 24.04
+LTS ships 3.4, Ubuntu 22.04 → 3.2a, Debian 12/13 → 3.3a/3.5a, Ubuntu 26.04 → 3.6a. On all of those
+it expands to `''` exactly like a bogus name, and the comparison against `'1'` answers **false for
+every pane**. The bundled tmux does not rescue it: `extraResources` places it under `"mac"` only,
+and `bundledTmuxPath` is deliberately the **last** candidate (see the comment at
+`pty-manager.ts:174` — preferring our binary would pair a new client with the user's older running
+*server*, which upstream refuses). On an **SSH project it is unfixable from our side entirely**:
+the remote's tmux is whatever the user's server has.
+
+**The rule this is an instance of: before asking tmux, ssh or `ps` something about a pane, check
+whether the emulator already knows it.** Facts about *what the app in the pane is doing* (VT modes,
+the alternate screen, the cursor shape it asked for) arrive as bytes we already parse. Facts about
+*the session* (does it exist, what is the foreground process group, which panes are in it) are
+genuinely tmux's and must be asked. Mixing the two up is how a feature acquires a dependency on a
+tmux version we do not control. herdr has no version problem here for exactly this reason — it
+reads `mode_get(MODE_BRACKETED_PASTE)` from its own state machine.
+
+**Measured, and the emulator is NOT the answer here.** The `?2004h` a tmux *client* receives is
+tmux's own paste-through on the outer terminal (`tty_start_tty`, gated on the outer terminfo
+`BE`/`BD`), not the pane app's request: it arrives ~5 ms after attach and reads `true` even for a
+pane running `sleep 30`. It never toggled across pane switches, window switches, re-attach or
+co-attach. A constant is not a signal — so `term.modes.bracketedPasteMode` cannot stand in for the
+pane's state, however tempting the symmetry with `mouseTrackingMode` looks.
+
+**The actual fix is older than the problem: `paste-buffer -p`.** From tmux's own man page — *"If
+`-p` is specified, paste bracket control codes are inserted around the buffer **if the application
+has requested bracketed paste mode**."* Introduced 2012-03-03, shipped in **tmux 1.7**, so it is
+present on every tmux in the field. We do not have to ask whether the app wants framing; we ask
+tmux to do the framing, and it applies the pane's real state. Measured on 3.4: framed when the app
+requested it, unframed when it did not, correct for a non-active pane, and the whole thing in one
+round trip —
+`tmux load-buffer -b nt - \; paste-buffer -d -p -b nt -t <target> \; send-keys -t <target> Enter`.
+
+Two hazards that come with it, both measured:
+- **Copy mode silently unframes.** With `#{pane_in_mode}` = 1, `paste-buffer -p` delivers unframed
+  (tmux checks the copy-mode screen, not the app), so a user who scrolled the wheel up gets the
+  one-turn-per-line bug. `send-keys -X cancel` in the same invocation restores it.
+- **`set-buffer -- "$text"` hits ARG_MAX** around 200 KB. Use `load-buffer -` over stdin — and on
+  the SSH path that means piping into the remote command rather than putting the text in argv.
+
+And a correction worth keeping, because it inverts what the old comment implied: when
+`bracketPasteRequested` answers false it does **not** refuse — it falls through to the legacy
+two-step, which delivers `line1\nline2\nline3\r`, i.e. raw newlines into the app. It does not
+decline to send a multi-line message; it mangles it.
+
 ### Seeding a fresh xterm (`attachReplay` / `seedPaint` in `terminal/terminal-config.ts`)
 
 A newly mounted xterm is empty. Since tmux paints its own client, there is usually **nothing to
