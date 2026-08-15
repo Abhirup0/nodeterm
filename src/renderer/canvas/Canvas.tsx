@@ -259,7 +259,6 @@ import {
   hasHooks,
   canBranch,
   canRename,
-  canTransferFrom,
   canContextLink,
   createdAgentId,
   resumeCommand,
@@ -5216,40 +5215,14 @@ export function Canvas() {
             }
           ] as MenuItem[])
         : []),
-      ...(ids.length === 1 &&
-      (() => {
-        const a = agentIdOf(ids[0])
-        return !!a && canTransferFrom(a) && !!useAgentStatus.getState().byId[ids[0]]?.sessionId
-      })()
-        ? (() => {
-            const src = agentIdOf(ids[0]) as AgentId
-            const disabled = useSettings.getState().settings.disabledAgents
-            const settings = useSettings.getState().settings
-            const targets: { id: AgentId; label: string }[] = [
-              ...BUILTIN_AGENT_IDS.filter((aid) => aid !== src && !disabled.includes(aid)).map(
-                (aid) => ({ id: aid as AgentId, label: AGENT_CONFIG[aid].label })
-              ),
-              ...settings.customAgents
-                .filter((c) => c.id !== src && !disabled.includes(c.id))
-                .map((c) => ({ id: c.id, label: c.label }))
-            ]
-            return [
-              { type: 'label', label: 'Transfer conversation to' },
-              ...targets.map(
-                (tg): MenuItem => ({
-                  label: tg.label,
-                  icon: <AgentIcon agentId={tg.id} />,
-                  onClick: () => void transferConversation(ids[0], tg.id, at)
-                })
-              )
-            ] as MenuItem[]
-          })()
+      ...(ids.length === 1
+        ? transferConversationItems(ids[0], at, {
+            sourceAgentId: agentIdOf(ids[0]),
+            sessionId: useAgentStatus.getState().byId[ids[0]]?.sessionId,
+            disabledAgents: useSettings.getState().settings.disabledAgents,
+            customAgents: useSettings.getState().settings.customAgents
+          }, transferConversation)
         : []),
-      ...(isHidden('align-grid', hidden)
-        ? []
-        : ([
-            { label: 'Align to grid', icon: <IconGrid />, onClick: () => alignToGrid(ids) }
-          ] as MenuItem[])),
       ...(isHidden('collapse', hidden)
         ? []
         : ([
@@ -5550,44 +5523,66 @@ export function Canvas() {
     ]
   }, [])
 
+  // The shared bag of creation callbacks + project context that every "add" menu derives its
+  // CONTENT items from (see lib/addMenuSpec.ts). Built once here so the pane menu, the sidebar
+  // project-header "+", and any other ContextMenu-based surface pass the same handlers and can no
+  // longer drift on which kinds are addable. Agent entries are layered on by each surface from
+  // `agentCreationItems` (already shared) — the spec owns the content list only.
+  const addCtx = useMemo(
+    () => ({
+      hasCwd: !!(useProjects.getState().getProject(activeProjectId)?.ssh?.remoteCwd ??
+        useProjects.getState().getProject(activeProjectId)?.cwd),
+      isSshProject
+    }),
+    [activeProjectId, isSshProject]
+  )
+  const addHandlers = useMemo<AddHandlers>(
+    () => ({
+      terminal: (at) => addTerminal(at),
+      remote: (screenPos) => openRemotePicker(screenPos),
+      browser: (at) => addBrowser(at),
+      web: (at) => void addWebView(at),
+      sticky: (at) => addSticky(at),
+      dino: (at) => addDino(at),
+      openFile: (at) => void openFileDialog(at),
+      newFile: (at) => void newProjectFile(at),
+      worktree: (at) => openWorktreeDialog(null, at)
+    }),
+    [
+      addTerminal,
+      openRemotePicker,
+      addBrowser,
+      addWebView,
+      addSticky,
+      addDino,
+      openFileDialog,
+      newProjectFile,
+      openWorktreeDialog
+    ]
+  )
+
   const onPaneContextMenu = useCallback(
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
-      // "New file…" needs a project folder to create into — hidden when the project has no cwd.
-      const project = useProjects.getState().getProject(activeProjectId)
-      const hasCwd = !!(project?.ssh?.remoteCwd ?? project?.cwd)
+      const screenPos = { x: e.clientX, y: e.clientY }
+      // Split the canonical content list around the agent block: the pane menu shows terminal,
+      // THEN agents, THEN the rest (remote, browser, …, worktree). The spec is still the single
+      // source for WHICH kinds appear and in what order — only the agent interleaving is local.
+      const [terminalItem, ...restContent] = contentAddItemsToMenuItems(
+        CONTENT_ADD_ITEMS,
+        addHandlers,
+        addCtx,
+        at,
+        screenPos
+      )
       setMenu({
         x: e.clientX,
         y: e.clientY,
         items: [
-          // Sessions: local terminal, agent CLIs, remote host.
-          { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
+          terminalItem,
           ...agentCreationItems(at),
-          {
-            label: 'New remote…',
-            icon: <IconTerminal />,
-            onClick: () => openRemotePicker({ x: e.clientX, y: e.clientY })
-          },
-          { type: 'separator' },
-          // Content nodes.
-          { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
-          { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
-          { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
-          { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
-          ...(hasCwd
-            ? [{ label: 'New file…', icon: <IconEditor />, onClick: () => void newProjectFile(at) }]
-            : []),
-          { type: 'separator' },
-          // A worktree lands as a group frame bound to it; nodes created inside inherit its path.
-          // Disabled (with the reason) on an SSH project — see WORKTREE_SSH_HINT.
-          {
-            label: 'New worktree…',
-            icon: <IconBranch />,
-            disabled: isSshProject,
-            hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
-            onClick: () => openWorktreeDialog(null, at)
-          },
+          ...restContent,
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
@@ -7602,6 +7597,19 @@ export function Canvas() {
               }
             }
           },
+          // Transfer conversation to another agent — the SAME submenu the canvas node right-click
+          // has. Only valid for the ACTIVE project's canvas: transferConversation reads the source
+          // node out of `nodesRef.current` (the live React Flow nodes), which only holds the active
+          // project. For a non-active project the block is empty (no submenu appears), matching the
+          // Duplicate guard's active-project branch.
+          ...(projectId === activeProjectId
+            ? transferConversationItems(id, undefined, {
+                sourceAgentId: agentIdOf(id),
+                sessionId: useAgentStatus.getState().byId[id]?.sessionId,
+                disabledAgents: useSettings.getState().settings.disabledAgents,
+                customAgents: useSettings.getState().settings.customAgents
+              }, transferConversation)
+            : []),
           {
             label: 'Close',
             icon: <IconTrash />,
@@ -7611,7 +7619,16 @@ export function Canvas() {
         ]
       })
     },
-    [activeProjectId, focusNodeById, renameSession, duplicateNodes, closeSession, writeDisk]
+    [
+      activeProjectId,
+      focusNodeById,
+      renameSession,
+      duplicateNodes,
+      closeSession,
+      writeDisk,
+      agentIdOf,
+      transferConversation
+    ]
   )
 
   // Stream live subagent transcript chunks into the agent-nodes store.
