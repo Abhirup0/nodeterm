@@ -11,7 +11,6 @@ import claudeIcon from '../assets/claude.svg'
 import codexIcon from '../assets/codex-color.svg'
 import geminiIcon from '../assets/gemini-color.svg'
 import opencodeIcon from '../assets/opencode.svg'
-import copilotIcon from '../assets/copilot.svg'
 
 // Brand logo per builtin agent; custom/unknown agents have none (callers fall back to the terminal
 // glyph, or to the plain pulsing dot).
@@ -25,8 +24,7 @@ export const AGENT_LOGO: Partial<Record<string, string>> = {
   claude: claudeIcon,
   codex: codexIcon,
   gemini: geminiIcon,
-  opencode: opencodeIcon,
-  copilot: copilotIcon
+  opencode: opencodeIcon
 }
 
 /**
@@ -42,8 +40,13 @@ export const brandLogoSrc = (agentId: AgentId): string | undefined =>
 
 /** Does this agent have a brand mark to draw? grok is inlined rather than an asset, so it is not in
  *  AGENT_LOGO — ask through here rather than testing that map directly. */
+export const INLINE_MARK_AGENTS = ['grok', 'copilot'] as const
+export type InlineMark = (typeof INLINE_MARK_AGENTS)[number]
+export const inlineMarkFor = (agentId: AgentId): InlineMark | null =>
+  (INLINE_MARK_AGENTS as readonly string[]).includes(agentId) ? (agentId as InlineMark) : null
+
 export const hasBrandLogo = (agentId: AgentId): boolean =>
-  agentId === 'grok' || brandLogoSrc(agentId) !== undefined
+  inlineMarkFor(agentId) !== null || brandLogoSrc(agentId) !== undefined
 
 /** Canvas RUNNING-badge class (styles.css). */
 export const BRAND_PULSE_CLASS = 'term-node__mascot--pulse'
@@ -55,7 +58,7 @@ export const HUD_BRAND_PULSE_CLASS = 'mascot mascot--pulse'
  * lib/grokMark.ts (monochrome, painted in `currentColor`), `asset` = the brand file at `src`.
  */
 export type BrandPulsePlan =
-  | { kind: 'inline'; size: number }
+  | { kind: 'inline'; mark: InlineMark; size: number }
   | { kind: 'asset'; src: string; size: number }
 
 /**
@@ -79,7 +82,8 @@ export type BrandPulsePlan =
  */
 export function brandPulsePlan(agentId: AgentId | undefined, size: number): BrandPulsePlan | null {
   if (!agentId || !hasBrandLogo(agentId)) return null
-  if (agentId === 'grok') return { kind: 'inline', size }
+  const mark = inlineMarkFor(agentId)
+  if (mark) return { kind: 'inline', mark, size }
   const src = brandLogoSrc(agentId)
   return src ? { kind: 'asset', src, size } : null
 }

@@ -104,6 +104,17 @@ describe('computeWorktreePath', () => {
     expect(computeWorktreePath('   ', 'x')).toBe('')
     expect(computeWorktreePath('/src/repo', '')).toBe('')
   })
+  it('refuses a template that climbs past the repo to the filesystem root', () => {
+    // `../../../../..` clamps at `/`, which on a root-running Server Edition would make
+    // `git worktree add` create a directory at the filesystem root. Suggest nothing instead.
+    expect(computeWorktreePath('/src/repo', 'topic/a', '../../../../../..')).toBe('')
+    // One level under root is still refused (a single top-level segment).
+    expect(computeWorktreePath('/repo', 'b', '/${branch}')).toBe('')
+    // But a legitimate absolute base with depth is allowed.
+    expect(computeWorktreePath('/src/repo', 'b', '/srv/worktrees/${branch}')).toBe(
+      '/srv/worktrees/b'
+    )
+  })
 })
 
 describe('resolveWorktreePath', () => {

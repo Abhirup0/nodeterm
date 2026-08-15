@@ -4995,7 +4995,12 @@ export function Canvas() {
   // is safe to run over the whole list. v1: arrange-all-on-enable only — it does not re-snap on
   // later drags. Turning OFF is a no-op (nodes stay where they were snapped). The transition is
   // tracked with a ref so a re-render that preserves the ON value doesn't re-arrange.
-  const prevAutoAlignRef = useRef(false)
+  //
+  // SEEDED from the persisted setting, NOT `false`: a `false` seed made every app launch with the
+  // mode already ON read as an OFF->ON transition, snapping all nodes and rewriting project.json at
+  // boot (unsolicited). Seeding from the initial value means only a within-session user toggle
+  // arranges — which is what "enable the mode" means.
+  const prevAutoAlignRef = useRef(settings.autoAlignGrid === true)
   useEffect(() => {
     const on = settings.autoAlignGrid
     if (on && !prevAutoAlignRef.current) {
@@ -5781,7 +5786,10 @@ export function Canvas() {
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
-          { label: 'Fit view', icon: <IconFit />, onClick: fitView },
+          // fitAll, NOT the raw fitView: fitAll frames against the CURRENT chrome layout (the same
+          // wrapper the command palette's Fit view uses). #227 swapped this to bare fitView, which
+          // loses that framing and lets sidebar/HUD chrome cover part of the fitted content.
+          { label: 'Fit view', icon: <IconFit />, onClick: fitAll },
           // Project-wide: restart every idle agent CLI in place (new model pickup). Hidden on a
           // canvas with no restartable agent node — there it could only ever report "0 restarted".
           ...(hasRestartableAgents()
@@ -5803,7 +5811,7 @@ export function Canvas() {
       addHandlers,
       addCtx,
       selectAll,
-      fitView,
+      fitAll,
       hasRestartableAgents,
       restartIdleAgents
     ]

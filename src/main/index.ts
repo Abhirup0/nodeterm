@@ -428,8 +428,11 @@ function buildAppMenu(win: BrowserWindow): void {
       click: () => send(IPC.appToggleAutoAlign)
     },
     {
+      // No accelerator: `installKeydownIntercepts` already claims ⌘0 for zoom-to-100% before the
+      // renderer sees it, so labelling this item "⌘0" would show a shortcut that does something
+      // else. The item stays click-only; the renderer's own Shift+1 chord is the keyboard route to
+      // Fit View.
       label: 'Fit View',
-      accelerator: 'CmdOrCtrl+0',
       click: () => send(IPC.appFitView)
     },
     {

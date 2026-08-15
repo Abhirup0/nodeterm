@@ -191,7 +191,9 @@ export function contentAddItemsToDockRows(
   for (const item of items) {
     switch (item.kind) {
       case 'terminal':
-        out.push({ kind: 'terminal', label: 'Terminal', icon: <IconTerminal />, onClick: () => handlers.terminal() })
+        // The Dock renders its OWN "Terminal" button (agents have bespoke account flyouts beside
+        // it, so the whole session cluster is Dock-local — see Dock.tsx). Emitting a terminal row
+        // here too produced a duplicate "Terminal" entry. Skip, exactly like `remote` below.
         break
       case 'remote':
         // The Dock uses its own "New Remote Connection" affordance, not the remote picker. Skip

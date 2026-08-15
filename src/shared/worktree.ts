@@ -107,6 +107,14 @@ function resolvePathFromRepo(repoRoot: string, configuredPath: string): string {
     }
     parts.push(part)
   }
+  // Refuse a result that lands at (or directly under) the filesystem root. A pathological template
+  // such as `../../../../..` climbs past the repo and clamps at `/`, yielding `/branch-x`; the
+  // Server Edition often runs as root and `git worktree add /branch-x` would cheerfully create that
+  // at the filesystem root. The original template code guarded this explicitly (see the historical
+  // computeWorktreePath comment); the rewrite dropped it. A rooted path needs at least two segments
+  // (e.g. `/srv/worktrees` is fine, `/worktrees` is not) — a Windows drive root is refused the same
+  // way. Callers already treat '' as "no default / no writable base".
+  if ((rooted || drive) && parts.length < 2) return ''
   const prefix = drive ? `${drive}/` : rooted ? '/' : ''
   return `${prefix}${parts.join('/')}`
 }

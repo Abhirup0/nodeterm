@@ -101,13 +101,14 @@ describe('contentAddItemsToMenuItems', () => {
 })
 
 describe('contentAddItemsToDockRows', () => {
-  it('omits the remote picker (the Dock has its own remote-connection flow) but keeps the rest', () => {
+  it('omits the Dock-local terminal + remote rows (the Dock renders those itself) and keeps the rest', () => {
     const rows = contentAddItemsToDockRows(CONTENT_ADD_ITEMS, handlers(), {
       hasCwd: true,
       isSshProject: false
     })
+    // NO 'terminal' and NO 'remote': the Dock draws its own Terminal button and its own
+    // "New Remote Connection" flow. Emitting a terminal row here duplicated the Terminal entry.
     expect(rows.map((r) => r.kind)).toEqual([
-      'terminal',
       'browser',
       'web',
       'sticky',
@@ -116,6 +117,7 @@ describe('contentAddItemsToDockRows', () => {
       'new-file',
       'worktree'
     ])
+    expect(rows.some((r) => r.kind === 'terminal')).toBe(false)
     expect(rows.some((r) => r.kind === 'remote')).toBe(false)
   })
 

@@ -35,6 +35,6 @@ describe('SessionRow status age', () => {
     )
 
     expect(html).toContain('5m ago')
-    expect(html).toContain('In this state 5m ago')
+    expect(html).toContain('Entered this state 5m ago')
   })
 })

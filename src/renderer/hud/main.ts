@@ -7,6 +7,7 @@ import './hud.css'
 import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB } from '../lib/mascot'
 import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../lib/brandPulse'
 import { createGrokMarkSvg } from '../lib/grokMark'
+import { createCopilotMarkSvg } from '../lib/copilotMark'
 import { buildIndicator, orderIndicatorAgents } from './indicator'
 import codexPet from '../assets/pet-codex.webp'
 
@@ -185,7 +186,9 @@ function workingMascot(agentId?: string): Element {
   const plan = brandPulsePlan(agentId, HUD_QUADRANT_H)
   if (plan) {
     return plan.kind === 'inline'
-      ? createGrokMarkSvg(plan.size, HUD_BRAND_PULSE_CLASS)
+      ? plan.mark === 'copilot'
+        ? createCopilotMarkSvg(plan.size, HUD_BRAND_PULSE_CLASS)
+        : createGrokMarkSvg(plan.size, HUD_BRAND_PULSE_CLASS)
       : brandPulseMascot(plan.src, plan.size)
   }
   const dot = document.createElement('span')
