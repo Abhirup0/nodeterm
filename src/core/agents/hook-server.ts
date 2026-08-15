@@ -472,9 +472,13 @@ class HookServer {
           // The POSIX-sh shim asks for text/plain: it has no JSON parser, so the server does the
           // rendering the Node CLI used to do client-side. Everything else keeps the JSON shape.
           if (wantsText) {
+            // A FAILURE may now carry both: `error` is the machine-readable name a JSON client
+            // keys on, `message` the sentence a human (or a language model) reads. The text
+            // dialect has no fields, so it prefers the sentence and falls back to the name — which
+            // is what every existing handler still sends, so this is inert for all of them.
             const text = result.ok
               ? result.message ?? JSON.stringify(result.result ?? {})
-              : result.error ?? 'control request failed'
+              : result.message ?? result.error ?? 'control request failed'
             res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/plain; charset=utf-8' })
             res.end(note ? `${note}\n${text}\n` : `${text}\n`)
             return
