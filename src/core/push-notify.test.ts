@@ -16,6 +16,7 @@ import {
   onNodeNowChange,
   recordAgentEvent,
   recordRawToolEvent,
+  sweepStaleWorking,
   initAgentStatusMirror,
   _resetForTest,
   type InboxEvent,
@@ -1085,6 +1086,137 @@ describe('createLiveUpdatePush', () => {
       await vi.advanceTimersByTimeAsync(1000)
       expect(liveBodyOf().updates[0]).not.toHaveProperty('multiSelect')
       h.stop()
+    })
+  })
+
+  // The mirror sends message:'Stopped' for BOTH an interrupt and the stale sweep, and 'Finished'
+  // for a real completion — so the phone was deciding WHY a turn ended from a display STRING, and
+  // could not tell "you stopped it" from "we lost the host" at all. These two flags are the
+  // structured answer; they ride done edges only.
+  describe('done-edge end reason (interrupted / stale)', () => {
+    it('forwards interrupted:true on an interrupted done edge', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', message: 'Stopped', interrupted: true, ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u.interrupted).toBe(true)
+      expect(u).not.toHaveProperty('stale')
+      h.stop()
+    })
+
+    it('forwards stale:true on a sweep-produced done edge', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', message: 'Stopped', stale: true, ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u.stale).toBe(true)
+      expect(u).not.toHaveProperty('interrupted')
+      h.stop()
+    })
+
+    it('omits both on a real completion (a plain done edge)', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', message: 'Finished', ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u).not.toHaveProperty('interrupted')
+      expect(u).not.toHaveProperty('stale')
+      h.stop()
+    })
+
+    it('never carries either on a working/needsYou edge even if the change object has them', async () => {
+      const { h, st } = wire()
+      // Belt-and-braces: only a done edge may carry an end reason.
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', interrupted: true, stale: true, ts: 1 } as NodeStateChange)
+      st.emit({
+        nodeId: 'b',
+        event: 'update',
+        state: 'needsYou',
+        message: 'Approve',
+        interrupted: true,
+        stale: true,
+        ts: 2
+      } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      const updates = liveBodyOf().updates
+      expect(updates).toHaveLength(2)
+      for (const u of updates) {
+        expect(u).not.toHaveProperty('interrupted')
+        expect(u).not.toHaveProperty('stale')
+      }
+      h.stop()
+    })
+
+    it('now-update (activity/context) ticks never carry an end reason', async () => {
+      const { h, nw } = wire()
+      clock = 0
+      nw.emit({ nodeId: 'a', activity: 'Editing a.ts', contextPercent: 10, ts: 0 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u).not.toHaveProperty('interrupted')
+      expect(u).not.toHaveProperty('stale')
+      h.stop()
+    })
+
+    describe('via the real mirror', () => {
+      let dir: string
+      beforeEach(() => {
+        _resetForTest()
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'push-endreason-'))
+        initAgentStatusMirror(path.join(dir, 'agent-status.json'))
+      })
+      afterEach(() => {
+        _resetForTest()
+        fs.rmSync(dir, { recursive: true, force: true })
+      })
+
+      function ev(p: Partial<NormalizedAgentEvent>): NormalizedAgentEvent {
+        return { nodeId: 'n1', agentId: 'claude', kind: 'state', ...p } as NormalizedAgentEvent
+      }
+
+      it("an interrupted turn rides as interrupted:true — and its message is the sweep's own 'Stopped'", async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true }))
+        recordAgentEvent(ev({ state: 'done', interrupted: true }))
+        await vi.advanceTimersByTimeAsync(1000)
+        const end = liveBodyOf().updates.find((u: Record<string, unknown>) => u.event === 'end')!
+        expect(end.interrupted).toBe(true)
+        expect(end).not.toHaveProperty('stale')
+        // The very collision this feature exists for: the string is the SAME as the sweep's.
+        expect(end.message).toBe('Stopped')
+        h.stop()
+      })
+
+      it('a sweep-presumed-gone session rides as stale:true under that same message', async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true }))
+        // Nobody heard from it for the stale window → the sweep fires the synthetic end.
+        expect(sweepStaleWorking(Date.now() + 60 * 60_000, 20 * 60_000)).toEqual(['n1'])
+        await vi.advanceTimersByTimeAsync(1000)
+        const end = liveBodyOf().updates.find((u: Record<string, unknown>) => u.event === 'end')!
+        expect(end.stale).toBe(true)
+        expect(end).not.toHaveProperty('interrupted')
+        expect(end.message).toBe('Stopped')
+        h.stop()
+      })
+
+      it('a real completion carries neither flag', async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true }))
+        recordAgentEvent(ev({ state: 'done', lastMessage: 'Done' }))
+        await vi.advanceTimersByTimeAsync(1000)
+        const end = liveBodyOf().updates.find((u: Record<string, unknown>) => u.event === 'end')!
+        expect(end.message).toBe('Finished')
+        expect(end).not.toHaveProperty('interrupted')
+        expect(end).not.toHaveProperty('stale')
+        h.stop()
+      })
     })
   })
 
