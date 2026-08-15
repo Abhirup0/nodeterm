@@ -234,3 +234,24 @@ describe('the strict identity bucket is pre-positioned, not live', () => {
     expect(STRICT_CONTROL_VERBS.has('open-browser')).toBe(false)
   })
 })
+
+/**
+ * The same pre-positioning, for messaging. `needsLiveCanvas` already declares `send`/`reply` as
+ * store-answered so that a delivery can never travel the camera — a routing decision made once,
+ * ahead of the dispatch that will consume it.
+ *
+ * This test is what stops "it ships inert" from becoming a false claim: it FAILS on the day the
+ * verbs land, which is exactly when the PR body has to stop saying nothing changes for anyone —
+ * and when Canvas's store-answered branch, which today only knows how to answer `list`, has to
+ * learn to deliver instead of replying with a node listing.
+ */
+describe('the messaging verbs are declared but do not exist yet', () => {
+  it('send and reply are refused by the parser, so nothing routes them today', () => {
+    expect(parseControlRequest('send', { node: 'n-1', text: 'hi' })).toEqual({
+      error: 'Unknown verb: send'
+    })
+    expect(parseControlRequest('reply', { node: 'n-1', text: 'hi' })).toEqual({
+      error: 'Unknown verb: reply'
+    })
+  })
+})

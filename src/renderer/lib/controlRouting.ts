@@ -66,13 +66,37 @@ export function routeControlSource(
 }
 
 /**
+ * Verbs that are answered from the SERIALIZED store instead of the live canvas.
+ *
+ * `list` reads names only, and it is the verb an agent calls most — answering it out of the store
+ * keeps a background agent's polling from yanking the user's view to another project tab on every
+ * call.
+ *
+ * `send`/`reply` are here for a stronger reason than politeness, and it is worth being precise
+ * about WHICH travel this prevents: routing here is by SOURCE
+ * (`routeControlSource(projects, activeId, sourceNodeId)`), so what the declaration stops is a trip
+ * to the SENDER's project — which an off-canvas orchestrator would otherwise trigger on every
+ * message it sent, hijacking the human's view on a background agent's say-so and clearing that
+ * node's unread badge via `setActive` on the way (G5). A delivery goes to a tmux PANE, not to a
+ * canvas, so it needs no live canvas at either end.
+ *
+ * The other half — never travelling to the TARGET's project — is not this function's doing. It
+ * comes from `resolveDeliveryScope` (`src/core/agents/agent-message-scope.ts`) taking the
+ * serialized store and having no live-node parameter at all, so there is nothing to travel toward.
+ *
+ * INERT AS OF THIS COMMIT: neither verb is in `ControlVerb` yet, so `parseControlRequest` refuses
+ * both before any of this is reached (asserted by running it, in `canvas-control-core.test.ts`).
+ * The declaration lands first so the routing decision is made once, here, rather than inside the
+ * dispatch that Task 5.1 adds.
+ */
+const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set(['list', 'send', 'reply'])
+
+/**
  * Does this verb have to run against the LIVE canvas? Everything that creates, moves, writes to or
- * closes a node does. `list` reads names only, and it is the verb an agent calls most — answering
- * it out of the store keeps a background agent's polling from yanking the user's view to another
- * project tab on every call.
+ * closes a node does.
  */
 export function needsLiveCanvas(verb: string): boolean {
-  return verb !== 'list'
+  return !STORE_ANSWERED_VERBS.has(verb)
 }
 
 /**
