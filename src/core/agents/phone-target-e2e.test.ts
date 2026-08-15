@@ -234,12 +234,28 @@ function waitFor(cond: () => boolean, ms: number, what: string): void {
   throw new Error(`timed out waiting for ${what}`)
 }
 
+/**
+ * The fake agent is `cat` wearing claude's argv0 — NOT an interactive bash, and the difference is
+ * what made this test red on GitHub runners while green locally (issue #241, failed 4/4 there).
+ *
+ * An `exec -a claude bash -i` has JOB CONTROL: it executes the pasted envelope line by line, and
+ * every line forks a child into its OWN process group and hands it the tty's foreground. G3's
+ * post-write probe reads exactly that foreground group (`pane-owner.ts`), so a probe landing in
+ * one of those windows sees a different pgid/pid and reports `deliveredToReplacedTarget`. On a
+ * fast machine the window is microseconds and 16/16 local runs missed it; on a loaded 2-core
+ * runner the probe hit it every time. A real agent TUI never executes the payload — the envelope
+ * lands in its composer — so the fork storm was a test artifact, not the production shape.
+ *
+ * `cat` is still a REAL reader on a real tty (the point of this e2e): it sits in the foreground
+ * group reading the pane's stdin, never forks, and the tty's canonical-mode echo puts the pasted
+ * frame on the pane for the capture assertions below.
+ */
 function startAgentPane(session: string): void {
   tmux(
     'new-session', '-d', '-s', session, '-x', '200', '-y', '40',
-    `${BASH} -c 'exec -a claude ${BASH} --norc --noprofile -i'`
+    `${BASH} -c 'echo READY; exec -a claude cat'`
   )
-  waitFor(() => capturePane(session).includes('#') || capturePane(session).includes('$'), 5000, 'a prompt')
+  waitFor(() => capturePane(session).includes('READY'), 5000, 'the reader')
 }
 
 function realPaneOwner(session: string): DeliveryDeps['paneOwner'] {
