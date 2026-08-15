@@ -56,7 +56,10 @@ describe('stale-working sweeper', () => {
     useAgentStatus.getState().setState(id, 'working', 'claude')
     vi.advanceTimersByTime(STALE_WORKING_MS + 60_000)
     useAgentStatus.getState().sweepStaleWorking()
-    expect(useAgentStatus.getState().byId[id].state).toBeUndefined()
+    expect(useAgentStatus.getState().byId[id]).toMatchObject({
+      state: undefined,
+      lastEventAt: Date.now()
+    })
   })
 
   it('keeps a working entry fresh as long as events keep arriving', () => {

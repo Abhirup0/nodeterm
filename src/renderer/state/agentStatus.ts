@@ -52,12 +52,12 @@ export interface AgentNodeStatus {
    */
   stateVerified?: boolean
   /**
-   * When this node last CHANGED state — the idle clock the hibernation policy reads
-   * (`terminal/hibernation-policy.ts`). Deliberately not `stateAt`: that one is refreshed by
-   * every same-state event (freshness), while "how long has this session been idle" means "how
-   * long since the turn ended". TRANSIENT — never persisted: a relaunch has seen no events yet,
-   * and a stale stamp read as "idle since before the restart" would hibernate a session the
-   * moment the app came back. Absent ⇒ unknown idle ⇒ never a hibernation candidate.
+   * When this node last CHANGED state (or was explicitly woken) — rendered as the status group's
+   * relative age and also read as the idle clock by `terminal/hibernation-policy.ts`. Deliberately
+   * not `stateAt`: that one is refreshed by every same-state event (freshness), while "how long in
+   * this state" means "how long since the transition". TRANSIENT — never persisted: a relaunch has
+   * seen no events yet, and a stale stamp read as "idle since before the restart" would hibernate a
+   * session the moment the app came back. Absent ⇒ unknown idle ⇒ never a hibernation candidate.
    */
   lastEventAt?: number
   /**
@@ -423,7 +423,9 @@ export function createAgentStatusSession(
         const byId = { ...s.byId }
         for (const [id, v] of Object.entries(byId)) {
           if (v.state === 'working' && now - (v.stateAt ?? 0) > staleMs) {
-            byId[id] = { ...v, state: undefined, stateAt: now }
+            // This is a real transition to Unknown, even though it did not arrive through a hook.
+            // Stamp both clocks so the sidebar age and Eco idle clock begin at the transition.
+            byId[id] = { ...v, state: undefined, stateAt: now, lastEventAt: now }
             changed = true
           }
         }
