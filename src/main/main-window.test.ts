@@ -5,6 +5,7 @@ import {
   sendToMain,
   mainWindowClientIds,
   shouldHideOnClose,
+  closeAction,
   createCrashReloadPolicy,
   type MainWindowLike
 } from './main-window'
@@ -156,5 +157,22 @@ describe('shouldHideOnClose', () => {
   it('never intercepts close on other platforms', () => {
     expect(shouldHideOnClose('win32', false)).toBe(false)
     expect(shouldHideOnClose('linux', false)).toBe(false)
+  })
+})
+
+describe('closeAction', () => {
+  it('hides a windowed macOS close', () => {
+    expect(closeAction('darwin', false, false)).toBe('hide')
+  })
+  it('leaves fullscreen before hiding — hiding in place strands a black Space (issue #78)', () => {
+    expect(closeAction('darwin', false, true)).toBe('leave-fullscreen-then-hide')
+  })
+  it('lets the close through when quitting, fullscreen or not', () => {
+    expect(closeAction('darwin', true, true)).toBe('default')
+    expect(closeAction('darwin', true, false)).toBe('default')
+  })
+  it('never intercepts on other platforms, fullscreen included', () => {
+    expect(closeAction('linux', false, true)).toBe('default')
+    expect(closeAction('win32', false, true)).toBe('default')
   })
 })
