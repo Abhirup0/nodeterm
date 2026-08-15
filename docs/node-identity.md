@@ -169,8 +169,20 @@ including nodes on other projects, or on other people's canvases. Minting happen
 secret is. The case-fold collision refusal is applied on the *minting* side for the same reason: an
 APFS host must not be a way around the local guard.
 
-**The phone needs nothing.** It posts hook events with no node token (`legacy`, accepted) and drives
-canvas control over the relay → IPC, not over `/control/*` at all.
+**The phone needs nothing, and holds nothing — but the sessions it spawns are `verified`.** The
+phone *device* posts no hook events at all: it drives canvas control over the relay → IPC, not over
+`/control/*` at all. The sessions it SPAWNS run **on the host**, source the host's 0600 endpoint
+file, and therefore read and present the host's per-node token exactly as a desktop-spawned session
+does — a phone-spawned session is `verified`.
+
+The chain is worth stating, because it has been mis-derived twice: the phone injects only
+`NODETERM_HOOK_ENDPOINT` and `NODETERM_NODE_ID` (it types `tmux new-session -A` over its own SSH
+transport, so no `ptyManager` and no `ensureNodeToken` is involved anywhere); the endpoint file
+advertises `NODETERM_NODE_TOKEN_DIR`; the managed script reads `$DIR/$NODETERM_NODE_ID` and sends it
+on stdin. The token file is there because `refreshNodeTokens` runs on **every canvas persist**, not
+because the spawn path minted it. Narrowing that materialisation to the spawn path would silently
+drop every phone-spawned session to `legacy` — `src/core/agents/phone-spawned-identity.test.ts`
+exists to make that a red build.
 
 ## Per-route policy
 
@@ -187,8 +199,10 @@ The bearer is required everywhere; this table is about the *node* token on top o
 | `/codex-thread/fallback` | **Always accepted** | 403 | It reports a DEGRADE and grants nothing; refusing it would silence it in exactly the tokenless case it exists for. |
 
 **Why `/hook/*` never 403s a missing token.** It is the fail-open contract, and it is load-bearing
-rather than timid. The legitimate tokenless callers are real and permanent: the **phone** (it injects
-its own env and cannot mint), the **cross-instance failover** (a second instance's token is
+rather than timid. The legitimate tokenless callers are real and permanent: a **phone-spawned session
+whose host had no endpoint file yet** (its `NODETERM_HOOK_ENDPOINT` resolved empty, so there was no
+token dir to read — note that a phone-spawned session on a host that *does* have one is `verified`,
+see above), the **cross-instance failover** (a second instance's token is
 unjudgeable, not hostile), every session that predates the feature, and any future spawner. A 403
 there does not degrade a feature — it silently stops an agent's status, context meter and approvals,
 and the managed script's `curl -sS` has no `--fail`, so a 403 exits 0 and the node goes dark with no

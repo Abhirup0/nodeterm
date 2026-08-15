@@ -54,6 +54,47 @@ export interface MirrorEntry {
    *  must be held as `waiting` (see reduceEntry). Cleared by anything that supersedes the
    *  ask — a new turn, other tool activity, an interrupt, or a session boundary. */
   awaitingInput?: boolean
+  /**
+   * Did the hook POST that set the CURRENT `state` present a per-node token this instance minted
+   * for this node id? Set from `ev.verified` (hook-server.ts), which is a LABEL on the wire and
+   * must stay one for every other consumer — invariant 2 says /hook/* accepts a tokenless POST
+   * forever, and `normalize.ts` says outright that no consumer may treat it as reject.
+   *
+   * Messaging is the ONE consumer that reads it, and it reads it as a GATE rather than a filter:
+   * gate 2 admits a target as idle only on a verified `done`, because a gate whose input an
+   * attacker writes is a comment. Nothing else in the product may start branching on this field
+   * without re-reading Decision A1 of the messaging design.
+   *
+   * `false` after a `true` is meaningful and is written: a legacy event SUPERSEDES an earlier proof
+   * about a state that has since changed.
+   */
+  stateVerified?: boolean
+  /**
+   * The revision of the managed hook script that posted the event behind the current `state`
+   * (`ev.clientRevision`). `undefined` = no stamp, which is what a script predating per-node
+   * identity sends — and the ONLY thing that separates "this session cannot read a token" from
+   * "there is no token for it to read". Those need opposite advice, and before the stamp existed
+   * they were byte-identical on the wire (Finding F2).
+   *
+   * Written on the same edge as `stateVerified` and, like it, moves DOWN as readily as up: an SSH
+   * project reconnected against an older desktop really is running an older script now.
+   */
+  clientRevision?: number
+  /** When proof was last seen at all. Never cleared by a later legacy event — "we once saw this
+   *  node prove itself" stays true, and it is what separates a node that CAN verify (retryable)
+   *  from one that never has (not retryable). See the plan's Correction C1 mitigation. */
+  verifiedAt?: number
+  /**
+   * This entry's `state` came off disk at boot, not off a hook event this run. The mirror restores
+   * with a 6 h expiry and never pushes the restored copy to a listener — it is 6-hour-old evidence
+   * about a pane that has since done anything at all, including being replaced.
+   *
+   * Gate 2 refuses it outright (`targetNotIdleUnknown`), which is why the flag exists: without it a
+   * restored `done` is indistinguishable from a fresh one and the most dangerous moment in the
+   * product (just after a relaunch, sessions re-adopted, nothing re-confirmed) would read as the
+   * safest. Cleared by the first live event.
+   */
+  restored?: true
 }
 
 /** This host's Server-Edition install metadata (spec: server-update). Written by the installer
@@ -306,6 +347,31 @@ export function reduceEntry(
   now: number
 ): MirrorEntry {
   const next: MirrorEntry = prev ? { ...prev } : { updatedAt: now }
+  /**
+   * Commit a state onto `next` — and everything that must move WITH it. One function rather than
+   * the same four lines at each branch, because the alternative was measured: of the three branches
+   * that commit a state, the `request_user_input` hold set `next.state` and nothing else. A
+   * verified `waiting` therefore kept `stateVerified: true` after a TOKENLESS `done` re-asserted
+   * it — replayable indefinitely by any caller, since `/hook/*` is fail-open by contract, with
+   * `updatedAt` advancing each time so the entry never even expired. A rule three call sites have
+   * to remember is a rule two of them keep.
+   *
+   * `proof` is the evidence for THIS transition, passed in rather than read off `ev` so the one
+   * caller that means something different has to say so out loud.
+   */
+  const commitState = (state: AgentState | undefined, proof: boolean): void => {
+    next.state = state
+    next.updatedAt = now
+    next.stateVerified = proof
+    if (proof) next.verifiedAt = now
+    next.clientRevision = ev.clientRevision
+    // The entry's STATE now comes from this run, so it is no longer the one restored off disk.
+    // Cleared HERE and only here: an event that commits no state — a context/usage event, a
+    // held-off late `working`, the idle rescue — leaves a restored `done` exactly as restored as
+    // it was. `restored` means "this state came off disk", not "we have heard something since
+    // boot", and gate 2 will read it as the former.
+    delete next.restored
+  }
   // Identity is captured off ANY event (mirrors the renderer's per-event setSessionId +
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
   if (ev.agentId) next.agentId = ev.agentId
@@ -325,8 +391,9 @@ export function reduceEntry(
     if (ev.awaitingInput) {
       next.awaitingInput = true
     } else if (prev?.awaitingInput && ev.state === 'done' && !ev.interrupted) {
-      next.state = 'waiting'
-      next.updatedAt = now
+      // The HELD state is still a state this event committed — the entry says `waiting` because
+      // THIS POST arrived — so its evidence is this POST's evidence, not the ask's from before.
+      commitState('waiting', ev.verified === true)
       return next
     } else {
       next.awaitingInput = undefined
@@ -340,15 +407,20 @@ export function reduceEntry(
       !ev.newTurn &&
       prev?.state === 'done' &&
       now - (prev.updatedAt ?? 0) < DONE_HOLDOFF_MS
-    if (!heldOff) {
-      next.state = ev.state
-      next.updatedAt = now
-    }
+    // Evidence is written on the SAME edge the state is, and only there: a context/usage event
+    // carrying a verified flag says nothing about how the current state arrived, and a held-off
+    // working did not change the state whose proof this describes. `clientRevision` is ASSIGNED
+    // rather than merged — an event with no stamp is a report that this node is running a script
+    // that cannot send one, which is exactly what a stale entry would hide.
+    if (!heldOff) commitState(ev.state, ev.verified === true)
   } else if (ev.kind === 'session') {
     // SessionStart / SessionEnd both reset the node to idle (renderer: setState(id, undefined)).
-    next.state = undefined
+    // The proof goes with the state it was about, and `false` is passed EXPLICITLY rather than
+    // `ev.verified`: this commits idle, and "the idle was verified" is not a claim worth making.
+    // `verifiedAt` stays — "this node has proven itself at least once" survives a session boundary
+    // and is what makes a refusal retryable.
+    commitState(undefined, false)
     next.awaitingInput = undefined
-    next.updatedAt = now
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
   return next
@@ -994,7 +1066,13 @@ function loadPersisted(file: string): void {
           agentId: e.agentId,
           sessionId: e.sessionId,
           ...(e.name ? { name: e.name } : {}),
-          updatedAt
+          updatedAt,
+          // Marked, and FORCED unverified whatever the file said. `buildFile` writes neither field
+          // — it is an allowlist, which is what keeps `stateVerified` off disk — but a file this
+          // process did not write (hand-edited, downgraded, or from a future build) must not be
+          // able to hand gate 2 a proof nothing presented this run. See `restored`.
+          restored: true,
+          stateVerified: false
         })
       }
     }

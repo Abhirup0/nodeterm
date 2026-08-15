@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   useAgentStatus,
   createAgentStatusSession,
@@ -226,5 +228,72 @@ describe('clearUnread — cross-surface ack vs. external (host-driven) clear', (
     store.getState().markUnread(id)
     store.getState().clearUnread(id, { external: true })
     expect(acked).toEqual([])
+  })
+})
+
+describe('the verified evidence for a transition', () => {
+  it('setState records it', () => {
+    const s = useAgentStatus.getState()
+    const id = nid()
+    s.setState(id, 'done', 'claude', false, undefined, true)
+    expect(useAgentStatus.getState().byId[id].stateVerified).toBe(true)
+    s.setState(id, 'working', 'claude', true, undefined, false)
+    expect(useAgentStatus.getState().byId[id].stateVerified).toBe(false)
+  })
+
+  it('an omitted argument is not proof (every existing call site keeps compiling, and lies about nothing)', () => {
+    const id = nid()
+    useAgentStatus.getState().setState(id, 'done', 'claude')
+    expect(useAgentStatus.getState().byId[id].stateVerified).toBe(false)
+  })
+
+  it('Canvas hands the event\'s flag to the store — the drop this whole change exists to fix', () => {
+    // A store field with no writer is the same bug in a new place, and this one is a plain
+    // argument list: nothing else in the suite would notice if the last argument disappeared.
+    const src = readFileSync(resolve(__dirname, '../../..', 'src/renderer/canvas/Canvas.tsx'), 'utf8')
+    expect(src).toMatch(
+      /cs\.setState\(\s*e\.nodeId,\s*e\.state,\s*e\.agentId,\s*e\.newTurn,\s*e\.pendingId,\s*e\.verified\s*\)/
+    )
+  })
+
+  it('a same-state re-assert by a legacy POST drops the earlier proof', () => {
+    // The same-state fast path refreshes in place instead of allocating; the evidence has to ride
+    // along, or this copy would keep saying `verified` about a state a tokenless event re-asserted.
+    const s = useAgentStatus.getState()
+    const id = nid()
+    s.setState(id, 'working', 'claude', true, undefined, true)
+    s.setState(id, 'working', 'claude', false, undefined, false)
+    expect(useAgentStatus.getState().byId[id].stateVerified).toBe(false)
+  })
+
+  it('stateVerified is TRANSIENT — never persisted', () => {
+    // This suite runs under node, not jsdom, so the store's localStorage writes are swallowed by
+    // its own try/catch. A minimal in-memory stub is what makes the durable whitelist observable
+    // at all — without it this assertion would pass against ANY whitelist, including a broken one.
+    const mem = new Map<string, string>()
+    ;(globalThis as unknown as { localStorage: unknown }).localStorage = {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, v),
+      removeItem: (k: string) => void mem.delete(k)
+    }
+    try {
+      const KEY = 'nodeterm.agentStatus.verified-test'
+      const { store } = createAgentStatusSession(KEY)
+      const id = nid()
+      // ORDER IS LOAD-BEARING, and the first draft of this test had it backwards. `setState` does
+      // not itself call `save`, and `save` skips entries with no durable field — so writing the
+      // blob BEFORE the verified transition produced a blob that could not contain `stateVerified`
+      // whatever the whitelist said, and the assertion below passed against a whitelist that
+      // included it. Set the flag first, then trigger a save with a durable write.
+      store.getState().setState(id, 'done', 'claude', false, undefined, true)
+      expect(store.getState().byId[id].stateVerified).toBe(true)
+      store.getState().markUnread(id)
+      const saved = JSON.parse(mem.get(KEY) ?? '{}')
+      expect(saved[id]).toBeTruthy()
+      expect(saved[id].unread).toBe(true)
+      expect(saved[id].stateVerified).toBeUndefined()
+    } finally {
+      delete (globalThis as unknown as { localStorage?: unknown }).localStorage
+    }
   })
 })

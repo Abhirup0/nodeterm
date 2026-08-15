@@ -13,7 +13,8 @@
  * since the 1990s, and a silent downgrade to argv would be the leak wearing a compatibility hat.
  *
  * ONE COPY OF THE ESCAPING RULE, FOUR CLIENTS: the managed hook script, the canvas-control shim
- * and the context-link shim all send the same two hook headers (`HOOK_CURL_HEADERS_SH` below);
+ * and the context-link shim all send the same hook headers (`HOOK_CURL_HEADERS_SH` below — two
+ * credentials plus the client stamp, which only the managed script fills in);
  * the SSH askpass helper in `main/remote-ssh/ssh-askpass.ts` sends a different, single header and
  * builds its own emitter from `curlHeaderConfigSh`. They all go through `headerLine`, because four
  * copies of a quoting rule is how one of them stays wrong.
@@ -95,9 +96,16 @@ export const HOOK_CURL_HEADERS_SH = curlHeaderConfigSh(
     // The caller's variable (each client reads it from the token dir the endpoint file advertises,
     // keyed by its own node id) — read here, not passed, because the failover in the managed
     // script RE-READS it between POSTs and the emitter must see the current value.
-    { name: 'X-Nodeterm-Node-Token', valueRef: '$nt_node_token' }
+    { name: 'X-Nodeterm-Node-Token', valueRef: '$nt_node_token' },
+    // WHICH CLIENT is speaking. Set by the managed hook script (`nt_client_rev`, its own revision
+    // constant); EMPTY — and therefore dropped by curl, exactly like an absent node token — for the
+    // canvas-control and context-link shims, which are different clients with their own lifecycles
+    // and which the server does not read this header from. It is here rather than in a fourth
+    // emitter for the reason the docblock above gives: one copy of the escaping rule, and one place
+    // that guarantees a header rides stdin.
+    { name: 'X-Nodeterm-Hook-Client', valueRef: '$nt_client_rev' }
   ],
-  `# Both credentials go to curl on STDIN as a config file, never in argv: a command line is
+  `# Every header goes to curl on STDIN as a config file, never in argv: a command line is
 # world-readable through \`ps\` / /proc/<pid>/cmdline for the life of the process, locally and on
 # every SSH host, so an argv header hands the app-wide bearer — and this node's own capability —
 # to any co-tenant who looks at the process table. Reading another node's token out of \`ps\` is

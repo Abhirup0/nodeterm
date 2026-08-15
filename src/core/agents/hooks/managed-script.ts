@@ -60,6 +60,29 @@ import { codexThreadIdentityResolverSh } from '../../codex-thread-identity-sh'
 import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
 import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
 
+/**
+ * Bumped by hand whenever this script's CONTRACT with the server changes. Not a git sha and not a
+ * date: the server COMPARES it (`>= MIN_TOKEN_AWARE_REVISION`), and a sha does not order.
+ *
+ * WHY THIS EXISTS AT ALL. Before it, an old script and a current script whose token file happened to
+ * be missing were byte-identical on the wire: both POST `version=2` (that field is sourced from the
+ * ENDPOINT FILE, so it reports the server's protocol version, never the client's) and neither sends
+ * an X-Nodeterm-Node-Token header. The server therefore could not distinguish "this session cannot
+ * read a token" from "there is no token to read" — and those need OPPOSITE advice. Messaging's gate
+ * 2 would have told an SSH-only host's session to retry after its next turn, forever.
+ *
+ * Two stale windows this makes visible, and they are ONE mechanism:
+ *   - LOCAL: none in practice. install-helper.ts rewrites the script unconditionally at every boot
+ *     of both shells, so a host running nodeterm is current as of its last start.
+ *   - REMOTE: real. remote-hooks.ts writes it only inside RemoteHooks.setup(), which runs on
+ *     CONNECT. An already-connected project keeps the script it was given, so its remote nodes —
+ *     and any session the PHONE spawns on that host, which runs the host's installed script — stay
+ *     `legacy` until the project reconnects.
+ */
+export const MANAGED_SCRIPT_REVISION = 3
+/** The first revision that reads NODETERM_NODE_TOKEN_DIR and sends the node token (PR #195). */
+export const MIN_TOKEN_AWARE_REVISION = 3
+
 function safeIdentityRoot(): string | null {
   try {
     return codexThreadIdentityRoot()
@@ -78,6 +101,17 @@ export function buildManagedScript(
     'if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then',
     '  . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :',
     'fi',
+    '# THIS SCRIPT\'s revision, stamped on every POST (X-Nodeterm-Hook-Client) so the server can tell',
+    '# a session running a pre-identity script from one whose token file is merely missing — they',
+    '# used to be byte-identical on the wire, because the `version` field below comes from the',
+    '# ENDPOINT FILE and therefore reports the SERVER\'s protocol version, never the client\'s.',
+    '# Deliberately set HERE, outside nt_pick_fallback\'s clearing block: sock/port/token-dir belong',
+    '# to whichever endpoint we adopt, but the revision is a property of this file on this disk.',
+    '# (The failover SOURCES the endpoint file it adopts, so a file carrying an nt_client_rev line',
+    '# would overwrite this. Not defended against and not worth defending: every candidate is a',
+    '# 0600 file under our own $HOME, so writing one already means being us — at which point the',
+    '# script itself is editable. Noted so the next reader does not have to re-derive it.)',
+    `nt_client_rev=${MANAGED_SCRIPT_REVISION}`,
     '# The PER-NODE capability. The endpoint file (v2) advertises the directory; the token itself is',
     '# one file in it named for THIS node id — a lookup by name, never a scan, so a session can only',
     '# ever present its own. Absent (pre-v2 endpoint, pre-upgrade session, remote write that failed)',

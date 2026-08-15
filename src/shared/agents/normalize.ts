@@ -61,6 +61,19 @@ export interface NormalizedAgentEvent {
    * phone, and the documented cross-instance failover, so no consumer may treat it as "reject".
    */
   verified?: boolean
+  /**
+   * The revision of the managed hook script that posted this event (`MANAGED_SCRIPT_REVISION`,
+   * sent as `X-Nodeterm-Hook-Client`). Set by the hook server, never by a normalizer.
+   *
+   * `undefined` means the client sent no stamp — a script that predates the header, i.e. one that
+   * also predates per-node identity. That is a DISTINCT state from `verified: false`, and telling
+   * them apart is the entire point: a session with no token file needs "retry after its next turn",
+   * a session running an old script needs "reconnect the project / restart the app", and before
+   * this field the two were indistinguishable on the wire.
+   *
+   * Like `verified` it is a LABEL: nothing may refuse a POST because of it.
+   */
+  clientRevision?: number
   // recurring
   recurringKind?: 'loop' | 'schedule' | 'cron'
   /** The recurring job was REMOVED (e.g. CronDelete) — take the card down. */
