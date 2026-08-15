@@ -73,6 +73,9 @@ export interface ProjectFileV1 {
    * (`readProjectCapabilities`, literal `true` only) and why the switch alone grants nothing.
    */
   agentBrowserControl?: boolean
+  /** Per-project capability switch (@shared/project-capabilities): agents may message other agent
+   *  nodes in this project. Git-shared like `agentBrowserControl`, read with the same strictness. */
+  agentMessaging?: boolean
   dinoHighScore?: number
   kanban?: ProjectKanban
 }

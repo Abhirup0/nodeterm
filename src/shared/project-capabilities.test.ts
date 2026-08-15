@@ -51,6 +51,18 @@ describe('projectCapabilityFields — the spread projectToFile uses', () => {
   })
 })
 
+describe('agentMessaging is a registry capability (messaging PR 6) — a line in the registry, zero new mechanism', () => {
+  it('is in PROJECT_CAPABILITIES, so every generated surface (round-trip, notice, Settings row) covers it', () => {
+    expect(PROJECT_CAPABILITIES).toContain('agentMessaging')
+  })
+  it('reads with the same strictness as every capability — project.json stays hostile input', () => {
+    expect(projectCapabilityFlagInFile({ agentMessaging: true }, 'agentMessaging')).toBe(true)
+    expect(projectCapabilityFlagInFile({ agentMessaging: 'true' } as never, 'agentMessaging')).toBe(false)
+    expect(readProjectCapabilities({ agentMessaging: 1 })).toEqual({})
+    expect(projectCapabilityFields({ agentMessaging: true })).toEqual({ agentMessaging: true })
+  })
+})
+
 describe('every capability has copy, and the copy says what travels', () => {
   it.each(PROJECT_CAPABILITIES)('%s has label, description and cloneWarning', (cap) => {
     const c = PROJECT_CAPABILITY_COPY[cap]

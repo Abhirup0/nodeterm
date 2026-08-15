@@ -478,6 +478,10 @@ export interface Project {
    * machine's recorded 'kept' answer below.
    */
   agentBrowserControl?: boolean
+  /** Per-project capability switch: agents may message other agent nodes in this project. Same
+   *  rules as `agentBrowserControl` above — git-shared hostile input, strict `=== true` read,
+   *  never a grant without this machine's recorded 'kept' (`projectCapabilityGrantedFor`). */
+  agentMessaging?: boolean
   /**
    * MACHINE-LOCAL record of what this machine's user ANSWERED for each capability switch —
    * 'kept' or 'declined', not a bare bit, because a declined switch whose hostile `true`
