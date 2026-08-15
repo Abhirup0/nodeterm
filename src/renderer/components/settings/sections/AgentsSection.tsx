@@ -256,15 +256,15 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               <div key={row.id} className="flex items-center gap-3 py-1.5">
                 <AgentIcon agentId={row.id} size={18} />
                 <span className="flex-1 text-[13px] text-text">{row.label}</span>
-                {row.isBuiltin && (
-                  <Button
-                    variant={isDefault ? 'primary' : 'default'}
-                    aria-pressed={isDefault}
-                    onClick={() => update(setDefaultAgent(settings, row.id))}
-                  >
-                    {isDefault ? 'Default' : 'Set default'}
-                  </Button>
-                )}
+                {/* Custom agents included — a user living on their own CLI aliases must be able
+                    to make one the default (⌘⇧C / Add menu) instead of a disabled claude. */}
+                <Button
+                  variant={isDefault ? 'primary' : 'default'}
+                  aria-pressed={isDefault}
+                  onClick={() => update(setDefaultAgent(settings, row.id))}
+                >
+                  {isDefault ? 'Default' : 'Set default'}
+                </Button>
                 <SegmentedPill<'enabled' | 'disabled'>
                   value={enabled ? 'enabled' : 'disabled'}
                   ariaLabel={`${row.label} availability`}
