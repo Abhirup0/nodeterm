@@ -7,6 +7,11 @@ import {
   setDefaultAgent
 } from './agentAvailability'
 import type { CustomAgent } from '@shared/types'
+import { BUILTIN_AGENT_IDS } from '@shared/agents/config'
+
+// Derived, not hardcoded: a builtin added later (copilot landed after these tests were written)
+// must not silently leave one enabled and break the "every builtin disabled" premise.
+const ALL_BUILTINS = [...BUILTIN_AGENT_IDS] as string[]
 
 const custom = (id: string, label = id): CustomAgent => ({
   id: `custom:${id}`,
@@ -28,21 +33,21 @@ describe('firstEnabledAgent', () => {
   })
 
   it('falls through to an enabled CUSTOM agent when every builtin is disabled — the bug', () => {
-    const all = ['claude', 'codex', 'gemini', 'opencode', 'grok']
+    const all = ALL_BUILTINS
     expect(firstEnabledAgent({ disabledAgents: all, customAgents: [custom('work')] })).toBe(
       'custom:work'
     )
   })
 
   it('skips a disabled custom agent too', () => {
-    const all = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'custom:work']
+    const all = [...ALL_BUILTINS, 'custom:work']
     expect(
       firstEnabledAgent({ disabledAgents: all, customAgents: [custom('work'), custom('personal')] })
     ).toBe('custom:personal')
   })
 
   it("answers 'claude' only when literally everything is disabled", () => {
-    const all = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'custom:work']
+    const all = [...ALL_BUILTINS, 'custom:work']
     expect(firstEnabledAgent({ disabledAgents: all, customAgents: [custom('work')] })).toBe('claude')
   })
 })
@@ -50,7 +55,8 @@ describe('firstEnabledAgent', () => {
 describe('setAgentEnabled — default reassignment', () => {
   it('hands the default to a custom agent when the last builtin goes dark', () => {
     const s = {
-      disabledAgents: ['codex', 'gemini', 'opencode', 'grok'],
+      // Every builtin but claude already dark; disabling claude then leaves only the custom agent.
+      disabledAgents: ALL_BUILTINS.filter((id) => id !== 'claude'),
       defaultAgent: 'claude',
       customAgents: [custom('work')]
     }
