@@ -1579,6 +1579,15 @@ export function nodeState(nodeId: string): AgentState | undefined {
 }
 
 /**
+ * The full mirror entry for one node — agent messaging's gate 2 reads this (state, `stateVerified`,
+ * `restored`, `idleInferred`, `clientRevision`) through `DeliveryDeps.mirrorEntry`. Read-only by
+ * contract: the reference is live, and a caller that mutates it is corrupting the mirror.
+ */
+export function mirrorEntry(nodeId: string): MirrorEntry | undefined {
+  return state.get(nodeId)
+}
+
+/**
  * The nodes the mirror currently believes are `working`, with the identity a synthetic event needs.
  * Read-only peek for the shells — the reconnect resync asks the host about exactly these, because
  * `working` is the only state a lost hook event can strand (see remote-ssh/agent-resync-decide.ts).

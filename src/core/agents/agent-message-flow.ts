@@ -255,6 +255,86 @@ export function checkFlowLimits(src: string, dst: string, now: number): FlowChec
 }
 
 /**
+ * IN-FLIGHT RESERVATIONS — what makes check + record atomic across a sender's CONCURRENT sends.
+ *
+ * `checkFlowLimits` is a pure read and `noteSent` records only after the pane write, so between
+ * the two sits the whole delivery (probes, the framed write — and on SSH a real round-trip). N
+ * parallel sends to N DISTINCT targets therefore all passed the fan-out cap before any of them
+ * recorded: the plan's blast-radius limit held only for a sender polite enough to send
+ * sequentially, and a language model firing tool calls in parallel is not that sender. The pair
+ * limiter had the narrower version of the same hole (two same-pair sends serialized at the target
+ * lock, but the second delivered with the verdict it read before waiting).
+ *
+ * `reserveFlow` closes both: the check and a provisional hold happen with NO await between them —
+ * which, single-threaded, IS the critical section — and the hold is released when the delivery
+ * ends. A hold counts against the fan-out budget exactly like a recorded send, and holds a pair
+ * shut exactly like a fresh `noteSent`; a delivery that never reaches the pane releases its hold
+ * and costs nothing, preserving `noteSent`'s contract. The maps cannot leak holds: every release
+ * runs in the caller's `finally`, and a process that dies loses the maps with the process.
+ */
+const pendingPairs = new Set<string>()
+const pendingBySender = new Map<string, number>()
+
+export interface FlowReservation {
+  ok: true
+  /** Give the slot back. Idempotent — a double release must not free a sibling's hold. */
+  release(): void
+}
+
+/**
+ * Check BOTH budgets and take a provisional hold in one synchronous step.
+ *
+ * A refused reservation reports the same `rateLimited` shape `checkFlowLimits` does. A pair held
+ * by an in-flight delivery reports the full `PAIR_MIN_INTERVAL_MS` — a floor, same reasoning as
+ * `FANOUT_RETRY_AFTER_MS`: if the in-flight send lands, that is the real wait; if it fails, the
+ * caller retries early and merely gets refused zero times instead of once.
+ */
+export type FlowReserve = { ok: false; limit: FlowLimit; outcome: RateLimited } | FlowReservation
+
+export function reserveFlow(src: string, dst: string, now: number): FlowReserve {
+  sweep(now)
+  const sent = senderTurns.get(src)?.sent ?? 0
+  const pending = pendingBySender.get(src) ?? 0
+  if (sent + pending >= FANOUT_PER_TURN) {
+    return {
+      ok: false,
+      limit: 'fan-out',
+      outcome: { kind: 'rateLimited', retryAfterMs: FANOUT_RETRY_AFTER_MS }
+    }
+  }
+  const key = pairKey(src, dst)
+  const last = pairLastSentAt.get(key)
+  if (last !== undefined) {
+    return {
+      ok: false,
+      limit: 'pair',
+      outcome: { kind: 'rateLimited', retryAfterMs: PAIR_MIN_INTERVAL_MS - (now - last) }
+    }
+  }
+  if (pendingPairs.has(key)) {
+    return {
+      ok: false,
+      limit: 'pair',
+      outcome: { kind: 'rateLimited', retryAfterMs: PAIR_MIN_INTERVAL_MS }
+    }
+  }
+  pendingPairs.add(key)
+  pendingBySender.set(src, pending + 1)
+  let released = false
+  return {
+    ok: true,
+    release(): void {
+      if (released) return
+      released = true
+      pendingPairs.delete(key)
+      const n = (pendingBySender.get(src) ?? 1) - 1
+      if (n <= 0) pendingBySender.delete(src)
+      else pendingBySender.set(src, n)
+    }
+  }
+}
+
+/**
  * Record a delivery that ACTUALLY reached the pane — the single write path for both budgets.
  *
  * Called after the write, not before the gate. A refusal puts nothing in anybody's pane, so it
@@ -301,4 +381,6 @@ export function flowStats(): { pairs: number; senders: number } {
 export function resetMessageFlow(): void {
   pairLastSentAt.clear()
   senderTurns.clear()
+  pendingPairs.clear()
+  pendingBySender.clear()
 }

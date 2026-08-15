@@ -84,10 +84,10 @@ export function routeControlSource(
  * comes from `resolveDeliveryScope` (`src/core/agents/agent-message-scope.ts`) taking the
  * serialized store and having no live-node parameter at all, so there is nothing to travel toward.
  *
- * INERT AS OF THIS COMMIT: neither verb is in `ControlVerb` yet, so `parseControlRequest` refuses
- * both before any of this is reached (asserted by running it, in `canvas-control-core.test.ts`).
- * The declaration lands first so the routing decision is made once, here, rather than inside the
- * dispatch that Task 5.1 adds.
+ * LIVE AS OF PR 5: Canvas.tsx's dispatch handles `send`/`reply` BEFORE its source-routing
+ * machinery, so neither `routeControlSource` nor any travel runs for them — the declaration here
+ * and that early-exit are the same decision stated once each, and `controlRouting.test.ts` pins
+ * this half.
  */
 const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set(['list', 'send', 'reply'])
 

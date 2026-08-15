@@ -6064,6 +6064,75 @@ export function Canvas() {
       const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) =>
         api.sendAgentControlResult({ requestId, ...r })
 
+      // ── Agent messaging (`send`/`reply`) — handled BEFORE the source-routing machinery ──────
+      // These are STORE_ANSWERED_VERBS (lib/controlRouting): routing by source must never travel
+      // to the sender's project (G5 — an off-canvas orchestrator would otherwise yank the human's
+      // view on every message and clear an unread badge via `setActive` on the way), and the
+      // delivery goes to a tmux PANE, not to a canvas, so no live canvas is needed at either end.
+      // The renderer's whole job here: validate the arguments, check the SOURCE is a
+      // control-capable agent, and forward to main — where the scope check, the per-project
+      // switch, flow control and the pane probes all run against main's own stores
+      // (src/main/agent-messaging.ts).
+      if (verb === 'send' || verb === 'reply' || verb === 'notify') {
+        const targetId = (args.node ?? '').trim()
+        if (!targetId) {
+          reply({ ok: false, error: `${verb} requires --node` })
+          return
+        }
+        // notify is APP-OWNED TEXT ONLY (#98's rule, kept verbatim): the caller cannot smuggle a
+        // prompt through its arguments. The body itself is substituted in MAIN (NOTIFY_BODY) —
+        // this refusal is the polite half, that substitution is the boundary.
+        if (verb === 'notify' && args.text) {
+          reply({ ok: false, error: 'notify does not accept --text' })
+          return
+        }
+        if (verb !== 'notify' && !args.text) {
+          reply({ ok: false, error: `${verb} requires --text` })
+          return
+        }
+        const live = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const stored = useProjects
+          .getState()
+          .projects.flatMap((p) => p.nodes)
+          .find((n) => n.id === sourceNodeId)
+        if (!live && !stored) {
+          reply({ ok: false, error: 'source node is not in any open project' })
+          return
+        }
+        const srcAgent = (live?.data.agentId ?? stored?.agentId) as string | undefined
+        if (!sourceIsControlCapable(srcAgent)) {
+          reply({ ok: false, error: 'source node is not a control-capable agent' })
+          return
+        }
+        // The SAME per-node lock every renderer-driven run that types into the target pane takes
+        // (restart, hibernate-exit, wake-resume, the confirmed `write`). Main serialises
+        // deliveries against each other; this lock serialises them against those runs — a
+        // delivery must never land inside a wake's un-submitted resume line.
+        let delivered: { ok: boolean; message?: string; result?: unknown; error?: string } | null =
+          null
+        const outcome = await guardConcurrentRestart(targetId, async () => {
+          delivered = await api.agentMessage.deliver({
+            verb,
+            sourceNodeId,
+            targetNodeId: targetId,
+            body: args.text ?? ''
+          })
+          return 'done' as const
+        })()
+        if (outcome === 'not-eligible') {
+          // The guard's own word for "that node is mid-restart/mid-wake": a retryable refusal in
+          // the same dialect main renders, so the caller learns the same way in both cases.
+          reply({
+            ok: false,
+            error:
+              'targetBusy: the target is mid-restart or mid-wake. Retryable — wait, then try once more.'
+          })
+          return
+        }
+        reply(delivered ?? { ok: false, error: 'delivery produced no reply' })
+        return
+      }
+
       // Which canvas answers? React Flow holds only the ACTIVE project's nodes, but every OTHER
       // project's tmux sessions keep running and are re-adopted on the next app start — so after a
       // restart the agents of every project the app did NOT come up on were answered by a canvas

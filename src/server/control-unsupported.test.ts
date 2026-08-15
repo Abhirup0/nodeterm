@@ -12,7 +12,7 @@ import os from 'os'
 import path from 'path'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { fakePlatform } from '../core/platform-fake'
-import { hookServer } from '../core/agents/hook-server'
+import { hookServer, MESSAGING_CONTROL_REFUSAL } from '../core/agents/hook-server'
 import { nodeAuthToken } from '../core/agents/node-auth-token'
 import { STRICT_CONTROL_REFUSAL } from '../core/agents/node-identity-policy'
 import {
@@ -85,6 +85,24 @@ describe('the Server Edition refuses canvas control by name', () => {
     expect(text).toContain(CONTROL_UNSUPPORTED_SENTENCE)
     // One line: the shim prints the body as-is.
     expect(text.trimEnd()).not.toContain('\n')
+  })
+
+  it('the messaging verbs get the same NAMED refusal — /control/send is 400, never an outage', async () => {
+    // Task 5.3 of the messaging plan, shared with this mechanism by agreement. `send` is
+    // verified-only at the route (requiresVerified runs before the handler on every edition), so
+    // a token is presented here for the same reason the `browser` test presents one: the edition
+    // answer is what a caller that got PAST identity hears.
+    const res = await control('send', 'n-msg', 'text/plain', nodeAuthToken(SECRET, 'n-msg'))
+    expect(res.status).toBe(400)
+    const text = await res.text()
+    expect(text).toContain(CONTROL_UNSUPPORTED_ERROR)
+    expect(text).toContain('do not retry')
+  })
+
+  it('an unverified `send` is refused on IDENTITY first, and that refusal does not invite a retry either', async () => {
+    const res = await control('send', 'n-msg2')
+    expect(res.status).toBe(403)
+    expect((await res.text()).trim()).toBe(MESSAGING_CONTROL_REFUSAL)
   })
 
   it('names WHY browser control is structural, not merely unimplemented', async () => {

@@ -155,6 +155,32 @@ export interface HookEventMeta {
   verified: boolean
 }
 
+/**
+ * Control verbs that admit ONLY a `verified` caller — the agent-messaging verbs.
+ *
+ * A route that admits only `verified` is untouched by the foreign-kid escape: an invented kid is
+ * FOREIGN, therefore `legacy` (invariant 3, required or cross-instance failover dies), therefore
+ * never `verified` (node-identity-policy.ts, `verifyNodeToken`'s foreign-kid rule). The escape
+ * defeats the latch and the window. It does not defeat this.
+ *
+ * Deliberately NOT routed through controlPolicy: `settings.hookIdentityStrict: false` releases the
+ * latch and the dated cutoff, and it must never release these. There is no upgrade population to
+ * protect — the routes are new — which is the one place in the whole control surface where
+ * fail-closed from day one costs nobody anything.
+ *
+ * Consulted in the `/control/` route BEFORE `identityGate`'s decision is, so no future change to
+ * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
+ * of every hatch and is the test that fails if either half of this comment stops being true.
+ */
+export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', 'notify'])
+
+/**
+ * The refusal for a messaging verb: one sentence, no diagnosis, no hint about tokens or restarts —
+ * the same posture as STRICT_CONTROL_REFUSAL, for the same reason. Advice here is advice to an
+ * attacker and a lie to nobody else.
+ */
+export const MESSAGING_CONTROL_REFUSAL = 'Agent messaging refused.'
+
 class HookServer {
   private server: Server | null = null
   private port = 0
@@ -456,6 +482,19 @@ class HookServer {
           if (verdict === 'forged') {
             res.writeHead(403)
             res.end()
+            return
+          }
+          // VERIFIED-ONLY VERBS, decided on the VERDICT and never on the decision: the policy's
+          // `decision` is what the escape hatch and the warning window can reach, and neither may
+          // reach these. See `requiresVerified` for the whole argument.
+          if (requiresVerified.has(verb) && verdict !== 'verified') {
+            if (wantsText) {
+              res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+              res.end(`${MESSAGING_CONTROL_REFUSAL}\n`)
+            } else {
+              res.writeHead(403, { 'content-type': 'application/json' })
+              res.end(JSON.stringify({ ok: false, error: MESSAGING_CONTROL_REFUSAL }))
+            }
             return
           }
           if (decision === 'refuse') {

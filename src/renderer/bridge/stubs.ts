@@ -378,7 +378,16 @@ export function buildStubApi(): Omit<
       error: 'Raising the terminal limit must be done on the machine running the server.'
     }),
     onAgentControl: noopUnsub,
-    sendAgentControlResult: noop
+    sendAgentControlResult: noop,
+    // Messaging never runs in the browser: `onAgentControl` above is inert here, so no dispatch
+    // can ever reach this. It answers the honest terminal refusal all the same, so a stray call
+    // can never look like it delivered.
+    agentMessage: {
+      deliver: async () => ({
+        ok: false as const,
+        error: 'Agent messaging is only available in the desktop app. Do not retry.'
+      })
+    }
   } satisfies Omit<
     NodeTerminalApi,
     | 'pty'

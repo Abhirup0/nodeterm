@@ -109,6 +109,14 @@ describe('the control shim translates flags', () => {
     expect(run(['write', 'n7', '--text', 'hi'])).toEqual(['arg.node=n7', 'arg.text=hi'])
   })
 
+  // Task 5.4: the messaging verbs take the same "first bare word is the node" convenience —
+  // executed under real sh, because the case pattern is the easy thing to typo and the string
+  // assertion in canvas-control-core.test.ts cannot see a broken glob.
+  it('send/reply map the bare positional onto arg.node too', () => {
+    expect(run(['send', 'b1', '--text', 'hi'])).toEqual(['arg.node=b1', 'arg.text=hi'])
+    expect(run(['reply', 'b1', '--text', 'done'])).toEqual(['arg.node=b1', 'arg.text=done'])
+  })
+
   it('a trailing flag with no value is still empty, as it always was', () => {
     expect(run(['rename', '--node', 'n1', '--title'])).toEqual(['arg.node=n1', 'arg.title='])
   })
