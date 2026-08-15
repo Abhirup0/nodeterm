@@ -209,6 +209,47 @@ describe('webgl-budget coordinator', () => {
     expect(a.rec.held).toBe(true)
   })
 
+  it('a page-wide loss re-grants as a TRICKLE, not a burst (the GPU-reset shape)', () => {
+    // A GPU process reset loses every context at once, so every visible client reports the loss
+    // and their retries all come due together. The re-grants go through the drain, so the
+    // rebuilds spread out at WEBGL_SWAPS_PER_DRAIN per tick instead of landing in one frame.
+    // (`contextLost` drops the accounting only — the caller has already disposed the dead addon,
+    // which is why the acquire COUNT, not `held`, is what says a rebuild happened.)
+    const clients = ['a', 'b', 'c', 'd', 'e'].map((id) => fakeClient(id))
+    clients.forEach(grant)
+    expect(clients.every((c) => c.rec.acquires === 1)).toBe(true)
+
+    clients.forEach((c) => c.handle.contextLost())
+    const rebuilt = () => clients.filter((c) => c.rec.acquires === 2).length
+
+    // Every retry comes due in the same frame; the queue caps what that frame may execute.
+    vi.advanceTimersByTime(WEBGL_REACQUIRE_AFTER_LOSS_MS)
+    const firstFrame = rebuilt()
+    expect(firstFrame).toBeGreaterThan(0)
+    expect(firstFrame).toBeLessThanOrEqual(WEBGL_SWAPS_PER_DRAIN)
+    expect(firstFrame).toBeLessThan(clients.length) // the burst is what this prevents
+
+    // …and each tick after it moves at most a batch further.
+    const secondFrame = (vi.advanceTimersByTime(WEBGL_DRAIN_MS), rebuilt())
+    expect(secondFrame).toBeGreaterThan(firstFrame)
+    expect(secondFrame - firstFrame).toBeLessThanOrEqual(WEBGL_SWAPS_PER_DRAIN)
+
+    // …until every terminal is back on the GPU.
+    vi.advanceTimersByTime(WEBGL_DRAIN_MS * 5)
+    expect(rebuilt()).toBe(clients.length)
+  })
+
+  it('a post-loss re-grant waits for the canvas to come to rest (no rebuild mid-gesture)', () => {
+    const a = fakeClient('a')
+    grant(a)
+    a.handle.contextLost()
+    setWebglGesture(true)
+    vi.advanceTimersByTime(WEBGL_REACQUIRE_AFTER_LOSS_MS + WEBGL_DRAIN_MS * 5)
+    expect(a.rec.acquires).toBe(1) // parked, not rebuilt under the user's hand
+    setWebglGesture(false)
+    expect(a.rec.acquires).toBe(2)
+  })
+
   it('a hidden client whose context is lost schedules no retry', () => {
     const a = fakeClient('a')
     grant(a)
