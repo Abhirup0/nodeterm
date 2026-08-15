@@ -136,6 +136,42 @@ describe('both shells register a 4-arg raw listener', () => {
   const root = resolve(__dirname, '../../..')
   const shells = ['src/main/index.ts', 'src/server/agent-status.ts']
 
+  /** Source with comments removed — a comment that mentions `meta.verified` (both shells have one,
+   *  saying why they do NOT read it) is documentation, not a branch. */
+  const code = (rel: string): string =>
+    readFileSync(join(root, rel), 'utf8').replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '')
+
+  // The rule this repo keeps re-learning: a hook-server change that lands on ONE shell.
+  // `verified` reaches the mirror through the NORMALIZED listener, so neither raw listener needs
+  // to read it — and that is a state worth pinning, because "neither" is as easy to break as
+  // "both". If a future change teaches one raw listener to branch on the flag, the other must
+  // change in the same commit or this fails.
+  it('neither raw listener branches on meta.verified — and if one ever does, both must', () => {
+    const branches = (s: string): boolean => /_?meta(\.verified|\?\.verified)/.test(s)
+    expect(branches(code('src/main/index.ts'))).toBe(branches(code('src/server/agent-status.ts')))
+  })
+
+  it('the normalized listener is where verified travels, and it is the only gate input', () => {
+    // Both shells subscribe to the SAME src/core hook server, so this one line is what carries the
+    // flag to the src/core mirror on both of them. A refactor that drops it here would leave the
+    // gate reading a field nothing writes — silently, and identically on both shells, which is
+    // exactly the failure the parity assertion above cannot see.
+    const hs = readFileSync(join(root, 'src/core/agents/hook-server.ts'), 'utf8')
+    expect(hs).toMatch(/this\.listener\(\{\s*\.\.\.normalized,\s*verified/)
+  })
+
+  it('the src/core mirror is the consumer, on both shells', () => {
+    // The gate reads MirrorEntry.stateVerified. It is only true evidence if the reducer that
+    // writes it runs wherever hook events land — i.e. if both shells feed the same mirror.
+    for (const rel of shells.concat(['src/server/index.ts'])) {
+      const src = readFileSync(join(root, rel), 'utf8')
+      if (rel === 'src/server/agent-status.ts') continue
+      expect(src, `${rel} does not import the status mirror`).toMatch(/agent-status-mirror/)
+    }
+    const mirror = readFileSync(join(root, 'src/core/agent-status-mirror.ts'), 'utf8')
+    expect(mirror).toContain('next.stateVerified = ev.verified === true')
+  })
+
   for (const rel of shells) {
     it(`${rel} takes the meta argument`, () => {
       const src = readFileSync(join(root, rel), 'utf8')
