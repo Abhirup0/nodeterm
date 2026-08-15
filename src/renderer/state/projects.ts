@@ -10,6 +10,8 @@ import type {
   Workspace
 } from '@shared/types'
 import { collisionSeed, derivedProjectId } from '@shared/project-id'
+import type { ProjectCapability } from '@shared/project-capabilities'
+import { recordCapabilityAck } from '@shared/project-capability-consent'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
 
 interface ProjectsState {
@@ -66,6 +68,19 @@ interface ProjectsState {
   /** Sets (or clears, with undefined = fall back to the global setting) the project's default
    *  permission mode for new Claude terminal (CLI) sessions. Chat nodes are not covered. */
   setProjectDefaultPermissionMode(id: string, mode: AgentPermissionMode | undefined): void
+  /**
+   * THE strict per-project capability setter (@shared/project-capabilities). `on` writes the
+   * literal `true` the validators accept AND records the machine-local ack — setting a switch
+   * yourself is its own acknowledgment, so the clone notice never fires on your own decision.
+   * `off` deletes the field outright (an off capability adds no bytes to the shared file); the
+   * ack, once earned, stays. */
+  setProjectCapability(id: string, cap: ProjectCapability, on: boolean): void
+  /**
+   * Records this machine's answer to the one-time clone notice. MACHINE-LOCAL by construction:
+   * `Project.capabilityAck` rides `IndexEntryV3.capabilityAck` through splitWorkspace on the next
+   * save and is never written into .nodeterm/project.json (workspace-files.test.ts pins the file
+   * bytes; capability-notice.test.tsx pins this path). */
+  recordProjectCapabilityAck(id: string, cap: ProjectCapability): void
   /** Raises the project's dino high score (never lowers it). */
   setDinoHighScore(id: string, score: number): void
   /** Replaces the project's kanban board (the UI computes the next board via lib/kanban). */
@@ -330,6 +345,24 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectDefaultPermissionMode(id, mode) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, defaultPermissionMode: mode } : p))
+    }))
+  },
+
+  setProjectCapability(id, cap, on) {
+    set((s) => ({
+      projects: s.projects.map((p) => {
+        if (p.id !== id) return p
+        if (on) return recordCapabilityAck({ ...p, [cap]: true }, cap)
+        const next = { ...p }
+        delete next[cap]
+        return next
+      })
+    }))
+  },
+
+  recordProjectCapabilityAck(id, cap) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? recordCapabilityAck(p, cap) : p))
     }))
   },
 
