@@ -41,6 +41,15 @@ export interface DiscardWhenHiddenOptions {
   /** Is the page making sound right now? Omitted = this surface cannot tell (never treated as
    *  audible — a surface with no webview has nothing playing). */
   isAudible?: () => boolean
+  /**
+   * Is an agent driving this page right now (a live control lease)?
+   *
+   * Read AT FIRE TIME like every other input, and treated as TRANSIENT: a lease that has ended
+   * leaves the node discardable on the next retry, never exempt for the whole hidden stretch.
+   * Omitted = this surface has no notion of a lease, which is every surface until one pushes lease
+   * state into the renderer.
+   */
+  isDriven?: () => boolean
   /** Is there anything to release? (A start page / empty node has no guest process.) */
   hasContent: () => boolean
   /** Release the page: the caller unmounts its `<webview>` and shows its plate. */
@@ -113,10 +122,13 @@ export function useDiscardWhenHidden(
       const enabled = useSettings.getState().settings.browserMemorySaver
       const loading = o.isLoading()
       const audible = o.isAudible?.() ?? false
-      if (!shouldDiscard({ hiddenMs: Date.now() - hiddenSince, loading, enabled, audible })) {
-        // Both blockers END BY THEMSELVES, so they earn a retry rather than disarming the saver for
-        // the whole hidden stretch. A disabled setting does not: see the policy's doc comment.
-        if (enabled && (loading || audible)) arm(DISCARD_RETRY_MS)
+      const driven = o.isDriven?.() ?? false
+      if (!shouldDiscard({ hiddenMs: Date.now() - hiddenSince, loading, enabled, audible, driven })) {
+        // All three blockers END BY THEMSELVES, so they earn a retry rather than disarming the
+        // saver for the whole hidden stretch. A disabled setting does not: see the policy's doc
+        // comment. `driven` belongs with the other two and NOT with the setting — an agent that
+        // stops driving must not leave the page exempt until its next hide→show cycle.
+        if (enabled && (loading || audible || driven)) arm(DISCARD_RETRY_MS)
         return
       }
       discarded = true

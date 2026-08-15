@@ -9,6 +9,15 @@
  *    result or an interstitial would simply be lost).
  *  - **Never discard a page making noise.** Audible = in use, even off-screen (a call, music, a
  *    video the user is listening to). Chrome exempts audible tabs for the same reason.
+ *  - **Never discard a page an agent is driving.** A live control lease is "in use even though
+ *    hidden", the same category as loading and audible. Without this, an agent drives a node, the
+ *    user pans away, and five minutes later the target is destroyed mid-task with no signal: the
+ *    restore re-navigates to the stored URL, so cookies survive but form state, scroll position and
+ *    every post-login SPA state do not, and every element reference from the last read is silently
+ *    stale. The cost is a whole Chromium renderer held resident until the lease ends — bounded by
+ *    whatever idle timeout the driver enforces, and preferable to a feature that fails five minutes
+ *    into every long task. The input is optional, so a surface with no notion of a lease (every
+ *    surface today) behaves exactly as it did before it existed.
  *  - **The setting is re-read when the timer FIRES, not when it was armed** — so a user who
  *    switches the saver off during a hidden stretch is not discarded by an older timer. The
  *    symmetry is deliberately incomplete: switching the saver ON mid-hide does NOT discard that
@@ -29,6 +38,14 @@ export function shouldDiscard(i: {
   enabled: boolean
   /** Is the page making sound right now? Optional so a surface that cannot tell says nothing. */
   audible?: boolean
+  /**
+   * Is an agent driving this page right now (a live control lease)?
+   *
+   * Optional for the same reason as `audible`: a surface that cannot tell must behave exactly as it
+   * did before the input existed. It is a SUPPRESSOR, never an exemption — the caller re-reads it
+   * when the timer fires, so a page whose lease ended is discardable on the next pass.
+   */
+  driven?: boolean
 }): boolean {
-  return i.enabled && !i.loading && !i.audible && i.hiddenMs > BROWSER_DISCARD_MS
+  return i.enabled && !i.loading && !i.audible && !i.driven && i.hiddenMs > BROWSER_DISCARD_MS
 }

@@ -42,6 +42,7 @@ function Harness(props: Partial<DiscardWhenHiddenOptions> & { onEl?: (el: HTMLEl
   useDiscardWhenHidden(ref, {
     isLoading: props.isLoading ?? (() => false),
     isAudible: props.isAudible,
+    isDriven: props.isDriven,
     hasContent: props.hasContent ?? (() => true),
     onDiscard: props.onDiscard ?? (() => {}),
     onRestore: props.onRestore ?? (() => {})
@@ -225,5 +226,62 @@ describe('useDiscardWhenHidden', () => {
   it('shares one decision with the pure policy', () => {
     // The hook must not grow its own copy of the threshold.
     expect(shouldDiscard({ hiddenMs: BROWSER_DISCARD_MS + DISCARD_SLACK_MS, loading: false, enabled: true })).toBe(true)
+  })
+})
+
+describe('a control lease is a transient blocker, like a load or a sound', () => {
+  let root: Root | null = null
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', FakeIntersectionObserver)
+    useSettings.setState({ settings: { ...DEFAULT_SETTINGS } })
+    observed = null
+  })
+  afterEach(() => {
+    act(() => root?.unmount())
+    root = null
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('a lease that ENDS leaves the node discardable on the next retry — never exempt forever', () => {
+    // hidden → driven → fire (no discard, re-armed) → lease ends → retry fires → discarded.
+    const onDiscard = vi.fn()
+    let driven = true
+    let el!: HTMLElement
+    root = mount({ onDiscard, isDriven: () => driven, onEl: (e) => (el = e) })
+    hide(el)
+    advance(BROWSER_DISCARD_MS + DISCARD_SLACK_MS)
+    expect(onDiscard).not.toHaveBeenCalled()
+    // Still driving a minute later — still exempt, and still re-armed.
+    advance(DISCARD_RETRY_MS)
+    expect(onDiscard).not.toHaveBeenCalled()
+    driven = false
+    advance(DISCARD_RETRY_MS)
+    expect(onDiscard).toHaveBeenCalledTimes(1)
+  })
+
+  it('is read at FIRE time, not at arm time', () => {
+    // A lease taken after the timer was armed must still be honoured — the whole point of reading
+    // every input through optsRef when the timer fires.
+    const onDiscard = vi.fn()
+    let driven = false
+    let el!: HTMLElement
+    root = mount({ onDiscard, isDriven: () => driven, onEl: (e) => (el = e) })
+    hide(el)
+    advance(BROWSER_DISCARD_MS - 1000)
+    driven = true
+    advance(DISCARD_SLACK_MS + 1000)
+    expect(onDiscard).not.toHaveBeenCalled()
+  })
+
+  it('a surface that passes no isDriven is discarded exactly as before', () => {
+    const onDiscard = vi.fn()
+    let el!: HTMLElement
+    root = mount({ onDiscard, onEl: (e) => (el = e) })
+    hide(el)
+    advance(BROWSER_DISCARD_MS + DISCARD_SLACK_MS)
+    expect(onDiscard).toHaveBeenCalledTimes(1)
   })
 })
