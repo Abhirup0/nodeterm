@@ -34,7 +34,10 @@ const SLOWLORIS_MS = 2000
 // OUTSIDE core, so a future core-side handler with no bound of its own would inherit an unbounded
 // socket if this were `setTimeout(0)`. 130s sits comfortably above that, so in the desktop the
 // handler's own timeout always wins and this only ever fires as a backstop.
-const CONTROL_CEILING_MS = 130_000
+// Exported so a caller that parks on this socket can assert its own deadline sits under it by
+// RUNNING the comparison rather than by copying the number into a comment (the delivery receipt,
+// `agent-message.ts`, does exactly that).
+export const CONTROL_CEILING_MS = 130_000
 
 // The context-link handler has no timeout of its own, and its remote leg reads over an SSH
 // ControlMaster that can wedge (ConnectTimeout only covers the connect). Race it so the agent
