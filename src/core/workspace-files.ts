@@ -99,6 +99,13 @@ export interface IndexEntryV3 {
   /** MACHINE-LOCAL default managed Claude account for a ref'd project: the id names a credential
    *  dir in THIS machine's userData, so it is meaningless in anyone else's checkout. */
   defaultAccountId?: string
+  /**
+   * MACHINE-LOCAL record that this machine's user has acknowledged each capability switch for THIS
+   * entry (the one-time clone notice, @shared/project-capability-consent). Never copied into the
+   * shared project file — a repo must not be able to carry its own consent — and keyed to the
+   * entry, so a second worktree of the same repo (a second entry) notifies again, on purpose.
+   */
+  capabilityAck?: import('../shared/project-capability-consent').CapabilityAckMap
   cwd?: string
   ssh?: Project['ssh']
   cache?: ProjectFileV1
@@ -231,6 +238,8 @@ export function fileToProject(
     viewport?: Viewport
     /** This machine's default managed account; falls back to the file's legacy value. */
     defaultAccountId?: string
+    /** This machine's clone-notice acknowledgments for this entry (never from the file). */
+    capabilityAck?: import('../shared/project-capability-consent').CapabilityAckMap
     /** This machine's own exec values for these nodes (from the local index entry). A file read
      *  WITHOUT them — an adopted/cloned folder, a probe — gets the safe defaults, never the file's
      *  own `shell`/`ssh.extraArgs`. */
@@ -257,7 +266,10 @@ export function fileToProject(
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
-    ...(base.closed ? { closed: true } : {})
+    ...(base.closed ? { closed: true } : {}),
+    // Machine-local, from the index entry ONLY: a file field named `capabilityAck` is a forgery
+    // attempt (the shared file cannot carry this machine's consent) and is simply never read.
+    ...(base.capabilityAck ? { capabilityAck: base.capabilityAck } : {})
   }
 }
 
@@ -343,7 +355,10 @@ export function splitWorkspace(
     // Inline entries need none of this: they store the whole Project verbatim.
     const localState = {
       ...(p.viewport ? { viewport: p.viewport } : {}),
-      ...(p.defaultAccountId ? { defaultAccountId: p.defaultAccountId } : {})
+      ...(p.defaultAccountId ? { defaultAccountId: p.defaultAccountId } : {}),
+      // The clone-notice acknowledgment rides the machine-local entry, never the shared file
+      // (projectToFile does not emit it — pinned by project-capability-consent.test.ts).
+      ...(p.capabilityAck ? { capabilityAck: p.capabilityAck } : {})
     }
     if (p.unavailable) {
       // Placeholder (folder missing / server unreachable at load): its nodes:[] is not real

@@ -244,6 +244,7 @@ export class WorkspaceStore {
               closed: e.closed,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, p)
             })
           })
@@ -262,6 +263,7 @@ export class WorkspaceStore {
               closed: e.closed,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, e.cache)
             })
           })
@@ -482,6 +484,9 @@ export class WorkspaceStore {
         // moment a folder is briefly unmounted.
         if (old?.viewport) e.viewport = old.viewport
         if (old?.defaultAccountId) e.defaultAccountId = old.defaultAccountId
+        // The clone-notice acknowledgment must also survive an unavailable window: forgetting it
+        // would re-raise a notice the user already answered the moment the folder remounts.
+        if (old?.capabilityAck) e.capabilityAck = old.capabilityAck
       }
     }
 
@@ -615,6 +620,7 @@ export class WorkspaceStore {
       closed: e.closed,
       viewport: e.viewport,
       defaultAccountId: e.defaultAccountId,
+      capabilityAck: e.capabilityAck,
       localExec: e.localExec
     })
   }
@@ -860,6 +866,7 @@ export class WorkspaceStore {
           closed: e.closed,
           viewport: e.viewport,
           defaultAccountId: e.defaultAccountId,
+          capabilityAck: e.capabilityAck,
           localExec: e.localExec
         })
       )
@@ -921,7 +928,8 @@ export class WorkspaceStore {
     this.revs.set(e.id, e.cache.rev)
     return fileToProject(e.cache, {
       id: e.id, ssh: e.ssh, closed: e.closed,
-      viewport: e.viewport, defaultAccountId: e.defaultAccountId, localExec: e.localExec
+      viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+      capabilityAck: e.capabilityAck, localExec: e.localExec
     })
   }
 
@@ -1027,7 +1035,8 @@ export class WorkspaceStore {
       else this.unmirrored.delete(e.id) // pure adopt: the server copy IS the truth now — nothing owed
       return fileToProject(adopted, {
         id: e.id, ssh: e.ssh, closed: e.closed,
-        viewport: e.viewport, defaultAccountId: e.defaultAccountId, localExec: e.localExec
+        viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+        capabilityAck: e.capabilityAck, localExec: e.localExec
       })
     }
     // Our cache stood. Before it clobbers the server, merge in any remote-only session nodes (the
@@ -1041,7 +1050,8 @@ export class WorkspaceStore {
         this.unmirrored.add(e.id) // the merged set must land on the server
         merged = fileToProject(e.cache, {
           id: e.id, ssh: e.ssh, closed: e.closed,
-          viewport: e.viewport, defaultAccountId: e.defaultAccountId, localExec: e.localExec
+          viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+          capabilityAck: e.capabilityAck, localExec: e.localExec
         })
       }
     }
