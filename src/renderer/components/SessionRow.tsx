@@ -76,15 +76,10 @@ export function SessionRow({
           <IconBellFilled />
         </span>
       ) : row.statusKind !== 'working' && row.unread ? (
-        // Finished (or reset to idle) while the user wasn't looking: the SAME check glyph,
+        // Finished before its live state became unknown while the user wasn't looking: the check,
         // but accent-blue and pulsing until they visit the node. Working/attention win —
         // a new turn or a permission prompt is more urgent than an old unread mark.
         <span className="ss-check ss-check--unread" title="Finished — new for you">
-          <IconCircleCheck />
-        </span>
-      ) : row.statusKind === 'done' ? (
-        // Completion glyph: a check icon scans better than one more dot.
-        <span className="ss-check" title={row.stateLabel}>
           <IconCircleCheck />
         </span>
       ) : (

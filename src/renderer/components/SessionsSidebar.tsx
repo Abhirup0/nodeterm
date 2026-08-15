@@ -501,28 +501,24 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
           <div className="sessions-sidebar__empty">No sessions yet.</div>
         )}
         {grouping === 'status' ? (
-          statusSections.length === 0 ? (
-            <div className="sessions-sidebar__empty">No sessions yet.</div>
-          ) : (
-            statusSections.map((section: StatusSection) => (
-              <div key={section.kind} className="ss-status">
-                <div className="ss-status__head">
-                  {section.kind === 'attention' ? (
-                    <span className="ss-status__icon ss-status__icon--attention">
-                      <IconBellFilled />
-                    </span>
-                  ) : (
-                    <span className={`ss-status__icon ss-status__icon--${section.kind}`} />
-                  )}
-                  <span className="ss-status__label">{section.label}</span>
-                  <span className="ss-status__count">{section.rows.length}</span>
-                </div>
-                <div className="ss-status__rows">
-                  {section.rows.map((row) => renderStatusRow(row))}
-                </div>
+          statusSections.map((section: StatusSection) => (
+            <div key={section.kind} className="ss-status">
+              <div className="ss-status__head">
+                {section.kind === 'attention' ? (
+                  <span className="ss-status__icon ss-status__icon--attention">
+                    <IconBellFilled />
+                  </span>
+                ) : (
+                  <span className={`ss-status__icon ss-status__icon--${section.kind}`} />
+                )}
+                <span className="ss-status__label">{section.label}</span>
+                <span className="ss-status__count">{section.rows.length}</span>
               </div>
-            ))
-          )
+              <div className="ss-status__rows">
+                {section.rows.map((row) => renderStatusRow(row))}
+              </div>
+            </div>
+          ))
         ) : (
           groups.map((g) => {
           const collapseKey = projectCollapseKey(g.projectId)

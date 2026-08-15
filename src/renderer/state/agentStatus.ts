@@ -506,14 +506,15 @@ export function createAgentStatusSession(
       set((s) => {
         const prev = s.byId[id]
         if (!prev) return s
-        // Cross-surface ACK: opening a session marks its finishes read EVERYWHERE — the notch
+        // Cross-surface ACK: opening a session marks its finish read EVERYWHERE — the notch
         // capsule's green blob, the paired phone's lingering DONE Live Activity, and its Inbox
-        // Finished card (all via the core mirror's `ackDone`).
+        // Finished card (all via the core mirror's `ackDone`). This is READ state only: the live
+        // workflow state remains `done` until a genuine new turn begins.
         //
         // Deliberately gated on NOTHING but the external flag:
         //  - not on the unread flag, because a session you were LOOKING at when it finished never
-        //    got marked unread (the `watching` gate in Canvas), so opening it would be the only
-        //    read signal there ever is — and it was being dropped;
+        //    got marked unread (the `watching` gate in Canvas), so opening it is the only local
+        //    read signal there will ever be;
         //  - not on the node's current state, because a node whose PREVIOUS turn finished while a
         //    new one is already running left the phone showing a Finished card for a result the
         //    user had open on screen.

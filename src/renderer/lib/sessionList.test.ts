@@ -7,6 +7,7 @@ import {
   liveCollapseKeys,
   pruneCollapsedItems,
   sessionStatusKind,
+  sessionStateAgeLabel,
   projectIdAtIndex,
   isGroupCollapsed,
   projectHeadClickAction,
@@ -35,8 +36,16 @@ describe('sessionStatusKind', () => {
     expect(sessionStatusKind('working')).toBe('working')
     expect(sessionStatusKind('waiting')).toBe('attention')
     expect(sessionStatusKind('blocked')).toBe('attention')
-    expect(sessionStatusKind('done')).toBe('done')
-    expect(sessionStatusKind(undefined)).toBe('idle')
+    expect(sessionStatusKind('done')).toBe('attention')
+    expect(sessionStatusKind(undefined)).toBe('unknown')
+  })
+})
+
+describe('sessionStateAgeLabel', () => {
+  it('formats an observed transition and does not invent an age for unknown history', () => {
+    const now = 10 * 60_000
+    expect(sessionStateAgeLabel(now - 5 * 60_000, now)).toBe('5m ago')
+    expect(sessionStateAgeLabel(undefined, now)).toBeUndefined()
   })
 })
 
@@ -309,8 +318,8 @@ describe('projectSignalCounts', () => {
       title: `s${i}`,
       color: '#888',
       isAgent: false,
-      statusKind: 'idle' as const,
-      stateLabel: 'Idle',
+      statusKind: 'unknown' as const,
+      stateLabel: 'Unknown',
       unread: false,
       usesContext: false,
       ...s
@@ -331,10 +340,10 @@ describe('projectSignalCounts', () => {
           node('g1', { kind: 'group', title: 'G', color: '#abc' }),
           node('a'), // waiting → attention
           node('b', { parentId: 'g1' }), // blocked → attention
-          node('c'), // done + unread → unread
-          node('d'), // idle + unread → unread (state lost, unread persisted)
+          node('c'), // done + unread → attention (workflow state wins)
+          node('d'), // unknown + unread → unread (state lost, unread persisted)
           node('e'), // working + unread → NOT counted (mirrors the row glyph precedence)
-          node('f') // plain idle → neither
+          node('f') // plain unknown → neither
         ]
       }
     ]
@@ -348,7 +357,7 @@ describe('projectSignalCounts', () => {
     const [g] = buildSessionList(proj, null, 'p1', status, '')
     // `e` is the load-bearing one: it is the single working session AND carries an unread mark,
     // so it must land in `working` and NOT in `unread`.
-    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2, working: 1 })
+    expect(projectSignalCounts(g)).toEqual({ attention: 3, unread: 1, working: 1 })
   })
 
   it('returns zeros for a quiet project', () => {
@@ -367,14 +376,14 @@ describe('projectSignalCounts', () => {
       { statusKind: 'working' },
       { statusKind: 'working' },
       { statusKind: 'attention' },
-      { statusKind: 'idle' }
+      { statusKind: 'unknown' }
     ])
     expect(projectSignalCounts(g)).toEqual({ attention: 1, unread: 0, working: 2 })
   })
 
-  it('working is 0 when nothing is running, and unread is counted when not working', () => {
-    const g = group([{ statusKind: 'idle' }, { statusKind: 'done', unread: true }])
-    expect(projectSignalCounts(g)).toEqual({ attention: 0, unread: 1, working: 0 })
+  it('workflow attention wins over unread when nothing is running', () => {
+    const g = group([{ statusKind: 'unknown' }, { statusKind: 'attention', unread: true }])
+    expect(projectSignalCounts(g)).toEqual({ attention: 1, unread: 0, working: 0 })
   })
 
   it('drives through buildSessionList: counts grouped sessions, attention wins over unread, working is not double-counted as unread', () => {
@@ -387,7 +396,7 @@ describe('projectSignalCounts', () => {
           node('g1', { kind: 'group', title: 'Frontend', color: '#abc' }),
           node('a1', { agentId: 'claude', parentId: 'g1' }), // attention + unread -> attention only
           node('a2', { agentId: 'claude', parentId: 'g1' }), // working + unread -> working only
-          node('t1') // ungrouped, idle
+          node('t1') // ungrouped, unknown
         ]
       }
     ]
@@ -404,11 +413,11 @@ describe('projectSignalCounts', () => {
 describe('buildStatusList', () => {
   // Two projects, sessions in various states spread across them.
   const status: Record<string, AgentNodeStatus> = {
-    a1: { unread: false, state: 'waiting' }, // attention
-    a2: { unread: false, state: 'blocked' }, // attention
-    d1: { unread: false, state: 'done' }, // done
-    w1: { unread: false, state: 'working' }, // working
-    i1: { unread: false } // idle (no state)
+    a1: { unread: false, state: 'waiting', lastEventAt: 100 }, // attention, oldest
+    a2: { unread: false, state: 'blocked', lastEventAt: 300 }, // attention, newest
+    d1: { unread: false, state: 'done', lastEventAt: 200 }, // completed turn → attention
+    w1: { unread: false, state: 'working', lastEventAt: 400 }, // working
+    i1: { unread: false } // unknown (no state or transition time)
   }
   const proj: ProjectInput[] = [
     {
@@ -416,7 +425,7 @@ describe('buildStatusList', () => {
       name: 'Alpha',
       color: '#111',
       cwd: '/a',
-      nodes: [node('a1', { title: 'zebra' }), node('d1', { title: 'apple' }), node('i1', { title: 'idle1' })]
+      nodes: [node('a1', { title: 'zebra' }), node('d1', { title: 'apple' }), node('i1', { title: 'unknown1' })]
     },
     {
       id: 'p2',
@@ -426,27 +435,31 @@ describe('buildStatusList', () => {
     }
   ]
 
-  it('groups by status in the fixed order attention → idle → done → working', () => {
+  it('groups by workflow status in the fixed order attention → unknown → working', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
-    expect(sections.map((s) => s.kind)).toEqual(['attention', 'idle', 'done', 'working'])
+    expect(sections.map((s) => s.kind)).toEqual(['attention', 'unknown', 'working'])
   })
 
   it('flattens across projects and tags each row with its project', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
     const attention = sections.find((s) => s.kind === 'attention')!
-    expect(attention.rows.map((r) => r.id).sort()).toEqual(['a1', 'a2'])
+    expect(attention.rows.map((r) => r.id).sort()).toEqual(['a1', 'a2', 'd1'])
     const a1 = attention.rows.find((r) => r.id === 'a1')!
     expect(a1.projectId).toBe('p1')
     expect(a1.projectName).toBe('Alpha')
     expect(a1.projectColor).toBe('#111')
+    expect(a1.statusUpdatedAt).toBe(100)
     const a2 = attention.rows.find((r) => r.id === 'a2')!
     expect(a2.projectId).toBe('p2')
   })
 
-  it('sorts rows within a section by project store-order then title', () => {
+  it('sorts rows within a section by descending state-change time', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
-    // attention: p1/zebra then p2/mid (project order wins over title — zebra before mid)
-    expect(sections.find((s) => s.kind === 'attention')!.rows.map((r) => r.id)).toEqual(['a1', 'a2'])
+    expect(sections.find((s) => s.kind === 'attention')!.rows.map((r) => r.id)).toEqual([
+      'a2',
+      'd1',
+      'a1'
+    ])
   })
 
   it('keeps only terminal nodes (drops stickies/editors)', () => {
@@ -462,27 +475,47 @@ describe('buildStatusList', () => {
     expect(a1.title).toBe('renamed live')
   })
 
-  it('omits empty sections and filters by title/session', () => {
+  it('keeps empty sections while filtering rows by title/session', () => {
     // 'runner' only matches w1 (working)
     const filtered = buildStatusList(proj, null, 'p1', status, 'runner')
-    expect(filtered.map((s) => s.kind)).toEqual(['working'])
-    expect(filtered[0].rows.map((r) => r.id)).toEqual(['w1'])
+    expect(filtered.map((s) => s.kind)).toEqual(['attention', 'unknown', 'working'])
+    expect(filtered.find((s) => s.kind === 'working')!.rows.map((r) => r.id)).toEqual(['w1'])
+    expect(filtered.filter((s) => s.kind !== 'working').every((s) => s.rows.length === 0)).toBe(true)
   })
 
-  it('returns only non-empty sections (no empty headers)', () => {
-    // Only attention + done present, no idle/working sessions.
+  it('returns every section even when some headers have no sessions', () => {
+    // Waiting + done both land in attention; unknown/working stay present and empty.
     const onlyTwo: ProjectInput[] = [
       { id: 'p1', name: 'Alpha', color: '#111', nodes: [node('a1'), node('d1')] }
     ]
     const two: Record<string, AgentNodeStatus> = { a1: { unread: false, state: 'waiting' }, d1: { unread: false, state: 'done' } }
     const sections = buildStatusList(onlyTwo, null, 'p1', two, '')
-    expect(sections.map((s) => s.kind)).toEqual(['attention', 'done'])
+    expect(sections.map((s) => s.kind)).toEqual(['attention', 'unknown', 'working'])
+    expect(sections.find((s) => s.kind === 'attention')!.rows.map((row) => row.id).sort()).toEqual(['a1', 'd1'])
+    expect(sections.find((s) => s.kind === 'unknown')!.rows).toEqual([])
+    expect(sections.find((s) => s.kind === 'working')!.rows).toEqual([])
   })
 
-  it('falls through to idle when state is unknown', () => {
+  it('keeps read state separate from workflow grouping', () => {
+    const glowing: Record<string, AgentNodeStatus> = {
+      d1: { unread: true, state: 'done' },
+      i1: { unread: true },
+      w1: { unread: true, state: 'working' }
+    }
+    const sections = buildStatusList(proj, null, 'p1', glowing, '')
+    const attention = sections.find((s) => s.kind === 'attention')!
+    expect(attention.label).toBe('Waiting for your response')
+    expect(attention.rows.map((r) => r.id)).toEqual(['d1'])
+    // Unread alone is not a workflow state; a live turn is still Running.
+    expect(sections.find((s) => s.kind === 'unknown')!.rows.map((r) => r.id)).toContain('i1')
+    expect(sections.find((s) => s.kind === 'working')!.rows.map((r) => r.id)).toEqual(['w1'])
+  })
+
+  it('falls through to Unknown when no live state is known', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
-    const idle = sections.find((s) => s.kind === 'idle')!
-    expect(idle.rows.map((r) => r.id)).toEqual(['i1'])
+    const unknown = sections.find((s) => s.kind === 'unknown')!
+    expect(unknown.label).toBe('Unknown')
+    expect(unknown.rows.map((r) => r.id)).toEqual(['i1'])
   })
 
   it('never emits a node twice during a cross-project switch window', () => {

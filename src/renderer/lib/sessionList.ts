@@ -3,6 +3,7 @@ import type { AgentId } from '@shared/agents/config'
 import type { NodeKind } from '@shared/types'
 import { hasUsage } from '@shared/agents/config'
 import type { SshConnection } from '@shared/ssh'
+import { relativeTime } from './relativeTime'
 
 export interface SessionNodeInput {
   id: string
@@ -24,16 +25,15 @@ export interface ProjectInput {
   nodes: SessionNodeInput[]
 }
 
-export type StatusKind = 'working' | 'attention' | 'done' | 'idle'
+export type StatusKind = 'working' | 'attention' | 'unknown'
 
 /** Sessions sidebar top-level grouping mode. */
 export type SidebarGrouping = 'project' | 'status'
 
 const STATE_LABEL: Record<StatusKind, string> = {
   working: 'Running',
-  attention: 'Needs you',
-  done: 'Done',
-  idle: 'Idle'
+  attention: 'Waiting for your response',
+  unknown: 'Unknown'
 }
 
 /** Disclosure key for a project row in the sessions tree. */
@@ -48,11 +48,10 @@ export function groupCollapseKey(projectId: string, groupId: string): string {
 
 /**
  * Status section order when the sidebar is grouped by status. Anything needing you floats to the
- * top; working sinks to the bottom (a turn in flight is the least urgent to revisit). Idle sits
- * above done so a session whose state was lost — including a waiting one a scraper misclassified
- * as idle — stays above the finished pile.
+ * top; working sinks to the bottom (a turn in flight is the least urgent to revisit). Unknown sits
+ * between them: there is no current hook signal on which to infer a workflow state.
  */
-const STATUS_ORDER: StatusKind[] = ['attention', 'idle', 'done', 'working']
+const STATUS_ORDER: StatusKind[] = ['attention', 'unknown', 'working']
 
 /**
  * Whether a project row is collapsed in the sessions sidebar. `settings.sidebarAutoCollapse`
@@ -133,7 +132,8 @@ export function projectHeadClickAction(isActive: boolean): ProjectHeadAction {
 
 /**
  * Header badges for a project group: how many sessions need the user right now
- * (waiting/blocked), how many finished unseen, and how many are actively working right now.
+ * (done/waiting/blocked), how many unknown-state completions remain unseen, and how many are
+ * actively working right now.
  * Mirrors the row glyph's precedence — an attention session is never double-counted as unread,
  * and a working one isn't unread yet (a new turn is running; the old mark resurfaces when it ends).
  */
@@ -155,12 +155,16 @@ export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
       return 'working'
     case 'waiting':
     case 'blocked':
-      return 'attention'
     case 'done':
-      return 'done'
+      return 'attention'
     default:
-      return 'idle'
+      return 'unknown'
   }
+}
+
+/** Human-readable age of the current state. No timestamp means genuinely unknown, not "just now". */
+export function sessionStateAgeLabel(updatedAt: number | undefined, nowMs: number): string | undefined {
+  return updatedAt === undefined ? undefined : relativeTime(updatedAt, nowMs)
 }
 
 /**
@@ -182,6 +186,8 @@ export interface SessionRowVM {
   isAgent: boolean
   statusKind: StatusKind
   stateLabel: string
+  /** When the current live state began. Transient; absent when no transition has been observed. */
+  statusUpdatedAt?: number
   unread: boolean
   session?: string
   loop?: { kind: 'loop' | 'schedule' | 'cron'; count: number }
@@ -236,6 +242,8 @@ function toRow(
   status: AgentNodeStatus | undefined,
   project?: Pick<ProjectInput, 'id' | 'name' | 'color'>
 ): SessionRowVM {
+  // Workflow state and read state are deliberately independent. `done` means the agent finished a
+  // turn and is waiting for a new user prompt; `unread` only controls notification/read affordances.
   const statusKind = sessionStatusKind(status?.state)
   return {
     id: n.id,
@@ -245,6 +253,7 @@ function toRow(
     isAgent: !!n.agentId,
     statusKind,
     stateLabel: STATE_LABEL[statusKind],
+    statusUpdatedAt: status?.lastEventAt,
     unread: !!status?.unread,
     session: status?.session,
     // A dismissed cron/schedule entry is retained as a fact (the hibernation guard reads it) but
@@ -362,12 +371,12 @@ export interface StatusSection {
  * Build the status-grouped session list: every project's terminal nodes flattened into one list,
  * bucketed by live agent status so sessions needing attention float to the top. Project walls and
  * canvas sub-group frames are dropped — this is a flat regrouping keyed on status, not a
- * re-sort within project. Within a section, rows keep a stable order (project store-order, then
- * title) so the list doesn't reshuffle as statuses change.
+ * re-sort within project. Within a section, rows are ordered by most-recent state transition first,
+ * so the freshest work in each bucket is easiest to reach.
  *
  * Status comes from the same global `statusById` map `buildSessionList` reads; for local-core
  * projects that map is live for every node regardless of which project is active. Remote/relay
- * nodes are absent from it, so they fall through to `idle` — the same way they render in project
+ * nodes are absent from it, so they fall through to `unknown` — the same way they render in project
  * mode today, so this introduces no regression.
  */
 export function buildStatusList(
@@ -437,7 +446,8 @@ export function buildStatusList(
     }
   }
 
-  // Bucket by status, then stable-sort each bucket by project store-order then title.
+  // Bucket by status, then newest state transition first. An absent timestamp is genuinely unknown
+  // and sorts last; project store-order + title provide a deterministic tie-breaker.
   const byStatus = new Map<StatusKind, { row: SessionRowVM; pidx: number }[]>()
   for (const { row, pidx } of tagged) {
     const list = byStatus.get(row.statusKind)
@@ -445,19 +455,19 @@ export function buildStatusList(
     else byStatus.set(row.statusKind, [{ row, pidx }])
   }
   for (const list of byStatus.values()) {
-    list.sort((a, b) =>
-      a.pidx !== b.pidx
-        ? a.pidx - b.pidx
-        : a.row.title.toLowerCase().localeCompare(b.row.title.toLowerCase())
-    )
+    list.sort((a, b) => {
+      const ageOrder = (b.row.statusUpdatedAt ?? -1) - (a.row.statusUpdatedAt ?? -1)
+      if (ageOrder !== 0) return ageOrder
+      if (a.pidx !== b.pidx) return a.pidx - b.pidx
+      return a.row.title.toLowerCase().localeCompare(b.row.title.toLowerCase())
+    })
   }
 
-  // Non-empty sections only, in the fixed order. An empty section has no rows to surface (a
-  // misclassified-as-done session still has a row, so Done is rendered) — see the design's
-  // done/idle-visibility rule.
-  return STATUS_ORDER.map((kind) => {
-    const list = byStatus.get(kind)
-    if (!list || list.length === 0) return null
-    return { kind, label: STATE_LABEL[kind], rows: list.map((t) => t.row) }
-  }).filter((s): s is StatusSection => s !== null)
+  // Every section is always present. Stable headers make the grouping legible even when a bucket
+  // is temporarily empty and prevent the sidebar from jumping as sessions move between states.
+  return STATUS_ORDER.map((kind) => ({
+    kind,
+    label: STATE_LABEL[kind],
+    rows: (byStatus.get(kind) ?? []).map((t) => t.row)
+  }))
 }

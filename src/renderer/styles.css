@@ -6355,8 +6355,7 @@ body,
 .ss-row.is-active { background: rgba(var(--tint-rgb), 0.06); border-color: var(--border); }
 
 .ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
-.ss-dot--idle { background: var(--muted-2); }
-/* done renders as a check icon (ss-check), not a dot — see SessionRow. */
+.ss-dot--unknown { background: var(--muted-2); }
 .ss-check { color: var(--success); margin-top: 2px; flex: 0 0 auto; line-height: 0; }
 /* Unread: the same check, accent-blue and pulsing until the user visits the node. */
 .ss-check--unread { color: var(--accent); animation: nt-pulse 1.1s ease-in-out infinite; }
@@ -6538,7 +6537,7 @@ body,
 .sessions-sidebar__head .seg-pill-opt { font-size: 10.5px; padding: 2px 8px; }
 
 /* Status-grouped sections (sidebar grouped by status). Always expanded — no chevron, no
-   collapse; the whole point is that needs-attention sessions are visible at a glance. */
+   collapse; the whole point is that sessions awaiting a response are visible at a glance. */
 .ss-status { margin: 2px 0; }
 .ss-status + .ss-status { margin-top: 8px; }
 .ss-status__head { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; background: rgba(var(--tint-rgb), 0.035); }
@@ -6548,8 +6547,7 @@ body,
 .ss-status__icon--attention { width: auto; height: auto; border-radius: 0; color: var(--danger); display: inline-flex; }
 .ss-status__icon--attention svg { width: 11px; height: 11px; }
 .ss-status__icon--working { background: var(--accent); }
-.ss-status__icon--done { background: var(--muted); }
-.ss-status__icon--idle { background: rgba(var(--tint-rgb), 0.25); }
+.ss-status__icon--unknown { background: rgba(var(--tint-rgb), 0.25); }
 .ss-status__rows { padding: 2px 0 2px 2px; }
 
 /* Status-mode row: project monogram in place of the plain color mark. */

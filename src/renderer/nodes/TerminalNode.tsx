@@ -3928,7 +3928,8 @@ export function TerminalNode({
     if (r.ok) applyManualTitle(r.message)
   }
 
-  // Selecting a node clears its unread badge.
+  // Read state is separate from workflow state: selection clears the unread notification, while
+  // an agent whose turn is done remains "Waiting for your response" until its next prompt starts.
   useEffect(() => {
     if (selected) useAgentStatus.getState().clearUnread(id)
   }, [selected, id])
