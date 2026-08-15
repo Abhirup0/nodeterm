@@ -7552,7 +7552,10 @@ export function Canvas() {
           const stuckRescueSkip = e.idle === true && cs.byId[e.nodeId]?.state !== 'working'
           // `pendingId` (deterministic approvals) rides a `blocked` event; the store keeps it only
           // while blocked so the header's Approve/Deny buttons appear + vanish with the state.
-          if (e.state && !stuckRescueSkip) cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId)
+          // `e.verified` is the identity evidence for this very transition (hook-server labels it);
+          // it was in scope here and dropped on the floor before the store had a field for it.
+          if (e.state && !stuckRescueSkip)
+            cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId, e.verified)
           if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
           if (e.newTurn && e.task) {
             // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language
