@@ -137,6 +137,12 @@ import {
   decideExternalChange,
   mergeIncomingNodes
 } from '../lib/externalChange'
+import {
+  CONTENT_ADD_ITEMS,
+  contentAddItemsToMenuItems,
+  type AddHandlers
+} from '../lib/addMenuSpec'
+import { transferConversationItems } from '../lib/transferItems'
 import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
@@ -7481,35 +7487,36 @@ export function Canvas() {
     [renameSession]
   )
 
+  // The sessions-sidebar project-header "+": opens the SAME content menu the pane right-click
+  // uses (terminal + agents + browser/web/sticky/dino/file/worktree), so adding to a project from
+  // the sidebar is no longer a bare-terminal-only affordance that lags the canvas menu. For a
+  // non-active project, switch FIRST (synchronous) so the menu's account rows resolve against the
+  // clicked project; the node is only added on the user's later click, well after that project's
+  // canvas has loaded, so there is no load-race.
   const addToProject = useCallback(
     (projectId: string, e?: { clientX: number; clientY: number }) => {
-      // The sessions-sidebar "+" used to open a bare terminal. It now opens the SAME agent menu
-      // the canvas right-click uses (with "New terminal" kept on top so the old behavior is a
-      // deliberate pick, not lost) — so adding to a project picks an agent instead of always a
-      // shell. For a non-active project, switch FIRST (synchronous) so the menu's account rows
-      // resolve against the clicked project; the node is only added on the user's later click,
-      // well after the project's canvas has loaded, so there is no load-race.
+      // The sessions-sidebar "+" used to open a bare terminal. It now opens the SAME content menu
+      // the pane right-click uses (terminal + agents + browser/web/sticky/dino/file/worktree), so
+      // adding to a project from the sidebar is no longer a bare-terminal-only affordance that
+      // lags the canvas menu. For a non-active project, switch FIRST (synchronous) so the menu's
+      // account rows resolve against the clicked project; the node is only added on the user's
+      // later click, well after that project's canvas has loaded, so there is no load-race.
       if (projectId !== activeProjectId) switchProject(projectId)
       const pos = e ? { x: e.clientX, y: e.clientY } : { x: 80, y: 120 }
+      const [terminalItem, ...restContent] = contentAddItemsToMenuItems(
+        CONTENT_ADD_ITEMS,
+        addHandlers,
+        addCtx,
+        undefined,
+        pos
+      )
       setMenu({
         x: pos.x,
         y: pos.y,
-        items: [
-          {
-            label: 'New terminal',
-            icon: <IconTerminal />,
-            onClick: () => {
-              // For a non-active project the switch happened above; addTerminal targets the
-              // active project, which is now this one.
-              addTerminal()
-            }
-          },
-          { type: 'separator' },
-          ...agentCreationItems()
-        ]
+        items: [terminalItem, ...agentCreationItems(), ...restContent]
       })
     },
-    [activeProjectId, addTerminal, switchProject, agentCreationItems]
+    [activeProjectId, switchProject, addHandlers, addCtx, agentCreationItems]
   )
 
   // Sidebar drag-to-group: reparent a session into a canvas group (groupId) or out (null).
@@ -9358,6 +9365,10 @@ export function Canvas() {
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
+        onAddBrowser={() => addBrowser()}
+        onAddWeb={() => void addWebView()}
+        onNewFile={() => void newProjectFile()}
+        onAddWorktree={() => openWorktreeDialog(null)}
         onSave={persist}
         onFitView={fitAll}
         onZoomIn={() => zoomIn({ duration: 150 })}
