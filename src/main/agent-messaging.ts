@@ -36,7 +36,7 @@ import {
   type AgentMessageOutcome,
   type NotPermittedReason
 } from '../core/agents/agent-message-decide'
-import { checkFlowLimits, noteNewTurn, noteSent } from '../core/agents/agent-message-flow'
+import { noteNewTurn, noteSent, reserveFlow } from '../core/agents/agent-message-flow'
 import { recordDelivery } from '../core/agents/agent-message-trace'
 import { resolveDeliveryScope, scopeRefusal } from '../core/agents/agent-message-scope'
 import { nodeTokenFilePresent } from '../core/agents/node-token-files'
@@ -297,11 +297,19 @@ export async function deliverFromControl(
   if (!notPermitted && (!projectId || !deps.messagingEnabled(projectId)))
     notPermitted = 'switch-off'
 
-  // Flow control (PR #208): a pure read here; only a write that reaches the pane records.
+  // Flow control (PR #208), taken as a RESERVATION rather than a pure read: `checkFlowLimits`
+  // followed later by `noteSent` is not atomic, and N parallel sends to N distinct targets would
+  // all pass the fan-out cap before any of them recorded — the cap would hold only for a sender
+  // polite enough to send sequentially. `reserveFlow` checks and holds in one synchronous step;
+  // the hold is released in the `finally` below, so a delivery that never reaches the pane still
+  // costs nothing (noteSent's own contract). The parallel-sends test in agent-messaging.test.ts
+  // is the one that fails if this goes back to a bare check.
   let retryAfterMs: number | undefined
+  let reservation: { release(): void } | null = null
   if (!notPermitted) {
-    const flow = checkFlowLimits(req.sourceNodeId, req.targetNodeId, now())
+    const flow = reserveFlow(req.sourceNodeId, req.targetNodeId, now())
     if (!flow.ok) retryAfterMs = flow.outcome.retryAfterMs
+    else reservation = flow
   }
 
   const owner = projects.find((p) => p.id === projectId)
@@ -338,29 +346,35 @@ export async function deliverFromControl(
     subscribeEvents: deps.subscribeReceipts ?? subscribeBus
   }
 
-  const outcome = await deliverAgentMessage(
-    {
-      targetNodeId: req.targetNodeId,
-      sourceNodeId: req.sourceNodeId,
-      // The from-line is composed HERE from the store's title (oneLine'd inside buildEnvelope);
-      // the renderer never supplies a string that ends up inside the frame.
-      sourceTitle: sourceNode?.title || req.sourceNodeId,
-      // notify's body is APP-OWNED (#98): substituted here, in main, whatever the request
-      // carried — the renderer's `--text` refusal is UX, this line is the boundary. The test
-      // sends a hostile body over the IPC shape and asserts it never reaches the envelope.
-      body: req.verb === 'notify' ? NOTIFY_BODY : req.body,
-      targetAgentId,
-      targetBinaries: binariesFor(targetAgentId, deps.customAgents()),
-      targetIsRemote: deps.isRemoteNode(req.targetNodeId),
-      notPermitted,
-      retryAfterMs,
-      targetLive: deps.hasLiveSession(req.targetNodeId)
-    },
-    delivery
-  )
+  try {
+    const outcome = await deliverAgentMessage(
+      {
+        targetNodeId: req.targetNodeId,
+        sourceNodeId: req.sourceNodeId,
+        // The from-line is composed HERE from the store's title (oneLine'd inside buildEnvelope);
+        // the renderer never supplies a string that ends up inside the frame.
+        sourceTitle: sourceNode?.title || req.sourceNodeId,
+        // notify's body is APP-OWNED (#98): substituted here, in main, whatever the request
+        // carried — the renderer's `--text` refusal is UX, this line is the boundary. The test
+        // sends a hostile body over the IPC shape and asserts it never reaches the envelope.
+        body: req.verb === 'notify' ? NOTIFY_BODY : req.body,
+        targetAgentId,
+        targetBinaries: binariesFor(targetAgentId, deps.customAgents()),
+        targetIsRemote: deps.isRemoteNode(req.targetNodeId),
+        notPermitted,
+        retryAfterMs,
+        targetLive: deps.hasLiveSession(req.targetNodeId)
+      },
+      delivery
+    )
 
-  if (WROTE.has(outcome.kind)) noteSent(req.sourceNodeId, req.targetNodeId, now())
-  return answer(outcome)
+    // No await between the record and the release: the recorded send replaces the hold in the
+    // same tick, so no concurrent reservation can slip through the seam between them.
+    if (WROTE.has(outcome.kind)) noteSent(req.sourceNodeId, req.targetNodeId, now())
+    return answer(outcome)
+  } finally {
+    reservation?.release()
+  }
 }
 
 /** Guard for the IPC boundary: the request came over a channel, so its shape is asserted here. */
