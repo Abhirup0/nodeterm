@@ -2906,7 +2906,9 @@ export function TerminalNode({
         // core/settings store, so a local gateway must never be pushed into one.
         if (targetModel) {
           if (!selectedModel || session.source === 'relay') return 'not-eligible'
-          if (!(await api.pty.terminateForeground(id))) return 'not-eligible'
+          // Identity-gated: core SIGTERMs the foreground group ONLY if `target`'s harness still
+          // owns it, so a stale model-switch menu can never kill vim or a build in this pane.
+          if (!(await api.pty.terminateForeground(id, target))) return 'not-eligible'
           transport.recycle(id)
           updateNodeData(id, (node) => ({
             agentId: target,

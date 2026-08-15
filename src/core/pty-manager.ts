@@ -44,7 +44,7 @@ import {
   shouldRecordOwnership
 } from './agents/pane-ownership'
 import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './agents/pane-owner'
-import type { PaneOwner } from '../shared/agents/pane-owner-predicate'
+import { binariesFor, isAgentPane, type PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
 import {
   primePtyCeiling,
@@ -1412,8 +1412,8 @@ export class PtyManager {
     )
     platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
     platform().handle(IPC.ptyPaneCommand, (persistKey: string) => this.paneCommand(persistKey))
-    platform().handle(IPC.ptyTerminateForeground, (persistKey: string) =>
-      this.terminateForeground(persistKey)
+    platform().handle(IPC.ptyTerminateForeground, (persistKey: string, expectedAgentId?: string) =>
+      this.terminateForeground(persistKey, expectedAgentId)
     )
   }
 
@@ -3112,10 +3112,28 @@ export class PtyManager {
    * Terminate the foreground agent process group in a node's tmux pane without writing anything
    * into the terminal. This is intentionally narrower than recycling the session: model switching
    * first stops the harness by PID, then uses the existing recycle path to rebuild the shell with
-   * current gateway environment. A shell-owned pane is always refused.
+   * current gateway environment.
+   *
+   * `expectedAgentId` is the IDENTITY GATE. Refusing a shell (the old contract) is not enough: a
+   * model switch fires from a possibly-stale menu, and hours after the agent exited the pane may
+   * belong to vim, a build, or an ssh the user started — none of which should be SIGTERM'd. When an
+   * expected id is given, the foreground group's full argv is read (`paneOwner`) and the kill
+   * happens ONLY when `isAgentPane` confirms the expected harness owns the group; `not-agent` and
+   * `unknown` both refuse (fail-closed — we are about to send a signal). Omitting the id preserves
+   * the legacy shell-only guard for any caller that has no agent to assert.
    */
-  async terminateForeground(persistKey: string): Promise<boolean> {
+  async terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean> {
     if (typeof persistKey !== 'string' || !persistKey || persistKey.length > REF_MAX_LEN) return false
+    // Identity gate: prove the expected harness owns the foreground group before signalling it.
+    // `paneOwner` reads the full argv (local or over the project's ControlMaster) and is null on
+    // any uncertainty, which `isAgentPane` maps to `unknown` → refuse.
+    if (expectedAgentId) {
+      const owner = await this.paneOwner(persistKey)
+      // Pass the custom-agent list so a `custom:<uuid>` harness is verifiable by its launchCmd
+      // binary instead of collapsing to `unknown` (which would fail-closed on every model switch).
+      const binaries = binariesFor(expectedAgentId, this.getSettings().customAgents)
+      if (isAgentPane(owner, expectedAgentId, binaries) !== 'agent') return false
+    }
     const target = sessionName(persistKey)
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
     try {
@@ -3150,6 +3168,18 @@ export class PtyManager {
       const processGroup = foregroundProcessGroup(pane, processTable.stdout)
       if (!processGroup) return false
       process.kill(-processGroup, 'SIGTERM')
+      // Grace: give the harness a window to flush session state (transcript, --resume id) before
+      // the caller recycles the session (tmux kill-session). Poll the group with signal 0 —
+      // ESRCH means it is gone — up to ~1.5s, then return regardless (the recycle is a kill either
+      // way; this only improves resume fidelity for an agent that exits promptly on SIGTERM).
+      for (let i = 0; i < 30; i++) {
+        try {
+          process.kill(-processGroup, 0)
+        } catch {
+          break // ESRCH: the group has exited
+        }
+        await new Promise((r) => setTimeout(r, 50))
+      }
       return true
     } catch {
       return false

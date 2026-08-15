@@ -654,9 +654,11 @@ export interface PtyApi {
    *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
    *  callers must read as "not observed", never as evidence of a particular command. */
   paneCommand(persistKey: string): Promise<string | null>
-  /** Terminate the foreground non-shell process group in a node's pane. Returns false when the
-   *  pane/process cannot be safely identified; it never kills the pane's login shell. */
-  terminateForeground(persistKey: string): Promise<boolean>
+  /** Terminate the foreground process group in a node's pane. Returns false when the pane/process
+   *  cannot be safely identified; it never kills the pane's login shell. When `expectedAgentId` is
+   *  given, the kill happens only if that harness actually owns the foreground group (argv-verified)
+   *  — so a stale menu can never SIGTERM vim or a build the user started in the pane. */
+  terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from the agent's own
    *  session store, resolved strictly by sessionId; null if unknown. Keeps a node title in sync with
    *  the `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.

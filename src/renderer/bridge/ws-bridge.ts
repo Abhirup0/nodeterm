@@ -237,8 +237,8 @@ export function buildRealApi(
     // shell yet" and gives up on its own deadline.
     paneCommand: (persistKey) =>
       client.request(IPC.ptyPaneCommand, persistKey).catch(() => null) as Promise<string | null>,
-    terminateForeground: (persistKey) =>
-      client.request(IPC.ptyTerminateForeground, persistKey).catch(() => false) as Promise<boolean>,
+    terminateForeground: (persistKey, expectedAgentId) =>
+      client.request(IPC.ptyTerminateForeground, persistKey, expectedAgentId).catch(() => false) as Promise<boolean>,
     // No server handler — the session-name poll degrades to no adopted name. A PRE-EXISTING gap,
     // and not any one agent's: `IPC.ptyReadSessionName` has never been registered server-side, so
     // claude's, grok's and gemini's read legs are equally stubbed here (the write leg works on both

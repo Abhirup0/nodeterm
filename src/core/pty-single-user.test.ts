@@ -479,9 +479,18 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     await create(80, 24)
     paneProcessReply = '33293|codex\n'
     processGroupReply = '33319\n'
-    const signal = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    // sig 0 is the post-SIGTERM grace probe: ESRCH means the group has already exited, so the
+    // bounded wait breaks on its first iteration (no fake-timer setTimeout is reached).
+    const signal = vi
+      .spyOn(process, 'kill')
+      .mockImplementation(((_pid: number, sig?: string | number) => {
+        if (sig === 0) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' })
+        return true
+      }) as typeof process.kill)
     execCalls.length = 0
 
+    // No expectedAgentId here — the legacy shell-only guard path (an SSH/codex node's own
+    // model switch passes its id; this asserts the base kill mechanism stays intact).
     await expect(fake.handlers[IPC.ptyTerminateForeground]('solo-1')).resolves.toBe(true)
 
     expect(signal).toHaveBeenCalledWith(-33319, 'SIGTERM')
