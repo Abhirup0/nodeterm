@@ -137,6 +137,7 @@ import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
+import { useTerminalFocus } from '../state/terminalFocus'
 import { useProjects } from '../state/projects'
 import { useViewMode, viewFor } from '../state/viewMode'
 import { useSshConn } from '../state/sshConn'
@@ -3827,6 +3828,23 @@ export function TerminalNode({
     useAgentStatus.getState().clearUnread(id)
     presence.reportFocus(id)
   }
+
+  // "Go to node" focus (a sidebar session click, a notification tap): the canvas frames the node
+  // but does not move keyboard focus into it — xterm only takes the keyboard on a hover-dwell or a
+  // click (the pan/hover guard). Without this the first keystroke after a sidebar click went
+  // nowhere until the user clicked or hovered the terminal. `enterNow()` takes the keyboard now,
+  // skipping the dwell. One-shot: the request is cleared on consume so a later remount cannot
+  // re-grab focus for a node the user has since left.
+  const focusReq = useTerminalFocus((s) => (s.nodeId === id ? s.nonce : 0))
+  const lastFocusReqRef = useRef(0)
+  useEffect(() => {
+    if (focusReq === 0 || focusReq === lastFocusReqRef.current) return
+    lastFocusReqRef.current = focusReq
+    useTerminalFocus.setState({ nodeId: null })
+    enterNow()
+    // enterNow closes over live refs/setters; re-running on its identity would fire spuriously.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusReq])
   const onBodyEnter = () => {
     if (dwellRef.current) clearTimeout(dwellRef.current)
     const enter = () => {
