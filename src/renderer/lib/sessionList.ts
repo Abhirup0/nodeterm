@@ -37,6 +37,43 @@ const STATE_LABEL: Record<StatusKind, string> = {
   unknown: 'Unknown'
 }
 
+/**
+ * The status-MODE section a row falls in. Distinct from `StatusKind` (which drives the project-mode
+ * dot/glyph) because a section also reflects the `unread` mark: a finished turn you have not looked
+ * at gets its own **Unread** section so it is easy to find, separate from the read-and-idle ones.
+ */
+export type StatusGroup = 'attention' | 'unread' | 'working' | 'idle' | 'unknown'
+
+/**
+ * Section display order in status-grouping mode: what needs you first, then what is new for you,
+ * then what is live, then the settled ones. Unread sits high (second) so unlooked-at results are
+ * prominent even though, by membership priority, a still-RUNNING session stays under Running.
+ */
+const STATUS_GROUP_ORDER: StatusGroup[] = ['attention', 'unread', 'working', 'idle', 'unknown']
+
+const STATUS_GROUP_LABEL: Record<StatusGroup, string> = {
+  attention: 'Need attention',
+  unread: 'Unread',
+  working: 'Running',
+  idle: 'Idle',
+  unknown: 'Unknown'
+}
+
+/**
+ * Bucket a row for the status-mode sections. Membership priority (first match wins), which is NOT
+ * the display order: `attention` (you must act) → `working` (a live turn is Running, not Unread,
+ * matching the project-mode glyph) → `unread` (finished/settled but unlooked-at) → `idle` (a
+ * finished turn already seen) → `unknown` (no hook signal). So a finished-and-unread session lands
+ * in Unread, a working one stays in Running even if flagged, and a read-done one is Idle.
+ */
+export function sessionStatusGroup(kind: StatusKind, unread: boolean): StatusGroup {
+  if (kind === 'attention') return 'attention'
+  if (kind === 'working') return 'working'
+  if (unread) return 'unread'
+  if (kind === 'done') return 'idle'
+  return 'unknown'
+}
+
 /** Disclosure key for a project row in the sessions tree. */
 export function projectCollapseKey(projectId: string): string {
   return `project:${projectId}`
@@ -46,13 +83,6 @@ export function projectCollapseKey(projectId: string): string {
 export function groupCollapseKey(projectId: string, groupId: string): string {
   return `project:${projectId}:group:${groupId}`
 }
-
-/**
- * Status section order when the sidebar is grouped by status. Anything needing you floats to the
- * top; working sinks to the bottom (a turn in flight is the least urgent to revisit). Unknown sits
- * between them: there is no current hook signal on which to infer a workflow state.
- */
-const STATUS_ORDER: StatusKind[] = ['attention', 'done', 'unknown', 'working']
 
 /**
  * Whether a project row is collapsed in the sessions sidebar. `settings.sidebarAutoCollapse`
@@ -365,10 +395,10 @@ export function buildSessionList(
   return needle ? groups.filter((g) => g.groups.length > 0 || g.ungrouped.length > 0) : groups
 }
 
-/** A status section in status-grouping mode: one live status kind and the sessions in it,
- *  flattened across all (local-core) projects. Order is fixed by STATUS_ORDER. */
+/** A status section in status-grouping mode: one status group and the sessions in it, flattened
+ *  across all (local-core) projects. Order is fixed by STATUS_GROUP_ORDER. */
 export interface StatusSection {
-  kind: StatusKind
+  kind: StatusGroup
   label: string
   rows: SessionRowVM[]
 }
@@ -452,13 +482,15 @@ export function buildStatusList(
     }
   }
 
-  // Bucket by status, then newest state transition first. An absent timestamp is genuinely unknown
-  // and sorts last; project store-order + title provide a deterministic tie-breaker.
-  const byStatus = new Map<StatusKind, { row: SessionRowVM; pidx: number }[]>()
+  // Bucket by status GROUP (unread-aware), then newest state transition first. An absent timestamp
+  // is genuinely unknown and sorts last; project store-order + title provide a deterministic
+  // tie-breaker.
+  const byStatus = new Map<StatusGroup, { row: SessionRowVM; pidx: number }[]>()
   for (const { row, pidx } of tagged) {
-    const list = byStatus.get(row.statusKind)
+    const group = sessionStatusGroup(row.statusKind, row.unread)
+    const list = byStatus.get(group)
     if (list) list.push({ row, pidx })
-    else byStatus.set(row.statusKind, [{ row, pidx }])
+    else byStatus.set(group, [{ row, pidx }])
   }
   for (const list of byStatus.values()) {
     list.sort((a, b) => {
@@ -471,9 +503,9 @@ export function buildStatusList(
 
   // Every section is always present. Stable headers make the grouping legible even when a bucket
   // is temporarily empty and prevent the sidebar from jumping as sessions move between states.
-  return STATUS_ORDER.map((kind) => ({
+  return STATUS_GROUP_ORDER.map((kind) => ({
     kind,
-    label: STATE_LABEL[kind],
+    label: STATUS_GROUP_LABEL[kind],
     rows: (byStatus.get(kind) ?? []).map((t) => t.row)
   }))
 }
