@@ -3308,9 +3308,9 @@ export function TerminalNode({
       // project switch every node unmounts, and an unconditional clear could undo the focus the
       // node we just moved into already published.
       presence.releaseFocus(id)
-      // (The live agent state + subagent fan-out are cleared by the UNMOUNT-only effect below, not
-      // here: this cleanup also runs for a respawn and for an offscreen dispose, neither of which
-      // is a departure. See that effect for the whole argument.)
+      // Subagent render overrides are cleared by the UNMOUNT-only effect below, not here: this
+      // cleanup also runs for a respawn and for an offscreen dispose. Live agent state survives
+      // both this cleanup and a project-switch unmount; hooks and explicit deletion own it.
       termRef.current = null
       fitRef.current = null
       searchAddonRef.current = null
@@ -3587,31 +3587,14 @@ export function TerminalNode({
   }, [termKey])
 
   /**
-   * DEPARTURE-only bookkeeping: the node is leaving the canvas (project switch, or deletion).
-   *
-   * This lives in its own unmount-scoped effect rather than in the lifecycle cleanup because that
-   * cleanup runs for three different events — a park, a respawn, and now an offscreen dispose — and
-   * only the first of those is a departure. Clearing the live state on an offscreen dispose drops
-   * the RUNNING / NEEDS-YOU badge and the subagent fan-out off a node the user can still SEE (its
-   * kanban card most of all, which reads the same store) for a node that never went anywhere. And
-   * guarding the clear inside that cleanup instead is worse still: a node that is DOWN registers no
-   * cleanup at all, so an unmount that follows a dispose would clear nothing, ever — a leaked store
-   * entry per node, in a branch about memory.
-   *
-   * The RESPAWN case (worktree move, Refresh) changes with it, and is correct for the same reason:
-   * that node did not depart either, and its session comes back within seconds — reattached or
-   * cold-restored — at which point the agent's own hooks re-fire and Canvas's `agent:status`
-   * listener overwrites the state (a SessionStart is what clears it). Clearing it here would only
-   * blank the badge for the gap in between, on a node the user is looking at.
-   *
-   * What is NOT cleared here is as deliberate as it was before: the node's PERSISTED status
-   * (unread / session / sessionId) stays, because a project switch is a detach and the context
-   * meter looks that sessionId up on remount. Real deletion drops the whole entry in
-   * `Canvas.deleteNodes`.
+   * Remove transient subagent render overrides when this React node leaves the active canvas.
+   * Live agent status deliberately survives the unmount: selecting a session in another project
+   * swaps the whole active canvas, but the session we left is still alive and must remain Running
+   * or Waiting in the cross-project sidebar. Real node deletion removes the status explicitly in
+   * `Canvas.deleteNodes`; a later hook/session event owns every other state transition.
    */
   useEffect(
     () => () => {
-      useAgentStatus.getState().setState(id, undefined)
       useAgentNodes.getState().clearForParent(id)
     },
     [id]

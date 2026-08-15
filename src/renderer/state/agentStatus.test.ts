@@ -82,6 +82,22 @@ describe('stale-working sweeper', () => {
   })
 })
 
+describe('focus tracking', () => {
+  it('switches the watched node without changing either session state', () => {
+    const left = nid()
+    const right = nid()
+    const status = useAgentStatus.getState()
+    status.setState(left, 'done', 'claude')
+    status.setState(right, 'working', 'claude')
+    status.setActive(left, true)
+    status.setActive(right, true)
+
+    expect(useAgentStatus.getState().activeId).toBe(right)
+    expect(useAgentStatus.getState().byId[left].state).toBe('done')
+    expect(useAgentStatus.getState().byId[right].state).toBe('working')
+  })
+})
+
 describe('interrupt inference (Esc/Ctrl-C with no final hook)', () => {
   it('flips a still-working node to done after the settle window', () => {
     const id = nid()
