@@ -72,6 +72,14 @@ describe('needsLiveCanvas', () => {
       expect(needsLiveCanvas(verb)).toBe(true)
     }
   })
+
+  it('is false for send and reply — a delivery must never travel the camera', () => {
+    // Travelling to the target's project would hijack the human's view on a background agent's
+    // say-so, and the `setActive` on the way would clear that node's unread badge — a message
+    // silently erasing the signal a human relies on. A delivery goes to a pane; it needs no canvas.
+    expect(needsLiveCanvas('send')).toBe(false)
+    expect(needsLiveCanvas('reply')).toBe(false)
+  })
 })
 
 describe('sourceIsControlCapable', () => {

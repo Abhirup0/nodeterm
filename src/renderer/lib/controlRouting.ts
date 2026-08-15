@@ -66,13 +66,32 @@ export function routeControlSource(
 }
 
 /**
+ * Verbs that are answered from the SERIALIZED store instead of the live canvas.
+ *
+ * `list` reads names only, and it is the verb an agent calls most — answering it out of the store
+ * keeps a background agent's polling from yanking the user's view to another project tab on every
+ * call.
+ *
+ * `send`/`reply` are here for a stronger reason than politeness. A delivery goes to a tmux PANE,
+ * not to a canvas, so travelling to the target's project buys nothing — and it costs twice: it
+ * hijacks the human's view on a background agent's say-so, and the `setActive` on the way clears
+ * that node's unread badge, so a message silently erases the signal a human relies on. The target
+ * is therefore resolved off the store (`resolveDeliveryScope`), which is also the only source of
+ * truth that can see nodes outside the active tab at all.
+ *
+ * INERT AS OF THIS COMMIT: neither verb is in `ControlVerb` yet, so `parseControlRequest` refuses
+ * both before any of this is reached (asserted by running it, in `canvas-control-core.test.ts`).
+ * The declaration lands first so the routing decision is made once, here, rather than inside the
+ * dispatch that Task 5.1 adds.
+ */
+const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set(['list', 'send', 'reply'])
+
+/**
  * Does this verb have to run against the LIVE canvas? Everything that creates, moves, writes to or
- * closes a node does. `list` reads names only, and it is the verb an agent calls most — answering
- * it out of the store keeps a background agent's polling from yanking the user's view to another
- * project tab on every call.
+ * closes a node does.
  */
 export function needsLiveCanvas(verb: string): boolean {
-  return verb !== 'list'
+  return !STORE_ANSWERED_VERBS.has(verb)
 }
 
 /**
