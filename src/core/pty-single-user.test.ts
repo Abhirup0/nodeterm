@@ -80,6 +80,8 @@ vi.mock('node-pty', () => ({
  */
 const execCalls: Array<{ file: string; args: string[] }> = []
 const liveTmuxSessions = new Set<string>()
+let paneProcessReply = ''
+let processGroupReply = ''
 
 vi.mock('child_process', () => {
   type Cb = (err: Error | null, res?: { stdout: string; stderr: string }) => void
@@ -98,6 +100,10 @@ vi.mock('child_process', () => {
       ok('__NT_PATH_START__/usr/bin:/bin__NT_PATH_END__')
     } else if (args.includes('capture-pane')) {
       ok('PANE SNAPSHOT')
+    } else if (args.includes('#{pane_pid}|#{pane_current_command}')) {
+      ok(paneProcessReply)
+    } else if (file === 'ps' && args.includes('tpgid=')) {
+      ok(processGroupReply)
     } else {
       ok('')
     }
@@ -132,6 +138,8 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     spawnArgs.length = 0
     execCalls.length = 0
     liveTmuxSessions.clear()
+    paneProcessReply = ''
+    processGroupReply = ''
     userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-solo-'))
     fake = fakePlatform({ userDataDir })
     initPlatform(fake)
@@ -139,6 +147,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
   })
   afterEach(() => {
     vi.useRealTimers()
+    vi.restoreAllMocks()
     resetPlatformForTests()
     // BEST EFFORT, and it must stay that way. This races a write it cannot wait for: the scrollback
     // snapshot is fired and forgotten by design (`snapshotScrollback` is best-effort and nothing
@@ -471,6 +480,33 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     kill(sessionId)
     expect(spawned[0].killed).toBe(true) // the pty (tmux client) is released
     expect(tmuxCalls('kill-session')).toEqual([]) // the session keeps running
+  })
+
+  it('terminates an agent foreground process group without typing into its pane', async () => {
+    await tmuxManager()
+    await create(80, 24)
+    paneProcessReply = '33293|codex\n'
+    processGroupReply = '33319\n'
+    const signal = vi.spyOn(process, 'kill').mockImplementation(() => true)
+    execCalls.length = 0
+
+    await expect(fake.handlers[IPC.ptyTerminateForeground]('solo-1')).resolves.toBe(true)
+
+    expect(signal).toHaveBeenCalledWith(-33319, 'SIGTERM')
+    expect(tmuxCalls('send-keys')).toEqual([])
+    expect(execCalls.some((call) => call.file === 'ps' && call.args.includes('tpgid='))).toBe(true)
+  })
+
+  it('refuses to terminate the pane login shell', async () => {
+    await tmuxManager()
+    await create(80, 24)
+    paneProcessReply = '33293|-zsh\n'
+    processGroupReply = '33293\n'
+    const signal = vi.spyOn(process, 'kill').mockImplementation(() => true)
+
+    await expect(fake.handlers[IPC.ptyTerminateForeground]('solo-1')).resolves.toBe(false)
+
+    expect(signal).not.toHaveBeenCalled()
   })
 
   it('the detach path still snapshots the scrollback (cold restore after a reboot)', async () => {

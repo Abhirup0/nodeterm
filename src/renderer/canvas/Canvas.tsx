@@ -4664,12 +4664,10 @@ export function Canvas() {
     [setNodes]
   )
 
-  // Restart ONE agent CLI in place: quit it and relaunch it with the provider's own `--resume`, so
-  // a newly released model shows up in its model list without losing the conversation. The node's
-  // registered closure owns the whole choreography (and re-checks eligibility + liveness at call
-  // time, so a stale menu cannot force a restart onto a session that just went busy); all that is
-  // left here is telling the user how it went. Up to ~6s of exit polling plus the echo-verified
-  // resume line, hence the await before the notice.
+  // Restart ONE agent CLI while preserving its provider session. Ordinary restart/reopen asks the
+  // harness to exit and types its resume command; model switching terminates the foreground agent
+  // process and rebuilds the tmux session so gateway env is re-applied. The node closure owns that
+  // distinction and re-checks eligibility/liveness at call time; this layer reports the outcome.
   const restartAgentNode = useCallback(async (
     nodeId: string,
     targetAgentId?: AgentId,
@@ -4726,7 +4724,7 @@ export function Canvas() {
           useSettings.getState().settings.customAgents.find((c) => c.id === targetAgentId)?.label ??
           targetAgentId)
     // 'info' fades itself out; anything that did NOT restart is left on screen to be read and
-    // dismissed — the pane is untouched either way (nothing is ever killed).
+    // dismissed.
     setNotice(
       outcome === 'restarted'
         ? {

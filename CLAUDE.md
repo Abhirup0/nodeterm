@@ -674,20 +674,31 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   **`docs/grok-agent.md`**, **`docs/gemini-agent.md`**, **`docs/copilot-agent.md`** (there is none for codex — its approval mapping
   and every value's reasoning live in `src/shared/agents/approval-mode.ts`);
   the distilled rules are **Adding a new agent** at the end of this section.
-- **Model gateway / switcher** — `settings.modelGateway` stores one Bifrost-compatible root +
-  virtual key; `shared/agents/model-gateway.ts` is the ONE mapping from a base harness to derived
-  routes, env vars, compatible models and safely quoted model flags. It derives `/v1/models`,
-  `/openai/v1` and `/anthropic`; discovery runs in core (`agent:discover-models`) so browser CORS
-  cannot block the Server Edition and the key never enters a terminal command. Support is a
+- **Model gateway / switcher** — `settings.modelGateway` stores one gateway root + a NON-SECRET
+  credential reference: `${env:VAR}` for environment mode or
+  `${secret:model-gateway-api-key}` for a literal held by `ModelGatewayCredentialService`. Desktop
+  literal keys reuse the GitHub token store's safeStorage encryption / 0600 fallback; Server
+  Edition uses the same generic 0600 atomic store. Legacy plaintext settings migrate only after
+  the secret write succeeds. `shared/agents/model-gateway.ts` is the ONE mapping from a base
+  harness to derived routes, env vars, compatible models and safely quoted model flags. Env
+  expansion reuses `shared/agents/expansion.ts` and happens only in core against the host process
+  environment; an unset reference fails closed instead of sending a token or partial credential.
+  Discovery at `/v1/models` is the **OpenAI Models API convention**, implemented by both LiteLLM
+  and Bifrost; the current `/openai/v1` + `/anthropic` launch-route derivation is Bifrost's layout,
+  not the source of the discovery convention. Discovery sends the standard bearer header plus
+  Bifrost's `x-bf-vk` header (needed by legacy, non-`sk-bf-` virtual keys), and runs in core
+  (`agent:discover-models`) so browser CORS cannot block the Server Edition and the key never
+  enters a terminal command. Support is a
   capability (`MODEL_SWITCH_CAPABLE = claude/codex/copilot`) resolved through `capabilityAgentId`, so a
   custom agent with a supported `baseAgent` inherits it automatically — the settings UI and canvas
-  menu carry no agent allowlist. A model switch cleanly exits the CLI and RECYCLES the tmux session
-  before cold-resume: an existing shell may predate the gateway setting, and tmux env changes do
-  not retroactively change that shell's environment. Recreating it guarantees the current URL/key
-  applies without typing a secret into the pane. Ordinary Restart stays in-place. Custom-agent env
-  is still merged last and may override the shared mapping. Desktop and Server Edition use the
-  same core handler; relay tabs deliberately do not apply this machine's gateway to another core.
-  Mobile needs a settings/model-picker surface before it can expose the feature.
+  menu carry no agent allowlist. A model switch SIGTERMs the pane's foreground non-shell process
+  group (never types `/exit`) and RECYCLES the tmux session before cold-resume: an existing shell may
+  predate the gateway setting, and tmux env changes do not retroactively change that shell's
+  environment. Recreating it guarantees the current URL/key applies without typing a secret into
+  the pane. Ordinary Restart stays in-place. Custom-agent env is still merged last and may override
+  the shared mapping. Desktop and Server Edition use the same core handler; relay tabs deliberately
+  do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
+  before it can expose the feature.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE` and `CANVAS_CONTROL_CAPABLE`; NOT in
   `USAGE_CAPABLE` / `CONTEXT_LINK_CAPABLE` / `SUBAGENT_CAPABLE` (each blocked on a fixture that needs a
@@ -1370,8 +1381,9 @@ principle. Per-agent write-ups: `docs/grok-agent.md`, `docs/gemini-agent.md`.
     command grammar as one unit instead of four copies that drift.
 18. **A model switch must refresh the shell environment without printing the key.** An already-live
     shell does not inherit a later `tmux set-environment`, and prefixing the resume line with
-    `KEY=secret` leaks it into the pane/history. Exit the idle CLI, recycle the persistent session,
-    and let cold restore resume with the new model under the newly injected environment.
+    `KEY=secret` leaks it into the pane/history. SIGTERM the pane's foreground non-shell process
+    group (a typed `/exit` can land in the agent composer as prompt text), recycle the persistent
+    session, and let cold restore resume with the new model under the newly injected environment.
 
 ## Session memory (the RAM pill + the per-session panel)
 

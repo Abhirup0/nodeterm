@@ -2887,21 +2887,15 @@ export function TerminalNode({
               target,
               getNode(id)?.data.agentModel as string | undefined
             )
-        // A model switch must rebuild the terminal session, not merely type a new command into its
-        // existing shell: URL/key env was fixed when that shell was spawned and may have been
-        // configured AFTER this node was created. Recycling after a clean CLI exit gives the new
-        // shell the current gateway env without ever exposing the key in the pane. Relay sessions
-        // belong to another core/settings store, so a local gateway must never be pushed into one.
+        // A model switch must rebuild the terminal session: URL/key env was fixed when that shell
+        // was spawned and may have been configured AFTER this node was created. Do not type the
+        // harness's slash-exit command here — an agent composer can treat it as prompt text. Core
+        // instead SIGTERMs the pane's foreground non-shell process group, then recycling gives the
+        // replacement shell the current gateway env. Relay sessions belong to another
+        // core/settings store, so a local gateway must never be pushed into one.
         if (targetModel) {
           if (!selectedModel || session.source === 'relay') return 'not-eligible'
-          const exited = await performExitPhase({
-            agentId: target,
-            sessionId: agentSessionId,
-            io: restartIo,
-            paneCommand: () => api.pty.paneCommand(id),
-            isLive: restartTarget
-          })
-          if (exited !== 'exited') return exited
+          if (!(await api.pty.terminateForeground(id))) return 'not-eligible'
           transport.recycle(id)
           updateNodeData(id, (node) => ({
             agentId: target,
