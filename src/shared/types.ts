@@ -468,6 +468,20 @@ export interface Project {
   /** Permission mode for new Claude TERMINAL (CLI) sessions in this project. SDK chat nodes are
    *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode
+  /**
+   * Per-project capability switch: agents may drive browser nodes THEY opened in this project.
+   * GIT-SHARED (rides .nodeterm/project.json) and therefore hostile input — read it ONLY through
+   * `projectCapabilityEnabled` (@shared/project-capabilities, strict `=== true`); the switch alone
+   * grants nothing (see that module's header for the two required halves).
+   */
+  agentBrowserControl?: boolean
+  /**
+   * MACHINE-LOCAL record that this machine's user has seen (or personally set) each capability
+   * switch — the "once per project ever" half of the clone notice. Persisted on
+   * `IndexEntryV3.capabilityAck`, NEVER written into the shared project file
+   * (workspace-files.test.ts / capability-notice tests pin that the file bytes are unchanged).
+   */
+  capabilityAck?: Partial<Record<import('./project-capabilities').ProjectCapability, true>>
   /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
   dinoHighScore?: number
   /** Kanban task board — shared via .nodeterm/project.json like nodes. */

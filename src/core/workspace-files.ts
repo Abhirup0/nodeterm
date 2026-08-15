@@ -8,6 +8,7 @@ import {
   type LocalNodeExecMap
 } from '../shared/node-exec'
 import type { BridgeLink, CanvasNodeState, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
+import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
 
 export const PROJECT_DIR = '.nodeterm'
 export const PROJECT_FILE = 'project.json'
@@ -66,6 +67,12 @@ export interface ProjectFileV1 {
    */
   defaultAccountId?: string
   defaultPermissionMode?: AgentPermissionMode
+  /**
+   * Per-project capability switch (see @shared/project-capabilities): deliberately IN the
+   * git-shared file — the team shares the policy — which is exactly why reads are strict
+   * (`readProjectCapabilities`, literal `true` only) and why the switch alone grants nothing.
+   */
+  agentBrowserControl?: boolean
   dinoHighScore?: number
   kanban?: ProjectKanban
 }
@@ -182,6 +189,10 @@ export function projectToFile(
     ...(p.bridges ? { bridges: p.bridges } : {}),
     ...(p.ropes ? { ropes: p.ropes } : {}),
     ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
+    // Strict-normalised (literal true only, known keys only) and omitted when off — an off
+    // capability adds no bytes to the committed file. `capabilityAck` is deliberately NOT here:
+    // the acknowledgment is machine-local (IndexEntryV3.capabilityAck) and must never travel.
+    ...projectCapabilityFields(p),
     ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {}),
     ...(p.kanban ? { kanban: p.kanban } : {})
   }
@@ -239,6 +250,9 @@ export function fileToProject(
     ...(f.ropes ? { ropes: f.ropes } : {}),
     ...(defaultAccountId ? { defaultAccountId } : {}),
     ...(f.defaultPermissionMode ? { defaultPermissionMode: f.defaultPermissionMode } : {}),
+    // The file is hostile input: only a literal `true` under a known key survives the read
+    // (readProjectCapabilities). `"true"`, 1, {} et al. vanish here, at the boundary.
+    ...readProjectCapabilities(f),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),

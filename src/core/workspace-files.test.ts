@@ -64,6 +64,28 @@ describe('projectToFile / fileToProject round-trip', () => {
   })
 })
 
+describe('per-project capability fields in the shared file', () => {
+  it('a capability round-trips through projectToFile/fileToProject, and a non-literal-true does not', () => {
+    const p = project({ agentBrowserControl: true })
+    expect(projectToFile(p, 1, 'ts').agentBrowserControl).toBe(true)
+    const baseFile = projectToFile(project(), 1, 'ts')
+    expect(fileToProject({ ...baseFile, agentBrowserControl: true }, { id: 'x' }).agentBrowserControl).toBe(
+      true
+    )
+    // A hand-edited/hostile file carrying "true" (the string), 1 or {} is OFF — the field simply
+    // does not survive the read. projectCapabilityEnabled would answer false either way; this pins
+    // that the sanitisation happens at the FILE boundary, not only at the consumption site.
+    expect(
+      fileToProject({ ...baseFile, agentBrowserControl: 'true' } as never, { id: 'x' }).agentBrowserControl
+    ).toBeUndefined()
+  })
+  it('an off capability adds no bytes to the committed file', () => {
+    const f = projectToFile(project(), 1, 'ts')
+    expect('agentBrowserControl' in f).toBe(false)
+    expect(serializeProjectFile(f)).not.toContain('agentBrowserControl')
+  })
+})
+
 describe('sameProjectContent', () => {
   it('ignores rev and savedAt, sees node changes', () => {
     const a = projectToFile(project(), 1, '2026-01-01T00:00:00.000Z')
