@@ -278,7 +278,11 @@ export function buildStubApi(): Omit<
       // env + unexpanded command so the preview degrades to "unavailable" rather than throwing.
       envSnapshot: () => Promise.resolve({}),
       previewCommand: U('agent.previewCommand'),
-      discoverModels: () => Promise.resolve({ models: [], error: 'Model discovery is unavailable.' })
+      discoverModels: () => Promise.resolve({ models: [], error: 'Model discovery is unavailable.' }),
+      gatewayCredentialStatus: () =>
+        Promise.resolve({ hasStoredKey: false, storage: 'unavailable' }),
+      saveGatewayCredential: U('agent.saveGatewayCredential'),
+      clearGatewayCredential: U('agent.clearGatewayCredential')
     },
     chat: {
       readTranscript: U('chat.readTranscript')

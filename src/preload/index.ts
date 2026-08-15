@@ -440,7 +440,11 @@ const api: NodeTerminalApi = {
   agent: {
     envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),
     previewCommand: (inputs) => ipcRenderer.invoke(IPC.agentPreviewCommand, inputs),
-    discoverModels: (settings) => ipcRenderer.invoke(IPC.agentDiscoverModels, settings)
+    discoverModels: (settings) => ipcRenderer.invoke(IPC.agentDiscoverModels, settings),
+    gatewayCredentialStatus: () => ipcRenderer.invoke(IPC.agentGatewayCredentialStatus),
+    saveGatewayCredential: (apiKey) =>
+      ipcRenderer.invoke(IPC.agentGatewayCredentialSave, apiKey),
+    clearGatewayCredential: () => ipcRenderer.invoke(IPC.agentGatewayCredentialClear)
   },
   chat: {
     readTranscript: (sessionId, cwd, accountId, nodeId) =>

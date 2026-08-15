@@ -1,12 +1,46 @@
 import { canSwitchModel, capabilityAgentId, type AgentId } from './config'
 import { shellSingleQuote } from '../shell-quote'
+import { expandEnvVars } from './expansion'
 
-/** One Bifrost-compatible gateway configured once for every supported agent harness. */
+/** One model gateway configured once for every supported agent harness. */
 export interface ModelGatewaySettings {
-  /** Gateway root, before Bifrost's `/openai`, `/anthropic`, and `/v1/models` routes. */
+  /** Gateway root, before the OpenAI-compatible `/v1/models` discovery route. */
   baseUrl: string
-  /** Bifrost virtual key (or an upstream-compatible bearer key). */
+  /** Literal legacy key, `${env:VAR}` reference, or `MODEL_GATEWAY_SECRET_REF`. */
   apiKey: string
+}
+
+/** Stored in settings.json when the literal credential lives in the shell's secret store. */
+export const MODEL_GATEWAY_SECRET_REF = '${secret:model-gateway-api-key}'
+
+export type ModelGatewayCredentialStorage = 'encrypted' | 'restricted-file' | 'unavailable'
+
+export interface ModelGatewayCredentialStatus {
+  hasStoredKey: boolean
+  storage: ModelGatewayCredentialStorage
+}
+
+export interface ModelGatewayEnvReference {
+  name: string
+}
+
+const EXACT_ENV_REFERENCE = /^\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$/
+
+/** Parse the JSON representation used by the environment-variable credential mode. */
+export function parseModelGatewayEnvReference(apiKey: string): ModelGatewayEnvReference | null {
+  const match = EXACT_ENV_REFERENCE.exec(apiKey.trim())
+  if (!match) return null
+  return { name: match[1] }
+}
+
+export type ModelGatewayCredentialKind = 'empty' | 'environment' | 'stored' | 'legacy-literal'
+
+export function modelGatewayCredentialKind(apiKey: string): ModelGatewayCredentialKind {
+  const value = apiKey.trim()
+  if (!value) return 'empty'
+  if (value === MODEL_GATEWAY_SECRET_REF) return 'stored'
+  if (parseModelGatewayEnvReference(value)) return 'environment'
+  return 'legacy-literal'
 }
 
 /** The intentionally small model shape shared across IPC and renderer state. */
@@ -28,9 +62,44 @@ export interface ModelGatewayRoutes {
 }
 
 /**
- * Derive every route from one user-entered root. Only http(s) URLs are accepted: this value is
- * later handed to `fetch` and agent CLIs, and settings.json is hand-editable. Invalid input
- * degrades to null (no discovery and no injected environment), never to a guessed endpoint.
+ * Resolve the stored gateway credential against the host process environment. Keeping this next
+ * to the route/env mapping gives model discovery and every supported harness the exact same
+ * `${env:VAR}` parser as custom agents, without ever resolving a secret in the renderer. Gateway
+ * credentials deliberately accept one exact reference rather than embedded/fallback expansion:
+ * a fallback API key would put the very secret this mode avoids back into settings.json.
+ *
+ * Whitespace around either a literal or expanded key is ignored. A caller must treat `missing` as
+ * a hard failure even when `value` is partly non-empty: sending a partial credential is both
+ * surprising and unsafe.
+ */
+export interface ModelGatewayApiKeyResolution {
+  value: string
+  missing: string[]
+  storedSecretMissing: boolean
+}
+
+export function resolveModelGatewayApiKey(
+  apiKey: string,
+  env: Record<string, string | undefined>,
+  storedSecret: string | null = null
+): ModelGatewayApiKeyResolution {
+  if (apiKey.trim() === MODEL_GATEWAY_SECRET_REF) {
+    const value = storedSecret?.trim() ?? ''
+    return { value, missing: [], storedSecretMissing: !value }
+  }
+  const reference = parseModelGatewayEnvReference(apiKey)
+  if (!reference) {
+    return { value: apiKey.trim(), missing: [], storedSecretMissing: false }
+  }
+  const result = expandEnvVars(apiKey.trim(), env)
+  return { value: result.value.trim(), missing: result.missing, storedSecretMissing: false }
+}
+
+/**
+ * Derive every route from one user-entered root. Discovery is the OpenAI Models API convention;
+ * the provider-specific paths are the Bifrost layout requested by the launch mapping. Only http(s)
+ * URLs are accepted: this value is later handed to `fetch` and agent CLIs, and settings.json is
+ * hand-editable. Invalid input degrades to null, never to a guessed endpoint.
  */
 export function modelGatewayRoutes(baseUrl: string): ModelGatewayRoutes | null {
   const raw = baseUrl.trim().replace(/\/+$/, '')
@@ -52,7 +121,7 @@ export function modelGatewayRoutes(baseUrl: string): ModelGatewayRoutes | null {
   }
 }
 
-/** Parse OpenAI/Bifrost model-list responses, dropping unsafe/empty/duplicate ids. */
+/** Parse OpenAI-compatible model-list responses, dropping unsafe/empty/duplicate ids. */
 export function parseGatewayModels(payload: unknown): GatewayModel[] {
   if (!payload || typeof payload !== 'object') return []
   const data = (payload as { data?: unknown }).data
@@ -80,10 +149,10 @@ export function parseGatewayModels(payload: unknown): GatewayModel[] {
 }
 
 /**
- * Models an agent can be offered. Bifrost intentionally routes provider-prefixed models through
- * each harness protocol (including non-Anthropic models through Claude Code's Anthropic route), so
- * filtering by provider here would hide supported modes. The capability is the only UI gate;
- * custom agents inherit it from their declared base harness.
+ * Models an agent can be offered. OpenAI-compatible gateways may expose provider-prefixed or
+ * administrator-defined aliases and route them through either harness protocol, so filtering by
+ * provider here would hide supported modes. The capability is the only UI gate; custom agents
+ * inherit it from their declared base harness.
  */
 export function modelsForAgent(models: GatewayModel[], agentId: AgentId): GatewayModel[] {
   if (!canSwitchModel(agentId)) return []
@@ -99,11 +168,21 @@ export function modelsForAgent(models: GatewayModel[], agentId: AgentId): Gatewa
 export function modelGatewayEnv(
   settings: ModelGatewaySettings,
   agentId: AgentId,
-  model?: string
+  model?: string,
+  processEnv: Record<string, string | undefined> = {},
+  storedSecret: string | null = null
 ): Record<string, string> {
   const routes = modelGatewayRoutes(settings.baseUrl)
-  const key = settings.apiKey.trim()
-  if (!routes || !key || !canSwitchModel(agentId)) return {}
+  const resolvedKey = resolveModelGatewayApiKey(settings.apiKey, processEnv, storedSecret)
+  const key = resolvedKey.value
+  if (
+    !routes ||
+    !key ||
+    resolvedKey.missing.length ||
+    resolvedKey.storedSecretMissing ||
+    !canSwitchModel(agentId)
+  )
+    return {}
   switch (capabilityAgentId(agentId)) {
     case 'claude':
       return {

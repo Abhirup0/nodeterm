@@ -53,8 +53,13 @@ export const IPC = {
    *  live preview in Settings → Custom agents. Payload: `LaunchInputs`; resolves
    *  `{ command, missingEnv }`. */
   agentPreviewCommand: 'agent:preview-command',
-  /** Renderer → core: fetch a Bifrost/OpenAI-compatible model catalogue without browser CORS. */
+  /** Renderer → core: fetch an OpenAI-compatible model catalogue without browser CORS. */
   agentDiscoverModels: 'agent:discover-models',
+  /** Renderer → core secret boundary for a literal model-gateway API key. The value is write-only;
+   *  status returns only presence + storage protection. */
+  agentGatewayCredentialStatus: 'agent:gateway-credential-status',
+  agentGatewayCredentialSave: 'agent:gateway-credential-save',
+  agentGatewayCredentialClear: 'agent:gateway-credential-clear',
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',

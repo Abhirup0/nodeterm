@@ -29,8 +29,13 @@ Primary references:
 
 ## Model gateway mapping
 
-The user enters one Bifrost-compatible root and virtual key. Discovery calls `<root>/v1/models`.
-For a selected Copilot model:
+The user enters one gateway root and chooses either an environment-variable name (persisted as
+`${env:VAR}`) or a write-only literal key held in protected local storage. Discovery calls the
+OpenAI-compatible `<root>/v1/models` endpoint—the OpenAI Models API convention adopted by both
+LiteLLM and Bifrost—and sends both bearer auth and Bifrost's `x-bf-vk` compatibility header.
+An unavailable credential fails before any authenticated request. The
+provider launch routes below are specifically the current Bifrost layout. For a selected Copilot
+model:
 
 - `anthropic/<model>` uses provider type `anthropic`, base URL `<root>/anthropic`, internal model id
   `<model>`, and wire model `anthropic/<model>`.

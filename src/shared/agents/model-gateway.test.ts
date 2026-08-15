@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  MODEL_GATEWAY_SECRET_REF,
   modelGatewayEnv,
+  modelGatewayCredentialKind,
   modelGatewayRoutes,
   modelsForAgent,
   parseGatewayModels,
+  parseModelGatewayEnvReference,
+  resolveModelGatewayApiKey,
   withAgentModel
 } from './model-gateway'
 import {
@@ -67,6 +71,61 @@ describe('agent mappings', () => {
       OPENAI_API_KEY: 'vk-secret'
     })
     expect(modelGatewayEnv(gateway, 'gemini')).toEqual({})
+  })
+
+  it('expands the API key from the host environment for every mapped harness', () => {
+    const envGateway = {
+      baseUrl: gateway.baseUrl,
+      apiKey: '${env:BIFROST_API_KEY}'
+    }
+    expect(resolveModelGatewayApiKey(envGateway.apiKey, { BIFROST_API_KEY: 'vk-env' })).toEqual({
+      value: 'vk-env',
+      missing: [],
+      storedSecretMissing: false
+    })
+    expect(modelGatewayEnv(envGateway, 'claude', undefined, { BIFROST_API_KEY: 'vk-env' })).toEqual({
+      ANTHROPIC_BASE_URL: 'https://bifrost.example.test/anthropic',
+      ANTHROPIC_AUTH_TOKEN: 'vk-env'
+    })
+  })
+
+  it('fails closed when a referenced key is unset', () => {
+    expect(
+      modelGatewayEnv(
+        { baseUrl: gateway.baseUrl, apiKey: '${env:BIFROST_API_KEY}' },
+        'codex'
+      )
+    ).toEqual({})
+  })
+
+  it('resolves a stored-key sentinel without exposing the secret in settings', () => {
+    const storedGateway = { baseUrl: gateway.baseUrl, apiKey: MODEL_GATEWAY_SECRET_REF }
+    expect(resolveModelGatewayApiKey(storedGateway.apiKey, {}, 'stored-key')).toEqual({
+      value: 'stored-key',
+      missing: [],
+      storedSecretMissing: false
+    })
+    expect(resolveModelGatewayApiKey(storedGateway.apiKey, {})).toEqual({
+      value: '',
+      missing: [],
+      storedSecretMissing: true
+    })
+    expect(modelGatewayEnv(storedGateway, 'codex', undefined, {}, 'stored-key')).toEqual({
+      OPENAI_BASE_URL: 'https://bifrost.example.test/openai/v1',
+      OPENAI_API_KEY: 'stored-key'
+    })
+    expect(modelGatewayEnv(storedGateway, 'codex')).toEqual({})
+  })
+
+  it('classifies the persisted credential forms for the settings UI and migration', () => {
+    expect(parseModelGatewayEnvReference('${env:BIFROST_VK}')).toEqual({
+      name: 'BIFROST_VK'
+    })
+    expect(parseModelGatewayEnvReference('${env:BIFROST_VK:fallback}')).toBeNull()
+    expect(modelGatewayCredentialKind('')).toBe('empty')
+    expect(modelGatewayCredentialKind('${env:BIFROST_VK}')).toBe('environment')
+    expect(modelGatewayCredentialKind(MODEL_GATEWAY_SECRET_REF)).toBe('stored')
+    expect(modelGatewayCredentialKind('legacy-key')).toBe('legacy-literal')
   })
 
   it('maps Copilot BYOK through the protocol route and separates model id from wire id', () => {

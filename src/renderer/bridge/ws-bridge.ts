@@ -297,6 +297,18 @@ export function buildRealApi(
     discoverModels: (gateway) =>
       client.request(IPC.agentDiscoverModels, gateway) as ReturnType<
         NodeTerminalApi['agent']['discoverModels']
+      >,
+    gatewayCredentialStatus: () =>
+      client.request(IPC.agentGatewayCredentialStatus) as ReturnType<
+        NodeTerminalApi['agent']['gatewayCredentialStatus']
+      >,
+    saveGatewayCredential: (apiKey) =>
+      client.request(IPC.agentGatewayCredentialSave, apiKey) as ReturnType<
+        NodeTerminalApi['agent']['saveGatewayCredential']
+      >,
+    clearGatewayCredential: () =>
+      client.request(IPC.agentGatewayCredentialClear) as ReturnType<
+        NodeTerminalApi['agent']['clearGatewayCredential']
       >
   }
 

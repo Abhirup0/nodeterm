@@ -653,6 +653,8 @@ export class PtyManager {
   private tmuxPath: string | null = null
   private confPath = ''
   private getSettings: () => Settings = () => DEFAULT_SETTINGS
+  /** Literal model-gateway key loaded by the shell's secret service during startup. */
+  private getModelGatewaySecret: () => string | null = () => null
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -1191,8 +1193,12 @@ export class PtyManager {
   }
 
   /** Must run after app is ready (needs userData path). */
-  init(getSettings: () => Settings): void {
+  init(
+    getSettings: () => Settings,
+    getModelGatewaySecret: () => string | null = () => null
+  ): void {
     this.getSettings = getSettings
+    this.getModelGatewaySecret = getModelGatewaySecret
     // Register the custom-id → baseAgent resolver so the capability predicates in
     // shared/agents/config (hasHooks, canResume, mintsSessionId, hasPermissionMode,
     // canControlCanvas, …) resolve a custom agent's INHERITED harness. config.ts takes only an id
@@ -2012,7 +2018,13 @@ export class PtyManager {
     // historical Claude fallback does not apply here: gateway access is an explicit agent
     // capability, not a terminal default.
     const gatewayEnv = options.agentId
-      ? modelGatewayEnv(this.getSettings().modelGateway, options.agentId, options.agentModel)
+      ? modelGatewayEnv(
+          this.getSettings().modelGateway,
+          options.agentId,
+          options.agentModel,
+          process.env as Record<string, string | undefined>,
+          this.getModelGatewaySecret()
+        )
       : {}
     if (!options.sshRemote) {
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v

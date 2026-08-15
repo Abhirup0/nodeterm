@@ -6,6 +6,7 @@ import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform, type FakePlatform } from './platform-fake'
 import { IPC } from '../shared/ipc'
 import { DEFAULT_SETTINGS } from '../shared/types'
+import { MODEL_GATEWAY_SECRET_REF } from '../shared/agents/model-gateway'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 
 /**
@@ -229,28 +230,39 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
   })
 
   it('injects the shared gateway into both the PTY and its tmux session environment', async () => {
-    const { PtyManager } = await import('./pty-manager')
-    const m = new PtyManager()
-    m.init(() => ({
-      ...DEFAULT_SETTINGS,
-      modelGateway: { baseUrl: 'https://bifrost.example.test', apiKey: 'vk-secret' }
-    }))
-    m.registerIpc()
+    const inherited = process.env.NODETERM_TEST_GATEWAY_KEY
+    process.env.NODETERM_TEST_GATEWAY_KEY = 'vk-secret'
+    try {
+      const { PtyManager } = await import('./pty-manager')
+      const m = new PtyManager()
+      m.init(() => ({
+        ...DEFAULT_SETTINGS,
+        modelGateway: {
+          baseUrl: 'https://bifrost.example.test',
+          apiKey: '${env:NODETERM_TEST_GATEWAY_KEY}'
+        }
+      }))
+      m.registerIpc()
 
-    await create(80, 24, 'gateway-node', { agentId: 'claude' })
+      await create(80, 24, 'gateway-node', { agentId: 'claude' })
 
-    expect(spawnArgs[0].env.ANTHROPIC_BASE_URL).toBe(
-      'https://bifrost.example.test/anthropic'
-    )
-    expect(spawnArgs[0].env.ANTHROPIC_AUTH_TOKEN).toBe('vk-secret')
-    expect(spawnArgs[0].args).toEqual(
-      expect.arrayContaining([
-        '-e',
-        'ANTHROPIC_BASE_URL=https://bifrost.example.test/anthropic',
-        '-e',
-        'ANTHROPIC_AUTH_TOKEN=vk-secret'
-      ])
-    )
+      expect(spawnArgs[0].env.ANTHROPIC_BASE_URL).toBe(
+        'https://bifrost.example.test/anthropic'
+      )
+      expect(spawnArgs[0].env.ANTHROPIC_AUTH_TOKEN).toBe('vk-secret')
+      expect(spawnArgs[0].args).toEqual(
+        expect.arrayContaining([
+          '-e',
+          'ANTHROPIC_BASE_URL=https://bifrost.example.test/anthropic',
+          '-e',
+          'ANTHROPIC_AUTH_TOKEN=vk-secret'
+        ])
+      )
+      expect(spawnArgs[0].args.join(' ')).not.toContain('${env:')
+    } finally {
+      if (inherited === undefined) delete process.env.NODETERM_TEST_GATEWAY_KEY
+      else process.env.NODETERM_TEST_GATEWAY_KEY = inherited
+    }
   })
 
   it('maps a selected Copilot model into its BYOK environment, never a model flag', async () => {
@@ -284,6 +296,32 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       ])
     )
     expect(spawnArgs[0].args.join(' ')).not.toContain('--model')
+  })
+
+  it('reads a stored gateway key through the shell-owned secret cache', async () => {
+    const { PtyManager } = await import('./pty-manager')
+    const m = new PtyManager()
+    m.init(
+      () => ({
+        ...DEFAULT_SETTINGS,
+        modelGateway: {
+          baseUrl: 'https://bifrost.example.test',
+          apiKey: MODEL_GATEWAY_SECRET_REF
+        }
+      }),
+      () => 'stored-gateway-key'
+    )
+    m.registerIpc()
+
+    await create(80, 24, 'stored-gateway-node', { agentId: 'codex' })
+
+    expect(spawnArgs[0].env).toMatchObject({
+      OPENAI_BASE_URL: 'https://bifrost.example.test/openai/v1',
+      OPENAI_API_KEY: 'stored-gateway-key'
+    })
+    expect(spawnArgs[0].args).toEqual(
+      expect.arrayContaining(['-e', 'OPENAI_API_KEY=stored-gateway-key'])
+    )
   })
 
   it('never exposes gateway credentials to a plain terminal', async () => {

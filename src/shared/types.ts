@@ -10,6 +10,7 @@ import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type {
   ModelDiscoveryResult,
+  ModelGatewayCredentialStatus,
   ModelGatewaySettings
 } from './agents/model-gateway'
 
@@ -1015,7 +1016,7 @@ export interface Settings {
   soundVolume: number
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
-  /** One Bifrost-compatible endpoint/key used by every model-switch-capable base harness. */
+  /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
   modelGateway: ModelGatewaySettings
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
@@ -2061,6 +2062,10 @@ export interface AgentApi {
   }): Promise<{ command: string; missingEnv: string[] }>
   /** Query the configured gateway's OpenAI-compatible `/v1/models` endpoint. Never rejects. */
   discoverModels(settings: ModelGatewaySettings): Promise<ModelDiscoveryResult>
+  /** Literal gateway credentials are write-only in the renderer. */
+  gatewayCredentialStatus(): Promise<ModelGatewayCredentialStatus>
+  saveGatewayCredential(apiKey: string): Promise<ModelGatewayCredentialStatus>
+  clearGatewayCredential(): Promise<ModelGatewayCredentialStatus>
 }
 
 export interface HandoffApi {

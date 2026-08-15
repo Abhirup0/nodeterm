@@ -28,7 +28,16 @@ import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
-import { ElectronGitHubSecretStore, registerElectronGitHubControl } from './github-control'
+import {
+  ElectronGitHubSecretStore,
+  ElectronSecretStore,
+  registerElectronGitHubControl
+} from './github-control'
+import {
+  migrateLegacyModelGatewayKey,
+  MODEL_GATEWAY_SECRET_FILE,
+  ModelGatewayCredentialService
+} from '../core/model-gateway-credentials'
 import { generateCommitMessage, generateGroupName, generateTerminalName } from '../core/commit-message'
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
@@ -644,11 +653,32 @@ app.whenReady().then(async () => {
   })
 
   settingsStore.init()
+  const gatewayCredentials = new ModelGatewayCredentialService(
+    new ElectronSecretStore(app.getPath('userData'), safeStorage, MODEL_GATEWAY_SECRET_FILE)
+  )
+  await gatewayCredentials.init()
+  try {
+    const migratedGateway = await migrateLegacyModelGatewayKey(
+      settingsStore.get().modelGateway,
+      gatewayCredentials
+    )
+    if (migratedGateway) {
+      await settingsStore.save({ ...settingsStore.get(), modelGateway: migratedGateway })
+    }
+  } catch (error) {
+    // Preserve the legacy literal in settings when the keyring/file write fails; migration can
+    // retry next launch, and the user never loses their only copy of the credential.
+    console.warn('[model-gateway] could not migrate the legacy API key to secret storage', error)
+  }
   settingsStore.registerIpc()
   sshStore.registerIpc()
-  // Custom-agent preview/expansion IPC (renderer has no process.env; expansion runs here).
-  registerAgentEnvIpc()
-  ptyManager.init(() => settingsStore.get())
+  // Custom-agent preview/expansion + gateway discovery/credential IPC (renderer has no
+  // process.env and never receives a stored literal key).
+  registerAgentEnvIpc(gatewayCredentials)
+  ptyManager.init(
+    () => settingsStore.get(),
+    () => gatewayCredentials.readForHost()
+  )
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
   gitService.registerIpc()
