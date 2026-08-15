@@ -448,11 +448,33 @@ genuinely tmux's and must be asked. Mixing the two up is how a feature acquires 
 tmux version we do not control. herdr has no version problem here for exactly this reason — it
 reads `mode_get(MODE_BRACKETED_PASTE)` from its own state machine.
 
-**Open, and unmeasured at the time of writing** (do not build on either answer until it is settled):
-whether the pane app's DECSET reliably survives the tmux *client* boundary into our xterm.js
-instance, and what an offscreen or hibernated node reports once the offscreen/Eco work has released
-its terminal. If the first is false, the emulator is not a substitute here; if the second is, the
-substitute needs a last-known-value cache.
+**Measured, and the emulator is NOT the answer here.** The `?2004h` a tmux *client* receives is
+tmux's own paste-through on the outer terminal (`tty_start_tty`, gated on the outer terminfo
+`BE`/`BD`), not the pane app's request: it arrives ~5 ms after attach and reads `true` even for a
+pane running `sleep 30`. It never toggled across pane switches, window switches, re-attach or
+co-attach. A constant is not a signal — so `term.modes.bracketedPasteMode` cannot stand in for the
+pane's state, however tempting the symmetry with `mouseTrackingMode` looks.
+
+**The actual fix is older than the problem: `paste-buffer -p`.** From tmux's own man page — *"If
+`-p` is specified, paste bracket control codes are inserted around the buffer **if the application
+has requested bracketed paste mode**."* Introduced 2012-03-03, shipped in **tmux 1.7**, so it is
+present on every tmux in the field. We do not have to ask whether the app wants framing; we ask
+tmux to do the framing, and it applies the pane's real state. Measured on 3.4: framed when the app
+requested it, unframed when it did not, correct for a non-active pane, and the whole thing in one
+round trip —
+`tmux load-buffer -b nt - \; paste-buffer -d -p -b nt -t <target> \; send-keys -t <target> Enter`.
+
+Two hazards that come with it, both measured:
+- **Copy mode silently unframes.** With `#{pane_in_mode}` = 1, `paste-buffer -p` delivers unframed
+  (tmux checks the copy-mode screen, not the app), so a user who scrolled the wheel up gets the
+  one-turn-per-line bug. `send-keys -X cancel` in the same invocation restores it.
+- **`set-buffer -- "$text"` hits ARG_MAX** around 200 KB. Use `load-buffer -` over stdin — and on
+  the SSH path that means piping into the remote command rather than putting the text in argv.
+
+And a correction worth keeping, because it inverts what the old comment implied: when
+`bracketPasteRequested` answers false it does **not** refuse — it falls through to the legacy
+two-step, which delivers `line1\nline2\nline3\r`, i.e. raw newlines into the app. It does not
+decline to send a multi-line message; it mangles it.
 
 ### Seeding a fresh xterm (`attachReplay` / `seedPaint` in `terminal/terminal-config.ts`)
 
