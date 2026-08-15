@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -27,7 +27,8 @@ describe('buildManagedScript', () => {
     // (its baked NODETERM_HOOK_ENDPOINT resolved empty). The gate must exit on a MISSING NODE ID,
     // NOT on a missing token — otherwise the failover in nt_send_request never runs and the session
     // stays dark until it is recreated. See buildManagedScript's "Empty-endpoint self-heal" note.
-    expect(s).toContain('if [ -z "$NODETERM_NODE_ID" ]; then\n  exit 0\nfi')
+    // The bail drains stdin first (#187) — see the executed bail-path tests at the end of the file.
+    expect(s).toContain('if [ -z "$NODETERM_NODE_ID" ]; then\n  cat >/dev/null 2>&1 || :\n  exit 0\nfi')
     expect(s).not.toContain('if [ -z "$NODETERM_HOOK_TOKEN" ] || [ -z "$NODETERM_NODE_ID" ]; then')
   })
 
@@ -136,7 +137,15 @@ describe('buildManagedScript', () => {
     it('is omitted entirely when there is no identity root, leaving the legacy script', () => {
       const legacy = buildManagedScript('claude', null as unknown as string)
       expect(legacy).not.toContain('CODEX_THREAD_ID')
-      expect(legacy.split('\n')[1]).toBe('if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then')
+      // The gate PRECEDES the endpoint sourcing (#186): a non-nodeterm session bails before any
+      // foreign-env file is executed. Order asserted, not a line index — comments may grow.
+      const lines = legacy.split('\n')
+      const gate = lines.indexOf('if [ -z "$NODETERM_NODE_ID" ]; then')
+      const sourcing = lines.indexOf(
+        'if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then'
+      )
+      expect(gate).toBeGreaterThan(0)
+      expect(sourcing).toBeGreaterThan(gate)
     })
   })
 
@@ -652,4 +661,84 @@ describe('buildManagedScript generated shell is syntactically valid', () => {
       expect(res.status).toBe(0)
     })
   }
+})
+
+/**
+ * The bail path, executed under a real /bin/sh — the two failure modes of issues #186/#187, each
+ * pinned by the issue's own repro shape. String assertions above say the lines exist; these prove
+ * the behavior: no EPIPE for a big writer, and not one byte of endpoint stdout reaching the agent.
+ */
+describe('the managed script bail path (issues #186/#187), under /bin/sh', () => {
+  const sh = spawnSync('sh', ['-c', 'exit 0'])
+  const shAvailable = sh.status === 0 && !sh.error
+  const dir = shAvailable ? mkdtempSync(join(tmpdir(), 'nt-bail-path-')) : ''
+  const script = dir ? join(dir, 'claude.sh') : ''
+  const home = dir ? join(dir, 'home') : ''
+  beforeAll(() => {
+    if (!dir) return
+    mkdirSync(home, { recursive: true })
+    writeFileSync(script, buildManagedScript('claude'), { encoding: 'utf8', mode: 0o755 })
+  })
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true })
+  })
+  // HOME points at an empty temp dir in every run: the endpoint failover globs $HOME for candidate
+  // files, and a test that let it see the real ~/.nodeterm would depend on this machine's state.
+  const baseEnv = { PATH: process.env.PATH ?? '' }
+
+  it.skipIf(!shAvailable)(
+    'drains stdin before bailing — a >64KB payload never EPIPEs the writer (#187)',
+    async () => {
+      // The issue's repro: raw writes (subprocess.communicate-style helpers swallow EPIPE and hide
+      // this). 2MB is ~32 pipe buffers, so an un-drained bail fails on the second write at latest.
+      const payload = Buffer.alloc(2_000_000, 0x41)
+      const child = spawn('sh', [script], {
+        env: { ...baseEnv, HOME: home },
+        stdio: ['pipe', 'pipe', 'pipe']
+      })
+      const writeError = new Promise<Error | null>((resolve) => {
+        child.stdin.on('error', (e) => resolve(e))
+        child.stdin.end(payload, () => resolve(null))
+      })
+      const exit = new Promise<number | null>((resolve) => child.on('close', (c) => resolve(c)))
+      expect(await writeError).toBeNull()
+      expect(await exit).toBe(0)
+    }
+  )
+
+  it.skipIf(!shAvailable)(
+    'a no-node-id session never executes the endpoint file, let alone leaks its stdout (#186)',
+    () => {
+      // The issue's canary, plus a side-effect marker: executed-at-all and leaked-to-stdout are
+      // different failures, and the marker file catches the first even if output were swallowed.
+      const canary = join(dir, 'canary.env')
+      writeFileSync(canary, `echo "LEAKED"\n: > '${join(dir, 'executed.marker')}'\n`, 'utf8')
+      const res = spawnSync('sh', [script], {
+        encoding: 'utf8',
+        input: '{"hook_event_name":"UserPromptSubmit"}',
+        env: { ...baseEnv, HOME: home, NODETERM_HOOK_ENDPOINT: canary }
+      })
+      expect(res.status).toBe(0)
+      expect(res.stdout).toBe('')
+      expect(existsSync(join(dir, 'executed.marker'))).toBe(false)
+    }
+  )
+
+  it.skipIf(!shAvailable)(
+    'a nodeterm session sources the endpoint file but swallows its stdout (#186 point 2)',
+    () => {
+      // SessionStart/UserPromptSubmit stdout is ADDED TO THE AGENT'S CONTEXT, so even the legit
+      // sourcing path must print nothing. No SOCK/PORT and an empty HOME → the backgrounded POST
+      // finds no transport and no fallback candidates; the script still owes a silent exit 0.
+      const canary = join(dir, 'canary-live.env')
+      writeFileSync(canary, 'echo "LEAKED"\n', 'utf8')
+      const res = spawnSync('sh', [script], {
+        encoding: 'utf8',
+        input: '{"hook_event_name":"UserPromptSubmit"}',
+        env: { ...baseEnv, HOME: home, NODETERM_NODE_ID: 'node-1', NODETERM_HOOK_ENDPOINT: canary }
+      })
+      expect(res.status).toBe(0)
+      expect(res.stdout).toBe('')
+    }
+  )
 })
