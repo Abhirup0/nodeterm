@@ -2311,6 +2311,8 @@ export interface NodeTerminalApi {
    *  key is intercepted in main because Electron's default View menu owns the accelerator. In the
    *  Server Edition the renderer's own keydown handler sees the key and this is a no-op stub. */
   onZoomActualSize(listener: () => void): () => void
+  /** Fires when the native app menu's "Settings…" item (⌘,) is clicked. Returns unsubscribe. */
+  onOpenSettings(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
   closeWindow(): void
   /** Bring the app window to the foreground (show + OS focus). Called after a file is DROPPED

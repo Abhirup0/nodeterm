@@ -61,6 +61,9 @@ export const IPC = {
    *  page zoom rather than the canvas's. */
   appZoomActualSize: 'app:zoom-actual-size',
   appCloseWindow: 'app:close-window',
+  /** Main → renderer: the native application menu's "Settings…" item (⌘,) was clicked. The
+   *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */
+  appOpenSettings: 'app:open-settings',
   appFocusWindow: 'app:focus-window',
   /** Write text to the system clipboard from the MAIN process. Renderer-side `clipboard` access is
    *  deprecated in Electron; the renderer sends this instead (fire-and-forget). */
