@@ -141,7 +141,7 @@ import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
-import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { accountChipLabel, agentLaunchOverride, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { hasHooks, canRecur, canContextLink, hasUsage, canChat, canResume, canRename, canReadTitle, createdAgentId, reportsOwnCopy, resumeCommand, agentConfig, agentLaunchProgram } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { ensureActivePermissionMode } from '../state/permissionMode'
@@ -2828,8 +2828,14 @@ export function TerminalNode({
           // re-claims its own thread instead of joining as an anonymous client. `data.ssh` is what
           // keeps a remote node on the bare command (no launcher on the host).
           const shared = codexSharedIdentity(data.ssh || data.sshRemoteTmux)
+          // The user's launch-command override rides every leg of this relaunch: threaded into
+          // `resumeCommand` (its `base` param), and standing in for the builtin launchCmd on the
+          // no-session fresh start — otherwise a wrapper user's node comes back on the bare CLI
+          // after a reboot, the one moment the wrapper (account env etc.) mattered most.
+          const launchOverride = agentLaunchOverride(agentId)
           const base =
-            (priorId && resumeCommand(agentId, priorId, shared)) ||
+            (priorId && resumeCommand(agentId, priorId, shared, launchOverride)) ||
+            launchOverride ||
             (agentConfig(agentId) &&
               agentLaunchProgram(agentId, agentConfig(agentId)!.launchCmd, shared))
           // Re-resolve the mode at relaunch: it's a property of how a session is launched, not
@@ -2908,8 +2914,9 @@ export function TerminalNode({
         // read — exactly as the cold-restore relaunch above does it. Without it a canvas running
         // in acceptEdits/plan would come back from a restart in the default mode, silently.
         // Re-resolved at call time for the same reason as there: the mode is a property of how a
-        // session is launched, not of the node.
-        const base = resumeCommand(agentId, agentSessionId)
+        // session is launched, not of the node. The launch-command override rides along for the
+        // same reason — it is a property of how the agent is launched, read fresh per restart.
+        const base = resumeCommand(agentId, agentSessionId, false, agentLaunchOverride(agentId))
         const command = base
           ? withPermissionMode(base, agentId, await ensureActivePermissionMode(agentId))
           : undefined
@@ -3007,7 +3014,9 @@ export function TerminalNode({
         // not carry its directory on PATH — naming it there would be `command not found` where a
         // plain `codex resume` works. A restarted codex node therefore rejoins as a plain client
         // until its next cold start. Fail open, same rule as everywhere else in this feature.
-        const base = resumeCommand(agentId, agentSessionId)
+        // The USER's launch-command override is different from the launcher: it lives on their
+        // own PATH (or is an absolute path), not in a generated dir, so it rides the wake too.
+        const base = resumeCommand(agentId, agentSessionId, false, agentLaunchOverride(agentId))
         // Refused BEFORE anything is written. `performResumePhase` gates on this same bare command
         // and would refuse too — but the KILL_LINE below is ours, so leaving this check to it
         // meant an unusable session id erased the pane's line (three times, once per wake trigger)

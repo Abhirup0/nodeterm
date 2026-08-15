@@ -1,6 +1,6 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
-import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
+import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, agentLaunchProgram, mintsSessionId, withSessionId } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { uuid } from '@renderer/lib/uuid'
@@ -278,12 +278,31 @@ export function createSshTerminalNode(
 }
 
 /**
+ * The user's launch-command override for a builtin agent (Settings → Agents → Launch commands),
+ * or undefined when unset/blank. This is the ONE place the setting is read; every launch site
+ * (new node, cold restore, in-place restart, hibernation wake, transcript resume) either calls
+ * this or receives its result — shared/agents/config.ts cannot read settings (layering), so the
+ * renderer resolves the override and passes it down (`resumeCommand`'s `base` param).
+ *
+ * Trusted verbatim, like a custom agent's `launchCmd`: it comes from the local user's own
+ * settings.json and is typed into their own pane. Custom agents index past the builtin-keyed map
+ * to undefined — they already own their launchCmd.
+ */
+export function agentLaunchOverride(agentId: AgentId): string | undefined {
+  const raw = useSettings.getState().settings.agentLaunchCommands?.[agentId as BuiltinAgentId]
+  const cmd = typeof raw === 'string' ? raw.trim() : ''
+  return cmd || undefined
+}
+
+/**
  * Command that launches Claude Code. Detection works via hooks installed globally in
  * ~/.claude/settings.json (gated by NODETERM_* env that the PTY manager sets), so a plain
- * `claude` is enough. Append `-r <id>` to resume a specific session (used by Branch).
+ * `claude` is enough — which is also why an override wrapper (account switchers etc.) is safe
+ * here: hooks identify the session whatever the launch line was, as long as the wrapper ends up
+ * exec-ing the real CLI. Append `-r <id>` to resume a specific session (used by Branch).
  */
 export function claudeLaunchCommand(): string {
-  return 'claude'
+  return agentLaunchOverride('claude') ?? 'claude'
 }
 
 /** Fallback color for custom / unknown agents that have no config-provided color. */
@@ -365,10 +384,13 @@ export function createAgentNode(
   // machine actually has one — otherwise the bare CLI, byte-identical to before. Asked through the
   // capability helper, never `agentId === 'codex'`; `codexSharedIdentity` folds in the SSH answer
   // (a host has no launcher installed yet, so a remote node must stay on the bare command).
+  // A user launch-command override wins over BOTH the builtin default and the managed launcher —
+  // an explicit "launch it exactly like this" (see agentLaunchOverride / resumeCommand's `base`).
+  const override = agentLaunchOverride(agentId)
   const baseCmd =
     agentId === 'claude'
       ? claudeLaunchCommand()
-      : agentLaunchProgram(agentId, launchCmd, codexSharedIdentity(ssh))
+      : (override ?? agentLaunchProgram(agentId, launchCmd, codexSharedIdentity(ssh)))
   // A flag-prompt agent (opencode) takes the initial prompt via its flag — a bare positional
   // would be misread (opencode treats it as a project path). Everything else keeps the
   // historical argv append, INCLUDING stdin-after-start agents (gemini has always launched

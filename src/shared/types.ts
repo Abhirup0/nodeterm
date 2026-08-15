@@ -2,7 +2,7 @@
 
 import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
-import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
+import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
@@ -993,6 +993,13 @@ export interface Settings {
   soundVolume: number
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** Per-builtin-agent launch command overrides (Settings → Agents → Launch commands). The value
+   *  replaces the bare CLI name everywhere a launch line is built — new sessions, cold-restore
+   *  relaunches and in-place restarts, with the usual flags (`--resume`, `--permission-mode`, the
+   *  prompt) appended after it — so a wrapper script that picks an account or sets env vars runs
+   *  wherever the agent would. Empty/absent = the builtin default, byte-identical to before this
+   *  setting existed. Keyed by builtin id only: custom agents already own their `launchCmd`. */
+  agentLaunchCommands: Partial<Record<BuiltinAgentId, string>>
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
@@ -1137,6 +1144,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEffects: true,
   soundVolume: 0.5,
   customAgents: [],
+  agentLaunchCommands: {},
   claudeAccounts: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.

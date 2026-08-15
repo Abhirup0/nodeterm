@@ -18,9 +18,11 @@ import {
   ALL_PERMISSION_MODES,
   AUTO_PERMISSION_MODE_MIN_VERSION,
   BUILTIN_AGENT_IDS,
+  hasSharedIdentity,
   PERMISSION_MODE_LABELS,
   type AgentId,
-  type AgentPermissionMode
+  type AgentPermissionMode,
+  type BuiltinAgentId
 } from '@shared/agents/config'
 import {
   permissionModeAgentIds,
@@ -32,6 +34,7 @@ import { hintLabel } from '@shared/platform-utils'
 import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
+import { Input } from '@renderer/ui/Input'
 import { Select } from '@renderer/ui/Select'
 import { Switch } from '@renderer/ui/Switch'
 import { NumberField } from '@renderer/ui/NumberField'
@@ -43,6 +46,25 @@ const ROWS = {
   agents: {
     title: 'Agents',
     keywords: ['agent', 'claude', 'codex', 'gemini', 'enable', 'disable', 'default']
+  },
+  launchCommands: {
+    title: 'Launch commands',
+    keywords: [
+      'launch',
+      'command',
+      'wrapper',
+      'cli',
+      'binary',
+      'path',
+      'account',
+      'switch',
+      'custom command',
+      'claude',
+      'codex',
+      'gemini',
+      'grok',
+      'opencode'
+    ]
   },
   permissionMode: {
     title: 'Permission mode',
@@ -255,6 +277,45 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
               </div>
             )
           })}
+        </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.launchCommands}>
+        <FieldRow
+          label="Launch commands"
+          description={
+            'Launch an agent with your own command — e.g. a wrapper script that switches accounts or sets env vars. ' +
+            'Used everywhere the agent is launched (new sessions, resumes, restarts), with flags like --resume appended after it, ' +
+            'so the command must pass its arguments through — a shell script should end with `exec claude "$@"`. ' +
+            'Leave empty for the default. SSH projects run the same command on the remote host.'
+          }
+          control={null}
+        />
+        <div className="space-y-2">
+          {BUILTIN_AGENT_IDS.map((id: BuiltinAgentId) => (
+            <div key={id} className="flex items-center gap-3 py-1">
+              <AgentIcon agentId={id} size={18} />
+              <span className="w-28 text-[13px] text-text">{AGENT_CONFIG[id].label}</span>
+              <Input
+                className="w-72"
+                placeholder={AGENT_CONFIG[id].launchCmd}
+                aria-label={`${AGENT_CONFIG[id].label} launch command`}
+                value={settings.agentLaunchCommands[id] ?? ''}
+                onChange={(e) => {
+                  // A cleared field DELETES its key rather than storing '' — absent is the one
+                  // spelling of "default" every consumer (and a hand-read settings.json) agrees on.
+                  const next = { ...settings.agentLaunchCommands }
+                  if (e.target.value) next[id] = e.target.value
+                  else delete next[id]
+                  update({ agentLaunchCommands: next })
+                }}
+              />
+              {hasSharedIdentity(id) && settings.agentLaunchCommands[id]?.trim() ? (
+                <span className="text-[12px] text-muted">
+                  Overrides the managed per-node launcher — sessions join as plain clients.
+                </span>
+              ) : null}
+            </div>
+          ))}
         </div>
       </SearchableRow>
       <SearchableRow {...ROWS.permissionMode}>

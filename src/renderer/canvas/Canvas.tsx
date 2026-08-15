@@ -330,6 +330,7 @@ import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
+  agentLaunchOverride,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   alignNodes,
@@ -5982,7 +5983,7 @@ export function Canvas() {
         return
       }
       // No live node — open a resume node in the active project, using the transcript's cwd.
-      const cmd = resumeCommand('claude', hit.sessionId)
+      const cmd = resumeCommand('claude', hit.sessionId, false, agentLaunchOverride('claude'))
       if (!cmd) return
       const node = createAgentNode('claude', nodesRef.current.length, hit.cwd, viewCenter())
       // The resume command replaces (never wraps) the factory's command, so it is flagged once.
