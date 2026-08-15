@@ -50,23 +50,38 @@ export const PROJECT_CAPABILITY_COPY: Record<ProjectCapability, ProjectCapabilit
   }
 }
 
-/** Is this capability on for this project? STRICT `=== true`: .nodeterm/project.json is hostile
- *  input — git-shared, hand-editable, auto-adopted (@shared/node-exec) — so `"true"`, `1` and `{}`
- *  are off. Every consumption site goes through this function; a bare `if (project.x)` is a bug.
- *  (`project-capabilities.test.ts` fails on any of those values enabling.) */
-export function projectCapabilityEnabled(
+/**
+ * Is the capability's raw switch set in this project's shared file? STRICT `=== true`, own
+ * properties only: .nodeterm/project.json is hostile input — git-shared, hand-editable,
+ * auto-adopted (@shared/node-exec) — so `"true"`, `1`, `{}` and a prototype-inherited `true` are
+ * all off (`project-capabilities.test.ts` fails on any of them enabling).
+ *
+ * NEVER A GRANT CHECK (PR #213 review, I2). This reads the FILE BIT only and knows nothing of the
+ * clone notice: during the pending-notice window — and after a recorded decline — it answers
+ * `true` while the capability must refuse. It exists for exactly two kinds of caller: display (a
+ * Settings switch showing the file's state) and the notice decider's `enabledInFile` input.
+ * Grants go through `projectCapabilityGrantedFor` (@shared/project-capability-consent), pinned by
+ * project-capability-consent.test.ts "a switch that is on but unanswered grants nothing".
+ */
+export function projectCapabilityFlagInFile(
   p: Partial<Record<ProjectCapability, unknown>> | undefined | null,
   cap: ProjectCapability
 ): boolean {
-  return p?.[cap] === true
+  if (!p || !Object.prototype.hasOwnProperty.call(p, cap)) return false
+  return p[cap] === true
 }
 
-/** The capability half of a ProjectFileV1, normalised: known keys only, literal `true` only. */
+/** The capability half of a ProjectFileV1, normalised: known keys only, literal `true` only,
+ *  own properties only (M-1: no consent inherited through a prototype chain). */
 export function readProjectCapabilities(f: unknown): Partial<Record<ProjectCapability, true>> {
   const out: Partial<Record<ProjectCapability, true>> = {}
   if (!f || typeof f !== 'object') return out
   for (const cap of PROJECT_CAPABILITIES) {
-    if ((f as Record<string, unknown>)[cap] === true) out[cap] = true
+    if (
+      Object.prototype.hasOwnProperty.call(f, cap) &&
+      (f as Record<string, unknown>)[cap] === true
+    )
+      out[cap] = true
   }
   return out
 }

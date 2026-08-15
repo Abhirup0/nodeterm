@@ -2,24 +2,29 @@ import { describe, it, expect } from 'vitest'
 import {
   PROJECT_CAPABILITIES,
   PROJECT_CAPABILITY_COPY,
-  projectCapabilityEnabled,
+  projectCapabilityFlagInFile,
   readProjectCapabilities,
   projectCapabilityFields
 } from './project-capabilities'
 
-describe('projectCapabilityEnabled is STRICT', () => {
+describe('projectCapabilityFlagInFile is STRICT (and NEVER a grant check — see project-capability-consent)', () => {
   it('true enables', () => {
-    expect(projectCapabilityEnabled({ agentBrowserControl: true }, 'agentBrowserControl')).toBe(true)
+    expect(projectCapabilityFlagInFile({ agentBrowserControl: true }, 'agentBrowserControl')).toBe(true)
   })
   it.each([undefined, false, null, 0, 1, 'true', 'yes', {}, [], 'false'])(
     'everything else is OFF (%j) — project.json is hostile input, not a truthiness exercise',
     (v) => {
-      expect(projectCapabilityEnabled({ agentBrowserControl: v } as never, 'agentBrowserControl')).toBe(false)
+      expect(projectCapabilityFlagInFile({ agentBrowserControl: v } as never, 'agentBrowserControl')).toBe(false)
     }
   )
   it('an absent project is off, never a throw', () => {
-    expect(projectCapabilityEnabled(undefined, 'agentBrowserControl')).toBe(false)
-    expect(projectCapabilityEnabled(null, 'agentBrowserControl')).toBe(false)
+    expect(projectCapabilityFlagInFile(undefined, 'agentBrowserControl')).toBe(false)
+    expect(projectCapabilityFlagInFile(null, 'agentBrowserControl')).toBe(false)
+  })
+  it('a prototype-inherited true is OFF — own properties only (M-1)', () => {
+    const inherited = Object.create({ agentBrowserControl: true }) as Record<string, unknown>
+    expect(projectCapabilityFlagInFile(inherited, 'agentBrowserControl')).toBe(false)
+    expect(readProjectCapabilities(inherited)).toEqual({})
   })
 })
 

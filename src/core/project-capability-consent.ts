@@ -6,9 +6,12 @@
  * `project-capability-consent.test.ts` pins that both paths are the same function objects.
  */
 export {
+  capabilityAnswerOf,
   needsCapabilityNotice,
   projectCapabilityGranted,
+  projectCapabilityGrantedFor,
   recordCapabilityAck,
   type CapabilityAckMap,
+  type CapabilityAnswer,
   type CapabilityConsentState
 } from '../shared/project-capability-consent'

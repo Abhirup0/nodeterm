@@ -11,7 +11,7 @@ import type {
 } from '@shared/types'
 import { collisionSeed, derivedProjectId } from '@shared/project-id'
 import type { ProjectCapability } from '@shared/project-capabilities'
-import { recordCapabilityAck } from '@shared/project-capability-consent'
+import { recordCapabilityAck, type CapabilityAnswer } from '@shared/project-capability-consent'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
 
 interface ProjectsState {
@@ -70,17 +70,18 @@ interface ProjectsState {
   setProjectDefaultPermissionMode(id: string, mode: AgentPermissionMode | undefined): void
   /**
    * THE strict per-project capability setter (@shared/project-capabilities). `on` writes the
-   * literal `true` the validators accept AND records the machine-local ack — setting a switch
-   * yourself is its own acknowledgment, so the clone notice never fires on your own decision.
-   * `off` deletes the field outright (an off capability adds no bytes to the shared file); the
-   * ack, once earned, stays. */
+   * literal `true` the validators accept AND records this machine's 'kept' answer — setting a
+   * switch yourself is its own consent, so the clone notice never fires on your own decision.
+   * `off` deletes the field outright (an off capability adds no bytes to the shared file) AND
+   * records 'declined': if a teammate's (or a hostile) `true` re-arrives via git, the capability
+   * is refused and re-noticed rather than silently re-granted (PR #213 C1/M-2). */
   setProjectCapability(id: string, cap: ProjectCapability, on: boolean): void
   /**
-   * Records this machine's answer to the one-time clone notice. MACHINE-LOCAL by construction:
-   * `Project.capabilityAck` rides `IndexEntryV3.capabilityAck` through splitWorkspace on the next
-   * save and is never written into .nodeterm/project.json (workspace-files.test.ts pins the file
-   * bytes; capability-notice.test.tsx pins this path). */
-  recordProjectCapabilityAck(id: string, cap: ProjectCapability): void
+   * Records this machine's ANSWER ('kept' | 'declined') to the one-time clone notice.
+   * MACHINE-LOCAL by construction: `Project.capabilityAck` rides `IndexEntryV3.capabilityAck`
+   * through splitWorkspace on the next save and is never written into .nodeterm/project.json
+   * (workspace-files.test.ts pins the file bytes; capability-notice.test.tsx pins this path). */
+  recordProjectCapabilityAck(id: string, cap: ProjectCapability, answer: CapabilityAnswer): void
   /** Raises the project's dino high score (never lowers it). */
   setDinoHighScore(id: string, score: number): void
   /** Replaces the project's kanban board (the UI computes the next board via lib/kanban). */
@@ -352,17 +353,19 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     set((s) => ({
       projects: s.projects.map((p) => {
         if (p.id !== id) return p
-        if (on) return recordCapabilityAck({ ...p, [cap]: true }, cap)
+        if (on) return recordCapabilityAck({ ...p, [cap]: true }, cap, 'kept')
         const next = { ...p }
         delete next[cap]
-        return next
+        // 'declined', not silence: the deletion lives only in this working copy, so a re-arriving
+        // `true` (teammate commit, git checkout) must re-notice instead of meeting a bare ack.
+        return recordCapabilityAck(next, cap, 'declined')
       })
     }))
   },
 
-  recordProjectCapabilityAck(id, cap) {
+  recordProjectCapabilityAck(id, cap, answer) {
     set((s) => ({
-      projects: s.projects.map((p) => (p.id === id ? recordCapabilityAck(p, cap) : p))
+      projects: s.projects.map((p) => (p.id === id ? recordCapabilityAck(p, cap, answer) : p))
     }))
   },
 

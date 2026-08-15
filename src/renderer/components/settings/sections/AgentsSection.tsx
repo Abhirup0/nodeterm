@@ -4,7 +4,7 @@ import { useProjects } from '../../../state/projects'
 import {
   PROJECT_CAPABILITIES,
   PROJECT_CAPABILITY_COPY,
-  projectCapabilityEnabled
+  projectCapabilityFlagInFile
 } from '@shared/project-capabilities'
 import {
   isAgentEnabled,
@@ -330,7 +330,10 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
             description={`${PROJECT_CAPABILITY_COPY[cap].description} ${PROJECT_CAPABILITY_COPY[cap].cloneWarning}`}
             control={
               <Switch
-                checked={projectCapabilityEnabled(activeProject, cap)}
+                // The raw FILE FLAG is the right thing for a settings switch to display — it
+                // mirrors what is written in .nodeterm/project.json. It is NEVER the grant check:
+                // grants require the machine-local 'kept' too (projectCapabilityGrantedFor).
+                checked={projectCapabilityFlagInFile(activeProject, cap)}
                 ariaLabel={title}
                 disabled={!activeProject}
                 onChange={(on) => {

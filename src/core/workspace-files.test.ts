@@ -85,20 +85,20 @@ describe('per-project capability fields in the shared file', () => {
     expect(serializeProjectFile(f)).not.toContain('agentBrowserControl')
   })
   it('the ack is machine-local: index entry carries it, the shared file never does', () => {
-    const p = project({ cwd: '/a/foo', agentBrowserControl: true, capabilityAck: { agentBrowserControl: true } })
+    const p = project({ cwd: '/a/foo', agentBrowserControl: true, capabilityAck: { agentBrowserControl: 'kept' as const } })
     const { index, files } = splitWorkspace(
       { version: 2, activeProjectId: 'p1', projects: [p] },
       () => 1,
       '2026-08-15T00:00:00.000Z'
     )
-    expect(index.entries[0].capabilityAck).toEqual({ agentBrowserControl: true })
+    expect(index.entries[0].capabilityAck).toEqual({ agentBrowserControl: 'kept' })
     expect(serializeProjectFile(files.get('/a/foo')!)).not.toContain('capabilityAck')
     // Load: the ack comes from the entry; a file-borne `capabilityAck` (forgery — a repo carrying
     // its own consent) is never read.
-    const restored = fileToProject(files.get('/a/foo')!, { id: 'p1', cwd: '/a/foo', capabilityAck: { agentBrowserControl: true } })
-    expect(restored.capabilityAck).toEqual({ agentBrowserControl: true })
+    const restored = fileToProject(files.get('/a/foo')!, { id: 'p1', cwd: '/a/foo', capabilityAck: { agentBrowserControl: 'kept' as const } })
+    expect(restored.capabilityAck).toEqual({ agentBrowserControl: 'kept' })
     const forged = fileToProject(
-      { ...files.get('/a/foo')!, capabilityAck: { agentBrowserControl: true } } as never,
+      { ...files.get('/a/foo')!, capabilityAck: { agentBrowserControl: 'kept' as const } } as never,
       { id: 'p1', cwd: '/a/foo' }
     )
     expect(forged.capabilityAck).toBeUndefined()

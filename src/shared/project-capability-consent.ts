@@ -10,50 +10,105 @@
  * entry is the only authority for project identity), never in the shared file; a second worktree
  * of the same repo is a second entry, hence a second notice, on purpose.
  *
+ * THE ACK CARRIES THE ANSWER, not just the fact of one (PR #213 review, C1). "Turn it off" can
+ * only delete the field from THIS working copy — the hostile `true` survives in git and a routine
+ * `git checkout`/pull restores it. If the ack were a bare bit, that restored `true` would meet a
+ * standing acknowledgment and grant silently to a user who explicitly said no. So:
+ *   - `'kept'`     — explicit consent; enabled+kept is the ONE granting combination.
+ *   - `'declined'` — explicit refusal; if the file's `true` ever re-arrives it is refused AND a
+ *                    NEW notice is raised (never silence, never a grant without a fresh "keep").
+ *   - absent       — never answered (or dismissed without answering — dismissal is not an answer);
+ *                    enabled+absent is a pending notice and a refusal.
+ * Each rule is pinned by `project-capability-consent.test.ts`.
+ *
  * Lives in `src/shared` for the same reason as `safe-id.ts`: the renderer raises the dialog and may
  * not import `src/core`; `core/project-capability-consent.ts` re-exports these for main/core
  * callers, and its test pins that the two paths are the same function objects.
  */
-import type { ProjectCapability } from './project-capabilities'
+import {
+  projectCapabilityFlagInFile,
+  type ProjectCapability
+} from './project-capabilities'
 
-/** The machine-local ack record, keyed like the capability fields but never written to the shared
- *  project file (`projectToFile` does not know this shape exists — pinned by the consent test). */
-export type CapabilityAckMap = Partial<Record<ProjectCapability, true>>
+/** What this machine's user answered when told about a capability switch. */
+export type CapabilityAnswer = 'kept' | 'declined'
+
+/** The machine-local answer record, keyed like the capability fields but never written to the
+ *  shared project file (`projectToFile` does not know this shape exists — pinned by the consent
+ *  test with an ack-carrying project as input). */
+export type CapabilityAckMap = Partial<Record<ProjectCapability, CapabilityAnswer>>
 
 export interface CapabilityConsentState {
   capability: ProjectCapability
-  /** The strict read of the shared file's switch (`projectCapabilityEnabled` — literal true only). */
+  /** The strict read of the shared file's switch (`projectCapabilityFlagInFile` — literal true
+   *  only). NEVER a grant by itself. */
   enabledInFile: boolean
-  /** Has THIS MACHINE's user answered the notice for this project entry (or personally set the
-   *  switch, which is its own acknowledgment)? */
-  acknowledged: boolean
+  /** This machine's recorded answer for this project entry, if any. */
+  answer: CapabilityAnswer | undefined
 }
 
-/** On in the file + never acknowledged on this machine ⇒ notice. Everything else is silence:
- *  off needs no warning, and an answered notice is answered forever (per index entry). */
+/** On in the file + not explicitly KEPT on this machine ⇒ notice. That covers both the
+ *  never-answered clone window and the re-arrival of a `true` the user declined (C1): a recorded
+ *  "no" makes a re-appearing switch a NEW event to be told about, not a settled one. Off needs no
+ *  warning, whatever was answered. */
 export function needsCapabilityNotice(s: CapabilityConsentState): boolean {
-  return s.enabledInFile === true && s.acknowledged !== true
+  return s.enabledInFile === true && s.answer !== 'kept'
 }
 
 /**
- * May the capability act RIGHT NOW? A pending notice is a refusal, not a grant: the window between
- * a hostile clone's `agentBrowserControl: true` arriving and the user answering the notice must
- * refuse (`project-capability-consent.test.ts` — "a switch that is on but unanswered grants
- * nothing"). This is the predicate the browser ledger's admission check (PR 4) and messaging's
- * `messagingEnabled` wiring (PR 6) consult per call — never cached at lease start.
+ * May the capability act RIGHT NOW? Only `enabledInFile && answer === 'kept'`: a pending notice is
+ * a refusal, and a recorded DECLINE is a refusal even when the hostile `true` re-arrives via git
+ * (`project-capability-consent.test.ts` — "a switch that is on but unanswered grants nothing",
+ * "a DECLINED switch grants nothing even when the file says true again"). This is the predicate
+ * the browser ledger's admission check (PR 4) and messaging's `messagingEnabled` wiring (PR 6)
+ * consult per call — never cached at lease start.
  */
 export function projectCapabilityGranted(s: CapabilityConsentState): boolean {
-  return s.enabledInFile === true && !needsCapabilityNotice(s)
+  return s.enabledInFile === true && s.answer === 'kept'
 }
 
 /**
- * Returns `entry` with the capability acknowledged — a new object, input untouched. Works on any
+ * THE consumer-facing grant check: derives both halves (strict file flag, own-property answer)
+ * from a Project-shaped object, so a consumer cannot pick the raw file flag by mistake (PR #213
+ * review, I2). PR 6 wires `messagingEnabled(projectId)` as
+ * `projectCapabilityGrantedFor(getProject(projectId), 'agentMessaging')` — one call, nothing else.
+ */
+export function projectCapabilityGrantedFor(
+  p:
+    | (Partial<Record<ProjectCapability, unknown>> & { capabilityAck?: CapabilityAckMap })
+    | undefined
+    | null,
+  cap: ProjectCapability
+): boolean {
+  return projectCapabilityGranted({
+    capability: cap,
+    enabledInFile: projectCapabilityFlagInFile(p, cap),
+    answer: capabilityAnswerOf(p, cap)
+  })
+}
+
+/** This machine's recorded answer, own properties only (M-1: an in-process object must not inherit
+ *  consent through its prototype; JSON never produces one, but callers are not only JSON). */
+export function capabilityAnswerOf(
+  p: { capabilityAck?: CapabilityAckMap } | undefined | null,
+  cap: ProjectCapability
+): CapabilityAnswer | undefined {
+  const ack = p?.capabilityAck
+  if (!ack || !Object.prototype.hasOwnProperty.call(ack, cap)) return undefined
+  const v = ack[cap]
+  return v === 'kept' || v === 'declined' ? v : undefined
+}
+
+/**
+ * Returns `entry` with the capability answered — a new object, input untouched; a later answer
+ * overwrites an earlier one (decline → later explicit keep must win, and vice versa). Works on any
  * entry-shaped record (`IndexEntryV3` in main, the renderer's `Project` mirror of the same
- * machine-local field) so both sides record the ack through the one function.
+ * machine-local field) so both sides record the answer through the one function.
  */
 export function recordCapabilityAck<E extends { capabilityAck?: CapabilityAckMap }>(
   entry: E,
-  cap: ProjectCapability
+  cap: ProjectCapability,
+  answer: CapabilityAnswer
 ): E {
-  return { ...entry, capabilityAck: { ...entry.capabilityAck, [cap]: true } }
+  return { ...entry, capabilityAck: { ...entry.capabilityAck, [cap]: answer } }
 }

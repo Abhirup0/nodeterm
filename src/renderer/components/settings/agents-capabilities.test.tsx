@@ -11,9 +11,9 @@ import type { Project } from '@shared/types'
 import {
   PROJECT_CAPABILITIES,
   PROJECT_CAPABILITY_COPY,
-  projectCapabilityEnabled
+  projectCapabilityFlagInFile
 } from '@shared/project-capabilities'
-import { projectCapabilityGranted } from '@shared/project-capability-consent'
+import { projectCapabilityGrantedFor } from '@shared/project-capability-consent'
 import { useProjects } from '../../state/projects'
 import { AgentsSection } from './sections/AgentsSection'
 
@@ -79,10 +79,10 @@ describe('per-project capability rows, generated from PROJECT_CAPABILITIES', () 
       mount()
       act(() => capSwitch(PROJECT_CAPABILITY_COPY[cap].label).click())
       const p = useProjects.getState().getProject('p1')!
-      expect(p[cap]).toBe(true) // === true, not "true"/1 — projectCapabilityEnabled is strict
-      // Setting it yourself is its own acknowledgment: no clone notice for the user's own switch.
-      expect(p.capabilityAck?.[cap]).toBe(true)
-      expect(projectCapabilityEnabled(p, cap)).toBe(true)
+      expect(p[cap]).toBe(true) // === true, not "true"/1 — projectCapabilityFlagInFile is strict
+      // Setting it yourself records its own KEPT: no clone notice for the user's own switch.
+      expect(p.capabilityAck?.[cap]).toBe('kept')
+      expect(projectCapabilityFlagInFile(p, cap)).toBe(true)
     }
   )
 
@@ -92,7 +92,11 @@ describe('per-project capability rows, generated from PROJECT_CAPABILITIES', () 
       useProjects.getState().setProjectCapability('p1', cap, true)
       mount()
       act(() => capSwitch(PROJECT_CAPABILITY_COPY[cap].label).click())
-      expect(useProjects.getState().getProject('p1')![cap]).toBeUndefined()
+      const p = useProjects.getState().getProject('p1')!
+      expect(p[cap]).toBeUndefined()
+      // …and records DECLINED (PR #213 C1/M-2): if a teammate re-commits `true`, the project is
+      // re-noticed and refused instead of silently re-granted through the old consent.
+      expect(p.capabilityAck?.[cap]).toBe('declined')
     }
   )
 
@@ -102,14 +106,8 @@ describe('per-project capability rows, generated from PROJECT_CAPABILITIES', () 
     // the refusal immediately — no lease-start snapshot may answer for it.
     const cap = PROJECT_CAPABILITIES[0]
     useProjects.getState().setProjectCapability('p1', cap, true)
-    const grantedNow = (): boolean => {
-      const p = useProjects.getState().getProject('p1')
-      return projectCapabilityGranted({
-        capability: cap,
-        enabledInFile: projectCapabilityEnabled(p, cap),
-        acknowledged: p?.capabilityAck?.[cap] === true
-      })
-    }
+    const grantedNow = (): boolean =>
+      projectCapabilityGrantedFor(useProjects.getState().getProject('p1'), cap)
     expect(grantedNow()).toBe(true)
     mount()
     act(() => capSwitch(PROJECT_CAPABILITY_COPY[cap].label).click())
