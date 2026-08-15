@@ -61,11 +61,22 @@ const VERBS: ControlVerb[] = [
   'assign'
 ]
 
-const DESTRUCTIVE: ReadonlySet<ControlVerb> = new Set(['write', 'close'])
-
-export function isDestructiveVerb(verb: ControlVerb): boolean {
-  return DESTRUCTIVE.has(verb)
-}
+/**
+ * The confirm-gated set. It MOVED to `src/shared/control-verbs.ts` and is re-exported here so
+ * main-side callers read the same one the gate does.
+ *
+ * WHERE IT IS ENFORCED: `Canvas.tsx`'s `switch (verb)` — `case 'write'` and `case 'close'` read
+ * `isDestructiveVerb(verb)` before their `confirmBusy()` refusal. That is the only consumer, and
+ * until it existed this set gated nothing at all: it lived in `src/main`, which the renderer
+ * cannot import, so the actual confirm was hand-written per case and adding a verb to the set
+ * changed no behaviour — while `TOLERANT_CONTROL_VERBS`' doc comment, `hook-server.ts`'s
+ * `buildPtyEnv` note and `docs/node-identity.md` (twice, including invariant 6) all told a reader
+ * it was what decided.
+ *
+ * A verb that needs gating is added to the shared set, not by hand-writing a third confirm block;
+ * `src/renderer/canvas/control-destructive.test.ts` fails if the two disagree again.
+ */
+export { isDestructiveVerb, DESTRUCTIVE_VERBS } from '../shared/control-verbs'
 
 /** Validate a raw (verb, args) pair into a ControlCommand, or return an { error }. */
 export function parseControlRequest(

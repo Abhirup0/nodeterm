@@ -315,6 +315,10 @@ import { createCanvasOrder, createReconnectWatch, type CanvasOrder } from '@shar
 import { createMutationGuard } from '@shared/canvas-mutations'
 import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@shared/shortcut'
 
+// The dispatch below is the CONSUMER of the confirm-gated set. Before this import the set named
+// write/close as "the confirm-gated pair" from inside `src/main` — which this project cannot see —
+// while the gating lived in two hand-written blocks here, so the set decided nothing.
+import { isDestructiveVerb } from '@shared/control-verbs'
 import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
@@ -6964,7 +6968,13 @@ export function Canvas() {
             // mounted on top of a destructive one (the worktree-removal confirm) turned an Enter
             // aimed at THIS harmless prompt into a deletion. `confirmBusy` covers every confirm
             // state, not just `confirm`. Reject instead.
-            if (confirmBusy()) {
+            //
+            // `isDestructiveVerb` is read here rather than assumed: the set is the authority on
+            // which verbs are confirm-gated, and until this line it was a security-shaped constant
+            // that gated nothing — every reader of invariant 6 or TOLERANT_CONTROL_VERBS' doc
+            // comment believed adding a verb to it gated that verb. Reading it is what makes the
+            // set true.
+            if (isDestructiveVerb(verb) && confirmBusy()) {
               reply({ ok: false, error: 'a confirmation is already pending — try again' })
               return
             }
@@ -6996,8 +7006,9 @@ export function Canvas() {
               return
             }
             // One confirm dialog at a time (see `write`): reject rather than orphan a pending one —
-            // or stack this one over a destructive dialog the user then cannot see.
-            if (confirmBusy()) {
+            // or stack this one over a destructive dialog the user then cannot see. Gated on the
+            // shared set for the same reason `write` is.
+            if (isDestructiveVerb(verb) && confirmBusy()) {
               reply({ ok: false, error: 'a confirmation is already pending — try again' })
               return
             }
