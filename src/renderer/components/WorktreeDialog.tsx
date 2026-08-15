@@ -108,27 +108,29 @@ export function WorktreeDialog({
         {existing.length > 0 && (
           <div className="bind-existing">
             <div className="bind-existing__title">Existing worktrees</div>
-            {existing.map((e) => (
-              // A detached-HEAD worktree cannot be bound (there is no branch to merge or name the
-              // group after), so the row is DISABLED and says why — clicking it used to be a
-              // silent no-op.
-              <button
-                key={e.path}
-                className="bind-existing__row"
-                disabled={busy || !e.branch}
-                onClick={() => onBindExisting(e)}
-                title={
-                  e.branch
-                    ? e.path
-                    : `${e.path}\nDetached HEAD — check out a branch in this worktree first.`
-                }
-              >
-                <span className="bind-existing__branch">
-                  {e.branch ? `⎇ ${e.branch}` : '⎇ (detached HEAD — check out a branch first)'}
-                </span>
-                <span className="bind-existing__path">{e.path}</span>
-              </button>
-            ))}
+            <div className="bind-existing__list">
+              {existing.map((e) => (
+                // A detached-HEAD worktree cannot be bound (there is no branch to merge or name the
+                // group after), so the row is DISABLED and says why — clicking it used to be a
+                // silent no-op.
+                <button
+                  key={e.path}
+                  className="bind-existing__row"
+                  disabled={busy || !e.branch}
+                  onClick={() => onBindExisting(e)}
+                  title={
+                    e.branch
+                      ? e.path
+                      : `${e.path}\nDetached HEAD — check out a branch in this worktree first.`
+                  }
+                >
+                  <span className="bind-existing__branch">
+                    {e.branch ? `⎇ ${e.branch}` : '⎇ (detached HEAD — check out a branch first)'}
+                  </span>
+                  <span className="bind-existing__path">{e.path}</span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
