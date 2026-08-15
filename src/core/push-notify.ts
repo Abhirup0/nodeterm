@@ -378,6 +378,19 @@ export interface LiveUpdateItem {
   multiSelect?: boolean
   /** approval needsYou only: the deterministic hook-reply ticket, letting an intent answer. */
   pendingId?: string
+  /** done only: the turn ended because the user INTERRUPTED it (Esc/Ctrl-C), not because it
+   *  finished. Omitted when false/absent, and never sent off a done edge — the backend also forces
+   *  it null on non-done content-state. Without it the phone had only the `message` STRING
+   *  ('Stopped' vs 'Finished') to tell the two apart, so a wording change silently altered
+   *  behaviour. A consumer that CELEBRATES a completion must skip this (same rule as the notch
+   *  HUD's `doneSeen`) — nothing was accomplished, so there is nothing to go and read. */
+  interrupted?: boolean
+  /** done only: this end came from the stale-working SWEEP (nobody heard from the session for
+   *  WORKING_STALE_MS, so it is presumed gone), NOT from the session itself. Same omission rules and
+   *  the same "never celebrate it" contract as `interrupted` — but a DIFFERENT fact: `interrupted`
+   *  is "you stopped it", `stale` is "we lost the host". The mirror sends message:'Stopped' for
+   *  both, which is exactly why the phone cannot infer this from the text. */
+  stale?: boolean
   /** true on a state EDGE (start / needsYou / end, and the working update that follows an answered
    *  needs-you) — a user-visible state change. Absent on the ≥20s activity/context coalesced ticks.
    *  The backend uses it for APNs priority: an edge is priority 10, a tick priority 5 (iOS delays
@@ -504,6 +517,12 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
     // interactive-push-live-activities addendum) — belt-and-braces gate on state so a working/done
     // edge never carries them (the backend also nulls them on non-needsYou content-state).
     const needsYou = c.state === 'needsYou'
+    // interrupted/stale are the WHY of an end edge, and they ride done edges only — same
+    // belt-and-braces gate as the needsYou block above (the backend nulls them off done too).
+    // They are forwarded because 'Stopped' is the mirror's message for BOTH the interrupt and the
+    // stale sweep: without these flags the phone cannot tell "you stopped it" from "we lost the
+    // host", and both are indistinguishable from a real completion except by that string.
+    const done = c.state === 'done'
     buffer.push({
       nodeId: c.nodeId,
       ...(title ? { nodeTitle: title } : {}),
@@ -522,6 +541,8 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
       ...(needsYou && c.options && c.options.length > 0 ? { options: c.options } : {}),
       ...(needsYou && c.multiSelect ? { multiSelect: true } : {}),
       ...(needsYou && c.pendingId ? { pendingId: c.pendingId } : {}),
+      ...(done && c.interrupted ? { interrupted: true } : {}),
+      ...(done && c.stale ? { stale: true } : {}),
       ts: c.ts
     })
     scheduleFlush()
