@@ -422,6 +422,38 @@ session (you can't keep a live OS process across a reboot):
   --resume`) when known, else the bare `launchCmd`. The one-shot `data.initialCommand` still wins
   on the very first open, so the agent is never double-launched.
 
+### We have our own VT emulator — check it before asking tmux
+
+xterm.js is not just a renderer. It parses the pane's output stream, so it **tracks DECSET modes
+itself** and exposes them as public API (`term.modes`, `@xterm/xterm/typings/xterm.d.ts:1865`) —
+bracketed paste, application-cursor, mouse tracking, origin mode, and the rest. We already read one
+of them: `term.modes.mouseTrackingMode` decides whether a click means "follow this file link"
+(`src/renderer/terminal/file-links.ts:341`).
+
+But `PtyManager.bracketPasteRequested` asks **tmux** for the same class of fact, via
+`#{bracket_paste_flag}` — and that format **first shipped in tmux 3.7** (2026-06-26). Ubuntu 24.04
+LTS ships 3.4, Ubuntu 22.04 → 3.2a, Debian 12/13 → 3.3a/3.5a, Ubuntu 26.04 → 3.6a. On all of those
+it expands to `''` exactly like a bogus name, and the comparison against `'1'` answers **false for
+every pane**. The bundled tmux does not rescue it: `extraResources` places it under `"mac"` only,
+and `bundledTmuxPath` is deliberately the **last** candidate (see the comment at
+`pty-manager.ts:174` — preferring our binary would pair a new client with the user's older running
+*server*, which upstream refuses). On an **SSH project it is unfixable from our side entirely**:
+the remote's tmux is whatever the user's server has.
+
+**The rule this is an instance of: before asking tmux, ssh or `ps` something about a pane, check
+whether the emulator already knows it.** Facts about *what the app in the pane is doing* (VT modes,
+the alternate screen, the cursor shape it asked for) arrive as bytes we already parse. Facts about
+*the session* (does it exist, what is the foreground process group, which panes are in it) are
+genuinely tmux's and must be asked. Mixing the two up is how a feature acquires a dependency on a
+tmux version we do not control. herdr has no version problem here for exactly this reason — it
+reads `mode_get(MODE_BRACKETED_PASTE)` from its own state machine.
+
+**Open, and unmeasured at the time of writing** (do not build on either answer until it is settled):
+whether the pane app's DECSET reliably survives the tmux *client* boundary into our xterm.js
+instance, and what an offscreen or hibernated node reports once the offscreen/Eco work has released
+its terminal. If the first is false, the emulator is not a substitute here; if the second is, the
+substitute needs a last-known-value cache.
+
 ### Seeding a fresh xterm (`attachReplay` / `seedPaint` in `terminal/terminal-config.ts`)
 
 A newly mounted xterm is empty. Since tmux paints its own client, there is usually **nothing to
