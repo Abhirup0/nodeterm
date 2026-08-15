@@ -1,3 +1,4 @@
+import { isSafeNodeId } from '../remote-safety'
 import type { NotPermittedReason } from './agent-message-decide'
 
 /**
@@ -15,12 +16,17 @@ import type { NotPermittedReason } from './agent-message-decide'
  * exists to fix on the source side, where it surfaced as a lost capability rather than as the wrong
  * canvas answering.
  *
- * The fix is NOT to travel to the target's project. `send` is declared outside `needsLiveCanvas`
- * precisely so it never can: travelling would yank the human's view to another tab on a background
- * agent's say-so, and `setActive` on the way would clear that node's unread badge — a delivery
- * silently erasing the signal a human relies on (G5). So this resolver takes the projects store and
- * NOTHING else. There is no parameter for a live node list, which is a guarantee a test can check
- * by running it: a node the live canvas has but the store has not is refused, not admitted.
+ * Nor is the fix to travel to the target's project, and THIS resolver is what makes that
+ * impossible: it takes the projects store and NOTHING else. There is no parameter for a live node
+ * list, so there is nothing to travel toward — a guarantee a test can check by running it, since a
+ * node the live canvas has but the store has not is refused rather than admitted.
+ *
+ * `needsLiveCanvas` is a different guarantee and must not be confused with this one: Canvas routes
+ * by SOURCE (`routeControlSource(projects, activeId, sourceNodeId)`), so declaring `send`/`reply`
+ * store-answered stops a travel to the SENDER's project — the one an off-canvas orchestrator would
+ * otherwise trigger on every message it sent. Both matter, for different halves of the pair, and
+ * either alone would leave a way for a background agent to yank the human's view and clear an
+ * unread badge on the way (G5).
  *
  * ── THREE SURFACES ──────────────────────────────────────────────────────────────────────────────
  *
@@ -34,21 +40,27 @@ import type { NotPermittedReason } from './agent-message-decide'
  * ── WHICH WAY IT FAILS ──────────────────────────────────────────────────────────────────────────
  *
  * CLOSED, because the thing being authorised is a write into someone else's terminal. Anything this
- * cannot positively resolve to a single shared project is refused: a source that belongs to no
- * project the store knows, a target that resolves nowhere, a target in a project the store has but
- * the sender does not share. `notPermitted` is not retryable, so a refusal here is terminal — which
- * is correct for a boundary and would be wrong for a timing problem, and none of these are timing
- * problems.
+ * cannot positively resolve to a single shared project is refused: an id outside `isSafeNodeId`, a
+ * source that belongs to no project the store knows, a target that resolves nowhere, a target in a
+ * project the store has but the sender does not share. `notPermitted` is not retryable, so a
+ * refusal here is terminal — which is correct for a boundary and would be wrong for a timing
+ * problem, and none of these are timing problems.
  */
 
 /** The little this needs from a project — a structural subset of both `Project` and the store's
- *  serialized `ProjectFileV1`, so either can be passed without adaptation. */
+ *  serialized `ProjectFileV1`, so either can be passed without adaptation.
+ *
+ *  `nodes` is required rather than optional on purpose, and the caller owns that: a synthesised
+ *  array with `nodes` absent throws here instead of failing closed. Every real `Project` has it. */
 export interface ScopeProject {
   id: string
   nodes: readonly { id: string }[]
 }
 
-export type ScopeRefusal = Extract<NotPermittedReason, 'self-send' | 'cross-project'>
+export type ScopeRefusal = Extract<
+  NotPermittedReason,
+  'self-send' | 'cross-project' | 'unaddressable-node-id'
+>
 
 export type DeliveryScope =
   | { kind: 'same-project'; projectId: string }
@@ -64,18 +76,49 @@ export type DeliveryScope =
 /**
  * Resolve a (source, target) pair to the project they share, or to the refusal that stops it.
  *
- * `self-send` is checked first and is the same rule, in the same words, that the manual
- * `onConnect` already applies to a canvas edge — a node may not be wired to itself. It is decided
- * before project membership because it is true regardless of where either id lives, including when
- * neither lives anywhere.
+ * ── THE ID ITSELF IS CHECKED FIRST, AND NOTHING ELSE ON THIS PATH DOES IT ───────────────────────
+ *
+ * Node ids come out of `.nodeterm/project.json` and `fileToProject` validates NOTHING — the repo
+ * says so at `node-identity-policy.ts:128` and `hook-server.ts:282`. `isSafeNodeId` exists and is
+ * applied at `PtyManager.create()`, which is not the load path this resolver reads. Two concrete
+ * consequences, and both are why the check is here rather than deeper:
+ *
+ *  - **The pair limiter's key stops being injective.** Its separator is a NUL, so an id CONTAINING
+ *    one collides two different conversations and each throttles the other (`agent-message-flow.ts`
+ *    spells out the shape). `isSafeNodeId`'s charset — `[A-Za-z0-9._-]` — is exactly what makes
+ *    that impossible.
+ *  - **tmux session names FOLD.** `sessionName()` sanitises rather than refuses, so declared ids
+ *    `v/1` and `v_1` name ONE session. An id that cannot be sanitised into a different node's
+ *    session is the only kind worth admitting.
+ *
+ * Refused as `unaddressable-node-id`, not as `cross-project`: such an id may be listed in the
+ * sender's own project, so the scope word would be a false statement about why it was refused.
+ *
+ * `self-send` is the same rule, in the same words, that the manual `onConnect` already applies to a
+ * canvas edge — a node may not be wired to itself. It is decided before project membership because
+ * it is true regardless of where either id lives, including when neither lives anywhere.
  *
  * Note that this is the OUTER guard, not the only one: `decidePreProbe` carries its own self-send
  * backstop so that no future caller can forget this one. Both produce the identical
  * `notPermitted{reason:'self-send'}`, which the test asserts by running them.
  *
- * A duplicate node id across two projects (a cloned `project.json` — this repo has shipped that
- * bug once) resolves to the SOURCE's project when the source's project is one of them: the sender
- * addresses the node it can see, and the ambiguity never reaches the pane.
+ * ── A DUPLICATE NODE ID IS RESOLVED, NOT DISAMBIGUATED ──────────────────────────────────────────
+ *
+ * A duplicate id across two projects (a cloned `project.json` — this repo has shipped that bug
+ * once) resolves to the SOURCE's project when the source's project is one of them: the sender
+ * addresses the node it can see.
+ *
+ * That is a routing answer, NOT an isolation guarantee, and the earlier claim here that "the
+ * ambiguity never reaches the pane" was false. A session's only key is the bare node id
+ * (`PtyManager.byPersistKey`, `paneOwner(persistKey)`, tmux `nt-<nodeId>`); no project id appears
+ * anywhere in that namespace and nothing de-duplicates ids when a second project carrying them is
+ * opened. So a `project.json` that merely LISTS another project's node id resolves `same-project`
+ * here and lands in that node's one global pane — verified by execution, not reasoned about.
+ *
+ * This resolver cannot close that: the ambiguity is in the session namespace, not in the scope
+ * question. What it can do is refuse the ids that make it worse, which is the check above.
+ * **PR 5's delivery call must run `isSafeNodeId(targetNodeId)` before `paneOwner`** — a direct
+ * caller that skips this resolver gets neither guard.
  *
  * `closed` and `unavailable` projects are deliberately NOT filtered out. A closed project's tmux
  * sessions keep running and are re-adopted on the next start — that is the whole premise of
@@ -89,6 +132,8 @@ export function resolveDeliveryScope(
 ): DeliveryScope {
   const has = (p: ScopeProject, id: string): boolean => p.nodes.some((n) => n.id === id)
   const targetFound = projects.some((p) => has(p, targetNodeId))
+  if (!isSafeNodeId(sourceNodeId) || !isSafeNodeId(targetNodeId))
+    return { kind: 'refused', reason: 'unaddressable-node-id', targetFound }
   if (sourceNodeId === targetNodeId) return { kind: 'refused', reason: 'self-send', targetFound }
   const owner = projects.find((p) => has(p, sourceNodeId))
   if (owner && has(owner, targetNodeId)) return { kind: 'same-project', projectId: owner.id }

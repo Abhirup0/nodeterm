@@ -74,9 +74,10 @@ describe('needsLiveCanvas', () => {
   })
 
   it('is false for send and reply — a delivery must never travel the camera', () => {
-    // Travelling to the target's project would hijack the human's view on a background agent's
-    // say-so, and the `setActive` on the way would clear that node's unread badge — a message
-    // silently erasing the signal a human relies on. A delivery goes to a pane; it needs no canvas.
+    // Routing here is by SOURCE, so what this stops is a trip to the SENDER's project — which an
+    // off-canvas orchestrator would otherwise trigger on every message it sent, hijacking the
+    // human's view and clearing an unread badge via `setActive` on the way (G5). Never travelling
+    // to the TARGET's project is a different guarantee, and it belongs to `resolveDeliveryScope`.
     expect(needsLiveCanvas('send')).toBe(false)
     expect(needsLiveCanvas('reply')).toBe(false)
   })

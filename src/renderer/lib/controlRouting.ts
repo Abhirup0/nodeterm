@@ -72,12 +72,17 @@ export function routeControlSource(
  * keeps a background agent's polling from yanking the user's view to another project tab on every
  * call.
  *
- * `send`/`reply` are here for a stronger reason than politeness. A delivery goes to a tmux PANE,
- * not to a canvas, so travelling to the target's project buys nothing — and it costs twice: it
- * hijacks the human's view on a background agent's say-so, and the `setActive` on the way clears
- * that node's unread badge, so a message silently erases the signal a human relies on. The target
- * is therefore resolved off the store (`resolveDeliveryScope`), which is also the only source of
- * truth that can see nodes outside the active tab at all.
+ * `send`/`reply` are here for a stronger reason than politeness, and it is worth being precise
+ * about WHICH travel this prevents: routing here is by SOURCE
+ * (`routeControlSource(projects, activeId, sourceNodeId)`), so what the declaration stops is a trip
+ * to the SENDER's project — which an off-canvas orchestrator would otherwise trigger on every
+ * message it sent, hijacking the human's view on a background agent's say-so and clearing that
+ * node's unread badge via `setActive` on the way (G5). A delivery goes to a tmux PANE, not to a
+ * canvas, so it needs no live canvas at either end.
+ *
+ * The other half — never travelling to the TARGET's project — is not this function's doing. It
+ * comes from `resolveDeliveryScope` (`src/core/agents/agent-message-scope.ts`) taking the
+ * serialized store and having no live-node parameter at all, so there is nothing to travel toward.
  *
  * INERT AS OF THIS COMMIT: neither verb is in `ControlVerb` yet, so `parseControlRequest` refuses
  * both before any of this is reached (asserted by running it, in `canvas-control-core.test.ts`).

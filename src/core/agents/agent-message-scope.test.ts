@@ -93,7 +93,9 @@ describe('resolveDeliveryScope', () => {
 
   it('resolves a DUPLICATE node id to the sender’s own project', () => {
     // A cloned `project.json` gives two projects the same node id — this repo has shipped that bug
-    // once. The sender addresses the node it can see, and the ambiguity never reaches a pane.
+    // once. The sender addresses the node it can see. This is a ROUTING answer only: sessions are
+    // keyed by the bare node id, so the two ids still name one pane, and no resolver can change
+    // that from here.
     const cloned: ScopeProject[] = [
       { id: 'p-alpha', nodes: [{ id: 'a-1' }, { id: 'dup' }] },
       { id: 'p-clone', nodes: [{ id: 'c-1' }, { id: 'dup' }] }
@@ -121,6 +123,75 @@ describe('resolveDeliveryScope', () => {
 
   it('ids are matched exactly — a case-folded near-miss is not the same node', () => {
     expect(resolveDeliveryScope(projects, 'a-1', 'A-2').kind).toBe('refused')
+  })
+})
+
+describe('an id the app could never have made is refused before anything else', () => {
+  // Node ids come off `.nodeterm/project.json` and the load path validates nothing, so this is the
+  // only place on the messaging path that asks. Two things break without it: the pair limiter's
+  // key stops being injective (its separator is a NUL), and tmux session names FOLD, because
+  // `sessionName()` sanitises rather than refuses — declared `v/1` and `v_1` are one session.
+  const SEP = String.fromCharCode(0)
+  const unsafe = ['a 1', `a${SEP}1`, 'v/1', '../etc', '..', '', 'a$1', 'x'.repeat(129)]
+
+  it.each(unsafe)('refuses %j as a TARGET', (id) => {
+    const scope = resolveDeliveryScope([{ id: 'p', nodes: [{ id: 'a-1' }, { id }] }], 'a-1', id)
+    expect(scope).toEqual({ kind: 'refused', reason: 'unaddressable-node-id', targetFound: true })
+  })
+
+  it.each(unsafe)('refuses %j as a SOURCE', (id) => {
+    const scope = resolveDeliveryScope([{ id: 'p', nodes: [{ id }, { id: 'a-1' }] }], id, 'a-1')
+    expect(scope.kind).toBe('refused')
+    expect((scope as { reason: string }).reason).toBe('unaddressable-node-id')
+  })
+
+  it('refuses it even when BOTH nodes are listed in the same project — this is not a scope failure', () => {
+    // Which is exactly why the word is its own: such an id can be sitting in the sender's own
+    // project file, so calling it `cross-project` would be a false statement about the reason.
+    const both = [{ id: 'p', nodes: [{ id: 'a 1' }, { id: 'a 2' }] }]
+    expect(resolveDeliveryScope(both, 'a 1', 'a 2').kind).toBe('refused')
+    expect(resolveDeliveryScope(both, 'a-1', 'a-2')).toEqual({
+      kind: 'refused',
+      reason: 'cross-project',
+      targetFound: false
+    })
+  })
+
+  it('is decided BEFORE the self-send arm — an unaddressable id is not a self-send', () => {
+    // Both refusals are terminal, so this is about the WORD: "that is not a node id" and "you may
+    // not message yourself" need different actions from whoever reads it.
+    expect(resolveDeliveryScope([{ id: 'p', nodes: [{ id: 'a 1' }] }], 'a 1', 'a 1')).toEqual({
+      kind: 'refused',
+      reason: 'unaddressable-node-id',
+      targetFound: true
+    })
+  })
+
+  it('the two ids that would FOLD to one tmux session are both refused', () => {
+    const folding = [{ id: 'p', nodes: [{ id: 'v/1' }, { id: 'v_1' }] }]
+    // `v_1` is a legal id; `v/1` is the one that sanitises onto it, and it never gets that far.
+    expect(resolveDeliveryScope(folding, 'v_1', 'v/1')).toEqual({
+      kind: 'refused',
+      reason: 'unaddressable-node-id',
+      targetFound: true
+    })
+  })
+
+  it('the ids the app actually emits are all still admitted', () => {
+    // The check must not cost a legitimate population: `nextId()` emits `<prefix>-<base36>-<n>`
+    // and `uuid()` hex-with-dashes.
+    const real = ['term-mabc-3', 'claude-mb1x2y-11', '3f9a1c22-7b0e-4a11-9f00-0c1d2e3f4a5b', 'a.b_c-1']
+    for (const id of real) {
+      const scope = resolveDeliveryScope([{ id: 'p', nodes: [{ id: 'src-1' }, { id }] }], 'src-1', id)
+      expect(scope, id).toEqual({ kind: 'same-project', projectId: 'p' })
+    }
+  })
+
+  it('carries through decideDelivery as its own notPermitted reason, and is terminal', () => {
+    const scope = resolveDeliveryScope([{ id: 'p', nodes: [{ id: 'a-1' }] }], 'a-1', 'a 2')
+    const outcome = decideDelivery(facts({ notPermitted: scopeRefusal(scope) }))
+    expect(outcome).toEqual({ kind: 'notPermitted', reason: 'unaddressable-node-id' })
+    expect(RETRYABLE.notPermitted).toBe(false)
   })
 })
 

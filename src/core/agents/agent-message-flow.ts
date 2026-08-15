@@ -39,8 +39,10 @@ import type { AgentMessageOutcome } from './agent-message-decide'
  *   refuses every future delivery with a number nobody can wait out. That is the failure mode this
  *   module refuses to have, so every path that could produce it fails OPEN: entries are evicted on
  *   read (`sweep`), a clock that jumps BACKWARDS drops the entry instead of parking it in the
- *   future, and a fan-out budget whose reset signal never arrives expires on its own after
- *   `TURN_STALE_MS`.
+ *   future, a NON-FINITE clock reading drops everything (every comparison is false for `NaN`, which
+ *   would otherwise make an entry immortal — and would silence the fan-out budget while the pair
+ *   budget failed open, the worst of both), and a fan-out budget whose reset signal never arrives
+ *   expires on its own after `TURN_STALE_MS`.
  *
  * Nothing here reads the clock, the filesystem or a socket; `now` is injected exactly as it is in
  * `decideDelivery`, so the whole thing is testable without fake timers.
@@ -76,6 +78,13 @@ export const TURN_STALE_MS = 5 * 60_000
  * existing — and something enormous would tell a caller to abandon a budget that clears the moment
  * its turn ends. The per-pair interval is the honest lower bound: nothing this sender does can land
  * sooner than that anyway.
+ *
+ * KNOWN COST, stated so it is not a surprise: in the degenerate case where `noteNewTurn` never
+ * arrives, a caller that obeys this floor exactly spends `TURN_STALE_MS / FANOUT_RETRY_AFTER_MS`
+ * = 30 refused attempts before the staleness backstop opens the budget. Those 30 are cheap for the
+ * host (pre-probe, no pane, no ssh) and expensive for the caller (30 tool calls). The alternative —
+ * reporting the true wait — is not available: the number does not exist while the reset is a turn
+ * boundary rather than a clock event.
  */
 export const FANOUT_RETRY_AFTER_MS = PAIR_MIN_INTERVAL_MS
 
@@ -96,6 +105,20 @@ export type FlowCheck = { ok: true } | { ok: false; limit: FlowLimit; outcome: R
  * A raw NUL in a source file makes git, grep and ripgrep skip the ENTIRE file in silence. This
  * repo has been bitten twice (commit 4c0e8c3); the plan this task comes from was written with a raw
  * one and was itself invisible to grep until it was caught.
+ *
+ * -- THE KEY IS INJECTIVE ONLY OVER IDS THAT PASS `isSafeNodeId`, AND THAT IS A PRECONDITION ------
+ *
+ * An id that CONTAINS the separator collides two different conversations: with S for the separator,
+ * `pairKey('x'+S+'y', 'z')` and `pairKey('x', 'y'+S+'z')` are the same string, and the second
+ * conversation is then throttled by the first. `isSafeNodeId` (`[A-Za-z0-9._-]`, so no NUL, no
+ * space, no slash) is what makes the premise true, and `resolveDeliveryScope` enforces it at the
+ * AUTHORIZATION BOUNDARY rather than here: a limiter is the wrong place to decide whether an id is
+ * addressable at all, and enforcing it in two places would leave one of them untested in practice.
+ *
+ * A DIRECT caller of this module that has not gone through `resolveDeliveryScope` — PR 5's verbs,
+ * PR 7's queue — must validate first. Nothing in the type system says so, which is why the test
+ * asserts the collision EXISTS and asserts the validator refuses exactly the ids that cause it: a
+ * precondition pinned by execution instead of by this paragraph.
  */
 export function pairKey(src: string, dst: string): string {
   return `${src}\u0000${dst}`
@@ -159,8 +182,28 @@ const senderTurns = new Map<string, TurnBudget>()
  * step was large — an agent silenced for an hour by a time correction, with no way to wait it out.
  * Dropping it over-sends by at most one message per pair. That is the direction this module always
  * takes.
+ *
+ * A NON-FINITE `now` gets the same treatment, and it is not a hypothetical tidy-up: EVERY comparison
+ * below is false for `NaN`, so without this line an entry becomes immortal — and the two budgets
+ * then fail in OPPOSITE directions, which is the worst of both. The pair limiter fails open by
+ * accident (its `retryAfterMs` is `NaN`, and `decidePreProbe` refuses on `retryAfterMs > 0`, which
+ * `NaN` is not), while a fan-out budget already at the cap returns a real `FANOUT_RETRY_AFTER_MS`
+ * forever — a permanently silent sender that only a `newTurn` can rescue, which is exactly the
+ * failure this module claims not to have. Unreachable while `now` is `Date.now()`; the guard costs
+ * one comparison and makes the claim true instead of true-by-luck.
+ *
+ * NaN is the only value this line is load-bearing for, and the test says so: `+Infinity` is already
+ * dropped by the staleness arm and `-Infinity` by the future arm below. It is written as
+ * `!Number.isFinite` rather than `Number.isNaN` because that is the intent — a clock reading that
+ * is not a position on the number line — and because a mutation swapping the two is EQUIVALENT
+ * rather than a defect the sweep would let through.
  */
 function sweep(now: number): void {
+  if (!Number.isFinite(now)) {
+    pairLastSentAt.clear()
+    senderTurns.clear()
+    return
+  }
   for (const [key, at] of pairLastSentAt)
     if (at > now || now - at >= PAIR_MIN_INTERVAL_MS) pairLastSentAt.delete(key)
   for (const [id, b] of senderTurns)

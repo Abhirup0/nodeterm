@@ -17,6 +17,7 @@ import {
 import { decidePreProbe, RETRYABLE } from './agent-message-decide'
 import { deliverAgentMessage, type DeliveryDeps } from './agent-message'
 import { MANAGED_SCRIPT_REVISION } from './hooks/managed-script'
+import { isSafeNodeId } from '../remote-safety'
 import type { MirrorEntry } from '../agent-status-mirror'
 
 const T0 = 1_700_000_000_000
@@ -88,6 +89,23 @@ describe('the per-pair rate limit', () => {
     expect(seen.size).toBe(ids.length * ids.length)
     // The reverse pair in particular — the one people get wrong.
     expect(pairKey('a', 'b')).not.toBe(pairKey('b', 'a'))
+  })
+
+  it('an id CONTAINING the separator would collide two conversations — and is refused upstream', () => {
+    // The uniqueness test above cannot see this: no id in its set can contain a NUL, so the shape
+    // moves one layer down instead of dying. Here it is, exhibited rather than asserted away — and
+    // then the validator that makes the premise true, refusing exactly the ids that cause it.
+    const SEP = String.fromCharCode(0)
+    expect(pairKey(`x${SEP}y`, 'z')).toBe(pairKey('x', `y${SEP}z`))
+    noteSent(`x${SEP}y`, 'z', T0)
+    // …a live mis-throttle: a conversation nobody has had is refused for 9999 ms.
+    expect(wait(checkPairRate('x', `y${SEP}z`, T0 + 1))).toBe(PAIR_MIN_INTERVAL_MS - 1)
+    // Node ids are not validated on the project.json load path, so the premise is enforced at the
+    // authorization boundary instead — `resolveDeliveryScope`, over this predicate.
+    expect(isSafeNodeId(`x${SEP}y`)).toBe(false)
+    expect(isSafeNodeId('x y')).toBe(false)
+    expect(isSafeNodeId('v/1')).toBe(false)
+    expect(isSafeNodeId('term-mabc-3')).toBe(true)
   })
 
   it('a CHECK never starts a window — only a delivered message does', () => {
@@ -273,6 +291,32 @@ describe('eviction — the entries go away, not just the verdicts', () => {
     for (let i = 0; i < FANOUT_PER_TURN; i++) noteSent('a', `dst-${i}`, T0 + i)
     expect(wait(checkFanOut('a', T0 - 60 * 60_000))).toBeNull()
     expect(flowStats().senders).toBe(0)
+  })
+
+  it('a NON-FINITE clock reading empties both maps instead of freezing them', () => {
+    // Every comparison in the sweep is FALSE for NaN, so without the guard the entry is immortal —
+    // and the two budgets then fail in opposite directions: the pair limiter's `retryAfterMs` is
+    // NaN (which `decidePreProbe` reads as "no limit", so it fails open) while the fan-out cap
+    // keeps returning a real number forever, silencing the sender for the rest of the run.
+    for (let i = 0; i < FANOUT_PER_TURN; i++) noteSent('a', `dst-${i}`, T0 + i)
+    expect(wait(checkFanOut('a', T0 + 10))).toBe(FANOUT_RETRY_AFTER_MS)
+    expect(wait(checkFanOut('a', Number.NaN))).toBeNull()
+    expect(flowStats()).toEqual({ pairs: 0, senders: 0 })
+    // …and the budget is genuinely released rather than merely reported open once.
+    expect(wait(checkFanOut('a', T0 + 11))).toBeNull()
+    expect(wait(checkPairRate('a', 'dst-0', T0 + 11))).toBeNull()
+  })
+
+  it('an INFINITE reading is safe too, though not because of that guard', () => {
+    // Measured, not assumed: +Infinity is dropped by the staleness arm and -Infinity by the future
+    // arm, so swapping `!Number.isFinite` for `Number.isNaN` is an EQUIVALENT mutation. NaN is the
+    // one value both comparisons are false for, which is what the previous test pins.
+    noteSent('a', 'b', T0)
+    expect(wait(checkPairRate('a', 'b', Number.POSITIVE_INFINITY))).toBeNull()
+    expect(flowStats()).toEqual({ pairs: 0, senders: 0 })
+    noteSent('a', 'b', T0)
+    expect(wait(checkPairRate('a', 'b', Number.NEGATIVE_INFINITY))).toBeNull()
+    expect(flowStats()).toEqual({ pairs: 0, senders: 0 })
   })
 
   it('resetMessageFlow really empties both maps', () => {

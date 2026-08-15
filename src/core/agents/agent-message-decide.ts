@@ -18,7 +18,18 @@ import { MIN_TOKEN_AWARE_REVISION } from './hooks/managed-script'
  * the policy without either.
  */
 
-export type NotPermittedReason = 'switch-off' | 'cross-project' | 'self-send' | 'unsupported-edition'
+/**
+ * `unaddressable-node-id` is deliberately its own word rather than a shade of `cross-project`: an
+ * id outside `isSafeNodeId` may well be listed in the sender's OWN project file (nothing validates
+ * ids on the load path), so calling it a project-scope failure would be a false statement about
+ * why it was refused — and it needs a different action from the human. See `agent-message-scope.ts`.
+ */
+export type NotPermittedReason =
+  | 'switch-off'
+  | 'cross-project'
+  | 'self-send'
+  | 'unsupported-edition'
+  | 'unaddressable-node-id'
 
 /** Which signal satisfied the delivery receipt (Task 3.4). */
 export type ReceiptSignal = 'newTurn' | 'working'
