@@ -187,8 +187,10 @@ export function paneOwnerFrom(
 ): PaneOwner | null {
   if (!identity) return null
   const pgid = foregroundPgid(psStdout)
-  if (pgid === null) return null
-  const argv = parseForegroundArgv(psStdout, pgid)
+  const argv = pgid === null ? [] : parseForegroundArgv(psStdout, pgid)
+  // The ONE null-vs-owner decision, deliberately not two: "no foreground group marked" and "no rows
+  // in it" are the same fact — we could not see who owns the pane — and a second guard for the
+  // second phrasing would be a line no test can reach.
   if (argv.length === 0) return null
   return { ...identity, argv }
 }

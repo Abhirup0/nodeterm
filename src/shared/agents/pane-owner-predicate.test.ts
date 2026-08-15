@@ -64,6 +64,10 @@ describe('isAgentPane', () => {
     expect(isAgentPane(owner(['node /home/u/.local/share/npm/bin/claude']), 'claude')).toBe('agent')
     expect(isAgentPane(owner(['bun /opt/bin/codex mcp']), 'codex')).toBe('agent')
     expect(isAgentPane(owner(['node --inspect claude']), 'claude')).toBe('not-agent')
+    // An OPTION that reads like the agent once the login-shell dash is stripped. This is the case
+    // the "next token must not start with -" rule exists for: without it, `-claude` basenames to
+    // `claude` and an interpreter flag is mistaken for the script it is not.
+    expect(isAgentPane(owner(['node -claude']), 'claude')).toBe('not-agent')
   })
 
   it('answers unknown for a custom agent whose binary nothing can name', () => {
