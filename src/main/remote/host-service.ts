@@ -28,6 +28,7 @@ import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '..
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
 import * as fsOps from '../../core/fs-ops'
+import type { RemoteNodeInput } from '../../core/project-node-append'
 import { getStoredEntitlement, isPremium } from '../../core/license'
 import { publicKeyToB64, type KeyPair } from './e2ee'
 import { loadOrCreateHostKeyPair, HostKeyLockedError } from './host-identity'
@@ -190,7 +191,7 @@ export function createHostHandlers(
   git?: HostGitOps,
   // Registers a phone-started session as a project node (WorkspaceStore.appendRemoteNode).
   // Absent ⇒ `projects.registerNode` is not served.
-  registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+  registerNode?: (projectId: string, node: RemoteNodeInput) => Promise<boolean>
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -442,11 +443,19 @@ export function createHostHandlers(
       socket.respond(req.id, false, { message: 'projects.registerNode requires projectId and node.id.' })
       return
     }
-    const input: { id: string; title?: string; agentId?: string } = { id }
+    const input: RemoteNodeInput = { id }
     const title = str(node.title)
     if (title !== undefined) input.title = title
     const agentId = str(node.agentId)
     if (agentId !== undefined) input.agentId = agentId
+    // The managed Claude account the phone launched this session under (its CLAUDE_CONFIG_DIR).
+    // The direct-SSH registration path has always persisted it; this leg used to drop it on the
+    // floor, so an off-LAN session under account X came back as the system account and every
+    // account-scoped reader (transcript, context meter, find bar) then resolved against the wrong
+    // root — and a cold restore resumed it as the wrong identity. Validated in the registrar
+    // (appendProjectNode), which refuses the whole append rather than register a wrong identity.
+    const accountId = str(node.accountId)
+    if (accountId !== undefined) input.accountId = accountId
     void registerNode(projectId, input)
       .then((registered) => socket.respond(req.id, true, { registered }))
       .catch(() => socket.respond(req.id, true, { registered: false }))
@@ -719,7 +728,7 @@ export interface HostSessionOptions {
   /** Typed, jailed `git.*` bridge (see HostGitOps). Optional: absent ⇒ the verbs are not served. */
   git?: HostGitOps
   /** Registers a phone-started session as a project node (`projects.registerNode`). Optional. */
-  registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+  registerNode?: (projectId: string, node: RemoteNodeInput) => Promise<boolean>
   /** Extra fs/git jail roots beyond the shared canvas's node cwds — production passes the
    *  workspace's local project cwds: the phone browses EVERY project over `projects.list`, so a
    *  canvas-only jail denied whichever project the desktop didn't happen to have focused. */
