@@ -4390,6 +4390,15 @@ body,
   margin: 0 0 12px;
 }
 
+/* A repository may have hundreds of worktrees. Keep the dialog controls reachable and scroll only
+   the repeated rows; viewport-relative height still fits on short displays. */
+.bind-existing__list {
+  max-height: min(260px, 32vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+}
+
 .bind-existing__title {
   margin: 0 0 6px;
   font-size: 11px;
