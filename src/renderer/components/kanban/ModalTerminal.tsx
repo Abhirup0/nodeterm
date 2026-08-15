@@ -238,6 +238,12 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
         shellArgs: localSsh ? buildSshArgs(spawn.ssh!) : undefined,
         cwd: spawn.cwd,
         persistKey: nodeId,
+        // Pane-ownership ledger parity with TerminalNode (agent messaging, PR #237 fix round 2):
+        // if this modal is ever the FIRST/sole fresh spawner of the node (a card for a node whose
+        // project is not the active canvas), the pane must still record its true owner. Use the
+        // CARD's project resolved above, NOT the active canvas id — the modal may be for a
+        // non-active project. Recorded main-side only on a genuine fresh spawn.
+        ownerProjectId: projectId,
         agentId: spawn.agentId,
         accountId: spawn.accountId,
         sshRemote,

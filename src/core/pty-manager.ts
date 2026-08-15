@@ -35,7 +35,11 @@ import {
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
 import { parsePaneCursor } from './pane-cursor'
-import { recordFreshSpawnOwner, forgetPaneOwner } from './agents/pane-ownership'
+import {
+  recordFreshSpawnOwner,
+  forgetPaneOwner,
+  shouldRecordOwnership
+} from './agents/pane-ownership'
 import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './agents/pane-owner'
 import type { PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
@@ -1654,7 +1658,8 @@ export class PtyManager {
     // someone else spawned (incl. an app-restart re-attach) leaves the pane UNPROVEN, so a second
     // project that merely opens another's node id cannot claim it. The owner is the renderer's
     // machine-local project id, never the git-shared file id. See `agents/pane-ownership.ts`.
-    if (fresh && options.persistKey) recordFreshSpawnOwner(options.persistKey, options.ownerProjectId)
+    if (shouldRecordOwnership(fresh, options.persistKey, options.ownerProjectId))
+      recordFreshSpawnOwner(options.persistKey as string, options.ownerProjectId)
     // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
     const accountFallback = spawned?.accountFallback
     // The session's `persistKey` is set iff the spawn actually landed on a tmux, local or remote

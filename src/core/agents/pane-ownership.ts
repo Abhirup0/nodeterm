@@ -42,6 +42,22 @@
 const owners = new Map<string, string>()
 
 /**
+ * THE FRESH-GATE, pure and pinned: may this create() record pane ownership? True ONLY for a
+ * genuine fresh spawn (`fresh === true`) of a persistent node (`persistKey`) whose owner is known
+ * (`ownerProjectId`). This is the load-bearing security property — recording on an ATTACH
+ * (`fresh === false`) would let a project claim a pane it merely re-opened after a restart, which
+ * is exactly the confused deputy this ledger closes. Extracted so the gate has its own unit test
+ * (`pane-ownership.test.ts`) rather than living only inside `spawnNew`.
+ */
+export function shouldRecordOwnership(
+  fresh: boolean,
+  persistKey: string | undefined,
+  ownerProjectId: string | undefined
+): boolean {
+  return fresh === true && !!persistKey && !!ownerProjectId
+}
+
+/**
  * Record the owner of a node whose pane was just GENUINELY spawned. Call site: `spawnNew`, guarded
  * by `fresh === true` and a present `persistKey` + `ownerProjectId`. A fresh spawn for an id that
  * somehow already has an entry OVERWRITES it — the live pane is the one that just came into being.

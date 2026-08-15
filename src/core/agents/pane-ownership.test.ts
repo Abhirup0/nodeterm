@@ -3,7 +3,8 @@ import {
   recordFreshSpawnOwner,
   paneOwnerProject,
   forgetPaneOwner,
-  resetPaneOwnershipForTests
+  resetPaneOwnershipForTests,
+  shouldRecordOwnership
 } from './pane-ownership'
 
 beforeEach(() => resetPaneOwnershipForTests())
@@ -45,5 +46,23 @@ describe('pane-ownership ledger', () => {
     forgetPaneOwner('n1')
     expect(paneOwnerProject('n1')).toBeUndefined()
     expect(paneOwnerProject('n2')).toBe('proj-a')
+  })
+})
+
+describe('shouldRecordOwnership — the load-bearing fresh-gate, pure', () => {
+  it('records ONLY a genuine fresh spawn with a persistKey and a known owner', () => {
+    expect(shouldRecordOwnership(true, 'n1', 'proj-a')).toBe(true)
+  })
+  it('an ATTACH (fresh=false) never records — the confused-deputy hole this gate closes', () => {
+    // Recording on attach would let a project claim a pane it merely re-opened after a restart.
+    expect(shouldRecordOwnership(false, 'n1', 'proj-a')).toBe(false)
+  })
+  it('a spawn with no persistKey (a plain, non-persistent pty) does not record', () => {
+    expect(shouldRecordOwnership(true, undefined, 'proj-a')).toBe(false)
+    expect(shouldRecordOwnership(true, '', 'proj-a')).toBe(false)
+  })
+  it('a spawn with no known owner (old caller / relay) does not record — stays unproven, fails closed', () => {
+    expect(shouldRecordOwnership(true, 'n1', undefined)).toBe(false)
+    expect(shouldRecordOwnership(true, 'n1', '')).toBe(false)
   })
 })
