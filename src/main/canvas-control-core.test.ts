@@ -3,7 +3,8 @@ import {
   parseControlRequest,
   isDestructiveVerb,
   mergeCanvasControlBlock,
-  buildCanvasControlInstructions
+  buildCanvasControlInstructions,
+  buildCanvasSkillBody
 } from './canvas-control-core'
 
 describe('parseControlRequest', () => {
@@ -181,6 +182,21 @@ describe('parseControlRequest', () => {
       expect(body).toContain(verb)
     }
     expect(body.toLowerCase()).toContain('confirm')
+  })
+
+  // The parser change in this commit's sibling is only half a fix: an agent that never learns the
+  // `=` form simply cannot express a value beginning with `--`, and the failure stays silent for it.
+  // So both agent-facing texts must carry the rule, not just one of them.
+  it('the skill text documents --flag=value and warns about values starting with --', () => {
+    const body = buildCanvasSkillBody('/x/shim.sh')
+    expect(body).toContain('--flag=value')
+    expect(body).toMatch(/starts? with `--`/)
+  })
+
+  it('the codex/gemini instructions carry the same rule', () => {
+    const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
+    expect(body).toContain('--flag=value')
+    expect(body).toMatch(/starts? with `--`/)
   })
 
   it('spawn-team requires --team and none of the layout verbs are destructive', () => {

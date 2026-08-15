@@ -970,6 +970,16 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   control the desktop's canvas. The shim is generated source no compiler checks:
   `canvas-control-shim.test.ts` runs it for real (/bin/sh against a real hook server, port AND
   unix-socket transports) — keep it that way.
+  **Flag syntax**: `--flag value`, `--flag=value`, or a valueless flag anywhere on the line. The
+  shim used to consume the next token after any `--flag` *unconditionally*, so `--read --node b1`
+  became `arg.read=--node` with `b1` silently dropped and the server answering about the wrong
+  flag; it now peeks. The trade: a value that itself starts with `--` must use the `=` form
+  (`--cmd=--version`), which was previously unexpressible in either direction. Two parsers are in
+  play and both are tested — the sh loop (`control-shim-parse.test.ts`, real `sh` + a fake `curl`
+  that records argv) and `parseControlBody` reading what it built (`canvas-control-shim.test.ts`).
+  **A new verb must not DEPEND on the fix**: the shim is rewritten locally every app boot but onto
+  an SSH host only inside `RemoteHooks.setup()` (on connect), so an already-connected project keeps
+  the old loop with no signal on the wire. Give every flag a value and both loops agree.
   **Grouping verbs** (`group` / `ungroup` / `move` / `arrange` / `align`): `group` wraps **sibling**
   objects — nodes or frames — into a new frame in their shared container (a mixed-container set, or
   an ancestor plus its descendant, is refused with that reason); `ungroup --group <id>` dissolves a
