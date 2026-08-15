@@ -397,9 +397,13 @@ export interface BoardLogEvent {
     | 'due-cleared'
     | 'priority-set'
     | 'priority-cleared'
+    /** An agent-to-agent message delivery. `from`/`to` are NODE IDS (not column names) and `title`
+     *  is the delivery's outcome kind — a trace that cannot answer "did it land?" answers the only
+     *  question anyone asks it with silence. Written by `agent-message-trace.recordDelivery`. */
+    | 'agent-message'
   from?: string
   to?: string
-  /** Column title for column-added/deleted; card title for card-created. */
+  /** Column title for column-added/deleted; card title for card-created; outcome for agent-message. */
   title?: string
 }
 
