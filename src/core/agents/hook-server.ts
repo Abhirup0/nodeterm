@@ -17,6 +17,8 @@ import {
   IDENTITY_RESTART_NOTE,
   IDENTITY_UNMINTABLE_NOTE,
   IDENTITY_UNMINTABLE_WARN_NOTE,
+  STRICT_CONTROL_REFUSAL,
+  STRICT_CONTROL_VERBS,
   type IdentityDecision
 } from './node-identity-policy'
 
@@ -444,7 +446,14 @@ class HookServer {
             // Which sentence: a node in a case-folding collision group, or with an id
             // `isSafeNodeId` refuses, can NEVER pick up an identity, and telling it to restart is
             // an instruction to loop forever. See `identityRefusalNote`.
-            const note = this.identityRefusalNote(nodeId)
+            //
+            // A STRICT verb answers with its own flat sentence instead: those refusals are not a
+            // rollout accident to be talked through, they are the designed state for anything but
+            // a verified caller, and naming tokens or restarts there is advice to whoever is
+            // probing. See STRICT_CONTROL_VERBS.
+            const note = STRICT_CONTROL_VERBS.has(verb)
+              ? STRICT_CONTROL_REFUSAL
+              : this.identityRefusalNote(nodeId)
             if (wantsText) {
               res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
               res.end(`${note}\n`)

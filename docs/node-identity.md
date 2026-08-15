@@ -295,6 +295,12 @@ around. Anyone who can set the header can present an unjudgeable one, and the ap
 it takes to set the header. So: the latch is a good bug-catcher and worth keeping; it is not a
 boundary, and neither is the dated cutoff (the same probe walks past both).
 
+**The one place the probe stops.** A verb in `STRICT_CONTROL_VERBS` admits `verified` and nothing
+else, so a foreign kid — `legacy` by invariant 3 — is refused there with a flat sentence and no
+diagnosis. That is the only route in this document where the invented-kid escape does not apply, and
+it is affordable exactly because those verbs are new: there is no legacy population to strand, so
+nothing has to fail open. It buys nothing for the routes above, which keep the posture they have.
+
 **The real hardening, if it is ever wanted.** Scope the remote token dir as
 `node-tokens/<kid>/<nodeId>` (already sketched in `writeNodeTokens`' own doc comment). The *only*
 scenario the foreign-kid escape exists for is two instances sharing one host account overwriting
@@ -330,7 +336,13 @@ because it is a tri-state:
 | `false` | Not required | Keep the warning window open past the date **and** release the latch. |
 
 `false` is for a user whose upgrade strands a live session: it gets the canvas back without
-downgrading the app. Neither value ever admits a `forged` token. Both shells wire it as a **live
+downgrading the app. Neither value ever admits a `forged` token, and neither releases a verb in
+**`STRICT_CONTROL_VERBS`** (today: `browser`) — that bucket is decided one line below the `forged`
+check, above every branch the hatch or the dated window can reach, and it admits `verified` only.
+The hatch exists to rescue a session that cannot present an identity; it must not double as a grant
+of the one capability where identity *is* the admission control. The cost is named rather than
+hidden: cross-instance failover loses those verbs, because another instance's token is a foreign
+kid and therefore `legacy`. Both shells wire it as a **live
 getter** (`setIdentityStrictOverride`), so a change takes effect on the next request, not the next
 launch — a stranded user must not have to restart the thing that is already broken.
 

@@ -181,6 +181,38 @@ export const IDENTITY_UNMINTABLE_WARN_NOTE =
 export const TOLERANT_CONTROL_VERBS = new Set(['list'])
 
 /**
+ * Control verbs that admit ONLY a `verified` caller — no window, no latch, no override.
+ *
+ * `browser` is the whole bucket. It is a route through which an agent acts as the user on the
+ * internet, inside a session jar that may hold real logins, and it is NEW — so unlike every verb
+ * the two-move rollout was built for, there is no legacy population to strand and nothing to fail
+ * open FOR. Same posture `/codex-thread/{start,bind}` already holds, for the same reason.
+ *
+ * Checked BEFORE the `override === false` branch, deliberately. That branch returns
+ * `allow-with-warning` for any non-tolerant verb, so `settings.hookIdentityStrict: false` — the
+ * switch docs/node-identity.md tells a stranded user to reach for — would otherwise hand browser
+ * control to any holder of the app-wide bearer, permanently. The escape hatch exists to rescue a
+ * session that cannot present an identity; it must not double as a grant of the one capability
+ * where identity is the entire admission control.
+ *
+ * WHAT IT BUYS, precisely: an invented `kid` is a FOREIGN kid, which invariant 3 requires to be
+ * `legacy` (or cross-instance failover dies), so it walks past the latch and the cutoff into
+ * /control/list and every /context-link/* read. Here `legacy` is a refusal, so that probe fails.
+ *
+ * WHAT IT COSTS: cross-instance failover loses browser control. A second instance's token is a
+ * foreign kid, therefore `legacy`, therefore refused. Accepted. A verb must NEVER be moved from
+ * here into TOLERANT_CONTROL_VERBS.
+ */
+export const STRICT_CONTROL_VERBS: ReadonlySet<string> = new Set(['browser'])
+
+/**
+ * The refusal for a strict verb: one sentence, no diagnosis, no hint about tokens or kids.
+ * Advice here is advice to an attacker and a lie to nobody else — the doc's own phrasing for the
+ * `forged` case, applied to the whole non-`verified` set.
+ */
+export const STRICT_CONTROL_REFUSAL = 'Browser control refused.'
+
+/**
  * The verb `/context-link/*` presents to `controlPolicy`.
  *
  * Every context-link verb is a READ — the route hands back a rendered transcript, summary or
@@ -225,7 +257,9 @@ export interface ControlPolicyInput {
  *
  * `override === false` is the escape hatch: it releases the LATCH as well as the cutoff, because
  * the latch is the likelier of the two to have stranded a user whose upgrade went wrong, and a
- * hatch that does not rescue them is not a hatch. It never releases `forged`.
+ * hatch that does not rescue them is not a hatch. It never releases `forged`, and it never
+ * releases a verb in `STRICT_CONTROL_VERBS` — that bucket is decided one line below `forged`,
+ * above every branch the hatch can reach.
  */
 export function controlPolicy({
   verdict,
@@ -235,6 +269,8 @@ export function controlPolicy({
   override
 }: ControlPolicyInput): IdentityDecision {
   if (verdict === 'forged') return 'refuse'
+  // BEFORE the override and BEFORE the dated window — see STRICT_CONTROL_VERBS.
+  if (STRICT_CONTROL_VERBS.has(verb)) return verdict === 'verified' ? 'allow' : 'refuse'
   if (verdict === 'verified') return 'allow'
   if (override === false) {
     return TOLERANT_CONTROL_VERBS.has(verb) ? 'allow' : 'allow-with-warning'
