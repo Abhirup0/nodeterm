@@ -484,7 +484,13 @@ Consequences worth knowing:
 
 - The SDK **chat node** is still **deferred** — it is not wired into the server bridge.
 - **Canvas-control** (`agent:control`, the Claude-only `nodeterm` CLI verbs) is **not
-  wired** over the server.
+  wired** over the server, and since the strict-verb work it says so **by name**:
+  `/control/<verb>` answers HTTP 400 with `error: control-unsupported-on-this-edition`
+  and a sentence containing the literal *"do not retry"*. The old generic
+  `control unavailable` read to an agent like a transient outage, and an agent retries an
+  outage. `browser` additionally names why it is **structural** rather than unimplemented —
+  a browser node on this edition renders in the **viewer's own** browser tab, which this
+  server has no debugger for, and never can. See `src/server/control-unsupported.ts`.
 - The **`ptyDestroy` tail-teardown** — *resolved in Phase 3c.* Phase 3b left this skipped
   (agent tails self-cleared only on `SessionEnd`, so a node closed *without* one left an
   idle file-tail); the server now untracks agent tails on node close, at desktop parity.
@@ -510,7 +516,8 @@ desktop parity on agent-tail cleanup and first-connect behavior:
   and the app reloads on reopen, so first-load failure now behaves like a mid-session drop.
 
 **Still deferred** (unchanged from Phase 3b): the SDK **chat node**, **canvas-control**
-(`agent:control` / the `nodeterm` CLI verbs), full **two-master flow-control coordination**
+(`agent:control` / the `nodeterm` CLI verbs — now a *named, non-retryable* refusal rather
+than a generic failure, see above), full **two-master flow-control coordination**
 (the server still re-asserts its WS backpressure pause on each send rather than co-managing
 a single actuator with the renderer), and the web folder picker's **hardcoded start
 directory**.

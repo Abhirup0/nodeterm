@@ -309,6 +309,15 @@ around. Anyone who can set the header can present an unjudgeable one, and the ap
 it takes to set the header. So: the latch is a good bug-catcher and worth keeping; it is not a
 boundary, and neither is the dated cutoff (the same probe walks past both).
 
+**The one place the probe will stop — once there is anything in it.** A verb in
+`STRICT_CONTROL_VERBS` admits `verified` and nothing else, so a foreign kid — `legacy` by invariant
+3 — is refused there with a flat sentence and no diagnosis. That will be the only route in this
+document where the invented-kid escape does not apply, and it is affordable exactly because the
+verbs it is for are new: no legacy population to strand, so nothing has to fail open. **Today the
+set names a verb that does not exist yet** (see [The escape hatch](#the-escape-hatch)), so this
+changes nothing for any route currently reachable — every claim above still holds in full, and the
+probe still reaches `/control/list` and every `/context-link/*` verb.
+
 **The real hardening, if it is ever wanted.** Scope the remote token dir as
 `node-tokens/<kid>/<nodeId>` (already sketched in `writeNodeTokens`' own doc comment). The *only*
 scenario the foreign-kid escape exists for is two instances sharing one host account overwriting
@@ -344,7 +353,29 @@ because it is a tri-state:
 | `false` | Not required | Keep the warning window open past the date **and** release the latch. |
 
 `false` is for a user whose upgrade strands a live session: it gets the canvas back without
-downgrading the app. Neither value ever admits a `forged` token. Both shells wire it as a **live
+downgrading the app. Neither value ever admits a `forged` token.
+
+Neither releases a verb in **`STRICT_CONTROL_VERBS`** either — but **that set is pre-positioned and
+gates nothing today, and nobody's hatch has narrowed.** It contains one name, `browser`, which is
+**not a verb this app has**: `ControlVerb` lists 24 and the browser one is `open-browser`, which is
+deliberately *not* in the set. Measured over the real verb list, the set of verbs the hatch stops
+releasing is empty. What exists now is the ORDERING: the bucket is decided one line below the
+`forged` check, above every branch the hatch or the dated window can reach, and it admits `verified`
+only — so the verb it is for cannot arrive through the `override === false` branch, which returns
+`allow-with-warning` for every non-tolerant verb. The user-visible change begins in the PR that
+creates the verb, not here.
+
+`open-browser` stays out on purpose, and the distinction is worth stating because the sentence above
+says "browser": **opening a node is not driving one.** The threat is an agent acting inside a page
+the user is logged into (cookies, typing, script); `open-browser` only creates the surface and
+navigates it, like `show-web`. It is also a shipped verb with a live legacy population, and a strict
+gate would leave a pre-token session — or an SSH host whose project has not reconnected — unable to
+open a browser node with no way back, since the hatch by design cannot reach into this bucket. The
+residual is named rather than hidden: an unverified caller can open a node onto a logged-in page and
+the page's title then shows up in `list`. That is `list`'s tolerance, unchanged by this bucket.
+
+The cost, when the verb does land: cross-instance failover loses it, because another instance's
+token is a foreign kid and therefore `legacy`. Both shells wire it as a **live
 getter** (`setIdentityStrictOverride`), so a change takes effect on the next request, not the next
 launch — a stranded user must not have to restart the thing that is already broken.
 

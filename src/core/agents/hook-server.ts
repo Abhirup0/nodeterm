@@ -17,6 +17,8 @@ import {
   IDENTITY_RESTART_NOTE,
   IDENTITY_UNMINTABLE_NOTE,
   IDENTITY_UNMINTABLE_WARN_NOTE,
+  STRICT_CONTROL_REFUSAL,
+  STRICT_CONTROL_VERBS,
   type IdentityDecision
 } from './node-identity-policy'
 
@@ -462,7 +464,14 @@ class HookServer {
             // Which sentence: a node in a case-folding collision group, or with an id
             // `isSafeNodeId` refuses, can NEVER pick up an identity, and telling it to restart is
             // an instruction to loop forever. See `identityRefusalNote`.
-            const note = this.identityRefusalNote(nodeId)
+            //
+            // A STRICT verb answers with its own flat sentence instead: those refusals are not a
+            // rollout accident to be talked through, they are the designed state for anything but
+            // a verified caller, and naming tokens or restarts there is advice to whoever is
+            // probing. See STRICT_CONTROL_VERBS.
+            const note = STRICT_CONTROL_VERBS.has(verb)
+              ? STRICT_CONTROL_REFUSAL
+              : this.identityRefusalNote(nodeId)
             if (wantsText) {
               res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
               res.end(`${note}\n`)
@@ -481,9 +490,13 @@ class HookServer {
           // The POSIX-sh shim asks for text/plain: it has no JSON parser, so the server does the
           // rendering the Node CLI used to do client-side. Everything else keeps the JSON shape.
           if (wantsText) {
+            // A FAILURE may now carry both: `error` is the machine-readable name a JSON client
+            // keys on, `message` the sentence a human (or a language model) reads. The text
+            // dialect has no fields, so it prefers the sentence and falls back to the name — which
+            // is what every existing handler still sends, so this is inert for all of them.
             const text = result.ok
               ? result.message ?? JSON.stringify(result.result ?? {})
-              : result.error ?? 'control request failed'
+              : result.message ?? result.error ?? 'control request failed'
             res.writeHead(result.ok ? 200 : 400, { 'content-type': 'text/plain; charset=utf-8' })
             res.end(note ? `${note}\n${text}\n` : `${text}\n`)
             return
