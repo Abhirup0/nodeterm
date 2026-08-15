@@ -366,3 +366,13 @@ export function worktreeRemoveMessage(p: WorktreeRemovePrompt): string {
   const warn = p.warning ? `\n\n⚠ ${p.warning}` : ''
   return `${who}${what}${body}${optIn}${warn}`
 }
+
+/** Case-insensitive branch/path search for the existing-worktree picker. Every term must match. */
+export function filterWorktrees(entries: WorktreeEntry[], query: string): WorktreeEntry[] {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return entries
+  return entries.filter((entry) => {
+    const haystack = `${entry.branch ?? ''}\n${entry.path}`.toLowerCase()
+    return terms.every((term) => haystack.includes(term))
+  })
+}

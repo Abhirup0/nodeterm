@@ -18,6 +18,7 @@ import {
   DEFAULT_BASE_REF,
   type WorktreeEntry
 } from './worktree'
+import { filterWorktrees } from './worktree'
 
 const entry = (path: string, branch: string | null): WorktreeEntry => ({
   path,
@@ -399,5 +400,23 @@ describe('worktreeRemoveMessage', () => {
     expect(worktreeRemoveMessage({ ...base, warning: '3 uncommitted file(s) in the worktree.' })).toContain(
       '⚠ 3 uncommitted file(s) in the worktree.'
     )
+  })
+})
+
+describe('filterWorktrees', () => {
+  const entries = [
+    entry('/repo.worktrees/feature-login', 'feature/login'),
+    entry('/repo.worktrees/fix-api', 'fix/API'),
+    entry('/repo.worktrees/detached', null)
+  ]
+
+  it('matches branch or path without case sensitivity', () => {
+    expect(filterWorktrees(entries, 'LOGIN')).toEqual([entries[0]])
+    expect(filterWorktrees(entries, 'fix api')).toEqual([entries[1]])
+  })
+
+  it('returns every entry for a blank query and none for a miss', () => {
+    expect(filterWorktrees(entries, '  ')).toBe(entries)
+    expect(filterWorktrees(entries, 'not-here')).toEqual([])
   })
 })

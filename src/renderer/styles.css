@@ -4407,6 +4407,30 @@ body,
   color: var(--muted);
 }
 
+.bind-existing__search {
+  width: 100%;
+  height: 30px;
+  margin: 0 0 6px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.bind-existing__search:focus {
+  border-color: var(--accent);
+}
+
+.bind-existing__empty {
+  padding: 10px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 .bind-existing__row {
   display: flex;
   align-items: baseline;

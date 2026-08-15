@@ -12,4 +12,11 @@ describe('New Worktree existing-worktree list', () => {
     expect(rule).toContain('max-height: min(260px, 32vh)')
     expect(rule).toContain('overflow-y: auto')
   })
+
+  it('offers a branch/path search before the scrolling list', () => {
+    expect(DIALOG).toContain('aria-label="Search existing worktrees"')
+    expect(DIALOG.indexOf('bind-existing__search')).toBeLessThan(
+      DIALOG.indexOf('bind-existing__list')
+    )
+  })
 })
