@@ -1969,3 +1969,136 @@ describe('a restored entry is never proof', () => {
     expect('restored' in doc.nodes.n1).toBe(false)
   })
 })
+
+// `clearNode` had NO production caller, so deleting a node told the live surfaces nothing: the
+// notch HUD kept its needs-you/done row until the 6 h prune and the phone's Live Activity for it
+// was never ended. It now fires the one end edge those surfaces listen for.
+describe('clearNode (permanent node destroy) fires the end edge', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('fires ONE end edge for a node deleted mid-turn, carrying its identity', () => {
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+    recordAgentEvent(ev({ nodeId: 'n1', sessionId: 's1', state: 'working', newTurn: true }))
+    edges.length = 0
+
+    clearNode('n1')
+
+    expect(edges).toHaveLength(1)
+    expect(edges[0]).toMatchObject({
+      nodeId: 'n1',
+      agentId: 'claude',
+      sessionId: 's1',
+      event: 'end',
+      state: 'done'
+    })
+    off()
+  })
+
+  it('fires the end edge for a node deleted while BLOCKED, and pushes no inbox event', () => {
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'blocked', lastMessage: 'Approve?' }))
+    const feedBefore = _inboxSnapshot().events.length
+    edges.length = 0
+
+    clearNode('n1')
+
+    expect(edges).toHaveLength(1)
+    expect(edges[0]).toMatchObject({ nodeId: 'n1', event: 'end', state: 'done' })
+    // The node is GONE — there is nothing left to read or act on, so no feed card is produced.
+    expect(_inboxSnapshot().events).toHaveLength(feedBefore)
+    // Its unanswered card is archived rather than dropped (unchanged behavior).
+    expect(_inboxSnapshot().events[0].resolved).toBe(true)
+    off()
+  })
+
+  it('fires NOTHING for an already-done node — the done edge already ended that card', () => {
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'done' }))
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+
+    clearNode('n1')
+
+    expect(edges).toEqual([])
+    off()
+  })
+
+  it('fires NOTHING for an idle node, or one the mirror never saw', () => {
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+    // A session end resets the node to idle (state undefined) — and fires its own end edge.
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'end' }))
+    edges.length = 0
+
+    clearNode('n1')
+    clearNode('never-seen')
+
+    expect(edges).toEqual([])
+    off()
+  })
+})
+
+// The feed's only bound was INBOX_EVENTS_CAP, so an unresolved approval on a node nobody came back
+// to stayed a red "Needs you" card with the tray badge lit forever.
+describe('inbox event age prune (flush)', () => {
+  let dir: string
+  let file: string
+  let nowSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    _resetForTest()
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-'))
+    file = path.join(dir, 'agent-status.json')
+    initAgentStatusMirror(file)
+    nowSpy = vi.spyOn(Date, 'now')
+  })
+
+  afterEach(() => {
+    nowSpy.mockRestore()
+    _resetForTest()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('drops events older than EXPIRE_MS — unresolved AND resolved alike — on the flush that finds them', async () => {
+    nowSpy.mockReturnValue(1_000_000)
+    // An UNRESOLVED ask nobody ever answered: the red card + the lit tray badge.
+    recordAgentEvent(ev({ nodeId: 'old', state: 'blocked', lastMessage: 'Approve?' }))
+    // A RESOLVED done: the phone's archive/history.
+    recordAgentEvent(ev({ nodeId: 'arch', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'arch', state: 'done', lastMessage: 'All done.' }))
+    ackDone('arch')
+    expect(_inboxSnapshot().events).toHaveLength(2)
+    expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
+    expect(_inboxSnapshot().events[1].resolved).toBe(true)
+
+    // A fresh ask arrives just past the window on the two above.
+    nowSpy.mockReturnValue(1_000_000 + EXPIRE_MS + 1)
+    recordAgentEvent(ev({ nodeId: 'new', state: 'blocked', lastMessage: 'Approve me?' }))
+
+    await flush()
+
+    // Both aged kinds are gone from memory; only the fresh card survives.
+    expect(_inboxSnapshot().events.map((e) => e.nodeId)).toEqual(['new'])
+    // ...and the FILE the phone reads agrees on the SAME flush: `buildFile` passes `inbox` through
+    // verbatim, so a prune placed after it would leave the aged card on disk for one more write —
+    // and an abandoned node schedules none.
+    const doc = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    expect(doc.inbox.events.map((e: { nodeId: string }) => e.nodeId)).toEqual(['new'])
+  })
+
+  it('keeps an unresolved ask INSIDE the window — a human may still be coming back to answer it', async () => {
+    nowSpy.mockReturnValue(1_000_000)
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'blocked', lastMessage: 'Approve?' }))
+
+    nowSpy.mockReturnValue(1_000_000 + EXPIRE_MS - 1)
+    await flush()
+
+    expect(_inboxSnapshot().events).toHaveLength(1)
+    expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
+  })
+})
