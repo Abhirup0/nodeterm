@@ -145,11 +145,18 @@ export function setWebglGesture(active: boolean): void {
 
 /** Execute deferred swaps, a few per tick, self-rescheduling while work remains. */
 function drain(): void {
-  if (drainTimer) {
-    clearTimeout(drainTimer)
-    drainTimer = null
+  if (gestureActive) {
+    if (drainTimer) {
+      clearTimeout(drainTimer)
+      drainTimer = null
+    }
+    return
   }
-  if (gestureActive) return
+  // A cycle is already running: new work joins the queue and rides its next tick. Without this
+  // the per-tick budget would really be per-CALLER, and the burst that matters arrives one
+  // client at a time — a GPU process reset gives every client its own retry timer, so each
+  // would otherwise find an idle drain and spend the whole budget on itself.
+  if (drainTimer) return
   let ops = 0
   for (const c of Array.from(owed)) {
     if (ops >= WEBGL_SWAPS_PER_DRAIN) break
@@ -170,7 +177,13 @@ function drain(): void {
       if (c.granted) ops++
     }
   }
-  if (owed.size && !drainTimer) drainTimer = setTimeout(drain, WEBGL_DRAIN_MS)
+  // Armed UNCONDITIONALLY — even on an empty queue — because it is what rate-limits the next
+  // CALLER (see above). The tick clears the handle first (it is itself a drain() call and the
+  // guard above would stop it) and only re-runs when work remains.
+  drainTimer = setTimeout(() => {
+    drainTimer = null
+    if (owed.size) drain()
+  }, WEBGL_DRAIN_MS)
 }
 
 /**
@@ -442,7 +455,14 @@ export function registerWebglClient(id: string, callbacks: WebglClientCallbacks)
       if (c.visible && c.lossStreak <= WEBGL_LOSS_STREAK_MAX && !c.acquireTimer) {
         c.acquireTimer = setTimeout(() => {
           c.acquireTimer = null
-          tryGrant(c)
+          // QUEUED, not granted inline: a GPU process reset loses every context on the page at
+          // once, so every visible client schedules this retry and they all come due together —
+          // a dozen renderer rebuilds in one frame, which is the swap burst the drain exists to
+          // spread out (and it parks the work while a gesture runs). A lone client is
+          // unaffected: the drain executes an idle queue immediately.
+          c.releaseOwed = false
+          owed.add(c)
+          drain()
         }, WEBGL_REACQUIRE_AFTER_LOSS_MS)
       }
     },

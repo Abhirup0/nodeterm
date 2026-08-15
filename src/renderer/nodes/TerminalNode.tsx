@@ -1702,14 +1702,53 @@ export function TerminalNode({
         })
         term.loadAddon(a)
         webgl = a
-        // A force-evicted context the browser later RESTORES (GPU memory pressure, sleep/wake)
-        // goes through the addon's webglcontextrestored handler — re-init + redraw with no error
-        // handling, and the redraw is swallowable (see fullRepaint). The addon exposes no
-        // onContextRestored and the event does not bubble, so listen on its canvas directly and
-        // repaint a beat after its handler ran. The listener dies with the addon's canvas.
-        term.element
-          ?.querySelector<HTMLCanvasElement>('.xterm-screen canvas')
-          ?.addEventListener('webglcontextrestored', fullRepaint)
+        // THE RESTORE PATH — rebuild, never trust the addon's in-place recovery.
+        //
+        // When the GPU process resets (returning from a GPU-heavy app; sleep/wake; memory
+        // pressure) the browser loses EVERY context on the page and then restores them. That
+        // restore never reaches `onContextLoss`: the addon arms a 3s timer on
+        // `webglcontextlost` and CANCELS it when the restore lands, so the coordinator is never
+        // told and the terminal's recovery is entirely the addon's own handler — which
+        // re-initializes GL state while the previous context's objects are disposed against the
+        // NEW context. That is not a theory: forcing a page-wide lose+restore in the harness
+        // reproduces the field console exactly (`webglcontextrestored` per terminal, then a
+        // storm of `INVALID_OPERATION: delete: object does not belong to this context`), and in
+        // the field it left terminals painting their backgrounds with NO GLYPHS — a live
+        // rectangle renderer over a broken glyph atlas, which no repaint of ours can heal
+        // (`term.refresh` re-runs the same broken renderer).
+        //
+        // So a restore is treated as what it materially is — this context is gone: drop the
+        // addon (xterm falls back to its DOM renderer synchronously, text visible), sweep the
+        // stray canvas, and report the loss so the COORDINATOR re-grants a FRESH addon with a
+        // fresh atlas on its usual path — budget-gated, delayed by
+        // `WEBGL_REACQUIRE_AFTER_LOSS_MS`, and abandoned after `WEBGL_LOSS_STREAK_MAX` losses so
+        // an unstable GPU degrades to the DOM renderer instead of being hammered. The listener
+        // dies with the addon's canvas.
+        // …on the ADDON's canvas, which is not the first one in `.xterm-screen`: xterm appends its
+        // own `.xterm-link-layer` (a 2d canvas) ahead of it, so the obvious
+        // `querySelector('.xterm-screen canvas')` resolves to the LINK LAYER — a canvas that can
+        // never fire a WebGL event. That is what the listener this replaces was bound to, so the
+        // restore hook has never once run in the field; verified in the harness by enumerating
+        // the screen's canvases (index 0 `.xterm-link-layer`, no webgl2 context; index 1
+        // class-less, webgl2).
+        const addonCanvas = term.element
+          ? Array.from(term.element.querySelectorAll<HTMLCanvasElement>('.xterm-screen canvas')).find(
+              (c) => !c.classList.contains('xterm-link-layer')
+            )
+          : undefined
+        addonCanvas?.addEventListener('webglcontextrestored', () => {
+          if (webgl !== a) return
+          try {
+            a.dispose()
+          } catch {
+            // the addon's own restore handler may have left it half-built — the sweep below is
+            // what actually guarantees the terminal is back on a renderer that paints.
+          }
+          webgl = null
+          verifyCleanDomState('context-restored')
+          fullRepaint()
+          webglHandle?.contextLost()
+        })
         // A fresh addon starts from an EMPTY model; the swap's own refresh is the exact one
         // that gets swallowed when this grant races a park/pause. Repaint unconditionally.
         fullRepaint()
