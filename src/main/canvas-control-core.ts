@@ -254,10 +254,34 @@ nt_i=0
 while [ "$nt_i" -lt "$nt_count" ]; do
   nt_a="$1"; shift; nt_i=$((nt_i + 1))
   case "$nt_a" in
+    --*=*)
+      # \`--flag=value\`: the only unambiguous form, and the ONLY way to pass a value that itself
+      # starts with \`--\`. Split on the FIRST \`=\` so a value may contain more of them.
+      nt_k=\${nt_a#--}
+      nt_v=\${nt_k#*=}
+      nt_k=\${nt_k%%=*}
+      set -- "$@" --data-urlencode "arg.$nt_k=$nt_v"
+      ;;
     --*)
+      # PEEK before consuming. The old code took the next token unconditionally, so \`--a --b v\`
+      # parsed as arg.a=--b plus a silently dropped \`v\`, and a valueless flag was expressible only
+      # as the LAST token on the line. Both failures were silent: the server saw a well-formed
+      # request carrying nonsense, and answered about the wrong flag.
+      #
+      # The peek matches \`--\` and NOT a single \`-\`, so a negative number stays a value.
+      #
+      # The cost, deliberately taken: a value that legitimately begins with \`--\` is no longer
+      # consumed positionally. \`--text --oops\` now sends arg.text= plus arg.oops=. Write it as
+      # \`--text=--oops\`, which the branch above exists for and which was previously unexpressible
+      # in either direction.
       nt_k=\${nt_a#--}
       nt_v=""
-      if [ "$nt_i" -lt "$nt_count" ]; then nt_v="$1"; shift; nt_i=$((nt_i + 1)); fi
+      if [ "$nt_i" -lt "$nt_count" ]; then
+        case "$1" in
+          --*) : ;;
+          *) nt_v="$1"; shift; nt_i=$((nt_i + 1)) ;;
+        esac
+      fi
       set -- "$@" --data-urlencode "arg.$nt_k=$nt_v"
       ;;
     *)
