@@ -347,10 +347,31 @@ export function reduceEntry(
   now: number
 ): MirrorEntry {
   const next: MirrorEntry = prev ? { ...prev } : { updatedAt: now }
-  // ANY event is this run's traffic from this node, so the entry is no longer "restored and
-  // unheard-from". Done before every branch — including the ones that return early — because what
-  // the flag means is "nothing has been heard since boot", not "the state is still the restored one".
-  delete next.restored
+  /**
+   * Commit a state onto `next` — and everything that must move WITH it. One function rather than
+   * the same four lines at each branch, because the alternative was measured: of the three branches
+   * that commit a state, the `request_user_input` hold set `next.state` and nothing else. A
+   * verified `waiting` therefore kept `stateVerified: true` after a TOKENLESS `done` re-asserted
+   * it — replayable indefinitely by any caller, since `/hook/*` is fail-open by contract, with
+   * `updatedAt` advancing each time so the entry never even expired. A rule three call sites have
+   * to remember is a rule two of them keep.
+   *
+   * `proof` is the evidence for THIS transition, passed in rather than read off `ev` so the one
+   * caller that means something different has to say so out loud.
+   */
+  const commitState = (state: AgentState | undefined, proof: boolean): void => {
+    next.state = state
+    next.updatedAt = now
+    next.stateVerified = proof
+    if (proof) next.verifiedAt = now
+    next.clientRevision = ev.clientRevision
+    // The entry's STATE now comes from this run, so it is no longer the one restored off disk.
+    // Cleared HERE and only here: an event that commits no state — a context/usage event, a
+    // held-off late `working`, the idle rescue — leaves a restored `done` exactly as restored as
+    // it was. `restored` means "this state came off disk", not "we have heard something since
+    // boot", and gate 2 will read it as the former.
+    delete next.restored
+  }
   // Identity is captured off ANY event (mirrors the renderer's per-event setSessionId +
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
   if (ev.agentId) next.agentId = ev.agentId
@@ -370,8 +391,9 @@ export function reduceEntry(
     if (ev.awaitingInput) {
       next.awaitingInput = true
     } else if (prev?.awaitingInput && ev.state === 'done' && !ev.interrupted) {
-      next.state = 'waiting'
-      next.updatedAt = now
+      // The HELD state is still a state this event committed — the entry says `waiting` because
+      // THIS POST arrived — so its evidence is this POST's evidence, not the ask's from before.
+      commitState('waiting', ev.verified === true)
       return next
     } else {
       next.awaitingInput = undefined
@@ -385,27 +407,20 @@ export function reduceEntry(
       !ev.newTurn &&
       prev?.state === 'done' &&
       now - (prev.updatedAt ?? 0) < DONE_HOLDOFF_MS
-    if (!heldOff) {
-      next.state = ev.state
-      next.updatedAt = now
-      // Set on the SAME edge the state is set on, and only there: a context/usage event carrying a
-      // verified flag says nothing about how the current state arrived, and a held-off working did
-      // not change the state whose proof this describes.
-      next.stateVerified = ev.verified === true
-      if (ev.verified === true) next.verifiedAt = now
-      // Same edge, and ASSIGNED rather than merged: an event with no stamp is a report that this
-      // node is running a script that cannot send one, which is exactly the state a stale entry
-      // would hide.
-      next.clientRevision = ev.clientRevision
-    }
+    // Evidence is written on the SAME edge the state is, and only there: a context/usage event
+    // carrying a verified flag says nothing about how the current state arrived, and a held-off
+    // working did not change the state whose proof this describes. `clientRevision` is ASSIGNED
+    // rather than merged — an event with no stamp is a report that this node is running a script
+    // that cannot send one, which is exactly what a stale entry would hide.
+    if (!heldOff) commitState(ev.state, ev.verified === true)
   } else if (ev.kind === 'session') {
     // SessionStart / SessionEnd both reset the node to idle (renderer: setState(id, undefined)).
-    next.state = undefined
+    // The proof goes with the state it was about, and `false` is passed EXPLICITLY rather than
+    // `ev.verified`: this commits idle, and "the idle was verified" is not a claim worth making.
+    // `verifiedAt` stays — "this node has proven itself at least once" survives a session boundary
+    // and is what makes a refusal retryable.
+    commitState(undefined, false)
     next.awaitingInput = undefined
-    next.updatedAt = now
-    // The proof went with the state it was about. `verifiedAt` stays — "this node has proven
-    // itself at least once" survives a session boundary and is what makes a refusal retryable.
-    next.stateVerified = false
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
   return next

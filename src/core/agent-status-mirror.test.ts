@@ -1785,6 +1785,18 @@ describe('reduceEntry records whether the state transition was verified', () => 
     expect(b.stateVerified).toBe(true)
   })
 
+  it('a VERIFIED session boundary still drops the proof — idle is not a proven state', () => {
+    // The `false` at that call site is explicit, so it needs a case where `ev.verified` is true
+    // and the answer is still false; without this, passing `ev.verified === true` there would be
+    // an untested equivalent. What a SessionStart proves is that a token holder started a
+    // session, not that the node is idle-and-accounted-for, and gate 2 reads `done` anyway.
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ kind: 'session', sessionPhase: 'start', verified: true }), 2000)
+    expect(b.state).toBeUndefined()
+    expect(b.stateVerified).toBe(false)
+    expect(b.verifiedAt).toBe(1000)
+  })
+
   it('a session boundary drops the proof with the state it was about', () => {
     // SessionStart/End reset the node to idle. A `stateVerified: true` left standing beside a
     // state of `undefined` would assert proof about a state that no longer exists.
@@ -1793,6 +1805,43 @@ describe('reduceEntry records whether the state transition was verified', () => 
     expect(b.state).toBeUndefined()
     expect(b.stateVerified).toBe(false)
     expect(b.verifiedAt).toBe(1000)
+  })
+})
+
+describe('the request_user_input hold carries its own evidence', () => {
+  // MEASURED on the first version of this PR: a verified `waiting` at t=1000 followed by a
+  // TOKENLESS `done` produced { state: 'waiting', stateVerified: true, updatedAt: 2000 }. The hold
+  // was the one branch that wrote `next.state` without co-writing the proof, so the label survived
+  // an event that never presented a token — and since /hook/* is fail-open by contract, any caller
+  // can replay that event forever, refreshing `updatedAt` so the entry never expires either.
+  it('a TOKENLESS done that gets held to waiting un-proves the entry', () => {
+    const a = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, verified: true }), 1000)
+    expect(a.stateVerified).toBe(true)
+    const b = reduceEntry(a, ev({ state: 'done', verified: false }), 2000)
+    expect(b.state).toBe('waiting')
+    expect(b.stateVerified).toBe(false)
+    expect(b.verifiedAt).toBe(1000) // "we once saw proof" is still true
+  })
+
+  it('stays false however many times the tokenless event is replayed', () => {
+    let e = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, verified: true }), 1000)
+    for (let i = 0; i < 98; i++) e = reduceEntry(e, ev({ state: 'done', verified: false }), 2000 + i)
+    expect(e.state).toBe('waiting')
+    expect(e.stateVerified).toBe(false)
+  })
+
+  it('and a VERIFIED held done proves it — the flag tracks the event, not the branch', () => {
+    const a = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, verified: false }), 1000)
+    const b = reduceEntry(a, ev({ state: 'done', verified: true }), 2000)
+    expect(b.state).toBe('waiting')
+    expect(b.stateVerified).toBe(true)
+    expect(b.verifiedAt).toBe(2000)
+  })
+
+  it('carries the client stamp on that edge too', () => {
+    const a = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, clientRevision: 3 }), 1000)
+    const b = reduceEntry(a, ev({ state: 'done' }), 2000)
+    expect(b.clientRevision).toBeUndefined() // the held event carried no stamp — say so
   })
 })
 
@@ -1826,19 +1875,56 @@ describe('a restored entry is never proof', () => {
     expect(_snapshot().n1?.stateVerified).toBe(false)
   })
 
-  it('the first live event clears `restored`', () => {
+  it('the first live event that COMMITS a state clears `restored`', () => {
+    // `newTurn` matters here and the first draft of this test omitted it: at now=5 against a
+    // restored `done` stamped 0, a bare `working` is inside the done-holdoff, commits nothing, and
+    // therefore — correctly — leaves the entry restored. A genuine UserPromptSubmit is what
+    // actually replaces the state that came off disk.
     const a = { state: 'done', stateVerified: false, restored: true, updatedAt: 0 } as MirrorEntry
-    expect(reduceEntry(a, ev({ state: 'working', verified: true }), 5).restored).toBeUndefined()
+    const b = reduceEntry(a, ev({ state: 'working', newTurn: true, verified: true }), 5)
+    expect(b.restored).toBeUndefined()
+    expect(b.state).toBe('working')
   })
 
-  it('even an event that changes nothing clears it — the entry is live evidence now', () => {
-    // A context/usage event is not a state transition, but it IS this run's traffic from that
-    // node. What `restored` means is "nothing has been heard from this node since boot".
-    const a = { state: 'done', restored: true, updatedAt: 0 } as MirrorEntry
-    expect(reduceEntry(a, ev({ kind: 'context' } as never), 5).restored).toBeUndefined()
+  // THIS ASSERTION USED TO SAY THE OPPOSITE, and it was wrong in the direction that matters.
+  // `restored` means "this entry's STATE came off disk at boot" — that is what its docblock says
+  // and what gate 2 will read it as. The first version cleared it on ANY event, so a `context`
+  // event left `restored` gone while `state` and `updatedAt` were still the six-hour-old on-disk
+  // ones: a future `!restored && state === 'done'` would then admit a stale restored `done` after
+  // one tool event. Not exploitable while `stateVerified` is the real input, but a loaded gun.
+  it('an event that commits NO state leaves it restored — a context event is not a state', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    const b = reduceEntry(a, ev({ kind: 'context' } as never), 999)
+    expect(b.restored).toBe(true)
+    expect(b.state).toBe('done')
+    expect(b.updatedAt).toBe(111) // still the on-disk stamp — nothing about the state is new
   })
 
-  it('a restored `stateVerified` never survives to disk either', () => {
+  it('a HELD-OFF late working leaves it restored — the state is still the restored one', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    expect(reduceEntry(a, ev({ state: 'working' }), 111 + 500).restored).toBe(true)
+  })
+
+  it('the idle RESCUE leaves it restored — it returns before committing anything', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    expect(reduceEntry(a, ev({ state: 'done', idle: true }), 999).restored).toBe(true)
+  })
+
+  it('a session boundary clears it — that DOES commit a state (idle)', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    const b = reduceEntry(a, ev({ kind: 'session', sessionPhase: 'start' }), 999)
+    expect(b.restored).toBeUndefined()
+    expect(b.state).toBeUndefined()
+  })
+
+  it('the request_user_input hold clears it — it commits `waiting`', () => {
+    const a = { state: 'waiting', awaitingInput: true, restored: true, updatedAt: 111 } as MirrorEntry
+    const b = reduceEntry(a, ev({ state: 'done' }), 999)
+    expect(b.state).toBe('waiting')
+    expect(b.restored).toBeUndefined()
+  })
+
+  it('buildFile\'s allowlist keeps neither field on disk (its sibling above covers the restore)', () => {
     const file = path.join(dir, 'agent-status.json')
     fs.writeFileSync(
       file,
