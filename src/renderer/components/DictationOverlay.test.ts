@@ -7,11 +7,19 @@ const terminalTarget: DictationTarget = { kind: 'terminal', nodeId: 'n1', title:
 // straight into the terminal, so there is no editable card (chat nodes, which had one, are gone).
 describe('dictationMode', () => {
   it('is "warning" whenever there is no target', () => {
-    expect(dictationMode(null)).toBe('warning')
+    expect(dictationMode(null, true)).toBe('warning')
   })
 
   it('is "pill" for a terminal target', () => {
-    expect(dictationMode(terminalTarget)).toBe('pill')
+    expect(dictationMode(terminalTarget, true)).toBe('pill')
+  })
+
+  // Dictation off (Whisper + the explicit None selection, #143): never records. It wins over a
+  // selected target too — otherwise the user speaks a whole take before transcribe refuses it,
+  // which reads as broken instead of off.
+  it('is "no-model" when dictation is off, target or not', () => {
+    expect(dictationMode(terminalTarget, false)).toBe('no-model')
+    expect(dictationMode(null, false)).toBe('no-model')
   })
 })
 

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId, type BuiltinAgentId } from '@shared/agents/config'
 import type { CustomAgent } from '@shared/types'
 import { formatShortcut, isHoldChord } from '@shared/shortcut'
+import { hasSpeechModel } from '@shared/speech'
 import { hintLabel } from '@shared/platform-utils'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
@@ -74,6 +75,12 @@ export function Dock({
   // button, byte-identical to before this nesting existed.
   const [openSub, setOpenSub] = useState<BuiltinAgentId | null>(null)
   const dictationShortcut = useSettings((s) => s.settings.speech.shortcut)
+  const speechEngine = useSettings((s) => s.settings.speech.engine)
+  const speechModel = useSettings((s) => s.settings.speech.model)
+  // Whisper with the explicit None selection = dictation off (issue #143). The mic stays visible
+  // and clickable — the overlay it opens says where to turn dictation on — but the tooltip is
+  // honest about the state instead of promising a shortcut that will only warn.
+  const dictationOff = speechEngine === 'whisper' && !hasSpeechModel(speechModel)
   const customAgents = useSettings((s) => s.settings.customAgents)
   const disabledAgents = useSettings((s) => s.settings.disabledAgents)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
@@ -289,9 +296,11 @@ export function Dock({
         <button
           className={`dock-btn${dictateActive ? ' active' : ''}`}
           title={
-            isHoldChord(dictationShortcut)
-              ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
-              : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
+            dictationOff
+              ? 'Dictation off — choose a model in Settings → Speech'
+              : isHoldChord(dictationShortcut)
+                ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
+                : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
           }
           onClick={onDictate}
         >

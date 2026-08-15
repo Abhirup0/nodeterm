@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SpeechModelInfo } from '@shared/types'
-import { modelAfterDelete, modelAfterDownload } from '@shared/speech'
+import { hasSpeechModel, modelAfterDelete, modelAfterDownload, SPEECH_MODEL_NONE } from '@shared/speech'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import {
   buildModifierChord,
@@ -35,7 +35,21 @@ const ROWS = {
   },
   models: {
     title: 'Whisper models',
-    keywords: ['whisper', 'model', 'download', 'delete', 'tiny', 'base', 'small', 'large', 'pro']
+    keywords: [
+      'whisper',
+      'model',
+      'download',
+      'delete',
+      'tiny',
+      'base',
+      'small',
+      'large',
+      'pro',
+      'none',
+      'off',
+      'disable',
+      'no dictation'
+    ]
   },
   language: {
     title: 'Language',
@@ -357,6 +371,26 @@ export function SpeechSection({
             <p className="text-[12px] text-muted">Loading models…</p>
           ) : (
             <div className="space-y-2">
+              {/* The honest off switch (issue #143): dictation is optional, and None is a real row
+                  in the same radio group — not a missing selection the heal helpers would fix. */}
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border p-3">
+                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-3">
+                  <input
+                    type="radio"
+                    name="speech-model"
+                    className="shrink-0"
+                    checked={!hasSpeechModel(settings.speech.model)}
+                    onChange={() => update({ speech: { ...settings.speech, model: SPEECH_MODEL_NONE } })}
+                  />
+                  <div className="min-w-0">
+                    <span className="text-[13px] font-medium text-text">None</span>
+                    <p className="text-[12px] text-muted">
+                      Dictation off — the shortcut and the Dock mic explain instead of recording.
+                      Downloading a model below turns it on.
+                    </p>
+                  </div>
+                </label>
+              </div>
               {models.map((m) => {
                 const pct = progress[m.id]
                 const downloading = busy[m.id] && pct !== undefined

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import type { SpeechModelInfo } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type BuiltinAgentId } from '@shared/agents/config'
 import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
+import { hasSpeechModel, SPEECH_MODEL_NONE } from '@shared/speech'
 import { keyLabel } from '@shared/platform-utils'
 import { IOS_APP_STORE_URL } from '../../lib/links'
 import { useSettings } from '../../state/settings'
@@ -262,8 +263,22 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                   anywhere to dictate — on-device Whisper turns speech into text. Nothing is
                   sent to the cloud, and nothing auto-submits.
                 </p>
-                <div className="onb-label">Whisper model</div>
+                <div className="onb-label">Whisper model — optional</div>
                 <div className="onb-models">
+                  {/* A real "I don't use dictation" choice (issue #143), not just the generic Next:
+                      selects None, downloads nothing. It is also the DEFAULT, so doing nothing on
+                      this step is the same honest opt-out. */}
+                  <button
+                    className={`onb-model ${!hasSpeechModel(settings.speech.model) ? 'is-selected' : ''}`}
+                    onClick={() => {
+                      setModelHint('')
+                      update({ speech: { ...settings.speech, model: SPEECH_MODEL_NONE } })
+                    }}
+                  >
+                    <span className="onb-model__radio" />
+                    <span className="onb-model__name">No dictation</span>
+                    <span className="onb-model__size">nothing downloads</span>
+                  </button>
                   {models.map((m) => {
                     const selected = settings.speech.model === m.id
                     const pct = progress[m.id]
