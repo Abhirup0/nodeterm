@@ -86,3 +86,47 @@ describe('resumeCommand — grok', () => {
     expect(resumeCommand('grok', 'abc-123')).toBe('grok --resume abc-123')
   })
 })
+
+/**
+ * `base` is the user's launch-command override (settings.agentLaunchCommands — e.g. an
+ * account-switching wrapper), threaded in from the renderer because this shared module cannot
+ * read the settings store. It replaces the PROGRAM part only; each agent's resume grammar
+ * (`--resume` / `resume` / `--session`) stays put after it.
+ */
+describe('resumeCommand — launch-command override (base)', () => {
+  it('replaces the program part for the --resume family', () => {
+    expect(resumeCommand('claude', 'abc-123', false, 'my-claude work')).toBe(
+      'my-claude work --resume abc-123'
+    )
+    expect(resumeCommand('gemini', 'abc-123', false, 'gemini-wrap')).toBe(
+      'gemini-wrap --resume abc-123'
+    )
+  })
+
+  it('keeps codex’s subcommand and opencode’s flag spelling', () => {
+    expect(resumeCommand('codex', 'abc-123', false, '/opt/bin/codex-work')).toBe(
+      '/opt/bin/codex-work resume abc-123'
+    )
+    expect(resumeCommand('opencode', 'ses_a1', false, 'oc-wrap')).toBe('oc-wrap --session ses_a1')
+  })
+
+  // An explicit override is the user saying "launch it exactly like this" — substituting the
+  // managed launcher back in would un-say it (see resumeCommand's doc).
+  it('wins over codex’s shared-identity launcher', () => {
+    expect(resumeCommand('codex', 'abc-123', true, '/opt/bin/codex-work')).toBe(
+      '/opt/bin/codex-work resume abc-123'
+    )
+  })
+
+  it('ignores a blank override — the bare command, byte-identical', () => {
+    expect(resumeCommand('claude', 'abc-123', false, '   ')).toBe('claude --resume abc-123')
+    expect(resumeCommand('claude', 'abc-123', false, undefined)).toBe('claude --resume abc-123')
+  })
+
+  // SAFE_SESSION_ID is the gate whatever the caller passes — the override customizes the
+  // program, never the validation.
+  it('still refuses an unsafe session id, override or not', () => {
+    expect(resumeCommand('claude', 'a; rm -rf /', false, 'wrapper')).toBeNull()
+    expect(resumeCommand('claude', '', false, 'wrapper')).toBeNull()
+  })
+})

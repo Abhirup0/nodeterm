@@ -1045,6 +1045,13 @@ export interface Settings {
   customAgents: CustomAgent[]
   /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
   modelGateway: ModelGatewaySettings
+  /** Per-builtin-agent launch command overrides (Settings → Agents → Launch commands). The value
+   *  replaces the bare CLI name everywhere a launch line is built — new sessions, cold-restore
+   *  relaunches and in-place restarts, with the usual flags (`--resume`, `--permission-mode`, the
+   *  prompt) appended after it — so a wrapper script that picks an account or sets env vars runs
+   *  wherever the agent would. Empty/absent = the builtin default, byte-identical to before this
+   *  setting existed. Keyed by builtin id only: custom agents already own their `launchCmd`. */
+  agentLaunchCommands: Partial<Record<BuiltinAgentId, string>>
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
@@ -1193,6 +1200,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundVolume: 0.5,
   customAgents: [],
   modelGateway: { baseUrl: '', apiKey: '' },
+  agentLaunchCommands: {},
   claudeAccounts: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.

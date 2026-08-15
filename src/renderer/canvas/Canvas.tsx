@@ -297,6 +297,7 @@ import { pushSessionRename } from '../lib/sessionRename'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
+import { launchableDefaultAgent } from '../state/agentAvailability'
 import { activePermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
@@ -342,6 +343,7 @@ import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
   applyMutationToFlow,
+  agentLaunchOverride,
   claudeLaunchCommand,
   COLLAPSED_HEIGHT,
   alignNodes,
@@ -3630,7 +3632,9 @@ export function Canvas() {
         addTerminal()
       } else if (k === 'c' && e.shiftKey) {
         e.preventDefault()
-        addAgentNode(useSettings.getState().settings.defaultAgent)
+        // launchableDefaultAgent, not the raw setting: a default naming a since-removed custom
+        // agent would otherwise type its bare `custom:<uuid>` id into the new node's shell.
+        addAgentNode(launchableDefaultAgent(useSettings.getState().settings))
       }
     }
     window.addEventListener('keydown', onKey)
@@ -6188,7 +6192,7 @@ export function Canvas() {
         return
       }
       // No live node — open a resume node in the active project, using the transcript's cwd.
-      const cmd = resumeCommand('claude', hit.sessionId)
+      const cmd = resumeCommand('claude', hit.sessionId, false, agentLaunchOverride('claude'))
       if (!cmd) return
       const node = createAgentNode('claude', nodesRef.current.length, hit.cwd, viewCenter())
       // The resume command replaces (never wraps) the factory's command, so it is flagged once.

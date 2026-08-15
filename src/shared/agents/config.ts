@@ -382,16 +382,32 @@ export function withSessionId(cmd: string, id: AgentId, sessionId: string): stri
  * `sharedIdentity` routes a SHARED_IDENTITY_CAPABLE agent's resume through the managed launcher,
  * so the resumed session re-claims the node's own thread instead of opening it as an anonymous
  * client. Default false = the bare command this has always emitted (see `agentLaunchProgram`).
+ *
+ * `base` is the user's launch-command override for this agent (`settings.agentLaunchCommands`,
+ * e.g. an account-switching wrapper), PASSED IN rather than read here: this module is imported by
+ * main/core/server and cannot reach the renderer's settings store, so the renderer resolves the
+ * override and threads it through — the same shape as `performRestartResume`'s `command` param.
+ * When set (non-blank) it replaces the program part outright, INCLUDING codex's shared-identity
+ * launcher: an explicit override is the user saying "launch it exactly like this", and silently
+ * substituting the managed launcher would un-say it. Blank/absent = unchanged behavior.
  */
-export function resumeCommand(id: AgentId, sessionId: string, sharedIdentity = false): string | null {
+export function resumeCommand(
+  id: AgentId,
+  sessionId: string,
+  sharedIdentity = false,
+  base?: string
+): string | null {
   const builtin = agentConfig(id)
   // A builtin resumes with its own command; a custom agent has no resume grammar here (its
   // baseAgent-aware path is `resumeCommandWith`, called by the shared launcher).
   if (!builtin) return null
-  // Route a SHARED_IDENTITY_CAPABLE builtin (codex) through its managed launcher when this machine
-  // has one, so the resumed session re-claims its own thread instead of joining as an anonymous
-  // client. Default false = the bare command this has always emitted.
-  const program = agentLaunchProgram(id, builtin.launchCmd, sharedIdentity)
+  // A per-builtin launch-command override (Settings → Agents → Launch commands, threaded here as
+  // `base`) replaces the program outright, INCLUDING codex's shared-identity launcher: an explicit
+  // override is the user saying "launch it exactly like this". Blank/absent → route a
+  // SHARED_IDENTITY_CAPABLE builtin (codex) through its managed launcher when present, else the
+  // bare command this has always emitted.
+  const custom = base?.trim() || undefined
+  const program = custom ?? agentLaunchProgram(id, builtin.launchCmd, sharedIdentity)
   return resumeCommandWith(program, id, sessionId)
 }
 

@@ -33,6 +33,12 @@ export interface LaunchInputs {
   agentId: AgentId
   /** The matching `CustomAgent` record when `agentId` is a custom id. `undefined` for builtins. */
   customAgent?: CustomAgent
+  /** Per-builtin launch-command override (Settings → Agents → Launch commands). When set it
+   *  replaces the resolved program outright — a wrapper the user runs the CLI through. Undefined
+   *  for a builtin with no override and for custom agents (their `launchCmd` already IS the value).
+   *  Trusted verbatim, exactly like a custom agent's `launchCmd`: it is the local user's own
+   *  settings and is typed into their own pane. */
+  launchCmdOverride?: string
   /** First-launch prompt. Empty/undefined = start the agent with no prompt. */
   initialPrompt?: string
   /** Permission mode to start in. `undefined` = no flag (the agent's own default). */
@@ -55,6 +61,9 @@ export interface LaunchInputs {
 export interface ResumeInputs {
   agentId: AgentId
   customAgent?: CustomAgent
+  /** Per-builtin launch-command override — same meaning as `LaunchInputs.launchCmdOverride`, so a
+   *  cold-restore / restart resumes through the same wrapper the fresh launch used. */
+  launchCmdOverride?: string
   /** The provider session id to resume (live hook id, or the minted id persisted on the node). */
   sessionId?: string
   permissionMode?: AgentPermissionMode
@@ -129,12 +138,19 @@ export function assembleLaunchCommand(
   const eff = resolveAgentConfig(inputs.agentId, inputs.customAgent)
   const capId = capabilityAgentId(inputs.agentId)
 
-  const { value: launchCmd, missing: m1 } = expandedProgram(eff.launchCmd, env)
+  // A per-builtin launch-command override replaces the resolved program (a wrapper the user runs
+  // the CLI through). It is expanded + quoted like any launchCmd, and — like a custom agent's own
+  // launchCmd — is NOT routed through the shared-identity launcher: an explicit override is the
+  // user saying "launch it exactly like this".
+  const overrideCmd = inputs.launchCmdOverride?.trim()
+  const { value: launchCmd, missing: m1 } = expandedProgram(overrideCmd || eff.launchCmd, env)
   // Route a SHARED_IDENTITY_CAPABLE builtin (codex) through its managed launcher when this machine
   // has one, so the pane re-claims its own thread. Custom agents are not in that list, so a custom
   // launchCmd is returned unchanged. Applied to the already-expanded launchCmd (the launcher is a
-  // bare program name, never an ${env:…} token).
-  const program = agentLaunchProgram(inputs.agentId, launchCmd, inputs.sharedIdentity)
+  // bare program name, never an ${env:…} token). Skipped when an override is set.
+  const program = overrideCmd
+    ? launchCmd
+    : agentLaunchProgram(inputs.agentId, launchCmd, inputs.sharedIdentity)
   const { fragment: argsFragment, missing: m2 } = expandedArgs(inputs.customAgent?.args ?? '', env)
   const baseCmd = argsFragment ? `${program} ${argsFragment}` : program
 
@@ -186,10 +202,15 @@ export function assembleResumeCommand(
   const eff = resolveAgentConfig(inputs.agentId, inputs.customAgent)
   const capId = capabilityAgentId(inputs.agentId)
 
-  const { value: launchCmd, missing: m1 } = expandedProgram(eff.launchCmd, env)
+  // A per-builtin launch-command override wins over the program and the launcher (same rule as the
+  // fresh-launch path), so a cold-restore / restart resumes through the same wrapper.
+  const overrideCmd = inputs.launchCmdOverride?.trim()
+  const { value: launchCmd, missing: m1 } = expandedProgram(overrideCmd || eff.launchCmd, env)
   // Same launcher routing as the fresh-launch path: a SHARED_IDENTITY_CAPABLE builtin (codex) names
-  // its managed launcher so the resumed session re-claims its own thread.
-  const program = agentLaunchProgram(inputs.agentId, launchCmd, inputs.sharedIdentity)
+  // its managed launcher so the resumed session re-claims its own thread. Skipped for an override.
+  const program = overrideCmd
+    ? launchCmd
+    : agentLaunchProgram(inputs.agentId, launchCmd, inputs.sharedIdentity)
   const { fragment: argsFragment, missing: m2 } = expandedArgs(inputs.customAgent?.args ?? '', env)
   const baseCmd = argsFragment ? `${program} ${argsFragment}` : program
 

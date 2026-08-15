@@ -1,6 +1,6 @@
 import type { Node } from '@xyflow/react'
 import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingLaunch, Project } from '@shared/types'
-import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
+import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { agentEnvSnapshot } from '../lib/agentEnv'
@@ -282,12 +282,31 @@ export function createSshTerminalNode(
 }
 
 /**
+ * The user's launch-command override for a builtin agent (Settings → Agents → Launch commands),
+ * or undefined when unset/blank. This is the ONE place the setting is read; every launch site
+ * (new node, cold restore, in-place restart, hibernation wake, transcript resume) either calls
+ * this or receives its result — shared/agents/config.ts cannot read settings (layering), so the
+ * renderer resolves the override and passes it down (`resumeCommand`'s `base` param).
+ *
+ * Trusted verbatim, like a custom agent's `launchCmd`: it comes from the local user's own
+ * settings.json and is typed into their own pane. Custom agents index past the builtin-keyed map
+ * to undefined — they already own their launchCmd.
+ */
+export function agentLaunchOverride(agentId: AgentId): string | undefined {
+  const raw = useSettings.getState().settings.agentLaunchCommands?.[agentId as BuiltinAgentId]
+  const cmd = typeof raw === 'string' ? raw.trim() : ''
+  return cmd || undefined
+}
+
+/**
  * Command that launches Claude Code. Detection works via hooks installed globally in
  * ~/.claude/settings.json (gated by NODETERM_* env that the PTY manager sets), so a plain
- * `claude` is enough. Append `-r <id>` to resume a specific session (used by Branch).
+ * `claude` is enough — which is also why an override wrapper (account switchers etc.) is safe
+ * here: hooks identify the session whatever the launch line was, as long as the wrapper ends up
+ * exec-ing the real CLI. Append `-r <id>` to resume a specific session (used by Branch).
  */
 export function claudeLaunchCommand(): string {
-  return 'claude'
+  return agentLaunchOverride('claude') ?? 'claude'
 }
 
 /** Fallback color for custom / unknown agents that have no config-provided color. */
@@ -365,6 +384,11 @@ export function createAgentNode(
   permissionMode?: AgentPermissionMode
 ): CanvasNode {
   const { label, color } = resolveAgent(agentId)
+  // A per-builtin launch-command override (Settings -> Agents -> Launch commands) replaces the bare
+  // CLI in the assembled command. Threaded into the shared assembler below as `launchCmdOverride`
+  // so fresh launch, cold-restore resume and in-place restart all pick it up identically. Custom
+  // agents already own their `launchCmd`, so the helper returns undefined for them.
+  const launchCmdOverride = agentLaunchOverride(agentId)
   // The session id is DECIDED here rather than learned from a hook later, so this node always has
   // something to resume with — see SESSION_ID_CAPABLE for the failure this closes. `uuid()` (not
   // crypto.randomUUID) because the Server Edition serves plain HTTP on a LAN, where randomUUID is
@@ -396,6 +420,11 @@ export function createAgentNode(
       permissionMode,
       sessionId: mintedSessionId,
       sessionIdFlagSupported,
+      // A per-builtin launch-command override (Settings → Agents → Launch commands) replaces the
+      // program in the assembled line; undefined for a builtin with no override and for custom
+      // agents (they own their launchCmd). Wins over the shared-identity launcher, like a custom
+      // launchCmd — an explicit "launch it exactly like this".
+      launchCmdOverride,
       // A SHARED_IDENTITY_CAPABLE agent (codex) launches through its managed launcher when this
       // machine actually has one — otherwise the bare CLI, byte-identical to before. `codexSharedIdentity`
       // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).

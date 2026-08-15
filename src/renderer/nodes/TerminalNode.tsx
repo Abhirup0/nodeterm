@@ -143,7 +143,7 @@ import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
 import { useSession, useActiveSessionPresence } from '../session/session'
-import { accountChipLabel, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
+import { accountChipLabel, agentLaunchOverride, COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import {
   hasHooks,
   canRecur,
@@ -2871,7 +2871,10 @@ export function TerminalNode({
               sessionId: priorId || undefined,
               permissionMode: mode,
               model: data.agentModel,
-              sharedIdentity: shared
+              sharedIdentity: shared,
+              // The user's launch-command override rides the relaunch too, so a wrapper user's node
+              // comes back through its wrapper after a reboot — the moment env/account setup matters.
+              launchCmdOverride: agentLaunchOverride(agentId)
             },
             // The boot-time desktop env snapshot — the same object fresh launch and the Settings
             // preview expand against, so a ${env:…}-referencing custom agent cold-restores with
@@ -3029,7 +3032,10 @@ export function TerminalNode({
             customAgent: customTarget,
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(target),
-            model: selectedModel ?? undefined
+            model: selectedModel ?? undefined,
+            // The per-builtin launch-command override rides the restart too (undefined for a custom
+            // target, which already owns its launchCmd) — it is a property of how the agent launches.
+            launchCmdOverride: agentLaunchOverride(target)
           },
           launchEnv
         )
@@ -3144,7 +3150,10 @@ export function TerminalNode({
             customAgent,
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(agentId),
-            sharedIdentity: false
+            sharedIdentity: false,
+            // The USER's launch-command override lives on their own PATH (or is an absolute path),
+            // not in a generated launcher dir, so it rides the wake too.
+            launchCmdOverride: agentLaunchOverride(agentId)
           },
           // Same boot-time env snapshot as fresh launch / cold restore, so a wake types the same
           // line the node launched with (empty on browser/relay by design).
