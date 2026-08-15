@@ -73,6 +73,17 @@ export interface MirrorEntry {
    *  node prove itself" stays true, and it is what separates a node that CAN verify (retryable)
    *  from one that never has (not retryable). See the plan's Correction C1 mitigation. */
   verifiedAt?: number
+  /**
+   * This entry's `state` came off disk at boot, not off a hook event this run. The mirror restores
+   * with a 6 h expiry and never pushes the restored copy to a listener — it is 6-hour-old evidence
+   * about a pane that has since done anything at all, including being replaced.
+   *
+   * Gate 2 refuses it outright (`targetNotIdleUnknown`), which is why the flag exists: without it a
+   * restored `done` is indistinguishable from a fresh one and the most dangerous moment in the
+   * product (just after a relaunch, sessions re-adopted, nothing re-confirmed) would read as the
+   * safest. Cleared by the first live event.
+   */
+  restored?: true
 }
 
 /** This host's Server-Edition install metadata (spec: server-update). Written by the installer
@@ -325,6 +336,10 @@ export function reduceEntry(
   now: number
 ): MirrorEntry {
   const next: MirrorEntry = prev ? { ...prev } : { updatedAt: now }
+  // ANY event is this run's traffic from this node, so the entry is no longer "restored and
+  // unheard-from". Done before every branch — including the ones that return early — because what
+  // the flag means is "nothing has been heard since boot", not "the state is still the restored one".
+  delete next.restored
   // Identity is captured off ANY event (mirrors the renderer's per-event setSessionId +
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
   if (ev.agentId) next.agentId = ev.agentId
@@ -1021,7 +1036,13 @@ function loadPersisted(file: string): void {
           agentId: e.agentId,
           sessionId: e.sessionId,
           ...(e.name ? { name: e.name } : {}),
-          updatedAt
+          updatedAt,
+          // Marked, and FORCED unverified whatever the file said. `buildFile` writes neither field
+          // — it is an allowlist, which is what keeps `stateVerified` off disk — but a file this
+          // process did not write (hand-edited, downgraded, or from a future build) must not be
+          // able to hand gate 2 a proof nothing presented this run. See `restored`.
+          restored: true,
+          stateVerified: false
         })
       }
     }
