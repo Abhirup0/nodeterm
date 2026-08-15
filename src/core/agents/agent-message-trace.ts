@@ -3,11 +3,17 @@ import type { BoardLogEntry } from '../../shared/types'
 import type { AgentMessageOutcomeKind, ReceiptSignal, TraceKind } from './agent-message-decide'
 
 /**
- * EVERY DELIVERY LEAVES A TRACE — and the trace records the OUTCOME, not the attempt.
+ * EVERY DELIVERY AND EVERY REFUSAL LEAVES A TRACE — and the trace records the OUTCOME, not the
+ * attempt.
  *
  * A trace that says "a message was sent" and cannot say whether it landed answers the only question
  * anyone ever asks it with silence. So the entry is written after the outcome is known, and carries
  * the outcome kind.
+ *
+ * The REFUSALS are traced too, and they are the ones an audit actually wants: an agent hammering a
+ * target it may not reach, a rate limiter firing over and over, a pane that keeps reading as a
+ * stranger's shell. `deliverAgentMessage` routes every pre-write refusal through here for exactly
+ * that reason — a security core whose refusals are silent is a security core with no evidence.
  *
  * ── WHY THERE ARE TWO PLACES IT CAN LAND ────────────────────────────────────────────────────────
  *

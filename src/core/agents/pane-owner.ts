@@ -59,14 +59,21 @@
  */
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
 
-/** What one `display-message` round-trip yields: everything but the argv. */
-export type PaneIdentity = Omit<PaneOwner, 'argv'>
+/** What one `display-message` round-trip yields: everything but the per-process facts (`argv` and
+ *  `pids`), which only `ps` can answer. Spelled out rather than `Omit<PaneOwner, 'argv'>` so a new
+ *  field on `PaneOwner` cannot silently become something tmux is expected to have answered. */
+export interface PaneIdentity {
+  panePid: number
+  tty: string
+  command: string
+  paneId?: string
+}
 
 /**
  * One round-trip for the three fields the read needs. Same `|` separator as `session-memory.ts`'s
  * `PANE_FMT`, for the same reason: one string, one parser, no second copy to drift.
  */
-export const PANE_OWNER_FMT = '#{pane_pid}|#{pane_tty}|#{pane_current_command}'
+export const PANE_OWNER_FMT = '#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{pane_id}'
 
 /**
  * Parse `display-message -p '<PANE_OWNER_FMT>'`.
@@ -87,7 +94,14 @@ export function parsePaneOwner(stdout: string | null | undefined): PaneIdentity 
   const tty = parts[1].trim()
   const command = parts[2].trim()
   if (!tty || !command) return null
-  return { panePid, tty, command }
+  // `#{pane_id}` is APPENDED rather than placed first so a three-field read — an older format
+  // string, or a tmux that expanded the name to nothing — still parses into the same three fields
+  // it always did. Validated to tmux's own shape (`%<digits>`) because a field that is sometimes
+  // absent and sometimes garbage is worse than one that is simply absent: `samePane` treats an
+  // absent id as "cannot confirm", and that must mean what it says.
+  const rawId = parts[3]?.trim()
+  const paneId = rawId && /^%\d+$/.test(rawId) ? rawId : undefined
+  return { panePid, tty, command, ...(paneId ? { paneId } : {}) }
 }
 
 /**
@@ -192,6 +206,20 @@ export function parseForegroundArgv(stdout: string | null | undefined, pgid: num
 }
 
 /**
+ * The pids of the same rows `parseForegroundArgv` returns, in the same order.
+ *
+ * A sibling rather than a change to `parseForegroundArgv`'s return type: that function has callers
+ * and tests that want the argv alone, and a tuple return would make every one of them destructure
+ * something they do not use. `ps` already prints the column, so this is free.
+ */
+export function parseForegroundPids(stdout: string | null | undefined, pgid: number): number[] {
+  if (!Number.isInteger(pgid) || pgid <= 0) return []
+  return parsePsRows(stdout)
+    .filter((row) => row.pgid === pgid)
+    .map((row) => row.pid)
+}
+
+/**
  * The two round-trips joined: a parsed pane identity plus the `ps` output for its tty.
  *
  * Null — never a `PaneOwner` with an empty `argv` — when `ps` said nothing usable, so the caller
@@ -205,9 +233,15 @@ export function paneOwnerFrom(
   if (!identity) return null
   const pgid = foregroundPgid(psStdout)
   const argv = pgid === null ? [] : parseForegroundArgv(psStdout, pgid)
+  const pids = pgid === null ? [] : parseForegroundPids(psStdout, pgid)
   // The ONE null-vs-owner decision, deliberately not two: "no foreground group marked" and "no rows
   // in it" are the same fact — we could not see who owns the pane — and a second guard for the
   // second phrasing would be a line no test can reach.
   if (argv.length === 0) return null
-  return { ...identity, argv }
+  // `argv` and `pids` line up row-for-row BY CONSTRUCTION: both are the same `parsePsRows` output,
+  // filtered by the same pgid, mapped to different columns. A length guard here was written and
+  // then removed — no input can reach it, and this file already says why that matters ("a second
+  // guard for the second phrasing would be a line no test can reach"). The correspondence is
+  // asserted on real `ps` output instead, which is where it could actually break.
+  return { ...identity, argv, pids }
 }

@@ -178,7 +178,24 @@ export class BoardLogStore {
     } catch {
       return []
     }
-    return parseLines(raw, opts)
+    const entries = parseLines(raw, opts)
+    // Read THROUGH the rotation boundary.
+    //
+    // Without this the panel goes blank at the exact moment rotation happens: the fresh file holds
+    // one line, and a board with months of history would show one entry. The previous generation is
+    // consulted only when the current file has not satisfied the request — the common case (a log
+    // far below the bound) still does exactly one read, as it always did.
+    if (!opts.all && entries.length >= (opts.cap ?? DEFAULT_CAP)) return entries
+    let older: string
+    try {
+      older = await fs.promises.readFile(`${this.localPath(cwd)}.1`, 'utf-8')
+    } catch {
+      return entries // no previous generation, which is the ordinary state
+    }
+    // Both halves are newest-first; the rotated file is entirely older, so it appends. The cap is
+    // re-applied to the JOIN, or a capped read could return more than it was asked for.
+    const joined = [...entries, ...parseLines(older, { all: true })]
+    return opts.all ? joined : joined.slice(0, opts.cap ?? DEFAULT_CAP)
   }
 
   /** Watch the log for changes; `cb` fires (debounced 250ms) on each change. Returns an unsub.

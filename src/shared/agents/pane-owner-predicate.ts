@@ -24,6 +24,22 @@ export interface PaneOwner {
   tty: string
   command: string
   argv: readonly string[]
+  /**
+   * `#{pane_id}` — tmux's own handle for the pane (`%17`). Unique for the life of the server and
+   * NEVER reused, which is what `panePid` and `tty` are not: a tty number is recycled aggressively,
+   * and `panePid` is the pane's ROOT process (the login shell), which survives the agent it
+   * launched. Absent only when the read predates this field or the format expanded to nothing.
+   */
+  paneId?: string
+  /**
+   * The pid of each foreground-group member, in the same order as `argv`.
+   *
+   * `ps` already prints it — `foregroundArgvArgs` asks for `pid=` as its first column — so this
+   * costs nothing extra, and it is the only thing that can distinguish "the same agent process is
+   * still there" from "an agent process is there again". A wrapper loop (`while :; do claude; done`)
+   * makes the second case ordinary rather than exotic.
+   */
+  pids?: readonly number[]
 }
 
 /**
@@ -223,4 +239,39 @@ export function isAgentPane(
     if (wanted.includes(effectiveBinary(line))) return 'agent'
   }
   return 'not-agent'
+}
+
+/**
+ * The PID of the agent process this pane's verdict rests on — the identity `isAgentPane` finds but
+ * throws away.
+ *
+ * It exists because "an agent owns this pane" is not the same claim as "the SAME agent owns this
+ * pane", and a delivery's post-write re-verify needs the second one. The failure it closes is
+ * ordinary rather than exotic:
+ *
+ *   pane root = bash(1000), claude(2000) in the foreground group  → we write
+ *   claude exits before reading; bash reads the pasted lines and EXECUTES them
+ *   a wrapper (`while :; do claude; done`) starts claude(2100)
+ *   post-probe: same tty, same pane_pid (bash is the pane's ROOT process), an agent in the group
+ *
+ * On name alone that reads as "unchanged", and the delivery is reported as `delivered` when the body
+ * in fact ran as shell commands. The pid moved, so the pid is what has to be compared.
+ *
+ * `null` when the pane is not an agent's, when the read carries no `pids` (an older read — treat it
+ * as unknown, never as unchanged), or when the matching row has no pid.
+ */
+export function agentPidIn(
+  owner: PaneOwner | null | undefined,
+  expected: string,
+  binaries?: readonly string[] | null
+): number | null {
+  if (!owner || !owner.argv || !owner.pids) return null
+  const wanted = binaries ?? binariesFor(expected)
+  if (!wanted || wanted.length === 0) return null
+  for (let i = 0; i < owner.argv.length; i++) {
+    if (!wanted.includes(effectiveBinary(owner.argv[i]))) continue
+    const pid = owner.pids[i]
+    return typeof pid === 'number' && pid > 0 ? pid : null
+  }
+  return null
 }

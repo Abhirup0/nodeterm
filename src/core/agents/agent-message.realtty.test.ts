@@ -204,7 +204,14 @@ suite('REAL tmux pane, REAL bash: what the delivery actually does', () => {
       )
       // No hook events come from a bash pane, so the receipt legitimately stalls. It is reported,
       // not swallowed — which is the entire point of having a receipt.
+      // `stalled` and not `deliveredToReplacedTarget` is itself an assertion about the REAL read:
+      // the post-write check requires a pane id and the agent's own pid on both sides, so this
+      // outcome proves tmux answered `#{pane_id}` and `ps` gave a pid column that lined up with
+      // argv. A bash pane emits no hook events, so `stalled` is the honest end state.
       expect(out.kind).toBe('stalled')
+      const live = await realPaneOwner(s)('n-dst')
+      expect(live?.paneId, 'the real read carried no pane id').toMatch(/^%\d+$/)
+      expect(live?.pids?.length).toBe(live?.argv.length)
       waitFor(() => capture(s).includes('END NODETERM MESSAGE'), 5000, 'the closing frame line')
       const pane = capture(s)
       for (const line of [

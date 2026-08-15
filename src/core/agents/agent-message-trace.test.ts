@@ -8,7 +8,7 @@ import {
   resetAgentMessageTraceForTests,
   TRACE_RING_CAPACITY
 } from './agent-message-trace'
-import { BoardLogStore, MAX_BOARD_LOG_BYTES, parseLines } from '../board-log'
+import { BoardLogStore, MAX_BOARD_LOG_BYTES, buildLine, parseLines } from '../board-log'
 import type { BoardLogEntry } from '../../shared/types'
 
 let work: string
@@ -164,6 +164,38 @@ describe('board-log truncation — the 500 was a READ cap, not an eviction', () 
     const file = path.join(work, '.nodeterm', 'board-log.jsonl')
     expect(fs.existsSync(`${file}.1`)).toBe(false)
     expect(parseLines(fs.readFileSync(file, 'utf8')).map((e) => e.text)).toEqual(['two', 'one'])
+  })
+
+  it('a read spans the rotation boundary, so the panel does not go blank at rotation', async () => {
+    const store = new BoardLogStore({})
+    const dir = path.join(work, '.nodeterm')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'board-log.jsonl')
+    // Two real entries in the generation that is about to be rotated away.
+    fs.writeFileSync(file, buildLine(entry('old-1')) + buildLine(entry('old-2')))
+    fs.appendFileSync(file, 'x'.repeat(MAX_BOARD_LOG_BYTES))
+    await store.append(work, entry('new-1'))
+    expect(fs.existsSync(`${file}.1`)).toBe(true)
+    const read = await store.read(work)
+    // Newest first, across both generations — the fresh file's line, then the rotated ones.
+    expect(read.map((e) => e.text)).toEqual(['new-1', 'old-2', 'old-1'])
+  })
+
+  it('a capped read never returns more than the cap, even spanning generations', async () => {
+    const store = new BoardLogStore({})
+    const dir = path.join(work, '.nodeterm')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, 'board-log.jsonl')
+    fs.writeFileSync(file, [1, 2, 3].map((n) => buildLine(entry(`old-${n}`))).join(''))
+    fs.appendFileSync(file, 'x'.repeat(MAX_BOARD_LOG_BYTES))
+    await store.append(work, entry('new-1'))
+    expect((await store.read(work, { cap: 2 })).map((e) => e.text)).toEqual(['new-1', 'old-3'])
+    expect((await store.read(work, { all: true })).map((e) => e.text)).toEqual([
+      'new-1',
+      'old-3',
+      'old-2',
+      'old-1'
+    ])
   })
 
   it('keeps exactly ONE generation — a second rotation replaces the first', async () => {

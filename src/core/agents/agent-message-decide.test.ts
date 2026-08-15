@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   decideDelivery,
+  decidePreProbe,
+  FIRST_PAID_DECISION,
   type AgentMessageOutcome,
   type Proceed,
   DECISION_ORDER,
@@ -230,12 +232,12 @@ describe('the decision ORDER is load-bearing', () => {
       (p) => ({ ...p, notPermitted: undefined }),
       (p) => ({ ...p, retryAfterMs: undefined }),
       (p) => ({ ...p, targetLive: true }),
-      (p) => ({ ...p, pane: 'agent' }),
       (p) => ({ ...p, target: { ...p.target!, clientRevision: MANAGED_SCRIPT_REVISION } }),
       (p) => ({ ...p, tokenFilePresent: true }),
       (p) => ({ ...p, target: { ...p.target!, stateVerified: true, state: undefined } }),
       (p) => ({ ...p, target: { ...p.target!, state: 'working' } }),
       (p) => ({ ...p, target: { ...p.target!, state: 'done' } }),
+      (p) => ({ ...p, pane: 'agent' }),
       (p) => ({ ...p, pasteAware: true })
     ]
     const walked: string[] = []
@@ -249,6 +251,46 @@ describe('the decision ORDER is load-bearing', () => {
 
   it('every reason in DECISION_ORDER is a real outcome kind with a RETRYABLE entry', () => {
     for (const kind of DECISION_ORDER) expect(typeof RETRYABLE[kind]).toBe('boolean')
+  })
+
+  it('every gate BEFORE the first paid one is decidable with no pane fact at all', () => {
+    // The free/paid boundary, asserted by running the decider with the pane fact deliberately
+    // withheld: everything ahead of FIRST_PAID_DECISION must still answer. This is what makes
+    // `decidePreProbe` a guarantee rather than a comment — a gate that quietly started needing the
+    // pane would answer `undefined` here and fail.
+    const paidAt = DECISION_ORDER.indexOf(FIRST_PAID_DECISION)
+    expect(paidAt).toBeGreaterThan(0)
+    const free: Array<[AgentMessageOutcomeKind, Parameters<typeof decidePreProbe>[0]]> = [
+      ['notPermitted', { targetLive: true, notPermitted: 'switch-off', tokenFilePresent: true, target: readyEntry() }],
+      ['notPermitted', { targetLive: true, sourceNodeId: 'a', targetNodeId: 'a', tokenFilePresent: true, target: readyEntry() }],
+      ['rateLimited', { targetLive: true, retryAfterMs: 10, tokenFilePresent: true, target: readyEntry() }],
+      ['targetGone', { targetLive: false, tokenFilePresent: true, target: readyEntry() }],
+      ['targetHookScriptStale', { targetLive: true, tokenFilePresent: true, target: readyEntry({ stateVerified: false, clientRevision: 1 }) }],
+      ['targetStatusUnverified', { targetLive: true, tokenFilePresent: false, target: readyEntry({ stateVerified: false }) }],
+      ['targetStatusStale', { targetLive: true, tokenFilePresent: true, target: readyEntry({ stateVerified: false }) }],
+      ['targetNotIdleUnknown', { targetLive: true, tokenFilePresent: true, target: readyEntry({ restored: true }) }],
+      ['targetBusy', { targetLive: true, tokenFilePresent: true, target: readyEntry({ state: 'working' }) }]
+    ]
+    for (const [kind, facts] of free) {
+      expect(decidePreProbe(facts)?.kind, `${kind} needed a pane`).toBe(kind)
+    }
+    // …and the paid ones genuinely are not decidable without it.
+    expect(decidePreProbe({ targetLive: true, tokenFilePresent: true, target: readyEntry() })).toBeNull()
+    expect(DECISION_ORDER.slice(paidAt)).toEqual(['targetNotAgentPane', 'targetNotPasteAware'])
+  })
+
+  it('a self-send is refused ahead of everything except an explicit notPermitted', () => {
+    expect(decideDelivery(ready({ sourceNodeId: 'n', targetNodeId: 'n' }))).toEqual({
+      kind: 'notPermitted',
+      reason: 'self-send'
+    })
+    // Even against a target that would otherwise be perfectly deliverable, and even when the pane
+    // is unreadable — the check costs a string comparison.
+    expect(
+      decideDelivery(ready({ sourceNodeId: 'n', targetNodeId: 'n', pane: 'unknown' })).kind
+    ).toBe('notPermitted')
+    // Different ids are not a self-send.
+    expect(decideDelivery(ready({ sourceNodeId: 'a', targetNodeId: 'b' })).kind).toBe('proceed')
   })
 })
 

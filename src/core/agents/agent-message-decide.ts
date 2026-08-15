@@ -94,16 +94,36 @@ export const DECISION_ORDER = [
   'notPermitted',
   'rateLimited',
   'targetGone',
-  'targetNotAgentPane',
   'targetHookScriptStale',
   'targetStatusUnverified',
   'targetStatusStale',
   'targetNotIdleUnknown',
   'targetBusy',
+  'targetNotAgentPane',
   'targetNotPasteAware'
 ] as const
 
+/**
+ * Where the free/paid line falls, and it is NOT a style choice.
+ *
+ * Everything before `targetNotAgentPane` is decidable from a map lookup and a local `existsSync`.
+ * Everything from it on costs a tmux round-trip — and on an SSH project, an `ssh` one over a
+ * ControlMaster that may be dead, in which case `-o ControlMaster=auto` makes it a real LOGIN.
+ *
+ * The plan's draft order put the pane verdict ahead of the identity and idle refusals. That reads
+ * well and costs badly: `targetBusy` is the most common refusal in an orchestration session and one
+ * of only four retryable outcomes, so under the draft order every retry of a busy target paid for a
+ * probe. A message sent to a working agent every few seconds would then be the 72k-logins/day shape
+ * this codebase already survived once. Free-before-paid wins, and the reported reason for a target
+ * that is both busy AND on a stranger's pane changes from `targetNotAgentPane` to `targetBusy` —
+ * accepted deliberately: it is retryable, so the caller comes back and learns the rest.
+ */
+export const FIRST_PAID_DECISION = 'targetNotAgentPane'
+
 export interface DeliveryFacts {
+  /** The sender. Compared to `targetNodeId` for the self-send backstop; absent skips that check. */
+  sourceNodeId?: string
+  targetNodeId?: string
   /** Set by PR 5/PR 6 (the verbs and the per-project switch). Cheapest gate: pure caller state. */
   notPermitted?: NotPermittedReason
   /** Set by PR 4's per-pair limiter. `> 0` means refuse now and say when. */
@@ -235,7 +255,9 @@ export const NO_TOKEN_FILE_NOTE =
  * reason it is wrong is the PERSIST-TIME token sweep (`refreshNodeTokens` on `onPersist`), NOT
  * `ptyManager.create` — which a phone-spawned session never touches.
  */
-function identityRefusal(f: DeliveryFacts): AgentMessageOutcome | null {
+function identityRefusal(
+  f: Pick<DeliveryFacts, 'target' | 'tokenFilePresent' | 'targetIsRemote'>
+): AgentMessageOutcome | null {
   const e = f.target
   if (e?.stateVerified === true) return null
   // "Observed this run" is the precondition for reading a client revision at all: a restored entry
@@ -256,22 +278,49 @@ function identityRefusal(f: DeliveryFacts): AgentMessageOutcome | null {
 /**
  * The gates that cost NOTHING to evaluate — decided before any pane is touched.
  *
- * This split is the reason `DECISION_ORDER` is ordered the way it is, made real: a caller that is
- * not permitted, or that is over its rate budget, must be told so WITHOUT a tmux (or, on an SSH
- * project, an `ssh`) round-trip. Without the split the order would be a comment — the refusal text
- * would be right and the cost would be paid anyway, which is exactly the kind of gap a
- * source-reading test cannot see.
+ * This split is the reason `DECISION_ORDER` is ordered the way it is, made real: everything
+ * decidable from a map lookup and a local stat is decided BEFORE anything touches a pane. Without
+ * the split the order would be a comment — the refusal text would be right and the round-trip would
+ * be paid anyway, which is exactly the kind of gap a source-reading test cannot see.
+ *
+ * The set is exhaustive as of `FIRST_PAID_DECISION`: `notPermitted`, self-send, `rateLimited`,
+ * `targetGone`, the three identity refusals and the two idle ones. If a future gate is free, it
+ * belongs here; if it needs a probe, it belongs after. The test asserts the boundary by RUNNING a
+ * delivery and counting `paneOwner` calls, not by reading this sentence.
  *
  * `null` means "nothing decidable yet"; the caller probes and then calls `decideDelivery`.
  */
 export function decidePreProbe(
-  f: Pick<DeliveryFacts, 'notPermitted' | 'retryAfterMs' | 'targetLive'>
+  f: Pick<
+    DeliveryFacts,
+    | 'sourceNodeId'
+    | 'targetNodeId'
+    | 'notPermitted'
+    | 'retryAfterMs'
+    | 'targetLive'
+    | 'target'
+    | 'tokenFilePresent'
+    | 'targetIsRemote'
+  >
 ): AgentMessageOutcome | null {
   if (f.notPermitted) return { kind: 'notPermitted', reason: f.notPermitted }
+  // SELF-SEND, and it is a backstop rather than the only guard.
+  //
+  // Gate 2 covers it by accident today: a sender is mid-turn, so its own mirror entry says
+  // `working` and the delivery refuses as `targetBusy`. "By accident" is the problem — PR 7's
+  // deliver-on-idle queue exists precisely to deliver to a node that is NOT mid-turn, and a node
+  // messaging itself from its own queue is a loop with a rate limiter for a brake. Two lines here,
+  // and no later caller can forget it.
+  if (f.sourceNodeId && f.targetNodeId && f.sourceNodeId === f.targetNodeId)
+    return { kind: 'notPermitted', reason: 'self-send' }
   if (typeof f.retryAfterMs === 'number' && f.retryAfterMs > 0)
     return { kind: 'rateLimited', retryAfterMs: f.retryAfterMs }
   if (!f.targetLive) return { kind: 'targetGone' }
-  return null
+  // Identity and idleness are BOTH free — a map lookup and a local stat — so they belong here,
+  // ahead of anything that touches a pane. See FIRST_PAID_DECISION.
+  const identity = identityRefusal(f)
+  if (identity) return identity
+  return idleRefusal(f.target)
 }
 
 /**
@@ -298,10 +347,6 @@ export function decideDelivery(f: DeliveryFacts): AgentMessageOutcome | Proceed 
   // holding an unreadable pane is not "try again in a moment".
   if (f.pane !== 'agent')
     return { kind: 'targetNotAgentPane', observed: f.paneObserved ?? (f.pane === 'unknown' ? 'unknown' : 'not-agent') }
-  const identity = identityRefusal(f)
-  if (identity) return identity
-  const idle = idleRefusal(f.target)
-  if (idle) return idle
   // Last, and only when everything else passed: the pane must have ASKED for bracketed paste.
   // herdr :260 — a multi-line envelope on the unframed fallback would be submitted line-by-line as
   // separate turns. It is refused, never sent and hoped for.

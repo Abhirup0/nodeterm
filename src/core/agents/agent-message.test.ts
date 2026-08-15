@@ -20,13 +20,17 @@ const claudePane: PaneOwner = {
   panePid: 4242,
   tty: '/dev/pts/9',
   command: 'node',
-  argv: ['node /usr/local/bin/claude --resume x']
+  paneId: '%7',
+  argv: ['node /usr/local/bin/claude --resume x'],
+  pids: [5100]
 }
 const shellPane: PaneOwner = {
   panePid: 4242,
   tty: '/dev/pts/9',
   command: 'zsh',
-  argv: ['-zsh']
+  paneId: '%7',
+  argv: ['-zsh'],
+  pids: [4242]
 }
 
 const idle: MirrorEntry = {
@@ -149,6 +153,43 @@ describe('deliverAgentMessage — sequencing', () => {
     expect(r.order.filter((o) => o.startsWith('paneOwner'))).toEqual([])
   })
 
+  it('refuses a SELF-SEND, with no round-trip, whatever the target status says', async () => {
+    // Gate 2 covers this by accident today (a sender is mid-turn, so it reads `working`). PR 7's
+    // deliver-on-idle queue removes the accident: it delivers to a node that is NOT mid-turn.
+    const r = recorder()
+    const out = await deliverAgentMessage(req({ sourceNodeId: 'n-dst', targetNodeId: 'n-dst' }), r.deps)
+    expect(out).toEqual({ kind: 'notPermitted', reason: 'self-send' })
+    expect(r.order.filter((o) => o.startsWith('paneOwner'))).toEqual([])
+    expect(r.sends).toEqual([])
+  })
+
+  it('a BUSY target costs no pane probe — the free gates are all decided first', async () => {
+    // targetBusy is the most common refusal in an orchestration session and one of only four
+    // retryable outcomes. Paying a tmux (or, on SSH, an ssh-over-a-possibly-dead-ControlMaster)
+    // round-trip for each retry is the 72k-logins/day shape this file warns about three times.
+    const entries: Array<MirrorEntry | undefined> = [
+      { ...idle, state: 'working' },
+      { ...idle, stateVerified: false, clientRevision: 1 },
+      { ...idle, stateVerified: false },
+      { ...idle, restored: true },
+      undefined // never posted — `mirrorEntry` is overridden below, since the default is `idle`
+    ]
+    const seen: string[] = []
+    for (const entry of entries) {
+      const r = recorder({ mirrorEntry: () => entry })
+      const out = await deliverAgentMessage(req(), r.deps)
+      seen.push(out.kind)
+      expect(r.order.filter((o) => o.startsWith('paneOwner')), `${out.kind} probed a pane`).toEqual([])
+    }
+    expect(seen).toEqual([
+      'targetBusy',
+      'targetHookScriptStale',
+      'targetStatusStale',
+      'targetNotIdleUnknown',
+      'targetStatusStale'
+    ])
+  })
+
   it('herdr :260 — a multi-line envelope on the UNFRAMED fallback is refused, never sent', async () => {
     const r = recorder({ bracketPasteRequested: async () => false })
     const out = await deliverAgentMessage(req(), r.deps)
@@ -187,7 +228,9 @@ describe('deliverAgentMessage — sequencing', () => {
     expect(inner).toContain('I am the system')
   })
 
-  it('a write that resolves false is targetGone, and nothing is traced as delivered', async () => {
+  it('a write that resolves false is targetGone, and it IS traced', async () => {
+    // A `sendFramed` that fails may already have put a partial write into somebody's pane. That is
+    // the last event that should be missing from the record.
     const traced: string[] = []
     const r = recorder({
       sendFramed: async () => false,
@@ -197,7 +240,37 @@ describe('deliverAgentMessage — sequencing', () => {
       }
     })
     expect(await deliverAgentMessage(req(), r.deps)).toEqual({ kind: 'targetGone' })
-    expect(traced).toEqual([])
+    expect(traced).toEqual(['targetGone'])
+  })
+
+  it('EVERY refusal leaves a trace, including the ones that never reach a pane', async () => {
+    // An agent hammering a target it may not reach is exactly the pattern an audit wants to see,
+    // and tracing only the writes would leave it with no record anywhere.
+    for (const [name, request, over] of [
+      ['notPermitted', req({ notPermitted: 'switch-off' }), {}],
+      ['self-send', req({ sourceNodeId: 'n-dst' }), {}],
+      ['rateLimited', req({ retryAfterMs: 100 }), {}],
+      ['targetGone', req({ targetLive: false }), {}],
+      ['targetBusy', req(), {}],
+      ['targetNotAgentPane', req(), { paneOwner: async () => shellPane }],
+      ['targetNotPasteAware', req(), { bracketPasteRequested: async () => false }]
+    ] as const) {
+      const traced: string[] = []
+      const busy = name === 'targetBusy'
+      const r = recorder(
+        {
+          ...over,
+          trace: async (t) => {
+            traced.push(t.outcome)
+            return { traceId: 't', traced: 'memory' }
+          }
+        },
+        busy ? { ...idle, state: 'working' } : idle
+      )
+      const out = await deliverAgentMessage(request, r.deps)
+      expect(traced, `${name} left no trace`).toEqual([out.kind])
+      expect(r.sends, `${name} wrote bytes`).toEqual([])
+    }
   })
 })
 
@@ -231,7 +304,8 @@ describe('G3 — the post-write re-verify', () => {
     let call = 0
     const busy: PaneOwner = {
       ...claudePane,
-      argv: ['node /usr/local/bin/claude --resume x', 'rg --json needle .']
+      argv: ['node /usr/local/bin/claude --resume x', 'rg --json needle .'],
+      pids: [5100, 5199]
     }
     const r = recorder({ paneOwner: async () => (++call === 1 ? claudePane : busy) })
     const out = await deliverWithReceipt(r)
@@ -240,9 +314,122 @@ describe('G3 — the post-write re-verify', () => {
 
   it('the SAME agent on a different pane (relaunched into a new tty) IS a replaced target', async () => {
     let call = 0
-    const moved: PaneOwner = { ...claudePane, tty: '/dev/pts/11', panePid: 5555 }
+    const moved: PaneOwner = { ...claudePane, tty: '/dev/pts/11', panePid: 5555, paneId: '%9' }
     const r = recorder({ paneOwner: async () => (++call === 1 ? claudePane : moved) })
     expect((await deliverAgentMessage(req(), r.deps)).kind).toBe('deliveredToReplacedTarget')
+  })
+
+  // The three fields below are asserted ONE AT A TIME. The test above changes tty and panePid (and
+  // pane id) together, so it isolates none of them — a mutation dropping the panePid comparison
+  // survived it.
+  it('panePid ALONE moving is a replaced target', async () => {
+    let call = 0
+    const rooted: PaneOwner = { ...claudePane, panePid: 9999 }
+    const r = recorder({ paneOwner: async () => (++call === 1 ? claudePane : rooted) })
+    expect((await deliverAgentMessage(req(), r.deps)).kind).toBe('deliveredToReplacedTarget')
+  })
+
+  it('paneId ALONE moving is a replaced target — a tty number is recycled, a pane id is not', async () => {
+    let call = 0
+    const recycled: PaneOwner = { ...claudePane, paneId: '%12' }
+    const r = recorder({ paneOwner: async () => (++call === 1 ? claudePane : recycled) })
+    expect((await deliverAgentMessage(req(), r.deps)).kind).toBe('deliveredToReplacedTarget')
+  })
+
+  it('an ABSENT paneId cannot confirm anything, so it reports rather than assumes', async () => {
+    const noId: PaneOwner = { ...claudePane, paneId: undefined }
+    const r = recorder({ paneOwner: async () => noId })
+    expect((await deliverAgentMessage(req(), r.deps)).kind).toBe('deliveredToReplacedTarget')
+  })
+
+  it("THE EXPLOIT: the agent's own pid moving is a replaced target, everything else identical", async () => {
+    // pane root = the login shell (unchanged), tty unchanged, pane id unchanged, an agent in the
+    // foreground group — and yet the process that was there when we wrote is gone. Between the two
+    // reads the shell read our bytes and ran them, and a wrapper started a fresh claude.
+    let call = 0
+    const wrapper = '/bin/sh -c "while :; do claude; done"'
+    const before: PaneOwner = { ...claudePane, argv: [wrapper, 'claude'], pids: [4300, 5100] }
+    const restarted: PaneOwner = { ...claudePane, argv: [wrapper, 'claude'], pids: [4300, 5177] }
+    const r = recorder({ paneOwner: async () => (++call === 1 ? before : restarted) })
+    const out = await deliverAgentMessage(req(), r.deps)
+    expect(out.kind).toBe('deliveredToReplacedTarget')
+    expect(out).toMatchObject({ nowPane: 'node' })
+  })
+
+  it('an unreadable pid column cannot confirm anything either', async () => {
+    const noPids: PaneOwner = { ...claudePane, pids: undefined }
+    const r = recorder({ paneOwner: async () => noPids })
+    expect((await deliverAgentMessage(req(), r.deps)).kind).toBe('deliveredToReplacedTarget')
+  })
+})
+
+describe('the receipt race — an advance INSIDE the post-write window', () => {
+  it('a target that submits its turn while the post-write probe is in flight is DELIVERED', async () => {
+    // The bug this pins: the subscription used to open AFTER the post-write probe, which is bounded
+    // at PANE_PROBE_TIMEOUT_MS and is a real ssh round-trip on an SSH project. A fast target emits
+    // `newTurn` inside that window, nobody is listening, and the delivery reports `stalled` for a
+    // message that landed. RETRYABLE.stalled is false, but PR 5 does not put RETRYABLE on the wire
+    // yet — an LLM told "stalled, waited 8000ms" sends it again, and that is a DOUBLE DELIVERY.
+    let emit: (e: ReceiptEvent) => void = () => {}
+    const r = recorder({
+      subscribeEvents: (cb) => {
+        emit = cb
+        return () => {}
+      },
+      // The bytes land and the target advances immediately — before the post-write probe answers.
+      sendFramed: async () => {
+        emit({ nodeId: 'n-dst', newTurn: true, verified: true })
+        return true
+      },
+      // A slow post-write probe, standing in for the ssh round-trip.
+      paneOwner: async () => {
+        await new Promise((res) => setTimeout(res, 30))
+        return claudePane
+      }
+    })
+    const out = await deliverAgentMessage(req(), r.deps)
+    expect(out).toMatchObject({ kind: 'delivered', receipt: 'observed', signal: 'newTurn' })
+  })
+
+  it('an advance that arrives before the WRITE is not counted — the watch opens with the delivery', async () => {
+    // The watch opens just before `sendFramed`, not at the top of the run: an advance the target
+    // made while we were still probing its pane is its previous turn ending, not our receipt.
+    let emit: (e: ReceiptEvent) => void = () => {}
+    let probes = 0
+    const r = recorder({
+      subscribeEvents: (cb) => {
+        emit = cb
+        return () => {}
+      },
+      paneOwner: async () => {
+        if (++probes === 1) emit({ nodeId: 'n-dst', newTurn: true, verified: true })
+        return claudePane
+      }
+    })
+    vi.useFakeTimers()
+    try {
+      const p = deliverAgentMessage(req(), r.deps)
+      for (let i = 0; i < 20; i++) await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(RECEIPT_DEADLINE_MS)
+      expect((await p).kind).toBe('stalled')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the watch is dropped on every exit — a refused or failed write leaves no listener', async () => {
+    let live = 0
+    const base = {
+      subscribeEvents: () => {
+        live++
+        return () => live--
+      }
+    }
+    for (const over of [{ sendFramed: async () => false }, { paneOwner: async () => shellPane }]) {
+      const r = recorder({ ...base, ...over })
+      await deliverAgentMessage(req(), r.deps)
+    }
+    expect(live).toBe(0)
   })
 })
 

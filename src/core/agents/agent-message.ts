@@ -1,7 +1,7 @@
 import type { MirrorEntry } from '../agent-status-mirror'
 import type { AgentState } from '../../shared/agents/normalize'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
-import { isAgentPane } from '../../shared/agents/pane-owner-predicate'
+import { agentPidIn, isAgentPane } from '../../shared/agents/pane-owner-predicate'
 import { bracketedInjection, PASTE_END, PASTE_START } from '../paste-injection'
 import { buildEnvelope, newFrameNonce } from './agent-message-envelope'
 import { PANE_PROBE_TIMEOUT_MS, probeWithin } from './pane-probe'
@@ -113,17 +113,36 @@ export interface DeliveryDeps {
 }
 
 /**
- * Is the pane we just wrote into still the pane we checked?
+ * Is the pane we just wrote into still the pane we checked — and is the same agent PROCESS still in
+ * it?
  *
- * NOT argv equality, and the difference matters. An agent's foreground process group changes
- * constantly while it works — a tool subprocess joins the group and the argv list grows — so
- * argv equality would report a REPLACED TARGET on every busy pane and turn a real signal into
- * noise nobody reads. What identifies the pane is the pane: same tty, same pane pid, and still
- * owned by the same agent.
+ * Four things must all hold, and each closes a different way the answer can be yes-but-wrong:
  *
- * `after === null` is NOT treated as "same". A probe that lapsed cannot confirm anything, and the
- * fail-open direction here is to TELL the sender: an unconfirmable delivery is reported as
- * `deliveredToReplacedTarget` with `nowPane: 'unknown'`, never as `delivered`.
+ *  1. **`paneId`** (`#{pane_id}`). tmux guarantees it unique for the life of the server and never
+ *     reuses it. A tty number, by contrast, is recycled aggressively, so `/dev/pts/9` after is not
+ *     evidence of `/dev/pts/9` before.
+ *  2. **`tty`** — kept as the cheap corroboration, and the only one an older read carries.
+ *  3. **`panePid`** — the pane's ROOT process. Necessary but nowhere near sufficient: it is the
+ *     login shell, which OUTLIVES the agent it launched. Isolated by its own test, because a test
+ *     that changes the tty and the pane pid together proves neither.
+ *  4. **The agent's OWN pid** (`agentPidIn`). This is the one that closes the exploit:
+ *
+ *         pane root = bash(1000), claude(2000) in the foreground group  → we write
+ *         claude exits before reading; bash reads the pasted lines and EXECUTES them
+ *         a wrapper (`while :; do claude; done`) starts claude(2100)
+ *         post-probe: same pane id, same tty, same pane pid, an agent in the group
+ *
+ *     On names alone that is "unchanged", and the body that just ran as shell commands would be
+ *     reported `delivered`. The pid moved; comparing it is what makes the window OBSERVABLE. It
+ *     still cannot un-send the bytes — nothing can — but the sender is told and the trace records
+ *     it, which is the whole and only job of a post-write check.
+ *
+ * NOT argv equality: an agent's foreground group grows a member every time it runs a tool, so argv
+ * equality would cry "replaced" on every busy pane and turn a real signal into noise nobody reads.
+ *
+ * Every UNKNOWN is a "no". A lapsed probe, a read with no `paneId`, a read with no `pids` — none of
+ * them can confirm anything, and the fail direction here is to TELL the sender:
+ * `deliveredToReplacedTarget` with `nowPane: 'unknown'`, never `delivered`.
  */
 function samePane(
   before: PaneOwner,
@@ -133,7 +152,11 @@ function samePane(
 ): boolean {
   if (!after) return false
   if (after.tty !== before.tty || after.panePid !== before.panePid) return false
-  return isAgentPane(after, agentId, binaries) === 'agent'
+  if (!before.paneId || !after.paneId || before.paneId !== after.paneId) return false
+  if (isAgentPane(after, agentId, binaries) !== 'agent') return false
+  const wasPid = agentPidIn(before, agentId, binaries)
+  const nowPid = agentPidIn(after, agentId, binaries)
+  return wasPid !== null && nowPid !== null && wasPid === nowPid
 }
 
 /**
@@ -154,34 +177,92 @@ function samePane(
  * deliveries, which is the same hole gate 2 exists to close — the cost of an unverified receipt is
  * not "a slightly wrong log", it is that PR 7's queue would consider a message consumed.
  */
+export interface ReceiptWatch {
+  /** Wait up to `deadlineMs` for the advance, or return null. Consumes the watch. */
+  wait(deadlineMs?: number): Promise<ReceiptSignal | null>
+  /** Drop the subscription without waiting (a refused or failed write has no receipt to collect). */
+  cancel(): void
+}
+
+/**
+ * Start watching BEFORE the write, and buffer.
+ *
+ * ── THE RACE THIS CLOSES, AND WHY IT CAUSED A DOUBLE DELIVERY ───────────────────────────────────
+ *
+ * Subscribing after the write looks harmless — the target cannot answer before it is asked — but
+ * between the write and the subscription sat the POST-WRITE PROBE, bounded by
+ * `PANE_PROBE_TIMEOUT_MS` (2 s) and, on an SSH project, a real round-trip over the ControlMaster. A
+ * fast target submits its turn inside that window; `newTurn` fires with nobody listening; the
+ * delivery reports `stalled` while the target demonstrably advanced. `RETRYABLE.stalled` is false,
+ * but a language model reading "stalled, waited 8000ms" retries anyway — and the retry is a SECOND
+ * delivery of a message that already landed.
+ *
+ * So the subscription opens before the bytes go out and holds anything that arrives. The deadline
+ * still starts at `wait()`, i.e. after the write and the probe: the 8 s is a budget for the
+ * target's response, not for our own round-trips, and letting a slow probe eat a quarter of it
+ * would make the timeout mean something different on SSH than on local.
+ */
+export function watchForReceipt(
+  nodeId: string,
+  subscribe: DeliveryDeps['subscribeEvents']
+): ReceiptWatch {
+  let buffered: ReceiptSignal | null = null
+  let deliver: ((s: ReceiptSignal) => void) | null = null
+  const unsub = subscribe((e) => {
+    if (e.nodeId !== nodeId) return // another node's turn is not this node's receipt
+    if (e.verified !== true) return // an unverifiable event is not evidence, here as everywhere
+    const signal: ReceiptSignal | null =
+      e.newTurn === true ? 'newTurn' : e.state === 'working' ? 'working' : null
+    if (!signal || buffered) return // first advance wins; later ones are the turn proceeding
+    buffered = signal
+    deliver?.(signal)
+  })
+  const drop = (): void => {
+    try {
+      unsub()
+    } catch {
+      // an unsubscribe that throws must not turn a delivered message into a rejection
+    }
+  }
+  return {
+    cancel: drop,
+    wait(deadlineMs: number = RECEIPT_DEADLINE_MS): Promise<ReceiptSignal | null> {
+      if (buffered !== null) {
+        // The advance landed while we were writing or probing. Nothing to wait for — and this is
+        // exactly the case that used to report `stalled`.
+        drop()
+        return Promise.resolve(buffered)
+      }
+      return new Promise<ReceiptSignal | null>((resolve) => {
+        let done = false
+        const finish = (signal: ReceiptSignal | null): void => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          deliver = null
+          drop()
+          resolve(signal)
+        }
+        const timer = setTimeout(() => finish(null), deadlineMs)
+        deliver = finish
+      })
+    }
+  }
+}
+
+/**
+ * Subscribe and wait, as one call.
+ *
+ * Kept because it is the honest expression of "watch for the receipt with nothing else going on",
+ * and it is what the receipt's own unit tests exercise. `deliverAgentMessage` does NOT use it: it
+ * needs the subscription open across the write, which is the whole point of `watchForReceipt`.
+ */
 export async function awaitReceipt(
   nodeId: string,
   subscribe: DeliveryDeps['subscribeEvents'],
   deadlineMs: number = RECEIPT_DEADLINE_MS
 ): Promise<ReceiptSignal | null> {
-  return new Promise<ReceiptSignal | null>((resolve) => {
-    let done = false
-    let unsub: () => void = () => {}
-    const finish = (signal: ReceiptSignal | null): void => {
-      if (done) return
-      done = true
-      clearTimeout(timer)
-      try {
-        unsub()
-      } catch {
-        // an unsubscribe that throws must not turn a delivered message into a rejection
-      }
-      resolve(signal)
-    }
-    const timer = setTimeout(() => finish(null), deadlineMs)
-    unsub = subscribe((e) => {
-      if (e.nodeId !== nodeId) return // another node's turn is not this node's receipt
-      if (e.verified !== true) return // an unverifiable event is not evidence, here as everywhere
-      if (e.newTurn === true) return finish('newTurn')
-      if (e.state === 'working') return finish('working')
-    })
-    if (done) unsub() // a synchronous event during subscribe already resolved us
-  })
+  return watchForReceipt(nodeId, subscribe).wait(deadlineMs)
 }
 
 /**
@@ -195,16 +276,56 @@ export async function deliverAgentMessage(
   req: DeliveryRequest,
   deps: DeliveryDeps
 ): Promise<AgentMessageOutcome> {
+  const bodyChars = req.body.length
+  /**
+   * Record the outcome — EVERY outcome, including the refusals that never reach a pane.
+   *
+   * The refusals are the ones an audit actually wants: an agent hammering a target it may not
+   * reach, a rate limiter firing over and over, a pane that keeps reading as a stranger's shell.
+   * Tracing only the writes would leave exactly that pattern with no record anywhere, which is the
+   * opposite of what a security core is for.
+   *
+   * The amplification is bounded on both legs and deliberately so: the in-memory ring evicts at
+   * `TRACE_RING_CAPACITY`, and the board log rotates at `MAX_BOARD_LOG_BYTES` — the rotation this
+   * same PR added, which a per-refusal trace is precisely the workload that needs.
+   *
+   * The refusal OUTCOMES do not gain a `traceId`: the trace is a record for the human, not a handle
+   * for the sender, and widening ten union members to carry an id nobody correlates would be shape
+   * for its own sake.
+   */
+  const trace = async (
+    outcome: AgentMessageOutcome['kind'],
+    receipt?: ReceiptSignal
+  ): Promise<{ traceId: string; traced: TraceKind }> =>
+    deps.trace({
+      sourceNodeId: req.sourceNodeId,
+      sourceTitle: req.sourceTitle,
+      targetNodeId: req.targetNodeId,
+      outcome,
+      ...(receipt ? { receipt } : {}),
+      bodyChars
+    })
+  const refuse = async (o: AgentMessageOutcome): Promise<AgentMessageOutcome> => {
+    await trace(o.kind)
+    return o
+  }
+
   return deps.lock(req.targetNodeId, async () => {
     // The free gates first, and this ordering is load-bearing rather than tidy: a caller that is
-    // not permitted or is over its rate budget must be refused WITHOUT a tmux round-trip (and, on
-    // an SSH project, without an `ssh` one). The unit test asserts the probe never happens.
+    // not permitted, is talking to itself, is over its rate budget, cannot prove its target's
+    // identity, or is aiming at a busy target must be refused WITHOUT a tmux round-trip (and, on an
+    // SSH project, without an `ssh` one). The unit test asserts the probe never happens.
     const cheap = decidePreProbe({
+      sourceNodeId: req.sourceNodeId,
+      targetNodeId: req.targetNodeId,
       notPermitted: req.notPermitted,
       retryAfterMs: req.retryAfterMs,
-      targetLive: req.targetLive ?? true
+      targetLive: req.targetLive ?? true,
+      target: deps.mirrorEntry(req.targetNodeId),
+      tokenFilePresent: deps.tokenFilePresent(req.targetNodeId),
+      targetIsRemote: req.targetIsRemote
     })
-    if (cheap) return cheap
+    if (cheap) return refuse(cheap)
 
     // ── DO NOT RETRY AN `unknown` PANE VERDICT ON A FIXED SHORT TIMER WITHOUT A CIRCUIT BREAKER ──
     //
@@ -232,13 +353,36 @@ export async function deliverAgentMessage(
       // point paying for it to tell a rate-limited caller something it cannot act on.
     }
     const gate = decideDelivery(facts)
-    if (gate.kind !== 'proceed') return gate
+    if (gate.kind !== 'proceed') return refuse(gate)
     // `before` is non-null here: `isAgentPane(null, …)` is `unknown`, which the gate refused.
     const owner = before as PaneOwner
 
     // herdr :260 — a multi-line envelope on the UNFRAMED fallback would be submitted line by line
     // as separate turns. It is refused, never sent and hoped for.
-    if (!(await deps.bracketPasteRequested(req.targetNodeId))) return { kind: 'targetNotPasteAware' }
+    //
+    // ── ROLLOUT BLOCKER, MEASURED — DO NOT SHIP THE VERBS WITHOUT READING THIS ──────────────────
+    //
+    // `PtyManager.bracketPasteRequested` reads tmux's `#{bracket_paste_flag}`, and that format
+    // FIRST SHIPPED IN TMUX 3.7 (2026-06-26). On every earlier tmux the name is unknown and expands
+    // to the empty string, which compares unequal to '1' — so the probe answers false for every
+    // pane and this refusal fires for every delivery. Measured here on tmux 3.4: the format is
+    // absent from the binary's format table and from the man page's FORMATS list, and behaves
+    // exactly like a bogus name.
+    //
+    // Who that is: Ubuntu 24.04 LTS ships 3.4, Ubuntu 22.04 → 3.2a, Debian 12 → 3.3a, Debian 13 →
+    // 3.5a, Ubuntu 26.04 → 3.6a. Plus EVERY SSH target (the REMOTE host's tmux decides) and the
+    // Server Edition. The bundled 3.7b does not rescue it: `extraResources` places it under "mac"
+    // only, and `bundledTmuxPath` is deliberately the LAST candidate after the system one.
+    //
+    // The refusal is the correct fail direction — sending a multi-line envelope unframed is herdr
+    // :260, which is worse. But it means messaging is INERT on most Linux hosts, and PR 5 owes:
+    // a three-way probe ('1' = aware, '0' = genuinely unaware, '' or error = FORMAT UNSUPPORTED), a
+    // distinct outcome carrying `tmux -V` and the fix, and an explicit decision on whether the
+    // feature ships to Linux and SSH at all without either a Linux tmux bundle or a single-line
+    // envelope fallback. `targetNotPasteAware` cannot carry that today: it says the pane did not
+    // ask, when the truth is that we could not ask.
+    if (!(await deps.bracketPasteRequested(req.targetNodeId)))
+      return refuse({ kind: 'targetNotPasteAware' })
 
     // herdr :48 — the text and the Enter ride ONE write. Two writes race the receiving TUI's paste
     // heuristics, and an Enter arriving milliseconds behind the text is absorbed as pasted content
@@ -256,24 +400,19 @@ export async function deliverAgentMessage(
       }),
       true
     )
+    // The receipt watch opens BEFORE the bytes go out. A fast target can submit its next turn while
+    // the post-write probe is still in flight — 2s locally, a real ssh round-trip remotely — and a
+    // subscription opened after that probe would miss it and report `stalled` for a message that
+    // demonstrably landed. See `watchForReceipt`: that miss is what makes an LLM send it twice.
+    const watch = watchForReceipt(req.targetNodeId, deps.subscribeEvents)
     const wrote = await deps.sendFramed(req.targetNodeId, payload)
     // The pane went away between the gate and the write. Not a failure of ours and not retryable:
-    // the node is gone.
-    if (!wrote) return { kind: 'targetGone' }
-
-    const bodyChars = req.body.length
-    const trace = async (
-      outcome: AgentMessageOutcome['kind'],
-      receipt?: ReceiptSignal
-    ): Promise<{ traceId: string; traced: TraceKind }> =>
-      deps.trace({
-        sourceNodeId: req.sourceNodeId,
-        sourceTitle: req.sourceTitle,
-        targetNodeId: req.targetNodeId,
-        outcome,
-        ...(receipt ? { receipt } : {}),
-        bodyChars
-      })
+    // the node is gone. It IS traced: a `sendFramed` that fails after a partial write has left
+    // bytes in somebody's pane, and that must not be the one event with no record.
+    if (!wrote) {
+      watch.cancel()
+      return refuse({ kind: 'targetGone' })
+    }
 
     // G3, post-write. rev. 2's gate 3 was check-then-act — a TOCTOU where the body lands in a
     // stranger's shell. The post-check CANNOT un-send the bytes; the residual window is unchanged.
@@ -281,6 +420,7 @@ export async function deliverAgentMessage(
     // `deliveredToReplacedTarget` is never reported as success.
     const after = await probeWithin(() => deps.paneOwner(req.targetNodeId), PANE_PROBE_TIMEOUT_MS)
     if (!samePane(owner, after, req.targetAgentId, req.targetBinaries)) {
+      watch.cancel()
       const t = await trace('deliveredToReplacedTarget')
       return {
         kind: 'deliveredToReplacedTarget',
@@ -291,7 +431,7 @@ export async function deliverAgentMessage(
       }
     }
 
-    const signal = await awaitReceipt(req.targetNodeId, deps.subscribeEvents, RECEIPT_DEADLINE_MS)
+    const signal = await watch.wait(RECEIPT_DEADLINE_MS)
     if (!signal) {
       const t = await trace('stalled')
       return { kind: 'stalled', traceId: t.traceId, traced: t.traced, waitedMs: RECEIPT_DEADLINE_MS }
