@@ -1,8 +1,8 @@
 // SECURITY — the LOCAL delivery argv, run against a real tmux driving a real bash.
 //
-// `paste-injection.realtty.test.ts` proves what the framed BODY does to a reader. This file proves
-// what the ARGV does to tmux, which is a different parser and had a different hole: `send-keys -l`
-// does not stop option parsing, so a payload beginning with `-` was consumed by tmux as FLAGS.
+// This file proves what the ARGV does to TMUX, which is a different parser from the receiving
+// app's and had a different hole: `send-keys -l` does not stop option parsing, so a payload
+// beginning with `-` was consumed by tmux as FLAGS.
 // Measured on tmux 3.4, every one of `-R  -K  -l  --  -H  -F  -N 3` exits 0 while typing nothing,
 // so the delivery reported success — and then sent its Enter anyway, submitting whatever the human
 // had already composed in that pane.
@@ -12,9 +12,11 @@
 // holds it. The human sees an empty prompt; the Enter that follows submits the line they can no
 // longer see.
 //
-// The remote counterpart (`remoteTmuxSendKeysArgs`) has carried `--` since it was written; the
-// local one never did. Same rule, one implementation missing it — the drift `sanitizePasteText`'s
-// own header names as how a hole survives.
+// The delivery no longer defends against that class — it cannot reach it. `sendText` hands the
+// payload to `tmux load-buffer -` on STDIN, so the text is never an argument of anything and
+// there is no option parser between it and the pane. The tests below run the same `-R` payload
+// through the CURRENT delivery, and keep the pre-fix argv as a control so "structurally
+// impossible" stays a measurement rather than a claim.
 //
 // A hand-rolled assertion on the argv array cannot see any of this: tmux's option parser is the
 // only thing that knows which leading dashes it eats. So tmux is the judge, and a real bash pane
@@ -24,12 +26,12 @@ import { execFileSync } from 'child_process'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { localTmuxSendKeysArgs, localTmuxEnterArgs } from './tmux-naming'
+import { localTmuxPasteArgs, localTmuxEnterArgs, pasteBufferName } from './tmux-naming'
 import { sanitizePasteText } from './paste-injection'
 
 /** A private socket, never `TMUX_SOCKET` — this must not touch a running nodeterm's tmux server. */
 const SOCKET = `nt-sendkeys-test-${process.pid}`
-const SESSION = 'probe'
+const SESSION = 'nt-probe'
 
 /**
  * The socket lives in the test's OWN temp dir, not `/tmp/tmux-<uid>/`.
@@ -53,8 +55,8 @@ const TMUX = findTmux()
 let work: string
 
 /** `tmux <args>`, throwing on a non-zero exit exactly as `PtyManager`'s `runAsync` would. */
-function tmux(args: string[]): string {
-  return execFileSync(TMUX as string, args, { encoding: 'utf8', env: tmuxEnv() })
+function tmux(args: string[], input?: string): string {
+  return execFileSync(TMUX as string, args, { encoding: 'utf8', env: tmuxEnv(), input })
 }
 
 /** Type `body` into the probe pane the way the HARNESS does it — always safely quoted. */
@@ -142,8 +144,11 @@ suite('REAL tmux: a payload starting with `-` is text, never a flag', () => {
     // The human has half-typed a command and has NOT pressed Enter yet.
     compose(`touch ${danger}`)
     // The agent's `write` verb arrives. `-R` is a real `send-keys` flag ("reset terminal state").
-    tmux(localTmuxSendKeysArgs(SOCKET, SESSION, sanitizePasteText('-R')))
-    tmux(localTmuxEnterArgs(SOCKET, SESSION))
+    // Through the current delivery it is buffer CONTENT, so tmux's option parser never sees it.
+    tmux(
+      localTmuxPasteArgs(SOCKET, SESSION, pasteBufferName(), true),
+      sanitizePasteText('-R')
+    )
     drain('minus-r')
     expect(
       fs.existsSync(danger),
@@ -168,12 +173,10 @@ suite('REAL tmux: a payload starting with `-` is text, never a flag', () => {
     expect(fs.existsSync(`${danger}-R`)).toBe(false)
   })
 
-  it('a framed body (which starts with ESC, not `-`) is unaffected either way', () => {
+  it('an ordinary payload still types and submits normally', () => {
     freshPane()
     const ok = path.join(work, 'framed')
-    // Not the paste framer's job here — just that a normal payload still types normally.
-    tmux(localTmuxSendKeysArgs(SOCKET, SESSION, `touch ${ok}`))
-    tmux(localTmuxEnterArgs(SOCKET, SESSION))
+    tmux(localTmuxPasteArgs(SOCKET, SESSION, pasteBufferName(), true), `touch ${ok}`)
     drain('framed')
     expect(fs.existsSync(ok)).toBe(true)
   })

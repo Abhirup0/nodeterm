@@ -26,7 +26,8 @@ import {
   localKillSockets,
   localTmuxKillArgs,
   remoteTmuxPtyArgs,
-  remoteTmuxSendKeysArgs,
+  remoteTmuxPasteArgs,
+  remoteTmuxEnterArgs,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
   remotePaneOwnerArgs,
@@ -50,11 +51,12 @@ import {
   TMUX_SOCKET,
   sessionName,
   isSessionName,
-  localTmuxSendKeysArgs,
-  localTmuxEnterArgs
+  localTmuxPasteArgs,
+  localTmuxEnterArgs,
+  pasteBufferName
 } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
-import { bracketedInjection, sanitizePasteText } from './paste-injection'
+import { sanitizePasteText } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
@@ -121,6 +123,32 @@ const runAsync = ((file: string, args: readonly string[], opts?: object) =>
     timeout: PROC_TIMEOUT_MS,
     ...(opts ?? {})
   } as never)) as unknown as typeof execFileAsync
+
+/**
+ * `runAsync`, with a payload written to the child's STDIN.
+ *
+ * The delivery path (`sendText`) puts the text in `tmux load-buffer -`'s stdin rather than in an
+ * argument — no payload on a command line, and no MAX_ARG_STRLEN ceiling (measured: 300 KB in one
+ * argument is "Argument list too long"; the same over stdin lands intact).
+ *
+ * `execFile`'s promise carries the ChildProcess as `.child`, so this stays inside the one bounded
+ * wrapper every other side-call uses instead of hand-rolling a spawn: same `PROC_TIMEOUT_MS`, same
+ * rejection on a non-zero exit. An EPIPE on the write (the child died before reading) is swallowed
+ * here on purpose — the process result is the authority, and an unhandled 'error' on the stream
+ * would take the main process down instead of failing this one call.
+ */
+function runWithStdin(file: string, args: readonly string[], input: string): Promise<unknown> {
+  const p = execFileAsync(file, args as string[], { timeout: PROC_TIMEOUT_MS } as never)
+  const child = (p as unknown as { child: import('child_process').ChildProcess }).child
+  const stdin = child.stdin
+  if (stdin) {
+    stdin.on('error', () => {
+      /* child gone; the exit code below is what decides success */
+    })
+    stdin.end(input)
+  }
+  return p as unknown as Promise<unknown>
+}
 
 // Minimal tmux config so the user's ~/.tmux.conf never interferes. The tmux server
 // (under our socket) keeps sessions alive while no client is attached, which is what
@@ -1015,7 +1043,7 @@ export class PtyManager {
    *    is a name we have no claim to (a remote node's local orphan, another machine's idea of it, a
    *    session someone else made). An unknown key is not evidence of a session.
    *  - a node whose record says `remote`: its tmux is on the far host. Reaching it means the
-   *    project's ControlMaster (`remoteTmuxSendKeysArgs`), not this channel; refusing is the honest
+   *    project's ControlMaster (`remoteTmuxPasteArgs`), not this channel; refusing is the honest
    *    answer until that exists.
    */
   async backgroundWrite(persistKey: string, data: string): Promise<boolean> {
@@ -2793,21 +2821,47 @@ export class PtyManager {
    *
    * An SSH-project node has no LOCAL tmux session to target (its pty program is `ssh -t '<remote
    * attach>'`) — so if the node's LIVE session is registered with `sshRemote`, this runs the
-   * remote counterpart instead (`remoteTmuxSendKeysArgs`, over the project's ControlMaster),
+   * remote counterpart instead (`remoteTmuxPasteArgs`, over the project's ControlMaster),
    * mirroring how `remoteSessionExists` reuses `findSsh()` + `runAsync`. A node with no live
    * session at all (nothing mounted right now) still falls through to the local path and returns
    * false there, same as before this change — reaching a currently-unmounted SSH node's remote
    * session is not supported.
+   *
+   * ── DELIVERY: TMUX FRAMES THE PASTE, WE DO NOT ─────────────────────────────────────────────────
+   *
+   * Both paths are now one `tmux load-buffer - ; … ; paste-buffer -d -p -r ; send-keys Enter`
+   * invocation with the payload on STDIN. `localTmuxPasteArgs` carries the whole measurement: the
+   * old `#{bracket_paste_flag}` probe needed tmux 3.7 and, on every older tmux, quietly delivered
+   * raw newlines into the app instead of a paste; `paste-buffer -p` asks the pane itself and has
+   * done since tmux 1.7.
+   *
+   * `sanitizePasteText` still runs, ONCE, here, for both paths — the payload must not be able to
+   * close the frame and become key input, and tmux inserting the markers does not change that.
+   *
+   * An EMPTY payload is handled before the buffer: `load-buffer -` with no bytes creates no
+   * buffer, the `paste-buffer` that follows fails, and tmux aborts the rest of the list — so the
+   * Enter would be lost. Measured. A caller sending `''` with `enter` means "just submit", which
+   * is what the legacy two-step did, so that is what happens.
    */
   async sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<boolean> {
     const enter = opts?.enter ?? true
     const target = sessionName(persistKey)
+    const body = sanitizePasteText(text)
+    const buffer = pasteBufferName()
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
     if (sshRemote) {
       const ssh = findSsh()
       if (!ssh) return false
       try {
-        await runAsync(ssh, remoteTmuxSendKeysArgs(sshRemote.conn, sshRemote.controlPath, target, text, enter))
+        if (body.length === 0) {
+          if (enter) await runAsync(ssh, remoteTmuxEnterArgs(sshRemote.conn, sshRemote.controlPath, target))
+          return true
+        }
+        await runWithStdin(
+          ssh,
+          remoteTmuxPasteArgs(sshRemote.conn, sshRemote.controlPath, target, buffer, enter),
+          body
+        )
         return true
       } catch {
         return false
@@ -2815,29 +2869,11 @@ export class PtyManager {
     }
     if (!this.tmuxPath) return false
     try {
-      if (await this.bracketPasteRequested(target)) {
-        // Paste-aware target (agent TUIs, multiplexers like herdr): one atomic write — the
-        // text framed in paste markers plus the Enter — so the composer sees a definitive
-        // paste boundary and the Enter can never be re-chunked into the paste (issue #47).
-        await runAsync(
-          this.tmuxPath,
-          localTmuxSendKeysArgs(TMUX_SOCKET, target, bracketedInjection(text, enter))
-        )
+      if (body.length === 0) {
+        if (enter) await runAsync(this.tmuxPath, localTmuxEnterArgs(TMUX_SOCKET, target))
         return true
       }
-      // The literal text and the Enter (when sent) must go in order, so await sequentially.
-      // Sanitized like the framed body: which branch runs is decided by a runtime probe of the
-      // RECEIVER, so a payload must not become key input just because the target happens not to
-      // have requested bracketed paste (`sanitizePasteText`).
-      //
-      // `localTmuxSendKeysArgs` is what ends tmux's option parsing before the payload (`--`). This
-      // branch is the one that needed it: a framed body starts with ESC, but the legacy body is
-      // the caller's own text, and a `-R`/`-K`/`-l` payload was silently eaten as a FLAG — no
-      // characters typed, exit 0, and then the Enter below submitting the pane's composed line.
-      await runAsync(this.tmuxPath, localTmuxSendKeysArgs(TMUX_SOCKET, target, sanitizePasteText(text)))
-      if (enter) {
-        await runAsync(this.tmuxPath, localTmuxEnterArgs(TMUX_SOCKET, target))
-      }
+      await runWithStdin(this.tmuxPath, localTmuxPasteArgs(TMUX_SOCKET, target, buffer, enter), body)
       return true
     } catch {
       return false
@@ -2952,28 +2988,17 @@ export class PtyManager {
   }
 
   /**
-   * Did the application in this pane request bracketed-paste mode? tmux tracks the DECSET
-   * 2004 state per pane and exposes it as `bracket_paste_flag`. Unknown — query fails, old
-   * tmux without the format — reads as false, so delivery degrades to the legacy two-step
-   * path rather than sending paste markers an unaware app would render as garbage input.
+   * DELETED: `bracketPasteRequested`.
+   *
+   * It read `#{bracket_paste_flag}`, a format that first shipped in TMUX 3.7 (2026-06-26). On
+   * every earlier tmux — Ubuntu 24.04's 3.4, 22.04's 3.2a, Debian 12/13's 3.3a/3.5a, Ubuntu
+   * 26.04's 3.6a, and whatever an SSH target happens to run — it expanded to the empty string,
+   * so the probe answered "not paste-aware" for every pane on earth and the delivery mangled
+   * every multi-line write. `paste-buffer -p` asks the pane's real state, inside tmux, with no
+   * version floor; there is nothing left for this method to be right about. Do not reintroduce
+   * it as a "capability check": on a pre-3.7 tmux it cannot distinguish "the app did not ask"
+   * from "I cannot ask", which is exactly the confusion that shipped the bug.
    */
-  private async bracketPasteRequested(target: string): Promise<boolean> {
-    if (!this.tmuxPath) return false
-    try {
-      const { stdout } = await runAsync(this.tmuxPath, [
-        '-L',
-        TMUX_SOCKET,
-        'display-message',
-        '-p',
-        '-t',
-        target,
-        '#{bracket_paste_flag}'
-      ])
-      return stdout.trim() === '1'
-    } catch {
-      return false
-    }
-  }
 
   /**
    * List the names of all live nodeterm tmux sessions (on our dedicated socket). Used by the
