@@ -193,6 +193,20 @@ describe('remoteTmuxSendKeysArgs', () => {
     // Only the frame's own two escapes survive anywhere in the remote line.
     expect(cmd.split('\x1b')).toHaveLength(3)
   })
+  // SECURITY, the other half, stated as a NON-guarantee: line breaks are NOT stripped by either
+  // branch and must not be — a pasted transcript and a note push both carry newlines legitimately
+  // (which is why the sanitizer above removes ESC and leaves `\n` alone). A `\r` in the text
+  // therefore survives the quoting and reaches the remote pane as a KEY. That is exactly why a
+  // caller that believed it was sending ONE line (`/rename <title>`, built from an agent-supplied
+  // title) has to be fixed where it COMPOSES that line, not here. See `@shared/one-line` and
+  // `renderer/lib/sessionRename.ts`.
+  it('carries a CR in the text through to the pane — the delivery is not where a splice is fixed', () => {
+    const cmd = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'one\rtwo', true).slice(-1)[0]
+    // Legacy branch: the CR is inside the quoted literal, and the submit is a SEPARATE send-keys.
+    expect(cmd).toContain(`${TMUX} send-keys -t nt-x -l -- 'one\rtwo' && ${TMUX} send-keys -t nt-x Enter`)
+    // Framed branch: same CR, still content of the payload.
+    expect(cmd).toContain(`'\x1b[200~one\rtwo\x1b[201~\r'`)
+  })
 })
 
 describe('remoteCapturePaneArgs', () => {
