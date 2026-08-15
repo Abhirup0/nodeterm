@@ -287,6 +287,7 @@ import { pushSessionRename } from '../lib/sessionRename'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
+import { launchableDefaultAgent } from '../state/agentAvailability'
 import { activePermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
@@ -3614,7 +3615,9 @@ export function Canvas() {
         addTerminal()
       } else if (k === 'c' && e.shiftKey) {
         e.preventDefault()
-        addAgentNode(useSettings.getState().settings.defaultAgent)
+        // launchableDefaultAgent, not the raw setting: a default naming a since-removed custom
+        // agent would otherwise type its bare `custom:<uuid>` id into the new node's shell.
+        addAgentNode(launchableDefaultAgent(useSettings.getState().settings))
       }
     }
     window.addEventListener('keydown', onKey)
