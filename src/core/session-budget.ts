@@ -57,8 +57,9 @@ export interface SessionInfo {
    */
   clients: number
   /**
-   * `#{session_activity}`. **Kept for the log line and NOTHING else — it is not an idleness
-   * signal, and this module must never gate a kill on it again.**
+   * `#{session_activity}`. **Kept for exactly two consumers — the kill log's second clock (so an
+   * operator cross-checking `tmux ls` sees why tmux disagrees) and the test suite's two-clock pin —
+   * it is not an idleness signal, and this module must never gate a kill on it again.**
    *
    * MEASURED on this host, 2026-08-15, on a private throwaway socket (a real socket was never
    * swept): tmux bumps `session_activity` to `now` every time a CLIENT ATTACHES, with no pane
@@ -291,6 +292,13 @@ export function hostUnderMemoryPressure(mem: MemInfo | null, cfg: SessionBudgetC
  * forced the distinction; the short version is that on a live host the old clock never reads older
  * than about half an hour, so no grace window could ever elapse and this function returned an
  * empty plan on a host that was 84% into its swap.
+ *
+ * A deliberate trade-off rides on that clock: PASSIVELY VIEWING a session no longer protects it.
+ * Attaching and reading a pane without pressing a key moves neither `window_activity` (measured —
+ * attach does not bump it) nor, therefore, `outputSec`, so a long-silent session someone glanced at
+ * an hour ago is still eligible. Accepted because the exposure is narrow — an ATTACHED session is
+ * never eligible at all, a single keystroke's echo restamps the clock, and the grace window still
+ * applies — and because the alternative is the attach clock this module just stopped trusting.
  *
  * Eligible = named `nt-*` AND detached AND silent past the grace window. Then:
  *   - memory below the watermark → up to `batchMax` (a failed memory read — `mem === null` — is
@@ -531,7 +539,8 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
     const now = nowSec()
     const plan = new Set(planReap(all, readMem(), now, cfg, sweepOpts?.pressure !== undefined))
     if (plan.size === 0) return 0
-    const silentH = new Map(all.map((s) => [s.name, ((now - s.outputSec) / 3600).toFixed(1)]))
+    const h = (sec: number): string => ((now - sec) / 3600).toFixed(1)
+    const clocks = new Map(all.map((s) => [s.name, `no pane output for ${h(s.outputSec)}h; last attach ${h(s.activitySec)}h ago`]))
 
     let killed = 0
     for (const [socket, listed] of bySocket) {
@@ -547,11 +556,12 @@ export function createSessionReaper(opts: SessionReaperOpts): SessionReaper {
           // `=` forces an exact target match — never tmux's prefix matching.
           await exec(bin, ['-L', socket, 'kill-session', '-t', `=${name}`])
           killed++
-          // The silence is what justified the kill, so it is what the log has to name — an operator
-          // reading "idle" against tmux's own `session_activity` would be reading the clock this
-          // change exists to stop trusting.
+          // The silence is what justified the kill, so it leads — and the attach clock rides along
+          // BECAUSE it disagrees: an operator cross-checking `tmux ls` sees `session_activity`
+          // minutes old and would otherwise read this reap as a bug. Naming both clocks puts the
+          // discrepancy, and the reason for it, in the line they will actually be looking at.
           log(
-            `[session-budget] reaped detached session ${name} — no pane output for ${silentH.get(name) ?? '?'}h (socket ${socket})`
+            `[session-budget] reaped detached session ${name} — ${clocks.get(name) ?? 'clocks unknown'} (socket ${socket})`
           )
         } catch {
           // A vanished-in-between session or a kill failure changes nothing; next sweep re-plans.

@@ -422,6 +422,21 @@ describe('createSessionReaper (service)', () => {
     ])
   })
 
+  it('the kill log names BOTH clocks, with the silence leading', async () => {
+    // The attach clock's only production consumer is this log line. It rides along BECAUSE it
+    // disagrees with the silence: an operator cross-checking `tmux ls` sees `session_activity`
+    // minutes old and would read the reap as a bug unless the line itself explains the discrepancy.
+    // The numbers are pinned, not just the words — 100.0h of silence against a 0.0h-old attach is
+    // exactly the two-clock disagreement the whole change rests on.
+    const lines: string[] = []
+    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
+    const reaper = createSessionReaper({ ...base, log: (m) => lines.push(m), tmuxBin: () => 'tmux', exec: w.exec })
+    expect(await reaper.sweep()).toBe(1)
+    expect(lines).toEqual([
+      '[session-budget] reaped detached session nt-x — no pane output for 100.0h; last attach 0.0h ago (socket node-terminal)'
+    ])
+  })
+
   it('re-verifies at kill time: a session attached between plan and kill is spared', async () => {
     let first = true
     const w = fakeWorld({})
