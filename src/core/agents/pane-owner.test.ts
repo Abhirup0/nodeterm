@@ -62,14 +62,34 @@ describe('isSafeTty', () => {
       expect(isSafeTty(t)).toBe(false)
     }
   )
+
+  it('refuses an absurdly long tty — a bounded value, not just a well-charactered one', () => {
+    // Charset-clean and therefore past every other check, but no pty path is anywhere near this.
+    // The cost of not capping is DoS-shaped (a megabyte argv on the remote command line), which is
+    // why it is a cap rather than a pattern.
+    const long = `/dev/pts/${'0'.repeat(200)}`
+    expect(/^[A-Za-z0-9/._-]+$/.test(long)).toBe(true)
+    expect(isSafeTty(long)).toBe(false)
+    expect(isSafeTty(`/dev/pts/${'0'.repeat(100)}`)).toBe(true)
+  })
 })
 
 describe('foregroundArgvArgs', () => {
   it('is one ps call on the pane tty, wide enough that BSD does not truncate the argv', () => {
     expect(foregroundArgvArgs('/dev/pts/0')).toEqual({
       bin: 'ps',
-      args: ['-ww', '-o', 'pid=,pgid=,stat=,args=', '-t', '/dev/pts/0']
+      args: ['-ww', '-o', 'pid=', '-o', 'pgid=', '-o', 'stat=', '-o', 'args=', '-t', '/dev/pts/0']
     })
+  })
+
+  it('gives each keyword its OWN -o, because a comma list is one column on the BSDs', () => {
+    // FreeBSD parsefmt(): an item containing `=` is a column HEADER and is always the last item, so
+    // `-o pid=,pgid=,stat=,args=` asks for the single keyword `pid` with the header
+    // `,pgid=,stat=,args=` — one column, exit 0, a read that silently never works. The SSH leg runs
+    // this on the remote host, and FreeBSD/TrueNAS/pfSense is an ordinary SSH target.
+    const args = foregroundArgvArgs('/dev/pts/0')!.args
+    expect(args.filter((a) => a === '-o')).toHaveLength(4)
+    expect(args.some((a) => a.includes(','))).toBe(false)
   })
   it('refuses to build a command line around an unsafe tty', () => {
     expect(foregroundArgvArgs('/dev/pts/0; id')).toBeNull()

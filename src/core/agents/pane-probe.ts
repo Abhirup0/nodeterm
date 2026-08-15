@@ -22,6 +22,17 @@
  * repo at well under a second each), short enough that a wedged one is reported rather than sat on.
  * The timeout is a REFUSAL, not a retry — `probeWithin` answers null and `isAgentPane(null)` is
  * `unknown`, which the caller may retry deliberately rather than by hanging.
+ *
+ * ── DO NOT RETRY `unknown` ON A FIXED SHORT TIMER WITHOUT A CIRCUIT BREAKER ─────────────────────
+ *
+ * This deadline abandons the WAIT, not the WORK. Measured: the probe answers null at 2.0s while the
+ * `ssh` child it started lives until `runAsync`'s own 15s reap — so a 2s retry loop stacks ~7
+ * overlapping children per pane. And `childArgs` carries `-o ControlMaster=auto`, which means that
+ * when the master socket is DEAD each of those children does not multiplex: it opens a full
+ * connection, i.e. a real login. A pane that is unreadable *because* its master died is therefore
+ * the worst case, and it is the same shape this repo already lived through once at 72k logins/day
+ * (memory: ssh-controlmaster-fallback). Any caller that retries on `unknown` needs a breaker —
+ * backoff plus a per-target cap — before the second attempt, not after the incident.
  */
 export const PANE_PROBE_TIMEOUT_MS = 2000
 

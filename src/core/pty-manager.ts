@@ -2905,7 +2905,14 @@ export class PtyManager {
    *
    * Two round-trips, not one: tmux does not know the foreground process group (`#{pane_pid}` is the
    * shell it forked, which is usually NOT in it), so the tty has to come back before `ps` can be
-   * asked about it. On the SSH leg both ride the same ControlMaster.
+   * asked about it. On the SSH leg both ride the same ControlMaster — and both are `ssh` children
+   * that outlive the caller's 2s deadline (they are reaped at `PROC_TIMEOUT_MS`), so a caller that
+   * retries `unknown` on a short timer stacks them. See `agents/pane-probe.ts` for why that needs a
+   * circuit breaker rather than a shorter timeout.
+   *
+   * `remotePaneOwnerArgs` splices the session id unquoted (`-t ${sessionId}`), exactly as every
+   * sibling builder does. That is safe only because `sessionName()` sanitises to `[A-Za-z0-9_-]`
+   * before it ever gets here — the guarantee lives THERE, not in this call.
    */
   async paneOwner(persistKey: string): Promise<PaneOwner | null> {
     const target = sessionName(persistKey)

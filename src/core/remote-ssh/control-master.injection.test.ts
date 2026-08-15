@@ -202,7 +202,20 @@ describe('remoteForegroundArgvArgs: a tty the remote host reported is DATA, neve
     expect(args).not.toBeNull()
     const { argv, unquotedMeta } = shellParse(args![args!.length - 1])
     expect(unquotedMeta).toEqual([])
-    expect(argv).toEqual(['ps', '-ww', '-o', 'pid=,pgid=,stat=,args=', '-t', '/dev/pts/7'])
+    expect(argv).toEqual([
+      'ps',
+      '-ww',
+      '-o',
+      'pid=',
+      '-o',
+      'pgid=',
+      '-o',
+      'stat=',
+      '-o',
+      'args=',
+      '-t',
+      '/dev/pts/7'
+    ])
   })
 
   it('refuses to build anything for a hostile tty — the second layer never has to hold', () => {

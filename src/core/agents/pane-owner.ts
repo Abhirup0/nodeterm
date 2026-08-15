@@ -116,7 +116,24 @@ export function foregroundArgvArgs(tty: string): { bin: string; args: string[] }
   if (!isSafeTty(tty)) return null
   // -ww: BSD ps truncates `args` to the terminal width without it, which would cut off exactly the
   // script path that names the agent. Harmless (and also "unlimited") on procps.
-  return { bin: 'ps', args: ['-ww', '-o', 'pid=,pgid=,stat=,args=', '-t', tty] }
+  //
+  // ONE `-o` PER KEYWORD, and it is not style. `-o pid=,pgid=,stat=,args=` is a single column on
+  // the BSDs: FreeBSD's `bin/ps/keyword.c` `parsefmt()` treats an item containing `=` as "a column
+  // header, may contain embedded separator characters and is always the last item" — it sets
+  // `tempstr = NULL` and the header swallows the rest, so the whole string parses as the keyword
+  // `pid` with the header `,pgid=,stat=,args=`. `ps` then exits 0 with one column and the read
+  // silently never works. macOS is NOT affected — Apple's adv_cmds wraps that branch in
+  // `#ifndef __APPLE__` and always `strsep`s on " \t,\n" — but FreeBSD/TrueNAS/pfSense is an
+  // ordinary SSH target and this call runs on the REMOTE host.
+  //
+  // The multi-`-o` form is sanctioned by FreeBSD's own ps(1) ("Multiple keywords may also be given
+  // in the form of more than one -o option… If all keywords have empty header texts, no header line
+  // is written") and is byte-identical on procps-ng 4.0.4 — diffed against the single-`-o` form on
+  // a real pane running `sleep 300 | cat`.
+  return {
+    bin: 'ps',
+    args: ['-ww', '-o', 'pid=', '-o', 'pgid=', '-o', 'stat=', '-o', 'args=', '-t', tty]
+  }
 }
 
 /** One parsed `ps` row. Internal — only the argv leaves this module. */

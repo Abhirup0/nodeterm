@@ -112,7 +112,7 @@ describe('PtyManager.paneOwner', () => {
     })
     expect(calls[1]).toEqual({
       file: 'ps',
-      args: ['-ww', '-o', 'pid=,pgid=,stat=,args=', '-t', TTY]
+      args: ['-ww', '-o', 'pid=', '-o', 'pgid=', '-o', 'stat=', '-o', 'args=', '-t', TTY]
     })
     expect(owner).toEqual({
       panePid: 2485382,
@@ -136,7 +136,7 @@ describe('PtyManager.paneOwner', () => {
     expect(calls[0].args.at(-1)).toContain(`tmux -L ${RMT_TMUX_SOCKET} display-message`)
     expect(calls.join(' ')).not.toContain(`-L ${TMUX_SOCKET} `)
     expect(calls[1].args.at(-1)).toBe(
-      `ps '-ww' '-o' 'pid=,pgid=,stat=,args=' '-t' '${TTY}'`
+      `ps '-ww' '-o' 'pid=' '-o' 'pgid=' '-o' 'stat=' '-o' 'args=' '-t' '${TTY}'`
     )
     expect(owner).toMatchObject({ tty: TTY, argv: [expect.stringContaining('claude'), 'rg --files'] })
   })

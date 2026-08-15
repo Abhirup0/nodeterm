@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isAgentPane, AGENT_BINARIES } from './pane-owner-predicate'
+import { isAgentPane, AGENT_BINARIES, binariesFor, binaryFromLaunchCmd } from './pane-owner-predicate'
 import { isShellCommand } from './pane'
 import { BUILTIN_AGENT_IDS, AGENT_CONFIG } from './config'
 
@@ -70,10 +70,35 @@ describe('isAgentPane', () => {
     expect(isAgentPane(owner(['node -claude']), 'claude')).toBe('not-agent')
   })
 
-  it('answers unknown for a custom agent whose binary nothing can name', () => {
-    // `custom:<uuid>` has no entry, and guessing one would be the exact class of mistake this
-    // module replaces. The caller refuses, retryably, rather than admitting the pane.
+  it('answers unknown for a custom agent whose definition the caller did not hand over', () => {
+    // `custom:<uuid>` alone names nothing, and guessing would be the exact class of mistake this
+    // module replaces. The fix for the dead end is `binariesFor(id, customAgents)` below, not a
+    // guess here.
     expect(isAgentPane(owner(['node /opt/bin/whatever']), 'custom:abc')).toBe('unknown')
+  })
+
+  it('verifies a custom agent once its launch command is supplied', () => {
+    const customAgents = [{ id: 'custom:abc', launchCmd: 'npx -y my-agent --serve' }]
+    expect(
+      isAgentPane(owner(['node /home/u/.npm/_npx/1/node_modules/.bin/my-agent --serve']), 'custom:abc',
+        binariesFor('custom:abc', customAgents))
+    ).toBe('agent')
+    expect(isAgentPane(owner(['-zsh'], 'zsh'), 'custom:abc', binariesFor('custom:abc', customAgents)))
+      .toBe('not-agent')
+  })
+
+  it('proves the agent is IN the foreground group, not that it is READING the tty', () => {
+    // `sh -c "sleep 600 | claude"`: claude really is in the group, so `agent` is the honest answer —
+    // but its stdin is the pipe, and text written to the pane waits in the tty buffer for the shell.
+    // Documented here so the delivery gate does not read this verdict as "it will be read".
+    expect(isAgentPane(owner(['sh -c sleep 600 | claude', 'sleep 600', 'claude']), 'claude')).toBe('agent')
+  })
+
+  it('refuses two shapes it cannot see through, rather than guessing (documented false negatives)', () => {
+    // A script path with a space splits into two tokens; a symlink carries the name it was invoked
+    // as. Both answer not-agent — the safe direction, and the reason they are documented not fixed.
+    expect(isAgentPane(owner(['node /opt/my agents/claude']), 'claude')).toBe('not-agent')
+    expect(isAgentPane(owner(['/usr/local/bin/claude-work']), 'claude')).toBe('not-agent')
   })
 
   it('accepts a caller-supplied binary list for a custom agent', () => {
@@ -88,5 +113,67 @@ describe('isAgentPane', () => {
       expect(AGENT_BINARIES[id]).toContain(AGENT_CONFIG[id].expectedProcess)
       expect(isAgentPane(owner([`/usr/local/bin/${AGENT_CONFIG[id].expectedProcess}`]), id)).toBe('agent')
     }
+  })
+})
+
+describe('binaryFromLaunchCmd', () => {
+  it('sees through package runners and their verbs and flags', () => {
+    expect(binaryFromLaunchCmd('npx -y my-agent')).toBe('my-agent')
+    expect(binaryFromLaunchCmd('pnpm dlx some-cli --flag')).toBe('some-cli')
+    expect(binaryFromLaunchCmd('bun run my-agent')).toBe('my-agent')
+    expect(binaryFromLaunchCmd('npx @acme/my-agent@1.2.3')).toBe('my-agent')
+  })
+
+  it('sees through env assignments and interpreters', () => {
+    expect(binaryFromLaunchCmd('env FOO=1 BAR=2 my-agent --serve')).toBe('my-agent')
+    expect(binaryFromLaunchCmd('node /opt/bin/my-agent.js')).toBe('my-agent.js')
+  })
+
+  it('takes a plain command as itself', () => {
+    expect(binaryFromLaunchCmd('my-agent')).toBe('my-agent')
+    expect(binaryFromLaunchCmd('/opt/vendor/bin/my-agent --x')).toBe('my-agent')
+  })
+
+  it('REFUSES to name a program every plain terminal also runs', () => {
+    // The danger is not a wrong name that matches nothing — it is a name that matches EVERYTHING.
+    // `bash` as an agent binary would make every idle shell on the canvas a delivery target.
+    for (const cmd of ['bash -lc "my-agent --serve"', 'sh -c my-agent', 'ssh host my-agent', 'sudo my-agent', 'zsh']) {
+      expect(binaryFromLaunchCmd(cmd), cmd).toBeNull()
+    }
+  })
+
+  it('answers null for nothing at all', () => {
+    expect(binaryFromLaunchCmd('')).toBeNull()
+    expect(binaryFromLaunchCmd('   ')).toBeNull()
+    expect(binaryFromLaunchCmd(null)).toBeNull()
+    expect(binaryFromLaunchCmd('--flag --only')).toBeNull()
+  })
+})
+
+describe('binariesFor', () => {
+  const customAgents = [
+    { id: 'custom:abc', launchCmd: 'npx -y my-agent' },
+    { id: 'custom:shell', launchCmd: 'bash -lc "run-me"' }
+  ]
+
+  it('answers the built-in table for a built-in id', () => {
+    expect(binariesFor('claude')).toEqual(AGENT_BINARIES.claude)
+  })
+
+  it('derives a custom agent binary from its launch command — the dead end, closed', () => {
+    expect(binariesFor('custom:abc', customAgents)).toEqual(['my-agent'])
+  })
+
+  it('stays null when the custom agent is not in the list we were handed', () => {
+    expect(binariesFor('custom:zzz', customAgents)).toBeNull()
+    expect(binariesFor('custom:abc')).toBeNull()
+  })
+
+  it('stays null when the launch command names something every shell runs', () => {
+    expect(binariesFor('custom:shell', customAgents)).toBeNull()
+  })
+
+  it('treats an unrecognised NON-custom id as its own command, mirroring resolveAgent', () => {
+    expect(binariesFor('aider')).toEqual(['aider'])
   })
 })
