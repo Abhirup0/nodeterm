@@ -15,7 +15,12 @@ import {
   type BrowserSurfaceKind
 } from './browser-guest-registry'
 import { appendBoardLogVia, registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
-import { deliverFromControl, isDeliverRequest, onMessagingAgentEvent } from './agent-messaging'
+import {
+  deliverFromControl,
+  isDeliverRequest,
+  messagingEnabledVia,
+  onMessagingAgentEvent
+} from './agent-messaging'
 import type { RemoteLogExec } from '../core/board-log'
 import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
@@ -73,6 +78,7 @@ import {
   nodeSessionName,
   workingNodes
 } from '../core/agent-status-mirror'
+import { paneOwnerProject } from '../core/agents/pane-ownership'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
@@ -925,11 +931,15 @@ app.whenReady().then(async () => {
       projects: () => workspaceStore.persistedCanvases(),
       isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
       // GLOBAL CONSTRAINT 11: every delivery path is gated behind the per-project switch, OFF by
-      // default. The switch itself (Project/ProjectFileV1 `agentMessaging`, validated `=== true`
-      // against a hostile project.json, plus the Settings row) is PR 6 — until it lands, nothing
-      // can turn messaging on, and every delivery answers `notPermitted (switch-off)`. PR 6
-      // replaces this closure with the validated read; it must not weaken the `=== true` rule.
-      messagingEnabled: () => false,
+      // default. The switch is the `agentMessaging` capability GRANT: the strict `=== true` flag
+      // in the hostile git-shared project.json AND this machine's recorded 'kept' answer to the
+      // clone notice (projectCapabilityGrantedFor — never the raw file bit). Read per call off
+      // the store's index, so a decline or an off-toggle refuses the very next delivery.
+      messagingEnabled: messagingEnabledVia((id) => workspaceStore.capabilityProjectFor(id)),
+      // Runtime pane ownership: which project actually SPAWNED the target's pane this run
+      // (core/agents/pane-ownership.ts). The gate trusts this over the attacker-writable store to
+      // decide whose grant applies; unproven ⇒ refused (PR #237 fix round 2).
+      paneOwnerProject: (id) => paneOwnerProject(id),
       customAgents: () => settingsStore.get().customAgents,
       appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry)
     })

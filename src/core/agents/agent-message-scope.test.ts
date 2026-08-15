@@ -91,22 +91,52 @@ describe('resolveDeliveryScope', () => {
     })
   })
 
-  it('resolves a DUPLICATE node id to the sender’s own project', () => {
-    // A cloned `project.json` gives two projects the same node id — this repo has shipped that bug
-    // once. The sender addresses the node it can see. This is a ROUTING answer only: sessions are
-    // keyed by the bare node id, so the two ids still name one pane, and no resolver can change
-    // that from here.
+  it('REFUSES a DUPLICATE target id — the one global pane cannot be attributed to one project’s grant', () => {
+    // A `project.json` that merely LISTS another project's node id (a clone, or a hostile file)
+    // resolves "same-project" by node-set membership, but the session namespace is the BARE id:
+    // both listings name ONE tmux pane, and only one of the projects may hold the messaging grant.
+    // PR #237 review I-1 proved the escalation by execution (granted A delivered into ungranted
+    // B's pane), so ambiguity is now a refusal in BOTH directions — the resolver cannot prove
+    // which project's pane the caller means, and "pick the sender's" was exactly the hole.
     const cloned: ScopeProject[] = [
       { id: 'p-alpha', nodes: [{ id: 'a-1' }, { id: 'dup' }] },
       { id: 'p-clone', nodes: [{ id: 'c-1' }, { id: 'dup' }] }
     ]
     expect(resolveDeliveryScope(cloned, 'a-1', 'dup')).toEqual({
-      kind: 'same-project',
-      projectId: 'p-alpha'
+      kind: 'refused',
+      reason: 'ambiguous-target-node-id',
+      targetFound: true
     })
     expect(resolveDeliveryScope(cloned, 'c-1', 'dup')).toEqual({
+      kind: 'refused',
+      reason: 'ambiguous-target-node-id',
+      targetFound: true
+    })
+  })
+
+  it('the ambiguity refusal names its own reason, not cross-project — different fact, different action', () => {
+    // cross-project = "you two do not share a project"; ambiguous = "the id names panes in more
+    // than one, and one of them may be ungranted". The human fixes the second by de-duplicating
+    // ids (re-adding the cloned folder mints fresh ones), not by moving nodes between projects.
+    const cloned: ScopeProject[] = [
+      { id: 'p-alpha', nodes: [{ id: 'a-1' }, { id: 'dup' }] },
+      { id: 'p-clone', nodes: [{ id: 'dup' }] }
+    ]
+    const scope = resolveDeliveryScope(cloned, 'a-1', 'dup')
+    const outcome = decideDelivery(facts({ notPermitted: scopeRefusal(scope) }))
+    expect(outcome).toEqual({ kind: 'notPermitted', reason: 'ambiguous-target-node-id' })
+    expect(RETRYABLE.notPermitted).toBe(false)
+  })
+
+  it('a UNIQUE target still resolves, whatever else the projects carry', () => {
+    // The refusal must not cost the legitimate population: same store shape, no duplicate.
+    const cloned: ScopeProject[] = [
+      { id: 'p-alpha', nodes: [{ id: 'a-1' }, { id: 'mine' }] },
+      { id: 'p-clone', nodes: [{ id: 'c-1' }] }
+    ]
+    expect(resolveDeliveryScope(cloned, 'a-1', 'mine')).toEqual({
       kind: 'same-project',
-      projectId: 'p-clone'
+      projectId: 'p-alpha'
     })
   })
 

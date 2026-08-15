@@ -22,10 +22,12 @@
  * If (2) is ever dropped as friction, this field must move to a machine-local store. That is the
  * trigger, written down where the decision is, not only in the design doc.
  */
-export type ProjectCapability = 'agentBrowserControl'
-// Agent-to-agent messaging adds 'agentMessaging' here (its plan's PR 6 Task 6.1).
+export type ProjectCapability = 'agentBrowserControl' | 'agentMessaging'
 
-export const PROJECT_CAPABILITIES: readonly ProjectCapability[] = ['agentBrowserControl'] as const
+export const PROJECT_CAPABILITIES: readonly ProjectCapability[] = [
+  'agentBrowserControl',
+  'agentMessaging'
+] as const
 
 export interface ProjectCapabilityCopy {
   label: string
@@ -44,6 +46,17 @@ export const PROJECT_CAPABILITY_COPY: Record<ProjectCapability, ProjectCapabilit
       'contain instructions, and the same agent can navigate anywhere and type anywhere. Nodes an ' +
       'agent opens use their own logged-out session, separate from your own browsing. A badge on ' +
       'the node shows when one is being driven, with a Stop button.',
+    cloneWarning:
+      'This setting is saved in the project file (.nodeterm/project.json), so if you commit it, ' +
+      'everyone who clones the repo gets it too.'
+  },
+  agentMessaging: {
+    label: 'Let agents message other agents in this project',
+    description:
+      'Agents in this project can send short messages to other agent nodes in the SAME project — ' +
+      'the text is delivered into the target’s composer and becomes part of its ' +
+      'conversation, so a message can try to steer the agent that reads it. Deliveries go only ' +
+      'to idle, verified agent panes, are rate-limited per sender, and every one leaves a trace.',
     cloneWarning:
       'This setting is saved in the project file (.nodeterm/project.json), so if you commit it, ' +
       'everyone who clones the repo gets it too.'

@@ -2413,6 +2413,12 @@ export function TerminalNode({
           shellArgs: localSsh ? buildSshArgs(ssh) : undefined,
           cwd: data.cwd,
           persistKey: id,
+          // The project that OWNS this node, for the runtime pane-ownership ledger (agent
+          // messaging, src/core/agents/pane-ownership.ts): the ssh project's own scope for a remote
+          // node, else the active project whose canvas this node lives on. Recorded main-side ONLY
+          // on a genuine fresh spawn, so a second project opening another's live node id cannot
+          // claim it. Machine-local id, never the git-shared project.json id.
+          ownerProjectId: sshProjectId ?? useProjects.getState().activeProjectId,
           agentId: data.agentId,
           accountId: data.accountId,
           sshRemote,

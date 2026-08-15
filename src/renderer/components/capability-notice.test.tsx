@@ -211,6 +211,25 @@ describe('the one-time clone notice', () => {
     expect(grantedNow()).toBe(true)
   })
 
+  it('fires for agentMessaging too — the machinery is per-capability, nothing above is browser-specific', () => {
+    // Messaging PR 6 adds only the registry entry; a cloned repo arriving with
+    // `agentMessaging: true` must get exactly this dialog, with messaging's own copy.
+    useProjects.setState({ projects: [project({ agentMessaging: true })], activeProjectId: 'p1' })
+    mount()
+    expect(dialog()).toBeTruthy()
+    const text = dialog()!.textContent ?? ''
+    expect(text).toContain(PROJECT_CAPABILITY_COPY.agentMessaging.label)
+    expect(text).toContain(PROJECT_CAPABILITY_COPY.agentMessaging.description)
+    // Unanswered = refused: the exact predicate messagingEnabled consults.
+    expect(
+      projectCapabilityGrantedFor(useProjects.getState().getProject('p1'), 'agentMessaging')
+    ).toBe(false)
+    act(() => button('Turn it off').click())
+    const p = useProjects.getState().getProject('p1')!
+    expect(p.agentMessaging).toBeUndefined()
+    expect(p.capabilityAck).toEqual({ agentMessaging: 'declined' })
+  })
+
   it('stays silent when the switch is off', () => {
     useProjects.setState({ projects: [project()], activeProjectId: 'p1' })
     mount()

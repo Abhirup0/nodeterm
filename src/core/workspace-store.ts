@@ -12,6 +12,8 @@ import {
   serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
+import { readProjectCapabilities, type ProjectCapability } from '../shared/project-capabilities'
+import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 import { collisionSeed, derivedProjectId, freshProjectId } from '../shared/project-id'
 import { appendProjectNode, type RemoteNodeInput } from './project-node-append'
@@ -780,6 +782,47 @@ export class WorkspaceStore {
       }
     }
     return out
+  }
+
+  /**
+   * The capability view of one project, for `projectCapabilityGrantedFor`: the STRICT capability
+   * flags from the shared file (`readProjectCapabilities` — literal `true`, known keys only) plus
+   * this machine's recorded answers from the INDEX ENTRY. Same three-entry-kind scan and same id
+   * semantics as `persistedCanvases`, because the projectId a delivery resolved there must look up
+   * the same project here.
+   *
+   * The ack deliberately never comes from the parsed file: a repo hand-carrying `capabilityAck`
+   * is a forgery attempt (workspace-files.ts says the same at the fileToProject boundary), and
+   * `agent-messaging-switch.test.ts` drives that exact file through a real store. An inline entry
+   * stores the Project verbatim (ack included — splitWorkspace gives it no localState), so there
+   * the project object IS the entry-local record.
+   */
+  capabilityProjectFor(
+    projectId: string
+  ): (Partial<Record<ProjectCapability, true>> & { capabilityAck?: CapabilityAckMap }) | undefined {
+    for (const e of this.index?.entries ?? []) {
+      if (e.project) {
+        if (e.project.id !== projectId) continue
+        return {
+          ...readProjectCapabilities(e.project),
+          ...(e.project.capabilityAck ? { capabilityAck: e.project.capabilityAck } : {})
+        }
+      }
+      if (e.id !== projectId) continue
+      const ack = e.capabilityAck ? { capabilityAck: e.capabilityAck } : {}
+      if (e.cache) return { ...readProjectCapabilities(e.cache), ...ack }
+      if (e.cwd) {
+        const raw = this.lastWritten.get(projectFilePath(e.cwd))
+        if (!raw) return { ...ack } // file never read this run: no flag known, so nothing grants
+        try {
+          return { ...readProjectCapabilities(JSON.parse(raw)), ...ack }
+        } catch {
+          return { ...ack } // corrupt file: fail closed, like every other reader of this cache
+        }
+      }
+      return undefined
+    }
+    return undefined
   }
 
   getNodeTitle(nodeId: string): string | undefined {

@@ -59,10 +59,13 @@ export interface ScopeProject {
 
 export type ScopeRefusal = Extract<
   NotPermittedReason,
-  'self-send' | 'cross-project' | 'unaddressable-node-id'
+  'self-send' | 'cross-project' | 'unaddressable-node-id' | 'ambiguous-target-node-id'
 >
 
 export type DeliveryScope =
+  /** `projectId` is the target pane's UNIQUE owning project (which the sender provably shares) —
+   *  the project whose `agentMessaging` grant authorizes the delivery. Uniqueness is part of the
+   *  contract: a target id claimed by two projects never produces this arm. */
   | { kind: 'same-project'; projectId: string }
   | {
       kind: 'refused'
@@ -102,23 +105,26 @@ export type DeliveryScope =
  * backstop so that no future caller can forget this one. Both produce the identical
  * `notPermitted{reason:'self-send'}`, which the test asserts by running them.
  *
- * ── A DUPLICATE NODE ID IS RESOLVED, NOT DISAMBIGUATED ──────────────────────────────────────────
+ * ── A DUPLICATE TARGET ID IS REFUSED, NOT DISAMBIGUATED ─────────────────────────────────────────
  *
- * A duplicate id across two projects (a cloned `project.json` — this repo has shipped that bug
- * once) resolves to the SOURCE's project when the source's project is one of them: the sender
- * addresses the node it can see.
+ * A session's only key is the bare node id (`PtyManager.byPersistKey`, `paneOwner(persistKey)`,
+ * tmux `nt-<nodeId>`); no project id appears anywhere in that namespace and nothing de-duplicates
+ * ids when a second project carrying them is opened (a cloned `project.json` — this repo has
+ * shipped that bug once). So a duplicate id across projects is ONE global pane with several
+ * claimed owners, and the messaging grant is PER PROJECT: a hostile file for granted project A
+ * that merely LISTS ungranted project B's node id would resolve "same-project" to A by node-set
+ * membership, pass A's switch, and land in B's running pane — the confused deputy PR #237's
+ * review proved by execution (I-1), live from the moment the user keeps A's clone notice.
  *
- * That is a routing answer, NOT an isolation guarantee, and the earlier claim here that "the
- * ambiguity never reaches the pane" was false. A session's only key is the bare node id
- * (`PtyManager.byPersistKey`, `paneOwner(persistKey)`, tmux `nt-<nodeId>`); no project id appears
- * anywhere in that namespace and nothing de-duplicates ids when a second project carrying them is
- * opened. So a `project.json` that merely LISTS another project's node id resolves `same-project`
- * here and lands in that node's one global pane — verified by execution, not reasoned about.
+ * Therefore: the grant must gate the project that OWNS the target pane, and when the target id
+ * appears in more than one persisted project no single owner can be proved, so the pair is
+ * refused as `ambiguous-target-node-id` — never "pick the sender's". A unique target's owning
+ * project is by construction the same project the sender shares, which is what `projectId` names.
+ * The cost falls only on stores that already carry duplicate ids, which the id-repair path
+ * (re-adding a folder mints fresh ids) exists to fix.
  *
- * This resolver cannot close that: the ambiguity is in the session namespace, not in the scope
- * question. What it can do is refuse the ids that make it worse, which is the check above.
  * **PR 5's delivery call must run `isSafeNodeId(targetNodeId)` before `paneOwner`** — a direct
- * caller that skips this resolver gets neither guard.
+ * caller that skips this resolver gets neither that guard nor this one.
  *
  * `closed` and `unavailable` projects are deliberately NOT filtered out. A closed project's tmux
  * sessions keep running and are re-adopted on the next start — that is the whole premise of
@@ -131,12 +137,23 @@ export function resolveDeliveryScope(
   targetNodeId: string
 ): DeliveryScope {
   const has = (p: ScopeProject, id: string): boolean => p.nodes.some((n) => n.id === id)
-  const targetFound = projects.some((p) => has(p, targetNodeId))
+  // Every project claiming the target id — the pane's POSSIBLE owners. The grant is evaluated
+  // against the pane's owning project, so this set deciding the answer is the point, not a detail.
+  const targetOwners = projects.filter((p) => has(p, targetNodeId))
+  const targetFound = targetOwners.length > 0
   if (!isSafeNodeId(sourceNodeId) || !isSafeNodeId(targetNodeId))
     return { kind: 'refused', reason: 'unaddressable-node-id', targetFound }
   if (sourceNodeId === targetNodeId) return { kind: 'refused', reason: 'self-send', targetFound }
   const owner = projects.find((p) => has(p, sourceNodeId))
-  if (owner && has(owner, targetNodeId)) return { kind: 'same-project', projectId: owner.id }
+  if (owner && has(owner, targetNodeId)) {
+    // The id names panes in more than one project: ONE global tmux pane, several claimed owners,
+    // and the sender's grant must not speak for the others (PR #237 review I-1). Refused with its
+    // own word — "pick the sender's project" was exactly the confused-deputy hole.
+    if (targetOwners.length > 1)
+      return { kind: 'refused', reason: 'ambiguous-target-node-id', targetFound: true }
+    // Unique: the target's owning project, which the sender provably shares.
+    return { kind: 'same-project', projectId: targetOwners[0].id }
+  }
   return { kind: 'refused', reason: 'cross-project', targetFound }
 }
 

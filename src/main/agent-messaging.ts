@@ -41,6 +41,11 @@ import { recordDelivery } from '../core/agents/agent-message-trace'
 import { resolveDeliveryScope, scopeRefusal } from '../core/agents/agent-message-scope'
 import { nodeTokenFilePresent } from '../core/agents/node-token-files'
 import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../core/agent-status-mirror'
+import {
+  projectCapabilityGrantedFor,
+  type CapabilityAckMap
+} from '../core/project-capability-consent'
+import type { ProjectCapability } from '../shared/project-capabilities'
 
 /** The little the service needs to know about a stored node. */
 export interface MessagingStoredNode {
@@ -63,16 +68,49 @@ export interface AgentMessagingDeps {
   isRemoteNode(nodeId: string): boolean
   /**
    * The per-project switch (Global Constraint 11): messaging is OFF unless the project opted in.
-   * PR 6 gives `Project`/`ProjectFileV1` the `agentMessaging` field (validated `=== true` — the
-   * file is hostile input) and wires this to it; until then the desktop wires `() => false`, so
-   * the verbs ship fail-closed and every delivery answers `notPermitted (switch-off)`.
+   * The desktop wires this through `messagingEnabledVia` below — the capability GRANT
+   * (`projectCapabilityGrantedFor`: the strict `=== true` flag in the hostile git-shared
+   * project.json AND this machine's recorded 'kept' answer to the clone notice), never the raw
+   * file bit. Read per call, so an off-toggle or a decline takes effect on the next delivery.
    */
   messagingEnabled(projectId: string): boolean
+  /**
+   * The project that PROVABLY spawned the target node's pane this run, or `undefined` when
+   * unproven (runtime ledger, `core/agents/pane-ownership.ts`). The delivery gate trusts THIS,
+   * not the persisted store's node-set, to decide whose grant applies — the store is
+   * attacker-writable (`project.json` lists any node id) and cannot tell a real owner from a
+   * project that merely listed a live pane it never spawned (PR #237 fix round 2). Undefined ⇒
+   * refuse `unproven-target-owner`.
+   */
+  paneOwnerProject(nodeId: string): string | undefined
   customAgents(): readonly { id: string; launchCmd: string }[] | undefined
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
   /** Test seam: override the receipt subscription. Production uses the module bus below. */
   subscribeReceipts?(cb: (e: ReceiptEvent) => void): () => void
   now?(): number
+}
+
+/**
+ * The production `messagingEnabled`: the per-project capability GRANT, one call, nothing else.
+ *
+ * `projectCapabilityGrantedFor` — NEVER `projectCapabilityFlagInFile` (PR #213 review, I2): the
+ * raw file bit answers `true` during the pending-notice window and after a recorded decline,
+ * which are exactly the states where a hostile cloned project.json must not buy delivery. The
+ * grant requires the strict `=== true` flag AND this machine's 'kept' ack, both derived inside
+ * the one predicate. `agent-messaging-switch.test.ts` goes red on the flag-for-grant swap.
+ *
+ * `getProject` is main's ONE store reader for this purpose (`WorkspaceStore.capabilityProjectFor`
+ * on the desktop — the same index scan `persistedCanvases` resolves the delivery scope from);
+ * factored as a dep so the suite can drive the identical wiring over a real store.
+ */
+export function messagingEnabledVia(
+  getProject: (
+    projectId: string
+  ) =>
+    | (Partial<Record<ProjectCapability, unknown>> & { capabilityAck?: CapabilityAckMap })
+    | undefined
+): (projectId: string) => boolean {
+  return (projectId) => projectCapabilityGrantedFor(getProject(projectId), 'agentMessaging')
 }
 
 // ── The receipt bus ───────────────────────────────────────────────────────────────────────────
@@ -134,7 +172,15 @@ const NOT_PERMITTED_TEXT: Record<NotPermittedReason, string> = {
   'cross-project': 'the target node is not in the sending node\'s project.',
   'self-send': 'a node cannot message itself.',
   'unsupported-edition': 'agent messaging does not exist on this edition.',
-  'unaddressable-node-id': 'that node id cannot be addressed safely.'
+  'unaddressable-node-id': 'that node id cannot be addressed safely.',
+  'ambiguous-target-node-id':
+    'that node id exists in more than one project, so the target pane cannot be attributed to a ' +
+    'single project\'s messaging grant. De-duplicate the id (re-add the cloned folder to mint ' +
+    'fresh ids) before messaging it.',
+  'unproven-target-owner':
+    'the target pane\'s owning project cannot be proven at runtime (it was not freshly spawned in ' +
+    'this session, or its ownership is disputed), so a per-project messaging grant cannot be ' +
+    'applied to it. Re-open the target node so its owner is recorded, then try again.'
 }
 
 /**
@@ -294,8 +340,18 @@ export async function deliverFromControl(
   const scope = resolveDeliveryScope(projects, req.sourceNodeId, req.targetNodeId)
   let notPermitted = scopeRefusal(scope)
   const projectId = scope.kind === 'same-project' ? scope.projectId : undefined
-  if (!notPermitted && (!projectId || !deps.messagingEnabled(projectId)))
-    notPermitted = 'switch-off'
+  if (!notPermitted) {
+    // OWNERSHIP IS PROVEN AT RUNTIME, NOT READ FROM THE STORE (PR #237 fix round 2). The scope
+    // above resolved `projectId` from the persisted node-set, which is attacker-writable — a
+    // hostile `project.json` can LIST a live pane's node id it never spawned, and when the real
+    // owner is absent from the store that hostile project is the sole claimant. The ledger records
+    // who actually SPAWNED the pane this run; the grant is evaluated against THAT owner, and the
+    // store's `projectId` is only a cross-check. Unprovable — no ledger entry (restart / never
+    // spawned here), or the ledger owner disagrees with the sole store claimant — fails closed.
+    const owner = projectId ? deps.paneOwnerProject(req.targetNodeId) : undefined
+    if (!projectId || !owner || owner !== projectId) notPermitted = 'unproven-target-owner'
+    else if (!deps.messagingEnabled(owner)) notPermitted = 'switch-off'
+  }
 
   // Flow control (PR #208), taken as a RESERVATION rather than a pure read: `checkFlowLimits`
   // followed later by `noteSent` is not atomic, and N parallel sends to N distinct targets would
