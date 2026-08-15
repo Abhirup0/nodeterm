@@ -94,6 +94,7 @@ export const IPC = {
   hudDismiss: 'hud:dismiss',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
+  agentMessageDeliver: 'agent:message-deliver',
   /** Canvas sync: a client casts its local node mutations here; the core reflector
    *  (src/core/canvas-sync.ts) stamps each with the total order (`seq`) and sends it back out on the
    *  SAME channel to EVERY attached client — the sender included, whose copy is its ack (see

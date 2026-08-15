@@ -29,14 +29,30 @@ const POLL_MS = 5000
 /** Registers boardLogAppend / boardLogRead / boardLogSubscribe / boardLogUnsubscribe and drives the
  *  per-project `boardLogChanged` push. Ref-counted per project: the first subscriber starts a watch
  *  (local fs.watch) or a poll (desktop SSH), the last one stops it. */
+/**
+ * Append one entry through a router — the same routing the `boardLogAppend` IPC handler performs,
+ * exported so an in-process writer (the agent-messaging delivery trace) appends through the
+ * identical local/remote/unsupported decision instead of restating it. `false` covers both "no
+ * reachable log" (a cwd-less inline project, a disconnected SSH project) and a failed write —
+ * exactly the answer `recordDelivery` treats as "ring only".
+ */
+export function appendBoardLogVia(
+  router: BoardLogRouter,
+  projectId: string,
+  entry: BoardLogEntry,
+  localStore = new BoardLogStore({})
+): Promise<boolean> {
+  const r = router.route(projectId)
+  if (r.kind === 'local') return localStore.append(r.cwd, entry)
+  if (r.kind === 'remote') return new BoardLogStore({ remote: r.exec }).append(r.remoteCwd, entry)
+  return Promise.resolve(false)
+}
+
 export function registerBoardLogHandlers(platform: CorePlatform, router: BoardLogRouter): void {
   const localStore = new BoardLogStore({})
 
   platform.handle(IPC.boardLogAppend, async (projectId: string, entry: BoardLogEntry): Promise<boolean> => {
-    const r = router.route(projectId)
-    if (r.kind === 'local') return localStore.append(r.cwd, entry)
-    if (r.kind === 'remote') return new BoardLogStore({ remote: r.exec }).append(r.remoteCwd, entry)
-    return false
+    return appendBoardLogVia(router, projectId, entry, localStore)
   })
 
   platform.handle(

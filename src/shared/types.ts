@@ -3,6 +3,7 @@
 import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
+import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
@@ -2304,4 +2305,10 @@ export interface NodeTerminalApi {
     result?: unknown
     error?: string
   }): void
+  /** Agent messaging (the `send`/`reply` control verbs): run one delivery in main, where the
+   *  scope check, the per-project switch, flow control and the pane probes all live. The reply is
+   *  already rendered as a control reply — Canvas forwards it verbatim. */
+  agentMessage: {
+    deliver(req: AgentMessageDeliverRequest): Promise<AgentMessageReply>
+  }
 }

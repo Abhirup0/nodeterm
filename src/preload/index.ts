@@ -610,7 +610,10 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.agentControl, handler)
     return () => ipcRenderer.removeListener(IPC.agentControl, handler)
   },
-  sendAgentControlResult: (payload) => ipcRenderer.send(IPC.agentControlResult, payload)
+  sendAgentControlResult: (payload) => ipcRenderer.send(IPC.agentControlResult, payload),
+  agentMessage: {
+    deliver: (req) => ipcRenderer.invoke(IPC.agentMessageDeliver, req)
+  }
 }
 
 contextBridge.exposeInMainWorld('nodeTerminal', api)

@@ -14,7 +14,8 @@ import {
   type BrowserGuest,
   type BrowserSurfaceKind
 } from './browser-guest-registry'
-import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { appendBoardLogVia, registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { deliverFromControl, isDeliverRequest, onMessagingAgentEvent } from './agent-messaging'
 import type { RemoteLogExec } from '../core/board-log'
 import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
@@ -875,7 +876,9 @@ app.whenReady().then(async () => {
   // a desktop router that adds SSH routing on top of the local-cwd/unsupported the server also does.
   // A connected SSH project (refForProject → a ref with a remoteCwd) reads/writes/fingerprints over
   // its ControlMaster; anything else falls to the local folder cwd, then unsupported.
-  registerBoardLogHandlers(corePlatform, {
+  // Extracted so the agent-messaging delivery trace can append THROUGH the same router the IPC
+  // handler uses (appendBoardLogVia) instead of restating the local/remote/unsupported decision.
+  const boardLogRouter = {
     route: (projectId: string): BoardLogRoute => {
       const ref = sshProjectManager?.refForProject(projectId)
       if (ref?.remoteCwd) {
@@ -903,6 +906,31 @@ app.whenReady().then(async () => {
       if (cwd) return { kind: 'local', cwd }
       return { kind: 'unsupported' }
     }
+  }
+  registerBoardLogHandlers(corePlatform, boardLogRouter)
+
+  // Agent messaging (the `send`/`reply` control verbs). Canvas.tsx forwards the validated verb
+  // here; everything that authorizes or performs the delivery reads MAIN's stores. See
+  // src/main/agent-messaging.ts for the whole map.
+  ipcMain.handle(IPC.agentMessageDeliver, async (_e, raw: unknown) => {
+    if (!isDeliverRequest(raw))
+      return { ok: false, error: 'malformed agent-message request. Do not retry.' }
+    const { reply } = await deliverFromControl(raw, {
+      paneOwner: (id) => ptyManager.paneOwner(id),
+      sendFramedPayload: (id, payload) => ptyManager.sendFramedPayload(id, payload),
+      hasLiveSession: (id) => ptyManager.hasLiveSession(id),
+      projects: () => workspaceStore.persistedCanvases(),
+      isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
+      // GLOBAL CONSTRAINT 11: every delivery path is gated behind the per-project switch, OFF by
+      // default. The switch itself (Project/ProjectFileV1 `agentMessaging`, validated `=== true`
+      // against a hostile project.json, plus the Settings row) is PR 6 — until it lands, nothing
+      // can turn messaging on, and every delivery answers `notPermitted (switch-off)`. PR 6
+      // replaces this closure with the validated read; it must not weaken the `=== true` rule.
+      messagingEnabled: () => false,
+      customAgents: () => settingsStore.get().customAgents,
+      appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry)
+    })
+    return reply
   })
 
   ipcMain.handle(IPC.dialogSelectFolder, async () => {
@@ -1581,6 +1609,9 @@ app.whenReady().then(async () => {
     sendToMain(IPC.agentStatus, enriched)
     // Feed the macOS Notch HUD its prompt (ev.task on newTurn) + subagent grouping (no-op off/non-darwin).
     notchHudOnAgentEvent(enriched)
+    // Agent messaging taps the SAME stream: the sender's newTurn resets its fan-out budget, and
+    // an open delivery receipt watch is satisfied by the target's verified advance.
+    onMessagingAgentEvent(enriched)
   }
   hookServer.setListener(emitAgentStatus)
   // Deterministic hook-reply approvals (docs/hook-reply-approvals.md): the canvas Approve/Deny
