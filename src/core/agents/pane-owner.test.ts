@@ -6,6 +6,9 @@
 // docblock for what was measured and what it ruled out.
 import { describe, it, expect, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import {
   PANE_OWNER_FMT,
   foregroundArgvArgs,
@@ -151,8 +154,10 @@ describe('paneOwnerFrom', () => {
  * tmux allocates the pane's pty itself, so no node-pty wrapper is needed to make this real: the
  * process under test genuinely has a controlling terminal and a foreground process group.
  *
- * The socket is private (`nt-paneowner-<pid>-<rand>`) and killed in afterAll — nothing here can
- * touch the app's `node-terminal` socket or the SSH `nodeterm-rmt` one.
+ * The tmux server is entirely private: its own socket, in its own `TMUX_TMPDIR`, removed with the
+ * directory in afterAll. Nothing here can see — let alone touch — the app's `node-terminal` socket
+ * or an SSH project's `nodeterm-rmt` one, and nothing is left behind in the shared `/tmp/tmux-<uid>`
+ * of a host that may be running other people's sessions.
  */
 const tmuxBin = (() => {
   try {
@@ -162,9 +167,13 @@ const tmuxBin = (() => {
   }
 })()
 
-const SOCKET = `nt-paneowner-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+const TMUX_TMPDIR = tmuxBin ? fs.mkdtempSync(path.join(os.tmpdir(), 'nt-paneowner-')) : ''
 const tmux = (...args: string[]) =>
-  execFileSync(tmuxBin as string, ['-L', SOCKET, ...args], { encoding: 'utf8', timeout: 10_000 })
+  execFileSync(tmuxBin as string, ['-L', 'probe', ...args], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: { ...process.env, TMUX_TMPDIR }
+  })
 
 afterAll(() => {
   if (!tmuxBin) return
@@ -173,6 +182,7 @@ afterAll(() => {
   } catch {
     // already gone — the server exits on its own when the last session dies
   }
+  fs.rmSync(TMUX_TMPDIR, { recursive: true, force: true })
 })
 
 describe.skipIf(!tmuxBin)('against a real tmux pane', () => {
