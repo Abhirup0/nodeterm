@@ -46,7 +46,13 @@ import {
 } from './pty-devices'
 import { REAP_SWEEP_MS, shouldReap } from './pty-reap'
 import { ControlModeClient, type ControlSpawn } from './tmux-control-client'
-import { TMUX_SOCKET, sessionName, isSessionName } from './tmux-naming'
+import {
+  TMUX_SOCKET,
+  sessionName,
+  isSessionName,
+  localTmuxSendKeysArgs,
+  localTmuxEnterArgs
+} from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
 import { bracketedInjection, sanitizePasteText } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
@@ -2813,32 +2819,24 @@ export class PtyManager {
         // Paste-aware target (agent TUIs, multiplexers like herdr): one atomic write — the
         // text framed in paste markers plus the Enter — so the composer sees a definitive
         // paste boundary and the Enter can never be re-chunked into the paste (issue #47).
-        await runAsync(this.tmuxPath, [
-          '-L',
-          TMUX_SOCKET,
-          'send-keys',
-          '-t',
-          target,
-          '-l',
-          bracketedInjection(text, enter)
-        ])
+        await runAsync(
+          this.tmuxPath,
+          localTmuxSendKeysArgs(TMUX_SOCKET, target, bracketedInjection(text, enter))
+        )
         return true
       }
       // The literal text and the Enter (when sent) must go in order, so await sequentially.
       // Sanitized like the framed body: which branch runs is decided by a runtime probe of the
       // RECEIVER, so a payload must not become key input just because the target happens not to
       // have requested bracketed paste (`sanitizePasteText`).
-      await runAsync(this.tmuxPath, [
-        '-L',
-        TMUX_SOCKET,
-        'send-keys',
-        '-t',
-        target,
-        '-l',
-        sanitizePasteText(text)
-      ])
+      //
+      // `localTmuxSendKeysArgs` is what ends tmux's option parsing before the payload (`--`). This
+      // branch is the one that needed it: a framed body starts with ESC, but the legacy body is
+      // the caller's own text, and a `-R`/`-K`/`-l` payload was silently eaten as a FLAG — no
+      // characters typed, exit 0, and then the Enter below submitting the pane's composed line.
+      await runAsync(this.tmuxPath, localTmuxSendKeysArgs(TMUX_SOCKET, target, sanitizePasteText(text)))
       if (enter) {
-        await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'])
+        await runAsync(this.tmuxPath, localTmuxEnterArgs(TMUX_SOCKET, target))
       }
       return true
     } catch {

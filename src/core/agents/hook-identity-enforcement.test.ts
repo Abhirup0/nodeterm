@@ -386,7 +386,7 @@ describe('write/close keep the human in the loop, token or no token', () => {
   })
 
   it('never waves them through as tolerant', () => {
-    // The confirm-gated pair (src/main/canvas-control-core.ts `isDestructiveVerb`) is untouched by
+    // The confirm-gated pair (src/shared/control-verbs.ts `isDestructiveVerb`) is untouched by
     // this feature. Tolerance would be the one way identity could weaken it, so it is pinned here;
     // the set itself is covered in canvas-control-core.test.ts.
     expect(TOLERANT_CONTROL_VERBS.has('write')).toBe(false)

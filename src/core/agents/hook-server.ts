@@ -813,7 +813,8 @@ class HookServer {
       // `-e` argv into a long-lived tmux CLIENT process whose /proc/<pid>/cmdline is mode 444 on a
       // stock Linux (no hidepid), so any unprivileged local user read a live app-wide bearer and
       // could drive canvas control — including `open-terminal --cmd`, which is NOT in the
-      // confirm-gated DESTRUCTIVE set. Every client already sources the 0600 endpoint file FIRST
+      // confirm-gated DESTRUCTIVE_VERBS set (src/shared/control-verbs.ts). Every client already
+      // sources the 0600 endpoint file FIRST
       // and prefers it, so nothing legitimate loses anything: the only regression surface is a
       // session whose endpoint file is unreadable AND whose env held a good token, a state that
       // means the data dir has vanished and the hook is meant to be inert anyway.

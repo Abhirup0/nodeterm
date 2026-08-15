@@ -105,6 +105,40 @@ describe('canvas-control shim', () => {
     expect(received.at(-1)?.args).toEqual({ node: 'n1', title: '' })
   })
 
+  // TWO parsers stand between an agent's command line and a verb's args: the sh loop that BUILDS
+  // the form body, and parseControlBody that READS it. src/main/control-shim-parse.test.ts pins the
+  // first alone (argv, via a fake curl); these pin the pair, because a flag can survive the shim
+  // and still be dropped by the reader — `arg.<name>` with an empty value is exactly the shape
+  // that would be plausible to discard.
+  it('a --flag does not swallow the next --flag, all the way through to parsed args', async () => {
+    await callShim(['open-terminal', '--count', '2', '--verbose', '--cwd', '/tmp'])
+    expect(received.at(-1)?.args).toEqual({ count: '2', verbose: '', cwd: '/tmp' })
+  })
+
+  it('--flag=value carries a value that itself starts with -- (unexpressible before)', async () => {
+    await callShim(['open-terminal', '--cmd=--version', '--cwd', '/srv'])
+    expect(received.at(-1)?.args).toEqual({ cmd: '--version', cwd: '/srv' })
+  })
+
+  it('--flag=value splits on the FIRST =, and the rest survives urlencoding', async () => {
+    await callShim(['open-terminal', '--cmd=env A=1 B="2 3"'])
+    expect(received.at(-1)?.args).toEqual({ cmd: 'env A=1 B="2 3"' })
+  })
+
+  // The peek looks for `--`, not `-`. A single-dash value must still be consumed positionally.
+  it('a value beginning with a single dash is still a value', async () => {
+    await callShim(['rename', '--node', 'n1', '--title', '-7'])
+    expect(received.at(-1)?.args).toEqual({ node: 'n1', title: '-7' })
+  })
+
+  // The regression the fix takes deliberately, and its escape — pinned so neither half drifts.
+  it('a --value passed as a separate token becomes its own flag; the = form is the escape', async () => {
+    await callShim(['write', '--node', 'n1', '--text', '--oops'])
+    expect(received.at(-1)?.args).toEqual({ node: 'n1', text: '', oops: '' })
+    await callShim(['write', '--node', 'n1', '--text=--oops'])
+    expect(received.at(-1)?.args).toEqual({ node: 'n1', text: '--oops' })
+  })
+
   it('carries the kanban verbs (board / assign) through', async () => {
     await callShim(['board'])
     expect(received.at(-1)).toMatchObject({ verb: 'board', args: {} })

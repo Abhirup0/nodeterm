@@ -125,6 +125,15 @@ passed with the code they were meant to pin removed, including one mutation that
 Watch for fixtures that cannot discriminate: if every row in your fixture happens to make the
 mutant's output identical to the real one, the test proves nothing while looking thorough.
 
+**Never pin behaviour by reading source text.** `expect(SRC).toContain('...')` is the fixture that
+can never discriminate: it is satisfied by code that is present *and wrong*. We shipped one —
+`src/main/menu-accelerator-intercepts.test.ts` matched three strings inside the `before-input-event`
+handler, and stayed green on a tree where a shared guard had moved out from under them and the bare
+`0` key was swallowed app-wide. It was, precisely, red on the fix and green on the break. If a
+module is untestable because it imports `electron` at the top, that is the thing to fix: lift the
+decision into a pure function next to it (`keydown-intercept.ts`, `main-window.ts`,
+`zoomShortcut.ts`) and press the keys.
+
 Where a behaviour can only be verified on hardware we do not have in CI (a Mac, a real SSH host, a
 GPU), say so explicitly rather than implying coverage. Several docs carry numbered device
 checklists for exactly this.

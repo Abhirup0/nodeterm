@@ -62,9 +62,12 @@ On 2026-08-13, on a stock Linux host with no `hidepid`:
   unprivileged local user — a different uid, no relationship to the victim — could read a live
   app-wide bearer straight out of the process table.
 - The bearer is all `/control/*` required. `open-terminal --cmd C` opens a terminal running an
-  arbitrary command and is **not** in the confirm-gated `DESTRUCTIVE` set (only `write` and `close`
-  are, `src/main/canvas-control-core.ts`). So this was **arbitrary command execution as the victim
-  user**, from any account on the machine, with no prompt.
+  arbitrary command and is **not** in the confirm-gated `DESTRUCTIVE_VERBS` set (only `write` and
+  `close` are, `src/shared/control-verbs.ts`). So this was **arbitrary command execution as the
+  victim user**, from any account on the machine, with no prompt. (Note what that set is and is
+  not: the dialogs are hand-written per case in `Canvas.tsx`'s dispatch, and `close-worktree
+  --mode remove` is confirmed by a human without being in the set. The set is what the two `case`
+  blocks read for their `confirmBusy()` refusal, and a drift alarm over that agreement.)
 - The same shape existed on SSH hosts: `RemoteHooks.verifyTunnel` passed the bearer as `-H` on a
   curl command line, i.e. argv on the host, readable by every other account there.
 

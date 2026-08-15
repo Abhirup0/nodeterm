@@ -61,11 +61,23 @@ const VERBS: ControlVerb[] = [
   'assign'
 ]
 
-const DESTRUCTIVE: ReadonlySet<ControlVerb> = new Set(['write', 'close'])
-
-export function isDestructiveVerb(verb: ControlVerb): boolean {
-  return DESTRUCTIVE.has(verb)
-}
+/**
+ * MOVED to `src/shared/control-verbs.ts` — read that file's header before trusting this set for
+ * anything. It is re-exported here so main-side callers are unchanged.
+ *
+ * WHERE IT IS READ: `Canvas.tsx`'s `switch (verb)` — `case 'write'` and `case 'close'` call
+ * `isDestructiveVerb(verb)` before their `confirmBusy()` refusal. That is the only consumer, and
+ * until it existed the set was read by nothing but its own unit test: it lived here in `src/main`,
+ * which the renderer cannot import, while `TOLERANT_CONTROL_VERBS`' doc comment, `hook-server.ts`'s
+ * `buildPtyEnv` note and `docs/node-identity.md:65` all named it as the confirm-gated set.
+ *
+ * Two things it still is NOT, both spelled out in the shared file: adding a verb here does not
+ * gate it (each case hand-writes its own `setConfirm`), and it is not the complete list of
+ * actions a human confirms (`close-worktree --mode remove` is confirmed and is not in it). What
+ * the shared home buys is a drift alarm — `control-destructive.test.ts` fails when the set and the
+ * dispatch stop agreeing.
+ */
+export { isDestructiveVerb, DESTRUCTIVE_VERBS } from '../shared/control-verbs'
 
 /** Validate a raw (verb, args) pair into a ControlCommand, or return an { error }. */
 export function parseControlRequest(
@@ -137,6 +149,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '```sh',
     `sh "${shimPath}" <verb> [args]`,
     '```',
+    '',
+    'Flags take a value: `--flag value`, or `--flag=value`. Use the `=` form when the value itself',
+    'starts with `--` (`--cmd=--version`); written as two tokens, a leading `--` is read as the next',
+    'flag. A flag with no value is allowed anywhere on the line.',
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
@@ -215,6 +231,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
 // request is form-urlencoded rather than JSON because `curl --data-urlencode` does the escaping
 // for us — emitting valid JSON from sh for arbitrary values (`--prompt`, `--html`, `--team`)
 // could not be made safe.
+//
+// INSTALL LIFECYCLE, and why a verb must not depend on this parser's fixes: the shim is rewritten
+// locally at every app boot, but onto an SSH host ONLY inside RemoteHooks.setup(), i.e. on connect.
+// An already-connected SSH project keeps the shim it was handed. So a parsing improvement reaches
+// remote agent nodes only after a reconnect, with no signal on the wire — the same shape as the
+// managed hook script's stale window. Verbs are therefore designed to parse identically under both
+// the old and the new loop: give every flag a value, and the two loops agree.
 export const CONTROL_SHIM_SCRIPT = `#!/bin/sh
 # nodeterm canvas-control CLI (auto-generated — do not edit).
 
@@ -254,10 +277,34 @@ nt_i=0
 while [ "$nt_i" -lt "$nt_count" ]; do
   nt_a="$1"; shift; nt_i=$((nt_i + 1))
   case "$nt_a" in
+    --*=*)
+      # \`--flag=value\`: the only unambiguous form, and the ONLY way to pass a value that itself
+      # starts with \`--\`. Split on the FIRST \`=\` so a value may contain more of them.
+      nt_k=\${nt_a#--}
+      nt_v=\${nt_k#*=}
+      nt_k=\${nt_k%%=*}
+      set -- "$@" --data-urlencode "arg.$nt_k=$nt_v"
+      ;;
     --*)
+      # PEEK before consuming. The old code took the next token unconditionally, so \`--a --b v\`
+      # parsed as arg.a=--b plus a silently dropped \`v\`, and a valueless flag was expressible only
+      # as the LAST token on the line. Both failures were silent: the server saw a well-formed
+      # request carrying nonsense, and answered about the wrong flag.
+      #
+      # The peek matches \`--\` and NOT a single \`-\`, so a negative number stays a value.
+      #
+      # The cost, deliberately taken: a value that legitimately begins with \`--\` is no longer
+      # consumed positionally. \`--text --oops\` now sends arg.text= plus arg.oops=. Write it as
+      # \`--text=--oops\`, which the branch above exists for and which was previously unexpressible
+      # in either direction.
       nt_k=\${nt_a#--}
       nt_v=""
-      if [ "$nt_i" -lt "$nt_count" ]; then nt_v="$1"; shift; nt_i=$((nt_i + 1)); fi
+      if [ "$nt_i" -lt "$nt_count" ]; then
+        case "$1" in
+          --*) : ;;
+          *) nt_v="$1"; shift; nt_i=$((nt_i + 1)) ;;
+        esac
+      fi
       set -- "$@" --data-urlencode "arg.$nt_k=$nt_v"
       ;;
     *)
@@ -323,6 +370,11 @@ Run the shim (absolute path):
 \`\`\`sh
 sh "${shimPath}" <verb> [args]
 \`\`\`
+
+Flags take a value: \`--flag value\`, or \`--flag=value\`. Use the \`=\` form when the value itself
+starts with \`--\` (\`--cmd=--version\`); written as two tokens, a leading \`--\` is read as the
+next flag, so \`--text --oops\` sends an empty \`--text\` plus a stray \`--oops\`. A flag with no
+value is allowed anywhere on the line, not only at the end.
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
