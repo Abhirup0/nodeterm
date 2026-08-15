@@ -28,7 +28,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { buildManagedScript } from './hooks/managed-script'
+import {
+  buildManagedScript,
+  MANAGED_SCRIPT_REVISION,
+  MIN_TOKEN_AWARE_REVISION
+} from './hooks/managed-script'
 import { nodeAuthToken, verifyNodeToken } from './node-auth-token'
 
 const SECRET = Buffer.alloc(32, 7)
@@ -208,4 +212,54 @@ describe('a phone-spawned session presents its per-node token', () => {
     expect(post.headers['x-nodeterm-node-token'] ?? '').toBe('')
   })
 
+  // ---- Finding F2: the client stamp, on the same wire, from the same phone-shaped env ----------
+
+  it.skipIf(!available)('stamps its own revision beside the node token', async () => {
+    const tokens = tokenDirWith('tokens-4', { 'phone-1': nodeAuthToken(SECRET, 'phone-1') })
+    const ep = endpointFile('hook-endpoint-4.env', tokens)
+    const script = writeScript('hook-4.sh', buildManagedScript('claude', null))
+
+    expect(await runPhoneHook(script, newHome('home-4'), 'phone-1', ep)).toBe(0)
+    const post = await nextPost()
+
+    expect(post.headers['x-nodeterm-hook-client']).toBe(String(MANAGED_SCRIPT_REVISION))
+    expect(Number(post.headers['x-nodeterm-hook-client'])).toBeGreaterThanOrEqual(
+      MIN_TOKEN_AWARE_REVISION
+    )
+    expect(post.headers['x-nodeterm-node-token']).toBeTruthy()
+    // The `version` field is the SERVER's protocol version, sourced from the endpoint file — which
+    // is exactly why it could never answer "what is the client?" and the stamp had to exist.
+    expect(post.body).toContain('version=2')
+  })
+
+  it.skipIf(!available)(
+    'an OLDER script sends neither header — so a stale script and a missing token are now distinguishable',
+    async () => {
+      // A pre-#195 build, constructed from the current one by removing the two things it did not
+      // have: the token read and the revision stamp. Both header values are then empty, curl drops
+      // both, and the POST is byte-identical to what such a build really sent.
+      const tokens = tokenDirWith('tokens-5', { 'phone-1': nodeAuthToken(SECRET, 'phone-1') })
+      const ep = endpointFile('hook-endpoint-5.env', tokens)
+      const current = buildManagedScript('claude', null)
+      const old = current
+        // Blanked rather than deleted: an empty header value is dropped by curl, so the wire is
+        // byte-identical to a script that never had the line — while the generated sh stays valid
+        // (deleting the assignment would leave an empty `if … then fi`, and a script that fails to
+        // parse proves nothing about what a real old script sent).
+        .replace(/nt_node_token=\$\(head -n 1[^\n]*/, 'nt_node_token=""')
+        .replace(/nt_client_rev=\d+\n/, '')
+      expect(old).not.toContain('nt_client_rev=')
+      expect(old).not.toContain('$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID')
+      const script = writeScript('hook-5.sh', old)
+
+      expect(await runPhoneHook(script, newHome('home-5'), 'phone-1', ep)).toBe(0)
+      const post = await nextPost()
+
+      expect(post.body).toContain('nodeId=phone-1')
+      // The defect, stated as an assertion: the token header is absent HERE for a different reason
+      // than in the "no token file" case above — and only the client stamp tells them apart.
+      expect(post.headers['x-nodeterm-node-token'] ?? '').toBe('')
+      expect(post.headers['x-nodeterm-hook-client'] ?? '').toBe('')
+    }
+  )
 })

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, utimesSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { buildManagedScript } from './managed-script'
+import { buildManagedScript, MANAGED_SCRIPT_REVISION } from './managed-script'
 import { hookServer } from '../hook-server'
 import { nodeAuthToken } from '../node-auth-token'
 import { initPlatform, resetPlatformForTests } from '../../platform'
@@ -41,6 +41,18 @@ describe('buildManagedScript', () => {
     expect((s.match(/\n *curl -sS/g) ?? []).length).toBe(4)
     expect((s.match(/\n *nt_hook_headers \|/g) ?? []).length).toBe(4)
     expect((s.match(/--config -/g) ?? []).length).toBe(4)
+  })
+
+  it('stamps its own revision on every POST, through the same stdin emitter', () => {
+    // Finding F2: the `version` field below is sourced from the ENDPOINT FILE, so it reports the
+    // SERVER's protocol version and can never answer "which client is this?". Without the stamp an
+    // old script and a current one with a missing token file are byte-identical on the wire.
+    expect(s).toContain(`nt_client_rev=${MANAGED_SCRIPT_REVISION}`)
+    expect(s).toContain('printf \'header = "X-Nodeterm-Hook-Client: %s"')
+    expect(s).not.toContain('-H "X-Nodeterm-Hook-Client')
+    // Set once, at the top — not inside any function, and in particular not where the failover
+    // clears the vars that belong to the endpoint rather than to this file.
+    expect((s.match(/nt_client_rev=/g) ?? []).length).toBe(1)
   })
 
   describe('deterministic hook-reply approvals (PermissionRequest wait branch)', () => {
@@ -333,6 +345,11 @@ describe('buildManagedScript endpoint failover, executed under /bin/sh', () => {
       expect(calls[0].cfg).toContain('header = "X-Nodeterm-Node-Token: PRIMARY-NODE-TOKEN"')
       expect(calls[1].cfg).toContain('header = "X-Nodeterm-Node-Token: FALLBACK-NODE-TOKEN"')
       expect(calls[1].cfg).not.toContain('PRIMARY-NODE-TOKEN')
+      // The client stamp is a property of THIS SCRIPT, so it survives the endpoint switch that
+      // clears sock/port/token-dir — on both legs, with the same value.
+      for (const c of calls) {
+        expect(c.cfg).toContain(`header = "X-Nodeterm-Hook-Client: ${MANAGED_SCRIPT_REVISION}"`)
+      }
     }
   )
 

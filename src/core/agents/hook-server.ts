@@ -124,6 +124,21 @@ export function parseControlBody(
 }
 
 /**
+ * `X-Nodeterm-Hook-Client` → the posting script's revision, or `undefined`.
+ *
+ * Strict on purpose: only an unsigned decimal integer counts. Anything else — a version string
+ * someone thought would be friendlier, a duplicated header (node hands those over as an array,
+ * which is not a string and so lands here as undefined), an empty value — is "no stamp", which is
+ * the same answer a pre-#195 script gives. Guessing a number out of "v3-beta" would be inventing
+ * evidence for a gate.
+ */
+function parseClientRevision(raw: string | string[] | undefined): number | undefined {
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim())) return undefined
+  const n = Number(raw.trim())
+  return Number.isSafeInteger(n) ? n : undefined
+}
+
+/**
  * What the hook server knows about the POST an event arrived on, beyond the event itself.
  *
  * `verified` = the caller presented a per-node token THIS instance minted for THAT node id. It is
@@ -545,6 +560,13 @@ class HookServer {
         }
         const verified = verdict === 'verified'
         if (verified) this.provenNodes.add(nodeId)
+        // WHICH CLIENT posted. A LABEL like `verified`, and for the same reason a second one was
+        // needed: an old managed script and a current one whose token file is missing send exactly
+        // the same bytes otherwise (the `version` form field is sourced from the endpoint file, so
+        // it reports OUR protocol version, not the client's). Absent or unparseable stays
+        // `undefined` — never 0 — because "no stamp" and "revision zero" are different claims and
+        // only the first one is true of a pre-#195 script.
+        const clientRevision = parseClientRevision(req.headers['x-nodeterm-hook-client'])
         if (agentId && nodeId && form.payload) {
           let payload: Record<string, unknown> = {}
           try {
@@ -566,7 +588,7 @@ class HookServer {
           // transcript_path). Inside the try so a throwing raw listener still ends 204.
           this.rawListener?.(agentId, nodeId, payload, { verified })
           const normalized = normalizeFor(agentId, { nodeId, agentId, payload })
-          if (normalized && this.listener) this.listener({ ...normalized, verified })
+          if (normalized && this.listener) this.listener({ ...normalized, verified, clientRevision })
         }
         res.writeHead(204)
         res.end()

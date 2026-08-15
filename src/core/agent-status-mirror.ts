@@ -69,6 +69,17 @@ export interface MirrorEntry {
    * about a state that has since changed.
    */
   stateVerified?: boolean
+  /**
+   * The revision of the managed hook script that posted the event behind the current `state`
+   * (`ev.clientRevision`). `undefined` = no stamp, which is what a script predating per-node
+   * identity sends — and the ONLY thing that separates "this session cannot read a token" from
+   * "there is no token for it to read". Those need opposite advice, and before the stamp existed
+   * they were byte-identical on the wire (Finding F2).
+   *
+   * Written on the same edge as `stateVerified` and, like it, moves DOWN as readily as up: an SSH
+   * project reconnected against an older desktop really is running an older script now.
+   */
+  clientRevision?: number
   /** When proof was last seen at all. Never cleared by a later legacy event — "we once saw this
    *  node prove itself" stays true, and it is what separates a node that CAN verify (retryable)
    *  from one that never has (not retryable). See the plan's Correction C1 mitigation. */
@@ -382,6 +393,10 @@ export function reduceEntry(
       // not change the state whose proof this describes.
       next.stateVerified = ev.verified === true
       if (ev.verified === true) next.verifiedAt = now
+      // Same edge, and ASSIGNED rather than merged: an event with no stamp is a report that this
+      // node is running a script that cannot send one, which is exactly the state a stale entry
+      // would hide.
+      next.clientRevision = ev.clientRevision
     }
   } else if (ev.kind === 'session') {
     // SessionStart / SessionEnd both reset the node to idle (renderer: setState(id, undefined)).
