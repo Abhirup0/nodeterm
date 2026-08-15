@@ -6,8 +6,15 @@ import path from 'path'
 /** Shape of a valid account id (uuid / opaque token). Shared by every path builder so a bad id
  *  can never traverse out of the accounts root — locally OR on a remote host over ssh. */
 const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/
+/** The same rule as a predicate, for callers that must REFUSE a bad id rather than throw on it —
+ *  `project-node-append` validates the account id a phone sends over the relay before writing it
+ *  into a project file. One definition: a second copy of this alphabet would drift out of step
+ *  with the path builders it exists to protect. */
+export function isSafeAccountId(accountId: string): boolean {
+  return ACCOUNT_ID_RE.test(accountId)
+}
 function assertAccountId(accountId: string): void {
-  if (!ACCOUNT_ID_RE.test(accountId)) {
+  if (!isSafeAccountId(accountId)) {
     throw new Error(`invalid account id: ${JSON.stringify(accountId)}`)
   }
 }

@@ -2122,8 +2122,12 @@ app.whenReady().then(async () => {
   // the canvas adopts the node live).
   const hostBridge = {
     git: gitService,
-    registerNode: (projectId: string, node: { id: string; title?: string; agentId?: string }) =>
-      workspaceStore.appendRemoteNode(projectId, node),
+    // `accountId` = the managed Claude account the phone launched the session under. It has to be
+    // declared here too, or the wire's honest shape stops at this boundary (see RemoteNodeInput).
+    registerNode: (
+      projectId: string,
+      node: { id: string; title?: string; agentId?: string; accountId?: string }
+    ) => workspaceStore.appendRemoteNode(projectId, node),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
