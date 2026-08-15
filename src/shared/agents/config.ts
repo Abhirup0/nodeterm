@@ -305,20 +305,34 @@ export function withSessionId(cmd: string, id: AgentId, sessionId: string): stri
  * `sharedIdentity` routes a SHARED_IDENTITY_CAPABLE agent's resume through the managed launcher,
  * so the resumed session re-claims the node's own thread instead of opening it as an anonymous
  * client. Default false = the bare command this has always emitted (see `agentLaunchProgram`).
+ *
+ * `base` is the user's launch-command override for this agent (`settings.agentLaunchCommands`,
+ * e.g. an account-switching wrapper), PASSED IN rather than read here: this module is imported by
+ * main/core/server and cannot reach the renderer's settings store, so the renderer resolves the
+ * override and threads it through — the same shape as `performRestartResume`'s `command` param.
+ * When set (non-blank) it replaces the program part outright, INCLUDING codex's shared-identity
+ * launcher: an explicit override is the user saying "launch it exactly like this", and silently
+ * substituting the managed launcher would un-say it. Blank/absent = unchanged behavior.
  */
-export function resumeCommand(id: AgentId, sessionId: string, sharedIdentity = false): string | null {
+export function resumeCommand(
+  id: AgentId,
+  sessionId: string,
+  sharedIdentity = false,
+  base?: string
+): string | null {
   if (!canResume(id)) return null
   const sid = sessionId.trim()
   if (!sid || !SAFE_SESSION_ID.test(sid)) return null
+  const custom = base?.trim() || undefined
   switch (id) {
     case 'codex':
-      return `${agentLaunchProgram('codex', 'codex', sharedIdentity)} resume ${sid}`
+      return `${custom ?? agentLaunchProgram('codex', 'codex', sharedIdentity)} resume ${sid}`
     case 'opencode':
-      return `opencode --session ${sid}`
+      return `${custom ?? 'opencode'} --session ${sid}`
     case 'claude':
     case 'gemini':
     case 'grok':
-      return `${id} --resume ${sid}`
+      return `${custom ?? id} --resume ${sid}`
     default:
       return null
   }
