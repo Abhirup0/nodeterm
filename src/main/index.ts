@@ -422,6 +422,13 @@ function buildAppMenu(win: BrowserWindow): void {
   // can't read it, so the label is generic and the renderer's handler decides direction. (A live
   // label would need a reverse-IPC the renderer drives on toggle — out of scope for this change.)
   const viewSubmenu: Electron.MenuItemConstructorOptions[] = [
+    // Restored from Electron's default View menu, which the custom menu replaced. Reloading the
+    // renderer is a real recovery lever and safe here: the tmux sessions live in the MAIN process,
+    // so a reload only re-hydrates the canvas from the workspace store — it never drops a session
+    // (same path the crash-reload policy uses). No interceptor claims ⌘R, so the accelerator is
+    // honest (unlike ⌘0, which `installKeydownIntercepts` owns for zoom-to-100%).
+    { role: 'reload' },
+    { role: 'forceReload' },
     { role: 'toggleDevTools' },
     { type: 'separator' },
     {
@@ -442,7 +449,10 @@ function buildAppMenu(win: BrowserWindow): void {
       label: 'Toggle Kanban Board',
       accelerator: 'CmdOrCtrl+Shift+B',
       click: () => send(IPC.appToggleKanban)
-    }
+    },
+    { type: 'separator' },
+    // Also restored from the default menu: Enter Full Screen (Ctrl+⌘F on mac, F11 on Linux).
+    { role: 'togglefullscreen' }
   ]
   const template: Electron.MenuItemConstructorOptions[] = isMac
     ? [
