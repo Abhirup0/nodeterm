@@ -343,6 +343,11 @@ export function buildStubApi(): Omit<
     // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the
     // renderer's own keydown handler is the whole path there.
     onZoomActualSize: noopUnsub,
+    // Native app-menu events (desktop-only — the Server Edition has no native menu). Stubs so the
+    // bridge satisfies NodeTerminalApi; the canvas only wires real listeners on desktop.
+    onToggleAutoAlign: noopUnsub,
+    onFitView: noopUnsub,
+    onToggleKanban: noopUnsub,
     onOpenSettings: noopUnsub,
     closeWindow: noop,
     // Best-effort: a browser tab can't force itself frontmost the way the desktop BrowserWindow

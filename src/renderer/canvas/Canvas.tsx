@@ -3984,16 +3984,31 @@ export function Canvas() {
     })
   }, [deleteNodes])
 
-  // The native app menu's "Settings…" item (⌘,) → open settings, same as the gear button and the
-  // Cmd+, keydown. Main sends IPC.appOpenSettings when the menu item is clicked (a menu click does
-  // not fire before-input-event, so the typed-⌘, path alone would leave the menu item inert).
+  // Native View menu → renderer. The menu item click sends IPC; these listeners fire the canvas
+  // action. Snap-to-Grid flips the setting (the `autoAlignGrid` effect above runs the arrange on
+  // the false→true edge), and main rebuilds the menu on the settings change so the checkmark moves.
+  useEffect(() => {
+    return window.nodeTerminal.onToggleAutoAlign(() => {
+      useSettings.getState().update({ autoAlignGrid: !useSettings.getState().settings.autoAlignGrid })
+    })
+  }, [])
+  useEffect(() => {
+    return window.nodeTerminal.onFitView(() => fitAll())
+  }, [fitAll])
+  useEffect(() => {
+    return window.nodeTerminal.onToggleKanban(() => {
+      const id = useProjects.getState().activeProjectId
+      if (id) useViewMode.getState().toggle(id)
+    })
+  }, [])
+  // Native app menu → open Settings (⌘,). A menu click does not fire before-input-event, so the
+  // Cmd+, keydown handler alone would leave the menu item inert — main forwards it as IPC.
   useEffect(() => {
     return window.nodeTerminal.onOpenSettings(() => {
       setSettingsSection(undefined)
       setSettingsOpen(true)
     })
   }, [])
-
   const groupSelection = useCallback(
     (ids: string[]) => {
       const groupCount = nodesRef.current.filter((n) => n.type === 'group').length
@@ -4898,6 +4913,25 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  // Snap-to-grid MODE (like a desktop "Auto arrange"): when `autoAlignGrid` flips ON, snap EVERY
+  // node to the grid at that moment (not just the selection — the one-shot `alignToGrid` is no
+  // longer exposed in the UI; this is its replacement). `nodesRef.current` holds only the active
+  // project's persistent nodes (subagent/loop ephemeral cards live in a separate array), so this
+  // is safe to run over the whole list. v1: arrange-all-on-enable only — it does not re-snap on
+  // later drags. Turning OFF is a no-op (nodes stay where they were snapped). The transition is
+  // tracked with a ref so a re-render that preserves the ON value doesn't re-arrange.
+  const prevAutoAlignRef = useRef(false)
+  useEffect(() => {
+    const on = settings.autoAlignGrid
+    if (on && !prevAutoAlignRef.current) {
+      const ids = nodesRef.current
+        .filter((n) => n.type !== 'subagent' && n.type !== 'loop')
+        .map((n) => n.id)
+      if (ids.length) alignToGrid(ids)
+    }
+    prevAutoAlignRef.current = on
+  }, [settings.autoAlignGrid, alignToGrid])
+
   const selectAll = useCallback(() => {
     setNodes((ns) => ns.map((n) => ({ ...n, selected: true })))
   }, [setNodes])
@@ -5604,19 +5638,11 @@ export function Canvas() {
     },
     [
       screenToFlowPosition,
-      activeProjectId,
-      addTerminal,
       agentCreationItems,
-      addSticky,
-      addDino,
-      addBrowser,
-      openFileDialog,
-      newProjectFile,
-      openRemotePicker,
-      openWorktreeDialog,
-      isSshProject,
+      addHandlers,
+      addCtx,
       selectAll,
-      fitView,
+      fitAll,
       hasRestartableAgents,
       restartIdleAgents
     ]
