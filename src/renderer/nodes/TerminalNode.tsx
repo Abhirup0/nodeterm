@@ -115,6 +115,7 @@ import {
   type ExitPhaseOutcome,
   type ResumePhaseOutcome
 } from '../terminal/agent-restart'
+import { WakeInputBuffer } from '../terminal/wake-input-buffer'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic, IconReload } from '../components/icons'
 import { NodeLabels } from '../components/kanban/NodeLabels'
@@ -1281,6 +1282,14 @@ export function TerminalNode({
   // sweep that landed in between, must not deliver a second launch line into the same pane.
   const wakeInFlightRef = useRef(false)
   const wakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // A wake types the resume line into this pane un-KILL_LINE'd (its "most fragile moment"), and the
+  // keyboard path writes straight to the transport throughout. This bounded buffer HOLDS anything
+  // the human types between `beginWake` and the resume's confirmed submit, then flushes it in order
+  // (a `resumed` outcome) or drops it (any other) — so nothing splices into the resume line. See
+  // wake-input-buffer.ts; the keyboard interception is in `term.onData` below, the writer is the
+  // session-scoped `restartIo.write` published here so the wake `.then` (component body) can reach it.
+  const wakeInputBufferRef = useRef(new WakeInputBuffer())
+  const paneWriteRef = useRef<(data: string) => void>(() => {})
   const wakeRef = useRef<(attempt?: number) => void>(() => {})
   wakeRef.current = (attempt = 0): void => {
     // A wake that could not run YET is retried a couple of times: at mount the spawn is still in
@@ -1298,9 +1307,15 @@ export function TerminalNode({
     const fns = agentHibernateFns(id)
     if (!fns) return retryLater() // no terminal here yet (mid-spawn, or an offscreen revive)
     wakeInFlightRef.current = true
+    // Hold keyboard input from HERE — before the resume line's first byte — until the resume
+    // resolves. `beginWake` is idempotent, so a retry that re-enters keeps what is already held.
+    wakeInputBufferRef.current.beginWake()
     void fns
       .resume()
       .then((outcome) => {
+        // Flush on a confirmed resume (the held keystrokes land after the resume line submitted),
+        // drop on anything else (`expired` — the pane became something we did not resume into).
+        wakeInputBufferRef.current.endWake(outcome === 'resumed', paneWriteRef.current)
         if (outcome === 'resumed') {
           useAgentStatus.getState().setHibernated(id, false)
           return
@@ -1312,7 +1327,9 @@ export function TerminalNode({
       })
       .catch(() => {
         // A transport that threw leaves the node hibernated (and the chip clickable). Reporting a
-        // wake here would clear the badge over a pane nothing was typed into.
+        // wake here would clear the badge over a pane nothing was typed into — and the held input is
+        // dropped, never spliced into whatever the pane became.
+        wakeInputBufferRef.current.endWake(false, paneWriteRef.current)
       })
       .finally(() => {
         wakeInFlightRef.current = false
@@ -2690,6 +2707,12 @@ export function TerminalNode({
             // interrupt, so probe the cancelled turn (still-silent working → done). Exact
             // match — arrow keys etc. arrive as multi-byte \x1b[… sequences.
             if (showStatus && (input === '\x1b' || input === '\x03')) inferInterruptAfterSettle(id)
+            // While a wake is in flight, HOLD this input rather than write it: the resume line is
+            // sitting un-submitted in the pane and a keystroke would splice into it. The buffer is
+            // bounded — a `queueFull`/`buffered` verdict means "held, do not write". Flushed (or
+            // dropped) when the resume resolves; see `wakeInputBufferRef`. `passthrough` is the
+            // ordinary case and is byte-for-byte the old behaviour.
+            if (wakeInputBufferRef.current.offer(input).kind !== 'passthrough') return
             transport.write(sid, input)
           }).dispose
         )
@@ -2820,6 +2843,11 @@ export function TerminalNode({
       },
       onData: (cb) => (sessionId && !life.dead ? transport.onData(sessionId, cb) : () => {})
     }
+    // The wake buffer flushes held keystrokes through the SAME session-scoped, lifetime-gated write
+    // as the resume line — so a flush into a torn-down session no-ops instead of throwing. Published
+    // to the ref the wake `.then` (component body) reads; re-set on every mount, which is when a new
+    // `restartIo` closure captures a live `sessionId`/`life`.
+    paneWriteRef.current = restartIo.write
     // Is there still a pane to restart in? A spawn in flight has no session yet; a real teardown
     // flips `life.dead`; and a session another client DESTROYED (or one recycled with no
     // replacement) is gone while this component happily stays mounted showing the overlay — the
