@@ -138,6 +138,8 @@ describe('where the verbs sit in the routing tables', () => {
   it('the verified-only set is exactly the messaging verbs', () => {
     // Pins that nothing ELSE ever drifts in: adding a SHIPPED verb here would strand its legacy
     // population with no hatch, which is the one thing this set must never be casually grown by.
-    expect([...requiresVerified].sort()).toEqual(['reply', 'send'])
+    // `notify` (folded in from #98, Task 5.2) is a messaging verb like the other two — it writes
+    // into another agent's pane — so it takes the same gate.
+    expect([...requiresVerified].sort()).toEqual(['notify', 'reply', 'send'])
   })
 })

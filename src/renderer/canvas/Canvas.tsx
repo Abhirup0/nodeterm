@@ -6008,13 +6008,20 @@ export function Canvas() {
       // control-capable agent, and forward to main — where the scope check, the per-project
       // switch, flow control and the pane probes all run against main's own stores
       // (src/main/agent-messaging.ts).
-      if (verb === 'send' || verb === 'reply') {
+      if (verb === 'send' || verb === 'reply' || verb === 'notify') {
         const targetId = (args.node ?? '').trim()
         if (!targetId) {
           reply({ ok: false, error: `${verb} requires --node` })
           return
         }
-        if (!args.text) {
+        // notify is APP-OWNED TEXT ONLY (#98's rule, kept verbatim): the caller cannot smuggle a
+        // prompt through its arguments. The body itself is substituted in MAIN (NOTIFY_BODY) —
+        // this refusal is the polite half, that substitution is the boundary.
+        if (verb === 'notify' && args.text) {
+          reply({ ok: false, error: 'notify does not accept --text' })
+          return
+        }
+        if (verb !== 'notify' && !args.text) {
           reply({ ok: false, error: `${verb} requires --text` })
           return
         }

@@ -5,11 +5,12 @@
  * is deliberately types + one constant.
  */
 
-export type AgentMessageVerb = 'send' | 'reply'
+export type AgentMessageVerb = 'send' | 'reply' | 'notify'
 
 export const AGENT_MESSAGE_VERBS: ReadonlySet<string> = new Set([
   'send',
-  'reply'
+  'reply',
+  'notify'
 ] satisfies AgentMessageVerb[])
 
 /** What the renderer forwards to main for one delivery. Deliberately minimal: the source TITLE,
@@ -20,9 +21,21 @@ export interface AgentMessageDeliverRequest {
   verb: AgentMessageVerb
   sourceNodeId: string
   targetNodeId: string
-  /** The sender's text. */
+  /** The sender's text for send/reply. IGNORED for notify — its body is app-owned and composed
+   *  in main (`NOTIFY_BODY`), which is the whole point of that verb. */
   body: string
 }
+
+/**
+ * `notify`'s entire body — fixed, app-owned, and substituted in MAIN whatever the request
+ * carries. Folded in from PR #98, whose design line survives verbatim: "The app owns the entire
+ * prompt so the source cannot inject instructions through command arguments." #98's "check your
+ * configured inbox" wording is dropped — the product has no inbox concept; the linked context is
+ * the thing a notified agent can actually read.
+ */
+export const NOTIFY_BODY =
+  'A linked agent updated shared coordination context. Read the latest linked context ' +
+  '(get-linked-context) before continuing.'
 
 /** The rendered control reply for one delivery — the exact shape every other control verb answers
  *  with, so the hook server and the shim need no messaging-specific branch. */

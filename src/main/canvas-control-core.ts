@@ -30,6 +30,7 @@ export type ControlVerb =
   | 'assign'
   | 'send'
   | 'reply'
+  | 'notify'
 
 export interface ControlCommand {
   verb: ControlVerb
@@ -62,7 +63,8 @@ const VERBS: ControlVerb[] = [
   'board',
   'assign',
   'send',
-  'reply'
+  'reply',
+  'notify'
 ]
 
 /**
@@ -116,6 +118,8 @@ export function parseControlRequest(
   if (v === 'rename' && !args.node) return { error: 'rename requires --node <id>' }
   if (v === 'rename' && !args.title) return { error: 'rename requires --title' }
   if ((v === 'send' || v === 'reply') && !args.node) return { error: `${v} requires --node <id>` }
+  if (v === 'notify' && !args.node) return { error: 'notify requires --node <id>' }
+  if (v === 'notify' && args.text) return { error: 'notify does not accept --text' }
   return { verb: v, args }
 }
 

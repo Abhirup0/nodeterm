@@ -259,4 +259,17 @@ describe('the messaging verbs parse', () => {
       error: 'reply requires --node <id>'
     })
   })
+
+  // #98's validation, kept verbatim: notify carries NO caller text — its body is app-owned.
+  it('requires a target for notify and does not accept message text', () => {
+    expect(parseControlRequest('notify', {})).toEqual({ error: 'notify requires --node <id>' })
+    expect(parseControlRequest('notify', { node: 'n1' })).toEqual({
+      verb: 'notify',
+      args: { node: 'n1' }
+    })
+    expect(parseControlRequest('notify', { node: 'n1', text: 'custom prompt' })).toEqual({
+      error: 'notify does not accept --text'
+    })
+    expect(isDestructiveVerb('notify')).toBe(false)
+  })
 })

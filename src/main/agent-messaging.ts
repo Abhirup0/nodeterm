@@ -25,7 +25,7 @@ import type {
   AgentMessageDeliverRequest,
   AgentMessageReply
 } from '../shared/agents/agent-messaging'
-import { AGENT_MESSAGE_VERBS } from '../shared/agents/agent-messaging'
+import { AGENT_MESSAGE_VERBS, NOTIFY_BODY } from '../shared/agents/agent-messaging'
 import {
   deliverAgentMessage,
   type DeliveryDeps,
@@ -345,7 +345,10 @@ export async function deliverFromControl(
       // The from-line is composed HERE from the store's title (oneLine'd inside buildEnvelope);
       // the renderer never supplies a string that ends up inside the frame.
       sourceTitle: sourceNode?.title || req.sourceNodeId,
-      body: req.body,
+      // notify's body is APP-OWNED (#98): substituted here, in main, whatever the request
+      // carried — the renderer's `--text` refusal is UX, this line is the boundary. The test
+      // sends a hostile body over the IPC shape and asserts it never reaches the envelope.
+      body: req.verb === 'notify' ? NOTIFY_BODY : req.body,
       targetAgentId,
       targetBinaries: binariesFor(targetAgentId, deps.customAgents()),
       targetIsRemote: deps.isRemoteNode(req.targetNodeId),

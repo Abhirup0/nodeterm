@@ -172,7 +172,7 @@ export interface HookEventMeta {
  * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
  * of every hatch and is the test that fails if either half of this comment stops being true.
  */
-export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply'])
+export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', 'notify'])
 
 /**
  * The refusal for a messaging verb: one sentence, no diagnosis, no hint about tokens or restarts —
