@@ -22,6 +22,14 @@ export interface PtyCreateOptions {
    */
   persistKey?: string
   /**
+   * The machine-local id (`IndexEntryV3.id`) of the project this node belongs to, as the renderer
+   * knows it at the create call. Recorded in the runtime pane-ownership ledger on a GENUINE FRESH
+   * spawn (`agents/pane-ownership.ts`) so agent messaging can prove which project actually spawned
+   * a pane rather than trusting the git-shared, forgeable `project.json`. Optional: absent ⇒ the
+   * pane is left unproven and messaging to it fails closed (never derived from the file id).
+   */
+  ownerProjectId?: string
+  /**
    * Which agent runs in this session (claude/codex/gemini/custom). Drives the hook env
    * injected at spawn. Defaults to 'claude' for backward compat; the renderer passes a
    * real value in a later phase.

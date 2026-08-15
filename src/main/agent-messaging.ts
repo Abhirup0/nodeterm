@@ -74,6 +74,15 @@ export interface AgentMessagingDeps {
    * file bit. Read per call, so an off-toggle or a decline takes effect on the next delivery.
    */
   messagingEnabled(projectId: string): boolean
+  /**
+   * The project that PROVABLY spawned the target node's pane this run, or `undefined` when
+   * unproven (runtime ledger, `core/agents/pane-ownership.ts`). The delivery gate trusts THIS,
+   * not the persisted store's node-set, to decide whose grant applies — the store is
+   * attacker-writable (`project.json` lists any node id) and cannot tell a real owner from a
+   * project that merely listed a live pane it never spawned (PR #237 fix round 2). Undefined ⇒
+   * refuse `unproven-target-owner`.
+   */
+  paneOwnerProject(nodeId: string): string | undefined
   customAgents(): readonly { id: string; launchCmd: string }[] | undefined
   appendBoardLog(projectId: string, entry: BoardLogEntry): Promise<boolean>
   /** Test seam: override the receipt subscription. Production uses the module bus below. */
@@ -167,7 +176,11 @@ const NOT_PERMITTED_TEXT: Record<NotPermittedReason, string> = {
   'ambiguous-target-node-id':
     'that node id exists in more than one project, so the target pane cannot be attributed to a ' +
     'single project\'s messaging grant. De-duplicate the id (re-add the cloned folder to mint ' +
-    'fresh ids) before messaging it.'
+    'fresh ids) before messaging it.',
+  'unproven-target-owner':
+    'the target pane\'s owning project cannot be proven at runtime (it was not freshly spawned in ' +
+    'this session, or its ownership is disputed), so a per-project messaging grant cannot be ' +
+    'applied to it. Re-open the target node so its owner is recorded, then try again.'
 }
 
 /**
@@ -327,8 +340,18 @@ export async function deliverFromControl(
   const scope = resolveDeliveryScope(projects, req.sourceNodeId, req.targetNodeId)
   let notPermitted = scopeRefusal(scope)
   const projectId = scope.kind === 'same-project' ? scope.projectId : undefined
-  if (!notPermitted && (!projectId || !deps.messagingEnabled(projectId)))
-    notPermitted = 'switch-off'
+  if (!notPermitted) {
+    // OWNERSHIP IS PROVEN AT RUNTIME, NOT READ FROM THE STORE (PR #237 fix round 2). The scope
+    // above resolved `projectId` from the persisted node-set, which is attacker-writable — a
+    // hostile `project.json` can LIST a live pane's node id it never spawned, and when the real
+    // owner is absent from the store that hostile project is the sole claimant. The ledger records
+    // who actually SPAWNED the pane this run; the grant is evaluated against THAT owner, and the
+    // store's `projectId` is only a cross-check. Unprovable — no ledger entry (restart / never
+    // spawned here), or the ledger owner disagrees with the sole store claimant — fails closed.
+    const owner = projectId ? deps.paneOwnerProject(req.targetNodeId) : undefined
+    if (!projectId || !owner || owner !== projectId) notPermitted = 'unproven-target-owner'
+    else if (!deps.messagingEnabled(owner)) notPermitted = 'switch-off'
+  }
 
   // Flow control (PR #208), taken as a RESERVATION rather than a pure read: `checkFlowLimits`
   // followed later by `noteSent` is not atomic, and N parallel sends to N distinct targets would

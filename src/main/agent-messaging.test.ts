@@ -36,6 +36,12 @@ interface Recorded {
 
 function fakeDeps(over: Partial<AgentMessagingDeps> = {}): AgentMessagingDeps & { rec: Recorded } {
   const rec: Recorded = { paneOwnerCalls: [], sent: [] }
+  const projectsFn =
+    over.projects ??
+    (() => [
+      { id: 'p1', nodes: [{ id: 'a1', title: 'Alpha', agentId: 'claude' }, { id: 'b1', title: 'Beta', agentId: 'claude' }] },
+      { id: 'p2', nodes: [{ id: 'c2', title: 'Gamma', agentId: 'claude' }] }
+    ])
   return {
     rec,
     paneOwner: async (nodeId) => {
@@ -55,12 +61,13 @@ function fakeDeps(over: Partial<AgentMessagingDeps> = {}): AgentMessagingDeps & 
     },
     hasLiveSession: () => true,
     mirrorEntry: () => idle,
-    projects: () => [
-      { id: 'p1', nodes: [{ id: 'a1', title: 'Alpha', agentId: 'claude' }, { id: 'b1', title: 'Beta', agentId: 'claude' }] },
-      { id: 'p2', nodes: [{ id: 'c2', title: 'Gamma', agentId: 'claude' }] }
-    ],
+    projects: projectsFn,
     isRemoteNode: () => false,
     messagingEnabled: () => true,
+    // Ownership gate (PR #237 fix round 2): default to "proven-owned by whatever project the store
+    // lists it in", so these pre-existing tests keep exercising the flow/scope/switch they were
+    // written for. The ownership gate itself is proven in agent-messaging-switch.test.ts.
+    paneOwnerProject: (id) => projectsFn().find((p) => p.nodes.some((n) => n.id === id))?.id,
     customAgents: () => undefined,
     appendBoardLog: async () => false,
     subscribeReceipts: (cb) => {

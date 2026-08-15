@@ -35,6 +35,7 @@ import {
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
 import { parsePaneCursor } from './pane-cursor'
+import { recordFreshSpawnOwner, forgetPaneOwner } from './agents/pane-ownership'
 import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './agents/pane-owner'
 import type { PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
@@ -1648,6 +1649,12 @@ export class PtyManager {
     }
     const sessionId = this.spawnSession(options, clientId, undefined)
     const spawned = this.sessions.get(sessionId)
+    // PANE OWNERSHIP (agent messaging, PR #237 fix round 2): record the OWNING project of a pane
+    // this process just GENUINELY spawned. Gated on `fresh` — an attach/co-attach to a session
+    // someone else spawned (incl. an app-restart re-attach) leaves the pane UNPROVEN, so a second
+    // project that merely opens another's node id cannot claim it. The owner is the renderer's
+    // machine-local project id, never the git-shared file id. See `agents/pane-ownership.ts`.
+    if (fresh && options.persistKey) recordFreshSpawnOwner(options.persistKey, options.ownerProjectId)
     // Surface a missing-account-dir fallback so the renderer can flag the node's account chip.
     const accountFallback = spawned?.accountFallback
     // The session's `persistKey` is set iff the spawn actually landed on a tmux, local or remote
@@ -3137,6 +3144,10 @@ export class PtyManager {
     // Also drop any in-flight create for this node: a create racing the kill-session below must
     // spawn a fresh session, not await (and then join) the one we are ending.
     this.inflight.delete(persistKey)
+    // The session is ending (delete or recycle), so its pane ownership no longer holds — a later
+    // genuine respawn re-records it; until then the id is unproven, which fails closed for
+    // messaging (agents/pane-ownership.ts). Safe on either intent: recycle's respawn overwrites.
+    forgetPaneOwner(persistKey)
     // The tmux session is about to be killed, so everything attached to it goes now: a shadow would
     // otherwise linger until tmux dropped its client, and what we remembered about the released
     // session describes a pane that is about to stop existing.

@@ -78,6 +78,7 @@ import {
   nodeSessionName,
   workingNodes
 } from '../core/agent-status-mirror'
+import { paneOwnerProject } from '../core/agents/pane-ownership'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor, type PushGrant } from '../core/push-grants'
 import { createRemoteGrantsCache } from '../core/remote-push-grants'
@@ -935,6 +936,10 @@ app.whenReady().then(async () => {
       // clone notice (projectCapabilityGrantedFor — never the raw file bit). Read per call off
       // the store's index, so a decline or an off-toggle refuses the very next delivery.
       messagingEnabled: messagingEnabledVia((id) => workspaceStore.capabilityProjectFor(id)),
+      // Runtime pane ownership: which project actually SPAWNED the target's pane this run
+      // (core/agents/pane-ownership.ts). The gate trusts this over the attacker-writable store to
+      // decide whose grant applies; unproven ⇒ refused (PR #237 fix round 2).
+      paneOwnerProject: (id) => paneOwnerProject(id),
       customAgents: () => settingsStore.get().customAgents,
       appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry)
     })
