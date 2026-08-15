@@ -11,6 +11,7 @@ import {
   foregroundArgvArgs,
   foregroundPgid,
   isSafeTty,
+  paneOwnerFrom,
   parseForegroundArgv,
   parsePaneOwner
 } from './pane-owner'
@@ -118,6 +119,25 @@ describe('parseForegroundArgv', () => {
     expect(parseForegroundArgv('<<ps: illegal option>>', 4243)).toEqual([])
     expect(parseForegroundArgv(REAL_PS, 0)).toEqual([])
     expect(parseForegroundArgv(null, 4243)).toEqual([])
+  })
+})
+
+describe('paneOwnerFrom', () => {
+  const identity = { panePid: 2485382, tty: '/dev/pts/0', command: 'sh' }
+
+  it('joins the two round-trips into one owner', () => {
+    expect(paneOwnerFrom(identity, REAL_PS)).toEqual({
+      ...identity,
+      argv: ['/bin/sh -c sleep 200 | cat', 'sleep 200', 'cat']
+    })
+  })
+
+  it('answers null rather than an owner with an empty argv', () => {
+    // A PaneOwner carrying no argv would read to isAgentPane as "the kernel answered" and then as
+    // `unknown` anyway — but the two must not be able to diverge, so the null happens HERE, once.
+    expect(paneOwnerFrom(identity, '')).toBeNull()
+    expect(paneOwnerFrom(identity, '2485382 2485382 Ss   -bash')).toBeNull()
+    expect(paneOwnerFrom(null, REAL_PS)).toBeNull()
   })
 })
 

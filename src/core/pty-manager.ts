@@ -29,9 +29,13 @@ import {
   remoteTmuxSendKeysArgs,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
+  remotePaneOwnerArgs,
+  remoteForegroundArgvArgs,
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
 import { parsePaneCursor } from './pane-cursor'
+import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './agents/pane-owner'
+import type { PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
 import {
   primePtyCeiling,
@@ -2881,6 +2885,62 @@ export class PtyManager {
         '#{pane_current_command}'
       ])
       return stdout.trim() || null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * WHO owns a node's pane right now, read from the kernel: the pane's pid and tty from tmux, then
+   * the full argv of the tty's FOREGROUND PROCESS GROUP. `paneCommand` above answers one name —
+   * `node`, for every npm-installed agent CLI — which is not enough to decide whether a message may
+   * be delivered into a pane. This is (see `src/core/agents/pane-owner.ts` for the measurement).
+   *
+   * Mirrors `paneCommand`'s dispatch exactly, including the SSH branch over the project's
+   * ControlMaster, and its failure contract exactly: no live session, no tmux, no ssh, a throw, an
+   * empty read, a `ps` that lists nothing, an unsafe tty — every one of them answers `null` rather
+   * than throwing or returning a partial object, because unknown is never evidence of a particular
+   * command. Deliberately has NO deadline of its own: the caller bounds it (`probeWithin`), the
+   * same way the restart poll bounds `paneCommand`.
+   *
+   * Two round-trips, not one: tmux does not know the foreground process group (`#{pane_pid}` is the
+   * shell it forked, which is usually NOT in it), so the tty has to come back before `ps` can be
+   * asked about it. On the SSH leg both ride the same ControlMaster.
+   */
+  async paneOwner(persistKey: string): Promise<PaneOwner | null> {
+    const target = sessionName(persistKey)
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    try {
+      if (sshRemote) {
+        const ssh = findSsh()
+        if (!ssh) return null
+        const first = await runAsync(
+          ssh,
+          remotePaneOwnerArgs(sshRemote.conn, sshRemote.controlPath, target)
+        )
+        const identity = parsePaneOwner(first.stdout)
+        if (!identity) return null
+        const psArgs = remoteForegroundArgvArgs(sshRemote.conn, sshRemote.controlPath, identity.tty)
+        if (!psArgs) return null
+        const second = await runAsync(ssh, psArgs)
+        return paneOwnerFrom(identity, second.stdout)
+      }
+      if (!this.tmuxPath) return null
+      const first = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'display-message',
+        '-p',
+        '-t',
+        target,
+        PANE_OWNER_FMT
+      ])
+      const identity = parsePaneOwner(first.stdout)
+      if (!identity) return null
+      const call = foregroundArgvArgs(identity.tty)
+      if (!call) return null
+      const second = await runAsync(call.bin, call.args)
+      return paneOwnerFrom(identity, second.stdout)
     } catch {
       return null
     }

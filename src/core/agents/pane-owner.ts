@@ -173,3 +173,22 @@ export function parseForegroundArgv(stdout: string | null | undefined, pgid: num
     .filter((row) => row.pgid === pgid)
     .map((row) => row.args)
 }
+
+/**
+ * The two round-trips joined: a parsed pane identity plus the `ps` output for its tty.
+ *
+ * Null — never a `PaneOwner` with an empty `argv` — when `ps` said nothing usable, so the caller
+ * cannot mistake "nothing owns this" for "we could not see". Shared by the local and the SSH leg of
+ * `PtyManager.paneOwner` so the two cannot drift into different readings of the same output.
+ */
+export function paneOwnerFrom(
+  identity: PaneIdentity | null,
+  psStdout: string | null | undefined
+): PaneOwner | null {
+  if (!identity) return null
+  const pgid = foregroundPgid(psStdout)
+  if (pgid === null) return null
+  const argv = parseForegroundArgv(psStdout, pgid)
+  if (argv.length === 0) return null
+  return { ...identity, argv }
+}

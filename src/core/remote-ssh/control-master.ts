@@ -7,6 +7,7 @@ import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } fr
 import { TMUX_SOCKET } from '../tmux-naming'
 import { canControlCanvas } from '../../shared/agents/config'
 import { bracketedInjection, sanitizePasteText } from '../paste-injection'
+import { PANE_OWNER_FMT, foregroundArgvArgs } from '../agents/pane-owner'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
@@ -361,6 +362,43 @@ export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, 
     `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`
   )
 }
+/**
+ * Ask the REMOTE tmux for everything the ownership read needs in one round-trip — the remote
+ * counterpart of `PtyManager.paneOwner`'s first call. Same single-quoting rule as
+ * `remotePaneCommandArgs`: the `#{…}` fields have to reach the remote tmux verbatim rather than
+ * being eaten by the remote shell.
+ */
+export function remotePaneOwnerArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
+  return childArgs(
+    conn,
+    controlPath,
+    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`
+  )
+}
+
+/**
+ * The second round-trip: `ps` on the REMOTE host, listing the pane tty's processes.
+ *
+ * `tty` is a value the remote host printed back at us (`#{pane_tty}`), so it is DATA crossing into
+ * a command line — exactly the class `remote-safety.ts` exists for. Two layers, both required:
+ * `isSafeTty` refuses anything outside `[A-Za-z0-9/._-]` (returning null here, which the caller
+ * reads as "unknown"), and what survives is `posixQuote`d at the splice. No credential is involved
+ * — a tty path is the whole payload — so nothing here needs, or may grow, a stdin header channel
+ * (Global Constraint 6).
+ *
+ * The `ps` flags are the ones measured for the local leg, unchanged: they are valid on both GNU and
+ * BSD `ps`, and the remote host is at least as likely to be either.
+ */
+export function remoteForegroundArgvArgs(
+  conn: SshConnection,
+  controlPath: string,
+  tty: string
+): string[] | null {
+  const call = foregroundArgvArgs(tty)
+  if (!call) return null
+  return childArgs(conn, controlPath, `${call.bin} ${call.args.map(posixQuote).join(' ')}`)
+}
+
 /**
  * Ask the REMOTE tmux where a pane's cursor is — the remote counterpart of `PtyManager.paneCursor`,
  * and the thing that makes a refreshed SSH terminal land its cursor in the right place. Same
