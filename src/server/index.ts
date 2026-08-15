@@ -185,9 +185,12 @@ export async function startServer(
     console.warn('[model-gateway] could not migrate the legacy API key to secret storage', error)
   }
   settingsStore.registerIpc()
-  // Custom-agent preview/expansion + gateway discovery/credential IPC (browser has no process.env
-  // and never receives a stored literal key).
-  registerAgentEnvIpc(gatewayCredentials)
+  // Gateway discovery/credential IPC. NO env snapshot on the server: every registered handler
+  // here is dispatchable by any authenticated WS client, and the server process environment is
+  // exactly the secret store that must never cross that boundary. Browser clients hardcode an
+  // empty snapshot and `${env:VAR}` expansion degrades to the missing-env refusal; discovery
+  // resolves key REFERENCES only for the saved gateway URL (the exfil-oracle gate in core).
+  registerAgentEnvIpc(() => settingsStore.get().modelGateway, gatewayCredentials)
   ptyManager.init(
     () => settingsStore.get(),
     () => gatewayCredentials.readForHost()

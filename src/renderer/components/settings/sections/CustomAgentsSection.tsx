@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useSettings } from '../../../state/settings'
 import { firstEnabledBuiltin } from '../../../state/agentAvailability'
 import type { CustomAgent } from '@shared/types'
@@ -15,6 +15,8 @@ import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 import { Select } from '@renderer/ui/Select'
 import { uuid } from '@renderer/lib/uuid'
+import { assembleLaunchCommand } from '@shared/agents/launch'
+import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 
 const ROWS = {
   custom: {
@@ -284,38 +286,30 @@ function EnvRow({
 }
 
 /**
- * Live, fully-expanded preview of the command nodeterm will run for this agent. Assembled + expanded
- * main-side (the renderer has no process.env) so it is identical to the real launch. Re-fetches on a
- * debounce as the agent's fields change.
+ * Live, fully-expanded preview of the command nodeterm will run for this agent. Assembled with the
+ * SAME builder and the SAME cached env snapshot every launch path uses (shared/agents/launch.ts +
+ * lib/agentEnv.ts) — no IPC, so the preview IS the typed line by construction and cannot drift.
+ * In the browser / over relay the snapshot is empty by design, and the missing-env markers shown
+ * here are exactly what makes the launch path refuse.
  */
 function CommandPreview({ agent }: { agent: CustomAgent }): React.JSX.Element | null {
-  const [preview, setPreview] = useState<{ command: string; missingEnv: string[] } | null>(null)
-  // Re-run when any field that affects the command changes.
+  // Re-computed when any field that affects the command changes.
   const sig = `${agent.id}|${agent.launchCmd}|${agent.args ?? ''}|${agent.baseAgent ?? ''}|${agent.promptInjectionMode ?? ''}`
-  useEffect(() => {
-    let alive = true
-    const t = setTimeout(() => {
-      window.nodeTerminal.agent
-        .previewCommand({
+  const preview = useMemo(
+    () =>
+      assembleLaunchCommand(
+        {
           agentId: agent.id as AgentId,
           customAgent: agent,
           // No prompt: nodeterm launches the agent BARE and you type the prompt into it after it
           // starts. The preview shows exactly the launch line that gets typed into the shell.
           sessionIdFlagSupported: true
-        })
-        .then((r) => {
-          if (alive) setPreview(r)
-        })
-        .catch(() => {
-          if (alive) setPreview(null)
-        })
-    }, 250)
-    return () => {
-      alive = false
-      clearTimeout(t)
-    }
+        },
+        agentEnvSnapshot()
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sig])
+    [sig]
+  )
   if (!preview) return null
   return (
     <div className="rounded-md bg-bg-2 p-2">

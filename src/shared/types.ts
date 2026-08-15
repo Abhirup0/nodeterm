@@ -2067,26 +2067,16 @@ export interface ClaudeApi {
 
 export type HandoffResult = { filePath: string } | { error: string }
 
-/** Agent launch/preview IPC. The renderer has no `process.env`, so env-var expansion for the
- *  custom-agent settings preview is done main-side against the real OS environment — guaranteeing
- *  the preview matches what `pty-manager` will actually run. */
+/** Agent launch/gateway IPC. The renderer has no `process.env`; `${env:VAR}` expansion runs
+ *  renderer-side against the `envSnapshot()` cache (src/renderer/lib/agentEnv.ts), so the
+ *  Settings preview and the typed launch command share one assembler AND one environment — they
+ *  cannot drift by construction. */
 export interface AgentApi {
   /** A string-only snapshot of the main process environment (undefined entries omitted), for
-   *  expanding `${env:VAR}` tokens in the preview. */
+   *  expanding `${env:VAR}` tokens in launch commands and the Settings preview. Desktop-window
+   *  only: the browser/relay bridges resolve `{}` (a host env dump must never cross to a peer —
+   *  the PR #195 leak class), and expansion there degrades to the missing-env refusal. */
   envSnapshot(): Promise<Record<string, string>>
-  /** Assemble + expand a custom agent's FIRST-LAUNCH command against the main env. Returns the
-   *  command string and any env vars that were referenced but unset (no fallback) — surfaced as
-   *  `<unset>` markers in the preview. `inputs` is structurally `LaunchInputs`
-   *  (src/shared/agents/launch.ts); typed loosely here to avoid a types↔launch import cycle. */
-  previewCommand(inputs: {
-    agentId: AgentId
-    customAgent?: CustomAgent
-    initialPrompt?: string
-    model?: string
-    permissionMode?: AgentPermissionMode
-    sessionId?: string
-    sessionIdFlagSupported?: boolean
-  }): Promise<{ command: string; missingEnv: string[] }>
   /** Query the configured gateway's OpenAI-compatible `/v1/models` endpoint. Never rejects. */
   discoverModels(settings: ModelGatewaySettings): Promise<ModelDiscoveryResult>
   /** Literal gateway credentials are write-only in the renderer. */

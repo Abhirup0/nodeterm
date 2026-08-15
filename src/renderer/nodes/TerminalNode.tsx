@@ -159,6 +159,7 @@ import {
 } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
 import { assembleResumeCommand } from '@shared/agents/launch'
+import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
@@ -2806,7 +2807,10 @@ export function TerminalNode({
               model: data.agentModel,
               sharedIdentity: shared
             },
-            {}
+            // The boot-time desktop env snapshot — the same object fresh launch and the Settings
+            // preview expand against, so a ${env:…}-referencing custom agent cold-restores with
+            // the exact line it launched with. Empty on browser/relay by design.
+            agentEnvSnapshot()
           )
           if (cmd) writeWhenShellReady(cmd) // same shell-startup race as initialCommand
         }
@@ -2938,8 +2942,11 @@ export function TerminalNode({
         // Re-resolved at call time for the same reason as there: the mode is a property of how a
         // session is launched, not of the node. Inheritance-aware: a custom agent's baseAgent/args
         // are re-applied so a restart of a claude-base proxy resumes correctly.
-        // Launch-command / args substitutions must use the host that owns this pane. `api` is
-        // session-scoped, so a relay tab asks its host rather than expanding against this Mac.
+        // Env for ${env:…} substitution in launchCmd/args. `api` is session-scoped: a LOCAL pane
+        // resolves the desktop window's raw-ipcMain snapshot; a relay tab's host registers no
+        // env-snapshot handler at all (a host env dump must never cross to a peer — the PR #195
+        // leak class), so the request settles empty and the missingEnv gate below refuses instead
+        // of typing a mangled line. Builtins reference no env tokens, so they skip the round-trip.
         const launchEnv = customTarget
           ? await api.agent.envSnapshot().catch(() => ({}))
           : {}
@@ -3066,7 +3073,9 @@ export function TerminalNode({
             permissionMode: await ensureActivePermissionMode(agentId),
             sharedIdentity: false
           },
-          {}
+          // Same boot-time env snapshot as fresh launch / cold restore, so a wake types the same
+          // line the node launched with (empty on browser/relay by design).
+          agentEnvSnapshot()
         )
         // Refused BEFORE anything is written. `performResumePhase` gates on this same bare command
         // and would refuse too — but the KILL_LINE below is ours, so leaving this check to it

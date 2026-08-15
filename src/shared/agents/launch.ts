@@ -1,10 +1,12 @@
 // Pure command assembly — the ONE place an agent's launch / resume command line is built.
 //
-// Used by the renderer (fresh node creation in `workspace.ts createAgentNode`, cold-restore resume
-// in `TerminalNode.tsx`) and by the main process (the preview IPC handler, so the settings card
-// can show the exact command nodeterm will run). Pure: the environment is an explicit parameter
-// (the renderer passes an IPC-fetched snapshot; main passes `process.env`), so the same function
-// serves every caller and the preview can never drift from the real launch.
+// Used by the renderer only: fresh node creation (`workspace.ts createAgentNode`), cold-restore /
+// wake / variant resume (`TerminalNode.tsx`), and the Settings command preview
+// (`CustomAgentsSection.tsx`). Pure: the environment is an explicit parameter, and every caller
+// passes the SAME boot-time snapshot (src/renderer/lib/agentEnv.ts) — one assembler, one env, so
+// the preview cannot drift from the real launch by construction. There is deliberately no
+// main/server preview IPC: an endpoint that expands ${env:…} for a caller-supplied agent record
+// is an environment-variable oracle for relay peers (the #171/#190 review).
 //
 // Inheritance: a custom agent with a `baseAgent` resolves its prompt convention, separator, and
 // capability flags through that base harness (`capabilityAgentId`), so a claude-compatible proxy
@@ -12,7 +14,7 @@
 // `launchCmd`, `args`, and `env` override the binary and the surroundings.
 
 import type { CustomAgent } from '../types'
-import { shellSingleQuote, shellSplit } from '../shell-quote'
+import { shellQuoteIfNeeded, shellSingleQuote, shellSplit } from '../shell-quote'
 import { expandEnvVars } from './expansion'
 import {
   agentLaunchProgram,
@@ -71,15 +73,47 @@ export interface AssembledCommand {
   missingEnv: string[]
 }
 
-/** Expand + shell-split + re-quote a custom agent's `args` into a safe argv fragment. Expansion
- *  (`${env:…}`) runs first; the shell-split then tokenizes; each token is single-quoted so a
- *  resolved value carrying spaces or metacharacters stays one argument and a stray `;`/`$` in the
- *  raw text can never reach the shell as syntax. Returns '' when there are no args. */
+/** Shell-split + expand + re-quote a custom agent's `args` into a safe argv fragment. The split
+ *  runs FIRST, so token boundaries are fixed before any environment value enters the string;
+ *  `${env:…}` then expands per token and each token is single-quoted — a resolved value carrying
+ *  spaces or metacharacters stays ONE argument, and a stray `;`/`$`/backtick in an env value can
+ *  never reach the shell as syntax or smuggle an extra flag. A token whose env references all
+ *  expand to nothing vanishes (matching what an unquoted `$VAR` does at a real shell); the names
+ *  are still reported in `missing`. Returns '' when there are no args. */
 function expandedArgs(raw: string, env: Record<string, string | undefined>): { fragment: string; missing: string[] } {
   if (!raw?.trim()) return { fragment: '', missing: [] }
-  const { value, missing } = expandEnvVars(raw, env)
-  const tokens = shellSplit(value).map(shellSingleQuote)
+  const missing: string[] = []
+  const tokens: string[] = []
+  for (const token of shellSplit(raw)) {
+    const r = expandEnvVars(token, env)
+    missing.push(...r.missing)
+    if (r.value === '' && token !== '') continue
+    tokens.push(shellSingleQuote(r.value))
+  }
   return { fragment: tokens.join(' '), missing }
+}
+
+/** Expand `${env:…}` in a custom `launchCmd`. A launchCmd with no env tokens — every builtin, and
+ *  almost every custom agent — is returned byte-for-byte, raw shell text included, exactly as it
+ *  always was. When a token DOES reference the environment, the whole command is re-tokenized and
+ *  each token re-quoted unless shell-inert: the program position is typed unquoted into the pane,
+ *  so an env value expanding to `x; rm -rf ~` must land as literal text, never as syntax. This is
+ *  the local-shell-injection hole from the #171/#190 review, closed by construction instead of by
+ *  trusting whoever set the variable. */
+function expandedProgram(
+  raw: string,
+  env: Record<string, string | undefined>
+): { value: string; missing: string[] } {
+  if (!raw.includes('${env:')) return { value: raw, missing: [] }
+  const missing: string[] = []
+  const tokens: string[] = []
+  for (const token of shellSplit(raw)) {
+    const r = expandEnvVars(token, env)
+    missing.push(...r.missing)
+    if (r.value === '' && token !== '') continue
+    tokens.push(shellQuoteIfNeeded(r.value))
+  }
+  return { value: tokens.join(' '), missing }
 }
 
 /**
@@ -95,7 +129,7 @@ export function assembleLaunchCommand(
   const eff = resolveAgentConfig(inputs.agentId, inputs.customAgent)
   const capId = capabilityAgentId(inputs.agentId)
 
-  const { value: launchCmd, missing: m1 } = expandEnvVars(eff.launchCmd, env)
+  const { value: launchCmd, missing: m1 } = expandedProgram(eff.launchCmd, env)
   // Route a SHARED_IDENTITY_CAPABLE builtin (codex) through its managed launcher when this machine
   // has one, so the pane re-claims its own thread. Custom agents are not in that list, so a custom
   // launchCmd is returned unchanged. Applied to the already-expanded launchCmd (the launcher is a
@@ -152,7 +186,7 @@ export function assembleResumeCommand(
   const eff = resolveAgentConfig(inputs.agentId, inputs.customAgent)
   const capId = capabilityAgentId(inputs.agentId)
 
-  const { value: launchCmd, missing: m1 } = expandEnvVars(eff.launchCmd, env)
+  const { value: launchCmd, missing: m1 } = expandedProgram(eff.launchCmd, env)
   // Same launcher routing as the fresh-launch path: a SHARED_IDENTITY_CAPABLE builtin (codex) names
   // its managed launcher so the resumed session re-claims its own thread.
   const program = agentLaunchProgram(inputs.agentId, launchCmd, inputs.sharedIdentity)

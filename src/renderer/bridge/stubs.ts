@@ -273,11 +273,10 @@ export function buildStubApi(): Omit<
       readTranscript: U('claude.readTranscript')
     },
     agent: {
-      // The preview/expansion IPC runs main-side (the renderer has no process.env). In the browser
-      // (Server Edition) ws-bridge overrides this with the real handler; the stub returns an empty
-      // env + unexpanded command so the preview degrades to "unavailable" rather than throwing.
+      // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers
+      // an empty env, so `${env:VAR}` expansion reports every referenced var as missing and the
+      // launch/preview paths degrade to the missing-env refusal instead of a host-env dump.
       envSnapshot: () => Promise.resolve({}),
-      previewCommand: U('agent.previewCommand'),
       discoverModels: () => Promise.resolve({ models: [], error: 'Model discovery is unavailable.' }),
       gatewayCredentialStatus: () =>
         Promise.resolve({ hasStoredKey: false, storage: 'unavailable' }),

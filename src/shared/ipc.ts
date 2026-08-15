@@ -48,14 +48,13 @@ export const IPC = {
    *  'plain' events are what make the launcher's fallback visible instead of silent. */
   codexIdentity: 'codex-identity:event',
   /** Renderer → main: a snapshot of the main process's `process.env`, used to expand `${env:VAR}`
-   *  tokens in the custom-agent settings preview (the renderer has no `process.env` of its own).
-   *  Values are strings; undefined entries are omitted. */
+   *  tokens in custom-agent launch commands and the Settings preview (the renderer has no
+   *  `process.env` of its own). Values are strings; undefined entries are omitted.
+   *  DESKTOP-WINDOW-ONLY: registered via raw `ipcMain.handle`, never `platform().handle` — a
+   *  peer-dispatchable full-env dump is the credential-leak class PR #195 closed. The
+   *  browser/relay bridges answer `{}` locally and expansion degrades to the missing-env
+   *  refusal. */
   envSnapshot: 'env:snapshot',
-  /** Renderer → main: assemble + `${env:…}`-expand a custom agent's launch command against the
-   *  main process env, returning the exact string nodeterm will type into the shell. Powers the
-   *  live preview in Settings → Custom agents. Payload: `LaunchInputs`; resolves
-   *  `{ command, missingEnv }`. */
-  agentPreviewCommand: 'agent:preview-command',
   /** Renderer → core: fetch an OpenAI-compatible model catalogue without browser CORS. */
   agentDiscoverModels: 'agent:discover-models',
   /** Renderer → core secret boundary for a literal model-gateway API key. The value is write-only;

@@ -11,6 +11,19 @@ export function shellSingleQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'"
 }
 
+/** Tokens made only of these characters mean the same thing bare and quoted, so they may pass
+ *  through unquoted — which keeps an unexpanded `claude --resume` byte-identical to what the
+ *  historical builder typed. Everything else (whitespace, quotes, `;`, `$`, backticks, globs…)
+ *  gets the single-quote treatment. */
+const SAFE_BARE_TOKEN = /^[A-Za-z0-9_@%+=:,.^/-]+$/
+
+/** Quote `s` as one shell argument ONLY if it needs it. The quote-by-construction half of env
+ *  expansion: an expanded value that is shell-inert stays bare (so builtin commands don't churn),
+ *  and anything that could read as shell syntax is fenced into a literal. */
+export function shellQuoteIfNeeded(s: string): string {
+  return s !== '' && SAFE_BARE_TOKEN.test(s) ? s : shellSingleQuote(s)
+}
+
 /**
  * Split a free-text argv string into tokens the way a POSIX shell would, honoring single and
  * double quotes and backslash escapes. Used for a custom agent's `args` field, which the user
@@ -18,9 +31,9 @@ export function shellSingleQuote(s: string): string {
  * is appended.
  *
  * Deliberately NOT a full shell: no variable expansion, no command substitution, no tilde. The
- * expansion that DOES happen (`${env:VAR}`) is nodeterm's own, run BEFORE this split, so a
- * resolved value containing spaces is indistinguishable from a quoted one only if the user quoted
- * it — i.e. the user keeps the same control they have at a real shell.
+ * expansion that DOES happen (`${env:VAR}`) is nodeterm's own, run PER TOKEN after this split
+ * (see launch.ts), so a resolved value containing spaces or metacharacters stays one argument by
+ * construction — the token boundary is fixed before any environment value enters the string.
  */
 export function shellSplit(input: string): string[] {
   const tokens: string[] = []

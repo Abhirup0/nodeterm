@@ -3,6 +3,7 @@ import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingL
 import type { AgentId, AgentPermissionMode } from '@shared/agents/config'
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
+import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
 import { codexSharedIdentity } from './codexIdentity'
@@ -379,12 +380,11 @@ export function createAgentNode(
   const mintedSessionId = sessionIdFlagSupported ? uuid() : undefined
   // Command assembly is delegated to the ONE shared builder (src/shared/agents/launch.ts), used by
   // fresh launch AND cold-restore resume, so a custom agent's baseAgent/args/expansion are applied
-  // identically in both paths. The renderer has no process.env, so expansion here runs against an
-  // empty snapshot — but the FIRST-LAUNCH command typed into the shell only carries ${env:...} when
-  // the user put it in launchCmd/args, and the real env merge happens main-side in pty-manager
-  // (env values are injected as process env, NOT typed into the shell, so they never needed
-  // renderer-side expansion). For a builtin with no custom args this is byte-identical to the old
-  // hand-built command line.
+  // identically in both paths. ${env:...} in launchCmd/args expands against the boot-time env
+  // snapshot (lib/agentEnv.ts) — the SAME object the Settings preview expands against, so the
+  // typed line is the previewed line. Env-var VALUES (the env map) are separate: pty-manager
+  // injects them as process env main-side, never into the typed command. For a builtin with no
+  // custom args this is byte-identical to the old hand-built command line.
   const customAgent = agentConfig(agentId)
     ? undefined
     : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
@@ -401,10 +401,9 @@ export function createAgentNode(
       // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).
       sharedIdentity: codexSharedIdentity(ssh)
     },
-    // The renderer has no process.env; pass an empty record. ${env:...} in launchCmd/args resolves
-    // to empty here, but that only affects the TYPED command — env-var VALUES are injected as
-    // process env by pty-manager (main-side, against the real env), not typed into the shell.
-    {}
+    // The boot-time snapshot of the desktop env (empty on browser/relay by design, where the
+    // missing-env warning below is the honest outcome — the same markers the preview shows).
+    agentEnvSnapshot()
   )
   if (missingEnv.length) {
     // A missing var in the typed command (launchCmd/args) would launch with a blank — surface it,

@@ -678,9 +678,21 @@ app.whenReady().then(async () => {
   }
   settingsStore.registerIpc()
   sshStore.registerIpc()
-  // Custom-agent preview/expansion + gateway discovery/credential IPC (renderer has no
-  // process.env and never receives a stored literal key).
-  registerAgentEnvIpc(gatewayCredentials)
+  // Gateway discovery/credential IPC (peer-reachable by design; the renderer never receives a
+  // stored literal key, and discovery resolves key REFERENCES only for the saved gateway URL).
+  registerAgentEnvIpc(() => settingsStore.get().modelGateway, gatewayCredentials)
+  // The `${env:VAR}` snapshot for custom-agent expansion is DESKTOP-WINDOW-ONLY, so it is a raw
+  // `ipcMain.handle` on purpose (see the handler-table comment in platform-electron.ts): a
+  // `platform().handle` registration would answer relay peers too — a paired phone or remote tab
+  // could read every API key in this process's environment. The browser/relay bridges hardcode
+  // an empty snapshot instead, and expansion there degrades to the missing-env refusal.
+  ipcMain.handle(IPC.envSnapshot, () => {
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === 'string') out[k] = v
+    }
+    return out
+  })
   ptyManager.init(
     () => settingsStore.get(),
     () => gatewayCredentials.readForHost()

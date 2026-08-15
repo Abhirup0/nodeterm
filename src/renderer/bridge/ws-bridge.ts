@@ -291,11 +291,11 @@ export function buildRealApi(
   }
 
   const agent: NodeTerminalApi['agent'] = {
-    envSnapshot: () => client.request(IPC.envSnapshot) as Promise<Record<string, string>>,
-    previewCommand: (inputs) =>
-      client.request(IPC.agentPreviewCommand, inputs) as ReturnType<
-        NodeTerminalApi['agent']['previewCommand']
-      >,
+    // Deliberately NOT a request: the server registers no env-snapshot handler (a full host-env
+    // dump answerable by any authenticated WS client is the PR #195 leak class at the RPC layer).
+    // An empty snapshot makes `${env:VAR}` expansion surface every referenced var as missing, and
+    // the launch paths refuse rather than type a mangled line.
+    envSnapshot: () => Promise.resolve({}),
     discoverModels: (gateway) =>
       client.request(IPC.agentDiscoverModels, gateway) as ReturnType<
         NodeTerminalApi['agent']['discoverModels']
