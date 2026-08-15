@@ -1,0 +1,203 @@
+// The pure parsers, then the same parsers against a REAL tmux pane.
+//
+// The `ps` fixtures below are not invented: they are literal output captured on this host while
+// writing the module (Linux 6.8, procps-ng 4.0.4), which is why they carry a `stat` column and why
+// the foreground group is found through its `+` flag rather than through `tpgid`. See the module
+// docblock for what was measured and what it ruled out.
+import { describe, it, expect, afterAll } from 'vitest'
+import { execFileSync } from 'child_process'
+import {
+  PANE_OWNER_FMT,
+  foregroundArgvArgs,
+  foregroundPgid,
+  isSafeTty,
+  parseForegroundArgv,
+  parsePaneOwner
+} from './pane-owner'
+
+describe('PANE_OWNER_FMT', () => {
+  it('asks for pid, tty and current command in one round-trip', () => {
+    expect(PANE_OWNER_FMT).toBe('#{pane_pid}|#{pane_tty}|#{pane_current_command}')
+  })
+})
+
+describe('parsePaneOwner', () => {
+  it('parses a well-formed line', () => {
+    expect(parsePaneOwner('4242|/dev/pts/9|claude')).toEqual({
+      panePid: 4242,
+      tty: '/dev/pts/9',
+      command: 'claude'
+    })
+  })
+
+  it('tolerates the trailing newline a real display-message writes', () => {
+    expect(parsePaneOwner('4242|/dev/pts/9|node\n')?.command).toBe('node')
+  })
+
+  // Unknown is never evidence of a particular command — paneCommand's contract, verbatim.
+  it.each(['', '   ', 'notanumber|/dev/pts/9|claude', '0|/dev/pts/9|claude', '4242', '4242||claude', '4242|/dev/pts/9|'])(
+    'answers null for %j rather than guessing',
+    (s) => {
+      expect(parsePaneOwner(s)).toBeNull()
+    }
+  )
+
+  it('answers null for a missing read rather than throwing', () => {
+    expect(parsePaneOwner(null)).toBeNull()
+    expect(parsePaneOwner(undefined)).toBeNull()
+  })
+})
+
+describe('isSafeTty', () => {
+  it.each(['/dev/pts/0', '/dev/ttys004', 'pts/9'])('accepts the real thing: %s', (t) => {
+    expect(isSafeTty(t)).toBe(true)
+  })
+  it.each(['', '/dev/pts/0; rm -rf ~', '/dev/pts/$(id)', '/dev/../etc/passwd', '/dev/pts/0 && x', '/dev/pts/`id`'])(
+    'refuses %j — nothing shell-live reaches a command line',
+    (t) => {
+      expect(isSafeTty(t)).toBe(false)
+    }
+  )
+})
+
+describe('foregroundArgvArgs', () => {
+  it('is one ps call on the pane tty, wide enough that BSD does not truncate the argv', () => {
+    expect(foregroundArgvArgs('/dev/pts/0')).toEqual({
+      bin: 'ps',
+      args: ['-ww', '-o', 'pid=,pgid=,stat=,args=', '-t', '/dev/pts/0']
+    })
+  })
+  it('refuses to build a command line around an unsafe tty', () => {
+    expect(foregroundArgvArgs('/dev/pts/0; id')).toBeNull()
+  })
+})
+
+// Captured verbatim from `ps -ww -o pid=,pgid=,stat=,args= -t /dev/pts/0` while a pipeline ran in a
+// real tmux pane. `Ss` (no `+`) is the pane's own shell; the `S+` rows are the foreground group.
+const REAL_PS = [
+  '2485382 2485382 Ss   -bash',
+  '2489089 2489089 S+   /bin/sh -c sleep 200 | cat',
+  '2489091 2489089 S+   sleep 200',
+  '2489092 2489089 S+   cat'
+].join('\n')
+
+describe('foregroundPgid', () => {
+  it('reads the foreground group off the + flag, not off the pane shell', () => {
+    expect(foregroundPgid(REAL_PS)).toBe(2489089)
+  })
+  it('answers null when nothing is marked foreground', () => {
+    expect(foregroundPgid('2485382 2485382 Ss   -bash')).toBeNull()
+  })
+  it('answers null on garbage and on nothing at all', () => {
+    expect(foregroundPgid('<<ps: illegal option>>')).toBeNull()
+    expect(foregroundPgid('')).toBeNull()
+    expect(foregroundPgid(null)).toBeNull()
+  })
+})
+
+describe('parseForegroundArgv', () => {
+  it('returns every argv in the group, group leader first', () => {
+    expect(parseForegroundArgv(REAL_PS, 2489089)).toEqual([
+      '/bin/sh -c sleep 200 | cat',
+      'sleep 200',
+      'cat'
+    ])
+  })
+
+  it('ignores rows from another pgid — a backgrounded job shares the tty', () => {
+    expect(parseForegroundArgv(REAL_PS, 2489089)).toHaveLength(3)
+    expect(parseForegroundArgv(REAL_PS, 2489089).join('\n')).not.toContain('-bash')
+  })
+
+  it('keeps the full argv, so the script path an interpreter runs is still there', () => {
+    const ps = '2503294 2503294 Sl+  node /home/u/.npm/bin/claude --resume x'
+    expect(parseForegroundArgv(ps, 2503294)).toEqual(['node /home/u/.npm/bin/claude --resume x'])
+  })
+
+  it('answers [] on garbage — never throws, never partially guesses', () => {
+    expect(parseForegroundArgv('<<ps: illegal option>>', 4243)).toEqual([])
+    expect(parseForegroundArgv(REAL_PS, 0)).toEqual([])
+    expect(parseForegroundArgv(null, 4243)).toEqual([])
+  })
+})
+
+/**
+ * THE REAL PANE (Global Constraint 9).
+ *
+ * Everything above trusts our own fixtures. This drives a real tmux server on a socket of its own,
+ * runs a real command in a real pane, and asks the real `ps` — so the format string, the `ps`
+ * columns and the `+` flag are judged by the programs that produce them, not by us.
+ *
+ * tmux allocates the pane's pty itself, so no node-pty wrapper is needed to make this real: the
+ * process under test genuinely has a controlling terminal and a foreground process group.
+ *
+ * The socket is private (`nt-paneowner-<pid>-<rand>`) and killed in afterAll — nothing here can
+ * touch the app's `node-terminal` socket or the SSH `nodeterm-rmt` one.
+ */
+const tmuxBin = (() => {
+  try {
+    return execFileSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim() || null
+  } catch {
+    return null
+  }
+})()
+
+const SOCKET = `nt-paneowner-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+const tmux = (...args: string[]) =>
+  execFileSync(tmuxBin as string, ['-L', SOCKET, ...args], { encoding: 'utf8', timeout: 10_000 })
+
+afterAll(() => {
+  if (!tmuxBin) return
+  try {
+    tmux('kill-server')
+  } catch {
+    // already gone — the server exits on its own when the last session dies
+  }
+})
+
+describe.skipIf(!tmuxBin)('against a real tmux pane', () => {
+  it('finds the command actually running in the pane, which pane_current_command cannot name', () => {
+    tmux('new-session', '-d', '-s', 'owner', 'sh')
+    // A distinctive argv the pane's shell could never be confused with.
+    tmux('send-keys', '-t', 'owner', 'sleep 411', 'Enter')
+    // The pane's shell forks and execs asynchronously; poll rather than sleep a fixed time.
+    let argv: string[] = []
+    let identity: ReturnType<typeof parsePaneOwner> = null
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      identity = parsePaneOwner(tmux('display-message', '-p', '-t', 'owner', PANE_OWNER_FMT))
+      if (identity) {
+        const call = foregroundArgvArgs(identity.tty)
+        expect(call).not.toBeNull()
+        const out = execFileSync(call!.bin, call!.args, { encoding: 'utf8', timeout: 10_000 })
+        const pgid = foregroundPgid(out)
+        if (pgid !== null) argv = parseForegroundArgv(out, pgid)
+      }
+      if (argv.some((a) => a.includes('sleep 411'))) break
+    }
+    expect(identity).not.toBeNull()
+    expect(identity!.panePid).toBeGreaterThan(0)
+    expect(identity!.tty).toMatch(/^\/dev\//)
+    expect(argv.join('\n')).toContain('sleep 411')
+    // And the pane's own shell — which is NOT in the foreground group — is not reported as owner.
+    expect(argv.every((a) => !/(^|\/)-?sh$/.test(a))).toBe(true)
+  }, 30_000)
+
+  it('reports the pane shell as owner once the command finishes, so an idle pane is never an agent', () => {
+    tmux('new-session', '-d', '-s', 'idle', 'sh')
+    let argv: string[] = []
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      const identity = parsePaneOwner(tmux('display-message', '-p', '-t', 'idle', PANE_OWNER_FMT))
+      if (identity) {
+        const call = foregroundArgvArgs(identity.tty)!
+        const out = execFileSync(call.bin, call.args, { encoding: 'utf8', timeout: 10_000 })
+        const pgid = foregroundPgid(out)
+        if (pgid !== null) argv = parseForegroundArgv(out, pgid)
+      }
+      if (argv.length > 0) break
+    }
+    expect(argv).toHaveLength(1)
+    expect(argv[0]).toMatch(/(^|\/)-?sh$/)
+  }, 30_000)
+})
