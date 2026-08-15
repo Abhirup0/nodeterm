@@ -6,7 +6,9 @@ import { Switch } from '@renderer/ui/Switch'
 import { NumberField } from '@renderer/ui/NumberField'
 import { Select } from '@renderer/ui/Select'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
+import { Input } from '@renderer/ui/Input'
 import { hintLabel } from '@shared/platform-utils'
+import { DEFAULT_WORKTREE_PATH_TEMPLATE } from '@shared/worktree'
 
 const ROWS = {
   defaultView: {
@@ -32,6 +34,10 @@ const ROWS = {
   sidebarGrouping: {
     title: 'Sidebar: group by',
     keywords: ['sidebar', 'sessions', 'group', 'status', 'project', 'attention']
+  },
+  worktreePath: {
+    title: 'Worktree path template',
+    keywords: ['worktree', 'git', 'path', 'folder', 'repo', 'branch', 'template']
   },
   wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] },
   trackpadPan: {
@@ -185,6 +191,23 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
                 { value: 'status', label: 'Status' }
               ]}
               onChange={(v) => update({ sidebarGrouping: v })}
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.worktreePath}>
+        <FieldRow
+          label="Worktree path template"
+          description={
+            'Resolved from the repository root. Supports $repoName (also $reponame or $defaultFolderName) and $branch; a missing branch is appended automatically.'
+          }
+          control={
+            <Input
+              className="w-80 font-mono"
+              aria-label="Worktree path template"
+              placeholder={DEFAULT_WORKTREE_PATH_TEMPLATE}
+              value={settings.worktreePathTemplate}
+              onChange={(e) => update({ worktreePathTemplate: e.target.value })}
             />
           }
         />

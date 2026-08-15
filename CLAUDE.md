@@ -1630,6 +1630,13 @@ again; the grace window was never the thing that was wrong.
   worktrees listed for adoption. (Both git IPCs existed before this feature and had **zero**
   renderer callers, which is why it was unusable: the dialog's repo field was always empty and had
   to be typed by hand. Don't re-strand them.)
+  - **Default location** — `settings.worktreePathTemplate` is a machine-global Behavior setting,
+    expanded only by `shared/worktree.computeWorktreePath` for both the dialog and canvas-control
+    CLI. It is relative to the repo root and supports `$repoName` (`$reponame` /
+    `$defaultFolderName` aliases) and `$branch` in bare or `${…}` form. If branch is omitted, its
+    safe slug is appended automatically. The shipped `../${repoName}.worktrees/${branch}` keeps
+    worktrees beside — not nested inside — the main checkout. There is no general project-settings
+    surface today, so the setting is intentionally global rather than hidden in a one-off menu.
   - **One store, one poller** — `renderer/state/worktrees.ts` is the **only** caller of the worktree
     /status *read* IPCs (`git.repoRoot`, `git.worktreeList`, `git.status`); the group chip, the
     creation dialog and the Source Control panel all read that store. Three independent pollers would

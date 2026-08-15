@@ -947,17 +947,6 @@ export function Canvas() {
   const worktreeOrphans = useWorktrees((s) => s.orphans)
   // git's order — entries[0] is the repo's main checkout, i.e. the real default branch.
   const worktreeEntries = useWorktrees((s) => s.entries)
-  // Writable base dir for the default worktree path (userData on desktop, the server's data dir
-  // in the browser), fetched once on mount. STATE, not a ref: a dialog opened before the promise
-  // resolves must re-render with the real base, or it would keep suggesting nothing.
-  const [userDataDir, setUserDataDir] = useState('')
-  useEffect(() => {
-    // The SESSION core's writable base, not this client's: a remote tab's worktree default path
-    // must live on the machine `git worktree add` runs on (the host — obligation c), so it comes
-    // from the session api (`api.userDataDir()`), re-resolved when the active session changes.
-    // For the local session `api` IS window.nodeTerminal, so this stays byte-identical.
-    void api.userDataDir().then(setUserDataDir)
-  }, [api])
   // Worktrees already bound to a group on THIS canvas. The store's orphan list is refreshed after
   // every mutation, but it is also filled asynchronously — filtering against the live nodes is the
   // guard that stops the dialog from offering a worktree a second group could bind to.
@@ -7169,13 +7158,13 @@ export function Canvas() {
               bindGroupId = g.id
             }
             const baseRef = args.base?.trim() || resolveBaseRef(entries)
-            // Path from the SESSION core's userData (the HOST for a remote tab), not the local
-            // client's — the git worktree op below runs on `api.git`, so the path must live there.
+            // Resolve from this session's repo root, so a relay tab still produces a path on the
+            // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
               explicitPath: args.path,
-              userDataDir: api.userDataDir,
               repoRoot,
-              branch
+              branch,
+              template: useSettings.getState().settings.worktreePathTemplate
             })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
@@ -9463,9 +9452,9 @@ export function Canvas() {
           branches={worktreeBranches}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
-              userDataDir,
-              repoPath.split('/').pop() || 'repo',
-              sanitizeWorktreeBranch(branch)
+              repoPath,
+              branch,
+              settings.worktreePathTemplate
             )
           }
           busy={worktreeBusy}
