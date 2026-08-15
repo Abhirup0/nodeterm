@@ -2,19 +2,20 @@
 //
 // The sibling `paste-injection.test.ts` asserts on the produced BYTES. This file trusts no parser
 // of ours: it spawns a real pty running a real bash (readline turns bracketed paste on and
-// announces it with `ESC[?2004h`, which is exactly the `bracket_paste_flag` the delivery paths
-// probe for), writes the framed body into it, and then asks the filesystem whether the attacker's
-// trailing bytes were executed as KEYS.
+// announces it with `ESC[?2004h`), writes the framed body into it, and then asks the filesystem
+// whether the attacker's trailing bytes were executed as KEYS.
 //
 // It exists for the reason `control-master.realsh.test.ts` exists: a structural test can only
 // catch the tricks it was taught, and this repo has twice shipped a defect that a hand-rolled
 // parser passed and the real thing caught. A paste frame is a promise made to somebody else's
 // parser, so somebody else's parser has to be the judge.
 //
-// The SSH case goes the whole way: the remote command line `remoteTmuxSendKeysArgs` builds is run
-// through a real /bin/sh with a stub `tmux` on PATH, and the bytes that stub receives — what the
-// remote tmux would inject into the pane — are what get delivered to bash. Real quoting, then a
-// real reader.
+// SCOPE, since it changed: `bracketedInjection` is no longer how `sendText` delivers. Both of its
+// paths hand the payload to tmux and let `paste-buffer -p` insert the markers, which is what
+// removed the tmux-3.7 version floor — `tmux-paste.realtmux.test.ts` is where THAT is proven,
+// against a real tmux, on both the local and the SSH command lines, including these same escape
+// payloads. What remains here is the one caller that still builds a frame in JS:
+// `agents/agent-message.ts`, which frames a message envelope before handing it to `sendFramed`.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
@@ -22,7 +23,6 @@ import os from 'os'
 import path from 'path'
 import * as pty from 'node-pty'
 import { bracketedInjection, PASTE_END } from './paste-injection'
-import { remoteTmuxSendKeysArgs } from './remote-ssh/control-master'
 
 const ESC = '\x1b'
 /** readline says "I have requested bracketed paste" with this — the same DECSET tmux tracks. */
@@ -56,30 +56,11 @@ const BASH = findPasteAwareBash()
 
 let work: string
 let markerDir: string
-let binDir: string
 
 beforeAll(() => {
   work = fs.mkdtempSync(path.join(os.tmpdir(), 'ntpaste-'))
   markerDir = path.join(work, 'm')
-  binDir = path.join(work, 'bin')
   fs.mkdirSync(markerDir)
-  fs.mkdirSync(binDir)
-  // Stub tmux for the SSH path: answers the bracket_paste_flag probe with 1 and prints the body
-  // of a `send-keys` verbatim — i.e. exactly the bytes the remote tmux would put in the pane.
-  fs.writeFileSync(
-    path.join(binDir, 'tmux'),
-    [
-      '#!/bin/sh',
-      'for a in "$@"; do',
-      '  last="$a"',
-      '  case "$a" in display-message) dm=1;; send-keys) sk=1;; esac',
-      'done',
-      '[ -n "$dm" ] && { printf 1; exit 0; }',
-      '[ -n "$sk" ] && { if [ "$last" = Enter ]; then printf "\\r"; else printf %s "$last"; fi; }',
-      'exit 0'
-    ].join('\n') + '\n',
-    { mode: 0o755 }
-  )
 })
 
 afterAll(() => {
@@ -146,27 +127,11 @@ function deliver(bytes: string): Promise<string> {
   })
 }
 
-/** The local delivery: `PtyManager.sendText`'s framed branch hands exactly this to send-keys. */
+/** The one surviving JS framer: `agent-message.ts` builds exactly this for `sendFramed`. */
 const localBody = (text: string, enter: boolean): string => bracketedInjection(text, enter)
 
-/** The SSH delivery: build the remote line, run it through a real sh, keep what tmux received. */
-function sshBody(text: string, enter: boolean): string {
-  const cmd = remoteTmuxSendKeysArgs(
-    { host: 'h.example.com', user: 'deploy', port: 22, identityFile: '/k/id' },
-    '/s.sock',
-    'nt-x',
-    text,
-    enter
-  ).slice(-1)[0]
-  return execFileSync('/bin/sh', ['-c', cmd], {
-    env: { PATH: `${binDir}:/usr/bin:/bin`, HOME: work },
-    encoding: 'utf8'
-  })
-}
-
 const PATHS: Record<string, (text: string, enter: boolean) => string> = {
-  local: localBody,
-  ssh: sshBody
+  envelope: localBody
 }
 
 const suite = BASH ? describe : describe.skip

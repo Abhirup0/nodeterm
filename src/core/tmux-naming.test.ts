@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
-  localTmuxSendKeysArgs,
   localTmuxEnterArgs,
+  localTmuxPasteArgs,
+  pasteBufferName,
   sessionName,
   isSessionName,
   TMUX_SOCKET
@@ -17,29 +18,10 @@ describe('sessionName / isSessionName', () => {
   })
 })
 
-/**
- * SECURITY — the payload must not be able to become an OPTION.
- *
- * `send-keys -l <text>` stops being "type this literally" the moment `<text>` begins with `-`:
- * tmux is still in option-parsing mode, so the payload is read as flags. `--` is what ends option
- * parsing, and the remote path has always had it (`remoteTmuxSendKeysArgs`) while the local one
- * did not — the exact drift `sanitizePasteText`'s own header warns about.
- */
-describe('localTmuxSendKeysArgs', () => {
-  it('ends option parsing before the payload', () => {
-    const args = localTmuxSendKeysArgs('sock', 'nt-x', 'hello')
-    expect(args).toEqual(['-L', 'sock', 'send-keys', '-t', 'nt-x', '-l', '--', 'hello'])
-  })
-  it('puts `--` immediately before the body, whatever the body is', () => {
-    // Every payload here exits 0 as a FLAG on tmux 3.4 — i.e. was accepted, typed nothing, and let
-    // the caller believe it had been delivered. `-R` additionally resets the pane display.
-    for (const body of ['-R', '-K', '-l', '--', '-H', '-F', '-N 3', '\x1b[200~x\x1b[201~\r']) {
-      const args = localTmuxSendKeysArgs(TMUX_SOCKET, 'nt-x', body)
-      expect(args[args.length - 2]).toBe('--')
-      expect(args[args.length - 1]).toBe(body)
-    }
-  })
-  it('the Enter is a separate command and carries no literal body to protect', () => {
+describe('localTmuxEnterArgs', () => {
+  // The bare submit, used only for `sendText('', { enter: true })` now that the ordinary path is
+  // one atomic tmux command list. It carries no literal body, so it needs no `--`.
+  it('is a plain Enter with no payload', () => {
     expect(localTmuxEnterArgs('sock', 'nt-x')).toEqual([
       '-L',
       'sock',
@@ -48,5 +30,59 @@ describe('localTmuxSendKeysArgs', () => {
       'nt-x',
       'Enter'
     ])
+    expect(localTmuxEnterArgs(TMUX_SOCKET, 'nt-x')).not.toContain('-l')
+  })
+})
+
+/**
+ * The delivery `sendText` actually uses. Structure only — `tmux-paste.realtmux.test.ts` is where
+ * the same argv is handed to a real tmux driving a real application and the BYTES are judged.
+ */
+describe('localTmuxPasteArgs', () => {
+  const BUF = 'nt-paste-deadbeef'
+
+  it('is one invocation: stdin buffer, gated cancel, framed paste, Enter — in that order', () => {
+    expect(localTmuxPasteArgs('sock', 'nt-x', BUF, true)).toEqual([
+      '-L', 'sock',
+      'load-buffer', '-b', BUF, '-',
+      ';', 'if-shell', '-F', '-t', 'nt-x', '#{pane_in_mode}', 'send-keys -t nt-x -X cancel',
+      ';', 'paste-buffer', '-d', '-p', '-r', '-b', BUF, '-t', 'nt-x',
+      ';', 'send-keys', '-t', 'nt-x', 'Enter'
+    ])
+  })
+
+  it('omits the Enter for a dictation insert', () => {
+    expect(localTmuxPasteArgs('sock', 'nt-x', BUF, false)).not.toContain('Enter')
+  })
+
+  // The version floor this PR removes. `#{bracket_paste_flag}` first shipped in tmux 3.7; every
+  // older tmux expanded it to '' and the delivery mangled the write. Nothing here may depend on it.
+  it('never reads #{bracket_paste_flag} — `-p` asks the pane instead, and has since tmux 1.7', () => {
+    const args = localTmuxPasteArgs('sock', 'nt-x', BUF, true)
+    expect(args).not.toContain('#{bracket_paste_flag}')
+    expect(args).not.toContain('display-message')
+    expect(args).toContain('-p')
+  })
+
+  // Everything the payload could have been is absent: it goes down stdin, which is both the
+  // MAX_ARG_STRLEN fix and the repo rule that no payload rides a command line.
+  it('carries no payload of any kind', () => {
+    const args = localTmuxPasteArgs('sock', 'nt-x', BUF, true)
+    expect(args).not.toContain('set-buffer')
+    expect(args).not.toContain('-l')
+    expect(args.filter((a) => a === '-')).toHaveLength(1) // load-buffer's stdin marker
+  })
+
+  it('gives every call its own buffer, so two concurrent deliveries cannot overwrite each other', () => {
+    const names = new Set(Array.from({ length: 200 }, () => pasteBufferName()))
+    expect(names.size).toBe(200)
+    for (const n of names) expect(n).toMatch(/^nt-paste-[0-9a-f]{12}$/)
+  })
+
+  it('refuses anything spliced unquoted that this app did not generate', () => {
+    expect(() => localTmuxPasteArgs('sock', 'nt-x; kill-server', BUF, true)).toThrow(/paste target/)
+    expect(() => localTmuxPasteArgs('sock', sessionName(''), BUF, true)).toThrow(/paste target/)
+    expect(() => localTmuxPasteArgs('sock', 'nt-x', 'buffer0', true)).toThrow(/buffer name/)
+    expect(() => localTmuxPasteArgs('sock', sessionName('term-mabc-3'), pasteBufferName(), true)).not.toThrow()
   })
 })

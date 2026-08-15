@@ -93,7 +93,11 @@ export interface DeliveryRequest {
 export interface DeliveryDeps {
   /** Kernel truth about the target's pane. Unbounded by contract — this module bounds it. */
   paneOwner(nodeId: string): Promise<PaneOwner | null>
-  /** tmux's `#{bracket_paste_flag}` for the target's pane. */
+  /**
+   * Did the target's pane request bracketed paste? UNIMPLEMENTED — nothing wires this yet, and
+   * `PtyManager.bracketPasteRequested` (which read `#{bracket_paste_flag}`, a tmux-3.7+ format) was
+   * deleted when `sendText` stopped needing to ask. See the long note at the refusal that uses it.
+   */
   bracketPasteRequested(nodeId: string): Promise<boolean>
   /** ONE write: the framed text and the Enter together. Resolves false when the pane is gone. */
   sendFramed(nodeId: string, payload: string): Promise<boolean>
@@ -360,27 +364,27 @@ export async function deliverAgentMessage(
     // herdr :260 — a multi-line envelope on the UNFRAMED fallback would be submitted line by line
     // as separate turns. It is refused, never sent and hoped for.
     //
-    // ── ROLLOUT BLOCKER, MEASURED — DO NOT SHIP THE VERBS WITHOUT READING THIS ──────────────────
+    // ── THE ROLLOUT BLOCKER THAT USED TO BE HERE IS GONE; THIS PROBE IS NOW THE ONLY ONE LEFT ───
     //
-    // `PtyManager.bracketPasteRequested` reads tmux's `#{bracket_paste_flag}`, and that format
-    // FIRST SHIPPED IN TMUX 3.7 (2026-06-26). On every earlier tmux the name is unknown and expands
-    // to the empty string, which compares unequal to '1' — so the probe answers false for every
-    // pane and this refusal fires for every delivery. Measured here on tmux 3.4: the format is
-    // absent from the binary's format table and from the man page's FORMATS list, and behaves
-    // exactly like a bogus name.
+    // It used to read: `PtyManager.bracketPasteRequested` reads `#{bracket_paste_flag}`, a format
+    // that FIRST SHIPPED IN TMUX 3.7, so on Ubuntu 24.04 (3.4), 22.04 (3.2a), Debian 12/13
+    // (3.3a/3.5a), Ubuntu 26.04 (3.6a), every SSH target and the Server Edition it expanded to ''
+    // and this refusal fired for every delivery — messaging inert on most Linux hosts.
     //
-    // Who that is: Ubuntu 24.04 LTS ships 3.4, Ubuntu 22.04 → 3.2a, Debian 12 → 3.3a, Debian 13 →
-    // 3.5a, Ubuntu 26.04 → 3.6a. Plus EVERY SSH target (the REMOTE host's tmux decides) and the
-    // Server Edition. The bundled 3.7b does not rescue it: `extraResources` places it under "mac"
-    // only, and `bundledTmuxPath` is deliberately the LAST candidate after the system one.
+    // That method no longer exists. `sendText` stopped asking whether to frame and hands the
+    // payload to `tmux paste-buffer -p`, which consults the pane's real bracketed-paste state
+    // inside tmux and has done since tmux 1.7 (2012). There is no version floor on the DELIVERY.
     //
-    // The refusal is the correct fail direction — sending a multi-line envelope unframed is herdr
-    // :260, which is worse. But it means messaging is INERT on most Linux hosts, and PR 5 owes:
-    // a three-way probe ('1' = aware, '0' = genuinely unaware, '' or error = FORMAT UNSUPPORTED), a
-    // distinct outcome carrying `tmux -V` and the fix, and an explicit decision on whether the
-    // feature ships to Linux and SSH at all without either a Linux tmux bundle or a single-line
-    // envelope fallback. `targetNotPasteAware` cannot carry that today: it says the pane did not
-    // ask, when the truth is that we could not ask.
+    // WHAT IS STILL OWED HERE, and why this is not simply deleted: this gate is not the delivery,
+    // it is a REFUSAL — messaging declines to send a multi-line envelope into a pane that would
+    // submit it line by line (herdr :260). Answering that still needs to know whether the target
+    // asked for bracketed paste, and `DeliveryDeps.bracketPasteRequested` is still declared with
+    // no implementation wired anywhere. Whoever wires it inherits the same three-way problem the
+    // old note described ('1' = aware, '0' = genuinely unaware, '' or error = CANNOT ASK), because
+    // `targetNotPasteAware` says "the pane did not ask" when the truth may be "we could not ask".
+    // The cheap way out now exists and did not before: this module could stop probing and instead
+    // let the same `paste-buffer -p` delivery carry the envelope, since tmux frames it correctly
+    // or not at all — but that is a decision for the PR that ships the verbs, not this one.
     if (!(await deps.bracketPasteRequested(req.targetNodeId)))
       return refuse({ kind: 'targetNotPasteAware' })
 
