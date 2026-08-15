@@ -163,7 +163,11 @@ const NOT_PERMITTED_TEXT: Record<NotPermittedReason, string> = {
   'cross-project': 'the target node is not in the sending node\'s project.',
   'self-send': 'a node cannot message itself.',
   'unsupported-edition': 'agent messaging does not exist on this edition.',
-  'unaddressable-node-id': 'that node id cannot be addressed safely.'
+  'unaddressable-node-id': 'that node id cannot be addressed safely.',
+  'ambiguous-target-node-id':
+    'that node id exists in more than one project, so the target pane cannot be attributed to a ' +
+    'single project\'s messaging grant. De-duplicate the id (re-add the cloned folder to mint ' +
+    'fresh ids) before messaging it.'
 }
 
 /**

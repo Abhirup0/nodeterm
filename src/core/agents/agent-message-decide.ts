@@ -30,6 +30,11 @@ export type NotPermittedReason =
   | 'self-send'
   | 'unsupported-edition'
   | 'unaddressable-node-id'
+  /** The target id names nodes in MORE THAN ONE project while panes are keyed by the bare id —
+   *  one global pane, several possible owners, and one of them may be ungranted. Refused because
+   *  the per-project grant cannot be attributed (PR #237 review I-1); its own word because the
+   *  human's fix is de-duplicating ids, not moving nodes. See `agent-message-scope.ts`. */
+  | 'ambiguous-target-node-id'
 
 /** Which signal satisfied the delivery receipt (Task 3.4). */
 export type ReceiptSignal = 'newTurn' | 'working'

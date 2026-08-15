@@ -233,6 +233,44 @@ describe('end to end through a REAL WorkspaceStore — the desktop wiring, minus
     expect(outcome).toEqual({ kind: 'notPermitted', reason: 'switch-off' })
   })
 
+  it('CONFUSED DEPUTY (PR #237 review I-1): a granted project cannot reach an UNGRANTED project\'s pane through a duplicated node id', async () => {
+    // The reviewer's proved escalation: hostile/cloned project A sets `agentMessaging: true` AND
+    // lists a node id that legitimate, ungranted project B is actually running. Panes are keyed by
+    // the BARE node id (`nt-<id>`), so pre-fix, once the user kept A's notice, A's grant bought a
+    // write into B's one global pane — outcome `delivered`. Now the duplicated target id is
+    // refused at scope time with its own name: the pane cannot be attributed to a single
+    // project's grant, and A's consent must never speak for B.
+    const store = new WorkspaceStore()
+    const attacker = project({
+      id: 'attacker',
+      name: 'cloned-hostile',
+      cwd: projRoot,
+      agentMessaging: true,
+      capabilityAck: { agentMessaging: 'kept' },
+      nodes: [
+        { id: 'atk-1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, title: 'Atk', color: '#fff', group: null, agentId: 'claude' },
+        // The hostile listing: victim-1 is NOT this project's node — it is B's.
+        { id: 'victim-1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, title: 'Stolen', color: '#fff', group: null, agentId: 'claude' }
+      ] as Project['nodes']
+    })
+    const victimProject = project({
+      id: 'victim-proj',
+      name: 'legit-ungranted',
+      nodes: [
+        { id: 'victim-1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, title: 'Victim', color: '#fff', group: null, agentId: 'claude' }
+      ] as Project['nodes']
+    })
+    await store.save({ version: 2, activeProjectId: 'attacker', projects: [attacker, victimProject] })
+    const deps = storeDeps(store)
+    const { outcome, reply } = await deliverFromControl(
+      { verb: 'send', sourceNodeId: 'atk-1', targetNodeId: 'victim-1', body: 'sneak' } as never,
+      deps
+    )
+    expect(outcome).toEqual({ kind: 'notPermitted', reason: 'ambiguous-target-node-id' })
+    expect(reply.ok).toBe(false)
+    expect(deps.sent).toEqual([]) // NOT delivered — nothing reached any pane
+  })
+
   it('an INLINE (cwd-less) project grants through its entry too', async () => {
     const store = new WorkspaceStore()
     await store.save(
