@@ -44,7 +44,7 @@ import { REAP_SWEEP_MS, shouldReap } from './pty-reap'
 import { ControlModeClient, type ControlSpawn } from './tmux-control-client'
 import { TMUX_SOCKET, sessionName, isSessionName } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
-import { bracketedInjection } from './paste-injection'
+import { bracketedInjection, sanitizePasteText } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
@@ -2821,7 +2821,18 @@ export class PtyManager {
         return true
       }
       // The literal text and the Enter (when sent) must go in order, so await sequentially.
-      await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, '-l', text])
+      // Sanitized like the framed body: which branch runs is decided by a runtime probe of the
+      // RECEIVER, so a payload must not become key input just because the target happens not to
+      // have requested bracketed paste (`sanitizePasteText`).
+      await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'send-keys',
+        '-t',
+        target,
+        '-l',
+        sanitizePasteText(text)
+      ])
       if (enter) {
         await runAsync(this.tmuxPath, ['-L', TMUX_SOCKET, 'send-keys', '-t', target, 'Enter'])
       }

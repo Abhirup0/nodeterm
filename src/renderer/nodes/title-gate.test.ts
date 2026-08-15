@@ -37,11 +37,32 @@ describe('session-name title gates', () => {
   })
 
   it('the `/rename` push is gated on the WRITE capability', () => {
+    // Matched on `renameCommand(` rather than the literal `/rename `: the line is no longer
+    // composed here — see the next test for why that matters.
     const pushes = terminalNode
       .split('\n')
-      .filter((l) => l.includes('/rename ') && l.includes('sendText'))
+      .filter((l) => l.includes('renameCommand(') && l.includes('sendText'))
     expect(pushes.length).toBe(1)
     expect(pushes[0]).toContain('canRenameNode')
+  })
+
+  it('SECURITY: nobody composes the `/rename` line by hand — it comes from `renameCommand`', () => {
+    // `renameCommand` is where the title is stripped to ONE line (`@shared/one-line`), because
+    // `sendText` appends Enter and a `\n`/`\r` in the title would submit a SECOND line — a command
+    // the agent's operator never typed. The title is agent-supplied (the canvas-control `rename`
+    // verb's `--title`) and model-supplied (✦ Name with AI), so a second, hand-rolled composition
+    // site would be a second hole. This is the guard that keeps the strip un-bypassable; a
+    // behavioural test cannot see it, because neither file is unit-rendered.
+    for (const [name, src] of [
+      ['nodes/TerminalNode.tsx', terminalNode],
+      ['canvas/Canvas.tsx', canvas]
+    ] as const) {
+      // The composition shape specifically — a template literal interpolating the name — not the
+      // string `/rename`, which both files mention in prose.
+      expect(src.includes('`/rename ${'), `${name} composes the rename line itself`).toBe(false)
+    }
+    expect(sessionRename).toContain('export function renameCommand')
+    expect(sessionRename).toContain('oneLine(name)')
   })
 
   it('no rename-WRITE site gates on the read capability', () => {

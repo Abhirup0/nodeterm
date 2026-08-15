@@ -277,6 +277,7 @@ import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNoteP
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
+import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
 import { activePermissionMode } from '../state/permissionMode'
@@ -6926,7 +6927,13 @@ export function Canvas() {
           }
           case 'rename': {
             const id = args.node ?? ''
-            const title = (args.title ?? '').trim()
+            // `oneLine`, not `.trim()`: this is the door the agent-supplied title comes through,
+            // and the title does not stop here — it is composed into the submitted `/rename` line
+            // (which `renameCommand` also strips, since a title reaches that from the workspace
+            // file and from `generateName` too), quoted into the context-link note pushed into a
+            // THIRD session, and read back by the phone, push alerts and the board log. Landing it
+            // clean at the door is what keeps a control character out of all of them at once.
+            const title = oneLine(args.title ?? '')
             const target = nodesRef.current.find((nd) => nd.id === id)
             if (!target) {
               reply({ ok: false, error: `rename: no node with id ${id}` })
