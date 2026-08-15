@@ -35,6 +35,7 @@ import {
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose, createCrashReloadPolicy } from './main-window'
+import { installKeydownIntercepts } from './keydown-intercept'
 import {
   initNotchHud,
   applyNotchHudSettings,
@@ -470,32 +471,10 @@ function createWindow(): BrowserWindow {
     }
   })
 
-  // Intercept Cmd/Ctrl+M (default = minimize) and route it to the renderer for the
-  // markdown-view toggle instead.
-  win.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown' || !(input.meta || input.control)) return
-    const key = input.key.toLowerCase()
-    if (key === 'm') {
-      event.preventDefault()
-      win.webContents.send(IPC.appToggleMarkdown)
-    } else if (key === 'w' && !input.shift) {
-      // Repurpose Cmd/Ctrl+W: the renderer closes the selected node(s); if none are
-      // selected it asks us to close the window (the standard behavior).
-      event.preventDefault()
-      win.webContents.send(IPC.appCloseNode)
-    } else if (input.code === 'Digit0' && !input.shift && !input.alt) {
-      // Repurpose Cmd/Ctrl+0 the same way. We never call `Menu.setApplicationMenu`, so Electron
-      // installs its DEFAULT menu, whose View → Actual Size binds this accelerator to `resetZoom`
-      // — the window's page zoom, not the canvas's. A menu accelerator is handled before the page
-      // sees the key, so without this the renderer's Digit0 branch would simply never run on the
-      // desktop. `before-input-event`'s preventDefault suppresses both the menu item and the page
-      // event, so exactly one thing happens: the canvas goes to 100%.
-      event.preventDefault()
-      // Auto-repeat is dropped here rather than in the renderer, so a held chord cannot restart
-      // the 200ms zoom tween — the same rule `zoomShortcutChord` applies to the keydown path.
-      if (!input.isAutoRepeat) win.webContents.send(IPC.appZoomActualSize)
-    }
-  })
+  // Steal ⌘M / ⌘W / ⌘0 back from Electron's default application menu (minimize / close /
+  // resetZoom) and forward each to the renderer instead. The decision — and, importantly, what it
+  // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test.
+  installKeydownIntercepts(win)
 
   // Open external links in the system browser — only safe schemes (no file://, no custom
   // protocol handlers). Reachable from remotely-fetched announcement URLs and rendered
