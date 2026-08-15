@@ -39,6 +39,7 @@ import {
 import { noteNewTurn, noteSent, reserveFlow } from '../core/agents/agent-message-flow'
 import { recordDelivery } from '../core/agents/agent-message-trace'
 import { resolveDeliveryScope, scopeRefusal } from '../core/agents/agent-message-scope'
+import type { DeliveryQueue } from '../core/agents/delivery-queue'
 import { nodeTokenFilePresent } from '../core/agents/node-token-files'
 import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../core/agent-status-mirror'
 import {
@@ -88,6 +89,24 @@ export interface AgentMessagingDeps {
   /** Test seam: override the receipt subscription. Production uses the module bus below. */
   subscribeReceipts?(cb: (e: ReceiptEvent) => void): () => void
   now?(): number
+  /**
+   * Deliver-on-idle (PR 7): the process-lifetime bounded queue. Absent ⇒ no queueing, and a busy or
+   * hibernated target is refused exactly as before. Present ⇒ a PERMITTED delivery that refuses only
+   * because the target is BUSY (or is hibernated, its pane sitting on a shell) is enqueued and
+   * answered `queued`; the queue flushes it when the target next goes idle (wired through
+   * `onMessagingAgentEvent` → `onTargetIdle`). The queue's own `deliver` dep is `runDelivery` below,
+   * so a flush re-runs the whole gate chain against live state — the flush-time re-validation.
+   */
+  queue?: DeliveryQueue
+  /**
+   * Is the target node hibernated (Eco)? A hibernated node's pane is on a SHELL, so a direct
+   * delivery refuses `targetNotAgentPane` FOREVER (gate 1) — the DECSET-2004 measurement's one unsafe
+   * surface, a non-agent pane, which is exactly why the queue gates on node type and never sprays it.
+   * When the target is hibernated the queue enqueues on that refusal and WAKES it first, rather than
+   * treating a real non-agent pane the same way. Renderer-known (the `useAgentStatus` store),
+   * injected. Absent ⇒ never hibernated, and only a `targetBusy` refusal queues.
+   */
+  isHibernated?(nodeId: string): boolean
 }
 
 /**
@@ -125,6 +144,21 @@ function subscribeBus(cb: (e: ReceiptEvent) => void): () => void {
 }
 
 /**
+ * The process-lifetime deliver-on-idle queue (PR 7), wired once by the desktop shell. Held at module
+ * scope — not threaded through `AgentMessagingDeps` on the event path — because the flush trigger is
+ * the SAME normalized event stream `onMessagingAgentEvent` already taps, and a target going idle is
+ * what a flush waits for. Null on the Server Edition and until wired (messaging does not exist
+ * there). The verb path still takes the queue through `deps.queue` so a test can drive enqueue in
+ * isolation.
+ */
+let deliveryQueue: DeliveryQueue | null = null
+
+/** Wire (or clear) the deliver-on-idle queue. Called once from main; absent ⇒ no queueing. */
+export function setDeliveryQueue(q: DeliveryQueue | null): void {
+  deliveryQueue = q
+}
+
+/**
  * Feed one normalized agent event into messaging: the sender's own `newTurn` resets its fan-out
  * budget (the same edge normalize.ts flags so the renderer can clear per-turn fan-out), and every
  * event is offered to the open receipt watches — which accept only `verified: true`
@@ -143,6 +177,11 @@ export function onMessagingAgentEvent(
     verified: e.verified
   }
   for (const cb of [...receiptSubs]) cb(ev)
+  // Deliver-on-idle flush trigger: the target finished a turn, so it is idle NOW. `onTargetIdle`
+  // re-runs the whole delivery per queued message (the flush-time re-validation), so a `done` that
+  // is actually still-not-deliverable (an unverified or inferred idle) simply re-queues — this only
+  // needs to be a cheap "maybe now" nudge, not a precise idle verdict.
+  if (e.state === 'done') void deliveryQueue?.onTargetIdle(e.nodeId)
 }
 
 // ── The per-node delivery lock ────────────────────────────────────────────────────────────────
@@ -318,20 +357,18 @@ const WROTE: ReadonlySet<AgentMessageOutcome['kind']> = new Set([
 ])
 
 /**
- * One control-verb delivery, end to end: scope → switch → flow → `deliverAgentMessage` → budget →
- * rendered reply.
+ * One control-verb delivery attempt, end to end: scope → switch → ownership → flow →
+ * `deliverAgentMessage` → budget. Returns the raw typed outcome and does NOT queue — this is both
+ * the verb's first attempt AND the queue's flush-time `deliver` callback, so the queue re-runs the
+ * ENTIRE chain (ownership, grant and flow included) against live state every time it flushes. That
+ * is the flush-time re-validation the queue depends on: a grant revoked while a message was queued
+ * comes back `notPermitted` here and the queue drops it.
  */
-export async function deliverFromControl(
+export async function runDelivery(
   req: AgentMessageDeliverRequest,
   deps: AgentMessagingDeps
-): Promise<{ outcome: AgentMessageOutcome; reply: AgentMessageReply }> {
+): Promise<AgentMessageOutcome> {
   const now = deps.now ?? ((): number => Date.now())
-  const answer = (
-    outcome: AgentMessageOutcome
-  ): { outcome: AgentMessageOutcome; reply: AgentMessageReply } => ({
-    outcome,
-    reply: renderMessageOutcome(outcome)
-  })
 
   const projects = deps.projects()
   // WHO MAY BE ADDRESSED — the serialized store, never a live canvas (there is nothing to travel
@@ -427,10 +464,66 @@ export async function deliverFromControl(
     // No await between the record and the release: the recorded send replaces the hold in the
     // same tick, so no concurrent reservation can slip through the seam between them.
     if (WROTE.has(outcome.kind)) noteSent(req.sourceNodeId, req.targetNodeId, now())
-    return answer(outcome)
+    return outcome
   } finally {
     reservation?.release()
   }
+}
+
+/** The `AgentMessageOutcome` kinds a permitted-but-not-ready target produces — a busy agent, or a
+ *  node between sessions. Only these are enqueued (and only with a queue wired): the target passed
+ *  scope/ownership/grant, and its non-readiness is a turn it happens to be in, not a boundary. */
+const QUEUE_ON_BUSY: ReadonlySet<AgentMessageOutcome['kind']> = new Set([
+  'targetBusy',
+  'targetNotIdleUnknown'
+])
+
+/**
+ * One control-verb delivery, end to end, WITH deliver-on-idle: attempt it (`runDelivery`), and when
+ * a queue is wired, enqueue a permitted-but-not-ready target instead of refusing it.
+ *
+ *  - a BUSY target (or one between sessions) ⇒ `queued`, flushed on its next idle;
+ *  - a HIBERNATED target — whose pane is on a shell, so `runDelivery` refuses `targetNotAgentPane`
+ *    (the DECSET measurement's one unsafe surface) — ⇒ `queued` AND woken. A genuine non-agent pane
+ *    that is NOT hibernated stays refused: the node-type gate, not a probe, is what tells them apart;
+ *  - everything else (delivered, stalled, every refusal that waiting will not fix) is answered as-is.
+ *
+ * `queued` is not `delivered`: the bytes have not reached the pane, and the receipt closes the loop
+ * once the flush delivers them.
+ */
+export async function deliverFromControl(
+  req: AgentMessageDeliverRequest,
+  deps: AgentMessagingDeps
+): Promise<{ outcome: AgentMessageOutcome; reply: AgentMessageReply }> {
+  const answer = (
+    outcome: AgentMessageOutcome
+  ): { outcome: AgentMessageOutcome; reply: AgentMessageReply } => ({
+    outcome,
+    reply: renderMessageOutcome(outcome)
+  })
+  const outcome = await runDelivery(req, deps)
+  const queue = deps.queue
+  if (queue) {
+    const queued = (hibernated: boolean): Promise<AgentMessageOutcome> =>
+      queue.enqueue(
+        {
+          verb: req.verb,
+          sourceNodeId: req.sourceNodeId,
+          targetNodeId: req.targetNodeId,
+          // For the trace's `sourceTitle`; the flush re-resolves it from the store like the first
+          // attempt did, so this is only ever a label on the queued/expired trace lines.
+          sourceTitle: req.sourceNodeId,
+          body: req.body
+        },
+        { hibernated }
+      )
+    if (QUEUE_ON_BUSY.has(outcome.kind)) return answer(await queued(false))
+    // A hibernated target reads as `targetNotAgentPane` (its pane is a shell) — enqueue+wake ONLY
+    // then, never for a real non-agent pane.
+    if (outcome.kind === 'targetNotAgentPane' && deps.isHibernated?.(req.targetNodeId))
+      return answer(await queued(true))
+  }
+  return answer(outcome)
 }
 
 /** Guard for the IPC boundary: the request came over a channel, so its shape is asserted here. */

@@ -20,6 +20,7 @@ import { resetMessageFlow, FANOUT_PER_TURN } from '../core/agents/agent-message-
 import { NOTIFY_BODY } from '../shared/agents/agent-messaging'
 import { resetAgentMessageTraceForTests } from '../core/agents/agent-message-trace'
 import { MANAGED_SCRIPT_REVISION } from '../core/agents/hooks/managed-script'
+import { DeliveryQueue } from '../core/agents/delivery-queue'
 import type { MirrorEntry } from '../core/agent-status-mirror'
 
 const idle: MirrorEntry = {
@@ -330,5 +331,56 @@ describe('notify (folded in from #98)', () => {
     const notify = await deliverFromControl(req({ verb: 'notify', body: '' }), deps)
     expect(notify.outcome.kind).toBe('rateLimited')
     expect(deps.rec.sent).toHaveLength(1)
+  })
+})
+
+describe('deliver-on-idle wiring (PR 7)', () => {
+  /** A queue whose `deliver` is never reached on these paths (enqueue does not call it) — we only
+   *  need to observe enqueue + wake. Timers are inert so no TTL fires mid-test. */
+  function fakeQueue(): { queue: DeliveryQueue; woken: string[] } {
+    const woken: string[] = []
+    const queue = new DeliveryQueue({
+      now: () => 0,
+      deliver: async () => ({ kind: 'delivered', traceId: 'd', traced: 'memory', receipt: 'observed', signal: 'newTurn' }),
+      trace: async () => ({ traceId: 'q', traced: 'memory' }),
+      wake: (id) => woken.push(id),
+      schedule: () => () => {}
+    })
+    return { queue, woken }
+  }
+
+  it('a BUSY target is ENQUEUED, not refused — and nothing reaches the pane', async () => {
+    const { queue } = fakeQueue()
+    const busy: MirrorEntry = { state: 'working', updatedAt: 1, stateVerified: true, clientRevision: MANAGED_SCRIPT_REVISION }
+    const deps = fakeDeps({ mirrorEntry: () => busy, queue })
+    const { outcome } = await deliverFromControl(req(), deps)
+    expect(outcome.kind).toBe('queued')
+    expect(queue.depth('b1')).toBe(1)
+    expect(deps.rec.sent).toEqual([]) // queued is NOT delivered — no bytes yet
+  })
+
+  it('without a queue, the same busy target is refused `targetBusy` (old behaviour intact)', async () => {
+    const busy: MirrorEntry = { state: 'working', updatedAt: 1, stateVerified: true, clientRevision: MANAGED_SCRIPT_REVISION }
+    const deps = fakeDeps({ mirrorEntry: () => busy })
+    const { outcome } = await deliverFromControl(req(), deps)
+    expect(outcome).toEqual({ kind: 'targetBusy', state: 'working' })
+  })
+
+  it('a HIBERNATED target (shell pane) is enqueued AND woken; a real non-agent pane is not', async () => {
+    const { queue, woken } = fakeQueue()
+    // Its pane is on a shell (Eco left it there) — runDelivery refuses `targetNotAgentPane`.
+    const shellPane = {
+      tty: '/dev/pts/9', panePid: 100, paneId: '%1', command: 'bash', argv: ['bash'], pids: [200]
+    }
+    const hib = fakeDeps({ paneOwner: async () => shellPane, queue, isHibernated: () => true })
+    const { outcome } = await deliverFromControl(req(), hib)
+    expect(outcome.kind).toBe('queued')
+    expect(woken).toEqual(['b1']) // woken through the registry before delivery
+    expect(hib.rec.sent).toEqual([])
+
+    // The SAME shell pane that is NOT hibernated stays refused — the node-type gate, not a probe.
+    const notHib = fakeDeps({ paneOwner: async () => shellPane, queue: fakeQueue().queue, isHibernated: () => false })
+    const plain = await deliverFromControl(req(), notHib)
+    expect(plain.outcome.kind).toBe('targetNotAgentPane')
   })
 })
