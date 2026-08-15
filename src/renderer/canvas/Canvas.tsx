@@ -145,6 +145,7 @@ import { TmuxBanner } from '../components/TmuxBanner'
 import { PtyPressureBanner } from '../components/PtyPressureBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { CapabilityNotice } from '../components/CapabilityNotice'
 import { ConsentNotice } from '../remote/ConsentNotice'
 import { peerApprovalView } from '@shared/remote/approval'
 import { promptDialog } from '../components/promptDialog'
@@ -9131,6 +9132,12 @@ export function Canvas() {
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
       />
+
+      {/* The one-time clone notice for a project whose git-shared capability switch arrived
+          already on (PR 3 Task 3.4). Self-contained against the projects store: it re-evaluates on
+          every active-project change (the project-load path), is click-only, and records its
+          answer machine-locally — see components/CapabilityNotice.tsx and its test. */}
+      <CapabilityNotice />
 
       {confirm && (
         <ConfirmDialog

@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { NODE_ID_MAX, isSafeNodeId, isSafeRemoteHome } from './remote-safety'
+import { NODE_ID_MAX as SHARED_NODE_ID_MAX, isSafeNodeId as sharedIsSafeNodeId } from '@shared/safe-id'
 
 describe('isSafeNodeId', () => {
+  it('core re-exports the SAME function object — one predicate, not two that drift', () => {
+    // The definition moved to @shared/safe-id so the renderer can validate a project id before it
+    // becomes a session-partition storage key without importing src/core. This pin is what makes
+    // "moved, not copied" a property rather than a claim: if anyone re-declares the predicate here,
+    // the two function objects diverge and this fails.
+    expect(isSafeNodeId).toBe(sharedIsSafeNodeId)
+    expect(NODE_ID_MAX).toBe(SHARED_NODE_ID_MAX)
+  })
+
   it('accepts every shape the app actually mints', () => {
     // `nextId()` in state/workspace.ts: `<prefix>-<base36 time>-<counter>`.
     for (const id of ['term-mabc123-7', 'ssh-mabc123-1', 'node-1', 'a', 'A_b.c-1', '9'])

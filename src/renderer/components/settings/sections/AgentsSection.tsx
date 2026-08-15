@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useSettings } from '../../../state/settings'
+import { useProjects } from '../../../state/projects'
+import {
+  PROJECT_CAPABILITIES,
+  PROJECT_CAPABILITY_COPY,
+  projectCapabilityFlagInFile
+} from '@shared/project-capabilities'
 import {
   isAgentEnabled,
   setAgentEnabled,
@@ -94,7 +100,26 @@ const ROWS = {
     ]
   }
 }
-const ENTRIES = Object.values(ROWS)
+/**
+ * The per-project capability rows are GENERATED from PROJECT_CAPABILITIES — search registry
+ * included. A hand-written row list that happens to match the union is the documented
+ * claims-ahead-of-mechanism failure: agent messaging's row (its PR 6) must appear by adding a copy
+ * entry, and agents-capabilities.test.tsx iterates the array so a capability without a row is red.
+ */
+const CAPABILITY_ROWS = PROJECT_CAPABILITIES.map((cap) => ({
+  cap,
+  title: PROJECT_CAPABILITY_COPY[cap].label,
+  keywords: [
+    'project',
+    'capability',
+    'permission',
+    ...PROJECT_CAPABILITY_COPY[cap].label.toLowerCase().split(/\s+/)
+  ]
+}))
+const ENTRIES = [
+  ...Object.values(ROWS),
+  ...CAPABILITY_ROWS.map(({ title, keywords }) => ({ title, keywords }))
+]
 
 /**
  * Every fact in this sentence is DERIVED from the per-agent mapping (`@shared/agents/approval-mode`):
@@ -149,6 +174,13 @@ function identityValue(choice: IdentityChoice): boolean | undefined {
 export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const settings = useSettings((s) => s.settings)
   const update = useSettings((s) => s.update)
+  // Per-project capability rows act on the ACTIVE project. Subscribed (not getState()) so an
+  // off-toggle re-renders immediately — and consumers read the switch per call from the store,
+  // never from a snapshot taken when a lease started (agents-capabilities.test.tsx "takes effect
+  // LIVE"; browser PR 4 / messaging PR 6 rely on that shape).
+  const activeProjectId = useProjects((s) => s.activeProjectId)
+  const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
+  const setProjectCapability = useProjects((s) => s.setProjectCapability)
   const rows: { id: AgentId; label: string; isBuiltin: boolean }[] = [
     ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label, isBuiltin: true })),
     ...settings.customAgents.map((c) => ({ id: c.id, label: c.label || c.id, isBuiltin: false }))
@@ -283,6 +315,38 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
           }
         />
       </SearchableRow>
+      {CAPABILITY_ROWS.map(({ cap, title, keywords }) => (
+        <SearchableRow key={cap} title={title} keywords={keywords}>
+          <FieldRow
+            label={title}
+            note={
+              activeProject
+                ? `Applies to the active project: ${activeProject.name}.`
+                : 'Open a project to change this — the switch belongs to a project, not to the app.'
+            }
+            // The description carries the capability's own copy AND its cloneWarning — the same
+            // "this is in the project file" sentence the clone notice shows, so the two git-shared
+            // grants read alike wherever they appear (pinned by agents-capabilities.test.tsx).
+            description={`${PROJECT_CAPABILITY_COPY[cap].description} ${PROJECT_CAPABILITY_COPY[cap].cloneWarning}`}
+            control={
+              <Switch
+                // The raw FILE FLAG is the right thing for a settings switch to display — it
+                // mirrors what is written in .nodeterm/project.json. It is NEVER the grant check:
+                // grants require the machine-local 'kept' too (projectCapabilityGrantedFor).
+                checked={projectCapabilityFlagInFile(activeProject, cap)}
+                ariaLabel={title}
+                disabled={!activeProject}
+                onChange={(on) => {
+                  // The ONE strict setter: literal `true` on, field deleted on off. Writing the
+                  // value any other way (a string, a stored false) is the bug the validators
+                  // exist to refuse.
+                  if (activeProject) setProjectCapability(activeProject.id, cap, on)
+                }}
+              />
+            }
+          />
+        </SearchableRow>
+      ))}
       <SearchableRow {...ROWS.hibernation}>
         <FieldRow
           label="Hibernate idle agents"

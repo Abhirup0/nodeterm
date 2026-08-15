@@ -469,6 +469,23 @@ export interface Project {
   /** Permission mode for new Claude TERMINAL (CLI) sessions in this project. SDK chat nodes are
    *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode
+  /**
+   * Per-project capability switch: agents may drive browser nodes THEY opened in this project.
+   * GIT-SHARED (rides .nodeterm/project.json) and therefore hostile input — the raw bit is read
+   * ONLY through `projectCapabilityFlagInFile` (@shared/project-capabilities, strict `=== true`,
+   * own-property), and it is NEVER a grant by itself: grants go through
+   * `projectCapabilityGrantedFor` (@shared/project-capability-consent), which also requires this
+   * machine's recorded 'kept' answer below.
+   */
+  agentBrowserControl?: boolean
+  /**
+   * MACHINE-LOCAL record of what this machine's user ANSWERED for each capability switch —
+   * 'kept' or 'declined', not a bare bit, because a declined switch whose hostile `true`
+   * re-arrives via git must be refused and re-noticed, never silently granted (PR #213 C1).
+   * Persisted on `IndexEntryV3.capabilityAck`, NEVER written into the shared project file
+   * (workspace-files.test.ts / capability-notice tests pin that the file bytes are unchanged).
+   */
+  capabilityAck?: import('./project-capability-consent').CapabilityAckMap
   /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
   dinoHighScore?: number
   /** Kanban task board — shared via .nodeterm/project.json like nodes. */

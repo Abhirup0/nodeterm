@@ -64,6 +64,47 @@ describe('projectToFile / fileToProject round-trip', () => {
   })
 })
 
+describe('per-project capability fields in the shared file', () => {
+  it('a capability round-trips through projectToFile/fileToProject, and a non-literal-true does not', () => {
+    const p = project({ agentBrowserControl: true })
+    expect(projectToFile(p, 1, 'ts').agentBrowserControl).toBe(true)
+    const baseFile = projectToFile(project(), 1, 'ts')
+    expect(fileToProject({ ...baseFile, agentBrowserControl: true }, { id: 'x' }).agentBrowserControl).toBe(
+      true
+    )
+    // A hand-edited/hostile file carrying "true" (the string), 1 or {} is OFF — the field simply
+    // does not survive the read. projectCapabilityEnabled would answer false either way; this pins
+    // that the sanitisation happens at the FILE boundary, not only at the consumption site.
+    expect(
+      fileToProject({ ...baseFile, agentBrowserControl: 'true' } as never, { id: 'x' }).agentBrowserControl
+    ).toBeUndefined()
+  })
+  it('an off capability adds no bytes to the committed file', () => {
+    const f = projectToFile(project(), 1, 'ts')
+    expect('agentBrowserControl' in f).toBe(false)
+    expect(serializeProjectFile(f)).not.toContain('agentBrowserControl')
+  })
+  it('the ack is machine-local: index entry carries it, the shared file never does', () => {
+    const p = project({ cwd: '/a/foo', agentBrowserControl: true, capabilityAck: { agentBrowserControl: 'kept' as const } })
+    const { index, files } = splitWorkspace(
+      { version: 2, activeProjectId: 'p1', projects: [p] },
+      () => 1,
+      '2026-08-15T00:00:00.000Z'
+    )
+    expect(index.entries[0].capabilityAck).toEqual({ agentBrowserControl: 'kept' })
+    expect(serializeProjectFile(files.get('/a/foo')!)).not.toContain('capabilityAck')
+    // Load: the ack comes from the entry; a file-borne `capabilityAck` (forgery — a repo carrying
+    // its own consent) is never read.
+    const restored = fileToProject(files.get('/a/foo')!, { id: 'p1', cwd: '/a/foo', capabilityAck: { agentBrowserControl: 'kept' as const } })
+    expect(restored.capabilityAck).toEqual({ agentBrowserControl: 'kept' })
+    const forged = fileToProject(
+      { ...files.get('/a/foo')!, capabilityAck: { agentBrowserControl: 'kept' as const } } as never,
+      { id: 'p1', cwd: '/a/foo' }
+    )
+    expect(forged.capabilityAck).toBeUndefined()
+  })
+})
+
 describe('sameProjectContent', () => {
   it('ignores rev and savedAt, sees node changes', () => {
     const a = projectToFile(project(), 1, '2026-01-01T00:00:00.000Z')

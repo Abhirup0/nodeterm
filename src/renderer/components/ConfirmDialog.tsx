@@ -25,8 +25,25 @@ interface ConfirmDialogProps {
    * Escape still cancels either way.
    */
   enterConfirms?: boolean
+  /**
+   * When false, NEITHER button takes `autoFocus`. Default true (historical behavior). Pass false
+   * for a dialog that appears under the user's hands (the capability clone notice): `autoFocus`
+   * steals focus from whatever they were typing in, and their next Enter/Space then NATIVELY
+   * activates the focused button — a path `enterConfirms`/confirm-key never sees, because the
+   * browser's default button activation is not the window keydown listener (PR #213 review, I1).
+   */
+  autoFocusButtons?: boolean
   onConfirm: () => void
   onCancel: () => void
+  /**
+   * When provided, Escape and an overlay click call THIS instead of `onCancel`, and the cancel
+   * button remains the only path to `onCancel`. For a dialog where cancel is itself a recorded
+   * ANSWER (the capability clone notice's "Turn it off"), a stray Escape aimed at a terminal or a
+   * misclick outside the box must be a non-answer — close for now, decide nothing — not a
+   * consent-recording cancel (PR #213 review, I1). Absent = historical behavior (dismissal
+   * cancels).
+   */
+  onDismiss?: () => void
 }
 
 /**
@@ -44,9 +61,13 @@ export function ConfirmDialog({
   alert = false,
   option,
   enterConfirms = true,
+  autoFocusButtons = true,
   onConfirm,
-  onCancel
+  onCancel,
+  onDismiss
 }: ConfirmDialogProps) {
+  // Escape / overlay-click land here: the caller's dismiss channel when it has one, else cancel.
+  const dismiss = onDismiss ?? onCancel
   // An alert has nothing destructive to warn about and nothing to cancel; anything else keeps the
   // historical destructive defaults ("Delete", danger styling, focus parked on the safe button).
   const danger = dangerProp ?? !alert
@@ -82,14 +103,14 @@ export function ConfirmDialog({
       if (!action) return
       e.preventDefault()
       if (action === 'confirm') onConfirm()
-      else onCancel()
+      else dismiss()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [id, enterConfirms, onConfirm, onCancel])
+  }, [id, enterConfirms, onConfirm, dismiss])
 
   return createPortal(
-    <div className="confirm-overlay" onClick={onCancel}>
+    <div className="confirm-overlay" onClick={dismiss}>
       <div className="confirm" ref={boxRef} onClick={(e) => e.stopPropagation()}>
         {body}
         <p className="confirm__msg">{message}</p>
@@ -108,13 +129,13 @@ export function ConfirmDialog({
               (or Space) into a deletion. On a danger dialog the safe button is the focused one; on a
               harmless one the primary action may keep it. */}
           {!alert && (
-            <button className="confirm__btn" autoFocus={danger} onClick={onCancel}>
+            <button className="confirm__btn" autoFocus={autoFocusButtons && danger} onClick={onCancel}>
               {cancelLabel}
             </button>
           )}
           <button
             className={`confirm__btn${danger ? ' danger' : ' primary'}`}
-            autoFocus={!danger}
+            autoFocus={autoFocusButtons && !danger}
             onClick={onConfirm}
           >
             {confirmText}
