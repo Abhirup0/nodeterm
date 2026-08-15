@@ -26,6 +26,8 @@ import {
   IDENTITY_UNMINTABLE_NOTE,
   IDENTITY_UNMINTABLE_WARN_NOTE,
   NODE_IDENTITY_STRICT_AFTER,
+  STRICT_CONTROL_REFUSAL,
+  STRICT_CONTROL_VERBS,
   TOLERANT_CONTROL_VERBS
 } from './node-identity-policy'
 import { CONTEXT_LINK_VERBS } from '../context-link-render'
@@ -654,5 +656,124 @@ describe('the injected clock', () => {
     expect((await control('open-terminal', 'n-edge')).status).toBe(200)
     hookServer.setIdentityClockForTests(() => new Date(NODE_IDENTITY_STRICT_AFTER.getTime()))
     expect((await control('open-terminal', 'n-edge2')).status).toBe(403)
+  })
+})
+
+/**
+ * The strict bucket, proven on the wire rather than only in `controlPolicy`'s table.
+ *
+ * `browser` is the first verb whose admission control IS the identity, so the two escapes this
+ * file documents elsewhere — the dated window and `hookIdentityStrict: false` — must both stop at
+ * it, and the third (an invented kid, which walks past the latch into /control/list) must stop too.
+ * "Refused" here means the handler never ran, not that the reply looked unhappy.
+ */
+describe('/control/<strict verb> admits only a verified caller', () => {
+  const STRICT = 'browser'
+  // Same shape as the invented kid above: eight arbitrary characters, a dot, an arbitrary tail.
+  const INVENTED = 'CCCCCCCC.DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD'
+
+  it('is in the strict bucket and not in the tolerant one', () => {
+    expect(STRICT_CONTROL_VERBS.has(STRICT)).toBe(true)
+    expect(TOLERANT_CONTROL_VERBS.has(STRICT)).toBe(false)
+  })
+
+  it('refuses a tokenless caller INSIDE the warning window', async () => {
+    // Every other mutation still executes here until 2026-10-13. This one never did.
+    const res = await control(STRICT, 'n-strict-window')
+    expect(res.status).toBe(403)
+    expect(await res.text()).toBe(`${STRICT_CONTROL_REFUSAL}\n`)
+    expect(controlCalls).toEqual([])
+  })
+
+  it('refuses even with the escape hatch OFF — the hatch must not double as a grant', async () => {
+    // settings.hookIdentityStrict:false is what docs/node-identity.md tells a stranded user to
+    // reach for. Before the bucket it returned allow-with-warning for every non-tolerant verb, so
+    // it handed browser control to any holder of the app-wide bearer, permanently.
+    hookServer.setIdentityStrictOverride(() => false)
+    const res = await control(STRICT, 'n-strict-hatch')
+    expect(res.status).toBe(403)
+    expect(await res.text()).toBe(`${STRICT_CONTROL_REFUSAL}\n`)
+    expect(controlCalls).toEqual([])
+    // …while the hatch keeps doing its actual job for an ordinary mutation past the cutoff.
+    hookServer.setIdentityClockForTests(() => PAST_CUTOFF)
+    const ordinary = await control('open-terminal', 'n-hatch-ordinary')
+    expect(ordinary.status).toBe(200)
+    expect(controlCalls).toEqual([{ verb: 'open-terminal', nodeId: 'n-hatch-ordinary' }])
+  })
+
+  it('lets a VERIFIED caller through, on both sides of the cutoff and with any hatch setting', async () => {
+    for (const clock of [IN_WINDOW, PAST_CUTOFF]) {
+      for (const override of [undefined, true, false] as const) {
+        controlCalls = []
+        hookServer.setIdentityClockForTests(() => clock)
+        hookServer.setIdentityStrictOverride(() => override)
+        const node = `n-strict-ok-${clock.getTime()}-${String(override)}`
+        const res = await control(STRICT, node, nodeAuthToken(SECRET, node))
+        expect(res.status, node).toBe(200)
+        expect(controlCalls, node).toEqual([{ verb: STRICT, nodeId: node }])
+      }
+    }
+  })
+
+  it('403s a forged token, as everywhere else', async () => {
+    const res = await control(STRICT, 'n-strict-forged', nodeAuthToken(SECRET, 'somebody-else'))
+    expect(res.status).toBe(403)
+    expect(controlCalls).toEqual([])
+  })
+
+  it('the invented-kid escape does NOT reach a strict verb', async () => {
+    // docs/node-identity.md and the test above pin that an invented kid walks past the latch and
+    // the cutoff into /control/list and every /context-link/* verb, because a FOREIGN kid must be
+    // `legacy` (invariant 3) and `legacy` is admitted there. Here `legacy` is a refusal — one of
+    // the very few routes where that escape does not apply. Stated because the surrounding doc's
+    // honest pessimism would otherwise be read as covering this verb too.
+    const res = await control(STRICT, 'n-strict-invented', INVENTED)
+    expect(res.status).toBe(403)
+    expect(await res.text()).toBe(`${STRICT_CONTROL_REFUSAL}\n`)
+    expect(controlCalls).toEqual([])
+    // The contrast, in one test: the SAME token, the same instant, on a tolerant verb.
+    const list = await control('list', 'n-strict-invented', INVENTED)
+    expect(list.status).toBe(200)
+    expect(controlCalls).toEqual([{ verb: 'list', nodeId: 'n-strict-invented' }])
+  })
+
+  it('answers a JSON caller with the same sentence in the same shape', async () => {
+    const res = await control(STRICT, 'n-strict-json', undefined, 'application/json')
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({ ok: false, error: STRICT_CONTROL_REFUSAL })
+    expect(controlCalls).toEqual([])
+  })
+
+  it('says nothing about tokens, kids or restarts — not even to an unmintable node', async () => {
+    // An id `isSafeNodeId` refuses normally earns IDENTITY_UNMINTABLE_NOTE, which names the cause
+    // and the escape hatch. On a strict verb that sentence would be both an instruction that
+    // cannot help (the hatch does not release this) and a map for whoever is probing.
+    const res = await control(STRICT, '../etc')
+    expect(res.status).toBe(403)
+    const body = await res.text()
+    expect(body).toBe(`${STRICT_CONTROL_REFUSAL}\n`)
+    expect(body).not.toContain(IDENTITY_UNMINTABLE_NOTE)
+    expect(body).not.toContain(IDENTITY_REFUSED_NOTE)
+    expect(controlCalls).toEqual([])
+  })
+
+  it('leaves every other verb on its old table — window, hatch and tolerance all intact', async () => {
+    // The regression net for the bucket being a THIRD branch rather than a re-shaping.
+    const inWindow = await control('open-terminal', 'n-unchanged-window')
+    expect(inWindow.status).toBe(200)
+    expect((await inWindow.text()).startsWith(IDENTITY_RESTART_NOTE)).toBe(true)
+
+    hookServer.setIdentityClockForTests(() => PAST_CUTOFF)
+    expect((await control('open-terminal', 'n-unchanged-cutoff')).status).toBe(403)
+    expect((await control('list', 'n-unchanged-list')).status).toBe(200)
+
+    hookServer.setIdentityStrictOverride(() => false)
+    expect((await control('open-terminal', 'n-unchanged-hatch')).status).toBe(200)
+
+    expect(controlCalls).toEqual([
+      { verb: 'open-terminal', nodeId: 'n-unchanged-window' },
+      { verb: 'list', nodeId: 'n-unchanged-list' },
+      { verb: 'open-terminal', nodeId: 'n-unchanged-hatch' }
+    ])
   })
 })

@@ -10,6 +10,8 @@ import {
   isStrictInstant,
   NODE_IDENTITY_CLOCK_HORIZON_MS,
   NODE_IDENTITY_STRICT_AFTER,
+  STRICT_CONTROL_REFUSAL,
+  STRICT_CONTROL_VERBS,
   TOLERANT_CONTROL_VERBS
 } from './node-identity-policy'
 import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
@@ -232,5 +234,74 @@ describe('controlPolicy', () => {
         controlPolicy({ verdict: 'forged', proven: false, verb: TOLERANT, now: BEFORE, override: false })
       ).toBe('refuse')
     })
+  })
+})
+
+// The third bucket. Everything above this line is the two-move rollout for verbs that already had
+// a population; this is the posture for a verb that never did.
+describe('STRICT_CONTROL_VERBS admits `verified` and nothing else', () => {
+  const STRICT = 'browser'
+
+  for (const now of [BEFORE, AFTER]) {
+    for (const override of [undefined, true, false] as const) {
+      for (const proven of [true, false]) {
+        const where = `now=${now.toISOString()} override=${override} proven=${proven}`
+        it(`verified ⇒ allow (${where})`, () => {
+          expect(controlPolicy({ verdict: 'verified', proven, verb: STRICT, now, override })).toBe(
+            'allow'
+          )
+        })
+        for (const verdict of ['legacy', 'forged'] as const) {
+          it(`${verdict} ⇒ refuse (${where})`, () => {
+            expect(controlPolicy({ verdict, proven, verb: STRICT, now, override })).toBe('refuse')
+          })
+        }
+      }
+    }
+  }
+
+  it('the escape hatch does NOT release it — this is the whole point of the bucket', () => {
+    // settings.hookIdentityStrict:false is the switch docs/node-identity.md tells a stranded user
+    // to reach for. It releases the latch and the dated cutoff. It must not release this.
+    expect(
+      controlPolicy({ verdict: 'legacy', proven: false, verb: STRICT, now: BEFORE, override: false })
+    ).toBe('refuse')
+  })
+
+  it('the dated window does not release it either — refused from day one, not from the cutoff', () => {
+    // A tokenless caller would otherwise have driven a browser for the whole warning window.
+    expect(
+      controlPolicy({ verdict: 'legacy', proven: false, verb: STRICT, now: BEFORE, override: undefined })
+    ).toBe('refuse')
+  })
+
+  it('a strict verb is in NEITHER tolerant path, ever', () => {
+    expect(TOLERANT_CONTROL_VERBS.has(STRICT)).toBe(false)
+    expect(STRICT_CONTROL_VERBS.has(STRICT)).toBe(true)
+    expect([...STRICT_CONTROL_VERBS].some((v) => TOLERANT_CONTROL_VERBS.has(v))).toBe(false)
+  })
+
+  it('leaves every other verb exactly as it was', () => {
+    // The regression net: the bucket is a THIRD branch, not a re-shaping of the other two.
+    expect(
+      controlPolicy({ verdict: 'legacy', proven: false, verb: TOLERANT, now: AFTER, override: undefined })
+    ).toBe('allow')
+    expect(
+      controlPolicy({ verdict: 'legacy', proven: false, verb: MUTATION, now: BEFORE, override: undefined })
+    ).toBe('allow-with-warning')
+    expect(
+      controlPolicy({ verdict: 'legacy', proven: false, verb: MUTATION, now: AFTER, override: undefined })
+    ).toBe('refuse')
+    expect(
+      controlPolicy({ verdict: 'legacy', proven: true, verb: MUTATION, now: AFTER, override: false })
+    ).toBe('allow-with-warning')
+  })
+
+  it('says one sentence and diagnoses nothing — advice here is advice to whoever is probing', () => {
+    expect(STRICT_CONTROL_REFUSAL).toBe('Browser control refused.')
+    expect(STRICT_CONTROL_REFUSAL).not.toContain('\n')
+    for (const leak of ['token', 'kid', 'Restart', 'identity']) {
+      expect(STRICT_CONTROL_REFUSAL).not.toContain(leak)
+    }
   })
 })

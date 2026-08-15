@@ -23,6 +23,7 @@ import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
+import { serverEditionControlHandler } from './control-unsupported'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
 import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import {
@@ -418,6 +419,10 @@ export async function startServer(
     }
   }
   await hookServer.start()
+  // Canvas control does not exist on this edition, and saying so BY NAME is the whole point: the
+  // null handler answered `control unavailable`, which reads to an agent like a transient outage,
+  // and an agent retries an outage. See `control-unsupported.ts`.
+  hookServer.setControlHandler(serverEditionControlHandler)
 
   // ---- Node identity (src/core/agents/node-auth-secret.ts) ------------------------------------
   // First time the Server Edition arms node identity. Headless Linux has no OS keychain, so the
