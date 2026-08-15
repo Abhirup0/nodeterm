@@ -11,6 +11,7 @@ import {
   projectHeadClickAction,
   projectSignalCounts,
   pruneCollapsedItems,
+  sessionStateAgeLabel,
   type GroupBucket,
   type SessionNodeInput,
   type SessionRowVM,
@@ -78,6 +79,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
   const { api } = useSession()
 
   const [filter, setFilter] = useState('')
+  const [statusNow, setStatusNow] = useState(() => Date.now())
   const [branches, setBranches] = useState<Record<string, string>>({})
   // Drag-to-group: the object being dragged, and the current drop target for highlighting.
   // A group drag also remembers its parent frame, so a sibling-reorder drop zone can refuse a
@@ -147,6 +149,15 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         : [],
     [open, grouping, projects, liveActiveNodes, activeProjectId, statusById, filter]
   )
+
+  // Relative state ages need to advance even when no hook event arrives. Keep the clock dormant
+  // unless the status view is visible; 30s catches minute boundaries without per-row timers.
+  useEffect(() => {
+    if (!open || grouping !== 'status') return
+    setStatusNow(Date.now())
+    const timer = window.setInterval(() => setStatusNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [open, grouping])
 
   const projectCount = (g: (typeof groups)[number]): number =>
     g.groups.reduce((n, b) => n + groupSessionCount(b), 0) + g.ungrouped.length
@@ -434,6 +445,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         onContextMenu={(e) => props.onRowContextMenu(e, row.projectId!, row.id)}
         onDragStart={() => {}}
         onDragEnd={() => {}}
+        stateAgeLabel={sessionStateAgeLabel(row.statusUpdatedAt, statusNow)}
       />
     </div>
   )

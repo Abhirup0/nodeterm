@@ -921,7 +921,16 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   (shown only when `mainWin.isFocused()` is false); clicking it focuses the window and sends
   `app:focus-node` → `Canvas.focusNodeById` (selects + centers, switching projects via
   `pendingFocusRef` if needed). A one-time consent prompt gates notifications; toggle in
-  Settings (`notifyOnClaudeDone`). Unread clears on focus/select.
+  Settings (`notifyOnClaudeDone`). Selecting, focusing, dwelling into, or opening a session card
+  clears `unread` and ACKs the finish across phone/notch surfaces — existing read-on-view behavior.
+  This NEVER changes the workflow bucket: read state is independent from agent state.
+- **Status-grouped sessions** — three always-visible sections: **Waiting for your response** maps
+  internal `done`, `waiting`, and `blocked` together (a completed turn, question, or approval all
+  need the user); **Running** maps `working`; **Unknown** means no live hook state is available.
+  There is no Done bucket: a normal `done` hook means the turn ended and the agent is waiting for
+  another user prompt. Within each section rows sort newest-first by `lastEventAt`, the transition
+  clock (same-state hook freshness is `stateAt`), and show its short relative age. Missing clocks
+  stay last with no made-up timestamp. A click may clear the glow but cannot move the row.
 - **Session name ⇄ node title** — **two lists, because the two directions are separate facts**:
   `TITLE_READ_CAPABLE` (`canReadTitle` — claude, grok, **gemini**) is the READ leg, `RENAME_CAPABLE`
   (`canRename` — claude, grok) the WRITE leg, and **read ⊇ write** is an invariant pinned in

@@ -6382,6 +6382,7 @@ body,
 .ss-meta { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); min-width: 0; }
 .ss-meta__cwd { font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ss-meta__ssh { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.ss-meta__state-age { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .ss-ctx { font-size: 9.5px; padding: 0 5px; border-radius: 4px; color: #000; font-weight: 600; flex: 0 0 auto; }
 .ss-row__ai { margin-left: auto; opacity: 0; border: none; background: transparent; color: var(--text); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; flex: 0 0 auto; }
 .ss-row:hover .ss-row__ai { opacity: 0.6; }

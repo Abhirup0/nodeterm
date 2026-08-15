@@ -13,6 +13,8 @@ export interface SessionRowProps {
   onContextMenu(e: React.MouseEvent): void
   onDragStart(): void
   onDragEnd(): void
+  /** Status-group mode only: elapsed time since the current state began. */
+  stateAgeLabel?: string
 }
 
 function ctxColor(pct: number): string {
@@ -35,7 +37,8 @@ export function SessionRow({
   onAiName,
   onContextMenu,
   onDragStart,
-  onDragEnd
+  onDragEnd,
+  stateAgeLabel
 }: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(row.title)
@@ -155,11 +158,16 @@ export function SessionRow({
             ×
           </button>
         </div>
-        {(row.projectName || row.cwd || row.sshHost) && (
+        {(row.projectName || row.cwd || row.sshHost || stateAgeLabel) && (
           <div className="ss-meta">
             {row.projectName && <span className="ss-meta__project">{row.projectName}</span>}
             {row.sshHost && <span className="ss-meta__ssh">⇅ {row.sshHost}</span>}
             {row.cwd && <span className="ss-meta__cwd">{dirName(row.cwd)}</span>}
+            {stateAgeLabel && (
+              <span className="ss-meta__state-age" title={`In this state ${stateAgeLabel}`}>
+                {stateAgeLabel}
+              </span>
+            )}
           </div>
         )}
       </div>
