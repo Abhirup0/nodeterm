@@ -11,6 +11,7 @@ import {
   noteNewTurn,
   noteSent,
   pairKey,
+  reserveFlow,
   resetMessageFlow,
   type FlowVerdict
 } from './agent-message-flow'
@@ -405,5 +406,79 @@ describe('the limiter is consulted BEFORE any pane probe', () => {
     // An unreadable pane is refused, so still no write — the probe is the thing being counted.
     expect(outcome).toEqual({ kind: 'targetNotAgentPane', observed: 'unknown' })
     expect(writes).toEqual([])
+  })
+})
+
+/**
+ * The RESERVATION — what makes check+record atomic across a sender's CONCURRENT deliveries.
+ *
+ * `checkFlowLimits` is a pure read and `noteSent` records only after the pane write, so N parallel
+ * sends to N DISTINCT targets all used to pass the fan-out cap before any of them recorded — the
+ * cap held only for a sender polite enough to send sequentially. `reserveFlow` closes that: the
+ * check and the provisional hold happen in one synchronous step (no await between them, which in a
+ * single-threaded runtime IS the critical section), and a delivery that never reaches the pane
+ * releases its hold.
+ */
+describe('reserveFlow — check + provisional hold, atomically', () => {
+  const NOW = 1_000_000
+
+  it('N reservations to distinct targets consume the fan-out budget BEFORE any noteSent', () => {
+    const held: { release(): void }[] = []
+    for (let i = 0; i < FANOUT_PER_TURN; i++) {
+      const r = reserveFlow('src', `t${i}`, NOW)
+      expect(r.ok, `reservation ${i}`).toBe(true)
+      if (r.ok) held.push(r)
+    }
+    // The (N+1)th concurrent send is refused although NOTHING has been recorded yet.
+    const over = reserveFlow('src', 'tN', NOW)
+    expect(over.ok).toBe(false)
+    if (!over.ok) {
+      expect(over.limit).toBe('fan-out')
+      expect(over.outcome).toEqual({ kind: 'rateLimited', retryAfterMs: FANOUT_RETRY_AFTER_MS })
+    }
+    for (const r of held) r.release()
+  })
+
+  it('a released reservation restores the budget — a refused delivery costs nothing', () => {
+    const rs = Array.from({ length: FANOUT_PER_TURN }, (_, i) => reserveFlow('src', `t${i}`, NOW))
+    for (const r of rs) if (r.ok) r.release()
+    expect(reserveFlow('src', 'late', NOW).ok).toBe(true)
+  })
+
+  it('reservations and recorded sends SHARE the budget', () => {
+    noteSent('src', 'a', NOW)
+    noteSent('src', 'b', NOW)
+    const r1 = reserveFlow('src', 'c', NOW)
+    const r2 = reserveFlow('src', 'd', NOW)
+    expect(r1.ok && r2.ok).toBe(true)
+    expect(reserveFlow('src', 'e', NOW).ok).toBe(false)
+  })
+
+  it('an in-flight delivery holds its PAIR shut too — a concurrent same-pair send is rateLimited', () => {
+    const r = reserveFlow('src', 'dst', NOW)
+    expect(r.ok).toBe(true)
+    const second = reserveFlow('src', 'dst', NOW)
+    expect(second.ok).toBe(false)
+    if (!second.ok) expect(second.limit).toBe('pair')
+    // …and B→A stays open: a reply is never throttled by the message it answers.
+    expect(reserveFlow('dst', 'src', NOW).ok).toBe(true)
+  })
+
+  it('release is idempotent — a finally block calling it twice cannot free a stranger\'s slot', () => {
+    const a = reserveFlow('src', 'a', NOW)
+    const b = reserveFlow('src', 'b', NOW)
+    expect(a.ok && b.ok).toBe(true)
+    if (a.ok) {
+      a.release()
+      a.release()
+    }
+    // Only ONE slot came back (b still holds): three more fill the cap of FANOUT_PER_TURN = 4,
+    // and the next refuses. A double release that freed two would let the fifth through.
+    const c = reserveFlow('src', 'c', NOW)
+    const d = reserveFlow('src', 'd', NOW)
+    const e = reserveFlow('src', 'e', NOW)
+    expect(c.ok && d.ok && e.ok).toBe(true)
+    expect(reserveFlow('src', 'f', NOW).ok).toBe(false)
+    for (const r of [b, c, d, e]) if (r.ok) r.release()
   })
 })

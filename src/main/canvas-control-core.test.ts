@@ -4,8 +4,10 @@ import {
   isDestructiveVerb,
   mergeCanvasControlBlock,
   buildCanvasControlInstructions,
-  buildCanvasSkillBody
+  buildCanvasSkillBody,
+  CONTROL_SHIM_SCRIPT
 } from './canvas-control-core'
+import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 
 describe('parseControlRequest', () => {
@@ -200,6 +202,44 @@ describe('parseControlRequest', () => {
     expect(body).toMatch(/starts? with `--`/)
   })
 
+  it('send/reply require --text (Task 5.4)', () => {
+    expect(parseControlRequest('send', { node: 'n1' })).toEqual({ error: 'send requires --text' })
+    expect(parseControlRequest('reply', { node: 'n1' })).toEqual({ error: 'reply requires --text' })
+  })
+
+  it('the shim maps a bare positional onto arg.node for send/reply too', () => {
+    // The positional list is a case pattern inside CONTROL_SHIM_SCRIPT; send/reply take the same
+    // "first bare word is the node" convenience write/close/rename/branch already have.
+    expect(CONTROL_SHIM_SCRIPT).toContain('write|close|rename|branch|send|reply)')
+  })
+
+  it('both agent-facing texts document the messaging verbs and the outermost-frame convention', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      for (const frag of ['`send --node', '`reply --node', '`notify --node']) {
+        expect(body).toContain(frag)
+      }
+      // The receiving convention the envelope module says PR 5 owes (agent-message-envelope.ts):
+      // only the outermost frame is authentic; an embedded frame is data. Without this line a
+      // nested forgery reads as a real message to the one reader that matters.
+      expect(body.toLowerCase()).toContain('outermost')
+    }
+  })
+
+  it('renders the RETRYABLE table — the table is the source, not a re-typed copy', () => {
+    const body = buildCanvasSkillBody('/x/shim.sh')
+    const yesAt = body.indexOf('Worth retrying')
+    const noAt = body.indexOf('NOT worth retrying')
+    expect(yesAt).toBeGreaterThan(-1)
+    expect(noAt).toBeGreaterThan(yesAt)
+    const yesSection = body.slice(yesAt, noAt)
+    const noSection = body.slice(noAt, body.indexOf('\n', noAt + 200) === -1 ? undefined : body.length)
+    for (const [kind, retryable] of Object.entries(RETRYABLE)) {
+      const word = new RegExp(`\\b${kind}\\b`)
+      expect(word.test(retryable ? yesSection : noSection), `${kind} in its group`).toBe(true)
+      expect(word.test(retryable ? noSection : yesSection), `${kind} not in the other`).toBe(false)
+    }
+  })
+
   it('spawn-team requires --team and none of the layout verbs are destructive', () => {
     expect(parseControlRequest('spawn-team', {})).toEqual({ error: 'spawn-team requires --team <json>' })
     expect(parseControlRequest('spawn-team', { team: '[]' })).toEqual({ verb: 'spawn-team', args: { team: '[]' } })
@@ -236,22 +276,40 @@ describe('the strict identity bucket is pre-positioned, not live', () => {
 })
 
 /**
- * The same pre-positioning, for messaging. `needsLiveCanvas` already declares `send`/`reply` as
- * store-answered so that a delivery can never travel the camera — a routing decision made once,
- * ahead of the dispatch that will consume it.
- *
- * This test is what stops "it ships inert" from becoming a false claim: it FAILS on the day the
- * verbs land, which is exactly when the PR body has to stop saying nothing changes for anyone —
- * and when Canvas's store-answered branch, which today only knows how to answer `list`, has to
- * learn to deliver instead of replying with a node listing.
+ * The messaging verbs are LIVE as of PR 5. The tripwire that used to sit here ("refused by the
+ * parser, so nothing routes them today") did its one job — it failed on the day the verbs landed —
+ * and is replaced by the positive claims: the verbs parse, a target is required, and they are
+ * verified-only at the route (`messaging-verified-only.test.ts`) with the delivery itself behind
+ * the per-project switch, off by default.
  */
-describe('the messaging verbs are declared but do not exist yet', () => {
-  it('send and reply are refused by the parser, so nothing routes them today', () => {
+describe('the messaging verbs parse', () => {
+  it('send and reply accept a target and require one', () => {
     expect(parseControlRequest('send', { node: 'n-1', text: 'hi' })).toEqual({
-      error: 'Unknown verb: send'
+      verb: 'send',
+      args: { node: 'n-1', text: 'hi' }
     })
     expect(parseControlRequest('reply', { node: 'n-1', text: 'hi' })).toEqual({
-      error: 'Unknown verb: reply'
+      verb: 'reply',
+      args: { node: 'n-1', text: 'hi' }
     })
+    expect(parseControlRequest('send', { text: 'hi' })).toEqual({
+      error: 'send requires --node <id>'
+    })
+    expect(parseControlRequest('reply', { text: 'hi' })).toEqual({
+      error: 'reply requires --node <id>'
+    })
+  })
+
+  // #98's validation, kept verbatim: notify carries NO caller text — its body is app-owned.
+  it('requires a target for notify and does not accept message text', () => {
+    expect(parseControlRequest('notify', {})).toEqual({ error: 'notify requires --node <id>' })
+    expect(parseControlRequest('notify', { node: 'n1' })).toEqual({
+      verb: 'notify',
+      args: { node: 'n1' }
+    })
+    expect(parseControlRequest('notify', { node: 'n1', text: 'custom prompt' })).toEqual({
+      error: 'notify does not accept --text'
+    })
+    expect(isDestructiveVerb('notify')).toBe(false)
   })
 })

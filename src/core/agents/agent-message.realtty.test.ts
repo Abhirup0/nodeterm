@@ -26,6 +26,7 @@ import path from 'path'
 import { deliverAgentMessage, type DeliveryDeps, type DeliveryRequest } from './agent-message'
 import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './pane-owner'
 import { bracketedInjection, PASTE_END, PASTE_START, sanitizePasteText } from '../paste-injection'
+import { localFramedDelivery, runPasteDelivery } from '../tmux-naming'
 import { buildEnvelope } from './agent-message-envelope'
 import { MANAGED_SCRIPT_REVISION } from './hooks/managed-script'
 import type { MirrorEntry } from '../agent-status-mirror'
@@ -148,11 +149,19 @@ function realPaneOwner(session: string): DeliveryDeps['paneOwner'] {
   }
 }
 
-/** The REAL write: one `send-keys -l --`, exactly what `PtyManager.sendText`'s framed branch does. */
+/**
+ * The REAL write: the PRODUCTION plan (`localFramedDelivery` → `runPasteDelivery`), exactly what
+ * `PtyManager.sendFramedPayload` runs — payload over `load-buffer -`'s stdin, `paste-buffer -r`
+ * with no `-p` and no separate Enter. Until PR 5 this helper used `send-keys -l --`, which proved
+ * the bytes but not the transport; now the same real reader judges the argv that ships.
+ */
 function realSendFramed(session: string): DeliveryDeps['sendFramed'] {
   return async (_id, payload) => {
-    tmux('send-keys', '-t', session, '-l', '--', payload)
-    return true
+    const plan = localFramedDelivery(socket, session, payload)
+    if (!plan) return false
+    return runPasteDelivery(plan, async (args, input) => {
+      execFileSync(TMUX as string, args, { env, input, encoding: 'utf8' })
+    })
   }
 }
 
@@ -196,7 +205,7 @@ suite('REAL tmux pane, REAL bash: what the delivery actually does', () => {
   it(
     'the whole multi-line envelope arrives as ONE block, frame intact',
     async () => {
-      const s = 'whole'
+      const s = 'nt-whole' // an nt- name: the production plan asserts its target at the splice
       startPane(s, 'claude')
       const out = await deliverAgentMessage(
         req({ body: 'line one\nline two' }),
@@ -236,7 +245,7 @@ suite('REAL tmux pane, REAL bash: what the delivery actually does', () => {
   it(
     'a body carrying the paste-END marker plus a command does NOT execute it',
     async () => {
-      const s = 'escape'
+      const s = 'nt-escape' // nt- name, same reason as nt-whole
       const marker = path.join(work, 'PWNED-escape')
       startPane(s, 'claude')
       const out = await deliverAgentMessage(

@@ -491,6 +491,10 @@ Consequences worth knowing:
   outage. `browser` additionally names why it is **structural** rather than unimplemented —
   a browser node on this edition renders in the **viewer's own** browser tab, which this
   server has no debugger for, and never can. See `src/server/control-unsupported.ts`.
+  The agent-messaging verbs (`send`/`reply`/`notify`) are additionally **verified-only at
+  the route** on every edition, so on this one an unverified caller gets the flat 403
+  messaging refusal and a verified caller gets the same
+  `control-unsupported-on-this-edition` — both terminal, neither an invitation to retry.
 - The **`ptyDestroy` tail-teardown** — *resolved in Phase 3c.* Phase 3b left this skipped
   (agent tails self-cleared only on `SessionEnd`, so a node closed *without* one left an
   idle file-tail); the server now untracks agent tails on node close, at desktop parity.

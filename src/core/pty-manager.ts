@@ -27,6 +27,7 @@ import {
   localTmuxKillArgs,
   remoteTmuxPtyArgs,
   remotePasteDelivery,
+  remoteFramedDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
   remotePaneOwnerArgs,
@@ -51,6 +52,7 @@ import {
   sessionName,
   isSessionName,
   localPasteDelivery,
+  localFramedDelivery,
   runPasteDelivery
 } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
@@ -2989,6 +2991,49 @@ export class PtyManager {
    * it as a "capability check": on a pre-3.7 tmux it cannot distinguish "the app did not ask"
    * from "I cannot ask", which is exactly the confusion that shipped the bug.
    */
+
+  /**
+   * Deliver one ALREADY-FRAMED payload — the agent-messaging envelope, composed by
+   * `bracketedInjection` in `deliverAgentMessage` — into a node's pane, local or SSH.
+   *
+   * A two-line dispatcher over `localFramedDelivery` / `remoteFramedDelivery`, exactly as
+   * `sendText` is over its plans and for the same reason: the composition (the no-sanitize rule,
+   * the well-formed-frame assertion, the per-call buffer, the failure sweep) lives in the plan
+   * builders, where `agent-message.realtty.test.ts` drives the local one against a real tmux and
+   * a real bash. NOT `sendText`: that path sanitizes structurally, which would strip the ESC
+   * bytes that ARE this payload's frame.
+   */
+  async sendFramedPayload(persistKey: string, payload: string): Promise<boolean> {
+    const target = sessionName(persistKey)
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    try {
+      if (sshRemote) {
+        const ssh = findSsh()
+        if (!ssh) return false
+        const plan = remoteFramedDelivery(sshRemote.conn, sshRemote.controlPath, target, payload)
+        if (!plan) return false
+        return await runPasteDelivery(plan, (args, input) => runWithStdin(ssh, args, input))
+      }
+      if (!this.tmuxPath) return false
+      const tmuxPath = this.tmuxPath
+      const plan = localFramedDelivery(TMUX_SOCKET, target, payload)
+      if (!plan) return false
+      return await runPasteDelivery(plan, (args, input) => runWithStdin(tmuxPath, args, input))
+    } catch {
+      // A builder throwing (unsafe target, an unframed payload) lands here; `runPasteDelivery`
+      // itself answers false rather than throwing, so the buffer sweep is never skipped.
+      return false
+    }
+  }
+
+  /**
+   * Does a live session exist for this node in THIS process right now? The messaging delivery's
+   * `targetLive` fact — deliberately not derived from an unreadable pane (see `DeliveryRequest`):
+   * only "no session is registered" may be reported as "the node is gone".
+   */
+  hasLiveSession(persistKey: string): boolean {
+    return !!this.sessionByPersistKey(persistKey)
+  }
 
   /**
    * List the names of all live nodeterm tmux sessions (on our dedicated socket). Used by the
