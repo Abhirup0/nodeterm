@@ -25,6 +25,22 @@ import type { DeliveryTraceInput } from './agent-message-trace'
  * tested against a real tmux pane and a real reader (`agent-message.realtty.test.ts`). A structural
  * test can only catch the tricks it was taught, and this repo has twice shipped a defect that a
  * hand-rolled parser passed and a real reader caught.
+ *
+ * ── THE RESIDUAL RISK THAT NO GATE CLOSES (recorded here, not only in the design) ────────────────
+ *
+ * hook-idle ≠ nobody typing. A human's half-composed draft in a genuinely idle agent's composer
+ * gets the message appended and the Enter submits both. That is the literal 2026-07-16 objection, it
+ * is undetectable from hooks, and G4 plus the trace are what make it diagnosable rather than
+ * invisible.
+ *
+ * ── WHAT IS DELIBERATELY NOT IN v1: CATCH-UP AFTER RESTART ───────────────────────────────────────
+ *
+ * PR 7's deliver-on-idle queue is IN-MEMORY (`delivery-queue.ts`), and its existence must not imply
+ * a persisted one. Catch-up after an app restart is NOT built. A persisted queue would need the same
+ * TTL AND a "stale — the sender may have moved on" marker, because `--resume` can land the message
+ * in a conversation that no longer expects it — and whether an agent given a stale-marked message
+ * behaves better than one given none is a PROMPT question, unverified, to be measured before that
+ * queue is built.
  */
 
 /** How long the receipt waits for the target's own next turn.
