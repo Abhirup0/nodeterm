@@ -36,7 +36,8 @@ describe('sessionStatusKind', () => {
     expect(sessionStatusKind('working')).toBe('working')
     expect(sessionStatusKind('waiting')).toBe('attention')
     expect(sessionStatusKind('blocked')).toBe('attention')
-    expect(sessionStatusKind('done')).toBe('attention')
+    // A done turn is its OWN kind, not attention: the unread mark already carries "new for you".
+    expect(sessionStatusKind('done')).toBe('done')
     expect(sessionStatusKind(undefined)).toBe('unknown')
   })
 })
@@ -340,7 +341,7 @@ describe('projectSignalCounts', () => {
           node('g1', { kind: 'group', title: 'G', color: '#abc' }),
           node('a'), // waiting → attention
           node('b', { parentId: 'g1' }), // blocked → attention
-          node('c'), // done + unread → attention (workflow state wins)
+          node('c'), // done + unread → unread ('done' is not attention; unread carries the signal)
           node('d'), // unknown + unread → unread (state lost, unread persisted)
           node('e'), // working + unread → NOT counted (mirrors the row glyph precedence)
           node('f') // plain unknown → neither
@@ -356,8 +357,9 @@ describe('projectSignalCounts', () => {
     }
     const [g] = buildSessionList(proj, null, 'p1', status, '')
     // `e` is the load-bearing one: it is the single working session AND carries an unread mark,
-    // so it must land in `working` and NOT in `unread`.
-    expect(projectSignalCounts(g)).toEqual({ attention: 3, unread: 1, working: 1 })
+    // so it must land in `working` and NOT in `unread`. `c` (done+unread) now counts as unread,
+    // not attention — the user's call: unread already signals "there's something new here".
+    expect(projectSignalCounts(g)).toEqual({ attention: 2, unread: 2, working: 1 })
   })
 
   it('returns zeros for a quiet project', () => {
@@ -415,7 +417,7 @@ describe('buildStatusList', () => {
   const status: Record<string, AgentNodeStatus> = {
     a1: { unread: false, state: 'waiting', lastEventAt: 100 }, // attention, oldest
     a2: { unread: false, state: 'blocked', lastEventAt: 300 }, // attention, newest
-    d1: { unread: false, state: 'done', lastEventAt: 200 }, // completed turn → attention
+    d1: { unread: false, state: 'done', lastEventAt: 200 }, // completed turn → its own 'done' section
     w1: { unread: false, state: 'working', lastEventAt: 400 }, // working
     i1: { unread: false } // unknown (no state or transition time)
   }
@@ -435,15 +437,16 @@ describe('buildStatusList', () => {
     }
   ]
 
-  it('groups by workflow status in the fixed order attention → unknown → working', () => {
+  it('groups by workflow status in the fixed order attention → done → unknown → working', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
-    expect(sections.map((s) => s.kind)).toEqual(['attention', 'unknown', 'working'])
+    expect(sections.map((s) => s.kind)).toEqual(['attention', 'done', 'unknown', 'working'])
   })
 
   it('flattens across projects and tags each row with its project', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
     const attention = sections.find((s) => s.kind === 'attention')!
-    expect(attention.rows.map((r) => r.id).sort()).toEqual(['a1', 'a2', 'd1'])
+    expect(attention.rows.map((r) => r.id).sort()).toEqual(['a1', 'a2'])
+    expect(sections.find((s) => s.kind === 'done')!.rows.map((r) => r.id)).toEqual(['d1'])
     const a1 = attention.rows.find((r) => r.id === 'a1')!
     expect(a1.projectId).toBe('p1')
     expect(a1.projectName).toBe('Alpha')
@@ -455,11 +458,12 @@ describe('buildStatusList', () => {
 
   it('sorts rows within a section by descending state-change time', () => {
     const sections = buildStatusList(proj, null, 'p1', status, '')
+    // a2 (300) before a1 (100); d1 now sits in its own 'done' section, not between them.
     expect(sections.find((s) => s.kind === 'attention')!.rows.map((r) => r.id)).toEqual([
       'a2',
-      'd1',
       'a1'
     ])
+    expect(sections.find((s) => s.kind === 'done')!.rows.map((r) => r.id)).toEqual(['d1'])
   })
 
   it('keeps only terminal nodes (drops stickies/editors)', () => {
@@ -478,20 +482,21 @@ describe('buildStatusList', () => {
   it('keeps empty sections while filtering rows by title/session', () => {
     // 'runner' only matches w1 (working)
     const filtered = buildStatusList(proj, null, 'p1', status, 'runner')
-    expect(filtered.map((s) => s.kind)).toEqual(['attention', 'unknown', 'working'])
+    expect(filtered.map((s) => s.kind)).toEqual(['attention', 'done', 'unknown', 'working'])
     expect(filtered.find((s) => s.kind === 'working')!.rows.map((r) => r.id)).toEqual(['w1'])
     expect(filtered.filter((s) => s.kind !== 'working').every((s) => s.rows.length === 0)).toBe(true)
   })
 
   it('returns every section even when some headers have no sessions', () => {
-    // Waiting + done both land in attention; unknown/working stay present and empty.
+    // Waiting → attention, done → its own section; unknown/working stay present and empty.
     const onlyTwo: ProjectInput[] = [
       { id: 'p1', name: 'Alpha', color: '#111', nodes: [node('a1'), node('d1')] }
     ]
     const two: Record<string, AgentNodeStatus> = { a1: { unread: false, state: 'waiting' }, d1: { unread: false, state: 'done' } }
     const sections = buildStatusList(onlyTwo, null, 'p1', two, '')
-    expect(sections.map((s) => s.kind)).toEqual(['attention', 'unknown', 'working'])
-    expect(sections.find((s) => s.kind === 'attention')!.rows.map((row) => row.id).sort()).toEqual(['a1', 'd1'])
+    expect(sections.map((s) => s.kind)).toEqual(['attention', 'done', 'unknown', 'working'])
+    expect(sections.find((s) => s.kind === 'attention')!.rows.map((row) => row.id)).toEqual(['a1'])
+    expect(sections.find((s) => s.kind === 'done')!.rows.map((row) => row.id)).toEqual(['d1'])
     expect(sections.find((s) => s.kind === 'unknown')!.rows).toEqual([])
     expect(sections.find((s) => s.kind === 'working')!.rows).toEqual([])
   })
@@ -503,9 +508,13 @@ describe('buildStatusList', () => {
       w1: { unread: true, state: 'working' }
     }
     const sections = buildStatusList(proj, null, 'p1', glowing, '')
-    const attention = sections.find((s) => s.kind === 'attention')!
-    expect(attention.label).toBe('Waiting for your response')
-    expect(attention.rows.map((r) => r.id)).toEqual(['d1'])
+    // d1 is done (+unread) → the Done section, NOT attention. Unread is carried on the row, not
+    // in the workflow bucket.
+    expect(sections.find((s) => s.kind === 'attention')!.rows).toEqual([])
+    const done = sections.find((s) => s.kind === 'done')!
+    expect(done.label).toBe('Done')
+    expect(done.rows.map((r) => r.id)).toEqual(['d1'])
+    expect(done.rows[0].unread).toBe(true)
     // Unread alone is not a workflow state; a live turn is still Running.
     expect(sections.find((s) => s.kind === 'unknown')!.rows.map((r) => r.id)).toContain('i1')
     expect(sections.find((s) => s.kind === 'working')!.rows.map((r) => r.id)).toEqual(['w1'])

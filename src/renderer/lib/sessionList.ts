@@ -25,7 +25,7 @@ export interface ProjectInput {
   nodes: SessionNodeInput[]
 }
 
-export type StatusKind = 'working' | 'attention' | 'unknown'
+export type StatusKind = 'working' | 'attention' | 'done' | 'unknown'
 
 /** Sessions sidebar top-level grouping mode. */
 export type SidebarGrouping = 'project' | 'status'
@@ -33,6 +33,7 @@ export type SidebarGrouping = 'project' | 'status'
 const STATE_LABEL: Record<StatusKind, string> = {
   working: 'Running',
   attention: 'Waiting for your response',
+  done: 'Done',
   unknown: 'Unknown'
 }
 
@@ -51,7 +52,7 @@ export function groupCollapseKey(projectId: string, groupId: string): string {
  * top; working sinks to the bottom (a turn in flight is the least urgent to revisit). Unknown sits
  * between them: there is no current hook signal on which to infer a workflow state.
  */
-const STATUS_ORDER: StatusKind[] = ['attention', 'unknown', 'working']
+const STATUS_ORDER: StatusKind[] = ['attention', 'done', 'unknown', 'working']
 
 /**
  * Whether a project row is collapsed in the sessions sidebar. `settings.sidebarAutoCollapse`
@@ -155,8 +156,13 @@ export function sessionStatusKind(state: AgentNodeStatus['state']): StatusKind {
       return 'working'
     case 'waiting':
     case 'blocked':
-    case 'done':
       return 'attention'
+    case 'done':
+      // A finished turn is NOT an attention signal: the `unread` mark already carries "there is
+      // something new for you here" (see SessionRow), and escalating every completed turn to the
+      // red attention bell + project badge double-counts that. `done` is its own status — a
+      // finished check in project mode, its own section in status mode.
+      return 'done'
     default:
       return 'unknown'
   }

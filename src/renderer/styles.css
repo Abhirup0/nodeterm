@@ -6402,6 +6402,9 @@ body,
 
 .ss-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
 .ss-dot--unknown { background: var(--muted-2); }
+/* A finished turn the user has already seen: a quiet, filled success dot (the unread state
+   promotes to the pulsing check instead — see SessionRow). */
+.ss-dot--done { background: var(--success); }
 .ss-check { color: var(--success); margin-top: 2px; flex: 0 0 auto; line-height: 0; }
 /* Unread: the same check, accent-blue and pulsing until the user visits the node. */
 .ss-check--unread { color: var(--accent); animation: nt-pulse 1.1s ease-in-out infinite; }
