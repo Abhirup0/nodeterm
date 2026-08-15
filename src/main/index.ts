@@ -580,12 +580,12 @@ app.whenReady().then(async () => {
   ipcMain.on(
     IPC.browserRegister,
     (_e, webContentsId: number, nodeId: string, surface?: BrowserSurfaceKind) => {
-      // `surface` is optional ON THE WIRE only: both mount sites still send two arguments, so an
-      // absent value means "the canvas one", which is what every registration was taken to be
-      // before the field existed. A value that is present and wrong is refused, not defaulted.
-      const kind = surface === undefined ? 'canvas' : surface
+      // `surface` is passed through UNCHANGED, including when it is absent. Both mount sites
+      // (BrowserNode and the kanban CardModal) still send two arguments, so today it is always
+      // absent — and defaulting it to 'canvas' here would record every modal guest as a canvas
+      // guest, which is a false claim a later reverse lookup cannot detect. See `BrowserGuest`.
       if (
-        !registerBrowserGuest(browserGuests, webContentsId, nodeId, kind, (id) =>
+        !registerBrowserGuest(browserGuests, webContentsId, nodeId, surface, (id) =>
           webContents.fromId(id) ?? null
         )
       ) {

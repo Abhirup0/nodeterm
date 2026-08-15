@@ -6,6 +6,7 @@ import {
   buildCanvasControlInstructions,
   buildCanvasSkillBody
 } from './canvas-control-core'
+import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {
@@ -205,5 +206,31 @@ describe('parseControlRequest', () => {
     for (const v of ['group', 'arrange', 'align', 'spawn-team'] as const) {
       expect(isDestructiveVerb(v)).toBe(false)
     }
+  })
+})
+
+/**
+ * The claim `node-identity-policy.ts` makes about itself, checked against the real verb model.
+ *
+ * `STRICT_CONTROL_VERBS` is pre-positioned: the ordering is fixed before the verb it is for
+ * exists, so the verb cannot arrive through the `override === false` hole. These two tests are
+ * what stop that from quietly becoming a false claim in either direction — the first FAILS on the
+ * day the real `browser` verb lands, which is exactly when the PR body, the changelog and the
+ * Settings copy all have to stop saying "nothing changes for anyone".
+ */
+describe('the strict identity bucket is pre-positioned, not live', () => {
+  it('`browser` is not a verb this app has, so the bucket gates nothing today', () => {
+    expect(STRICT_CONTROL_VERBS.has('browser')).toBe(true)
+    expect(parseControlRequest('browser', {})).toEqual({ error: 'Unknown verb: browser' })
+  })
+
+  it('`open-browser` IS a real verb and is deliberately NOT in the bucket', () => {
+    // Opening a node is not driving one, and open-browser has a live legacy population that a
+    // strict gate would strand with no way back. See STRICT_CONTROL_VERBS' doc comment.
+    expect(parseControlRequest('open-browser', { url: 'https://example.com' })).toEqual({
+      verb: 'open-browser',
+      args: { url: 'https://example.com' }
+    })
+    expect(STRICT_CONTROL_VERBS.has('open-browser')).toBe(false)
   })
 })

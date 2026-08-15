@@ -11,14 +11,24 @@ import { isSafeNodeId } from '../core/remote-safety'
  *
  * One node id can have TWO live guests — the canvas one (`BrowserNode`) and the kanban card modal
  * one (`CardModal`) — both mounting `BrowserSurface` with the SAME nodeId, so a reverse lookup by
- * node id picks arbitrarily. The field is recorded here first; threading it from both mount sites
- * is its own change.
+ * node id picks arbitrarily.
  */
 export type BrowserSurfaceKind = 'canvas' | 'modal'
 
 export interface BrowserGuest {
   nodeId: string
-  surface: BrowserSurfaceKind
+  /**
+   * ABSENT until both mount sites are threaded, and absent is the only honest value: neither of
+   * them sends a surface yet, so this field is `undefined` for every registration the app makes
+   * today.
+   *
+   * It is deliberately NOT defaulted to `'canvas'`. Defaulting would record the kanban card
+   * modal's guest as a canvas guest — a positive false claim, indistinguishable from the real
+   * thing, producing two `'canvas'` entries for one node id: exactly the bug the field exists to
+   * prevent. `undefined` is detectable, so a future reverse lookup can refuse to guess. A consumer
+   * must treat it as "unknown", never as "canvas".
+   */
+  surface?: BrowserSurfaceKind
 }
 
 /** The minimum of Electron's `webContents` this module needs, injected so the guard is testable
@@ -46,12 +56,14 @@ export function registerBrowserGuest(
   guests: Map<number, BrowserGuest>,
   webContentsId: number,
   nodeId: string,
-  surface: BrowserSurfaceKind,
+  /** `undefined` = the caller does not know which surface this is; see {@link BrowserGuest.surface}.
+   *  A value that is PRESENT and unrecognised is refused rather than treated as unknown. */
+  surface: BrowserSurfaceKind | undefined,
   lookup: WebContentsLookup
 ): boolean {
   if (!Number.isInteger(webContentsId) || webContentsId <= 0) return false
   if (!isSafeNodeId(nodeId)) return false
-  if (surface !== 'canvas' && surface !== 'modal') return false
+  if (surface !== undefined && surface !== 'canvas' && surface !== 'modal') return false
   // The lookup can throw for a destroyed id (Electron's own accessors do); a guest that cannot be
   // looked at is not a guest.
   let contents: { getType(): string } | null = null
@@ -61,7 +73,10 @@ export function registerBrowserGuest(
     return false
   }
   if (!contents || contents.getType() !== 'webview') return false
-  guests.set(webContentsId, { nodeId, surface })
+  // The key is only written when it is known: an entry with no `surface` says "unknown", an entry
+  // with `surface: undefined` written explicitly says the same thing, and neither ever says
+  // "canvas" on a guess.
+  guests.set(webContentsId, surface === undefined ? { nodeId } : { nodeId, surface })
   return true
 }
 
