@@ -16,17 +16,14 @@ import {
 } from './browser-guest-registry'
 import { appendBoardLogVia, registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import {
+  createDeliveryQueue,
   deliverFromControl,
   isDeliverRequest,
   messagingEnabledVia,
   onMessagingAgentEvent,
-  runDelivery,
   setDeliveryQueue,
   type AgentMessagingDeps
 } from './agent-messaging'
-import { DeliveryQueue } from '../core/agents/delivery-queue'
-import { recordDelivery } from '../core/agents/agent-message-trace'
-import type { AgentMessageDeliverRequest } from '../shared/agents/agent-messaging'
 import type { RemoteLogExec } from '../core/board-log'
 import { boardLogRemotePath } from '../core/board-log'
 import { PtyManager } from '../core/pty-manager'
@@ -946,30 +943,16 @@ app.whenReady().then(async () => {
     customAgents: () => settingsStore.get().customAgents,
     appendBoardLog: (projectId, entry) => appendBoardLogVia(boardLogRouter, projectId, entry)
   }
-  // Deliver-on-idle (PR 7): the process-lifetime bounded queue. Its `deliver` is `runDelivery`
-  // against these SAME deps, so a flush re-runs the whole gate chain (ownership, grant, flow)
-  // against live state — the flush-time re-validation. The flush trigger is the target's own `done`
-  // event, already fed to `onMessagingAgentEvent` below. `wake`/`isHibernated` are RENDERER state
-  // (Eco lives in `useAgentStatus`, the wake registry in the renderer's agent-restart) with no
-  // main-side signal today; the BUSY-target leg is fully wired here, and the hibernated leg's
-  // renderer→main wiring is owed to device verification (see the PR body).
-  messagingDeps.queue = new DeliveryQueue({
-    now: () => Date.now(),
-    deliver: (qreq) =>
-      runDelivery(
-        {
-          verb: qreq.verb as AgentMessageDeliverRequest['verb'],
-          sourceNodeId: qreq.sourceNodeId,
-          targetNodeId: qreq.targetNodeId,
-          body: qreq.body
-        },
-        messagingDeps
-      ),
-    // The queue's own `queued`/`expired` lines land in the in-memory trace ring (no project is
-    // resolved at this level — the flush's real outcome traces to the project's board log inside
-    // `runDelivery`). Ring-only is honest: `traced: 'memory'`.
-    trace: (input) => recordDelivery(input, { appendBoardLog: async () => false, now: () => Date.now() })
-  })
+  // Deliver-on-idle (PR 7): the process-lifetime bounded queue, built by the service factory so its
+  // trace + sender-facing legs are wired (and unit-tested) in one place. Its `deliver` is
+  // `runDelivery` against these SAME deps, so a flush re-runs the whole gate chain (ownership, grant,
+  // flow) against live state — the flush-time re-validation. The flush trigger is the target's own
+  // `done` event, already fed to `onMessagingAgentEvent` below. A TTL expiry is board-logged to the
+  // sender's project AND held in the trace ring (never a silent drop). `wake`/`isHibernated` are
+  // RENDERER state (Eco lives in `useAgentStatus`, the wake registry in the renderer's
+  // agent-restart) with no main-side signal today: the BUSY-target leg is fully wired here, and the
+  // hibernated leg's renderer→main wake is an explicitly-recorded residual (see the PR body).
+  messagingDeps.queue = createDeliveryQueue(messagingDeps)
   setDeliveryQueue(messagingDeps.queue)
   ipcMain.handle(IPC.agentMessageDeliver, async (_e, raw: unknown) => {
     if (!isDeliverRequest(raw))

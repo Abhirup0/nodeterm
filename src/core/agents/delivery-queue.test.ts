@@ -206,17 +206,6 @@ describe('DeliveryQueue', () => {
     expect(h.expired.length).toBe(before)
   })
 
-  it('forget() expires every queued message for an ending session — not a silent drop', async () => {
-    const h = harness()
-    const q = new DeliveryQueue(h.deps)
-    await q.enqueue(req({ body: 'a' }))
-    await q.enqueue(req({ body: 'b' }))
-    await q.forget('dst')
-    expect(q.depth('dst')).toBe(0)
-    expect(h.expired.map((e) => e.req.body)).toEqual(['a', 'b'])
-    expect(h.timers.every((t) => t.cancelled)).toBe(true)
-  })
-
   it('the constants are finite and positive — a real bound and a real TTL', () => {
     expect(DELIVERY_QUEUE_CAPACITY).toBeGreaterThan(0)
     expect(Number.isFinite(DELIVERY_QUEUE_CAPACITY)).toBe(true)

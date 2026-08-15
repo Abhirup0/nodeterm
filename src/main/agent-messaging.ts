@@ -39,7 +39,12 @@ import {
 import { noteNewTurn, noteSent, reserveFlow } from '../core/agents/agent-message-flow'
 import { recordDelivery } from '../core/agents/agent-message-trace'
 import { resolveDeliveryScope, scopeRefusal } from '../core/agents/agent-message-scope'
-import type { DeliveryQueue } from '../core/agents/delivery-queue'
+import {
+  DeliveryQueue,
+  type DeliveryQueueDeps,
+  type QueuedDeliveryRequest
+} from '../core/agents/delivery-queue'
+import { randomUUID } from 'crypto'
 import { nodeTokenFilePresent } from '../core/agents/node-token-files'
 import { mirrorEntry as coreMirrorEntry, type MirrorEntry } from '../core/agent-status-mirror'
 import {
@@ -156,6 +161,84 @@ let deliveryQueue: DeliveryQueue | null = null
 /** Wire (or clear) the deliver-on-idle queue. Called once from main; absent ⇒ no queueing. */
 export function setDeliveryQueue(q: DeliveryQueue | null): void {
   deliveryQueue = q
+}
+
+/** The board-log author for a queue-level record (an app action, not a person's) — the same stamp
+ *  `recordDelivery` uses. */
+const QUEUE_TRACE_AUTHOR = { name: 'nodeterm', color: '#8b8b8b' } as const
+
+/**
+ * Build the deliver-on-idle queue against a messaging deps record, WIRING both trace legs required
+ * by Task 7.2 ("emits `expired` to the sender AND to the trace — never a silent drop"):
+ *
+ *  - the TRACE leg is `deps.trace`/`recordDelivery`: `queued` and `expired` go into the in-memory
+ *    ring Settings → Agents reads, and — for a resolvable owning project — the board log too;
+ *  - the SENDER leg is `onExpired` / `onFlushed`: a board-log line in the SENDER's own project, so
+ *    the operator watching the sender learns a queued message expired, was dropped by a grant that
+ *    changed under it, or finally landed. Without this, a busy-queued message that TTL-expires would
+ *    be recorded only where nobody looking at the sender would see it — the exact half-wiring the
+ *    PR 7 review flagged (I1).
+ *
+ * `deliver` is `runDelivery` against these same deps, so a flush re-runs the whole gate chain
+ * against live state (the flush-time re-validation). `wake`/`isHibernated` are RENDERER state with
+ * no main-side signal yet and are deliberately NOT supplied here — the busy-target leg is fully
+ * wired, the hibernated leg's main→renderer wake is an explicitly-recorded residual (see
+ * `delivery-queue.ts` and the PR body). `opts` exists only so a test can pin the TTL and scheduler.
+ */
+export function createDeliveryQueue(
+  deps: AgentMessagingDeps,
+  opts: { capacity?: number; ttlMs?: number; schedule?: DeliveryQueueDeps['schedule'] } = {}
+): DeliveryQueue {
+  const now = deps.now ?? ((): number => Date.now())
+  /** The project that lists a node id, for a board-log write. A trace is not an authorization, so
+   *  the first match is fine — unlike the delivery gate, which proves ownership. */
+  const projectFor = (nodeId: string): string | undefined =>
+    deps.projects().find((p) => p.nodes.some((n) => n.id === nodeId))?.id
+  /** Append one messaging record to a project's board log. No-ops when the project cannot be
+   *  resolved (an inline/cwd-less project has no log — Constraint 10 — the ring still holds it). */
+  const senderBoardLog = (req: QueuedDeliveryRequest, title: string): void => {
+    const projectId = projectFor(req.sourceNodeId)
+    if (!projectId) return
+    const entry: BoardLogEntry = {
+      id: randomUUID(),
+      ts: now(),
+      author: QUEUE_TRACE_AUTHOR,
+      nodeId: req.targetNodeId,
+      kind: 'event',
+      event: { type: 'agent-message', from: req.sourceNodeId, to: req.targetNodeId, title }
+    }
+    void deps.appendBoardLog(projectId, entry)
+  }
+  return new DeliveryQueue(
+    {
+      now,
+      deliver: (qreq) =>
+        runDelivery(
+          {
+            verb: qreq.verb as AgentMessageDeliverRequest['verb'],
+            sourceNodeId: qreq.sourceNodeId,
+            targetNodeId: qreq.targetNodeId,
+            body: qreq.body
+          },
+          deps
+        ),
+      // The trace leg: ring always, board log when the TARGET's owning project is resolvable.
+      trace: (input) =>
+        recordDelivery(input, {
+          appendBoardLog: (entry) => {
+            const projectId = deps.paneOwnerProject(input.targetNodeId)
+            return projectId ? deps.appendBoardLog(projectId, entry) : Promise.resolve(false)
+          },
+          now
+        }),
+      // The sender leg: a durable line where the sender's operator will see it.
+      onExpired: (req) => senderBoardLog(req, 'expired'),
+      onFlushed: (req, outcome) => senderBoardLog(req, outcome.kind),
+      // Injected so a test pins TTL expiry deterministically; production uses the default setTimeout.
+      ...(opts.schedule ? { schedule: opts.schedule } : {})
+    },
+    { capacity: opts.capacity, ttlMs: opts.ttlMs }
+  )
 }
 
 /**

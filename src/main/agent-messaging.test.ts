@@ -13,8 +13,10 @@ import {
   deliverFromControl,
   renderMessageOutcome,
   onMessagingAgentEvent,
+  createDeliveryQueue,
   type AgentMessagingDeps
 } from './agent-messaging'
+import type { BoardLogEntry } from '../shared/types'
 import { RETRYABLE, type AgentMessageOutcome } from '../core/agents/agent-message-decide'
 import { resetMessageFlow, FANOUT_PER_TURN } from '../core/agents/agent-message-flow'
 import { NOTIFY_BODY } from '../shared/agents/agent-messaging'
@@ -382,5 +384,55 @@ describe('deliver-on-idle wiring (PR 7)', () => {
     const notHib = fakeDeps({ paneOwner: async () => shellPane, queue: fakeQueue().queue, isHibernated: () => false })
     const plain = await deliverFromControl(req(), notHib)
     expect(plain.outcome.kind).toBe('targetNotAgentPane')
+  })
+
+  // I1: the production factory wires the sender-facing expiry channel. Without it a busy-queued
+  // message that TTL-expires would land only in the trace ring, never where the sender looks.
+  it('a TTL-expired busy-queued message is board-logged to the sender (expiry channel wired)', async () => {
+    const appended: { projectId: string; entry: BoardLogEntry }[] = []
+    let fire: (() => void) | null = null
+    const deps = fakeDeps({
+      appendBoardLog: async (projectId, entry) => {
+        appended.push({ projectId, entry })
+        return true
+      },
+      // By expiry the target's runtime ownership is often gone, so the TRACE leg (routed to the
+      // TARGET's owning project) cannot board-log — leaving the SENDER-facing `onExpired` leg
+      // (routed to the sender's project) as the ONLY board-log writer. That isolation is the point:
+      // it is `onExpired`, not the trace, that this test pins.
+      paneOwnerProject: () => undefined
+    })
+    // `createDeliveryQueue` is the SAME builder main uses — a fake scheduler makes the TTL lapse
+    // deterministic, and a short ttl is irrelevant since the scheduler never really waits.
+    const queue = createDeliveryQueue(deps, {
+      ttlMs: 1000,
+      schedule: (_ms, fn) => {
+        fire = fn
+        return () => {
+          fire = null
+        }
+      }
+    })
+    await queue.enqueue({
+      verb: 'send',
+      sourceNodeId: 'a1',
+      targetNodeId: 'b1',
+      sourceTitle: 'Alpha',
+      body: 'hi'
+    })
+    expect(fire).toBeTruthy()
+    fire!() // the TTL lapses
+    await Promise.resolve()
+    await Promise.resolve()
+    // A board-log line naming the expiry landed in the SENDER's project (a1 ∈ p1), from a1 to b1.
+    const expiredLine = appended.find(
+      (a) =>
+        a.entry.kind === 'event' &&
+        a.entry.event?.type === 'agent-message' &&
+        a.entry.event.title === 'expired' &&
+        a.entry.event.from === 'a1'
+    )
+    expect(expiredLine, 'no expired board-log line reached the sender').toBeTruthy()
+    expect(expiredLine?.projectId).toBe('p1')
   })
 })

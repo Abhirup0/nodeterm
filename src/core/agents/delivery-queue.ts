@@ -264,28 +264,6 @@ export class DeliveryQueue {
     this.deps.onExpired?.(entry.req, { traceId: t.traceId, queuedForMs })
   }
 
-  /** Drop everything for a node whose session is ending (delete/recycle) — its queued messages can
-   *  never land in the pane that is going away. Traces each as `expired` so the drop is not silent. */
-  async forget(nodeId: string): Promise<void> {
-    const list = this.queues.get(nodeId)
-    if (!list) return
-    this.queues.delete(nodeId)
-    for (const entry of list) await this.expireDetached(entry)
-  }
-
-  private async expireDetached(entry: QueueEntry): Promise<void> {
-    entry.cancelTimer()
-    const queuedForMs = this.deps.now() - entry.enqueuedAt
-    const t = await this.deps.trace({
-      sourceNodeId: entry.req.sourceNodeId,
-      sourceTitle: entry.req.sourceTitle,
-      targetNodeId: entry.req.targetNodeId,
-      outcome: 'expired',
-      bodyChars: entry.req.body.length
-    })
-    this.deps.onExpired?.(entry.req, { traceId: t.traceId, queuedForMs })
-  }
-
   /** Test seam / shutdown: cancel every timer and drop every queue WITHOUT tracing (a teardown is
    *  not an expiry the sender needs to hear about). */
   resetForTests(): void {
