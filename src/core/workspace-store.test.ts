@@ -535,6 +535,43 @@ describe('watcher self-write detection compares the RAW file bytes', () => {
 })
 
 describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  // The append is a read-modify-write of the very file a save rewrites WHOLE. Off the save chain the
+  // two interleave: the phone registers its session, an autosave that read the file first lands last,
+  // and the node the phone was just told exists ("true", card on screen) is gone from disk.
+  it('is serialized with saves — an in-flight save cannot un-write the appended node', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+
+    // Stall the next project.json write so the save is still in flight when the append arrives.
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const realWrite = fs.writeFile.bind(fs)
+    let stalled = false
+    vi.spyOn(fs, 'writeFile').mockImplementation(async (p, data, enc) => {
+      if (!stalled && String(p).includes('project.json')) {
+        stalled = true
+        await gate
+      }
+      return realWrite(p as string, data as string, enc as BufferEncoding)
+    })
+
+    const saving = store.save(ws([project({ cwd: projRoot, name: 'renamed' })]))
+    await new Promise((r) => setTimeout(r, 20)) // the save is parked inside its write
+    const appending = store.appendRemoteNode('p1', { id: 'term-zz1-1', title: 'Mobile' })
+    await new Promise((r) => setTimeout(r, 20)) // unserialized, the append reads + writes here
+    release()
+    expect(await appending).toBe(true)
+    await saving
+
+    const file = JSON.parse(await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8'))
+    expect(file.nodes.map((n: { id: string }) => n.id)).toContain('term-zz1-1') // the phone's session
+    expect(file.name).toBe('renamed') // …and the save's own change
+  })
+
   it('appends into a local ref project file and broadcasts the change itself', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
@@ -897,6 +934,64 @@ describe('ssh lineage safety', () => {
     expect(adopted?.nodes.map((n) => n.id)).toContain('term-1') // and our own node survives too
     // ...and the merged set is pushed back so the server keeps it.
     expect(JSON.parse(files['~/app']).nodes.map((n: any) => n.id)).toContain('term-mobile-1')
+  })
+
+  // The write side of the same field failure, and the one the 15 s poll could NOT cover: the phone
+  // appends its session at T0, the user drags a node here at T0+2 s, and that ordinary save's mirror
+  // write used to serialize a cache that had never seen the append — deleting the phone's session
+  // from BOTH sides, permanently, with nothing on screen to say it happened.
+  it('mirror write: an ordinary local edit never deletes a node the phone appended since our last look', async () => {
+    const { files, io } = cwdIO()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 't')] })]))
+    // The phone appends straight into the server file (its own SSH path) and bumps rev.
+    const f = JSON.parse(files['~/app'])
+    f.rev = 2
+    f.nodes = [...f.nodes, node('term-mobile-1', 'Mobile')]
+    files['~/app'] = JSON.stringify(f)
+    fake.sent.length = 0
+
+    // …two seconds later, well inside the poll window, the user drags a node here.
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 'dragged')] })]))
+
+    const after = JSON.parse(files['~/app'])
+    expect(after.nodes.map((n: any) => n.id)).toContain('term-mobile-1') // survived the mirror write
+    expect(after.nodes.find((n: any) => n.id === 'term-1').title).toBe('dragged') // our edit still landed
+    // The rescued node is live on the server and missing from the canvas — the renderer is told now.
+    const msg = fake.sent.find((m) => m.channel === 'workspace:external-change')
+    expect(msg).toBeTruthy()
+    expect((msg!.args[0] as Project).nodes.map((n) => n.id)).toContain('term-mobile-1')
+  })
+
+  // The other half of that rule: the re-read must not hand back what the user just deleted, or no
+  // node on an ssh project could ever be closed (every mirror write would resurrect it).
+  it('mirror write: a deliberate delete still propagates — the re-read does not resurrect it', async () => {
+    const { files, io } = cwdIO()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [node('term-1', 't')] })]))
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [] })])) // the user closed it
+    expect(JSON.parse(files['~/app']).nodes).toEqual([])
+    // …and the poll must not bring it back either.
+    expect(await store.refreshSshProject('ps')).toBeNull()
+    expect(JSON.parse(files['~/app']).nodes).toEqual([])
+  })
+
+  // An EMPTY desktop canvas is exactly where a phone-started session is the only node in the file,
+  // so "empty side with the higher rev = a deliberate clear" was the most expensive place to guess
+  // wrong: the rescue was skipped and the empty cache pushed up, erasing the phone's session.
+  it('an empty canvas whose rev drifted ahead still rescues the node it never had', async () => {
+    const { files, io } = cwdIO()
+    const store = new WorkspaceStore(io)
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [] })])) // rev 1, empty
+    await store.save(ws([project({ id: 'ps', ssh: sshConn, cwd: undefined, nodes: [], name: 'renamed' })])) // rev 2
+    // The server is BEHIND our cache (a dropped mirror write) and holds the phone's session.
+    files['~/app'] = JSON.stringify({
+      version: 1, rev: 1, savedAt: 'then', id: 'ps', name: 'foo', color: '#7aa2f7',
+      viewport: { x: 0, y: 0, zoom: 1 }, nodes: [node('term-mobile-1', 'Mobile')]
+    })
+    const adopted = await store.refreshSshProject('ps')
+    expect(adopted?.nodes.map((n) => n.id)).toContain('term-mobile-1') // reaches the live canvas
+    expect(JSON.parse(files['~/app']).nodes.map((n: any) => n.id)).toContain('term-mobile-1') // and stays on the server
   })
 
   it('poll (read-only stand) still rescues + surfaces a drifted mobile append', async () => {

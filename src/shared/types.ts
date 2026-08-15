@@ -1602,6 +1602,32 @@ export interface ProviderUsage {
 export interface MemInfo {
   availableMb: number
   totalMb: number
+  /**
+   * Swap, and the kernel's own stall accounting. **Optional on purpose, and their absence is the
+   * darwin contract.**
+   *
+   * `availableMb` alone cannot see a host that has already spent its overflow reserve: a machine
+   * with 10.5 GB "available" and 84% of its swap consumed reads as healthy under a 10%-of-RAM
+   * watermark, which is exactly the state the 2026-08-03 swap-thrash lockup was in. These fields
+   * carry the two host-wide facts that DO see it.
+   *
+   * Only the Linux reader populates them (`/proc/meminfo` for swap, `/proc/pressure/memory` for
+   * PSI — both world-readable, measured on a `hidepid=invisible` host where a non-root uid can read
+   * neither another user's processes nor their tmux socket). `parseVmStat` leaves every one of them
+   * undefined, so no macOS reading can ever satisfy a swap or PSI term: darwin cannot start firing
+   * on a signal that was never measured there.
+   *
+   * A consumer must treat `undefined` as NO SIGNAL, never as zero — a zero here reads as
+   * "swap totally exhausted" / "no stall", and both are claims the reader has not earned.
+   */
+  /** Total swap in MB; `0` legitimately means "this host has no swap configured". */
+  swapTotalMb?: number
+  /** Free swap in MB. */
+  swapFreeMb?: number
+  /** `/proc/pressure/memory` `some avg60` — % of the last minute at least one task stalled on memory. */
+  psiSomeAvg60?: number
+  /** `/proc/pressure/memory` `full avg60` — % of the last minute EVERY task was stalled. Thrash. */
+  psiFullAvg60?: number
 }
 
 /** One nt- session's memory, as the panel renders it. */

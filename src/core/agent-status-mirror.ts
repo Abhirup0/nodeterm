@@ -1493,11 +1493,15 @@ export function recordContextUsage(nodeId: string, percent: number): void {
 }
 
 /**
- * Remove a node (call on permanent destroy). Its `nodes` entries (main + inbox activity) drop,
- * but its inbox EVENTS stay as feed history — marked resolved so the phone archives them.
- * Schedules a write so the file reflects the removal.
+ * Remove a node (call on permanent destroy — the `×`/delete path, NOT an unmount, park, offscreen
+ * release or detach: those all leave the tmux session running and the node's status live). Its
+ * `nodes` entries (main + inbox activity) drop, but its inbox EVENTS stay as feed history — marked
+ * resolved so the phone archives them. Schedules a write so the file reflects the removal, and
+ * fires ONE end edge when the node was mid-turn (see below).
  */
 export function clearNode(nodeId: string): void {
+  // Read BEFORE the delete — the end edge below is decided on the state the node died holding.
+  const prev = state.get(nodeId)
   let changed = state.delete(nodeId)
   if (inboxNodes.delete(nodeId)) changed = true
   pendingQuestions.delete(nodeId)
@@ -1507,6 +1511,30 @@ export function clearNode(nodeId: string): void {
       e.resolved = true
       changed = true
     }
+  }
+  // A node deleted MID-TURN owes exactly one end edge, for the same reason the session-ended-
+  // mid-turn branch in `produceInboxFromState` does: dropping the map entry only makes the mirror
+  // FILE forget the node, while every LIVE surface is driven by this seam, not by the file. With
+  // no edge, deleting a working/blocked node left the notch HUD holding its needs-you/done row
+  // until the 6 h prune — its title collapsing to the literal 'Session' once the entry behind it
+  // was gone — and left the phone a Live Activity nothing would ever end.
+  //
+  // Only when it was actually mid-turn. An already-`done` node fired its own 'end' on the done
+  // edge, and an idle one (state undefined — never started, or reset by a session boundary) never
+  // opened a card at all; firing here would be a second 'end' for one card.
+  //
+  // No inbox event, by the same rule the mid-turn branch states: the node is GONE, so a feed card
+  // pointing at it is one the user can neither read nor act on. This is a dismissal, not news.
+  if (prev?.state && prev.state !== 'done') {
+    fireNodeStateChange({
+      nodeId,
+      ...(prev.agentId ? { agentId: prev.agentId } : {}),
+      ...(prev.sessionId ? { sessionId: prev.sessionId } : {}),
+      event: 'end',
+      state: 'done',
+      message: 'Ended',
+      ts: Date.now()
+    })
   }
   if (changed) scheduleWrite()
 }
@@ -1671,6 +1699,31 @@ export async function flush(): Promise<void> {
   const file = resolveFile()
   if (!file) return
   const now = Date.now()
+  // Age out inbox events on the SAME 6 h horizon as the two prunes below, applied to RESOLVED and
+  // UNRESOLVED alike. Until this existed the feed's only bound was INBOX_EVENTS_CAP, so an
+  // unresolved approval on a node nobody ever came back to stayed a red "Needs you" card with the
+  // tray badge lit forever — a node abandoned mid-approval emits nothing further, so neither the
+  // state-leave `resolveUnresolvedFor` nor the 50-event cap would ever reach it.
+  //
+  // One window for both kinds, deliberately:
+  //  - UNRESOLVED must not get a SHORTER one. An agent can legitimately sit blocked on a human for
+  //    hours, and this card (with its `pendingId` ticket) is how the phone answers the hook that is
+  //    still holding open. Cutting it early would trade a stale badge for lost functionality, which
+  //    is the worse bug.
+  //  - RESOLVED must not get a LONGER one. It is the phone's archive, but the phone keeps its own
+  //    copy of what it has read; this file is a live side-channel, not the archive of record, and
+  //    the cap already bounds history.
+  // 6 h is the horizon at which the module stops believing anything about a node at all, so an
+  // event outliving `state`/`inboxNodes` would be a card about a node the mirror has forgotten.
+  // Well clear of QUESTION_DEDUP_WINDOW_MS (10 min), so the title-dedup is untouched.
+  //
+  // Pruned BEFORE the doc is built, unlike the two below: `buildFile` applies the expiry to `nodes`
+  // itself but passes `inbox` through verbatim, so pruning after it would leave the aged card in
+  // the FILE for one more flush — and an abandoned node schedules no further writes, so "one more
+  // flush" can be never.
+  if (inboxEvents.some((e) => now - e.ts > EXPIRE_MS)) {
+    inboxEvents = inboxEvents.filter((e) => now - e.ts <= EXPIRE_MS)
+  }
   const inbox: MirrorInbox = { events: inboxEvents, nodes: Object.fromEntries(inboxNodes) }
   const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings(), safeUsage(), inbox, safeServer())
   // Also drop expired entries from memory so the map itself can't grow without bound.

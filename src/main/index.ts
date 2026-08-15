@@ -2,7 +2,7 @@ import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile } from 'fs/promises'
-import { statSync } from 'fs'
+import { existsSync, statSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
@@ -110,13 +110,16 @@ import { createRemoteContextTail } from './remote-context-tail'
 import { createRemoteSubagentTail } from './remote-subagent-tail'
 import { RemoteFile, type RemoteFileRef } from './remote-ssh/remote-file'
 import {
+  checkMasterArgs,
   childArgs,
+  controlPathFor,
   parseRemoteSessionNames,
   remoteListSessionsArgs,
   remotePaneCommandArgs
 } from '../core/remote-ssh/control-master'
+import { planRemoteWorkspacePoll } from './remote-workspace-poll'
 import { sessionName } from '../core/tmux-naming'
-import { posixQuote } from '../shared/ssh'
+import { posixQuote, type SshConnection } from '../shared/ssh'
 import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
@@ -2153,8 +2156,12 @@ app.whenReady().then(async () => {
   // the canvas adopts the node live).
   const hostBridge = {
     git: gitService,
-    registerNode: (projectId: string, node: { id: string; title?: string; agentId?: string }) =>
-      workspaceStore.appendRemoteNode(projectId, node),
+    // `accountId` = the managed Claude account the phone launched the session under. It has to be
+    // declared here too, or the wire's honest shape stops at this boundary (see RemoteNodeInput).
+    registerNode: (
+      projectId: string,
+      node: { id: string; title?: string; agentId?: string; accountId?: string }
+    ) => workspaceStore.appendRemoteNode(projectId, node),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
@@ -2316,18 +2323,73 @@ app.whenReady().then(async () => {
   // the live canvas without a reconnect. Read-only unless a mirror write is owed
   // (pushIfStanding:false), one `cat` per project per tick over the ControlMaster. The in-flight
   // set keeps a hung read from stacking a second poll on the same project.
+  //
+  // A project only HAS a master because the renderer's active-project effect connected it, which
+  // left every background / never-opened SSH tab permanently unpolled: a session the phone
+  // registered into one of them showed up only when the user happened to click that tab. So each
+  // tick also sweeps the unconnected ones — REUSE-ONLY (see remote-workspace-poll.ts): a master
+  // that is already running is adopted, a host with no live socket is never dialed.
   {
     const REMOTE_WORKSPACE_POLL_MS = 15_000
+    /** How long a cached ssh endpoint map may be reused before it is re-read from the index. */
+    const SSH_ENDPOINT_TTL_MS = 5 * 60_000
     const inFlight = new Set<string>()
+    let endpoints = new Map<string, { conn: SshConnection; remoteCwd: string }>()
+    let endpointsAt = 0
+    /** The project's connection spec, from the workspace index. Loaded lazily and only when an
+     *  adoption candidate exists, so a workspace with no orphan sockets never pays for it. */
+    const endpointFor = async (
+      projectId: string
+    ): Promise<{ conn: SshConnection; remoteCwd: string } | undefined> => {
+      if (Date.now() - endpointsAt > SSH_ENDPOINT_TTL_MS) {
+        try {
+          // sideline:false — a read-only caller must never rename a mid-merge project.json.
+          const workspace = await workspaceStore.load({ sideline: false })
+          endpoints = new Map(
+            workspace.projects
+              .filter((p) => p.ssh)
+              .map((p) => [p.id, { conn: p.ssh!.server, remoteCwd: p.ssh!.remoteCwd }] as const)
+          )
+          endpointsAt = Date.now()
+        } catch { /* keep the previous map: a failed read is not evidence the endpoints changed */ }
+      }
+      return endpoints.get(projectId)
+    }
     setInterval(() => {
-      for (const projectId of workspaceStore.sshProjectIds()) {
-        if (inFlight.has(projectId) || !sshProjectManager?.refForProject(projectId)) continue
+      const mgr = sshProjectManager
+      if (!mgr) return
+      const plan = planRemoteWorkspacePoll({
+        sshProjectIds: workspaceStore.sshProjectIds(),
+        hasLiveRef: (projectId) => !!mgr.refForProject(projectId),
+        busy: (projectId) => inFlight.has(projectId),
+        // Reuse-only gate: no socket file ⇒ no master to adopt ⇒ this project is left alone.
+        hasControlSocket: (projectId) => existsSync(controlPathFor(projectId))
+      })
+      for (const projectId of plan.poll) {
         inFlight.add(projectId)
         void workspaceStore
           .refreshSshProject(projectId, { pushIfStanding: false })
           .then((adopted) => {
             if (adopted) sendToMain(IPC.workspaceExternalChange, adopted)
           })
+          .catch(() => { /* fail-open: the next tick retries */ })
+          .finally(() => inFlight.delete(projectId))
+      }
+      for (const projectId of plan.adopt) {
+        inFlight.add(projectId)
+        void (async () => {
+          const endpoint = await endpointFor(projectId)
+          if (!endpoint) return
+          // Ask the socket itself before touching connect(): a leftover file whose master is gone
+          // would otherwise send connect() down the DIAL path — the one thing this sweep must not
+          // do. `-O check` speaks to the local mux socket only; with no master it fails at once
+          // without opening a connection.
+          const { code } = await mgr.sshRun(checkMasterArgs(endpoint.conn, controlPathFor(projectId)))
+          if (code !== 0) return
+          // Live master → connect() takes its reuse branch (no new auth, no passphrase prompt) and
+          // registers the ref, so the NEXT tick simply polls this project like any other.
+          await mgr.connect(projectId, endpoint.conn, endpoint.remoteCwd)
+        })()
           .catch(() => { /* fail-open: the next tick retries */ })
           .finally(() => inFlight.delete(projectId))
       }

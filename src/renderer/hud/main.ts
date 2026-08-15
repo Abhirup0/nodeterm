@@ -7,7 +7,7 @@ import './hud.css'
 import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB } from '../lib/mascot'
 import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../lib/brandPulse'
 import { createGrokMarkSvg } from '../lib/grokMark'
-import { orderIndicatorAgents } from './indicator'
+import { buildIndicator, orderIndicatorAgents } from './indicator'
 import codexPet from '../assets/pet-codex.webp'
 
 // Local mirror of the preload's HUD contract (src/preload/hud.ts) — kept self-contained so this
@@ -219,19 +219,9 @@ function rowIcon(row: HudRow): Element {
 
 function renderIndicator(rows: HudRow[]): void {
   indicator.replaceChildren()
-  const workingAgents: string[] = []
-  let doneUnseen = false
-  let needsYou = false
-  for (const r of rows) {
-    if (r.state === 'working') {
-      const id = r.agentId || 'unknown'
-      if (!workingAgents.includes(id)) workingAgents.push(id)
-    } else if (r.state === 'done') {
-      doneUnseen = true
-    } else if (r.state === 'needsYou') {
-      needsYou = true
-    }
-  }
+  // The aggregation is the pure `buildIndicator` (./indicator) — one definition of the rule, unit
+  // tested; this function only paints its result.
+  const { workingAgents, doneUnseen, needsYou } = buildIndicator(rows)
   // Left→right paint order, centered inside the capsule's drop zone: a red "needs you" dot and the
   // green "done" blob sit furthest left, then the working mascots with Claude last (notch-side).
   // Surfacing needsYou here keeps the collapsed capsule meaningful (never an empty black pill) for a

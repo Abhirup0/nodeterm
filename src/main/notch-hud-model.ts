@@ -5,9 +5,11 @@
 // table, and the normalized agent-event stream for prompt + subagents, plus context-update for the
 // model) into the row array the HUD renderer draws. Kept separate from the window so vitest can
 // cover the state→bucket mapping, subagent grouping, the done latch, the 6h drop, and the
-// prompt/model join without an Electron runtime. Imports only TYPES from core, never electron.
+// prompt/model join without an Electron runtime. Imports TYPES from core plus the one shared
+// clipping constant (PROMPT_MAX) — never electron.
 
 import type { NormalizedAgentEvent, AgentState } from '../shared/agents/normalize'
+import { PROMPT_MAX } from '../core/agent-status-mirror'
 import type { NodeStateChange, NodeNowChange, MirrorFile } from '../core/agent-status-mirror'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 
@@ -46,14 +48,10 @@ export interface HudRow {
   updatedAt: number
 }
 
-/** Collapsed-indicator aggregation: which agent kinds are actively working, and whether any
- *  finished-but-unseen session should show the green "done" blob. */
-export interface HudIndicator {
-  /** Distinct agentIds that have at least one working node (drives a walking mascot slot each). */
-  workingAgents: string[]
-  /** True if any row is a finished-but-unseen (`done`) session. */
-  doneUnseen: boolean
-}
+// The collapsed-indicator aggregation used to be duplicated here (`buildIndicator`/`HudIndicator`)
+// with no production caller — the HUD renderer, which is the only thing that draws it, cannot
+// import src/main. It lived on as dead code and drifted (it never learned the `needsYou` dot the
+// renderer draws). The single definition is now `buildIndicator` in src/renderer/hud/indicator.ts.
 
 interface NodeAccum {
   agentId?: string
@@ -82,8 +80,17 @@ export function bucketState(s: AgentState): Exclude<HudRowState, 'idle'> {
   return 'needsYou' // waiting | blocked
 }
 
-/** First non-empty line of a prompt/message, trimmed and clipped — the second-line summary. */
-export function firstPromptLine(text: string | undefined, max = 140): string | undefined {
+/**
+ * First non-empty line of a prompt/message, trimmed and clipped — the second-line summary.
+ *
+ * The default clip is the mirror's `PROMPT_MAX`, the SAME constant the phone's Live Activity line
+ * is cut at (core/agent-status-mirror.ts): both surfaces are fed by `onNodeStateChange` /
+ * `onNodeNowChange` and are meant to say the same sentence, so one prompt must not appear at two
+ * lengths. The HUD's own 140 was never load-bearing — `.hud-row__sub` is a single nowrap line with
+ * `text-overflow: ellipsis` inside a ~400 px panel, so the visible cut is the CSS one either way.
+ * `max` stays a parameter so the helper is reusable for any other clip.
+ */
+export function firstPromptLine(text: string | undefined, max = PROMPT_MAX): string | undefined {
   if (!text) return undefined
   const line = text
     .split('\n')
@@ -319,19 +326,4 @@ export function createHudModel(): HudModel {
     prune,
     buildRows
   }
-}
-
-/** Pure collapsed-indicator aggregation from the built rows. */
-export function buildIndicator(rows: HudRow[]): HudIndicator {
-  const workingAgents: string[] = []
-  let doneUnseen = false
-  for (const r of rows) {
-    if (r.state === 'working') {
-      const id = r.agentId || 'unknown'
-      if (!workingAgents.includes(id)) workingAgents.push(id)
-    } else if (r.state === 'done') {
-      doneUnseen = true
-    }
-  }
-  return { workingAgents, doneUnseen }
 }

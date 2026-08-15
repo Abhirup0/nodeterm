@@ -71,6 +71,7 @@ import {
   installCodexLauncher
 } from './codex-identity-proxy'
 import { ensureNodeToken, ensureRemoteNodeToken, sweepNodeToken } from './agents/node-token-service'
+import { clearNode as clearNodeAgentStatus } from './agent-status-mirror'
 import { hasSharedIdentity, type AgentId } from '../shared/agents/config'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
@@ -3205,6 +3206,23 @@ export class PtyManager {
     // after the sweep would close most of it, but it depends on respawn ordering and still leaves a
     // gap; not sweeping leaves none, and there is nothing stale to clean up.
     if (intent === 'delete') sweepNodeToken(persistKey)
+    // The node's agent-status goes with it — and, like the token, ONLY on a delete: a RECYCLE keeps
+    // the node (the worktree move replaces this session, and the respawned agent re-asserts state
+    // onto the SAME entry), so clearing there would blank a live badge and end a Live Activity for
+    // a node that is still on the canvas.
+    //
+    // Deleting a node used to tell the mirror nothing at all — `clearNode` had no production caller
+    // — so the surfaces the mirror feeds kept rendering a node that no longer exists: the notch HUD
+    // held its needs-you/done row until the 6 h prune (its title collapsing to the literal
+    // 'Session' once the entry behind it aged out), the phone's Inbox cards for it were never
+    // resolved, and its Live Activity was never ended.
+    //
+    // Wired HERE rather than in each shell's `pty:destroy` listener because this is the one core
+    // chokepoint every permanent delete funnels through (wire handler → endFromClient → endSession,
+    // plus the internal `destroySession`), and both shells register it via `registerIpc()`. The
+    // shells' own listeners are the wrong seam twice over: they are registered for `pty:recycle`
+    // too, and there are two of them to keep in step.
+    if (intent === 'delete') clearNodeAgentStatus(persistKey)
     if (sshRemote) {
       // Remote (ssh-project) node: end the REMOTE session.
       const ssh = findSsh()

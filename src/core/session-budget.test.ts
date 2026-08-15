@@ -6,6 +6,7 @@ import {
   parseSessionList,
   sessionBudgetConfig,
   createSessionReaper,
+  hostUnderMemoryPressure,
   readMemInfo,
   type SessionInfo,
   type SessionBudgetConfig
@@ -19,14 +20,31 @@ const cfg = (over: Partial<SessionBudgetConfig> = {}): SessionBudgetConfig => ({
   maxDetached: 48,
   graceSec: 6 * 3600,
   batchMax: 8,
+  swapFreeRatio: 0.2,
+  swapAvailRatio: 0.25,
+  psiFullAvg60: 10,
   ...over
 })
 
-/** An nt- session idle for `idleH` hours, with `clients` attached (0 = detached). */
+/**
+ * An nt- session whose PANE has been silent for `idleH` hours, with `clients` attached.
+ *
+ * **`activitySec` is deliberately always FRESH (60 s old), no matter how long the session has been
+ * silent** — that is the shape every session on a live host has, because tmux bumps
+ * `#{session_activity}` on every client attach and nodeterm attaches constantly (measured: across
+ * 67 production sessions the OLDEST `session_activity` was 33 minutes, while the oldest
+ * `#{window_activity}` was 37 hours).
+ *
+ * Encoding it in the shared helper makes the whole suite a regression test for the clock: if this
+ * module ever goes back to gating on `activitySec`, nothing is ever past grace and every eligibility
+ * assertion below turns red at once. A helper that set both stamps to the same value would let that
+ * revert pass — the two clocks have to disagree here, because they disagree in production.
+ */
 const idle = (name: string, idleH: number, clients = 0): SessionInfo => ({
   name,
   clients,
-  activitySec: NOW - idleH * 3600
+  activitySec: NOW - 60,
+  outputSec: NOW - idleH * 3600
 })
 
 const lowMem = { availableMb: 500, totalMb: 64_000 }
@@ -114,24 +132,212 @@ describe('planReap (pure policy)', () => {
   })
 })
 
+describe('the two clocks (the measurement this whole change rests on)', () => {
+  // 2026-08-15, production host: `nt-term-msrblsui-9` had NO pane output for 18.1 hours while
+  // `session_activity` read 15 minutes, because nodeterm had just re-attached a client to it.
+  const realHostSession: SessionInfo = {
+    name: 'nt-term-msrblsui-9',
+    clients: 0,
+    activitySec: NOW - 15 * 60, // what tmux says: 15 minutes
+    outputSec: NOW - 18 * 3600 // what the pane says: 18 hours of silence
+  }
+
+  it('reaps a session tmux calls fresh when its pane has been silent past grace', () => {
+    expect(planReap([realHostSession], lowMem, NOW, cfg())).toEqual(['nt-term-msrblsui-9'])
+  })
+
+  it('SPARES a session tmux calls stale when its pane is actually producing output', () => {
+    // The mirror image, and the reason this is not merely "use the older number": a session whose
+    // client detached hours ago but whose agent is still printing must survive. Gating on
+    // `activitySec` would kill it.
+    const working: SessionInfo = {
+      name: 'nt-busy',
+      clients: 0,
+      activitySec: NOW - 40 * 3600, // no client has attached in nearly two days
+      outputSec: NOW - 30 // …but the pane wrote something 30 seconds ago
+    }
+    expect(planReap([working], lowMem, NOW, cfg())).toEqual([])
+  })
+
+  it('orders by silence, not by attach time', () => {
+    const a: SessionInfo = { name: 'nt-a', clients: 0, activitySec: NOW - 3600, outputSec: NOW - 10 * 3600 }
+    const b: SessionInfo = { name: 'nt-b', clients: 0, activitySec: NOW - 90000, outputSec: NOW - 40 * 3600 }
+    // `b` is the least-recently-ACTIVE by output and must die first, even though `a` looks older
+    // on the attach clock's ordering.
+    expect(planReap([a, b], lowMem, NOW, cfg({ batchMax: 1 }))).toEqual(['nt-b'])
+  })
+})
+
 describe('parseSessionList', () => {
-  it('parses names, CLIENT COUNTS and activity, skipping malformed lines', () => {
-    const out = parseSessionList('nt-a|0|1753000000\nnt-b|2|1753000100\n\njunk\nx|y|z\n')
+  it('parses names, CLIENT COUNTS, activity and OUTPUT time, skipping malformed lines', () => {
+    const out = parseSessionList(
+      'nt-a|0|1753000000|1752900000\nnt-b|2|1753000100|1753000100\n\njunk\nx|y|z|w\nnt-c|0|1753000000\n'
+    )
     expect(out).toEqual([
-      { name: 'nt-a', clients: 0, activitySec: 1_753_000_000 },
-      { name: 'nt-b', clients: 2, activitySec: 1_753_000_100 }
+      { name: 'nt-a', clients: 0, activitySec: 1_753_000_000, outputSec: 1_752_900_000 },
+      { name: 'nt-b', clients: 2, activitySec: 1_753_000_100, outputSec: 1_753_000_100 }
     ])
+    // `nt-c` carried the OLD three-field shape. It is dropped rather than defaulted, so a format
+    // that ever regresses produces no candidates instead of candidates with a fabricated clock.
+    expect(out.map((s) => s.name)).not.toContain('nt-c')
+  })
+
+  it('rejects a row with MORE than four fields rather than parsing the first four', () => {
+    // The length check is pinned EXACTLY, as the original parser pinned its own. A row carrying an
+    // unexpected fifth field is a row in a format we do not understand, and the safe answer is to
+    // contribute no candidate rather than to trust four columns that happen to look plausible.
+    //
+    // Note the shape of this row: its first four fields are all individually VALID, so the numeric
+    // guards below cannot reject it. Only the exact-length check can — which is what makes this an
+    // assertion about that check rather than about the guards. (A row like `nt-a|b|0|1|2` proves
+    // nothing here: `Number('b')` is NaN and the client-count guard rejects it either way.)
+    expect(parseSessionList('nt-a|0|1753000000|1752900000|extra')).toEqual([])
+    expect(parseSessionList(`nt-ok|0|${NOW - 60}|${NOW - 40 * 3600}`)).toHaveLength(1)
+  })
+
+  it('reduces a multi-window session to ONE row holding its most recent output', () => {
+    // Verified against tmux: `list-windows -a` emits one line per window, and a two-window session
+    // carries two distinct `#{window_activity}` stamps. A session is silent only when ALL of its
+    // windows are, so the newest wins — and it must win regardless of which order they arrive in.
+    const newestLast = parseSessionList('nt-a|0|1753000000|1752900000\nnt-a|0|1753000000|1752999000')
+    const newestFirst = parseSessionList('nt-a|0|1753000000|1752999000\nnt-a|0|1753000000|1752900000')
+    expect(newestLast).toEqual([{ name: 'nt-a', clients: 0, activitySec: 1_753_000_000, outputSec: 1_752_999_000 }])
+    expect(newestFirst).toEqual(newestLast)
+  })
+
+  it('a session with a busy second window is NOT reaped for its quiet first one', () => {
+    // The behavioural consequence of the reduce, asserted through planReap rather than the parser:
+    // window 0 has been silent for 40 h, window 1 wrote a second ago.
+    const sessions = parseSessionList(
+      `nt-two|0|${NOW - 60}|${NOW - 40 * 3600}\nnt-two|0|${NOW - 60}|${NOW - 1}`
+    )
+    expect(planReap(sessions, lowMem, NOW, cfg())).toEqual([])
+  })
+})
+
+describe('hostUnderMemoryPressure', () => {
+  const c = cfg({ minAvailableMb: 6416 }) // 10% of a 64 GB host
+
+  // The live production reading, 2026-08-15: 12.6 GB available of 62.7 GB (well above the
+  // watermark), swap 73.9% consumed, PSI quiet. Nothing is wrong right now, so nothing may fire —
+  // this is the guard against a fix that simply reaps more.
+  const healthyToday = { availableMb: 13_481, totalMb: 64_158, swapTotalMb: 8192, swapFreeMb: 2140, psiFullAvg60: 0 }
+
+  // The reading this task was opened on: 10.5 GB available (16.7%), swap 84% consumed.
+  const swapSpent = { availableMb: 10_752, totalMb: 64_158, swapTotalMb: 8192, swapFreeMb: 1331, psiFullAvg60: 0 }
+
+  it('a failed read is never pressure', () => {
+    expect(hostUnderMemoryPressure(null, c)).toBe(false)
+  })
+
+  it('the available-memory watermark still fires on its own', () => {
+    expect(hostUnderMemoryPressure({ availableMb: 500, totalMb: 64_158 }, c)).toBe(true)
+  })
+
+  it("today's host — above the watermark, swap 74% spent, PSI quiet — is NOT pressure", () => {
+    expect(hostUnderMemoryPressure(healthyToday, c)).toBe(false)
+  })
+
+  it('swap 84% spent WITH low available memory IS pressure (the state the old reader called healthy)', () => {
+    expect(hostUnderMemoryPressure(swapSpent, c)).toBe(true)
+    // …and the old instrument, which is exactly `availableMb` against the watermark, says no.
+    expect(swapSpent.availableMb < c.minAvailableMb).toBe(false)
+  })
+
+  it('either half of the swap term alone is benign', () => {
+    // Swap spent, but memory is plentiful: cold pages parked in swap on a healthy host.
+    expect(hostUnderMemoryPressure({ ...swapSpent, availableMb: 40_000 }, c)).toBe(false)
+    // Memory lowish, but swap untouched: the reserve is still there.
+    expect(hostUnderMemoryPressure({ ...swapSpent, swapFreeMb: 8000 }, c)).toBe(false)
+  })
+
+  it('a host with NO swap configured never trips the swap term (0/0 is not exhaustion)', () => {
+    expect(hostUnderMemoryPressure({ ...swapSpent, swapTotalMb: 0, swapFreeMb: 0 }, c)).toBe(false)
+  })
+
+  it('absent swap fields are no signal, not zero', () => {
+    const { swapTotalMb: _t, swapFreeMb: _f, ...noSwap } = swapSpent
+    expect(hostUnderMemoryPressure(noSwap, c)).toBe(false)
+  })
+
+  it('HALF a swap reading is no signal either, in both directions', () => {
+    // `MemInfo` is a shared type and its swap pair is optional, so a caller that is not
+    // `parseMemInfoText` (the SSH leg, a future reader) can hand over one half. Neither half alone
+    // may be completed with a default: filling the missing TOTAL invents a denominator, and filling
+    // the missing FREE with 0 states that swap is exhausted. Both would make this term fire on a
+    // host nobody measured. Pinned explicitly because the arithmetic happens to yield NaN today —
+    // a guard that only works by accident of NaN is not a guard.
+    const { swapFreeMb: _f, ...totalOnly } = swapSpent
+    const { swapTotalMb: _t, ...freeOnly } = swapSpent
+    expect(hostUnderMemoryPressure(totalOnly, c)).toBe(false)
+    expect(hostUnderMemoryPressure(freeOnly, c)).toBe(false)
+  })
+
+  it('PSI full avg60 past the bar is pressure on its own; absent PSI is not', () => {
+    expect(hostUnderMemoryPressure({ availableMb: 40_000, totalMb: 64_158, psiFullAvg60: 25 }, c)).toBe(true)
+    expect(hostUnderMemoryPressure({ availableMb: 40_000, totalMb: 64_158, psiFullAvg60: 0 }, c)).toBe(false)
+    expect(hostUnderMemoryPressure({ availableMb: 40_000, totalMb: 64_158 }, c)).toBe(false)
+  })
+
+  it('a darwin-shaped reading (no swap, no PSI fields) can only ever use the watermark', () => {
+    // parseVmStat populates neither, so macOS cannot start firing on a signal never measured there.
+    const darwinish = { availableMb: 3000, totalMb: 24_576 }
+    expect(hostUnderMemoryPressure(darwinish, cfg({ minAvailableMb: 2458 }))).toBe(false)
+    expect(hostUnderMemoryPressure({ ...darwinish, availableMb: 100 }, cfg({ minAvailableMb: 2458 }))).toBe(true)
+  })
+
+  it('the new terms can be switched off, and off means off', () => {
+    expect(hostUnderMemoryPressure(swapSpent, cfg({ minAvailableMb: 6416, swapFreeRatio: 0 }))).toBe(false)
+    const psiOnly = { availableMb: 40_000, totalMb: 64_158, psiFullAvg60: 25 }
+    expect(hostUnderMemoryPressure(psiOnly, cfg({ minAvailableMb: 6416, psiFullAvg60: 0 }))).toBe(false)
+  })
+
+  it('drives planReap: the same sessions live or die on the swap reading alone', () => {
+    const sessions = [idle('nt-silent', 40)]
+    expect(planReap(sessions, healthyToday, NOW, cfg({ minAvailableMb: 6416 }))).toEqual([])
+    expect(planReap(sessions, swapSpent, NOW, cfg({ minAvailableMb: 6416 }))).toEqual(['nt-silent'])
   })
 })
 
 describe('sessionBudgetConfig', () => {
-  it('defaults: 10% of RAM watermark (floor 1GB), cap 48, grace 6h, batch 8', () => {
-    const c = sessionBudgetConfig({}, 64_000)
-    expect(c).toEqual({ disabled: false, minAvailableMb: 6400, maxDetached: 48, graceSec: 21_600, batchMax: 8 })
-    expect(sessionBudgetConfig({}, 4000).minAvailableMb).toBe(1024)
+  const memOf = (totalMb: number) => ({ availableMb: Math.round(totalMb / 2), totalMb })
+
+  it('defaults: 10% of RAM watermark (floor 1GB), grace 6h, batch 8', () => {
+    const c = sessionBudgetConfig({}, memOf(64_000), 0)
+    expect(c).toEqual({
+      disabled: false,
+      minAvailableMb: 6400,
+      maxDetached: 33,
+      graceSec: 21_600,
+      batchMax: 8,
+      swapFreeRatio: 0.2,
+      swapAvailRatio: 0.25,
+      psiFullAvg60: 10
+    })
+    expect(sessionBudgetConfig({}, memOf(4000), 0).minAvailableMb).toBe(1024)
   })
 
-  it('env overrides win; junk values fall back', () => {
+  it('the detached cap SCALES WITH THE HOST instead of being the constant 48', () => {
+    // A share of host RAM over a nominal session cost, clamped to [8, 48]. The point is that a
+    // 16 GB laptop and a 62 GB server stop getting the same number: 48 detached agent sessions is
+    // ~23 GB of nominal RSS, i.e. more than a 16 GB machine physically has.
+    expect(sessionBudgetConfig({}, memOf(64_158), 0).maxDetached).toBe(33) // the production host
+    expect(sessionBudgetConfig({}, memOf(16_384), 0).maxDetached).toBe(8)
+    expect(sessionBudgetConfig({}, memOf(8192), 0).maxDetached).toBe(8) // floor holds a small host usable
+    // The ceiling is the historical constant, so this can only ever LOWER a cap, never raise one.
+    expect(sessionBudgetConfig({}, memOf(1_000_000), 0).maxDetached).toBe(48)
+  })
+
+  it('NO host reading (darwin) keeps the historical 48 rather than deriving from os.totalmem()', () => {
+    // Deriving here would silently change reaping on macOS — a cap of 12 on a 24 GB Mac — off a
+    // host figure whose meaning there this module has been burned by twice. The fallback total is
+    // still used for the watermark, which is the number that HAS a defined meaning.
+    const c = sessionBudgetConfig({}, null, 24_576)
+    expect(c.maxDetached).toBe(48)
+    expect(c.minAvailableMb).toBe(2458)
+  })
+
+  it('env overrides win; junk values fall back to the DERIVED cap, not to 48', () => {
     const c = sessionBudgetConfig(
       {
         NODETERM_SESSION_MIN_AVAILABLE_MB: '3000',
@@ -139,12 +345,24 @@ describe('sessionBudgetConfig', () => {
         NODETERM_SESSION_GRACE_HOURS: '12',
         NODETERM_SESSION_REAP_DISABLED: '1'
       },
-      64_000
+      memOf(64_000),
+      0
     )
     expect(c.minAvailableMb).toBe(3000)
-    expect(c.maxDetached).toBe(48)
+    expect(c.maxDetached).toBe(33)
     expect(c.graceSec).toBe(43_200)
     expect(c.disabled).toBe(true)
+    expect(sessionBudgetConfig({ NODETERM_SESSION_MAX_DETACHED: '5' }, memOf(64_000), 0).maxDetached).toBe(5)
+  })
+
+  it('the swap and PSI terms are tunable, and junk falls back', () => {
+    const c = (env: Record<string, string>) => sessionBudgetConfig(env, memOf(64_000), 0)
+    expect(c({ NODETERM_SESSION_SWAP_FREE_PCT: '35' }).swapFreeRatio) .toBeCloseTo(0.35)
+    expect(c({ NODETERM_SESSION_PSI_FULL_AVG60: '40' }).psiFullAvg60).toBe(40)
+    for (const v of ['abc', '', '0', '-3']) {
+      expect(c({ NODETERM_SESSION_SWAP_FREE_PCT: v }).swapFreeRatio).toBeCloseTo(0.2)
+      expect(c({ NODETERM_SESSION_PSI_FULL_AVG60: v }).psiFullAvg60).toBe(10)
+    }
   })
 })
 
@@ -162,7 +380,7 @@ function fakeWorld(listings: Record<string, string[]>): {
     exec: async (_bin, args) => {
       calls.push({ args })
       const socket = args[1]
-      if (args[2] === 'list-sessions') {
+      if (args[2] === 'list-windows') {
         const lines = listings[socket]
         if (!lines) throw new Error('no server running')
         return lines.join('\n')
@@ -174,6 +392,14 @@ function fakeWorld(listings: Record<string, string[]>): {
 
 const OLD = String(NOW - 100 * 3600)
 
+/**
+ * One `list-windows -a` row. `session_activity` is pinned FRESH (60 s) for the same reason the
+ * `idle` helper pins it: that is the only shape a live host ever presents, so the service tests
+ * exercise the honest clock rather than a stamp that would never be stale in production.
+ */
+const row = (name: string, clients: number, silentSince: number | string): string =>
+  `${name}|${clients}|${NOW - 60}|${silentSince}`
+
 describe('createSessionReaper (service)', () => {
   const base = {
     readMem: () => ({ availableMb: 100, totalMb: 64_000 }),
@@ -184,8 +410,8 @@ describe('createSessionReaper (service)', () => {
 
   it('sweeps every socket, kills planned sessions on the right socket with exact-match targets', async () => {
     const w = fakeWorld({
-      'node-terminal': [`nt-local|0|${OLD}`],
-      'nodeterm-rmt': [`nt-remote|0|${OLD}`]
+      'node-terminal': [row('nt-local', 0, OLD)],
+      'nodeterm-rmt': [row('nt-remote', 0, OLD)]
     })
     const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', exec: w.exec })
     expect(await reaper.sweep()).toBe(2)
@@ -196,16 +422,31 @@ describe('createSessionReaper (service)', () => {
     ])
   })
 
+  it('the kill log names BOTH clocks, with the silence leading', async () => {
+    // The attach clock's only production consumer is this log line. It rides along BECAUSE it
+    // disagrees with the silence: an operator cross-checking `tmux ls` sees `session_activity`
+    // minutes old and would read the reap as a bug unless the line itself explains the discrepancy.
+    // The numbers are pinned, not just the words — 100.0h of silence against a 0.0h-old attach is
+    // exactly the two-clock disagreement the whole change rests on.
+    const lines: string[] = []
+    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
+    const reaper = createSessionReaper({ ...base, log: (m) => lines.push(m), tmuxBin: () => 'tmux', exec: w.exec })
+    expect(await reaper.sweep()).toBe(1)
+    expect(lines).toEqual([
+      '[session-budget] reaped detached session nt-x — no pane output for 100.0h; last attach 0.0h ago (socket node-terminal)'
+    ])
+  })
+
   it('re-verifies at kill time: a session attached between plan and kill is spared', async () => {
     let first = true
     const w = fakeWorld({})
     const exec = async (bin: string, args: string[]): Promise<string> => {
-      if (args[2] === 'list-sessions' && args[1] === 'node-terminal') {
+      if (args[2] === 'list-windows' && args[1] === 'node-terminal') {
         if (first) {
           first = false
-          return `nt-x|0|${OLD}`
+          return row('nt-x', 0, OLD)
         }
-        return `nt-x|1|${OLD}` // now attached
+        return row('nt-x', 1, OLD) // now attached
       }
       return w.exec(bin, args)
     }
@@ -215,7 +456,7 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('a socket whose listing fails contributes no candidates; the other socket still sweeps', async () => {
-    const w = fakeWorld({ 'nodeterm-rmt': [`nt-r|0|${OLD}`] }) // node-terminal listing throws
+    const w = fakeWorld({ 'nodeterm-rmt': [row('nt-r', 0, OLD)] }) // node-terminal listing throws
     const reaper = createSessionReaper({ ...base, tmuxBin: () => 'tmux', exec: w.exec })
     expect(await reaper.sweep()).toBe(1)
     const kills = w.calls.filter((c) => c.args[2] === 'kill-session')
@@ -223,7 +464,7 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('kill switch: disabled env runs no tmux commands at all', async () => {
-    const w = fakeWorld({ 'node-terminal': [`nt-x|0|${OLD}`] })
+    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({
       ...base,
       env: { NODETERM_SESSION_REAP_DISABLED: '1' },
@@ -235,14 +476,14 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('tmux unavailable (bin=null) → quiet no-op', async () => {
-    const w = fakeWorld({ 'node-terminal': [`nt-x|0|${OLD}`] })
+    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({ ...base, tmuxBin: () => null, exec: w.exec })
     expect(await reaper.sweep()).toBe(0)
     expect(w.calls).toHaveLength(0)
   })
 
   it('a failing kill is tolerated and does not abort the rest of the batch', async () => {
-    const w = fakeWorld({ 'node-terminal': [`nt-a|0|${OLD}`, `nt-b|0|${String(NOW - 99 * 3600)}`] })
+    const w = fakeWorld({ 'node-terminal': [row('nt-a', 0, OLD), row('nt-b', 0, NOW - 99 * 3600)] })
     const exec = async (bin: string, args: string[]): Promise<string> => {
       if (args[2] === 'kill-session' && args[4] === '=nt-a') throw new Error('gone already')
       return w.exec(bin, args)
@@ -252,7 +493,7 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('healthy memory + under cap → lists but never kills', async () => {
-    const w = fakeWorld({ 'node-terminal': [`nt-x|0|${OLD}`] })
+    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({
       ...base,
       readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
@@ -264,7 +505,7 @@ describe('createSessionReaper (service)', () => {
   })
 
   it('…but the same host sweeps under an explicit external pressure reason', async () => {
-    const w = fakeWorld({ 'node-terminal': [`nt-x|0|${OLD}`] })
+    const w = fakeWorld({ 'node-terminal': [row('nt-x', 0, OLD)] })
     const reaper = createSessionReaper({
       ...base,
       readMem: () => ({ availableMb: 30_000, totalMb: 64_000 }),
@@ -277,7 +518,7 @@ describe('createSessionReaper (service)', () => {
 
   it('an external reason never overrides the attached/grace exemptions', async () => {
     const w = fakeWorld({
-      'node-terminal': [`nt-watched|1|${OLD}`, `nt-fresh|0|${NOW - 60}`]
+      'node-terminal': [row('nt-watched', 1, OLD), row('nt-fresh', 0, NOW - 60)]
     })
     const reaper = createSessionReaper({
       ...base,
@@ -295,7 +536,8 @@ describe('planReap with no memory signal (the darwin shape)', () => {
   const idle = (name: string, hoursAgo: number): SessionInfo => ({
     name,
     clients: 0,
-    activitySec: 1_000_000 - hoursAgo * 3600
+    activitySec: 1_000_000 - 60,
+    outputSec: 1_000_000 - hoursAgo * 3600
   })
 
   it('culls NOTHING on memory grounds when the reader reports null', () => {
@@ -303,15 +545,21 @@ describe('planReap with no memory signal (the darwin shape)', () => {
     // compressed, macOS's own graph GREEN). hostMemReader returns null there, and null must mean
     // "no pressure signal", never "no memory". Absence of evidence may not cull a session.
     const sessions = Array.from({ length: 20 }, (_, i) => idle(`nt-old-${i}`, 48))
-    const cfg = sessionBudgetConfig({}, 24576)
+    const cfg = sessionBudgetConfig({}, null, 24576)
     expect(planReap(sessions, null, 1_000_000, cfg)).toEqual([])
   })
 
   it('still culls past the detached-count cap without any memory signal', () => {
     // The cap is not memory-based, so it survives — that is what keeps the reaper useful on macOS.
     const sessions = Array.from({ length: 60 }, (_, i) => idle(`nt-old-${i}`, 48))
-    const cfg = sessionBudgetConfig({}, 24576)
+    const cfg = sessionBudgetConfig({}, null, 24576)
     expect(planReap(sessions, null, 1_000_000, cfg).length).toBeGreaterThan(0)
+  })
+
+  it('…and that cap is still the historical 48 there, not a figure derived from os.totalmem()', () => {
+    // 60 detached sessions against a cap of 48 is 12 over; a derived cap (24 GB → 12) would make it
+    // 48 over and reap a full batch on a Mac that has done nothing wrong.
+    expect(sessionBudgetConfig({}, null, 24576).maxDetached).toBe(48)
   })
 })
 
@@ -359,7 +607,7 @@ describe('darwin default reader: no byte reading may ever reap (behavioural)', (
     // produce bytes at all (hostMemReader's darwin null) keeps these sessions alive. This encodes
     // "memory fullness must never reap on macOS" without depending on the host's current load.
     const w = fakeWorld({
-      'node-terminal': Array.from({ length: 20 }, (_, i) => `nt-idle-${i}|0|${OLD}`)
+      'node-terminal': Array.from({ length: 20 }, (_, i) => row(`nt-idle-${i}`, 0, OLD))
     })
     const reaper = createSessionReaper({
       tmuxBin: () => 'tmux',
@@ -376,7 +624,9 @@ describe('darwin default reader: no byte reading may ever reap (behavioural)', (
 })
 
 describe('sessionBudgetConfig with fractional env values', () => {
-  const cfg = (env: Record<string, string>) => sessionBudgetConfig(env, 24576)
+  // `null` mem, so the cap default is the historical 48 and these assertions keep testing the
+  // env-parsing trap they were written for rather than the new derivation.
+  const cfg = (env: Record<string, string>) => sessionBudgetConfig(env, null, 24576)
 
   it('a fractional MAX_DETACHED falls back — it must never become a cap of ZERO', () => {
     // Math.floor(0.5) === 0, and a cap of zero is not a smaller cap: every detached session counts

@@ -88,7 +88,12 @@ export const IPC = {
   /** hud → main: a HUD row was clicked — focus the node in nodeterm + clear its done latch.
    *  Arg: `nodeId: string`. Reuses the notification-click focus path. */
   hudFocusNode: 'hud:focus-node',
-  /** hud → main: the panel expanded/collapsed. `true` clears every done latch (you looked). */
+  /** hud → main: the panel expanded/collapsed. Arg: `expanded: boolean`. Marks NOTHING as read —
+   *  the handler is deliberately a no-op (notch-hud.ts `onExpanded`). It used to clear every done
+   *  latch ("you looked"), which with three finished sessions waiting meant opening the panel and
+   *  clicking one silently swallowed the other two. Read is strictly per row: `hudFocusNode` clears
+   *  that row, `hudDismiss` hides one by hand. Still wired because the expand state may drive more
+   *  main-side behavior later. */
   hudExpanded: 'hud:expanded',
   /** hud → main: dismiss one HUD row by hand (a stuck session). Arg: `nodeId: string`. */
   hudDismiss: 'hud:dismiss',

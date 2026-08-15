@@ -132,6 +132,11 @@ import { markMobileLaunchSeen, shouldShowMobileLaunch } from '../lib/mobileLaunc
 import type { DictationTarget } from '../components/DictationOverlay'
 import { describeOs, REPO_URL } from '../lib/bugReport'
 import { shouldReleasePaneFocus } from '../lib/paneFocus'
+import {
+  adoptedNodesNotice,
+  decideExternalChange,
+  mergeIncomingNodes
+} from '../lib/externalChange'
 import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
@@ -707,9 +712,12 @@ export function Canvas() {
   // give the debounced-autosave effect a dependency that CHANGES in that case — `dirty` stays true
   // throughout, so without it the effect would never re-arm. Rare, so a re-render costs nothing.
   const [resaveTick, setResaveTick] = useState(0)
-  // The active project's .nodeterm file changed on disk while we have unsaved local edits
-  // (the user must pick a side). One-shot v2→v3 migration note (dismissible strip).
-  const [conflict, setConflict] = useState<Project | null>(null)
+  // The active project's .nodeterm file changed on disk while we have unsaved local edits AND it
+  // changed something we also hold (the user must pick a side for that half). `added` counts the
+  // nodes that arrived with it and were already adopted onto the canvas — they are never part of
+  // the choice (see adoptIncomingNodes), only of the sentence, so the bar cannot imply that
+  // "Keep my version" would throw a live session away. One-shot v2→v3 migration note (dismissible strip).
+  const [conflict, setConflict] = useState<{ project: Project; added: number } | null>(null)
   const [migrationNote, setMigrationNote] = useState<string | null>(null)
   // A local edit team-sync cannot carry (a node over MUTATION_MAX_BYTES — in practice a sticky
   // whose body someone pasted a document into). The reflector refuses it SILENTLY, so the user is
@@ -1978,7 +1986,31 @@ export function Canvas() {
     useProjects.getState().requestReload()
   }, [])
 
-  // Outside edits to a project's .nodeterm file (git pull / sync / teammate / another machine).
+  /** Put nodes that arrived from ANOTHER device onto the live canvas immediately.
+   *
+   *  Called for every external change while dirty — bar or no bar. An incoming node id nothing here
+   *  holds cannot collide with a local edit, and unlike a git pull nobody re-emits it: the phone
+   *  appends the session it started straight into project.json (`appendProjectNode`) and then
+   *  forgets about it. Leaving it parked behind the conflict bar meant "Keep my version" — or just
+   *  switching tabs, which drops the bar and lets the next whole-workspace save write our canvas
+   *  over disk — deleted a node whose tmux session is still running, headless and unreachable. */
+  const adoptIncomingNodes = useCallback(
+    (added: CanvasNodeState[]) => {
+      if (!added.length) return
+      const next = mergeIncomingNodes(nodesRef.current, nodeStatesToFlow(added))
+      if (next === nodesRef.current) return
+      nodesRef.current = next
+      setNodes(next)
+      // The adopted nodes only exist on disk in the version we did NOT take: count them as an edit
+      // so the next save writes them back out under our canvas too.
+      bumpDirty()
+      setNotice({ kind: 'info', text: adoptedNodesNotice(added.length) })
+    },
+    [setNodes, bumpDirty]
+  )
+
+  // Outside edits to a project's .nodeterm file (git pull / sync / teammate / another machine /
+  // the phone registering a session it started).
   useEffect(() => {
     return api.workspace.onExternalChange((project) => {
       const { activeProjectId: current } = useProjects.getState()
@@ -1987,16 +2019,41 @@ export function Canvas() {
         useProjects.getState().replaceProject(project)
         return
       }
-      if (!dirtyRef.current) {
-        // Active but no unsaved local edits: reload in place.
+      // `base` is our last-known DISK state (the store copy is written by a load or a commit+save);
+      // React Flow holds the live, possibly dirty canvas. Both are needed to tell "the file only
+      // grew a node" from "the file and I disagree about the same nodes".
+      const decision = decideExternalChange({
+        dirty: dirtyRef.current,
+        base: useProjects.getState().getProject(project.id),
+        incoming: project,
+        liveNodeIds: nodesRef.current.map((n) => n.id)
+      })
+      if (decision.kind === 'reload') {
+        // Active but no unsaved local edits: reload in place (the incoming file already carries any
+        // added nodes, so nothing extra to adopt).
         useProjects.getState().replaceProject(project)
         reloadActiveProject()
         return
       }
-      // Active with unsaved local edits: let the user pick a side.
-      setConflict(project)
+      // Dirty. Whatever happens to the overlapping half, the sessions registered elsewhere are ours
+      // to keep — they are the only part of this payload nobody can produce a second time.
+      adoptIncomingNodes(decision.added)
+      if (decision.kind === 'conflict') {
+        // Something we also hold changed on disk: let the user pick a side for THAT half. The bar
+        // keeps its documented meaning (the discarded disk side is re-fetchable — a git pull, a
+        // teammate's commit), and it now names what already landed on the canvas behind it.
+        setConflict({ project, added: decision.added.length })
+        return
+      }
+      if (decision.kind === 'merge') {
+        // Purely additive: the store's baseline can safely move to the disk version (it differs
+        // from our last save only by the nodes we just adopted). No bar — there is nothing to
+        // choose between.
+        useProjects.getState().replaceProject(project)
+      }
+      // 'ignore': a self-write echo / a change we already hold. Nothing to do, and above all no bar.
     })
-  }, [reloadActiveProject])
+  }, [reloadActiveProject, adoptIncomingNodes])
 
   // One-shot note after an on-disk migration (dismissible, non-blocking strip). Both kinds change
   // where the user's data lives, so neither may happen silently.
@@ -2024,6 +2081,14 @@ export function Canvas() {
   // switches projects first, drop it: commitActiveToStore already preserved the local edits in
   // the store, so the next save keeps our version — resolving the stale bar against a different
   // active project would be wrong.
+  //
+  // Dropping it IS an implicit "keep mine", and that was a data-loss path while an incoming node
+  // could sit behind the bar. It no longer can: nodes registered from another device are adopted
+  // onto the canvas before the bar is ever raised (see adoptIncomingNodes), so what a switch
+  // discards is only the overlapping half — a git pull / a teammate's commit, which is still in the
+  // remote and re-fetchable. Parking the bar across the switch would not have saved anything
+  // either: `writeDisk` saves the WHOLE workspace from the store, so the overwrite happens at the
+  // next save of ANY project, not at the moment the bar disappears.
   useEffect(() => {
     setConflict(null)
   }, [activeProjectId])
@@ -8552,8 +8617,9 @@ export function Canvas() {
         )}
         {conflict && (
           <ConflictBar
+            addedCount={conflict.added}
             onReload={() => {
-              useProjects.getState().replaceProject(conflict)
+              useProjects.getState().replaceProject(conflict.project)
               // The canvas now matches disk exactly → no local unsaved edits. Clear dirty so the
               // re-armed autosave (conflict just went null) can't turn around and overwrite the
               // just-reloaded disk version.

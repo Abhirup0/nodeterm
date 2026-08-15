@@ -138,6 +138,38 @@ describe('projects.registerNode', () => {
     expect(f.responses).toEqual([{ id: '1', ok: true, body: { registered: true } }])
   })
 
+  it('forwards the managed account the phone launched under (accountId)', async () => {
+    // Without this the off-LAN leg registered every managed-Claude session as the SYSTEM account
+    // while the direct-SSH leg got it right — the same session registered as a different identity
+    // depending only on whether the phone happened to be on the LAN.
+    const f = makeFakes()
+    mk(f).onRpc({
+      id: '1',
+      method: 'projects.registerNode',
+      params: {
+        projectId: 'p1',
+        node: { id: 'term-abc-1', agentId: 'claude', accountId: 'acc-1', note: 'ignored' }
+      }
+    })
+    await flush()
+    expect(f.registerNode).toHaveBeenCalledWith('p1', {
+      id: 'term-abc-1',
+      agentId: 'claude',
+      accountId: 'acc-1'
+    })
+  })
+
+  it('drops a non-string accountId instead of passing it on', async () => {
+    const f = makeFakes()
+    mk(f).onRpc({
+      id: '1',
+      method: 'projects.registerNode',
+      params: { projectId: 'p1', node: { id: 'term-abc-1', accountId: 42 } }
+    })
+    await flush()
+    expect(f.registerNode).toHaveBeenCalledWith('p1', { id: 'term-abc-1' })
+  })
+
   it('a refused registration (bad shape / unknown project) reports registered:false', async () => {
     const f = makeFakes()
     f.registerNode.mockResolvedValueOnce(false as never)
