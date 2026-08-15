@@ -225,6 +225,7 @@ import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useTerminalFocus } from '../state/terminalFocus'
 import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useTeamAccessEvents } from '../state/teamAccess'
 import { useAgentNodes } from '../state/agentNodes'
@@ -1862,6 +1863,9 @@ export function Canvas() {
           } else {
             setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === pending })))
             goToNode(node)
+            // Same as focusNodeById: after the cross-project switch lands, hand the keyboard to the
+            // target terminal so the user can type without a second click.
+            useTerminalFocus.getState().request(pending)
           }
           useAgentStatus.getState().setActive(pending, true)
           useAgentStatus.getState().clearUnread(pending)
@@ -6013,6 +6017,10 @@ export function Canvas() {
         }
         setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })))
         goToNode(node)
+        // Hand the keyboard to the node's terminal so the user can type immediately — the zoom
+        // frames it but does not focus xterm on its own (the pan/hover guard owns that), which is
+        // why a sidebar click used to need a second click/hover before typing worked.
+        useTerminalFocus.getState().request(nodeId)
         // Mark this node as watched and its completion as read. Read state is independent of the
         // live `done` workflow state, so it remains under Waiting for your response.
         useAgentStatus.getState().setActive(nodeId, true)
