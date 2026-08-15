@@ -95,6 +95,22 @@ export interface MirrorEntry {
    * safest. Cleared by the first live event.
    */
   restored?: true
+  /**
+   * The CURRENT `done` was inferred from the CLI going idle at its prompt (Claude's `idle_prompt`
+   * notification, `normalize.ts` `idle`), not from a turn-end hook.
+   *
+   * `normalize.ts` already calls that a RESCUE signal, and `reduceEntry` already honours it as one
+   * — it may only move a node that is still `working`. What was missing is that the resulting entry
+   * did not remember WHICH kind of `done` it holds, so a consumer downstream could not tell a turn
+   * that ended from a CLI that merely went quiet. Gate 2 of agent messaging is the consumer that
+   * must: a node blocked on an approval is also "idle at its prompt", and delivering into it is
+   * delivering into a modal. `Canvas.tsx` already discards the idle rescue for an `undefined` node
+   * for the same reason; messaging must not be the one consumer that trusts it.
+   *
+   * Written on the SAME edge as `state`/`stateVerified` (inside `commitState`), so it can never
+   * describe a state it did not arrive with.
+   */
+  idleInferred?: true
 }
 
 /** This host's Server-Edition install metadata (spec: server-update). Written by the installer
@@ -365,6 +381,11 @@ export function reduceEntry(
     next.stateVerified = proof
     if (proof) next.verifiedAt = now
     next.clientRevision = ev.clientRevision
+    // Which KIND of `done` this is, recorded on the same edge as the state itself. `idle` is only
+    // ever meaningful on a `done`; assigning (not merging) is the point — a later, genuine turn-end
+    // `done` must clear the marker, or a node would stay tainted for the rest of its session.
+    if (state === 'done' && ev.idle) next.idleInferred = true
+    else delete next.idleInferred
     // The entry's STATE now comes from this run, so it is no longer the one restored off disk.
     // Cleared HERE and only here: an event that commits no state — a context/usage event, a
     // held-off late `working`, the idle rescue — leaves a restored `done` exactly as restored as
