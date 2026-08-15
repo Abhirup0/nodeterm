@@ -18,7 +18,6 @@ import {
   type StatusSection
 } from '../lib/sessionList'
 import { SessionRow } from './SessionRow'
-import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { IconBellFilled, IconCircleCheck, IconPin } from './icons'
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
@@ -461,15 +460,6 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
       <div className="sessions-sidebar__head">
         <span className="sessions-sidebar__title">Sessions</span>
         <span className="sessions-sidebar__count">{total}</span>
-        <SegmentedPill<'project' | 'status'>
-          value={grouping}
-          ariaLabel="Group sessions by"
-          options={[
-            { value: 'project', label: 'Project' },
-            { value: 'status', label: 'Status' }
-          ]}
-          onChange={(v) => updateSettings({ sidebarGrouping: v })}
-        />
         <div className="sessions-sidebar__head-actions">
           <button
             className={pinned ? 'is-on' : ''}
@@ -482,6 +472,27 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
             ×
           </button>
         </div>
+      </div>
+
+      {/* Grouping tabs: plain text with a 2px accent underline on the active one, sitting on the
+          hairline that separates the header from the list — quieter than a pill toggle. */}
+      <div className="ss-tabs" role="tablist" aria-label="Group sessions by">
+        <button
+          role="tab"
+          aria-selected={grouping === 'project'}
+          className={`ss-tab${grouping === 'project' ? ' is-active' : ''}`}
+          onClick={() => updateSettings({ sidebarGrouping: 'project' })}
+        >
+          Project
+        </button>
+        <button
+          role="tab"
+          aria-selected={grouping === 'status'}
+          className={`ss-tab${grouping === 'status' ? ' is-active' : ''}`}
+          onClick={() => updateSettings({ sidebarGrouping: 'status' })}
+        >
+          Status
+        </button>
       </div>
 
       <div className="sessions-sidebar__search">
