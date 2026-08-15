@@ -252,6 +252,13 @@ describe('remoteTmuxConf', () => {
     expect(c).not.toMatch(/set -g[a]? terminal-overrides/)
     expect(c).not.toMatch(/set -a[gs]? terminal-overrides/)
   })
+  it('declares RGB via terminal-features and sets COLORTERM so truecolor survives SSH (issue #78)', () => {
+    // Without RGB, the remote tmux quantizes 24-bit SGR to 256 colors before it ever reaches our
+    // renderer. COLORTERM rides the server's GLOBAL env (this conf is source-filed at connect,
+    // before sessions exist), so programs inside the panes see the handshake too.
+    expect(c).toContain('set -as terminal-features ",*:RGB"')
+    expect(c).toContain('set-environment -g COLORTERM truecolor')
+  })
   it('clears the override/feature arrays a long-lived server accumulated from older versions', () => {
     // A tmux server outlives the app and keeps every entry ever sourced into it; the stale
     // smcup@/rmcup@/indn@ entries would otherwise keep breaking scrolling forever. Measured:
