@@ -54,6 +54,25 @@ export interface MirrorEntry {
    *  must be held as `waiting` (see reduceEntry). Cleared by anything that supersedes the
    *  ask — a new turn, other tool activity, an interrupt, or a session boundary. */
   awaitingInput?: boolean
+  /**
+   * Did the hook POST that set the CURRENT `state` present a per-node token this instance minted
+   * for this node id? Set from `ev.verified` (hook-server.ts), which is a LABEL on the wire and
+   * must stay one for every other consumer — invariant 2 says /hook/* accepts a tokenless POST
+   * forever, and `normalize.ts` says outright that no consumer may treat it as reject.
+   *
+   * Messaging is the ONE consumer that reads it, and it reads it as a GATE rather than a filter:
+   * gate 2 admits a target as idle only on a verified `done`, because a gate whose input an
+   * attacker writes is a comment. Nothing else in the product may start branching on this field
+   * without re-reading Decision A1 of the messaging design.
+   *
+   * `false` after a `true` is meaningful and is written: a legacy event SUPERSEDES an earlier proof
+   * about a state that has since changed.
+   */
+  stateVerified?: boolean
+  /** When proof was last seen at all. Never cleared by a later legacy event — "we once saw this
+   *  node prove itself" stays true, and it is what separates a node that CAN verify (retryable)
+   *  from one that never has (not retryable). See the plan's Correction C1 mitigation. */
+  verifiedAt?: number
 }
 
 /** This host's Server-Edition install metadata (spec: server-update). Written by the installer
@@ -343,12 +362,20 @@ export function reduceEntry(
     if (!heldOff) {
       next.state = ev.state
       next.updatedAt = now
+      // Set on the SAME edge the state is set on, and only there: a context/usage event carrying a
+      // verified flag says nothing about how the current state arrived, and a held-off working did
+      // not change the state whose proof this describes.
+      next.stateVerified = ev.verified === true
+      if (ev.verified === true) next.verifiedAt = now
     }
   } else if (ev.kind === 'session') {
     // SessionStart / SessionEnd both reset the node to idle (renderer: setState(id, undefined)).
     next.state = undefined
     next.awaitingInput = undefined
     next.updatedAt = now
+    // The proof went with the state it was about. `verifiedAt` stays — "this node has proven
+    // itself at least once" survives a session boundary and is what makes a refusal retryable.
+    next.stateVerified = false
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
   return next

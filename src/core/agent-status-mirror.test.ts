@@ -1753,3 +1753,45 @@ describe('workingNodes', () => {
     expect(workingNodes()).toEqual([])
   })
 })
+
+describe('reduceEntry records whether the state transition was verified', () => {
+  it('a verified state transition stamps verifiedAt and sets stateVerified', () => {
+    const e = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    expect(e.state).toBe('done')
+    expect(e.stateVerified).toBe(true)
+    expect(e.verifiedAt).toBe(1000)
+  })
+
+  it('an UNVERIFIED transition clears stateVerified — a later legacy event un-proves an earlier proof', () => {
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ state: 'working', verified: false, newTurn: true }), 2000)
+    expect(b.stateVerified).toBe(false)
+    // verifiedAt is NOT cleared: it is "when we last saw proof", which stays true.
+    expect(b.verifiedAt).toBe(1000)
+  })
+
+  it('an event that does not change state does not fabricate proof', () => {
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: false }), 1000)
+    const b = reduceEntry(a, ev({ kind: 'context', verified: true } as never), 2000)
+    expect(b.stateVerified).toBe(false)
+  })
+
+  it('a held-off late working leaves the proof of the done it did not override', () => {
+    // The done-holdoff deliberately does not commit the state, so it must not restate the proof
+    // either — the entry still describes the `done`, and that done WAS verified.
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ state: 'working', verified: false }), 1000 + DONE_HOLDOFF_MS - 1)
+    expect(b.state).toBe('done')
+    expect(b.stateVerified).toBe(true)
+  })
+
+  it('a session boundary drops the proof with the state it was about', () => {
+    // SessionStart/End reset the node to idle. A `stateVerified: true` left standing beside a
+    // state of `undefined` would assert proof about a state that no longer exists.
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ kind: 'session', sessionPhase: 'start' }), 2000)
+    expect(b.state).toBeUndefined()
+    expect(b.stateVerified).toBe(false)
+    expect(b.verifiedAt).toBe(1000)
+  })
+})
