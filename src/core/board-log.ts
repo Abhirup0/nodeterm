@@ -16,6 +16,24 @@ const LOG_DIR = '.nodeterm'
 const LOG_FILE = 'board-log.jsonl'
 const DEFAULT_CAP = 500
 
+/**
+ * Rotate the log once it passes this size, keeping ONE previous generation
+ * (`board-log.jsonl.1`).
+ *
+ * The 500 in `DEFAULT_CAP` is not, and never was, an eviction: `parseLines` applies
+ * `out.slice(0, cap)` AFTER `out.reverse()`, so it is a READ cap — nothing was ever removed, real
+ * history was hidden below the fold, and `appendFileSync` grew the file UNBOUNDED inside the user's
+ * repo. That was survivable while entries were human board actions; a feature that writes one entry
+ * per agent-to-agent delivery must not ship without a bound.
+ *
+ * 4 MiB is ~40k entries at the size these lines actually are, and one generation means the worst
+ * case on disk is 8 MiB + one line. Rotation is LOCAL ONLY: `RemoteLogExec` exposes `append`/`tail`
+ * and nothing that can stat or rename, and inventing a third remote verb to run `mv` over a
+ * ControlMaster is a bigger change than this defect justifies. An SSH project's log therefore still
+ * grows — documented here rather than silently unbounded in two places.
+ */
+export const MAX_BOARD_LOG_BYTES = 4 * 1024 * 1024
+
 /** Clamp an entry's `text` to `BOARD_LOG_TEXT_MAX` chars (+ '…' when truncated). Returns the
  *  same entry when nothing changes, else a shallow copy with the shortened text. */
 export function clampEntryText(entry: BoardLogEntry): BoardLogEntry {
@@ -115,10 +133,32 @@ export class BoardLogStore {
     }
     try {
       fs.mkdirSync(path.join(cwd, LOG_DIR), { recursive: true })
+      this.rotateIfLarge(this.localPath(cwd), line.length)
       fs.appendFileSync(this.localPath(cwd), line)
       return true
     } catch {
       return false
+    }
+  }
+
+  /**
+   * Move the log aside when this append would take it past `MAX_BOARD_LOG_BYTES`.
+   *
+   * Rotates BEFORE the write, so the bound holds for the file as it exists on disk rather than one
+   * entry late. `renameSync` over an existing `.1` replaces it — one generation, deliberately: two
+   * would double the worst case for a file that lives inside the user's repository.
+   *
+   * Never throws: a log that cannot be rotated must still be APPENDED to (the caller's `try` then
+   * decides), because losing a board entry to a failed housekeeping step is a worse outcome than a
+   * file that is briefly too large.
+   */
+  private rotateIfLarge(file: string, incoming: number): void {
+    try {
+      const size = fs.statSync(file).size
+      if (size + incoming <= MAX_BOARD_LOG_BYTES) return
+      fs.renameSync(file, `${file}.1`)
+    } catch {
+      // No file yet (the common case), or an unstattable/unrenamable one — append regardless.
     }
   }
 
@@ -138,7 +178,24 @@ export class BoardLogStore {
     } catch {
       return []
     }
-    return parseLines(raw, opts)
+    const entries = parseLines(raw, opts)
+    // Read THROUGH the rotation boundary.
+    //
+    // Without this the panel goes blank at the exact moment rotation happens: the fresh file holds
+    // one line, and a board with months of history would show one entry. The previous generation is
+    // consulted only when the current file has not satisfied the request — the common case (a log
+    // far below the bound) still does exactly one read, as it always did.
+    if (!opts.all && entries.length >= (opts.cap ?? DEFAULT_CAP)) return entries
+    let older: string
+    try {
+      older = await fs.promises.readFile(`${this.localPath(cwd)}.1`, 'utf-8')
+    } catch {
+      return entries // no previous generation, which is the ordinary state
+    }
+    // Both halves are newest-first; the rotated file is entirely older, so it appends. The cap is
+    // re-applied to the JOIN, or a capped read could return more than it was asked for.
+    const joined = [...entries, ...parseLines(older, { all: true })]
+    return opts.all ? joined : joined.slice(0, opts.cap ?? DEFAULT_CAP)
   }
 
   /** Watch the log for changes; `cb` fires (debounced 250ms) on each change. Returns an unsub.

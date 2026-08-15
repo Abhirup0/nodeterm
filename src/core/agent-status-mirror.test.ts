@@ -1620,6 +1620,35 @@ describe('idle_prompt rescue (Esc that ran no Stop hook)', () => {
     expect(next.state).toBe('done')
     expect(next.updatedAt).toBe(1000)
   })
+
+  it('marks the RESCUED done as inferred, so a consumer can tell it from a turn end', () => {
+    // A node blocked on an approval is also "idle at its prompt". Messaging's gate 2 refuses this
+    // shape, and it can only refuse what the entry remembers.
+    const working = reduceEntry(undefined, ev({ state: 'working' }), 1000)
+    const rescued = reduceEntry(working, ev({ state: 'done', idle: true }), 2000)
+    expect(rescued).toMatchObject({ state: 'done', idleInferred: true })
+    const genuine = reduceEntry(undefined, ev({ state: 'done' }), 1000)
+    expect(genuine.idleInferred).toBeUndefined()
+  })
+
+  it('a later genuine turn-end CLEARS the marker — it describes the current state only', () => {
+    const working = reduceEntry(undefined, ev({ state: 'working' }), 1000)
+    const rescued = reduceEntry(working, ev({ state: 'done', idle: true }), 2000)
+    expect(rescued.idleInferred).toBe(true)
+    const nextTurn = reduceEntry(rescued, ev({ state: 'working', newTurn: true }), 3000)
+    expect(nextTurn.idleInferred).toBeUndefined()
+    const ended = reduceEntry(nextTurn, ev({ state: 'done' }), 4000)
+    expect(ended.idleInferred).toBeUndefined()
+  })
+
+  it('an idle event that commits NOTHING leaves the marker alone', () => {
+    // The rescue may only move a node that is still `working`; on a blocked node it returns early
+    // and must not stamp a state it did not commit.
+    const blocked = reduceEntry(undefined, ev({ state: 'blocked' }), 1000)
+    const next = reduceEntry(blocked, ev({ state: 'done', idle: true }), 2000)
+    expect(next.state).toBe('blocked')
+    expect(next.idleInferred).toBeUndefined()
+  })
 })
 
 

@@ -20,18 +20,37 @@ import {
 } from './pane-owner'
 
 describe('PANE_OWNER_FMT', () => {
-  it('asks for pid, tty and current command in one round-trip', () => {
-    expect(PANE_OWNER_FMT).toBe('#{pane_pid}|#{pane_tty}|#{pane_current_command}')
+  it('asks for pid, tty, current command and the pane id in one round-trip', () => {
+    expect(PANE_OWNER_FMT).toBe('#{pane_pid}|#{pane_tty}|#{pane_current_command}|#{pane_id}')
   })
 })
 
 describe('parsePaneOwner', () => {
   it('parses a well-formed line', () => {
+    expect(parsePaneOwner('4242|/dev/pts/9|claude|%17')).toEqual({
+      panePid: 4242,
+      tty: '/dev/pts/9',
+      command: 'claude',
+      paneId: '%17'
+    })
+  })
+
+  it('still parses a three-field read — an older format string is not a broken one', () => {
+    // `#{pane_id}` is appended, so a tmux that expands it to nothing (or a caller still sending the
+    // old format) degrades to exactly the three fields this parser always had.
     expect(parsePaneOwner('4242|/dev/pts/9|claude')).toEqual({
       panePid: 4242,
       tty: '/dev/pts/9',
       command: 'claude'
     })
+  })
+
+  it('drops a pane id that is not tmux-shaped rather than carrying a garbage one', () => {
+    // `samePane` reads an ABSENT id as "cannot confirm" and refuses. A garbage id that compared
+    // equal to another garbage id would read as "confirmed", which is the dangerous direction.
+    for (const bad of ['', '17', 'pane17', '%', '%1x']) {
+      expect(parsePaneOwner(`4242|/dev/pts/9|claude|${bad}`)?.paneId).toBeUndefined()
+    }
   })
 
   it('tolerates the trailing newline a real display-message writes', () => {
@@ -148,11 +167,24 @@ describe('parseForegroundArgv', () => {
 describe('paneOwnerFrom', () => {
   const identity = { panePid: 2485382, tty: '/dev/pts/0', command: 'sh' }
 
-  it('joins the two round-trips into one owner', () => {
+  it('joins the two round-trips into one owner, argv and pids row-for-row', () => {
     expect(paneOwnerFrom(identity, REAL_PS)).toEqual({
       ...identity,
-      argv: ['/bin/sh -c sleep 200 | cat', 'sleep 200', 'cat']
+      argv: ['/bin/sh -c sleep 200 | cat', 'sleep 200', 'cat'],
+      pids: [2489089, 2489091, 2489092]
     })
+  })
+
+  it('pairs each pid with ITS OWN argv row, and excludes the pane shell from both', () => {
+    // The property `agentPidIn` depends on: index i of `pids` is the process that ran `argv[i]`.
+    // The pane's own `-bash` (2485382, not in the foreground group) must appear in neither.
+    const owner = paneOwnerFrom(identity, REAL_PS)!
+    expect(owner.pids).toEqual([2489089, 2489091, 2489092])
+    expect(owner.argv).toEqual(['/bin/sh -c sleep 200 | cat', 'sleep 200', 'cat'])
+    for (let i = 0; i < owner.argv.length; i++) {
+      expect(REAL_PS).toContain(`${owner.pids![i]} 2489089 S+   ${owner.argv[i]}`)
+    }
+    expect(owner.pids).not.toContain(2485382)
   })
 
   it('answers null rather than an owner with an empty argv', () => {

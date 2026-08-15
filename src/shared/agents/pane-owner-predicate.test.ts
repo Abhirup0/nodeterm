@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { isAgentPane, AGENT_BINARIES, binariesFor, binaryFromLaunchCmd } from './pane-owner-predicate'
+import {
+  agentPidIn,
+  isAgentPane,
+  AGENT_BINARIES,
+  binariesFor,
+  binaryFromLaunchCmd
+} from './pane-owner-predicate'
 import { isShellCommand } from './pane'
 import { BUILTIN_AGENT_IDS, AGENT_CONFIG } from './config'
 
@@ -175,5 +181,50 @@ describe('binariesFor', () => {
 
   it('treats an unrecognised NON-custom id as its own command, mirroring resolveAgent', () => {
     expect(binariesFor('aider')).toEqual(['aider'])
+  })
+})
+
+
+describe('agentPidIn — WHICH agent process, not just whether one is there', () => {
+  const withPids = (argv: string[], pids: number[]) => ({
+    panePid: 1000,
+    tty: '/dev/pts/1',
+    command: 'node',
+    argv,
+    pids
+  })
+
+  it('returns the pid of the row that made the pane an agent pane', () => {
+    const o = withPids(['/bin/sh -c "while :; do claude; done"', 'node /usr/bin/claude --resume x'], [2000, 2100])
+    expect(isAgentPane(o, 'claude')).toBe('agent')
+    expect(agentPidIn(o, 'claude')).toBe(2100)
+  })
+
+  it('is null when the pane is not an agent pane at all', () => {
+    expect(agentPidIn(withPids(['-zsh'], [2000]), 'claude')).toBeNull()
+  })
+
+  it('is null when the read carries no pids — unknown is never "unchanged"', () => {
+    // An older read, or one whose pid column did not line up with argv. The delivery's post-write
+    // check reads null as "cannot confirm" and reports the uncertainty.
+    expect(agentPidIn(owner(['node /usr/bin/claude']), 'claude')).toBeNull()
+    expect(agentPidIn(null, 'claude')).toBeNull()
+    expect(agentPidIn(undefined, 'claude')).toBeNull()
+  })
+
+  it('is null for an unnameable agent, exactly like the verdict is `unknown`', () => {
+    expect(agentPidIn(withPids(['node /usr/bin/claude'], [2100]), 'custom:abc')).toBeNull()
+  })
+
+  it('distinguishes a RESTARTED agent from the same one — the whole reason it exists', () => {
+    // Same pane, same wrapper, same name: a wrapper loop replaced the process. Only the pid moved.
+    const before = withPids(['/bin/sh -c "while :; do claude; done"', 'claude'], [2000, 2100])
+    const after = withPids(['/bin/sh -c "while :; do claude; done"', 'claude'], [2000, 2199])
+    expect(isAgentPane(before, 'claude')).toBe(isAgentPane(after, 'claude'))
+    expect(agentPidIn(before, 'claude')).not.toBe(agentPidIn(after, 'claude'))
+  })
+
+  it('ignores a zero/negative pid rather than reporting a phantom process', () => {
+    expect(agentPidIn(withPids(['claude'], [0]), 'claude')).toBeNull()
   })
 })

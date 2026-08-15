@@ -5,6 +5,7 @@ import {
   remotePaneOwnerArgs,
   remoteTmuxPtyArgs
 } from './control-master'
+import { PANE_OWNER_FMT } from '../agents/pane-owner'
 import { accountTmuxEnvArgs } from '../claude-accounts-core'
 
 /**
@@ -237,6 +238,12 @@ describe('remoteForegroundArgvArgs: a tty the remote host reported is DATA, neve
     )
     expect(unquotedMeta).toEqual([])
     expect(argv.slice(0, 3)).toEqual(['tmux', '-L', 'nodeterm-rmt'])
-    expect(argv).toContain('#{pane_pid}|#{pane_tty}|#{pane_current_command}')
+    // The CONSTANT, not a copy of it. A literal here was a second spelling of the format that
+    // drifted the moment the local one gained a field — and "verbatim" is the property under test,
+    // so it has to be compared against the thing the local leg actually sends.
+    expect(argv).toContain(PANE_OWNER_FMT)
+    // Every one of the format's shell metacharacters (`{`, `}`, `|`) survives quoted, which is what
+    // `unquotedMeta` above is asserting: the remote shell must hand tmux the string, not parse it.
+    expect(PANE_OWNER_FMT).toMatch(/[{}|]/)
   })
 })

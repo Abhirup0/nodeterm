@@ -119,7 +119,10 @@ describe('PtyManager.paneOwner', () => {
       tty: TTY,
       command: 'node',
       // The foreground group, and only it — the pane's own `-bash` is not in it.
-      argv: ['node /usr/local/bin/claude --resume x', 'rg --files']
+      argv: ['node /usr/local/bin/claude --resume x', 'rg --files'],
+      // …and the pid of each of those rows, in the same order. `ps` already prints the column; it
+      // is what lets a delivery's post-write check tell "the same agent" from "an agent again".
+      pids: [2503294, 2503300]
     })
   })
 
