@@ -5425,10 +5425,17 @@ export function Canvas() {
               {
                 label: 'Restart agent and shell',
                 icon: <IconPower />,
-                disabled: !!why,
+                // A relay session's shell lives on the HOST's core, so recycling it here can't
+                // re-source that machine's profile/env — the closure refuses it. Surface that as a
+                // DISABLED row with the real reason instead of an enabled row that fails with the
+                // generic "not attached" notice. (Plain Restart above still works over relay: it
+                // only types --resume, no recycle.)
+                disabled: !!why || session.source === 'relay',
                 hint:
                   why ??
-                  'Quits the CLI, respawns a fresh shell (picks up env/profile changes), then resumes.',
+                  (session.source === 'relay'
+                    ? 'Restart the shell on the machine hosting this relay session.'
+                    : 'Quits the CLI, respawns a fresh shell (picks up env/profile changes), then resumes.'),
                 onClick: () => void restartAgentNode(ids[0], undefined, undefined, true)
               },
               ...(variants.length
