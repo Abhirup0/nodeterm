@@ -37,6 +37,7 @@ import {
   remoteNodeTokenMinter,
   setRemoteNodeTokenWriter
 } from '../../core/agents/node-token-service'
+import { setRemoteSessionEnvWriter } from '../../core/remote-ssh/session-env'
 import { askpassServer } from './ssh-askpass'
 import { appSshAgent } from './ssh-agent'
 import { sessionName } from '../../core/tmux-naming'
@@ -1016,6 +1017,36 @@ export class SshProjectManager {
    * absolute) and a verified tunnel (`hookEndpointPath` ⇒ the endpoint file that names the token
    * dir actually exists on the host).
    */
+  /**
+   * Stage a per-session env file on the host (0600, content over stdin — values never touch an
+   * argv on either machine). The spawn path fires this and forgets it; the remote command's
+   * bounded wait bridges the race, and a write that never lands only costs the agent its
+   * gateway/custom env (it fails loudly in its own pane). Path safety: `remotePath` is built
+   * core-side from the connection's VALIDATED remote $HOME (`isSafeRemoteHome`) plus the
+   * sanitized tmux session name, and is `posixQuote`d again here at the splice point.
+   */
+  async writeSessionEnvFile(controlPath: string, remotePath: string, content: string): Promise<void> {
+    try {
+      for (const c of this.conns.values()) {
+        if (c.controlPath !== controlPath) continue
+        // Refuse a path that is not under a known-safe home shape — belt to the builder's braces.
+        if (/[\0\n\r'"`$\\]/.test(remotePath) || !remotePath.startsWith('/')) return
+        const dir = remotePath.slice(0, remotePath.lastIndexOf('/'))
+        await this.r.run(
+          childArgs(
+            c.conn,
+            c.controlPath,
+            `umask 077; mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(remotePath)}`
+          ),
+          content
+        )
+        return
+      }
+    } catch {
+      /* fail-open: never let an env write reach a pty spawn */
+    }
+  }
+
   async writeNodeTokenForNode(controlPath: string, nodeId: string): Promise<void> {
     try {
       for (const c of this.conns.values()) {
@@ -1667,6 +1698,11 @@ export function initSshProject(
   // through this registration, because the runner that owns it lives here, in main.
   setRemoteNodeTokenWriter((controlPath, nodeId) => {
     void mgr.writeNodeTokenForNode(controlPath, nodeId)
+  })
+  // Same seam, same shape: the pty spawn path stages a remote session's env file (gateway/custom
+  // values, argv-free) through the manager that owns the ssh runner. See core/remote-ssh/session-env.ts.
+  setRemoteSessionEnvWriter((controlPath, remotePath, content) => {
+    void mgr.writeSessionEnvFile(controlPath, remotePath, content)
   })
   // Registered after `mgr` exists so the dialog can name the server: the askpass request carries
   // the asking master's pid, and only the manager can map it back to a connection.

@@ -718,7 +718,8 @@ export function remoteTmuxPtyArgs(
   program?: string,
   programArgs?: string[],
   extraEnv: string[] = [],
-  confPath?: string
+  confPath?: string,
+  sessionEnv?: RemoteSessionEnv
 ): string[] {
   let cmd = remoteTmuxCommand({ sessionId, remoteCwd, program, programArgs, socket: RMT_TMUX_SOCKET, confPath })
   if (extraEnv.length)
@@ -731,5 +732,48 @@ export function remoteTmuxPtyArgs(
     // was remote code execution EVEN WITH the posixQuote above. A function replacement is never
     // pattern-expanded, so the quoted bytes land verbatim. See control-master.injection.test.ts.
     cmd = cmd.replace('new-session -A ', () => `new-session -A ${extraEnv.map(posixQuote).join(' ')} `)
+  if (sessionEnv) cmd = `${remoteSessionEnvPrologue(sessionEnv, confPath)}${cmd}`
   return ['-t', ...childArgs(conn, controlPath, cmd)]
+}
+
+/** Credentials for a remote session, delivered WITHOUT argv: a 0600 file (staged over the
+ *  ControlMaster, content via stdin) that the remote command sources into the tmux client's env
+ *  and deletes, plus the key NAMES (never values) the remote server's `update-environment` must
+ *  learn at runtime — the conf bakes the fixed gateway list, but a custom agent's keys are
+ *  user-defined. See session-env.ts for the whole design. */
+export interface RemoteSessionEnv {
+  /** Absolute remote path of the staged env file (built from the validated remote $HOME). */
+  file: string
+  /** Env names OUTSIDE the conf-baked gateway list to append to `update-environment`. */
+  extraKeys: string[]
+}
+
+/** The shell prologue spliced before the remote tmux command. POSIX-sh only, one line. The
+ *  wait-loop bridges the staging race (the upload is fire-and-forget from a synchronous spawn
+ *  path); its budget is 40×50ms = 2s, after which the launch proceeds env-less and the agent
+ *  fails loudly in the pane — fail-open never leaks and never wedges a terminal on a dead
+ *  upload. The `rm -f` runs unconditionally so a late-landing file cannot linger at rest. */
+function remoteSessionEnvPrologue(sessionEnv: RemoteSessionEnv, confPath?: string): string {
+  const f = posixQuote(sessionEnv.file)
+  const t = `tmux -L ${RMT_TMUX_SOCKET}`
+  const parts: string[] = []
+  // Names only ever come from isSafeEnvName-shaped keys, but this builder is exported territory —
+  // re-filter at the splice point, the same idiom every other remote builder here uses.
+  const keys = sessionEnv.extraKeys.filter((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
+  if (keys.length) {
+    // The option must exist on the server BEFORE new-session copies the client env, so start the
+    // server (a no-op when warm) with the same conf new-session would use. The grep guard keeps a
+    // long-lived server's array from accumulating one duplicate per spawn.
+    parts.push(`${t}${confPath ? ` -f ${posixQuote(confPath)}` : ''} start-server 2>/dev/null;`)
+    for (const k of keys) {
+      parts.push(
+        `${t} show-options -g update-environment 2>/dev/null | grep -q ' ${k}$' || ${t} set-option -ga update-environment ${k} 2>/dev/null;`
+      )
+    }
+  }
+  parts.push(
+    `_nte=0; while [ ! -f ${f} ] && [ "$_nte" -lt 40 ]; do sleep 0.05; _nte=$((_nte+1)); done;`,
+    `[ -f ${f} ] && . ${f} >/dev/null 2>&1; rm -f ${f};`
+  )
+  return parts.join(' ') + ' '
 }

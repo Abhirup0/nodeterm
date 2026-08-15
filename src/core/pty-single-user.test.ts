@@ -259,14 +259,11 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
         'https://bifrost.example.test/anthropic'
       )
       expect(spawnArgs[0].env.ANTHROPIC_AUTH_TOKEN).toBe('vk-secret')
-      expect(spawnArgs[0].args).toEqual(
-        expect.arrayContaining([
-          '-e',
-          'ANTHROPIC_BASE_URL=https://bifrost.example.test/anthropic',
-          '-e',
-          'ANTHROPIC_AUTH_TOKEN=vk-secret'
-        ])
-      )
+      // NEVER on argv: the tmux client's command line is world-readable in /proc/<pid>/cmdline
+      // for the whole session on a multi-user host (the PR #195 leak class). The session gets the
+      // values through the conf's update-environment list reading this client's process env.
+      expect(spawnArgs[0].args.join(' ')).not.toContain('vk-secret')
+      expect(spawnArgs[0].args.join(' ')).not.toContain('ANTHROPIC_AUTH_TOKEN')
       expect(spawnArgs[0].args.join(' ')).not.toContain('${env:')
     } finally {
       if (inherited === undefined) delete process.env.NODETERM_TEST_GATEWAY_KEY
@@ -296,14 +293,10 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       COPILOT_PROVIDER_WIRE_MODEL: 'openai/gpt-5.5',
       COPILOT_PROVIDER_WIRE_API: 'responses'
     })
-    expect(spawnArgs[0].args).toEqual(
-      expect.arrayContaining([
-        '-e',
-        'COPILOT_PROVIDER_MODEL_ID=gpt-5.5',
-        '-e',
-        'COPILOT_PROVIDER_WIRE_MODEL=openai/gpt-5.5'
-      ])
-    )
+    // The BYOK env — key included — reaches the session via the client env + update-environment,
+    // never the argv (see the claude case above for why).
+    expect(spawnArgs[0].args.join(' ')).not.toContain('vk-secret')
+    expect(spawnArgs[0].args.join(' ')).not.toContain('COPILOT_PROVIDER')
     expect(spawnArgs[0].args.join(' ')).not.toContain('--model')
   })
 
@@ -328,9 +321,8 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       OPENAI_BASE_URL: 'https://bifrost.example.test/openai/v1',
       OPENAI_API_KEY: 'stored-gateway-key'
     })
-    expect(spawnArgs[0].args).toEqual(
-      expect.arrayContaining(['-e', 'OPENAI_API_KEY=stored-gateway-key'])
-    )
+    // The stored key must not surface on the tmux client's argv either — same #195 class.
+    expect(spawnArgs[0].args.join(' ')).not.toContain('stored-gateway-key')
   })
 
   it('never exposes gateway credentials to a plain terminal', async () => {

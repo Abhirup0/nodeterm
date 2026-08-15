@@ -26,6 +26,7 @@ import {
   localKillSockets,
   localTmuxKillArgs,
   remoteTmuxPtyArgs,
+  type RemoteSessionEnv,
   remotePasteDelivery,
   remoteFramedDelivery,
   remoteCapturePaneArgs,
@@ -82,7 +83,17 @@ import { clearNode as clearNodeAgentStatus } from './agent-status-mirror'
 import { hasSharedIdentity, setCustomAgentBaseResolver, type AgentId } from '../shared/agents/config'
 import { findCustomAgent } from '../shared/agents/custom-agent'
 import { applyCustomAgentEnv, customAgentEnvArgs } from './custom-agent-env'
-import { modelGatewayEnv } from '../shared/agents/model-gateway'
+import {
+  MODEL_GATEWAY_ENV_KEYS,
+  modelGatewayEnv,
+  tmuxUpdateEnvironmentLine
+} from '../shared/agents/model-gateway'
+import {
+  remoteSessionEnvAvailable,
+  remoteSessionEnvPath,
+  sessionEnvFileContent,
+  stageRemoteSessionEnv
+} from './remote-ssh/session-env'
 import { foregroundProcessGroup, parsePaneProcess } from './pane-process'
 import { isShellCommand } from '../shared/agents/pane'
 
@@ -192,6 +203,11 @@ set -g default-terminal "xterm-256color"
 set -sg escape-time 10
 set -g destroy-unattached off
 setw -g aggressive-resize on
+# Credentials travel HERE, not on argv: gateway env vars ride the tmux client's process
+# environment and update-environment copies them into the session at create/attach. The old
+# '-e KEY=VALUE' route parked the API key on the long-lived attached client's command line —
+# world-readable in /proc/<pid>/cmdline on any multi-user host (the PR #195 leak class).
+${tmuxUpdateEnvironmentLine()}
 # Copy to the SYSTEM clipboard via OSC 52 (the client's terminal writes it). BOTH lines are needed
 # on tmux 3.2+ — see tmuxConf's doc comment before touching either.
 # MIGRATION — do not remove. Older versions of this file blanked smcup/rmcup/indn via
@@ -1267,6 +1283,53 @@ export class PtyManager {
     return this.tmuxPath
   }
 
+  /** `update-environment` names already pushed to the running server this app-run (plus the
+   *  conf-baked set), so a custom agent's spawn costs at most one `set-option` per NEW key. */
+  private updateEnvKeys: Set<string> | null = null
+
+  /** Make the shared tmux server copy these client-env names into new sessions. The conf bakes
+   *  the fixed gateway list; a CUSTOM agent's env keys are user-defined and can only be appended
+   *  at runtime. Names ride the `set-option` argv — names only, values never (values reach tmux
+   *  through the client's process environment; that is the point of this whole path). Failure is
+   *  fail-open twice over: with NO server running, the session about to spawn starts the server
+   *  itself and its panes inherit the client env directly; a name that cannot be appended costs
+   *  that var on a shared server, never the terminal. */
+  private ensureUpdateEnvKeys(names: string[]): void {
+    if (!this.tmuxPath) return
+    const wanted = names.filter(
+      (n) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && n !== 'PATH' && n !== 'LANG'
+    )
+    if (!wanted.length) return
+    if (!this.updateEnvKeys) {
+      this.updateEnvKeys = new Set(MODEL_GATEWAY_ENV_KEYS)
+      try {
+        const out = execFileSync(
+          this.tmuxPath,
+          ['-L', TMUX_SOCKET, 'show-options', '-g', 'update-environment'],
+          { stdio: ['ignore', 'pipe', 'ignore'] }
+        ).toString()
+        for (const m of out.matchAll(/update-environment\[\d+\]\s+(\S+)/g)) {
+          this.updateEnvKeys.add(m[1])
+        }
+      } catch {
+        /* no server yet — the conf list is what a fresh server will have */
+      }
+    }
+    for (const name of wanted) {
+      if (this.updateEnvKeys.has(name)) continue
+      try {
+        execFileSync(
+          this.tmuxPath,
+          ['-L', TMUX_SOCKET, 'set-option', '-ga', 'update-environment', name],
+          { stdio: 'ignore' }
+        )
+        this.updateEnvKeys.add(name)
+      } catch {
+        /* no server yet — fresh-server sessions inherit the client env directly */
+      }
+    }
+  }
+
   registerIpc(): void {
     platform().handleWithSender(
       IPC.ptyCreate,
@@ -2054,11 +2117,13 @@ export class PtyManager {
     // the account path set). ${env:VAR} is expanded against the live process env. Only the LOCAL
     // path merges into `env` here; the remote (ssh) path threads the same vars into the tmux `-e`
     // list below (the local ssh client's env does not propagate to the remote tmux session).
+    let customEnvMerged: Record<string, string> = {}
     if (!options.sshRemote) {
       const custom = findCustomAgent(this.getSettings().customAgents, options.agentId ?? '')
       const merged = applyCustomAgentEnv(env, custom, process.env as Record<string, string | undefined>)
       for (const [k, v] of Object.entries(merged.env)) env[k] = v
       for (const w of merged.warnings) console.warn(w)
+      customEnvMerged = merged.env
     }
 
     const settings = this.getSettings()
@@ -2137,10 +2202,10 @@ export class PtyManager {
           ? accountTmuxEnvArgs(remoteAccountConfigDirAbs(options.sshRemote.remoteHome, options.accountId))
           : []
       // Custom-agent env for a REMOTE node: expand ${env:VAR} against the LOCAL process env (the
-      // key stays local; only the resolved VALUE travels over SSH) and thread the results into the
-      // remote tmux `-e` list. PATH is skipped — the local machine can't see the remote box's PATH,
-      // so a locally-resolved PATH would break CLI resolution on the host (recovering it is out of
-      // scope). Applied AFTER the account env so custom env still wins, mirroring the local path.
+      // key stays local; only the resolved VALUE travels over SSH). PATH is skipped — the local
+      // machine can't see the remote box's PATH, so a locally-resolved PATH would break CLI
+      // resolution on the host (recovering it is out of scope). Applied AFTER the account env so
+      // custom env still wins, mirroring the local path.
       const remoteCustom = findCustomAgent(this.getSettings().customAgents, options.agentId ?? '')
       const remoteCustomEnv = customAgentEnvArgs(
         remoteCustom,
@@ -2148,11 +2213,43 @@ export class PtyManager {
         { skipPath: true }
       )
       for (const w of remoteCustomEnv.warnings) console.warn(w)
-      const remoteCustomEnvArgs = remoteCustomEnv.args.flatMap((kv) => ['-e', kv])
-      const remoteGatewayEnvArgs = Object.entries(gatewayEnv).flatMap(([k, v]) => [
-        '-e',
-        `${k}=${v}`
-      ])
+      // Gateway + custom env VALUES never touch an argv (the old `-e KEY=VALUE` route parked the
+      // gateway API key on the local ssh client's command line for the whole session — the PR #195
+      // leak class, on the machine AND on the remote process table at creation). They ride a 0600
+      // per-session file staged over the ControlMaster; the remote command sources + deletes it,
+      // and the remote conf's `update-environment` copies the names into the session env. Gated on
+      // the validated remote $HOME and on a wired uploader — absent either, the vars are simply
+      // not delivered and the agent fails loudly in its pane (fail-open, never a fallback to argv).
+      const remoteEnvPairs: Record<string, string> = { ...gatewayEnv }
+      for (const kv of remoteCustomEnv.args) {
+        const eq = kv.indexOf('=')
+        if (eq > 0) remoteEnvPairs[kv.slice(0, eq)] = kv.slice(eq + 1)
+      }
+      let remoteSessionEnv: RemoteSessionEnv | undefined
+      if (
+        Object.keys(remoteEnvPairs).length &&
+        options.sshRemote.remoteHome &&
+        remoteSessionEnvAvailable()
+      ) {
+        const envFile = remoteSessionEnvPath(
+          options.sshRemote.remoteHome,
+          sessionName(options.persistKey)
+        )
+        stageRemoteSessionEnv(
+          options.sshRemote.controlPath,
+          envFile,
+          sessionEnvFileContent(remoteEnvPairs)
+        )
+        const baked = new Set<string>(MODEL_GATEWAY_ENV_KEYS)
+        remoteSessionEnv = {
+          file: envFile,
+          extraKeys: Object.keys(remoteEnvPairs).filter((k) => !baked.has(k))
+        }
+      } else if (Object.keys(remoteEnvPairs).length) {
+        console.warn(
+          '[pty] remote session env skipped (no remote home or no uploader) — agent will launch without gateway/custom env'
+        )
+      }
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -2164,15 +2261,11 @@ export class PtyManager {
         // place a foreign value is most at home.
         reqShell,
         options.shellArgs,
-        [
-          ...hookExtraEnv,
-          ...remoteAccountEnv,
-          ...remoteGatewayEnvArgs,
-          ...remoteCustomEnvArgs
-        ],
+        [...hookExtraEnv, ...remoteAccountEnv],
         // Source nodeterm's remote tmux.conf via `-f` (written on connect, Task 2) so a cold-start
         // session gets mouse/clipboard/scrollback. Fail-open: undefined → remote tmux host defaults.
-        options.sshRemote.tmuxConfPath
+        options.sshRemote.tmuxConfPath,
+        remoteSessionEnv
       )
     } else if (this.tmuxPath && settings.tmuxEnabled && options.persistKey) {
       // attach-or-create the persistent session for this node.
@@ -2198,12 +2291,15 @@ export class PtyManager {
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
-      // The shared tmux server outlives the app, so the gateway cannot rely on the tmux client's
-      // inherited process env. Emit only the centrally-mapped keys explicitly; read their FINAL
-      // values from `env` so a custom agent override retains last-write precedence.
-      const gatewayEnvArgs = Object.keys(gatewayEnv).flatMap((key) =>
-        typeof env[key] === 'string' ? ['-e', `${key}=${env[key]}`] : []
-      )
+      // Gateway env deliberately has NO `-e` pairs: the values are in this tmux CLIENT's process
+      // environment (merged above) and the conf's `update-environment` list copies them into the
+      // session at create/attach — measured on tmux 3.4, including the removal case (a plain
+      // terminal's client lacks the vars, so tmux strips them from its session even on a server
+      // another node's env seeded). `-e KEY=VALUE` parked the API key on the long-lived attached
+      // client's argv — world-readable in /proc/<pid>/cmdline on a multi-user host, the exact
+      // PR #195 leak class. Custom-agent env keys OUTSIDE the baked gateway list still need the
+      // option appended at runtime on a shared server (the conf assignment cannot know them):
+      this.ensureUpdateEnvKeys(Object.keys(customEnvMerged))
       const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',
@@ -2216,7 +2312,6 @@ export class PtyManager {
         ...pathEnvArgs,
         ...langEnvArgs,
         ...accountEnvArgs,
-        ...gatewayEnvArgs,
         '-c',
         cwd,
         '-s',

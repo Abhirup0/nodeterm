@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  MODEL_GATEWAY_ENV_KEYS,
   MODEL_GATEWAY_SECRET_REF,
   modelGatewayEnv,
   modelGatewayCredentialKind,
@@ -217,5 +218,27 @@ describe('agent mappings', () => {
     } finally {
       setCustomAgentBaseResolver(null)
     }
+  })
+})
+
+describe('MODEL_GATEWAY_ENV_KEYS lockstep', () => {
+  it('covers every var any capability base can emit — a missed key never reaches a shared tmux server', () => {
+    const gateway = { baseUrl: 'https://gw.example.test', apiKey: 'vk-1' }
+    const seen = new Set<string>()
+    for (const id of ['claude', 'codex', 'gemini', 'grok', 'copilot'] as const) {
+      for (const k of Object.keys(
+        modelGatewayEnv(gateway, id, 'openai/gpt-5.5-codex')
+      ))
+        seen.add(k)
+      // The gpt-5 responses-API marker only appears for a gpt-5-family OpenAI model.
+      for (const k of Object.keys(modelGatewayEnv(gateway, id, 'openai/gpt-5')))
+        seen.add(k)
+      for (const k of Object.keys(
+        modelGatewayEnv(gateway, id, 'anthropic/claude-sonnet-5')
+      ))
+        seen.add(k)
+    }
+    expect(seen.size).toBeGreaterThan(0)
+    for (const k of seen) expect(MODEL_GATEWAY_ENV_KEYS).toContain(k)
   })
 })

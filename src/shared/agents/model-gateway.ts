@@ -165,6 +165,48 @@ export function modelsForAgent(models: GatewayModel[], agentId: AgentId): Gatewa
  * its internal + wire model ids in environment variables. Credentials never enter a restart
  * command, so none are exposed in the pane.
  */
+/** Every env var name `modelGatewayEnv` can emit, in one place. The tmux confs bake this list
+ *  into `update-environment`, which is HOW gateway credentials reach a pane without ever touching
+ *  an argv: the values ride the tmux CLIENT's process environment (or a sourced 0600 file over
+ *  SSH), and tmux copies the listed names into the session environment at create/attach. A key
+ *  emitted here but missing from this list would silently fail to reach the agent on a shared
+ *  tmux server — model-gateway.test.ts asserts the lockstep. */
+export const MODEL_GATEWAY_ENV_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_AUTH_TOKEN',
+  'OPENAI_BASE_URL',
+  'OPENAI_API_KEY',
+  'COPILOT_PROVIDER_BASE_URL',
+  'COPILOT_PROVIDER_TYPE',
+  'COPILOT_PROVIDER_API_KEY',
+  'COPILOT_PROVIDER_MODEL_ID',
+  'COPILOT_PROVIDER_WIRE_MODEL',
+  'COPILOT_PROVIDER_WIRE_API'
+] as const
+
+/** tmux's own stock `update-environment` entries (tmux 3.4 defaults, measured via
+ *  `show-options -g`). Assigning the option as a whole REPLACES the array, so the defaults must be
+ *  restated or SSH agent forwarding et al. silently break. */
+const TMUX_STOCK_UPDATE_ENV = [
+  'DISPLAY',
+  'KRB5CCNAME',
+  'SSH_ASKPASS',
+  'SSH_AUTH_SOCK',
+  'SSH_AGENT_PID',
+  'SSH_CONNECTION',
+  'WINDOWID',
+  'XAUTHORITY'
+]
+
+/** The `update-environment` conf line both tmux confs (local + remote) bake in. This is the
+ *  argv-free credential path: gateway values sit in the tmux CLIENT's process environment (never
+ *  on a command line), and tmux copies the listed names into the session env on create/attach —
+ *  MEASURED on tmux 3.4: the pane sees the value, a client withOUT the var strips it from its own
+ *  session (no cross-session bleed into plain terminals), and re-sourcing the conf is idempotent. */
+export function tmuxUpdateEnvironmentLine(): string {
+  return `set -g update-environment "${[...TMUX_STOCK_UPDATE_ENV, ...MODEL_GATEWAY_ENV_KEYS].join(' ')}"`
+}
+
 export function modelGatewayEnv(
   settings: ModelGatewaySettings,
   agentId: AgentId,
