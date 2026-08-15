@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import type { NodeStateChange, NodeNowChange, MirrorFile } from '../core/agent-status-mirror'
+import { PROMPT_MAX, firstLine } from '../core/agent-status-mirror'
 import {
   createHudModel,
   bucketState,
   firstPromptLine,
-  buildIndicator,
   HUD_STALE_DROP_MS,
   type HudRow,
   WORKING_STALE_MS
@@ -44,6 +44,14 @@ describe('firstPromptLine', () => {
     const clipped = firstPromptLine(long, 10)!
     expect(clipped.length).toBe(10)
     expect(clipped.endsWith('…')).toBe(true)
+  })
+
+  it('clips at the mirror’s PROMPT_MAX by default, so both surfaces say the same sentence', () => {
+    // The HUD row and the phone's Live Activity line are fed by the same seams and must not show
+    // one prompt at two lengths (the HUD used to clip at 140 while the mirror clipped at 120).
+    const clipped = firstPromptLine('y'.repeat(300))!
+    expect(clipped.length).toBe(PROMPT_MAX)
+    expect(clipped).toBe(firstLine('y'.repeat(300), PROMPT_MAX))
   })
 })
 
@@ -203,19 +211,18 @@ describe('6h drop', () => {
   })
 })
 
-describe('buildIndicator + ordering', () => {
-  it('lists distinct working agents and flags done-unseen', () => {
+// The collapsed-indicator aggregation is NOT here: it is the renderer's pure `buildIndicator`
+// (src/renderer/hud/indicator.ts + indicator.test.ts), the only side that draws it.
+describe('row ordering', () => {
+  it('sorts newest-active first', () => {
     const m = createHudModel()
     m.applyStateChange(stateChange({ nodeId: 'a', state: 'working', agentId: 'claude', ts: T0 + 1 }))
     m.applyStateChange(stateChange({ nodeId: 'b', state: 'working', agentId: 'codex', ts: T0 + 2 }))
     m.applyStateChange(stateChange({ nodeId: 'c', state: 'working', agentId: 'claude', ts: T0 + 3 }))
     m.applyStateChange(stateChange({ nodeId: 'd', state: 'done', agentId: 'gemini', ts: T0 + 4 }))
     const rows = m.buildRows(T0 + 10, titleOf)
-    // newest-active first
     expect(rows.map((r) => r.nodeId)).toEqual(['d', 'c', 'b', 'a'])
-    const ind = buildIndicator(rows)
-    expect(ind.workingAgents.sort()).toEqual(['claude', 'codex'])
-    expect(ind.doneUnseen).toBe(true)
+    expect(rows.map((r) => r.state)).toEqual(['done', 'working', 'working', 'working'])
   })
 })
 
