@@ -10,6 +10,7 @@ export type SettingsSectionId =
   | 'usage'
   | 'accounts'
   | 'custom-agents'
+  | 'model-gateway'
   | 'notifications'
   | 'commit'
   | 'tmux'
@@ -45,6 +46,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'agents', title: 'Agents' },
       { id: 'accounts', title: 'Accounts' },
       { id: 'custom-agents', title: 'Custom agents' },
+      { id: 'model-gateway', title: 'Model gateway' },
       { id: 'usage', title: 'Usage' },
       { id: 'commit', title: 'Commit messages' }
     ]

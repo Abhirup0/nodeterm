@@ -11,6 +11,8 @@ import {
   probeSaysAbsent,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
+  remotePaneProcessArgs,
+  remoteTerminateForegroundArgs,
   remoteListSessionsArgs,
   parseRemoteSessionNames,
   remoteTmuxPtyArgs,
@@ -238,6 +240,27 @@ describe('remotePaneCommandArgs', () => {
   })
 })
 
+describe('remote foreground process termination', () => {
+  it('reads pane pid + command through the existing ControlMaster', () => {
+    const args = remotePaneProcessArgs(conn, '/s.sock', 'nt-x')
+    expect(args[args.length - 1]).toBe(
+      `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t nt-x '#{pane_pid}|#{pane_current_command}'`
+    )
+  })
+
+  it('revalidates the foreground group and never targets the pane shell group', () => {
+    const args = remoteTerminateForegroundArgs(conn, '/s.sock', 33293)
+    const command = args[args.length - 1]
+    expect(command).toContain('ps -o tpgid= -p 33293')
+    expect(command).toContain('[ "$tpgid" -ne 33293 ]')
+    expect(command).toContain('kill -TERM -- "-$tpgid"')
+  })
+
+  it('refuses an invalid pane pid before building a remote shell command', () => {
+    expect(() => remoteTerminateForegroundArgs(conn, '/s.sock', -1)).toThrow('invalid-pane-pid')
+  })
+})
+
 describe('remoteListSessionsArgs', () => {
   it('asks the remote nodeterm tmux socket for session names only', () => {
     const args = remoteListSessionsArgs(conn, '/cm/p1')
@@ -288,6 +311,41 @@ describe('remoteTmuxPtyArgs', () => {
     const args = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], '/home/u/.nodeterm/tmux.conf')
     const cmd = args[args.length - 1]
     expect(cmd).toContain(`-f '/home/u/.nodeterm/tmux.conf' new-session -A`)
+  })
+
+  describe('sessionEnv prologue (argv-free credential delivery)', () => {
+    it('prepends a bounded wait + source + rm before the tmux command', () => {
+      const args = remoteTmuxPtyArgs(
+        conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], '/home/u/.nodeterm/tmux.conf',
+        { file: '/home/u/.nodeterm/env/nt-x.env', extraKeys: [] }
+      )
+      const cmd = args[args.length - 1]
+      // The credential file is SOURCED, then removed — never a value on the command line.
+      expect(cmd).toContain(". '/home/u/.nodeterm/env/nt-x.env'")
+      expect(cmd).toContain("rm -f '/home/u/.nodeterm/env/nt-x.env'")
+      expect(cmd).toMatch(/while \[ ! -f '\/home\/u\/\.nodeterm\/env\/nt-x\.env' \]/)
+      // The prologue runs BEFORE the tmux new-session it guards.
+      expect(cmd.indexOf(". '")).toBeLessThan(cmd.indexOf('new-session'))
+    })
+
+    it('appends custom (non-gateway) env NAMES to update-environment — names only, never values', () => {
+      const args = remoteTmuxPtyArgs(
+        conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], undefined,
+        { file: '/h/.nodeterm/env/nt-x.env', extraKeys: ['MY_CUSTOM_TOKEN'] }
+      )
+      const cmd = args[args.length - 1]
+      expect(cmd).toContain('set-option -ga update-environment MY_CUSTOM_TOKEN')
+    })
+
+    it('drops a non-identifier env name at the splice point (belt to session-env.ts braces)', () => {
+      const args = remoteTmuxPtyArgs(
+        conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], undefined,
+        { file: '/h/.nodeterm/env/nt-x.env', extraKeys: ['BAD;NAME', 'GOOD_ONE'] }
+      )
+      const cmd = args[args.length - 1]
+      expect(cmd).toContain('update-environment GOOD_ONE')
+      expect(cmd).not.toContain('BAD;NAME')
+    })
   })
 })
 

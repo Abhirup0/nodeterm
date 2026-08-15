@@ -228,3 +228,113 @@ describe('PtyManager.paneOwner', () => {
     expect(await mgr.paneOwner(NODE)).toBeNull()
   })
 })
+
+// ── terminateForeground identity gate (#226 review) ──────────────────────────────────────────────
+// The kill must fire ONLY when the expected harness owns the foreground group. Refusing a shell is
+// not enough: a stale model-switch menu could otherwise SIGTERM whatever the user is now running in
+// the pane (vim, a build). These drive the real `terminateForeground` over the same fake exec.
+
+/** Manager with getSettings wired (binariesFor needs customAgents) and a spy on process.kill. */
+async function killManager(opts: { customAgents?: unknown[] } = {}) {
+  const { PtyManager } = await import('./pty-manager')
+  const mgr = new PtyManager() as unknown as {
+    tmuxPath: string | null
+    sessions: Map<string, unknown>
+    getSettings: () => unknown
+    terminateForeground(k: string, expected?: string): Promise<boolean>
+  }
+  mgr.tmuxPath = '/usr/bin/tmux'
+  mgr.sessions.set('sess-1', { persistKey: NODE, sshRemote: undefined })
+  mgr.getSettings = () => ({ customAgents: opts.customAgents ?? [] })
+  return mgr
+}
+
+describe('PtyManager.terminateForeground — identity gate', () => {
+  let killed: number[]
+  let killSpy: ReturnType<typeof vi.spyOn>
+  beforeEach(() => {
+    calls.length = 0
+    ssh.path = '/usr/bin/ssh'
+    vi.resetModules()
+    initPlatform(fakePlatform())
+    killed = []
+    killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, sig?: string | number) => {
+      // The grace poll probes with signal 0 and expects ESRCH once the group is gone; make the
+      // first probe say "alive" then throw so the loop terminates fast.
+      if (sig === 0) throw new Error('ESRCH')
+      killed.push(pid)
+      return true
+    }) as typeof process.kill)
+  })
+  afterEach(() => {
+    killSpy.mockRestore()
+    resetPlatformForTests()
+  })
+
+  const claudeForeground = (file: string, args: string[]): { stdout: string } => {
+    // paneOwner's PANE_OWNER_FMT read (MOST specific — it also contains '#{pane_pid}').
+    if (args.includes(PANE_OWNER_FMT)) return { stdout: `2485382|${TTY}|node|%3\n` }
+    // display-message #{pane_pid}|#{pane_current_command} (the kill path's pane read)
+    if (args.join(' ').includes('#{pane_pid}')) return { stdout: '2485382|node' }
+    // ps -o tpgid= -p <panePid>  (the kill-target read)
+    if (args.includes('tpgid=')) return { stdout: '2503294' }
+    // ps -ww ... -t tty  (paneOwner argv listing)
+    if (file === 'ps') return { stdout: PS_OUT }
+    return { stdout: '' }
+  }
+
+  it('KILLS the foreground group when the expected agent owns it', async () => {
+    script.answer = claudeForeground
+    const mgr = await killManager()
+    expect(await mgr.terminateForeground(NODE, 'claude')).toBe(true)
+    expect(killed).toEqual([-2503294]) // SIGTERM to the negative process group
+  })
+
+  it('REFUSES (no kill) when the pane belongs to a different program than expected', async () => {
+    // Foreground group is vim, not the agent.
+    script.answer = (file, args) => {
+      if (args.includes(PANE_OWNER_FMT)) return { stdout: `2485382|${TTY}|vim|%3\n` }
+      if (args.join(' ').includes('#{pane_pid}')) return { stdout: '2485382|vim' }
+      if (args.includes('tpgid=')) return { stdout: '2503294' }
+      if (file === 'ps')
+        return { stdout: '2485382 2485382 Ss   -bash\n2503294 2503294 Sl+  vim /etc/hosts' }
+      return { stdout: '' }
+    }
+    const mgr = await killManager()
+    expect(await mgr.terminateForeground(NODE, 'claude')).toBe(false)
+    expect(killed).toEqual([])
+  })
+
+  it('REFUSES when the owner is unknown (paneOwner answers null) — fail closed on a kill', async () => {
+    script.answer = (file, args) =>
+      args.includes(PANE_OWNER_FMT) ? { stdout: `2485382|${TTY}|node\n` } : { stdout: '' } // ps empty ⇒ null owner
+    const mgr = await killManager()
+    expect(await mgr.terminateForeground(NODE, 'claude')).toBe(false)
+    expect(killed).toEqual([])
+  })
+
+  it('verifies a custom agent by its launchCmd binary instead of failing closed', async () => {
+    script.answer = (file, args) => {
+      if (args.includes(PANE_OWNER_FMT)) return { stdout: `2485382|${TTY}|aider|%3\n` }
+      if (args.join(' ').includes('#{pane_pid}')) return { stdout: '2485382|aider' }
+      if (args.includes('tpgid=')) return { stdout: '2503294' }
+      if (file === 'ps')
+        return { stdout: '2485382 2485382 Ss   -bash\n2503294 2503294 Sl+  /usr/bin/aider --model gpt' }
+      return { stdout: '' }
+    }
+    const mgr = await killManager({
+      customAgents: [{ id: 'custom:x', label: 'Aider', launchCmd: 'aider' }]
+    })
+    expect(await mgr.terminateForeground(NODE, 'custom:x')).toBe(true)
+    expect(killed).toEqual([-2503294])
+  })
+
+  it('with no expected id, keeps the legacy shell-only guard (kills a non-shell foreground)', async () => {
+    script.answer = claudeForeground
+    const mgr = await killManager()
+    // No identity read happens (no PANE_OWNER_FMT call) — only the tpgid path.
+    expect(await mgr.terminateForeground(NODE)).toBe(true)
+    expect(killed).toEqual([-2503294])
+    expect(calls.some((c) => c.args.includes(PANE_OWNER_FMT))).toBe(false)
+  })
+})

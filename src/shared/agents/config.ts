@@ -2,11 +2,15 @@
 // Design: an open AgentId string, a declarative config record, and
 // capabilities expressed as const membership lists (not a capability object).
 
-export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'grok'
+export type BuiltinAgentId = 'claude' | 'codex' | 'gemini' | 'opencode' | 'grok' | 'copilot'
 // Open type — custom agents are any string ('custom:<uuid>'). Never restrict the set.
 export type AgentId = BuiltinAgentId | (string & {})
 
-export type PromptInjectionMode = 'argv' | 'flag-prompt' | 'stdin-after-start'
+export type PromptInjectionMode =
+  | 'argv'
+  | 'flag-prompt'
+  | 'flag-interactive'
+  | 'stdin-after-start'
 
 export interface AgentConfig {
   label: string // menu + node title, e.g. 'Claude Code'
@@ -35,7 +39,8 @@ export const BUILTIN_AGENT_IDS: readonly BuiltinAgentId[] = [
   'codex',
   'gemini',
   'opencode',
-  'grok'
+  'grok',
+  'copilot'
 ]
 
 export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
@@ -82,15 +87,25 @@ export const AGENT_CONFIG: Record<BuiltinAgentId, AgentConfig> = {
     promptInjectionMode: 'argv',
     argvPromptSeparator: '--',
     expectedProcess: 'grok'
+  },
+  copilot: {
+    label: 'GitHub Copilot',
+    color: '#8957e5',
+    launchCmd: 'copilot',
+    // `--prompt` is explicitly non-interactive and exits after one response. The installed
+    // 1.0.80 CLI's `--interactive <prompt>` starts the ordinary TUI and submits the prompt there.
+    promptInjectionMode: 'flag-interactive',
+    expectedProcess: 'copilot'
   }
 }
 
-// Capabilities = const membership lists. A custom agent is in no list, so it
-// automatically gets only spawn + terminal-title + process status.
-export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
-export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
-// Agents whose session id we MINT at launch (`--session-id <uuid>`) instead of learning it from
-// hook events. Claude only: it is the one CLI here that accepts a caller-chosen id.
+// Capabilities = const builtin membership lists. A custom agent resolves through its declared
+// base harness (capabilityAgentId); one with no base automatically gets only spawn + terminal-title
+// + process status.
+export const AGENT_HOOK_TARGETS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
+export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
+// Agents whose session id we MINT at launch (`--session-id <uuid>`) instead of learning it only
+// from hook events. Each member must have a measured caller-chosen-id grammar below.
 //
 // Why it matters: everything that resumes a conversation — cold restore after a reboot, the
 // session reaper's recovery path, the ⌘M transcript view — needs the id, and the id used to
@@ -105,7 +120,11 @@ export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'
 // clear/fork/compact), so hooks remain the only way to TRACK an id after launch. What minting
 // guarantees is that a node always has SOME resumable id, so the worst case degrades from "the
 // conversation is gone" to "continuity since the last /clear is gone".
-export const SESSION_ID_CAPABLE = ['claude'] as const
+export const SESSION_ID_CAPABLE = ['claude', 'copilot'] as const
+// Claude's flag is version-gated and comes from the Claude CLI probe. Copilot's installed 1.0.80
+// binary and current official reference accept `--session-id=<uuid>`, so it does not borrow an
+// unrelated Claude probe result. Custom agents resolve through their declared base harness.
+export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
 export const SUBAGENT_CAPABLE = ['claude'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
@@ -173,7 +192,7 @@ export const SHARED_IDENTITY_CAPABLE = ['codex'] as const
 // RemoteHooks.installCanvasControl. Membership here is what sets NODETERM_CANVAS_CONTROL in the
 // session env (hook-server's buildPtyEnv, remoteHookEnvArgs), i.e. what makes the shim anything
 // other than a no-op.
-export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
+export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok', 'copilot'] as const
 // Agents whose session start-up permission mode we can set (see AgentPermissionMode below).
 // claude and grok share the flag SPELLING and the value vocabulary
 // (`--permission-mode auto|plan|acceptEdits|bypassPermissions`; our `manual` = no flag = grok's own
@@ -194,6 +213,10 @@ export const CANVAS_CONTROL_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 
 // release, and gemini/codex accept theirs on the versions we measured, so none of them may inherit
 // a gate fed by a `claude --version` probe.
 export const PERMISSION_MODE_CAPABLE = ['claude', 'grok', 'gemini', 'codex'] as const
+// Agents whose harness accepts a per-launch model override and whose gateway protocol we know how
+// to configure. Custom agents inherit this through `capabilityAgentId`, like every other harness
+// capability — the renderer never maintains its own Claude/Codex/Copilot allowlist.
+export const MODEL_SWITCH_CAPABLE = ['claude', 'codex', 'copilot'] as const
 // Agents whose own CLI already tells the user when it copies, so nodeterm must not say it again.
 // Claude Code captures the mouse itself and prints its own line — "copied N chars to tmux buffer ·
 // paste with prefix + ]" — which makes our copy pill a second message for one gesture. Membership
@@ -204,11 +227,62 @@ export const PERMISSION_MODE_CAPABLE = ['claude', 'grok', 'gemini', 'codex'] as 
 // copy notice joins by being added here, and nothing else changes.
 export const SELF_REPORTS_COPY = ['claude'] as const
 
-const includes = (list: readonly string[], id: AgentId): boolean => list.includes(id)
+/** Fallback color for custom / unknown agents that have no config-provided color. */
+export const FALLBACK_AGENT_COLOR = '#888888'
+
+// ---------------------------------------------------------------------------------------------
+// Custom-agent harness inheritance.
+//
+// A custom agent (`CustomAgent`, id `'custom:<uuid>'`) may declare a `baseAgent` — one of the
+// builtins — to inherit that harness's CAPABILITIES (hooks, resume, permission modes, canvas
+// control, session-id minting) and prompt convention. The use case is a harness-compatible CLI
+// (e.g. a claude wrapper pointed at your own inference proxy) where you want to KEEP nodeterm's
+// integration while redirecting the calls.
+//
+// The capability predicates below take only an `AgentId`. `src/shared/agents/config.ts` cannot
+// import the settings store (renderer) or `settings-store` (core) without a cycle / platform
+// split, so the custom-id → baseAgent lookup is INJECTED: each runtime registers a resolver at
+// init that reads its own live settings. This mirrors the existing mutable-accessor idiom
+// (`claudeCliCapsNow`, `shellPathNow`): module-level state, set once at boot, read on every call.
+//
+// Tests register a resolver (or null) via `setCustomAgentBaseResolverForTests`.
+type BaseResolver = (id: AgentId) => BuiltinAgentId | undefined
+let customBaseResolver: BaseResolver | null = null
+
+/** Register the custom-id → baseAgent resolver. Called once at app init by the renderer
+ *  (`state/agent-resolver.ts`) and by main/core (`pty-manager`) and the server shell, each
+ *  reading its own settings store. Pass `null` to clear (tests). */
+export function setCustomAgentBaseResolver(fn: BaseResolver | null): void {
+  customBaseResolver = fn
+}
+
+/** The builtin harness a custom agent inherits from, or `undefined` for builtins and vanilla
+ *  (no-`baseAgent`) custom agents. Builtins never resolve through the registry — they ARE the
+ *  harness — so a custom agent whose id accidentally collides with a builtin name still resolves
+ *  as the builtin, never as itself. */
+export function baseAgentOf(id: AgentId): BuiltinAgentId | undefined {
+  if (!customBaseResolver) return undefined
+  if ((AGENT_CONFIG as Record<string, AgentConfig>)[id]) return undefined
+  return customBaseResolver(id)
+}
+
+/** The id whose capabilities apply to `id`: the base harness for an inheriting custom agent, else
+ *  `id` itself. This is what every capability predicate resolves through, so inheritance is
+ *  automatic everywhere a predicate is called — no per-call-site plumbing. */
+export function capabilityAgentId(id: AgentId): AgentId {
+  return baseAgentOf(id) ?? id
+}
+
+const includes = (list: readonly string[], id: AgentId): boolean =>
+  list.includes(capabilityAgentId(id))
 
 export const hasHooks = (id: AgentId): boolean => includes(AGENT_HOOK_TARGETS, id)
 export const canResume = (id: AgentId): boolean => includes(RESUMABLE_AGENTS, id)
 export const mintsSessionId = (id: AgentId): boolean => includes(SESSION_ID_CAPABLE, id)
+/** Is the caller-chosen session-id flag available for this effective base harness? */
+export const supportsSessionIdFlag = (id: AgentId, claudeFlagSupported: boolean): boolean =>
+  includes(UNCONDITIONAL_SESSION_ID_CAPABLE, id) ||
+  (mintsSessionId(id) && capabilityAgentId(id) === 'claude' && claudeFlagSupported)
 export const canSubagent = (id: AgentId): boolean => includes(SUBAGENT_CAPABLE, id)
 export const canRecur = (id: AgentId): boolean => includes(RECURRING_CAPABLE, id)
 export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)
@@ -220,6 +294,7 @@ export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const canReadTitle = (id: AgentId): boolean => includes(TITLE_READ_CAPABLE, id)
 export const canControlCanvas = (id: AgentId): boolean => includes(CANVAS_CONTROL_CAPABLE, id)
 export const hasPermissionMode = (id: AgentId): boolean => includes(PERMISSION_MODE_CAPABLE, id)
+export const canSwitchModel = (id: AgentId): boolean => includes(MODEL_SWITCH_CAPABLE, id)
 export const hasSharedIdentity = (id: AgentId): boolean => includes(SHARED_IDENTITY_CAPABLE, id)
 
 /**
@@ -293,7 +368,9 @@ export function withSessionId(cmd: string, id: AgentId, sessionId: string): stri
   if (!mintsSessionId(id)) return cmd
   const sid = sessionId.trim()
   if (!sid || !SAFE_SESSION_ID.test(sid)) return cmd
-  return `${cmd} --session-id ${sid}`
+  return capabilityAgentId(id) === 'copilot'
+    ? `${cmd} --session-id=${sid}`
+    : `${cmd} --session-id ${sid}`
 }
 
 /**
@@ -320,19 +397,59 @@ export function resumeCommand(
   sharedIdentity = false,
   base?: string
 ): string | null {
-  if (!canResume(id)) return null
+  const builtin = agentConfig(id)
+  // A builtin resumes with its own command; a custom agent has no resume grammar here (its
+  // baseAgent-aware path is `resumeCommandWith`, called by the shared launcher).
+  if (!builtin) return null
+  // A per-builtin launch-command override (Settings → Agents → Launch commands, threaded here as
+  // `base`) replaces the program outright, INCLUDING codex's shared-identity launcher: an explicit
+  // override is the user saying "launch it exactly like this". Blank/absent → route a
+  // SHARED_IDENTITY_CAPABLE builtin (codex) through its managed launcher when present, else the
+  // bare command this has always emitted.
+  const custom = base?.trim() || undefined
+  const program = custom ?? agentLaunchProgram(id, builtin.launchCmd, sharedIdentity)
+  return resumeCommandWith(program, id, sessionId)
+}
+
+/**
+ * Is `sessionId` one this app would put on a `--resume` command line for `id`? The eligibility GATE
+ * the restart/hibernation choreography uses — WITHOUT building the command (which for a custom agent
+ * needs its `launchCmd` from settings, unavailable here). Inheritance-aware via `canResume`, so a
+ * claude-base custom agent is resumable; the SAFE_SESSION_ID check is the same one `resumeCommand`
+ * applies. Pure companion to `resumeCommand` for the gate-only call sites.
+ */
+export function canResumeWith(id: AgentId, sessionId: string): boolean {
+  if (!canResume(id)) return false
+  const sid = sessionId.trim()
+  return !!sid && SAFE_SESSION_ID.test(sid)
+}
+
+/**
+ * Resume by provider session id, using `launchCmd` as the binary and `grammarId` to pick the
+ * resume flag grammar (`--resume` vs `resume` vs `--session`). `grammarId` is the BASE harness
+ * for an inheriting custom agent (`capabilityAgentId(agentId)`), so a claude-base custom agent
+ * resumes as `<customLaunchCmd> --resume <sid>` — its own binary, claude's flag. Returns null for
+ * a non-resumable base or an unsafe/empty session id.
+ */
+export function resumeCommandWith(
+  launchCmd: string,
+  grammarId: AgentId,
+  sessionId: string
+): string | null {
+  if (!canResume(grammarId)) return null
   const sid = sessionId.trim()
   if (!sid || !SAFE_SESSION_ID.test(sid)) return null
-  const custom = base?.trim() || undefined
-  switch (id) {
+  switch (grammarId) {
     case 'codex':
-      return `${custom ?? agentLaunchProgram('codex', 'codex', sharedIdentity)} resume ${sid}`
+      return `${launchCmd} resume ${sid}`
     case 'opencode':
-      return `${custom ?? 'opencode'} --session ${sid}`
+      return `${launchCmd} --session ${sid}`
+    case 'copilot':
+      return `${launchCmd} --resume=${sid}`
     case 'claude':
     case 'gemini':
     case 'grok':
-      return `${custom ?? id} --resume ${sid}`
+      return `${launchCmd} --resume ${sid}`
     default:
       return null
   }

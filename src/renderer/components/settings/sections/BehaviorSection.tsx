@@ -5,7 +5,10 @@ import { FieldRow } from '../FieldRow'
 import { Switch } from '@renderer/ui/Switch'
 import { NumberField } from '@renderer/ui/NumberField'
 import { Select } from '@renderer/ui/Select'
+import { SegmentedPill } from '@renderer/ui/SegmentedPill'
+import { Input } from '@renderer/ui/Input'
 import { hintLabel } from '@shared/platform-utils'
+import { DEFAULT_WORKTREE_PATH_TEMPLATE } from '@shared/worktree'
 
 const ROWS = {
   defaultView: {
@@ -18,11 +21,23 @@ const ROWS = {
     keywords: ['node', 'size', 'width', 'height', 'terminal', 'default']
   },
   snap: { title: 'Snap to grid', keywords: ['snap', 'grid', 'align'] },
+  autoAlign: {
+    title: 'Snap to grid mode (auto-arrange)',
+    keywords: ['snap', 'grid', 'align', 'arrange', 'auto', 'mode']
+  },
   panHover: { title: 'Pan-hover delay (ms)', keywords: ['pan', 'hover', 'delay', 'focus', 'guard'] },
   doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] },
   sidebarCollapse: {
     title: 'Sidebar: collapse inactive by default',
     keywords: ['sidebar', 'sessions', 'collapse', 'expand', 'project', 'switch', 'group', 'tree']
+  },
+  sidebarGrouping: {
+    title: 'Sidebar: group by',
+    keywords: ['sidebar', 'sessions', 'group', 'status', 'project', 'attention']
+  },
+  worktreePath: {
+    title: 'Worktree path template',
+    keywords: ['worktree', 'git', 'path', 'folder', 'repo', 'branch', 'template']
   },
   wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] },
   trackpadPan: {
@@ -111,6 +126,19 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
           }
         />
       </SearchableRow>
+      <SearchableRow {...ROWS.autoAlign}>
+        <FieldRow
+          label="Snap to grid mode"
+          description="Arranges every node to the grid at the moment you turn it on — like a desktop “Auto arrange”. Distinct from the drag-snap toggle above, which only constrains dragging."
+          control={
+            <Switch
+              checked={settings.autoAlignGrid}
+              onChange={(v) => update({ autoAlignGrid: v })}
+              ariaLabel="Snap to grid mode"
+            />
+          }
+        />
+      </SearchableRow>
       <SearchableRow {...ROWS.panHover}>
         <FieldRow
           label="Pan-hover delay (ms)"
@@ -146,6 +174,40 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.sidebarAutoCollapse}
               onChange={(v) => update({ sidebarAutoCollapse: v })}
               ariaLabel="Sidebar: collapse inactive by default"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.sidebarGrouping}>
+        <FieldRow
+          label="Sidebar: group sessions by"
+          description="Group the sessions sidebar by project (the default) or by live status, so sessions needing attention float to the top across all projects. Status reflects local-core sessions; remote sessions show as idle."
+          control={
+            <SegmentedPill<'project' | 'status'>
+              value={settings.sidebarGrouping}
+              ariaLabel="Group sessions by"
+              options={[
+                { value: 'project', label: 'Project' },
+                { value: 'status', label: 'Status' }
+              ]}
+              onChange={(v) => update({ sidebarGrouping: v })}
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.worktreePath}>
+        <FieldRow
+          label="Worktree path template"
+          description={
+            'Resolved from the repository root. Supports $repoName (also $reponame or $defaultFolderName) and $branch; a missing branch is appended automatically.'
+          }
+          control={
+            <Input
+              className="w-80 font-mono"
+              aria-label="Worktree path template"
+              placeholder={DEFAULT_WORKTREE_PATH_TEMPLATE}
+              value={settings.worktreePathTemplate}
+              onChange={(e) => update({ worktreePathTemplate: e.target.value })}
             />
           }
         />

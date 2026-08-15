@@ -5,7 +5,7 @@ import { readFile } from 'fs/promises'
 import { existsSync, statSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
 import { IPC } from '../shared/ipc'
 import { writeFilesToClipboard } from './clipboard-files'
 import { registerFsHandlers } from '../core/fs-handlers'
@@ -30,12 +30,22 @@ import { PtyManager } from '../core/pty-manager'
 import { WorkspaceStore } from '../core/workspace-store'
 import { WorkspaceWatcher } from '../core/workspace-watcher'
 import { SettingsStore } from '../core/settings-store'
+import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
-import { ElectronGitHubSecretStore, registerElectronGitHubControl } from './github-control'
+import {
+  ElectronGitHubSecretStore,
+  ElectronSecretStore,
+  registerElectronGitHubControl
+} from './github-control'
+import {
+  migrateLegacyModelGatewayKey,
+  MODEL_GATEWAY_SECRET_FILE,
+  ModelGatewayCredentialService
+} from '../core/model-gateway-credentials'
 import { generateCommitMessage, generateGroupName, generateTerminalName } from '../core/commit-message'
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
@@ -387,6 +397,113 @@ if (process.platform !== 'win32' && typeof process.setFdLimit === 'function') {
   }
 }
 
+/**
+ * Build the native application menu. The View submenu is the home of the Snap-to-Grid mode
+ * toggle (with a real native checkmark — `checked` reflects `settings.autoAlignGrid`), plus Fit
+ * View and the Kanban / Canvas view toggle. Menu clicks send IPC to the renderer, which owns the
+ * canvas state.
+ *
+ * Rebuilt on every settings change (see the `settingsStore.onChange` hook in `whenReady`) so the
+ * Snap-to-Grid checkmark and the Kanban/Canvas label stay live — the renderer is the sole settings
+ * writer, so a change persists through `settingsStore` and fires this rebuild. No reverse IPC.
+ */
+function buildAppMenu(win: BrowserWindow): void {
+  const isMac = process.platform === 'darwin'
+  const s = settingsStore.get()
+  const send = (channel: string): void => {
+    if (!win.isDestroyed()) win.webContents.send(channel)
+  }
+  const settingsItem: Electron.MenuItemConstructorOptions = {
+    label: isMac ? 'Settings…' : 'Settings',
+    accelerator: 'CmdOrCtrl+,',
+    click: () => send(IPC.appOpenSettings)
+  }
+  // The kanban toggle's label depends on which view is active. The renderer owns that state; main
+  // can't read it, so the label is generic and the renderer's handler decides direction. (A live
+  // label would need a reverse-IPC the renderer drives on toggle — out of scope for this change.)
+  const viewSubmenu: Electron.MenuItemConstructorOptions[] = [
+    { role: 'toggleDevTools' },
+    { type: 'separator' },
+    {
+      label: 'Snap to Grid',
+      type: 'checkbox',
+      checked: s.autoAlignGrid === true,
+      click: () => send(IPC.appToggleAutoAlign)
+    },
+    {
+      // No accelerator: `installKeydownIntercepts` already claims ⌘0 for zoom-to-100% before the
+      // renderer sees it, so labelling this item "⌘0" would show a shortcut that does something
+      // else. The item stays click-only; the renderer's own Shift+1 chord is the keyboard route to
+      // Fit View.
+      label: 'Fit View',
+      click: () => send(IPC.appFitView)
+    },
+    {
+      label: 'Toggle Kanban Board',
+      accelerator: 'CmdOrCtrl+Shift+B',
+      click: () => send(IPC.appToggleKanban)
+    }
+  ]
+  const template: Electron.MenuItemConstructorOptions[] = isMac
+    ? [
+        {
+          label: app.name,
+          submenu: [
+            { role: 'about' },
+            { type: 'separator' },
+            settingsItem,
+            { type: 'separator' },
+            { role: 'services' },
+            { type: 'separator' },
+            { role: 'hide' },
+            { role: 'hideOthers' },
+            { role: 'unhide' },
+            { type: 'separator' },
+            { role: 'quit' }
+          ]
+        },
+        {
+          label: 'Edit',
+          submenu: [
+            { role: 'undo' },
+            { role: 'redo' },
+            { type: 'separator' },
+            { role: 'cut' },
+            { role: 'copy' },
+            { role: 'paste' },
+            { role: 'pasteAndMatchStyle' },
+            { role: 'delete' },
+            { role: 'selectAll' }
+          ]
+        },
+        { label: 'View', submenu: viewSubmenu },
+        {
+          label: 'Window',
+          submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+        }
+      ]
+    : [
+        { label: 'File', submenu: [{ role: 'quit' }] },
+        {
+          label: 'Edit',
+          submenu: [
+            { role: 'undo' },
+            { role: 'redo' },
+            { type: 'separator' },
+            { role: 'cut' },
+            { role: 'copy' },
+            { role: 'paste' },
+            { role: 'delete' },
+            { role: 'selectAll' }
+          ]
+        },
+        { label: 'View', submenu: viewSubmenu },
+        { label: 'Settings', submenu: [settingsItem] },
+        { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }] }
+      ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 function createWindow(): BrowserWindow {
   // On Linux the window/taskbar icon is not supplied by an app bundle (unlike macOS),
   // so set it explicitly from the bundled png (extraResources). mac/win are untouched —
@@ -548,9 +665,44 @@ app.whenReady().then(async () => {
   })
 
   settingsStore.init()
+  const gatewayCredentials = new ModelGatewayCredentialService(
+    new ElectronSecretStore(app.getPath('userData'), safeStorage, MODEL_GATEWAY_SECRET_FILE)
+  )
+  await gatewayCredentials.init()
+  try {
+    const migratedGateway = await migrateLegacyModelGatewayKey(
+      settingsStore.get().modelGateway,
+      gatewayCredentials
+    )
+    if (migratedGateway) {
+      await settingsStore.save({ ...settingsStore.get(), modelGateway: migratedGateway })
+    }
+  } catch (error) {
+    // Preserve the legacy literal in settings when the keyring/file write fails; migration can
+    // retry next launch, and the user never loses their only copy of the credential.
+    console.warn('[model-gateway] could not migrate the legacy API key to secret storage', error)
+  }
   settingsStore.registerIpc()
   sshStore.registerIpc()
-  ptyManager.init(() => settingsStore.get())
+  // Gateway discovery/credential IPC (peer-reachable by design; the renderer never receives a
+  // stored literal key, and discovery resolves key REFERENCES only for the saved gateway URL).
+  registerAgentEnvIpc(() => settingsStore.get().modelGateway, gatewayCredentials)
+  // The `${env:VAR}` snapshot for custom-agent expansion is DESKTOP-WINDOW-ONLY, so it is a raw
+  // `ipcMain.handle` on purpose (see the handler-table comment in platform-electron.ts): a
+  // `platform().handle` registration would answer relay peers too — a paired phone or remote tab
+  // could read every API key in this process's environment. The browser/relay bridges hardcode
+  // an empty snapshot instead, and expansion there degrades to the missing-env refusal.
+  ipcMain.handle(IPC.envSnapshot, () => {
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === 'string') out[k] = v
+    }
+    return out
+  })
+  ptyManager.init(
+    () => settingsStore.get(),
+    () => gatewayCredentials.readForHost()
+  )
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
   gitService.registerIpc()
@@ -1102,7 +1254,14 @@ app.whenReady().then(async () => {
     initNotchHud({ getNodeTitle: displayTitleFor }, notchTunables())
   if (win.isVisible()) startNotchHud()
   else win.once('show', startNotchHud)
-  settingsStore.onChange(() => applyNotchHudSettings(notchTunables()))
+  buildAppMenu(win)
+  // Rebuild the native menu on every settings change so the View → Snap to Grid checkmark (and
+  // any future live label) tracks the renderer's setting. The renderer is the sole settings
+  // writer; a change persists through `settingsStore`, which fires this hook. No reverse IPC.
+  settingsStore.onChange(() => {
+    applyNotchHudSettings(notchTunables())
+    buildAppMenu(win)
+  })
   // Advertise launch settings to the mobile companion through the mirror. The provider is
   // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra
   // plumbing. Caps arrive async: re-flush once the memoized probe answers.

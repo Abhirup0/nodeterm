@@ -2,6 +2,7 @@
 // CLI source. No electron imports, so this module + CONTROL_CLI_SCRIPT are unit-testable.
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
 import { HOOK_CURL_HEADERS_SH } from '../core/agents/hook-curl-config-sh'
+import { AGENT_CONFIG, AGENT_HOOK_TARGETS, BUILTIN_AGENT_IDS } from '@shared/agents/config'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from '../core/agents/agent-message-flow'
 
@@ -168,6 +169,8 @@ export function mergeCanvasControlBlock(existing: string, block: string): string
 /** The instructions body telling codex/gemini how to control the nodeterm canvas.
  *  Keep the verb list in sync with the skill template in canvas-control.ts. */
 export function buildCanvasControlInstructions(shimPath: string): string {
+  const agentChoices = `${BUILTIN_AGENT_IDS.join('|')}|<custom-id>`
+  const statusAgents = AGENT_HOOK_TARGETS.join('/')
   return [
     '# Managing the nodeterm canvas (manage-nodeterm-canvas)',
     '',
@@ -190,12 +193,12 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>]` — open N plain terminals.',
     '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]` — open N Claude sessions.',
-    '- `open-agent --agent claude|codex|gemini|opencode|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]` — open',
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
     '  their work when it wakes — use it for "B needs what A produced" instead of polling. Only',
-    '  status-reporting agent nodes (claude/codex/gemini) may be waited on; a plain terminal never',
+    `  status-reporting agent nodes (${statusAgents}, or custom agents based on them) may be waited on; a plain terminal never`,
     '  reports finishing, so waiting on one is refused.',
     '- `show-image <path>` / `show-video <path>` — open a media file as a node.',
     '- `show-web (--url U | --file P.html | --html "<...>")` — open a web viewer.',
@@ -397,9 +400,12 @@ exit 1
  *  Parameterized because the same skill is installed twice with different paths: into the
  *  desktop's config dirs, and onto an SSH host for remote agent nodes. */
 export function buildCanvasSkillBody(shimPath: string): string {
+  const agentChoices = `${BUILTIN_AGENT_IDS.join('|')}|<custom-id>`
+  const statusAgents = AGENT_HOOK_TARGETS.join('/')
+  const agentLabels = BUILTIN_AGENT_IDS.map((id) => AGENT_CONFIG[id].label).join(' / ')
   return `---
 name: manage-nodeterm-canvas
-description: Create, organize and control nodes on the nodeterm canvas — open Claude Code / Codex / Gemini / terminal nodes, spawn a team of agents that divide up a task, create git worktrees as bound groups, wrap nodes in labeled groups, arrange/align/rename them, move nodes between frames, link nodes so you can read back what they produced, move session cards between kanban columns to track progress, show an image/video/web page, write to or close a terminal. Use whenever the user says "Build with Nodeterm orchestration", asks to create or open nodes/sessions/terminals, split or parallelize work across subagents/agents/sessions/worktrees, delegate parts of a task to other agents, work on several things at once, build something using multiple Claude (or other agent) sessions, collect or synthesize the results of agents you opened, organize the canvas into groups by topic, move tasks across a kanban board, or visualize code/output you produced. Only works inside a nodeterm agent session.
+description: Create, organize and control nodes on the nodeterm canvas — open ${agentLabels} / terminal nodes, spawn a team of agents that divide up a task, create git worktrees as bound groups, wrap nodes in labeled groups, arrange/align/rename them, move nodes between frames, link nodes so you can read back what they produced, move session cards between kanban columns to track progress, show an image/video/web page, write to or close a terminal. Use whenever the user says "Build with Nodeterm orchestration", asks to create or open nodes/sessions/terminals, split or parallelize work across subagents/agents/sessions/worktrees, delegate parts of a task to other agents, work on several things at once, build something using multiple Claude (or other agent) sessions, collect or synthesize the results of agents you opened, organize the canvas into groups by topic, move tasks across a kanban board, or visualize code/output you produced. Only works inside a nodeterm agent session.
 ---
 
 # Manage the nodeterm canvas
@@ -422,14 +428,14 @@ Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>]\` — open N plain terminals (default 1).
 - \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent claude|codex|gemini|opencode|<custom-id> [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open N sessions of any agent CLI.
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
   every listed station has gone idle — that is how you express "B needs what A produces" without
   sitting in a poll loop. The armed node is also context-linked to each station it waits on, so
   it can read their work the moment it wakes. Only agent nodes that report status
-  (claude/codex/gemini) can be waited on — waiting on a plain terminal is refused, because a
+  (${statusAgents}, or custom agents based on them) can be waited on — waiting on a plain terminal is refused, because a
   plain terminal never reports finishing and the node would hang forever. Note the semantics:
   "idle" is the end of a station's TURN, not proof its whole job is done — right for a station
   given one self-contained prompt, wrong if you expect a long conversation first.
@@ -523,7 +529,7 @@ Typical requests this skill covers:
   workstreams, then either one \`spawn-team\` per subject (each team is already a labeled
   group), or \`open-claude\`/\`open-agent\` per node followed by \`group --nodes ... --label\`
   per subject and \`arrange\` inside each.
-- "Open a codex/gemini session" → \`open-agent --agent codex|gemini\`.
+- "Open a Codex/Gemini/Copilot session" → \`open-agent --agent codex|gemini|copilot\`.
 - "Tidy up / group my terminals" → \`list\`, then \`group --nodes …\`, then \`arrange --nodes <those same ids>\`
   to tidy the new frame's contents (grouping keeps each node's scattered spot, so arrange after grouping).
 - "Move this node into that group" → \`move --nodes <id> --group <targetGroupId>\` (not \`group\`, which only

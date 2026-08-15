@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { GitHubSecretStore } from '../core/github/credentials'
+import type { SecretStore } from '../core/secret-store'
 import type { GitHubSecretAvailability } from '../shared/github-issues'
 import { IPC } from '../shared/ipc'
 import type { GitHubHostController } from '../core/github/host'
@@ -18,7 +19,7 @@ type TokenDocument =
   | { version: 1; kind: 'safe-storage'; value: string }
   | { version: 1; kind: 'restricted-file'; token: string }
 
-export class GitHubSecretError extends Error {
+export class SecretStoreError extends Error {
   constructor(readonly code: 'invalid-token' | 'keyring-locked') {
     super(code)
   }
@@ -88,7 +89,10 @@ async function atomicWrite(file: string, document: TokenDocument): Promise<void>
   await fs.chmod(file, 0o600)
 }
 
-export class ElectronGitHubSecretStore implements GitHubSecretStore {
+/** Generic Electron secret store: safeStorage ciphertext when a real OS keyring is available,
+ *  otherwise an owner-only file. GitHub and the model gateway use distinct file names but share
+ *  the exact same validation, atomic-write, locked-keyring, and stale-temp behavior. */
+export class ElectronSecretStore implements SecretStore {
   /** Mutations run FIFO (the WorkspaceStore.saveChain idiom): a clear's rm must never land inside
    *  an in-flight save's write-to-rename window — the parked rename would resurrect the PAT the
    *  UI just reported cleared — and save's read-modify-write of the document kind stays
@@ -97,7 +101,8 @@ export class ElectronGitHubSecretStore implements GitHubSecretStore {
 
   constructor(
     private readonly userDataDir: string,
-    private readonly safeStorage: SafeStorageLike
+    private readonly safeStorage: SafeStorageLike,
+    private readonly fileName: string
   ) {}
 
   private chained<T>(fn: () => Promise<T>): Promise<T> {
@@ -111,7 +116,7 @@ export class ElectronGitHubSecretStore implements GitHubSecretStore {
   }
 
   private get filePath(): string {
-    return path.join(this.userDataDir, FILE_NAME)
+    return path.join(this.userDataDir, this.fileName)
   }
 
   save(token: string): Promise<void> {
@@ -119,10 +124,10 @@ export class ElectronGitHubSecretStore implements GitHubSecretStore {
   }
 
   private async saveNow(token: string): Promise<void> {
-    if (!validToken(token)) throw new GitHubSecretError('invalid-token')
+    if (!validToken(token)) throw new SecretStoreError('invalid-token')
     const current = await this.readDocument()
     if (current?.kind === 'safe-storage' && !this.canEncrypt()) {
-      throw new GitHubSecretError('keyring-locked')
+      throw new SecretStoreError('keyring-locked')
     }
     const document: TokenDocument = this.canEncrypt()
       ? {
@@ -180,6 +185,12 @@ export class ElectronGitHubSecretStore implements GitHubSecretStore {
     } catch {
       return null
     }
+  }
+}
+
+export class ElectronGitHubSecretStore extends ElectronSecretStore implements GitHubSecretStore {
+  constructor(userDataDir: string, safeStorage: SafeStorageLike) {
+    super(userDataDir, safeStorage, FILE_NAME)
   }
 }
 

@@ -7,6 +7,7 @@ import './hud.css'
 import { CLAUDE_MASCOT, CODEX_MASCOT, DONE_BLOB } from '../lib/mascot'
 import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../lib/brandPulse'
 import { createGrokMarkSvg } from '../lib/grokMark'
+import { createCopilotMarkSvg } from '../lib/copilotMark'
 import { buildIndicator, orderIndicatorAgents } from './indicator'
 import codexPet from '../assets/pet-codex.webp'
 
@@ -161,7 +162,7 @@ function codexMascot(): HTMLElement {
   el.style.backgroundImage = `url(${codexPet})`
   return el
 }
-/** An asset brand mark (gemini/opencode), breathing: a background-image span. These marks carry their
+/** An asset brand mark (gemini/opencode/copilot), breathing: a background-image span. These marks carry their
  *  own fills, so unlike grok's they cannot be drawn as an inline `currentColor` path — the bloom is
  *  the strip's label colour rather than their own ink (see lib/brandPulse.ts). */
 function brandPulseMascot(src: string, size: number): HTMLElement {
@@ -179,13 +180,15 @@ function brandPulseMascot(src: string, size: number): HTMLElement {
 function workingMascot(agentId?: string): Element {
   if (agentId === 'claude' && CLAUDE_MASCOT.src) return quadrantMascot(CLAUDE_MASCOT, 'claude')
   if (agentId === 'codex') return codexMascot()
-  // grok, gemini and opencode breathe their own brand mark instead of walking a critter — the SAME
+  // grok, gemini, opencode and copilot breathe their own brand mark instead of walking a critter — the SAME
   // decision the canvas badge makes (lib/brandPulse.ts, shared precisely so one agent is never two
   // different things on two surfaces). This renderer stays React-free, so it draws the plan itself.
   const plan = brandPulsePlan(agentId, HUD_QUADRANT_H)
   if (plan) {
     return plan.kind === 'inline'
-      ? createGrokMarkSvg(plan.size, HUD_BRAND_PULSE_CLASS)
+      ? plan.mark === 'copilot'
+        ? createCopilotMarkSvg(plan.size, HUD_BRAND_PULSE_CLASS)
+        : createGrokMarkSvg(plan.size, HUD_BRAND_PULSE_CLASS)
       : brandPulseMascot(plan.src, plan.size)
   }
   const dot = document.createElement('span')

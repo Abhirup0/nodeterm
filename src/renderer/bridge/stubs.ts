@@ -272,6 +272,17 @@ export function buildStubApi(): Omit<
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
     },
+    agent: {
+      // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers
+      // an empty env, so `${env:VAR}` expansion reports every referenced var as missing and the
+      // launch/preview paths degrade to the missing-env refusal instead of a host-env dump.
+      envSnapshot: () => Promise.resolve({}),
+      discoverModels: () => Promise.resolve({ models: [], error: 'Model discovery is unavailable.' }),
+      gatewayCredentialStatus: () =>
+        Promise.resolve({ hasStoredKey: false, storage: 'unavailable' }),
+      saveGatewayCredential: U('agent.saveGatewayCredential'),
+      clearGatewayCredential: U('agent.clearGatewayCredential')
+    },
     chat: {
       readTranscript: U('chat.readTranscript')
     },
@@ -336,6 +347,12 @@ export function buildStubApi(): Omit<
     // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the
     // renderer's own keydown handler is the whole path there.
     onZoomActualSize: noopUnsub,
+    // Native app-menu events (desktop-only — the Server Edition has no native menu). Stubs so the
+    // bridge satisfies NodeTerminalApi; the canvas only wires real listeners on desktop.
+    onToggleAutoAlign: noopUnsub,
+    onFitView: noopUnsub,
+    onToggleKanban: noopUnsub,
+    onOpenSettings: noopUnsub,
     closeWindow: noop,
     // Best-effort: a browser tab can't force itself frontmost the way the desktop BrowserWindow
     // can, but `window.focus()` still helps when the page is merely blurred (not another OS app).

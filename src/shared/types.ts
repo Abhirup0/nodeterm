@@ -1,5 +1,6 @@
 // Types shared across the main, preload, and renderer processes.
 
+import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
@@ -8,6 +9,11 @@ import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
+import type {
+  ModelDiscoveryResult,
+  ModelGatewayCredentialStatus,
+  ModelGatewaySettings
+} from './agents/model-gateway'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -35,6 +41,8 @@ export interface PtyCreateOptions {
    * real value in a later phase.
    */
   agentId?: AgentId
+  /** Per-node model override. Applied through the node's base harness on launch/cold restore. */
+  agentModel?: string
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
   /**
@@ -232,6 +240,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** Model selected for this agent node through the shared model gateway. */
+  agentModel?: string
   /** Set while this node is armed but not yet launched — see PendingLaunch. */
   pendingLaunch?: PendingLaunch
   /**
@@ -644,6 +654,11 @@ export interface PtyApi {
    *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
    *  callers must read as "not observed", never as evidence of a particular command. */
   paneCommand(persistKey: string): Promise<string | null>
+  /** Terminate the foreground process group in a node's pane. Returns false when the pane/process
+   *  cannot be safely identified; it never kills the pane's login shell. When `expectedAgentId` is
+   *  given, the kill happens only if that harness actually owns the foreground group (argv-verified)
+   *  — so a stale menu can never SIGTERM vim or a build the user started in the pane. */
+  terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from the agent's own
    *  session store, resolved strictly by sessionId; null if unknown. Keeps a node title in sync with
    *  the `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.
@@ -791,14 +806,31 @@ export interface BrowserApi {
   onBrowserNewWindow(listener: (e: { url: string; sourceNodeId: string }) => void): () => void
 }
 
-/** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
- * terminal-title + process status (no hooks/branch/loop/bridge). */
+/** A user-defined agent (BYO CLI). With no `baseAgent` it is in no capability list, so it gets
+ * only spawn + terminal-title + process status (no hooks/branch/loop/bridge). With a `baseAgent`
+ * it inherits that builtin harness's capabilities (hooks, resume, permission modes, canvas
+ * control) and prompt convention — the use case being a harness-compatible CLI pointed at your
+ * own inference proxy, where you want to KEEP nodeterm's integration while redirecting the calls. */
 export interface CustomAgent {
   /** Stable id of the form 'custom:<uuid>'. Used as the node's agentId. */
   id: string
   label: string
+  /** Base launch command. Blank when `baseAgent` is set means "use the base harness's command"
+   * (so a claude-compatible proxy needs zero launch config). */
   launchCmd: string
-  promptInjectionMode: PromptInjectionMode
+  /** Prompt convention. Optional: inherited from `baseAgent` when set, else defaults to 'argv'. */
+  promptInjectionMode?: PromptInjectionMode
+  /** Optional builtin harness to inherit capabilities + prompt convention from. */
+  baseAgent?: BuiltinAgentId
+  /** Env vars injected at spawn, merged LAST so they win over hook/account env (required for the
+   *  proxy case — your ANTHROPIC_AUTH_TOKEN must beat any account env). Values support
+   *  `${env:VAR}` / `${env:VAR:fallback}` expansion at spawn time against the live OS env. */
+  env?: Record<string, string>
+  /** Extra argv inserted after `launchCmd`, before the prompt/flags. Free-text, shell-split.
+   *  Supports `${env:…}` expansion. Blank = none. */
+  args?: string
+  /** Node color. Falls back to `baseAgent`'s color (or the default grey). */
+  color?: string
 }
 
 /**
@@ -876,7 +908,16 @@ export interface Settings {
   /** Empty string = use the system default shell. */
   defaultShell: string
   gridSize: number
+  /** Drag-time snap: while ON, dragging a node rounds its position to the grid. A live editor in
+   *  BehaviorSection; the canvas reads it for the React Flow `snapToGrid` prop. Distinct from
+   *  `autoAlignGrid` (a one-shot arrange-all), which is a mode, not a drag constraint. */
   snapToGrid: boolean
+  /** Snap-to-grid MODE (like a desktop "Auto arrange"): while ON, every node is snapped to the
+   *  grid at the moment the mode is turned on (the existing one-shot `alignToGrid` run over all
+   *  node ids). Toggled from the native View menu (with a checkmark) and Settings → Behavior.
+   *  Distinct from `snapToGrid` (drag-time snap) — turning this on arranges once; it does not
+   *  constrain future drags. v1: arrange-all-on-enable only. */
+  autoAlignGrid: boolean
   /** Default size (px) for NEW terminal/agent nodes on the canvas. Existing nodes keep
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
@@ -889,9 +930,18 @@ export interface Settings {
    *  `project:<id>:group:<groupId>` (true = collapsed). Pruned on every write against the live
    *  tree, so a deleted frame or project cannot grow settings.json forever. */
   sidebarCollapsedItems: Record<string, boolean>
+  /** Sessions sidebar top-level grouping. 'project' (the default, the historical behavior) groups
+   *  sessions under their project; 'status' flattens across projects and regroups by live agent
+   *  status so sessions needing attention float to the top. Remote/relay sessions have no live
+   *  status in the sidebar and show as idle in either mode. */
+  sidebarGrouping: 'project' | 'status'
   /** Fallback view for projects the user hasn't explicitly toggled (canvas or the kanban board).
    *  Personal machine-local preference; per-project explicit choices override it. */
   defaultProjectView: 'canvas' | 'kanban'
+  /** New-worktree path template, resolved relative to the repository root. Supports `$repoName`
+   *  (`$reponame` and `$defaultFolderName` aliases) plus `$branch`; both `$x` and `${x}` forms.
+   *  A missing branch token is appended automatically. */
+  worktreePathTemplate: string
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
@@ -993,6 +1043,8 @@ export interface Settings {
   soundVolume: number
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
+  modelGateway: ModelGatewaySettings
   /** Per-builtin-agent launch command overrides (Settings → Agents → Launch commands). The value
    *  replaces the bare CLI name everywhere a launch line is built — new sessions, cold-restore
    *  relaunches and in-place restarts, with the usual flags (`--resume`, `--permission-mode`, the
@@ -1115,11 +1167,14 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultShell: '',
   gridSize: 24,
   snapToGrid: false,
+  autoAlignGrid: false,
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
   sidebarCollapsedItems: {},
+  sidebarGrouping: 'project',
   defaultProjectView: 'canvas',
+  worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
   terminalMiddleClickPaste: false,
@@ -1144,6 +1199,7 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEffects: true,
   soundVolume: 0.5,
   customAgents: [],
+  modelGateway: { baseUrl: '', apiKey: '' },
   agentLaunchCommands: {},
   claudeAccounts: [],
   systemAccountLabel: '',
@@ -2021,6 +2077,24 @@ export interface ClaudeApi {
 
 export type HandoffResult = { filePath: string } | { error: string }
 
+/** Agent launch/gateway IPC. The renderer has no `process.env`; `${env:VAR}` expansion runs
+ *  renderer-side against the `envSnapshot()` cache (src/renderer/lib/agentEnv.ts), so the
+ *  Settings preview and the typed launch command share one assembler AND one environment — they
+ *  cannot drift by construction. */
+export interface AgentApi {
+  /** A string-only snapshot of the main process environment (undefined entries omitted), for
+   *  expanding `${env:VAR}` tokens in launch commands and the Settings preview. Desktop-window
+   *  only: the browser/relay bridges resolve `{}` (a host env dump must never cross to a peer —
+   *  the PR #195 leak class), and expansion there degrades to the missing-env refusal. */
+  envSnapshot(): Promise<Record<string, string>>
+  /** Query the configured gateway's OpenAI-compatible `/v1/models` endpoint. Never rejects. */
+  discoverModels(settings: ModelGatewaySettings): Promise<ModelDiscoveryResult>
+  /** Literal gateway credentials are write-only in the renderer. */
+  gatewayCredentialStatus(): Promise<ModelGatewayCredentialStatus>
+  saveGatewayCredential(apiKey: string): Promise<ModelGatewayCredentialStatus>
+  clearGatewayCredential(): Promise<ModelGatewayCredentialStatus>
+}
+
 export interface HandoffApi {
   /**
    * Render the source agent's full conversation transcript (located by `sessionId`)
@@ -2274,6 +2348,8 @@ export interface NodeTerminalApi {
   canvas: CanvasApi
   codex: CodexApi
   claude: ClaudeApi
+  /** Custom-agent launch/preview (env-var expansion + command assembly). */
+  agent: AgentApi
   chat: ChatApi
   claudeAccounts: ClaudeAccountsApi
   transcripts: TranscriptsApi
@@ -2291,6 +2367,14 @@ export interface NodeTerminalApi {
    *  key is intercepted in main because Electron's default View menu owns the accelerator. In the
    *  Server Edition the renderer's own keydown handler sees the key and this is a no-op stub. */
   onZoomActualSize(listener: () => void): () => void
+  /** Native View menu → Snap to Grid toggle. Returns unsubscribe. */
+  onToggleAutoAlign(listener: () => void): () => void
+  /** Native View menu → Fit View. Returns unsubscribe. */
+  onFitView(listener: () => void): () => void
+  /** Native View menu → Toggle Kanban / Canvas view. Returns unsubscribe. */
+  onToggleKanban(listener: () => void): () => void
+  /** Fires when the native app menu's "Settings…" item (⌘,) is clicked. Returns unsubscribe. */
+  onOpenSettings(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
   closeWindow(): void
   /** Bring the app window to the foreground (show + OS focus). Called after a file is DROPPED

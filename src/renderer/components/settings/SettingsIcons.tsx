@@ -63,6 +63,14 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
       <path d="M8 5.5v5M5.5 8h5" />
     </>
   ),
+  'model-gateway': (
+    <>
+      <circle cx="4" cy="8" r="1.6" />
+      <circle cx="12" cy="4" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <path d="M5.6 7.4 10.4 4.6M5.6 8.6l4.8 2.8" />
+    </>
+  ),
   notifications: (
     <>
       <path d="M4.8 7a3.2 3.2 0 0 1 6.4 0c0 3 1.1 3.9 1.1 3.9H3.7S4.8 10 4.8 7Z" />

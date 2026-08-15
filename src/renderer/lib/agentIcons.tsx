@@ -1,7 +1,8 @@
-import type { AgentId } from '@shared/agents/config'
+import { capabilityAgentId, type AgentId } from '@shared/agents/config'
 import { IconTerminal } from '../components/icons'
 import { BRAND_PULSE_CLASS, brandLogoSrc, brandPulsePlan } from './brandPulse'
 import { GROK_MARK_PATH, GROK_MARK_VIEWBOX } from './grokMark'
+import { COPILOT_MARK_PATHS, COPILOT_MARK_VIEWBOX } from './copilotMark'
 
 // The logo map itself lives in the REACT-FREE lib/brandPulse.ts, because the notch HUD needs the
 // same assets and must not import React. Re-exported here so React callers have one import for
@@ -45,12 +46,47 @@ export function GrokMark({
  *
  * A thin renderer on purpose: every decision is in the pure plan, which the notch HUD shares.
  */
+/**
+ * The official GitHub Copilot mark, inlined rather than shipped as an asset — geometry from
+ * `lib/copilotMark.ts`, which the notch HUD's imperative renderer shares. Monochrome, so
+ * `currentColor` lets it follow the theme (the asset's fixed #f0f6fc was invisible on light).
+ */
+export function CopilotMark({
+  size,
+  className
+}: {
+  size: number
+  className?: string
+}): React.JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={COPILOT_MARK_VIEWBOX}
+      fill="currentColor"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden
+      className={className}
+      style={{ display: 'block' }}
+    >
+      {COPILOT_MARK_PATHS.map((d) => (
+        <path key={d.slice(0, 12)} d={d} />
+      ))}
+    </svg>
+  )
+}
+
 export function BrandPulse({ agentId, size }: { agentId?: AgentId; size: number }): React.JSX.Element | null {
   const plan = brandPulsePlan(agentId, size)
   if (!plan) return null
   // Grok keeps carrying the class on the <svg> itself — no wrapper — so its `currentColor` fill and
   // its drop-shadow bloom resolve exactly as they did before the class was generalized.
-  if (plan.kind === 'inline') return <GrokMark size={plan.size} className={BRAND_PULSE_CLASS} />
+  if (plan.kind === 'inline')
+    return plan.mark === 'copilot' ? (
+      <CopilotMark size={plan.size} className={BRAND_PULSE_CLASS} />
+    ) : (
+      <GrokMark size={plan.size} className={BRAND_PULSE_CLASS} />
+    )
   return (
     <span className={BRAND_PULSE_CLASS} aria-hidden style={{ display: 'block', lineHeight: 0 }}>
       <img src={plan.src} width={plan.size} height={plan.size} alt="" style={{ display: 'block' }} />
@@ -59,10 +95,16 @@ export function BrandPulse({ agentId, size }: { agentId?: AgentId; size: number 
 }
 
 export function AgentIcon({ agentId, size = 16 }: { agentId: AgentId; size?: number }): React.JSX.Element {
-  if (agentId === 'grok') return <GrokMark size={size} />
-  // `brandLogoSrc`, not `AGENT_LOGO[agentId]`: the id can be anything a hand-edited project.json
-  // says, and a prototype key ('constructor') would hand back a Function as the image source.
-  const src = brandLogoSrc(agentId)
+  // A custom agent with `baseAgent` speaks that harness's protocol and should carry its visual
+  // identity too. The renderer registers a live custom-id resolver at boot, so settings edits are
+  // reflected on the next render without duplicating custom-agent lookup logic in every menu.
+  const iconAgentId = capabilityAgentId(agentId)
+  if (iconAgentId === 'grok') return <GrokMark size={size} />
+  if (iconAgentId === 'copilot') return <CopilotMark size={size} />
+  // `brandLogoSrc`, not `AGENT_LOGO[iconAgentId]`: the id can be anything a hand-edited
+  // project.json says, and a prototype key ('constructor') would hand back a Function as the image
+  // source.
+  const src = brandLogoSrc(iconAgentId)
   if (src) {
     return <img src={src} width={size} height={size} alt="" style={{ display: 'block' }} />
   }

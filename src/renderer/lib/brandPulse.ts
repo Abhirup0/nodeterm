@@ -15,7 +15,7 @@ import opencodeIcon from '../assets/opencode.svg'
 // Brand logo per builtin agent; custom/unknown agents have none (callers fall back to the terminal
 // glyph, or to the plain pulsing dot).
 //
-// These four are MULTI-COLOUR marks, so each carries its own fills and is loaded as an `<img src>` /
+// These asset marks carry their own fills and are loaded as an `<img src>` /
 // `background-image` (Vite hands us a URL). An SVG loaded that way is an isolated document —
 // `currentColor` has nothing to inherit there, which is why none of these assets uses it. Grok is
 // the exception: its mark is monochrome, so it is inlined from lib/grokMark.ts instead, and is
@@ -40,8 +40,13 @@ export const brandLogoSrc = (agentId: AgentId): string | undefined =>
 
 /** Does this agent have a brand mark to draw? grok is inlined rather than an asset, so it is not in
  *  AGENT_LOGO — ask through here rather than testing that map directly. */
+export const INLINE_MARK_AGENTS = ['grok', 'copilot'] as const
+export type InlineMark = (typeof INLINE_MARK_AGENTS)[number]
+export const inlineMarkFor = (agentId: AgentId): InlineMark | null =>
+  (INLINE_MARK_AGENTS as readonly string[]).includes(agentId) ? (agentId as InlineMark) : null
+
 export const hasBrandLogo = (agentId: AgentId): boolean =>
-  agentId === 'grok' || brandLogoSrc(agentId) !== undefined
+  inlineMarkFor(agentId) !== null || brandLogoSrc(agentId) !== undefined
 
 /** Canvas RUNNING-badge class (styles.css). */
 export const BRAND_PULSE_CLASS = 'term-node__mascot--pulse'
@@ -53,7 +58,7 @@ export const HUD_BRAND_PULSE_CLASS = 'mascot mascot--pulse'
  * lib/grokMark.ts (monochrome, painted in `currentColor`), `asset` = the brand file at `src`.
  */
 export type BrandPulsePlan =
-  | { kind: 'inline'; size: number }
+  | { kind: 'inline'; mark: InlineMark; size: number }
   | { kind: 'asset'; src: string; size: number }
 
 /**
@@ -77,7 +82,8 @@ export type BrandPulsePlan =
  */
 export function brandPulsePlan(agentId: AgentId | undefined, size: number): BrandPulsePlan | null {
   if (!agentId || !hasBrandLogo(agentId)) return null
-  if (agentId === 'grok') return { kind: 'inline', size }
+  const mark = inlineMarkFor(agentId)
+  if (mark) return { kind: 'inline', mark, size }
   const src = brandLogoSrc(agentId)
   return src ? { kind: 'asset', src, size } : null
 }

@@ -56,7 +56,10 @@ describe('stale-working sweeper', () => {
     useAgentStatus.getState().setState(id, 'working', 'claude')
     vi.advanceTimersByTime(STALE_WORKING_MS + 60_000)
     useAgentStatus.getState().sweepStaleWorking()
-    expect(useAgentStatus.getState().byId[id].state).toBeUndefined()
+    expect(useAgentStatus.getState().byId[id]).toMatchObject({
+      state: undefined,
+      lastEventAt: Date.now()
+    })
   })
 
   it('keeps a working entry fresh as long as events keep arriving', () => {
@@ -79,6 +82,22 @@ describe('stale-working sweeper', () => {
     useAgentStatus.getState().sweepStaleWorking()
     expect(useAgentStatus.getState().byId[a].state).toBe('done')
     expect(useAgentStatus.getState().byId[b].state).toBe('waiting')
+  })
+})
+
+describe('focus tracking', () => {
+  it('switches the watched node without changing either session state', () => {
+    const left = nid()
+    const right = nid()
+    const status = useAgentStatus.getState()
+    status.setState(left, 'done', 'claude')
+    status.setState(right, 'working', 'claude')
+    status.setActive(left, true)
+    status.setActive(right, true)
+
+    expect(useAgentStatus.getState().activeId).toBe(right)
+    expect(useAgentStatus.getState().byId[left].state).toBe('done')
+    expect(useAgentStatus.getState().byId[right].state).toBe('working')
   })
 })
 

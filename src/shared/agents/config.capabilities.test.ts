@@ -12,6 +12,7 @@ import {
   canResume,
   canSubagent,
   canTransferFrom,
+  canSwitchModel,
   createdAgentId,
   hasHooks,
   hasPermissionMode,
@@ -31,6 +32,51 @@ describe('CONTEXT_LINK_CAPABLE', () => {
   })
   it('custom agents cannot', () => {
     expect(canContextLink('custom:abc')).toBe(false)
+  })
+})
+
+describe('MODEL_SWITCH_CAPABLE', () => {
+  it('is centralized on the base harness capability', () => {
+    expect(canSwitchModel('claude')).toBe(true)
+    expect(canSwitchModel('codex')).toBe(true)
+    expect(canSwitchModel('copilot')).toBe(true)
+    for (const id of ['gemini', 'opencode', 'grok', 'custom:plain'] as const) {
+      expect(canSwitchModel(id), id).toBe(false)
+    }
+  })
+})
+
+describe('copilot capabilities', () => {
+  it('is a builtin with measured interactive launch, hooks, resume, and model switching', () => {
+    expect(BUILTIN_AGENT_IDS).toContain('copilot')
+    expect(AGENT_CONFIG.copilot).toEqual({
+      label: 'GitHub Copilot',
+      color: '#8957e5',
+      launchCmd: 'copilot',
+      promptInjectionMode: 'flag-interactive',
+      expectedProcess: 'copilot'
+    })
+    expect(hasHooks('copilot')).toBe(true)
+    expect(canResume('copilot')).toBe(true)
+    expect(canControlCanvas('copilot')).toBe(true)
+    expect(canSwitchModel('copilot')).toBe(true)
+  })
+
+  it('does not claim integrations whose Copilot-specific leaf is not implemented', () => {
+    for (const can of [
+      canContextLink,
+      canSubagent,
+      canRecur,
+      canBranch,
+      hasUsage,
+      canChat,
+      canTransferFrom,
+      canRename,
+      canReadTitle,
+      hasPermissionMode
+    ]) {
+      expect(can('copilot')).toBe(false)
+    }
   })
 })
 
@@ -148,7 +194,8 @@ describe('copy feedback', () => {
   it('speaks for every agent that says nothing itself', () => {
     // codex leaves the mouse to tmux: the drag copies via OSC 52 and the highlight vanishes on
     // release with no word from anyone. That silence is what the pill exists for.
-    for (const id of ['codex', 'gemini', 'opencode', 'grok']) expect(reportsOwnCopy(id)).toBe(false)
+    for (const id of ['codex', 'gemini', 'opencode', 'grok', 'copilot'])
+      expect(reportsOwnCopy(id)).toBe(false)
   })
 
   it('speaks for a plain terminal and a custom agent (no agent id at all)', () => {
@@ -192,7 +239,7 @@ describe('title read vs rename write', () => {
 
   it('only codex has a shared identity, and it is asked through the helper', () => {
     expect(hasSharedIdentity('codex')).toBe(true)
-    for (const id of ['claude', 'gemini', 'grok', 'opencode', 'custom:abc'] as const) {
+    for (const id of ['claude', 'gemini', 'grok', 'opencode', 'copilot', 'custom:abc'] as const) {
       expect(hasSharedIdentity(id), id).toBe(false)
     }
   })

@@ -137,6 +137,15 @@ import {
   decideExternalChange,
   mergeIncomingNodes
 } from '../lib/externalChange'
+import {
+  CONTENT_ADD_ITEMS,
+  contentAddItemsToMenuItems,
+  type AddHandlers
+} from '../lib/addMenuSpec'
+import { transferConversationItems } from '../lib/transferItems'
+import { reopenVariants } from '../lib/reopenVariants'
+import { modelsForAgent } from '@shared/agents/model-gateway'
+import { useModelGateway } from '../state/modelGateway'
 import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
@@ -194,6 +203,7 @@ import {
   guardConcurrentRestart,
   planBulkRestart,
   restartEligibility,
+  restartSessionId,
   settleRestart,
   summarizeBulkRestart,
   type BulkRestartPlan,
@@ -253,8 +263,8 @@ import {
   hasHooks,
   canBranch,
   canRename,
-  canTransferFrom,
   canContextLink,
+  canSwitchModel,
   createdAgentId,
   resumeCommand,
   AGENT_CONFIG,
@@ -299,6 +309,7 @@ import type { SshServer, SshConnection } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type {
   CanvasNodeState,
+  NodeKind,
   Project,
   ProjectKanban,
   SshPassphraseRequest,
@@ -308,6 +319,7 @@ import type {
 import type { KanbanCreateChoice, KanbanSession } from '../components/kanban/KanbanView'
 import { assignNode, assignedTo, defaultKanban, labelsForCard, migrateProjectTags, resolveColumnRef, unassigned } from '../lib/kanban'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
+import { snapNodeToGrid } from '../lib/nodeSizing'
 import { canClearDirty, canCommitCanvas } from '../state/persistGuards'
 import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
@@ -554,7 +566,7 @@ const minimapNodeColor = (n: Node): string =>
  *  restart on the strength of the wider one would get a row whose closure refuses every click.
  *  Anything that is not a terminal (a sticky, an editor) is undefined, which `restartEligibility`
  *  reads as `not-resumable`. */
-const restartAgentIdOf = (n: Node | undefined): string | undefined =>
+const restartAgentIdOf = (n: Node | undefined): AgentId | undefined =>
   !n || n.type !== 'terminal' ? undefined : createdAgentId(n.data)
 
 /** One canvas node as a board card, or null when this kind is not a card at all (a group frame, an
@@ -697,7 +709,8 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
 export function Canvas() {
   // This canvas's core api (a context read — stable for the session, no store subscription).
   // For the local session it IS window.nodeTerminal, so every call resolves identically.
-  const { api } = useSession()
+  const session = useSession()
+  const { api } = session
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([])
   // Persistent context links between Claude nodes (separate from ephemeral subagent/loop edges).
   const [linkEdges, setLinkEdges, onLinkEdgesChange] = useEdgesState<Edge>([])
@@ -866,9 +879,6 @@ export function Canvas() {
   // When pinned the sidebar is docked and stays open (mouse-leave never closes it); `dismissed`
   // hides it until the next hover/click. When unpinned it is a pure hover-peek.
   const sessionsOpen = sessionsPinned ? !sessionsDismissed : sessionsHover
-  // When set, add a terminal to this project once its nodes have loaded into React Flow
-  // (cross-project "add" from the sidebar, which must switch projects first).
-  const pendingAddRef = useRef<string | null>(null)
   // Live relay tabs, keyed by relay connectionId, so a host/relay drop can dispose the right one
   // (a remote connection is now a project TAB, not a full-surface overlay — Stage 4 Task 6).
   const relayTabsRef = useRef<Map<string, RelayTab>>(new Map())
@@ -939,17 +949,6 @@ export function Canvas() {
   const worktreeOrphans = useWorktrees((s) => s.orphans)
   // git's order — entries[0] is the repo's main checkout, i.e. the real default branch.
   const worktreeEntries = useWorktrees((s) => s.entries)
-  // Writable base dir for the default worktree path (userData on desktop, the server's data dir
-  // in the browser), fetched once on mount. STATE, not a ref: a dialog opened before the promise
-  // resolves must re-render with the real base, or it would keep suggesting nothing.
-  const [userDataDir, setUserDataDir] = useState('')
-  useEffect(() => {
-    // The SESSION core's writable base, not this client's: a remote tab's worktree default path
-    // must live on the machine `git worktree add` runs on (the host — obligation c), so it comes
-    // from the session api (`api.userDataDir()`), re-resolved when the active session changes.
-    // For the local session `api` IS window.nodeTerminal, so this stays byte-identical.
-    void api.userDataDir().then(setUserDataDir)
-  }, [api])
   // Worktrees already bound to a group on THIS canvas. The store's orphan list is refreshed after
   // every mutation, but it is also filled asynchronously — filtering against the live nodes is the
   // guard that stops the dialog from offering a worktree a second group could bind to.
@@ -1022,6 +1021,30 @@ export function Canvas() {
   const [mergeTarget, setMergeTargetState] = useState<MergeState | null>(null)
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
+  const gatewayModels = useModelGateway((s) => s.models)
+  const gatewayStatus = useModelGateway((s) => s.status)
+  const gatewayError = useModelGateway((s) => s.error)
+  const discoverModels = useModelGateway((s) => s.discover)
+  const clearModels = useModelGateway((s) => s.clear)
+
+  // Prime the context-menu catalogue after hydration and refresh it after a gateway edit. Debounce
+  // keystrokes so entering a URL/key does not issue one authenticated request per character. The
+  // global preload is deliberate: gateway settings belong to this app instance, never to a relay
+  // tab whose terminals and secrets live on another machine.
+  useEffect(() => {
+    const gateway = settings.modelGateway
+    if (!gateway.baseUrl.trim() || !gateway.apiKey.trim()) {
+      clearModels()
+      return
+    }
+    const timer = setTimeout(() => void discoverModels(gateway), 500)
+    return () => clearTimeout(timer)
+  }, [
+    settings.modelGateway.baseUrl,
+    settings.modelGateway.apiKey,
+    discoverModels,
+    clearModels
+  ])
   const viewportRef = useRef<Viewport>({ x: 0, y: 0, zoom: 1 })
   const nodesRef = useRef<CanvasNode[]>(nodes)
   /**
@@ -1843,12 +1866,6 @@ export function Canvas() {
           useAgentStatus.getState().setActive(pending, true)
           useAgentStatus.getState().clearUnread(pending)
         }
-      }
-      // Consume a cross-project "add terminal" request from the sessions sidebar (which had
-      // to switch projects first). Only act if we landed on the requested project.
-      if (pendingAddRef.current === useProjects.getState().activeProjectId) {
-        pendingAddRef.current = null
-        addTerminal()
       }
     }, 0)
     return () => clearTimeout(t)
@@ -3992,6 +4009,31 @@ export function Canvas() {
     })
   }, [deleteNodes])
 
+  // Native View menu → renderer. The menu item click sends IPC; these listeners fire the canvas
+  // action. Snap-to-Grid flips the setting (the `autoAlignGrid` effect above runs the arrange on
+  // the false→true edge), and main rebuilds the menu on the settings change so the checkmark moves.
+  useEffect(() => {
+    return window.nodeTerminal.onToggleAutoAlign(() => {
+      useSettings.getState().update({ autoAlignGrid: !useSettings.getState().settings.autoAlignGrid })
+    })
+  }, [])
+  useEffect(() => {
+    return window.nodeTerminal.onFitView(() => fitAll())
+  }, [fitAll])
+  useEffect(() => {
+    return window.nodeTerminal.onToggleKanban(() => {
+      const id = useProjects.getState().activeProjectId
+      if (id) useViewMode.getState().toggle(id)
+    })
+  }, [])
+  // Native app menu → open Settings (⌘,). A menu click does not fire before-input-event, so the
+  // Cmd+, keydown handler alone would leave the menu item inert — main forwards it as IPC.
+  useEffect(() => {
+    return window.nodeTerminal.onOpenSettings(() => {
+      setSettingsSection(undefined)
+      setSettingsOpen(true)
+    })
+  }, [])
   const groupSelection = useCallback(
     (ids: string[]) => {
       const groupCount = nodesRef.current.filter((n) => n.type === 'group').length
@@ -4617,18 +4659,28 @@ export function Canvas() {
     [setNodes]
   )
 
-  // Restart ONE agent CLI in place: quit it and relaunch it with the provider's own `--resume`, so
-  // a newly released model shows up in its model list without losing the conversation. The node's
-  // registered closure owns the whole choreography (and re-checks eligibility + liveness at call
-  // time, so a stale menu cannot force a restart onto a session that just went busy); all that is
-  // left here is telling the user how it went. Up to ~6s of exit polling plus the echo-verified
-  // resume line, hence the await before the notice.
-  const restartAgentNode = useCallback(async (nodeId: string) => {
+  // Restart ONE agent CLI while preserving its provider session. Ordinary restart/reopen asks the
+  // harness to exit and types its resume command; model switching terminates the foreground agent
+  // process and rebuilds the tmux session so gateway env is re-applied. The node closure owns that
+  // distinction and re-checks eligibility/liveness at call time; this layer reports the outcome.
+  const restartAgentNode = useCallback(async (
+    nodeId: string,
+    targetAgentId?: AgentId,
+    targetModel?: string,
+    restartShell?: boolean
+  ) => {
     const fn = agentRestartFn(nodeId)
     if (!fn) return // node unmounted between opening the menu and clicking
+    const action = restartShell
+      ? 'Restart'
+      : targetModel
+        ? 'Model switch'
+        : targetAgentId
+          ? 'Reopen'
+          : 'Restart'
     let outcome: RestartOutcome
     try {
-      outcome = await fn()
+      outcome = await fn(targetAgentId, targetModel, restartShell)
     } catch {
       // The transport under the restart threw (a relay socket still CONNECTING rejects the very
       // first write). Unhandled, this rejection made the action a silent no-op — the user clicked
@@ -4636,15 +4688,48 @@ export function Canvas() {
       // the message sends them to look rather than claiming either.
       setNotice({
         kind: 'error',
-        text: 'Restart failed: this session could not be reached. Check the pane before retrying.'
+        text: `${action} failed: this session could not be reached. Check the pane before retrying.`
       })
       return
     }
+    if (outcome === 'restarted' && (targetAgentId || targetModel)) {
+      // The pane now runs the target variant. Persist that identity so its icon/capabilities and
+      // every later plain Restart describe what is actually in the pane. The provider session id
+      // stays unchanged, so choosing the original variant later reverses this cleanly.
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId && n.type === 'terminal'
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  ...(targetAgentId ? { agentId: targetAgentId } : {}),
+                  ...(targetModel ? { agentModel: targetModel } : {})
+                }
+              }
+            : n
+        )
+      )
+      markDirty()
+    }
+    const targetLabel =
+      targetAgentId == null
+        ? undefined
+        : (agentConfig(targetAgentId)?.label ??
+          useSettings.getState().settings.customAgents.find((c) => c.id === targetAgentId)?.label ??
+          targetAgentId)
     // 'info' fades itself out; anything that did NOT restart is left on screen to be read and
-    // dismissed — the pane is untouched either way (nothing is ever killed).
+    // dismissed.
     setNotice(
       outcome === 'restarted'
-        ? { kind: 'info', text: 'Agent restarted — conversation resumed.' }
+        ? {
+            kind: 'info',
+            text: targetModel
+              ? `Switched to ${targetModel} — conversation resumed.`
+              : targetLabel
+                ? `Session reopened as ${targetLabel} — conversation resumed.`
+                : 'Agent restarted — conversation resumed.'
+          }
         : outcome === 'exit-timeout'
           ? {
               kind: 'error',
@@ -4653,7 +4738,7 @@ export function Canvas() {
               // Nothing is ever force-killed, so the pane is exactly as the CLI left it — which is
               // what the user has to go and look at.
               text:
-                'Restart failed: the pane did not return to a shell in time, so the CLI was not ' +
+                `${action} failed: the pane did not return to a shell in time, so the CLI was not ` +
                 'relaunched. Nothing was killed — check the pane.'
             }
           : {
@@ -4665,12 +4750,12 @@ export function Canvas() {
               // know when the CLI has quit), or a restart of this node was already in flight (the
               // per-node action and the bulk one can reach the same node).
               text:
-                'Restart skipped: this session is busy, already restarting, not attached ' +
+                `${action} skipped: this session is busy, already restarting, not attached ` +
                 '(closed, ended, or nothing to resume), or its pane cannot be watched without ' +
                 'persistent tmux sessions. Nothing was written to the pane.'
             }
     )
-  }, [])
+  }, [setNodes, markDirty])
 
   // Who the bulk restart would act on, right now: the ACTIVE project's canvas (nodesRef holds
   // exactly that). Read fresh at every call — agent state and session ids arrive asynchronously.
@@ -4879,22 +4964,57 @@ export function Canvas() {
       const g = useSettings.getState().settings.gridSize || GRID
       const set = new Set(ids)
       setNodes((ns) =>
-        ns.map((n) =>
-          set.has(n.id)
-            ? {
-                ...n,
-                position: {
-                  x: Math.round(n.position.x / g) * g,
-                  y: Math.round(n.position.y / g) * g
-                }
-              }
-            : n
-        )
+        ns.map((n) => {
+          if (!set.has(n.id)) return n
+          // Snap all four corners to the grid: each edge rounds to its nearest grid
+          // line, so the node is moved AND resized to land every corner on a grid
+          // intersection. Size is clamped to the kind's minimum (the resizer's mins
+          // don't apply to programmatic changes). A collapsed node keeps its collapsed
+          // bar height — only its position and width snap; expanding still restores the
+          // saved height.
+          const kind = (n.type ?? 'terminal') as NodeKind
+          const w = n.measured?.width ?? (n.width as number) ?? 0
+          const h = n.measured?.height ?? (n.height as number) ?? 0
+          const snapped = snapNodeToGrid(g, kind, { x: n.position.x, y: n.position.y, width: w, height: h })
+          const height = n.data?.collapsed ? h : snapped.height
+          return {
+            ...n,
+            position: { x: snapped.x, y: snapped.y },
+            width: snapped.width,
+            height,
+            measured: { width: snapped.width, height },
+            style: { ...n.style, width: snapped.width, height }
+          }
+        })
       )
       markDirty()
     },
     [setNodes, markDirty]
   )
+
+  // Snap-to-grid MODE (like a desktop "Auto arrange"): when `autoAlignGrid` flips ON, snap EVERY
+  // node to the grid at that moment (not just the selection — the one-shot `alignToGrid` is no
+  // longer exposed in the UI; this is its replacement). `nodesRef.current` holds only the active
+  // project's persistent nodes (subagent/loop ephemeral cards live in a separate array), so this
+  // is safe to run over the whole list. v1: arrange-all-on-enable only — it does not re-snap on
+  // later drags. Turning OFF is a no-op (nodes stay where they were snapped). The transition is
+  // tracked with a ref so a re-render that preserves the ON value doesn't re-arrange.
+  //
+  // SEEDED from the persisted setting, NOT `false`: a `false` seed made every app launch with the
+  // mode already ON read as an OFF->ON transition, snapping all nodes and rewriting project.json at
+  // boot (unsolicited). Seeding from the initial value means only a within-session user toggle
+  // arranges — which is what "enable the mode" means.
+  const prevAutoAlignRef = useRef(settings.autoAlignGrid === true)
+  useEffect(() => {
+    const on = settings.autoAlignGrid
+    if (on && !prevAutoAlignRef.current) {
+      const ids = nodesRef.current
+        .filter((n) => n.type !== 'subagent' && n.type !== 'loop')
+        .map((n) => n.id)
+      if (ids.length) alignToGrid(ids)
+    }
+    prevAutoAlignRef.current = on
+  }, [settings.autoAlignGrid, alignToGrid])
 
   const selectAll = useCallback(() => {
     setNodes((ns) => ns.map((n) => ({ ...n, selected: true })))
@@ -5213,40 +5333,14 @@ export function Canvas() {
             }
           ] as MenuItem[])
         : []),
-      ...(ids.length === 1 &&
-      (() => {
-        const a = agentIdOf(ids[0])
-        return !!a && canTransferFrom(a) && !!useAgentStatus.getState().byId[ids[0]]?.sessionId
-      })()
-        ? (() => {
-            const src = agentIdOf(ids[0]) as AgentId
-            const disabled = useSettings.getState().settings.disabledAgents
-            const settings = useSettings.getState().settings
-            const targets: { id: AgentId; label: string }[] = [
-              ...BUILTIN_AGENT_IDS.filter((aid) => aid !== src && !disabled.includes(aid)).map(
-                (aid) => ({ id: aid as AgentId, label: AGENT_CONFIG[aid].label })
-              ),
-              ...settings.customAgents
-                .filter((c) => c.id !== src && !disabled.includes(c.id))
-                .map((c) => ({ id: c.id, label: c.label }))
-            ]
-            return [
-              { type: 'label', label: 'Transfer conversation to' },
-              ...targets.map(
-                (tg): MenuItem => ({
-                  label: tg.label,
-                  icon: <AgentIcon agentId={tg.id} />,
-                  onClick: () => void transferConversation(ids[0], tg.id, at)
-                })
-              )
-            ] as MenuItem[]
-          })()
+      ...(ids.length === 1
+        ? transferConversationItems(ids[0], at, {
+            sourceAgentId: agentIdOf(ids[0]),
+            sessionId: useAgentStatus.getState().byId[ids[0]]?.sessionId,
+            disabledAgents: useSettings.getState().settings.disabledAgents,
+            customAgents: useSettings.getState().settings.customAgents
+          }, transferConversation)
         : []),
-      ...(isHidden('align-grid', hidden)
-        ? []
-        : ([
-            { label: 'Align to grid', icon: <IconGrid />, onClick: () => alignToGrid(ids) }
-          ] as MenuItem[])),
       ...(isHidden('collapse', hidden)
         ? []
         : ([
@@ -5287,7 +5381,19 @@ export function Canvas() {
         ? (() => {
             const n = nodesRef.current.find((x) => x.id === ids[0])
             const st = useAgentStatus.getState().byId[ids[0]]
-            const gate = restartEligibility(restartAgentIdOf(n), st?.state, st?.sessionId)
+            const sourceAgentId = restartAgentIdOf(n)
+            const sessionId = restartSessionId(st?.sessionId, n?.data.agentSessionId)
+            const gate = restartEligibility(sourceAgentId, st?.state, sessionId)
+            const settings = useSettings.getState().settings
+            const variants = sourceAgentId
+              ? reopenVariants(sourceAgentId, settings.customAgents, settings.disabledAgents)
+              : []
+            const switchCapable = !!sourceAgentId && canSwitchModel(sourceAgentId)
+            const compatibleModels = sourceAgentId && session.source !== 'relay'
+              ? modelsForAgent(gatewayModels, sourceAgentId)
+              : []
+            const currentModel =
+              typeof n?.data.agentModel === 'string' ? n.data.agentModel : undefined
             // 'not-resumable' is permanent (a plain shell, opencode, a custom CLI with no exit
             // command) — no row at all. The other two are temporary, so the row stays and says
             // what to wait for instead of disappearing and teaching nothing.
@@ -5314,7 +5420,85 @@ export function Canvas() {
                 disabled: !!why,
                 hint: why ?? 'Quits the CLI and relaunches it with --resume (same conversation).',
                 onClick: () => void restartAgentNode(ids[0])
-              }
+              },
+              // Restart agent AND shell: same quit + relaunch, but RECYCLES the tmux session so a
+              // FRESH shell spawns — re-sourcing the user's profile/env (a change to .zshrc, or an
+              // env var set after this node was created), which typing the resume line into the
+              // existing shell never picks up. Same eligibility gate as Restart; the cold-restore
+              // auto-resume on the fresh spawn relaunches the agent with --resume <sid>.
+              {
+                label: 'Restart agent and shell',
+                icon: <IconPower />,
+                // A relay session's shell lives on the HOST's core, so recycling it here can't
+                // re-source that machine's profile/env — the closure refuses it. Surface that as a
+                // DISABLED row with the real reason instead of an enabled row that fails with the
+                // generic "not attached" notice. (Plain Restart above still works over relay: it
+                // only types --resume, no recycle.)
+                disabled: !!why || session.source === 'relay',
+                hint:
+                  why ??
+                  (session.source === 'relay'
+                    ? 'Restart the shell on the machine hosting this relay session.'
+                    : 'Quits the CLI, respawns a fresh shell (picks up env/profile changes), then resumes.'),
+                onClick: () => void restartAgentNode(ids[0], undefined, undefined, true)
+              },
+              ...(variants.length
+                ? ([
+                    {
+                      type: 'submenu',
+                      label: 'Reopen session as',
+                      icon: <IconSwitch />,
+                      children: variants.map(
+                        (variant): MenuItem => ({
+                          label: variant.label,
+                          icon: <AgentIcon agentId={variant.id} />,
+                          disabled: !!why,
+                          hint:
+                            why ??
+                            `Quits this CLI and resumes the same session as ${variant.label}.`,
+                          onClick: () => void restartAgentNode(ids[0], variant.id)
+                        })
+                      )
+                    }
+                  ] as MenuItem[])
+                : []),
+              ...(switchCapable
+                ? compatibleModels.length
+                  ? ([
+                      {
+                        type: 'submenu',
+                        label: currentModel ? `Switch model (${currentModel})` : 'Switch model',
+                        icon: <IconSwitch />,
+                        children: compatibleModels.map(
+                          (model): MenuItem => ({
+                            label: `${model.id === currentModel ? '✓ ' : ''}${model.id}`,
+                            disabled: !!why || model.id === currentModel,
+                            hint:
+                              model.id === currentModel
+                                ? 'This node is already using this model.'
+                                : why ??
+                                  `Restarts the terminal session and resumes this conversation with ${model.id}.`,
+                            onClick: () =>
+                              void restartAgentNode(ids[0], undefined, model.id)
+                          })
+                        )
+                      }
+                    ] as MenuItem[])
+                  : ([
+                      {
+                        label: 'Switch model',
+                        icon: <IconSwitch />,
+                        disabled: true,
+                        hint:
+                          session.source === 'relay'
+                            ? 'Configure the model gateway on the machine hosting this relay session.'
+                            : gatewayStatus === 'loading'
+                              ? 'Discovering models…'
+                              : gatewayError ||
+                                'Configure a URL and API key in Settings → Model gateway.'
+                      }
+                    ] as MenuItem[])
+                : [])
             ] as MenuItem[]
           })()
         : []),
@@ -5330,12 +5514,15 @@ export function Canvas() {
     branchClaude,
     transferConversation,
     agentIdOf,
-    alignToGrid,
     toggleCollapseNodes,
     toggleMarkdown,
     reloadTerminals,
     restartAgentNode,
-    deleteNodes
+    deleteNodes,
+    gatewayModels,
+    gatewayStatus,
+    gatewayError,
+    session.source
   ])
 
   /** "New <agent>" creation entries shared by the pane and group context menus.
@@ -5343,9 +5530,11 @@ export function Canvas() {
   const agentCreationItems = useCallback(
     (at?: { x: number; y: number }, groupId?: string): MenuItem[] => {
       const disabled = useSettings.getState().settings.disabledAgents
-      // Accounts selectable in the active project: local accounts for a local project, or this
-      // host's accounts for an SSH project (pending logins always excluded).
-      const project = useProjects.getState().getProject(activeProjectId)
+      // Read the active project LIVE from the store (not the closure value) so a menu built right
+      // after a `switchProject` — e.g. the sessions-sidebar "+" opening this menu on a non-active
+      // project — resolves accounts against the project the user clicked, not the one that was
+      // active when this callback was created. `switchProject` sets the store synchronously.
+      const project = useProjects.getState().getProject(useProjects.getState().activeProjectId)
       const accounts = accountsForProject(useSettings.getState().settings.claudeAccounts, project)
       // The system entry shows the user's custom label / detected email so it stays
       // distinguishable from managed accounts (falls back to "System account").
@@ -5417,7 +5606,7 @@ export function Canvas() {
           )
       ]
     },
-    [activeProjectId, addAgentNode]
+    [addAgentNode]
   )
 
   const groupItems = useCallback(
@@ -5545,47 +5734,72 @@ export function Canvas() {
     ]
   }, [])
 
+  // The shared bag of creation callbacks + project context that every "add" menu derives its
+  // CONTENT items from (see lib/addMenuSpec.ts). Built once here so the pane menu, the sidebar
+  // project-header "+", and any other ContextMenu-based surface pass the same handlers and can no
+  // longer drift on which kinds are addable. Agent entries are layered on by each surface from
+  // `agentCreationItems` (already shared) — the spec owns the content list only.
+  const addCtx = useMemo(
+    () => ({
+      hasCwd: !!(useProjects.getState().getProject(activeProjectId)?.ssh?.remoteCwd ??
+        useProjects.getState().getProject(activeProjectId)?.cwd),
+      isSshProject
+    }),
+    [activeProjectId, isSshProject]
+  )
+  const addHandlers = useMemo<AddHandlers>(
+    () => ({
+      terminal: (at) => addTerminal(at),
+      remote: (screenPos) => openRemotePicker(screenPos),
+      browser: (at) => addBrowser(at),
+      web: (at) => void addWebView(at),
+      sticky: (at) => addSticky(at),
+      dino: (at) => addDino(at),
+      openFile: (at) => void openFileDialog(at),
+      newFile: (at) => void newProjectFile(at),
+      worktree: (at) => openWorktreeDialog(null, at)
+    }),
+    [
+      addTerminal,
+      openRemotePicker,
+      addBrowser,
+      addWebView,
+      addSticky,
+      addDino,
+      openFileDialog,
+      newProjectFile,
+      openWorktreeDialog
+    ]
+  )
+
   const onPaneContextMenu = useCallback(
     (e: MouseEvent | React.MouseEvent) => {
       e.preventDefault()
       const at = screenToFlowPosition({ x: e.clientX, y: e.clientY })
-      // "New file…" needs a project folder to create into — hidden when the project has no cwd.
-      const project = useProjects.getState().getProject(activeProjectId)
-      const hasCwd = !!(project?.ssh?.remoteCwd ?? project?.cwd)
+      const screenPos = { x: e.clientX, y: e.clientY }
+      // Split the canonical content list around the agent block: the pane menu shows terminal,
+      // THEN agents, THEN the rest (remote, browser, …, worktree). The spec is still the single
+      // source for WHICH kinds appear and in what order — only the agent interleaving is local.
+      const [terminalItem, ...restContent] = contentAddItemsToMenuItems(
+        CONTENT_ADD_ITEMS,
+        addHandlers,
+        addCtx,
+        at,
+        screenPos
+      )
       setMenu({
         x: e.clientX,
         y: e.clientY,
         items: [
-          // Sessions: local terminal, agent CLIs, remote host.
-          { label: 'New terminal', icon: <IconTerminal />, onClick: () => addTerminal(at) },
+          terminalItem,
           ...agentCreationItems(at),
-          {
-            label: 'New remote…',
-            icon: <IconTerminal />,
-            onClick: () => openRemotePicker({ x: e.clientX, y: e.clientY })
-          },
-          { type: 'separator' },
-          // Content nodes.
-          { label: 'New browser', icon: <IconRemote />, onClick: () => addBrowser(at) },
-          { label: 'New sticky note', icon: <IconNote />, onClick: () => addSticky(at) },
-          { label: 'New dino game', icon: <IconDino />, onClick: () => addDino(at) },
-          { label: 'Open file…', icon: <IconEditor />, onClick: () => void openFileDialog(at) },
-          ...(hasCwd
-            ? [{ label: 'New file…', icon: <IconEditor />, onClick: () => void newProjectFile(at) }]
-            : []),
-          { type: 'separator' },
-          // A worktree lands as a group frame bound to it; nodes created inside inherit its path.
-          // Disabled (with the reason) on an SSH project — see WORKTREE_SSH_HINT.
-          {
-            label: 'New worktree…',
-            icon: <IconBranch />,
-            disabled: isSshProject,
-            hint: isSshProject ? WORKTREE_SSH_HINT : undefined,
-            onClick: () => openWorktreeDialog(null, at)
-          },
+          ...restContent,
           { type: 'separator' },
           // Canvas actions.
           { label: 'Select all', icon: <IconSelectAll />, onClick: selectAll },
+          // fitAll, NOT the raw fitView: fitAll frames against the CURRENT chrome layout (the same
+          // wrapper the command palette's Fit view uses). #227 swapped this to bare fitView, which
+          // loses that framing and lets sidebar/HUD chrome cover part of the fitted content.
           { label: 'Fit view', icon: <IconFit />, onClick: fitAll },
           // Project-wide: restart every idle agent CLI in place (new model pickup). Hidden on a
           // canvas with no restartable agent node — there it could only ever report "0 restarted".
@@ -5604,19 +5818,11 @@ export function Canvas() {
     },
     [
       screenToFlowPosition,
-      activeProjectId,
-      addTerminal,
       agentCreationItems,
-      addSticky,
-      addDino,
-      addBrowser,
-      openFileDialog,
-      newProjectFile,
-      openRemotePicker,
-      openWorktreeDialog,
-      isSshProject,
+      addHandlers,
+      addCtx,
       selectAll,
-      fitView,
+      fitAll,
       hasRestartableAgents,
       restartIdleAgents
     ]
@@ -5807,8 +6013,8 @@ export function Canvas() {
         }
         setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === nodeId })))
         goToNode(node)
-        // Mark this node as the one being watched, so an agent still producing output does not
-        // immediately re-flag it unread after we clear it (unread edges gate on activeId).
+        // Mark this node as watched and its completion as read. Read state is independent of the
+        // live `done` workflow state, so it remains under Waiting for your response.
         useAgentStatus.getState().setActive(nodeId, true)
         useAgentStatus.getState().clearUnread(nodeId)
         return
@@ -6304,7 +6510,7 @@ export function Canvas() {
           if (!depAgent || !hasHooks(depAgent)) {
             reply({
               ok: false,
-              error: `${verb}: --after ${depId} is not an agent session that reports when it is done — only claude/codex/gemini nodes can be waited on`
+              error: `${verb}: --after ${depId} is not an agent session that reports when it is done`
             })
             return null
           }
@@ -6424,8 +6630,8 @@ export function Canvas() {
           }
           case 'open-claude':
           case 'open-agent': {
-            // open-claude is the legacy fixed-agent form; open-agent takes any builtin
-            // (claude/codex/gemini) or custom agent id — resolveAgent falls back for the rest.
+            // open-claude is the legacy fixed-agent form; open-agent takes any builtin or custom
+            // agent id — resolveAgent is the single registry/base-harness resolver for both.
             const agentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
             const count = Math.max(1, Math.min(5, parseInt(args.count || '1', 10) || 1))
             // --group parents the new node(s) into an existing group frame; a worktree-bound
@@ -6971,13 +7177,13 @@ export function Canvas() {
               bindGroupId = g.id
             }
             const baseRef = args.base?.trim() || resolveBaseRef(entries)
-            // Path from the SESSION core's userData (the HOST for a remote tab), not the local
-            // client's — the git worktree op below runs on `api.git`, so the path must live there.
+            // Resolve from this session's repo root, so a relay tab still produces a path on the
+            // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
               explicitPath: args.path,
-              userDataDir: api.userDataDir,
               repoRoot,
-              branch
+              branch,
+              template: useSettings.getState().settings.worktreePathTemplate
             })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
@@ -7482,17 +7688,36 @@ export function Canvas() {
     [renameSession]
   )
 
+  // The sessions-sidebar project-header "+": opens the SAME content menu the pane right-click
+  // uses (terminal + agents + browser/web/sticky/dino/file/worktree), so adding to a project from
+  // the sidebar is no longer a bare-terminal-only affordance that lags the canvas menu. For a
+  // non-active project, switch FIRST (synchronous) so the menu's account rows resolve against the
+  // clicked project; the node is only added on the user's later click, well after that project's
+  // canvas has loaded, so there is no load-race.
   const addToProject = useCallback(
-    (projectId: string) => {
-      if (projectId === activeProjectId) {
-        addTerminal()
-      } else {
-        // Add once the project's nodes have loaded into React Flow (load effect consumes this).
-        pendingAddRef.current = projectId
-        switchProject(projectId)
-      }
+    (projectId: string, e?: { clientX: number; clientY: number }) => {
+      // The sessions-sidebar "+" used to open a bare terminal. It now opens the SAME content menu
+      // the pane right-click uses (terminal + agents + browser/web/sticky/dino/file/worktree), so
+      // adding to a project from the sidebar is no longer a bare-terminal-only affordance that
+      // lags the canvas menu. For a non-active project, switch FIRST (synchronous) so the menu's
+      // account rows resolve against the clicked project; the node is only added on the user's
+      // later click, well after that project's canvas has loaded, so there is no load-race.
+      if (projectId !== activeProjectId) switchProject(projectId)
+      const pos = e ? { x: e.clientX, y: e.clientY } : { x: 80, y: 120 }
+      const [terminalItem, ...restContent] = contentAddItemsToMenuItems(
+        CONTENT_ADD_ITEMS,
+        addHandlers,
+        addCtx,
+        undefined,
+        pos
+      )
+      setMenu({
+        x: pos.x,
+        y: pos.y,
+        items: [terminalItem, ...agentCreationItems(), ...restContent]
+      })
     },
-    [activeProjectId, addTerminal, switchProject]
+    [activeProjectId, switchProject, addHandlers, addCtx, agentCreationItems]
   )
 
   // Sidebar drag-to-group: reparent a session into a canvas group (groupId) or out (null).
@@ -7578,6 +7803,19 @@ export function Canvas() {
               }
             }
           },
+          // Transfer conversation to another agent — the SAME submenu the canvas node right-click
+          // has. Only valid for the ACTIVE project's canvas: transferConversation reads the source
+          // node out of `nodesRef.current` (the live React Flow nodes), which only holds the active
+          // project. For a non-active project the block is empty (no submenu appears), matching the
+          // Duplicate guard's active-project branch.
+          ...(projectId === activeProjectId
+            ? transferConversationItems(id, undefined, {
+                sourceAgentId: agentIdOf(id),
+                sessionId: useAgentStatus.getState().byId[id]?.sessionId,
+                disabledAgents: useSettings.getState().settings.disabledAgents,
+                customAgents: useSettings.getState().settings.customAgents
+              }, transferConversation)
+            : []),
           {
             label: 'Close',
             icon: <IconTrash />,
@@ -7587,7 +7825,16 @@ export function Canvas() {
         ]
       })
     },
-    [activeProjectId, focusNodeById, renameSession, duplicateNodes, closeSession, writeDisk]
+    [
+      activeProjectId,
+      focusNodeById,
+      renameSession,
+      duplicateNodes,
+      closeSession,
+      writeDisk,
+      agentIdOf,
+      transferConversation
+    ]
   )
 
   // Stream live subagent transcript chunks into the agent-nodes store.
@@ -8895,6 +9142,12 @@ export function Canvas() {
             variant={BackgroundVariant.Dots}
             gap={settings.gridSize || GRID}
             size={2.5}
+            /* React Flow centers each dot in its pattern tile, so by default dots sit at cell
+               centers (n·g + g/2) while every grid snap — drag snapGrid and align-to-grid —
+               targets cell corners (n·g). That mismatch makes snapped nodes look half a cell off
+               the dots. offset = size/2 shifts the tiling so dots render exactly on the grid
+               lines (n·g), aligning the visible grid with what snaps to it. */
+            offset={1.25}
             /* React Flow paints the dots from a JS prop, so this can't be a rule — it reads the
                token instead. On white the dark-mode grey reads as noise rather than as a grid. */
             color="var(--canvas-dot)"
@@ -9218,9 +9471,9 @@ export function Canvas() {
           branches={worktreeBranches}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
-              userDataDir,
-              repoPath.split('/').pop() || 'repo',
-              sanitizeWorktreeBranch(branch)
+              repoPath,
+              branch,
+              settings.worktreePathTemplate
             )
           }
           busy={worktreeBusy}
@@ -9341,6 +9594,10 @@ export function Canvas() {
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
         onConnectRemote={() => void connectRemote()}
+        onAddBrowser={() => addBrowser()}
+        onAddWeb={() => void addWebView()}
+        onNewFile={() => void newProjectFile()}
+        onAddWorktree={() => openWorktreeDialog(null)}
         onSave={persist}
         onFitView={fitAll}
         onZoomIn={() => zoomIn({ duration: 150 })}

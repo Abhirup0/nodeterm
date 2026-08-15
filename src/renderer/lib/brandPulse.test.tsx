@@ -25,7 +25,7 @@ import { BrandPulse } from './agentIcons'
  * both surfaces at once; the two thin renderers on top of it are checked separately below.
  */
 describe('brandPulsePlan', () => {
-  it('gives gemini and opencode their own asset mark', () => {
+  it('gives mascot-less asset agents their own mark', () => {
     for (const agentId of ['gemini', 'opencode'] as const) {
       const plan = brandPulsePlan(agentId, 16)
       expect(plan, agentId).toEqual({ kind: 'asset', src: expect.any(String), size: 16 })
@@ -35,11 +35,12 @@ describe('brandPulsePlan', () => {
     }
   })
 
-  it('keeps grok on its INLINE mark, not an asset', () => {
-    // Grok's mark is a single monochrome path drawn in `currentColor`; loading it through `<img>`
-    // would paint it black and lose it on the dark theme. This is the pre-existing behaviour the
-    // generalized pulse must not change.
-    expect(brandPulsePlan('grok', 16)).toEqual({ kind: 'inline', size: 16 })
+  it('keeps grok AND copilot on their INLINE marks, not assets', () => {
+    // Both marks are monochrome paths drawn in `currentColor`; loading them through `<img>` would
+    // fix the fill to one theme's colour (grok black on dark, copilot near-invisible on light).
+    // The generalized inline plan carries WHICH mark so each surface draws the right geometry.
+    expect(brandPulsePlan('grok', 16)).toEqual({ kind: 'inline', mark: 'grok', size: 16 })
+    expect(brandPulsePlan('copilot', 16)).toEqual({ kind: 'inline', mark: 'copilot', size: 16 })
   })
 
   it('answers nothing for an agent with no mark, so the caller falls back to the dot', () => {
@@ -84,8 +85,8 @@ describe('hasBrandLogo', () => {
     expect(hasBrandLogo('grok')).toBe(true)
   })
 
-  it('counts the four asset marks and nothing else', () => {
-    for (const agentId of ['claude', 'codex', 'gemini', 'opencode'] as const) {
+  it('counts every asset mark and nothing else', () => {
+    for (const agentId of ['claude', 'codex', 'gemini', 'opencode', 'copilot'] as const) {
       expect(hasBrandLogo(agentId), agentId).toBe(true)
     }
     expect(hasBrandLogo('custom:abc')).toBe(false)

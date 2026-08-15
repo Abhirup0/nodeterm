@@ -399,6 +399,59 @@ export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | nu
   return null
 }
 
+// GitHub Copilot CLI hook payload. Its event names and snake_case envelope intentionally resemble
+// Claude's, but its event set and notification vocabulary are a separate protocol contract. Keep a
+// dedicated normalizer so a future change in one harness cannot silently change the other's state.
+interface CopilotPayload {
+  hook_event_name?: string
+  session_id?: string
+  prompt?: string
+  notification_type?: string
+  message?: string
+  last_assistant_message?: string
+}
+
+export function normalizeCopilot(env: RawHookEnvelope): NormalizedAgentEvent | null {
+  const p = env.payload as CopilotPayload
+  const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.session_id }
+
+  if (p.hook_event_name === 'SessionStart') {
+    return { ...base, kind: 'session', sessionPhase: 'start' }
+  }
+  if (p.hook_event_name === 'SessionEnd') {
+    return { ...base, kind: 'session', sessionPhase: 'end' }
+  }
+  if (p.hook_event_name === 'UserPromptSubmit') {
+    return { ...base, kind: 'state', state: 'working', task: p.prompt, newTurn: true }
+  }
+  if (
+    p.hook_event_name === 'PreToolUse' ||
+    p.hook_event_name === 'PostToolUse' ||
+    p.hook_event_name === 'PostToolUseFailure'
+  ) {
+    return { ...base, kind: 'state', state: 'working' }
+  }
+  if (p.hook_event_name === 'Stop') {
+    return {
+      ...base,
+      kind: 'state',
+      state: 'done',
+      lastMessage: p.last_assistant_message
+    }
+  }
+  if (p.hook_event_name === 'Notification') {
+    // Closed matches only. Informational/background notification types must never create a sticky
+    // NEEDS YOU badge on a finished parent session.
+    if (p.notification_type === 'permission_prompt') {
+      return { ...base, kind: 'state', state: 'blocked', lastMessage: p.message }
+    }
+    if (p.notification_type === 'elicitation_dialog') {
+      return { ...base, kind: 'state', state: 'waiting', lastMessage: p.message }
+    }
+  }
+  return null
+}
+
 // opencode plugin payload (see core/agents/hooks/opencode.ts). The managed plugin forwards
 // { event, sessionID?, role? } per hook; field names beyond `event` are read defensively —
 // opencode's event payload shapes are not a contract, so the event NAME carries the mapping.
@@ -661,5 +714,6 @@ export function normalizeFor(agentId: AgentId, env: RawHookEnvelope): Normalized
   if (agentId === 'gemini') return normalizeGemini(env)
   if (agentId === 'opencode') return normalizeOpencode(env)
   if (agentId === 'grok') return normalizeGrok(env)
+  if (agentId === 'copilot') return normalizeCopilot(env)
   return null
 }

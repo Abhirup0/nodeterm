@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS } from './types'
+import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 
 describe('DEFAULT_SETTINGS', () => {
   it('enables git auto-fetch by default', () => {
@@ -18,5 +19,9 @@ describe('DEFAULT_SETTINGS', () => {
     // permission auto-grants enabled. This reaches existing users via
     // { ...DEFAULT_SETTINGS, ...saved } hydration. Do not change without a decision.
     expect(DEFAULT_SETTINGS.claudePermissionMode).toBe('auto')
+  })
+
+  it('uses the shared worktree path template default', () => {
+    expect(DEFAULT_SETTINGS.worktreePathTemplate).toBe(DEFAULT_WORKTREE_PATH_TEMPLATE)
   })
 })

@@ -640,7 +640,7 @@ Monaco is wired in `renderer/editor/monaco-setup.ts` (language workers bundled v
 `?worker` — no CDN; CSP `worker-src` allows them). Markdown rendering is shared in
 `renderer/lib/markdown.ts` (`marked` + DOMPurify sanitize).
 
-## Agent support (Claude / Codex / Gemini / opencode / Grok / custom)
+## Agent support (Claude / Codex / Gemini / Copilot / opencode / Grok / custom)
 
 The app is a pluggable multi-agent system: Claude Code is one builtin of
 several. Extra terminal-node behavior is driven per agent by a registry + capability lists, a
@@ -650,13 +650,13 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
 `nodeterm.agentStatus`, migrated once from the legacy `nodeterm.claudeStatus` key).
 
 - **Agent registry + capabilities** — `src/shared/agents/config.ts` holds `AGENT_CONFIG`
-  (claude/codex/gemini/opencode/grok: id, label, spawn command, color, `promptInjectionMode`, …) keyed
+  (claude/codex/gemini/copilot/opencode/grok: id, label, spawn command, color, `promptInjectionMode`, …) keyed
   by an **open** `AgentId`
   type (so custom ids fit). Capabilities are membership lists, not flags:
   `AGENT_HOOK_TARGETS`, `RESUMABLE_AGENTS`, `SUBAGENT_CAPABLE`, `RECURRING_CAPABLE`,
   `BRANCH_CAPABLE`, `CONTEXT_LINK_CAPABLE`, `USAGE_CAPABLE`, `CHAT_CAPABLE`,
   `TRANSFER_SOURCE_CAPABLE`, `RENAME_CAPABLE`, `TITLE_READ_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
-  `PERMISSION_MODE_CAPABLE`, with helpers (`hasHooks`,
+  `PERMISSION_MODE_CAPABLE`, `MODEL_SWITCH_CAPABLE`, with helpers (`hasHooks`,
   `canBranch`, `canContextLink`, `canChat`, `canRename`, `canReadTitle`, `hasPermissionMode`, …).
   Branch and the ⌘M **ChatPanel** transcript view (`CHAT_CAPABLE` / `canChat` — since the SDK chat
   node was removed, 2026-07, this is all `canChat` now gates) stay **Claude-only** purely by
@@ -667,12 +667,38 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   sync is **split in two** — `TITLE_READ_CAPABLE = claude/grok/gemini` (read) ⊇ `RENAME_CAPABLE =
   claude/grok` (write), because gemini names its own sessions but has no rename command;
   **Context Link** spans four builtins
-  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode`, NOT grok). UI gates
-  on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings, `customAgents`) are in
-  no capability list: spawn + terminal-title + process status only. Per-agent write-ups:
-  **`docs/grok-agent.md`**, **`docs/gemini-agent.md`** (there is none for codex — its approval mapping
+  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode`, NOT grok/copilot). UI gates
+  on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings,
+  `customAgents`) inherit the declared `baseAgent` harness through `capabilityAgentId`; a custom
+  agent with no base remains spawn + terminal-title + process status only. Per-agent write-ups:
+  **`docs/grok-agent.md`**, **`docs/gemini-agent.md`**, **`docs/copilot-agent.md`** (there is none for codex — its approval mapping
   and every value's reasoning live in `src/shared/agents/approval-mode.ts`);
   the distilled rules are **Adding a new agent** at the end of this section.
+- **Model gateway / switcher** — `settings.modelGateway` stores one gateway root + a NON-SECRET
+  credential reference: `${env:VAR}` for environment mode or
+  `${secret:model-gateway-api-key}` for a literal held by `ModelGatewayCredentialService`. Desktop
+  literal keys reuse the GitHub token store's safeStorage encryption / 0600 fallback; Server
+  Edition uses the same generic 0600 atomic store. Legacy plaintext settings migrate only after
+  the secret write succeeds. `shared/agents/model-gateway.ts` is the ONE mapping from a base
+  harness to derived routes, env vars, compatible models and safely quoted model flags. Env
+  expansion reuses `shared/agents/expansion.ts` and happens only in core against the host process
+  environment; an unset reference fails closed instead of sending a token or partial credential.
+  Discovery at `/v1/models` is the **OpenAI Models API convention**, implemented by both LiteLLM
+  and Bifrost; the current `/openai/v1` + `/anthropic` launch-route derivation is Bifrost's layout,
+  not the source of the discovery convention. Discovery sends the standard bearer header plus
+  Bifrost's `x-bf-vk` header (needed by legacy, non-`sk-bf-` virtual keys), and runs in core
+  (`agent:discover-models`) so browser CORS cannot block the Server Edition and the key never
+  enters a terminal command. Support is a
+  capability (`MODEL_SWITCH_CAPABLE = claude/codex/copilot`) resolved through `capabilityAgentId`, so a
+  custom agent with a supported `baseAgent` inherits it automatically — the settings UI and canvas
+  menu carry no agent allowlist. A model switch SIGTERMs the pane's foreground non-shell process
+  group (never types `/exit`) and RECYCLES the tmux session before cold-resume: an existing shell may
+  predate the gateway setting, and tmux env changes do not retroactively change that shell's
+  environment. Recreating it guarantees the current URL/key applies without typing a secret into
+  the pane. Ordinary Restart stays in-place. Custom-agent env is still merged last and may override
+  the shared mapping. Desktop and Server Edition use the same core handler; relay tabs deliberately
+  do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
+  before it can expose the feature.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
   `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE` and `CANVAS_CONTROL_CAPABLE`; NOT in
   `USAGE_CAPABLE` / `CONTEXT_LINK_CAPABLE` / `SUBAGENT_CAPABLE` (each blocked on a fixture that needs a
@@ -818,7 +844,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   own gate adds one beside claude's.
 - **State via each agent's hooks → shared 4-state model** — detection uses the agent's own
   hooks, **not** output parsing. `src/shared/agents/normalize.ts` has per-agent normalizers
-  (`normalizeClaude`/`normalizeCodex`/`normalizeGemini`/`normalizeOpencode`/`normalizeGrok`) that map each agent's native hook
+  (`normalizeClaude`/`normalizeCodex`/`normalizeGemini`/`normalizeCopilot`/`normalizeOpencode`/`normalizeGrok`) that map each agent's native hook
   events to a `NormalizedAgentEvent` over the shared `AgentState` (`working | waiting | blocked
   | done`) plus subagent/recurring/session kinds. Canvas's listener consumes
   `NormalizedAgentEvent` from `agent:status`, drives the `agentStatus` store, fires throttled
@@ -895,7 +921,16 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   (shown only when `mainWin.isFocused()` is false); clicking it focuses the window and sends
   `app:focus-node` → `Canvas.focusNodeById` (selects + centers, switching projects via
   `pendingFocusRef` if needed). A one-time consent prompt gates notifications; toggle in
-  Settings (`notifyOnClaudeDone`). Unread clears on focus/select.
+  Settings (`notifyOnClaudeDone`). Selecting, focusing, dwelling into, or opening a session card
+  clears `unread` and ACKs the finish across phone/notch surfaces — existing read-on-view behavior.
+  This NEVER changes the workflow bucket: read state is independent from agent state.
+- **Status-grouped sessions** — three always-visible sections: **Waiting for your response** maps
+  internal `done`, `waiting`, and `blocked` together (a completed turn, question, or approval all
+  need the user); **Running** maps `working`; **Unknown** means no live hook state is available.
+  There is no Done bucket: a normal `done` hook means the turn ended and the agent is waiting for
+  another user prompt. Within each section rows sort newest-first by `lastEventAt`, the transition
+  clock (same-state hook freshness is `stateAt`), and show its short relative age. Missing clocks
+  stay last with no made-up timestamp. A click may clear the glow but cannot move the row.
 - **Session name ⇄ node title** — **two lists, because the two directions are separate facts**:
   `TITLE_READ_CAPABLE` (`canReadTitle` — claude, grok, **gemini**) is the READ leg, `RENAME_CAPABLE`
   (`canRename` — claude, grok) the WRITE leg, and **read ⊇ write** is an invariant pinned in
@@ -1003,7 +1038,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   the session id already known from hooks; `lib/claudeBranch.ts` is the fallback that parses
   `pty.capture` output when the id isn't known. The source node stays on the new branch.
 - **Canvas control (manage-nodeterm-canvas)** — agents in `CANVAS_CONTROL_CAPABLE`
-  (claude/codex/gemini/opencode/grok) can create/organize/control canvas nodes from inside their
+  (claude/codex/gemini/copilot/opencode/grok) can create/organize/control canvas nodes from inside their
   session: a POSIX **sh+curl** shim (`nodeterm.sh`, `CONTROL_SHIM_SCRIPT` in
   `main/canvas-control-core.ts` — the Electron-as-Node CLI is retired) POSTs
   **form-urlencoded** (`nodeId` + `arg.<flag>` fields; `curl --data-urlencode` is the only
@@ -1012,7 +1047,8 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   reply (sh has no JSON parser). Env-gated on `NODETERM_CANVAS_CONTROL` (set by
   `buildPtyEnv`/`remoteHookEnvArgs` per `canControlCanvas`). Discovery: claude gets a
   `skills/manage-nodeterm-canvas/SKILL.md` (system `~/.claude` + each managed account dir);
-  codex/gemini/opencode get a marker block (`<!-- nodeterm:manage-canvas:start/end -->`); **grok needs
+  codex/gemini/opencode plus Copilot's `copilot-instructions.md` get a marker block
+  (`<!-- nodeterm:manage-canvas:start/end -->`); **grok needs
   no installer at all** — it scans `~/.claude/skills` by default for Claude compat, so membership alone
   (which sets `NODETERM_CANVAS_CONTROL`) is the whole wiring. That premise rests on grok's shipped
   docs and is **unverified** (`grok inspect --json` never run); if it does not hold, grok takes the
@@ -1347,6 +1383,16 @@ principle. Per-agent write-ups: `docs/grok-agent.md`, `docs/gemini-agent.md`.
 16. **Write the device checklist for what you could not run.** Every unverified claim becomes a
     numbered item; group the ones that fall out of a single capture run. `docs/grok-agent.md` §9 and
     `docs/gemini-agent.md` §9 are the format.
+17. **Extend the base harness mapping, never a frontend allowlist.** Model support is
+    `MODEL_SWITCH_CAPABLE` plus the protocol/env/flag leaf in `shared/agents/model-gateway.ts`.
+    Frontends call `canSwitchModel` / `modelsForAgent`; they never spell Claude, Codex or a custom
+    id themselves. This makes `baseAgent:'claude'` inherit discovery, filtering, environment and
+    command grammar as one unit instead of four copies that drift.
+18. **A model switch must refresh the shell environment without printing the key.** An already-live
+    shell does not inherit a later `tmux set-environment`, and prefixing the resume line with
+    `KEY=secret` leaks it into the pane/history. SIGTERM the pane's foreground non-shell process
+    group (a typed `/exit` can land in the agent composer as prompt text), recycle the persistent
+    session, and let cold restore resume with the new model under the newly injected environment.
 
 ## Session memory (the RAM pill + the per-session panel)
 
@@ -1584,6 +1630,13 @@ again; the grace window was never the thing that was wrong.
   worktrees listed for adoption. (Both git IPCs existed before this feature and had **zero**
   renderer callers, which is why it was unusable: the dialog's repo field was always empty and had
   to be typed by hand. Don't re-strand them.)
+  - **Default location** — `settings.worktreePathTemplate` is a machine-global Behavior setting,
+    expanded only by `shared/worktree.computeWorktreePath` for both the dialog and canvas-control
+    CLI. It is relative to the repo root and supports `$repoName` (`$reponame` /
+    `$defaultFolderName` aliases) and `$branch` in bare or `${…}` form. If branch is omitted, its
+    safe slug is appended automatically. The shipped `../${repoName}.worktrees/${branch}` keeps
+    worktrees beside — not nested inside — the main checkout. There is no general project-settings
+    surface today, so the setting is intentionally global rather than hidden in a one-off menu.
   - **One store, one poller** — `renderer/state/worktrees.ts` is the **only** caller of the worktree
     /status *read* IPCs (`git.repoRoot`, `git.worktreeList`, `git.status`); the group chip, the
     creation dialog and the Source Control panel all read that store. Three independent pollers would

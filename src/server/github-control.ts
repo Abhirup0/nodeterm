@@ -1,13 +1,14 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { GitHubSecretStore } from '../core/github/credentials'
+import type { SecretStore } from '../core/secret-store'
 import type { CorePlatform } from '../core/platform'
 import type { GitHubHostController } from '../core/github/host'
 import { IPC } from '../shared/ipc'
 
 const FILE_NAME = 'github-issues-token.json'
 
-export class ServerGitHubSecretError extends Error {
+export class ServerSecretStoreError extends Error {
   constructor(readonly code: 'invalid-token') {
     super(code)
   }
@@ -53,7 +54,9 @@ async function sweepStaleTmp(target: string): Promise<void> {
   }
 }
 
-export class ServerGitHubSecretStore implements GitHubSecretStore {
+/** Generic headless secret store. Server Edition has no OS keyring, so callers receive the same
+ *  owner-only atomic file semantics instead of copying the GitHub token implementation. */
+export class ServerSecretStore implements SecretStore {
   readonly availability = 'restricted-file' as const
 
   /** Mutations run FIFO (the WorkspaceStore.saveChain idiom): a clear's rm must never land inside
@@ -61,7 +64,10 @@ export class ServerGitHubSecretStore implements GitHubSecretStore {
    *  UI just reported cleared. Each caller still sees only its own mutation's failure. */
   private chain: Promise<unknown> = Promise.resolve()
 
-  constructor(private readonly userDataDir: string) {}
+  constructor(
+    private readonly userDataDir: string,
+    private readonly fileName: string
+  ) {}
 
   private chained<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.chain.then(fn)
@@ -70,7 +76,7 @@ export class ServerGitHubSecretStore implements GitHubSecretStore {
   }
 
   private get filePath(): string {
-    return path.join(this.userDataDir, FILE_NAME)
+    return path.join(this.userDataDir, this.fileName)
   }
 
   save(token: string): Promise<void> {
@@ -78,7 +84,7 @@ export class ServerGitHubSecretStore implements GitHubSecretStore {
   }
 
   private async saveNow(token: string): Promise<void> {
-    if (!validToken(token)) throw new ServerGitHubSecretError('invalid-token')
+    if (!validToken(token)) throw new ServerSecretStoreError('invalid-token')
     await fs.mkdir(this.userDataDir, { recursive: true })
     await sweepStaleTmp(this.filePath)
     // The store's per-instance chain orders this write against its sibling mutations; the per-call
@@ -123,6 +129,12 @@ export class ServerGitHubSecretStore implements GitHubSecretStore {
     } catch {
       return null
     }
+  }
+}
+
+export class ServerGitHubSecretStore extends ServerSecretStore implements GitHubSecretStore {
+  constructor(userDataDir: string) {
+    super(userDataDir, FILE_NAME)
   }
 }
 

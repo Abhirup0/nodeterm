@@ -82,7 +82,7 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
 
     // ── CORE-BOUND: route to the REMOTE core over the relay RpcClient. ──
     workspace: real.workspace, // the host's canvas/project files
-    userDataDir: real.userDataDir, // the host's writable base — worktree default paths live there
+    userDataDir: real.userDataDir, // the host's writable base
     fs: files.fs,
     git: files.git,
     files: files.files,

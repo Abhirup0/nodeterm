@@ -1,3 +1,4 @@
+import { tmuxUpdateEnvironmentLine } from './agents/model-gateway'
 /**
  * Pure helpers for launching the system `ssh` binary as a terminal session program.
  * No Electron, no node-pty — unit-testable in isolation.
@@ -279,6 +280,11 @@ set -g default-terminal "xterm-256color"
 set -sg escape-time 10
 set -g destroy-unattached off
 setw -g aggressive-resize on
+# Credentials travel HERE, not on argv: over SSH the gateway/custom env is sourced from a 0600
+# file into the remote tmux client's environment, and update-environment copies the listed names
+# into the session at create/attach. The old '-e KEY=VALUE' route parked the values on the LOCAL
+# ssh client's command line for the whole session (and on the remote process table at creation).
+${tmuxUpdateEnvironmentLine()}
 # OSC 52 to the client, which writes the LOCAL clipboard. BOTH lines are needed on tmux 3.2+ — see
 # remoteTmuxConf's doc comment before touching either.
 # MIGRATION — do not remove. Older versions of this file blanked smcup/rmcup/indn via

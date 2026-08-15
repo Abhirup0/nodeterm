@@ -14,11 +14,21 @@ import type { ServerConfig } from './config'
 import { initPlatform } from '../core/platform'
 import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
+import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
-import { registerServerGitHubControl, ServerGitHubSecretStore } from './github-control'
+import {
+  registerServerGitHubControl,
+  ServerGitHubSecretStore,
+  ServerSecretStore
+} from './github-control'
+import {
+  migrateLegacyModelGatewayKey,
+  MODEL_GATEWAY_SECRET_FILE,
+  ModelGatewayCredentialService
+} from '../core/model-gateway-credentials'
 import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import os from 'os'
@@ -159,8 +169,32 @@ export async function startServer(
   const workspaceStore = new WorkspaceStore()
 
   settingsStore.init()
+  const gatewayCredentials = new ModelGatewayCredentialService(
+    new ServerSecretStore(config.dataDir, MODEL_GATEWAY_SECRET_FILE)
+  )
+  await gatewayCredentials.init()
+  try {
+    const migratedGateway = await migrateLegacyModelGatewayKey(
+      settingsStore.get().modelGateway,
+      gatewayCredentials
+    )
+    if (migratedGateway) {
+      await settingsStore.save({ ...settingsStore.get(), modelGateway: migratedGateway })
+    }
+  } catch (error) {
+    console.warn('[model-gateway] could not migrate the legacy API key to secret storage', error)
+  }
   settingsStore.registerIpc()
-  ptyManager.init(() => settingsStore.get())
+  // Gateway discovery/credential IPC. NO env snapshot on the server: every registered handler
+  // here is dispatchable by any authenticated WS client, and the server process environment is
+  // exactly the secret store that must never cross that boundary. Browser clients hardcode an
+  // empty snapshot and `${env:VAR}` expansion degrades to the missing-env refusal; discovery
+  // resolves key REFERENCES only for the saved gateway URL (the exfil-oracle gate in core).
+  registerAgentEnvIpc(() => settingsStore.get().modelGateway, gatewayCredentials)
+  ptyManager.init(
+    () => settingsStore.get(),
+    () => gatewayCredentials.readForHost()
+  )
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
   // Dictation: same construction as src/main/index.ts, with the server's data dir. onProgress

@@ -26,7 +26,7 @@ describe('createAgentNode mints a session id when the CLI accepts one', () => {
     expect(a.data.agentSessionId).not.toBe(b.data.agentSessionId)
   })
 
-  // Only claude accepts a caller-chosen id. For every other agent the command line must stay
+  // Claude and Copilot accept a caller-chosen id. For every other agent the command line must stay
   // exactly what it was, or an unknown flag kills the launch.
   it('leaves non-capable agents unstamped and their command unchanged', () => {
     for (const id of ['codex', 'gemini', 'grok', 'opencode'] as const) {
@@ -34,6 +34,13 @@ describe('createAgentNode mints a session id when the CLI accepts one', () => {
       expect(n.data.agentSessionId).toBeUndefined()
       expect(n.data.initialCommand).not.toContain('--session-id')
     }
+  })
+
+  it('mints Copilot ids without borrowing the Claude CLI probe', () => {
+    resetClaudeCliCapsForTests()
+    const n = createAgentNode('copilot', 0)
+    expect(n.data.agentSessionId).toMatch(UUID_RE)
+    expect(n.data.initialCommand).toContain(`--session-id=${n.data.agentSessionId}`)
   })
 
   it('still carries the prompt alongside the flag', () => {
