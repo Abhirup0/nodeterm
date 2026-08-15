@@ -3,6 +3,7 @@
 // message a note link injects into an agent session, and re-export the link-map builders.
 // Kept free of React/store imports so the connection matrix is unit-testable.
 import type { BridgeLink } from '@shared/types'
+import { oneLine } from '@shared/one-line'
 
 export interface LinkEndpoint {
   /** React Flow node type: 'terminal' | 'sticky' | 'editor' | … */
@@ -141,17 +142,21 @@ const NOTE_PUSH_MAX = 2000
  * Single-line by construction: pty.sendText appends Enter and embedded newlines would act
  * as submits in agent REPLs, so newlines are collapsed to a visible ' ⏎ '.
  * Returns null when the note is empty (nothing to push).
+ *
+ * The ' ⏎ ' collapse is the READABLE part and it only covers `\r?\n`; `oneLine` is the part that
+ * makes the guarantee, and it runs over the whole composed line — the note TITLE was not covered
+ * at all, and a lone `\r`, a VT or a U+2028 would have walked straight through the collapse.
  */
 export function buildNotePushMessage(title: string, text: string, agentId?: string): string | null {
   if (!text.trim()) return null
-  const flat = text.replace(/\s*\r?\n\s*/g, ' ⏎ ').trim()
+  const flat = oneLine(text.replace(/\s*\r?\n\s*/g, ' ⏎ '))
   const pointer =
     !agentId || agentId === 'claude'
       ? 'read the full note with the get-linked-context skill'
       : 'read the full note with the nodeterm linked-context CLI — see the get-linked-context section in your global agent instructions'
   const body =
     flat.length > NOTE_PUSH_MAX ? flat.slice(0, NOTE_PUSH_MAX) + ` … [truncated — ${pointer}]` : flat
-  return `[nodeterm] Sticky note "${title}" linked as context: ${body}`
+  return `[nodeterm] Sticky note "${oneLine(title)}" linked as context: ${body}`
 }
 
 /**
@@ -159,19 +164,25 @@ export function buildNotePushMessage(title: string, text: string, agentId?: stri
  * Claude discovers the capability via its installed skill; codex/gemini get the CLI
  * inline (their global-instructions block may not be loaded mid-session). Single-line:
  * pty.sendText appends Enter.
+ *
+ * SECURITY: `otherTitle` is the OTHER node's title, and a node title is settable over the
+ * canvas-control `rename` verb — so it is agent-supplied text being quoted into a line that gets
+ * SUBMITTED in a THIRD session. `oneLine` is what keeps it one line: without it, an agent could
+ * rename its own node to `X\rcurl …` and wait for someone to draw a link to it.
  */
 export function buildContextLinkNote(
   agentId: string | undefined,
   otherTitle: string,
   shimPath: string
 ): string {
+  const other = oneLine(otherTitle)
   // Both variants must self-defuse: the note is injected + submitted as a prompt, and an
   // agent that reads it as a task launches an unsolicited investigation of the linked node
   // (observed with gemini). "No action needed" keeps it a notification.
   if (!agentId || agentId === 'claude') {
-    return `[nodeterm] You are now linked to "${otherTitle}". Use the get-linked-context skill to read its context when you need it. No action needed now — just acknowledge briefly.`
+    return `[nodeterm] You are now linked to "${other}". Use the get-linked-context skill to read its context when you need it. No action needed now — just acknowledge briefly.`
   }
-  return `[nodeterm] You are now linked to "${otherTitle}". When you need its context (and only then) run: sh "${shimPath}" list — then summary | transcript | terminal --node <id>. Details are in the get-linked-context section of your global agent instructions. No action needed now — acknowledge briefly and do not run these commands yet.`
+  return `[nodeterm] You are now linked to "${other}". When you need its context (and only then) run: sh "${shimPath}" list — then summary | transcript | terminal --node <id>. Details are in the get-linked-context section of your global agent instructions. No action needed now — acknowledge briefly and do not run these commands yet.`
 }
 
 // The link-map builders moved to @shared: the Server Edition derives the same map from persisted

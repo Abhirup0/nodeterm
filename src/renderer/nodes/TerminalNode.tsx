@@ -126,6 +126,7 @@ import { isZoomModifierHeld } from '../lib/zoomModifier'
 import { isHidden } from '../lib/ui-visibility'
 import { readsClaudeTranscript } from '../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../lib/projectJump'
+import { renameCommand } from '../lib/sessionRename'
 import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
@@ -3794,8 +3795,10 @@ export function TerminalNode({
 
   // A rename-capable agent's session name follows the node title: push `/rename <name>` into
   // the live session (tmux send-keys, like Branch's /branch). No-op for other agents/shells.
+  // The line is composed by `renameCommand` — the shared one, which is what keeps a `\n` in the
+  // name from submitting a SECOND line here (✦ Name with AI feeds this a model's answer).
   const pushSessionRename = (name: string) => {
-    if (canRenameNode && name) void api.pty.sendText(id, `/rename ${name}`)
+    if (canRenameNode && name) void api.pty.sendText(id, renameCommand(name))
   }
 
   // The user took over the name (manual rename or ✦ AI-name): stop auto-tracking the session

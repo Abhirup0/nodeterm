@@ -3,10 +3,28 @@
 // The io is injected so the gate below is unit-testable: it is the fix for a real data-loss bug,
 // not a nicety. Lives outside Canvas.tsx for that reason alone.
 import { isShellCommand } from '../terminal/agent-restart'
+import { oneLine } from '@shared/one-line'
 
 /** How long to wait for an agent CLI to take its pane before giving up on the mirror. */
 export const RENAME_PUSH_ATTEMPTS = 12
 export const RENAME_PUSH_RETRY_MS = 500
+
+/**
+ * The one place the `/rename` line is composed — SECURITY, not tidiness.
+ *
+ * `sendText` appends Enter, so this line is SUBMITTED. A `\n` or `\r` in `name` would end it
+ * early and turn the rest into a second submitted line in the agent's composer: a command its
+ * operator never typed. `name` is not ours — it arrives from the canvas-control `rename` verb's
+ * `--title` (so from another AGENT), from `generateName`'s model output, and from the workspace
+ * file. `oneLine` is what makes the line one line; the name still reads, minus a character that
+ * had no glyph.
+ *
+ * Both push sites call this (here and TerminalNode's header rename). A second composition site is
+ * how the two would drift, and this file already exists because of one such drift.
+ */
+export function renameCommand(name: string): string {
+  return `/rename ${oneLine(name)}`
+}
 
 export interface RenamePushIo {
   paneCommand(persistKey: string): Promise<string | null>
@@ -40,7 +58,7 @@ export async function pushSessionRename(
     if (i > 0) await sleep(RENAME_PUSH_RETRY_MS)
     const pane = await io.paneCommand(nodeId).catch(() => null)
     if (pane && !isShellCommand(pane)) {
-      void io.sendText(nodeId, `/rename ${name}`)
+      void io.sendText(nodeId, renameCommand(name))
       return true
     }
   }
