@@ -116,6 +116,15 @@ export class WorkspaceStore {
    *  save may NOT blind-write the mirror: a fresh/re-added project would clobber a populated
    *  server file it has never looked at (the ".nodeterm reset itself" bug). Runtime-only. */
   private reconciled = new Set<string>()
+  /** ssh project id -> node ids a save REMOVED from that project's cache and the server has not been
+   *  told about yet. The one discriminator between the two ways our cache can lack a node the server
+   *  has: "the user deleted it here" (the deletion must travel — never rescue it back) and "we simply
+   *  never had it" (the phone appended it while we were looking away — never delete it). Both rescue
+   *  sites consult it; a confirmed write / an adopt drops the entry, because the server then already
+   *  reflects our side. Runtime-only: after a restart an UNMIRRORED clear is indistinguishable from a
+   *  node we never had, and the tie is broken toward rescuing (a resurrected node is visible and
+   *  deletable again; a deleted session node is gone with no trace of where it went). */
+  private clearedNodes = new Map<string, Set<string>>()
   /** Last index written/loaded — lets readLocalRef/refresh resolve entries without a full load. */
   private index: WorkspaceIndexV3 | null = null
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
@@ -510,12 +519,16 @@ export class WorkspaceStore {
     for (const e of index.entries) {
       if (!e.ssh || !e.cache) continue
       const prevRev = this.revs.get(e.id) ?? 0
-      const changedSinceLoad = !this.index?.entries.some(
-        (old) => old.id === e.id && old.cache && sameProjectContent(old.cache, e.cache!)
-      )
+      const previousCache = this.index?.entries.find((old) => old.id === e.id && old.cache)?.cache
+      const changedSinceLoad = !(previousCache && sameProjectContent(previousCache, e.cache))
       e.cache.rev = changedSinceLoad ? prevRev + 1 : prevRev
       this.revs.set(e.id, e.cache.rev)
       if (!this.remoteIO) continue
+      // Anything this save dropped is a deliberate local deletion — remember it until the server has
+      // been told, so the mirror write's re-read below can tell it apart from a node we never had.
+      // Without that record the re-read would hand every just-deleted node straight back on the very
+      // write that was supposed to remove it, and no node on an ssh project could ever be closed.
+      this.recordLocalDeletions(e.id, previousCache?.nodes, e.cache.nodes)
       if (!this.reconciled.has(e.id)) {
         // Never blind-write a remote file we have not read yet: the first mirror of a fresh or
         // re-added project must LOOK first — an existing lineage on the server may win (adopted,
@@ -528,20 +541,13 @@ export class WorkspaceStore {
       // often races the ControlMaster coming up — its write is dropped fail-open, and without
       // the retry nothing rewrites until the next real content change).
       //
-      // KNOWN GAP (concurrent write, follow-up): this is a BLIND mirror write — it does not re-read
-      // the server first. While the desktop is connected, the connected-project poll
-      // (refreshSshProject, ~15s) reconciles + rescues a phone-appended node (reconcileSsh above), but
-      // a local edit whose 5s-throttled mirror write fires INSIDE that poll window overwrites the
-      // server before the poll adopts the append — the phone's session is lost until it is re-created.
-      // Closing it means routing this write through reconcileSsh (read → union → write) so it can
-      // never clobber a remote-only node; deferred here because that adds an SSH round-trip to every
-      // changed save (the poll was the deliberate cheaper alternative). The connect-LATER path — the
-      // reported field bug — is fully fixed by the union in reconcileSsh.
-      if (changedSinceLoad || this.unmirrored.has(e.id)) {
-        const ok = await this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
-        if (ok) this.unmirrored.delete(e.id)
-        else this.unmirrored.add(e.id)
-      }
+      // The write RE-READS the server first (mirrorSshCache) — it used to be blind, which is the
+      // gap that cost users a phone-started session: the phone appends its node to the server file
+      // at T0, the user drags a node here at T0+2s, and that ordinary save's mirror write pushed a
+      // cache that had never seen the append, deleting it from both sides for good. The ~15s poll
+      // only rescued the appends that happened to land outside its own window. The re-read costs one
+      // extra round-trip per CHANGED save (an unchanged, already-mirrored save still reads nothing).
+      if (changedSinceLoad || this.unmirrored.has(e.id)) await this.mirrorSshCache(e)
     }
 
     // Back up the raw v2 file BEFORE the v3 index flip: a crash between the two must never leave a
@@ -811,8 +817,19 @@ export class WorkspaceStore {
    * an OUR-write indistinguishable from a teammate's; the store's own caches (getNode,
    * persistedCanvases) were left holding a file they knew was outdated. Record the write like any
    * other and send the notification ourselves.
+   *
+   * It runs ON `saveChain`, like save(): this is a read-modify-write of the SAME project.json a save
+   * rewrites whole, and off the chain the two interleave — the phone registers its node, an autosave
+   * that read the file first lands last, and the node the phone was told about ("true", card shown)
+   * never existed. Queued, the append reads what the save just wrote and the save cannot un-write it.
    */
-  async appendRemoteNode(projectId: string, input: RemoteNodeInput, now = new Date()): Promise<boolean> {
+  appendRemoteNode(projectId: string, input: RemoteNodeInput, now = new Date()): Promise<boolean> {
+    const run = this.saveChain.then(() => this.appendRemoteNodeNow(projectId, input, now))
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  private async appendRemoteNodeNow(projectId: string, input: RemoteNodeInput, now: Date): Promise<boolean> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
     if (!e?.cwd) return false
     const file = projectFilePath(e.cwd)
@@ -848,6 +865,91 @@ export class WorkspaceStore {
       )
     } catch { /* the file is written and cached; the next load/poll surfaces the node */ }
     return true
+  }
+
+  /**
+   * The mirror write for one ssh entry, with the server's own additions rescued first.
+   *
+   * Never write the server file without looking at it: between two of our saves the OTHER writer of
+   * this same file (the mobile companion, appending a session it just started) may have added a node
+   * that exists nowhere else. Serializing our cache over it is a silent, permanent delete of a live
+   * session — the canvas node is gone on both machines while the tmux session keeps running.
+   */
+  private async mirrorSshCache(e: IndexEntryV3): Promise<void> {
+    if (!e.ssh || !e.cache || !this.remoteIO) return
+    const rescued = await this.rescueRemoteNodes(e)
+    // AFTER the rescue: it replaces e.cache with the merged copy, which is what must land.
+    const ok = await this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
+    if (ok) {
+      this.unmirrored.delete(e.id)
+      // The server now holds exactly our cache, deletions included — nothing left to remember.
+      this.clearedNodes.delete(e.id)
+    } else {
+      this.unmirrored.add(e.id)
+    }
+    // A rescued node is live on the server and missing from the live canvas: say so now, the same
+    // way the reconcile path does, instead of leaving the user to wait for the next poll.
+    if (rescued) platform().broadcast(IPC.workspaceExternalChange, rescued)
+  }
+
+  /**
+   * Reads the server file and unions in the session nodes it has that our cache lacks. Returns the
+   * merged project to announce, or null when nothing moved — which includes every case where the
+   * read could not answer (error, absent, corrupt) and the DIFFERENT-lineage case: a failed read is
+   * never evidence of absence, so it changes nothing and the caller writes exactly what it would
+   * have written before. Which lineage wins is `reconcileSsh`'s call alone; merging a stranger's
+   * nodes into our canvas would not be a rescue.
+   */
+  private async rescueRemoteNodes(e: IndexEntryV3): Promise<Project | null> {
+    if (!e.ssh || !e.cache || !this.remoteIO) return null
+    const res = await this.remoteIO.read(e.id, e.ssh)
+    if (res.status !== 'ok') return null
+    let remote: ProjectFileV1 | null = null
+    try {
+      const parsed = JSON.parse(res.content) as ProjectFileV1
+      if (parsed?.version === 1 && Array.isArray(parsed.nodes)) remote = parsed
+    } catch { /* corrupt server file — our cache is the only readable copy; it is written as-is */ }
+    if (!remote || remote.id !== e.cache.id) return null
+    const rescued = this.rescuableNodes(e.id, e.cache.nodes, remote.nodes)
+    if (!rescued.length) return null
+    // The merged set must outrank both sides, or the next reconcile could rev-decide it away.
+    e.cache = {
+      ...e.cache,
+      nodes: [...e.cache.nodes, ...rescued],
+      rev: Math.max(e.cache.rev, remote.rev) + 1
+    }
+    this.revs.set(e.id, e.cache.rev)
+    return fileToProject(e.cache, {
+      id: e.id, ssh: e.ssh, closed: e.closed,
+      viewport: e.viewport, defaultAccountId: e.defaultAccountId, localExec: e.localExec
+    })
+  }
+
+  /** The remote-only nodes worth rescuing: on the server, absent from `ours`, and NOT among the ones
+   *  we deliberately deleted (see `clearedNodes` — those must propagate, not resurrect). */
+  private rescuableNodes(
+    projectId: string,
+    ours: CanvasNodeState[],
+    theirs: CanvasNodeState[]
+  ): CanvasNodeState[] {
+    const cleared = this.clearedNodes.get(projectId)
+    const missing = nodesMissingFrom(ours, theirs)
+    return cleared ? missing.filter((n) => !cleared.has(n.id)) : missing
+  }
+
+  /** Record the nodes a save removed from an ssh cache (see `clearedNodes`). */
+  private recordLocalDeletions(
+    projectId: string,
+    before: CanvasNodeState[] | undefined,
+    after: CanvasNodeState[]
+  ): void {
+    if (!before?.length) return
+    const kept = new Set(after.map((n) => n.id))
+    const gone = before.filter((n) => !kept.has(n.id))
+    if (!gone.length) return
+    const cleared = this.clearedNodes.get(projectId) ?? new Set<string>()
+    for (const n of gone) cleared.add(n.id)
+    this.clearedNodes.set(projectId, cleared)
   }
 
   /**
@@ -893,10 +995,17 @@ export class WorkspaceStore {
     // ordered only by a single `rev` counter, and that counter DRIFTS: a dropped/forgotten final mirror
     // write or an offline edit leaves the server behind our cache, so the phone's append (rev = the
     // server file + 1) lands BELOW our cache rev and a rev-only decision silently discards it — the
-    // field bug where a phone-created SSH session never reached the desktop canvas. Guarded to
-    // same-lineage AND both sides populated, so a deliberate clear on either side (an empty side with a
-    // higher rev = "the user cleared their canvas elsewhere") still wins by rev, unchanged.
-    const mergeable = sameLineage && !!e.cache && cacheNodes > 0 && !!remote && remote.nodes.length > 0
+    // field bug where a phone-created SSH session never reached the desktop canvas.
+    //
+    // The guard is same-lineage + a POPULATED REMOTE, and deliberately no longer "our cache has
+    // nodes too". That half read an empty cache with a drifted rev as a deliberate clear and pushed
+    // the emptiness up — but an empty desktop canvas is precisely where a phone-started session is
+    // the ONLY node in the file, so it deleted the very thing this rescue exists to save. The
+    // deliberate clear is now told apart by WHAT the cache is missing rather than by how much:
+    // `clearedNodes` holds the ids this run removed, and `rescuableNodes` never brings those back,
+    // so a real clear still travels. The remote half of the guard is untouched: an empty REMOTE with
+    // a higher rev is the user clearing the canvas on another machine and still wins by rev.
+    const mergeable = sameLineage && !!e.cache && !!remote && remote.nodes.length > 0
     if (remote && remoteWins) {
       let adopted = remote.id === e.id ? remote : { ...remote, id: e.id }
       let owed = false
@@ -911,6 +1020,9 @@ export class WorkspaceStore {
       e.name = adopted.name
       e.color = adopted.color
       this.revs.set(e.id, adopted.rev)
+      // The remote won on rev, so its content — including anything we had deleted — is the truth
+      // now: our pending deletions are settled (overruled) and must not haunt a later rescue.
+      this.clearedNodes.delete(e.id)
       if (owed) this.unmirrored.add(e.id)
       else this.unmirrored.delete(e.id) // pure adopt: the server copy IS the truth now — nothing owed
       return fileToProject(adopted, {
@@ -922,7 +1034,7 @@ export class WorkspaceStore {
     // phone's drifted append) so the push carries them instead of erasing them.
     let merged: Project | null = null
     if (mergeable && e.cache && remote) {
-      const rescued = nodesMissingFrom(e.cache.nodes, remote.nodes)
+      const rescued = this.rescuableNodes(e.id, e.cache.nodes, remote.nodes)
       if (rescued.length) {
         e.cache = { ...e.cache, nodes: [...e.cache.nodes, ...rescued], rev: Math.max(cacheRev, remote.rev) + 1 }
         this.revs.set(e.id, e.cache.rev)
@@ -943,8 +1055,10 @@ export class WorkspaceStore {
       // Push-up runs with the master just up, but record the outcome anyway: a failed write
       // (connection flapped) stays owed so the next save retries it.
       const ok = await this.remoteIO.write(e.id, e.ssh, serializeProjectFile(e.cache))
-      if (ok) this.unmirrored.delete(e.id)
-      else this.unmirrored.add(e.id)
+      if (ok) {
+        this.unmirrored.delete(e.id)
+        this.clearedNodes.delete(e.id) // the server holds our deletions now
+      } else this.unmirrored.add(e.id)
     }
     // Surface a rescued merge to the renderer even on a read-only poll (pushIfStanding:false) — the
     // whole point is the phone's session reaching the live desktop canvas without a reconnect.
