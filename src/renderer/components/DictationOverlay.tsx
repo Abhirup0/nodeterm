@@ -17,6 +17,8 @@ import { createPortal } from 'react-dom'
 import { equalizerBars } from '../lib/dictation-equalizer'
 import { PcmCapture } from '../lib/pcm-capture'
 import { useSession } from '../session/session'
+import { useSettings } from '../state/settings'
+import { hasSpeechModel } from '@shared/speech'
 
 export interface DictationTarget {
   kind: 'terminal'
@@ -44,13 +46,20 @@ export function isProGateError(message: string): boolean {
 }
 
 type Phase = 'idle' | 'recording' | 'transcribing'
-/** 'warning' = no target at press time (never records). 'pill' = the compact recording/
- *  transcribing/error capsule — the whole surface for a terminal target, start to finish
- *  (the transcript is inserted straight into the terminal, so there is no editable card). */
-export type DictationMode = 'warning' | 'pill'
+/** 'no-model' = dictation is off (Whisper engine with the explicit None selection, issue #143) —
+ *  never records, explains where to turn it on. 'warning' = no target at press time (never
+ *  records). 'pill' = the compact recording/transcribing/error capsule — the whole surface for a
+ *  terminal target, start to finish (the transcript is inserted straight into the terminal, so
+ *  there is no editable card). */
+export type DictationMode = 'no-model' | 'warning' | 'pill'
 
-/** Pure — no side effects. Exported for its own unit coverage. */
-export function dictationMode(target: DictationTarget | null): DictationMode {
+/** Pure — no side effects. Exported for its own unit coverage.
+ *
+ *  'no-model' wins over everything, target included: with a model missing the failure would
+ *  otherwise surface only AFTER the user spoke a whole take (transcribe throws), which reads as
+ *  a broken feature rather than an off one. */
+export function dictationMode(target: DictationTarget | null, hasModel: boolean): DictationMode {
+  if (!hasModel) return 'no-model'
   return target ? 'pill' : 'warning'
 }
 
@@ -79,11 +88,15 @@ export function isAtRecordingCap(elapsedMs: number): boolean {
   return elapsedMs >= MAX_RECORDING_MS
 }
 
-/** How long the "no target selected" warning pill stays up before it auto-dismisses. */
+/** How long the "no target selected" / "no model" warning pill stays up before it auto-dismisses. */
 const NO_TARGET_DISMISS_MS = 2500
 
 export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }: DictationOverlayProps) {
   const { api } = useSession()
+  // The off state only exists for the local Whisper engine — cloud brings its own model. Read once
+  // per mount (the overlay is a fresh mount per shortcut press, like `target`).
+  const speech = useSettings((s) => s.settings.speech)
+  const modelReady = speech.engine !== 'whisper' || hasSpeechModel(speech.model)
 
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -212,7 +225,9 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
   // DictationOverlayProps — so this is correctly mount-only). No target means the warning pill;
   // it never records, and auto-dismisses on its own.
   useEffect(() => {
-    if (!target) {
+    // Both warning shapes never record and auto-dismiss: no target, and dictation-off (no model —
+    // recording a take that transcribe is guaranteed to refuse would waste the user's speech).
+    if (!target || !modelReady) {
       const t = setTimeout(() => onCloseRef.current(), NO_TARGET_DISMISS_MS)
       return () => clearTimeout(t)
     }
@@ -259,7 +274,7 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
     }
   }, [stopSignal, phase, stopRecording, handleClose])
 
-  const mode = dictationMode(target)
+  const mode = dictationMode(target, modelReady)
 
   const errorBlock = error && (
     <div className="dictation__error">
@@ -275,10 +290,14 @@ export function DictationOverlay({ target, stopSignal, onClose, onOpenLicense }:
     </div>
   )
 
-  if (mode === 'warning') {
+  if (mode === 'warning' || mode === 'no-model') {
     return createPortal(
       <div className="dictation dictation--warning nodrag nowheel" onMouseDown={(e) => e.stopPropagation()}>
-        <span className="dictation__warning-text">Select a terminal node first.</span>
+        <span className="dictation__warning-text">
+          {mode === 'no-model'
+            ? 'Dictation is off — choose a Whisper model in Settings → Speech.'
+            : 'Select a terminal node first.'}
+        </span>
         <button type="button" className="dictation__close" title="Dismiss" onClick={handleClose}>
           ×
         </button>

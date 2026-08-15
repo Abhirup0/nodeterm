@@ -1235,7 +1235,12 @@ export const DEFAULT_SETTINGS: Settings = {
   notchHud: true,
   notchWidth: 168,
   notchHoverExpand: true,
-  speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
+  // model: '' = the explicit "no dictation" state (SPEECH_MODEL_NONE, issue #143). Dictation is
+  // opt-in: nothing is selected — and so nothing downloads and no shortcut records — until the
+  // user picks a model in onboarding or Settings → Speech. Existing installs keep whatever their
+  // settings.json already says (the merge only fills ABSENT keys), so nobody's working dictation
+  // is switched off by an upgrade.
+  speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 
 export interface SettingsApi {

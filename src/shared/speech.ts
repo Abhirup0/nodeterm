@@ -16,6 +16,19 @@ export const WHISPER_MODELS: WhisperModelInfo[] = [
 
 export const WHISPER_DOWNLOAD_BASE = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/'
 
+/**
+ * The "no dictation" selection: an EMPTY model id (issue #143). A legitimate, user-chosen state —
+ * the settings default, the onboarding "skip" choice, and the Settings → Speech "None" row all
+ * write it — never a dangling pointer for the heal helpers below to fix behind the user's back.
+ * Spelled '' so a hand-read settings.json says what it means.
+ */
+export const SPEECH_MODEL_NONE = ''
+
+/** Is dictation actually configured (a model chosen)? `false` = the explicit None/off state. */
+export function hasSpeechModel(model: string): boolean {
+  return model !== SPEECH_MODEL_NONE
+}
+
 export function whisperModel(id: string): WhisperModelInfo | undefined {
   return WHISPER_MODELS.find((m) => m.id === id)
 }
@@ -43,6 +56,8 @@ export function modelAfterDownload(
 ): string | null {
   if (current === justDownloaded) return null
   // An id that is not in the list at all (a renamed/removed model) has nothing behind it either.
+  // That deliberately includes SPEECH_MODEL_NONE: starting a download IS asking for dictation, so
+  // the fresh model is adopted and the off state ends — the one heal None does not opt out of.
   return models.find((m) => m.id === current)?.downloaded ? null : justDownloaded
 }
 
@@ -56,6 +71,9 @@ export function modelAfterDelete(
   models: readonly ModelDownloadState[],
   current: string
 ): string | null {
+  // An explicit None is not a dangling pointer (issue #143): deleting a leftover model file while
+  // dictation is OFF must leave it off, never silently re-adopt whatever else is on disk.
+  if (!hasSpeechModel(current)) return null
   if (models.find((m) => m.id === current)?.downloaded) return null
   return models.find((m) => m.downloaded)?.id ?? null
 }
