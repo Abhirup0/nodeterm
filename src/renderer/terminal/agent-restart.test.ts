@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { resumeCommand } from '../../shared/agents/config'
 import { withPermissionMode } from '../../shared/agents/approval-mode'
 import {
@@ -1164,5 +1165,84 @@ describe('summarizeBulkRestart', () => {
     expect(summarizeBulkRestart(outcomes, { working: 0, noSession: 0 })).toBe(
       summarizeOutcomes(outcomes, { working: 0, noSession: 0 })
     )
+  })
+})
+
+/**
+ * THE `write` CONTROL VERB TAKES THIS LOCK TOO.
+ *
+ * `guardConcurrentRestart` is held for the whole of a hibernate exit, a wake resume and a user
+ * restart, for the reason its own doc comment gives: a second write arriving while a line sits
+ * un-submitted in the pane is spliced into that line. Only three closures took it, all in
+ * `TerminalNode.tsx`, and every `api.pty.sendText` caller was outside it — including the `write`
+ * control verb, whose text a human confirms on their own clock rather than the pane's. A confirmed
+ * `write` could therefore land mid hibernate-exit (blind KILL_LINE + `/exit`) or into an
+ * echo-verified launch line still waiting on verification.
+ */
+describe('the write verb shares the restart lock', () => {
+  beforeEach(() => __resetAgentRestartForTests())
+
+  it('a confirmed write is refused while that node is mid-restart', async () => {
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    const sent: string[] = []
+    // The restart/hibernate run holding the pane.
+    const restart = guardConcurrentRestart('n-w', async (): Promise<ExitPhaseOutcome> => {
+      await held
+      return 'exited'
+    })
+    // The shape `Canvas.tsx`'s `case 'write'` onConfirm now uses.
+    const write = guardConcurrentRestart('n-w', async () => {
+      sent.push('text')
+      return 'sent' as const
+    })
+    const first = restart()
+    expect(await write()).toBe('not-eligible')
+    expect(sent, 'the write reached the pane during a restart').toEqual([])
+    release()
+    expect(await first).toBe('exited')
+    // …and once the pane is free again the same write goes through.
+    expect(await write()).toBe('sent')
+    expect(sent).toEqual(['text'])
+  })
+
+  it('the reverse order holds too: a restart cannot start on top of an in-flight write', async () => {
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    const write = guardConcurrentRestart('n-w2', async () => {
+      await held
+      return 'sent' as const
+    })
+    const restart = guardConcurrentRestart('n-w2', async (): Promise<ExitPhaseOutcome> => 'exited')
+    const inFlight = write()
+    expect(await restart()).toBe('not-eligible')
+    release()
+    expect(await inFlight).toBe('sent')
+  })
+
+  it('a write to a DIFFERENT node is never blocked', async () => {
+    const busy = guardConcurrentRestart('n-a', () => new Promise<RestartOutcome>(() => {}))
+    void busy()
+    const write = guardConcurrentRestart('n-b', async () => 'sent' as const)
+    expect(await write()).toBe('sent')
+  })
+
+  // The wiring itself. The dispatch lives inside a 7000-line React component's IPC listener with
+  // no unit seam, and the tests above pass with or without it — so the source is the subject, the
+  // same way `control-destructive.test.ts` pins the confirm gate.
+  it("Canvas.tsx's write onConfirm actually goes through the guard", () => {
+    const src = readFileSync(
+      new URL('../canvas/Canvas.tsx', import.meta.url),
+      'utf8'
+    )
+    const start = src.indexOf("case 'write': {")
+    expect(start).toBeGreaterThan(-1)
+    const body = src.slice(start, src.indexOf("case 'close': {", start))
+    // Guarded, and CALLED — `guardConcurrentRestart` returns a function, so a missing `()` would
+    // await the closure itself and compare it to 'not-eligible' forever.
+    expect(body).toMatch(/guardConcurrentRestart\(args\.node, async \(\) => \{[\s\S]*?\}\)\(\)/)
+    expect(body).toContain("outcome === 'not-eligible'")
+    // No un-guarded sendText left beside it.
+    expect(body.match(/api\.pty\.sendText\(/g) ?? []).toHaveLength(1)
   })
 })
