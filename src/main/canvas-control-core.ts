@@ -138,6 +138,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     `sh "${shimPath}" <verb> [args]`,
     '```',
     '',
+    'Flags take a value: `--flag value`, or `--flag=value`. Use the `=` form when the value itself',
+    'starts with `--` (`--cmd=--version`); written as two tokens, a leading `--` is read as the next',
+    'flag. A flag with no value is allowed anywhere on the line.',
+    '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>]` — open N plain terminals.',
@@ -215,6 +219,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
 // request is form-urlencoded rather than JSON because `curl --data-urlencode` does the escaping
 // for us — emitting valid JSON from sh for arbitrary values (`--prompt`, `--html`, `--team`)
 // could not be made safe.
+//
+// INSTALL LIFECYCLE, and why a verb must not depend on this parser's fixes: the shim is rewritten
+// locally at every app boot, but onto an SSH host ONLY inside RemoteHooks.setup(), i.e. on connect.
+// An already-connected SSH project keeps the shim it was handed. So a parsing improvement reaches
+// remote agent nodes only after a reconnect, with no signal on the wire — the same shape as the
+// managed hook script's stale window. Verbs are therefore designed to parse identically under both
+// the old and the new loop: give every flag a value, and the two loops agree.
 export const CONTROL_SHIM_SCRIPT = `#!/bin/sh
 # nodeterm canvas-control CLI (auto-generated — do not edit).
 
@@ -347,6 +358,11 @@ Run the shim (absolute path):
 \`\`\`sh
 sh "${shimPath}" <verb> [args]
 \`\`\`
+
+Flags take a value: \`--flag value\`, or \`--flag=value\`. Use the \`=\` form when the value itself
+starts with \`--\` (\`--cmd=--version\`); written as two tokens, a leading \`--\` is read as the
+next flag, so \`--text --oops\` sends an empty \`--text\` plus a stray \`--oops\`. A flag with no
+value is allowed anywhere on the line, not only at the end.
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
