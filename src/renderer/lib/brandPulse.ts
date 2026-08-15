@@ -11,11 +11,12 @@ import claudeIcon from '../assets/claude.svg'
 import codexIcon from '../assets/codex-color.svg'
 import geminiIcon from '../assets/gemini-color.svg'
 import opencodeIcon from '../assets/opencode.svg'
+import copilotIcon from '../assets/copilot.svg'
 
 // Brand logo per builtin agent; custom/unknown agents have none (callers fall back to the terminal
 // glyph, or to the plain pulsing dot).
 //
-// These four are MULTI-COLOUR marks, so each carries its own fills and is loaded as an `<img src>` /
+// These asset marks carry their own fills and are loaded as an `<img src>` /
 // `background-image` (Vite hands us a URL). An SVG loaded that way is an isolated document —
 // `currentColor` has nothing to inherit there, which is why none of these assets uses it. Grok is
 // the exception: its mark is monochrome, so it is inlined from lib/grokMark.ts instead, and is
@@ -24,7 +25,8 @@ export const AGENT_LOGO: Partial<Record<string, string>> = {
   claude: claudeIcon,
   codex: codexIcon,
   gemini: geminiIcon,
-  opencode: opencodeIcon
+  opencode: opencodeIcon,
+  copilot: copilotIcon
 }
 
 /**

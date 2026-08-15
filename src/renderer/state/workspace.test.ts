@@ -574,12 +574,21 @@ describe('accountId serialization', () => {
       position: { x: 0, y: 0 },
       width: 600,
       height: 400,
-      data: { title: 'T', color: '#888', group: null, agentId: 'claude', accountId: 'a1' }
+      data: {
+        title: 'T',
+        color: '#888',
+        group: null,
+        agentId: 'claude',
+        agentModel: 'openai/gpt-5',
+        accountId: 'a1'
+      }
     } as unknown as CanvasNode
     const states = flowToNodeStates([node])
     expect(states[0].accountId).toBe('a1')
+    expect(states[0].agentModel).toBe('openai/gpt-5')
     const back = nodeStatesToFlow(states)
     expect(back[0].data.accountId).toBe('a1')
+    expect(back[0].data.agentModel).toBe('openai/gpt-5')
   })
   it('leaves accountId undefined when unset', () => {
     const node = {
@@ -759,6 +768,12 @@ describe('createAgentNode prompt injection', () => {
   it('uses --prompt for flag-prompt agents (opencode)', () => {
     const n = createAgentNode('opencode', 0, undefined, undefined, "rerank the results")
     expect(n.data.initialCommand).toBe("opencode --prompt 'rerank the results'")
+  })
+  it('uses --interactive for Copilot so the prompted session stays open', () => {
+    const n = createAgentNode('copilot', 0, undefined, undefined, 'fix the bug')
+    expect(n.data.initialCommand).toContain("copilot --interactive 'fix the bug'")
+    expect(n.data.initialCommand).toContain('--session-id=')
+    expect(n.data.initialCommand).not.toContain('--prompt')
   })
   it('shell-quotes a flag-prompt safely', () => {
     const n = createAgentNode('opencode', 0, undefined, undefined, "it's tricky")

@@ -6,6 +6,7 @@ import { vi } from 'vitest'
 import { IPC } from '../shared/ipc'
 import {
   ElectronGitHubSecretStore,
+  ElectronSecretStore,
   registerElectronGitHubControl,
   type SafeStorageLike
 } from './github-control'
@@ -31,6 +32,19 @@ function safeStorage(options: { available?: boolean; backend?: string } = {}): S
 }
 
 describe('ElectronGitHubSecretStore', () => {
+  it('keeps feature-specific secret files isolated while sharing storage semantics', async () => {
+    const github = new ElectronGitHubSecretStore(userDataDir, safeStorage())
+    const gateway = new ElectronSecretStore(userDataDir, safeStorage(), 'model-gateway-key.json')
+    await github.save('github-secret')
+    await gateway.save('gateway-secret')
+
+    expect(await github.readForHost()).toBe('github-secret')
+    expect(await gateway.readForHost()).toBe('gateway-secret')
+    expect(await fs.readdir(userDataDir)).toEqual(
+      expect.arrayContaining(['github-issues-token.json', 'model-gateway-key.json'])
+    )
+  })
+
   it('encrypts a token and reads it only inside the host', async () => {
     const store = new ElectronGitHubSecretStore(userDataDir, safeStorage())
     await store.save('github_pat_secret')

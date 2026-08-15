@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { resumeCommand, withSessionId } from './config'
+import { resumeCommand, supportsSessionIdFlag, withSessionId } from './config'
 
 describe('withSessionId', () => {
   it('appends the minted id for claude', () => {
@@ -10,6 +10,15 @@ describe('withSessionId', () => {
     for (const id of ['codex', 'gemini', 'grok', 'opencode'] as const) {
       expect(withSessionId(id, id, 'abc-123')).toBe(id)
     }
+  })
+
+  it('uses Copilot\'s equals-form session id independently of the Claude probe', () => {
+    expect(supportsSessionIdFlag('copilot', false)).toBe(true)
+    expect(supportsSessionIdFlag('claude', false)).toBe(false)
+    expect(supportsSessionIdFlag('claude', true)).toBe(true)
+    expect(withSessionId('copilot', 'copilot', 'abc-123')).toBe(
+      'copilot --session-id=abc-123'
+    )
   })
 
   // The value reaches a tmux send-keys line, so the type is not the guard — the same reason
@@ -57,6 +66,10 @@ describe('resumeCommand', () => {
 
   it('resumes opencode via --session', () => {
     expect(resumeCommand('opencode', 'ses_a1b2c3')).toBe('opencode --session ses_a1b2c3')
+  })
+
+  it('resumes Copilot via its optional-value equals form', () => {
+    expect(resumeCommand('copilot', 'abc-123')).toBe('copilot --resume=abc-123')
   })
   it('rejects an unsafe opencode session id', () => {
     expect(resumeCommand('opencode', 'x; rm -rf /')).toBeNull()

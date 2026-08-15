@@ -13,6 +13,8 @@ export interface SessionRowProps {
   onContextMenu(e: React.MouseEvent): void
   onDragStart(): void
   onDragEnd(): void
+  /** Status-group mode only: elapsed time since the current state began. */
+  stateAgeLabel?: string
 }
 
 function ctxColor(pct: number): string {
@@ -35,7 +37,8 @@ export function SessionRow({
   onAiName,
   onContextMenu,
   onDragStart,
-  onDragEnd
+  onDragEnd,
+  stateAgeLabel
 }: SessionRowProps): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(row.title)
@@ -76,15 +79,10 @@ export function SessionRow({
           <IconBellFilled />
         </span>
       ) : row.statusKind !== 'working' && row.unread ? (
-        // Finished (or reset to idle) while the user wasn't looking: the SAME check glyph,
+        // Finished before its live state became unknown while the user wasn't looking: the check,
         // but accent-blue and pulsing until they visit the node. Working/attention win —
         // a new turn or a permission prompt is more urgent than an old unread mark.
         <span className="ss-check ss-check--unread" title="Finished — new for you">
-          <IconCircleCheck />
-        </span>
-      ) : row.statusKind === 'done' ? (
-        // Completion glyph: a check icon scans better than one more dot.
-        <span className="ss-check" title={row.stateLabel}>
           <IconCircleCheck />
         </span>
       ) : (
@@ -92,7 +90,19 @@ export function SessionRow({
       )}
       <div className="ss-row__body">
         <div className="ss-row__titleline">
-          <span className="ss-mark" style={{ background: row.color }} />
+          {row.projectColor ? (
+            // Status mode: rows are flattened across projects, so each row shows its project's
+            // monogram (colored circle with the project initial) instead of the plain color mark.
+            <span
+              className="ss-mark ss-mark--project"
+              style={{ background: row.projectColor }}
+              title={row.projectName}
+            >
+              {(row.projectName?.trim() || '?').charAt(0).toUpperCase()}
+            </span>
+          ) : (
+            <span className="ss-mark" style={{ background: row.color }} />
+          )}
           {editing ? (
             <input
               className="ss-title-input"
@@ -148,10 +158,16 @@ export function SessionRow({
             ×
           </button>
         </div>
-        {(row.cwd || row.sshHost) && (
+        {(row.projectName || row.cwd || row.sshHost || stateAgeLabel) && (
           <div className="ss-meta">
+            {row.projectName && <span className="ss-meta__project">{row.projectName}</span>}
             {row.sshHost && <span className="ss-meta__ssh">⇅ {row.sshHost}</span>}
             {row.cwd && <span className="ss-meta__cwd">{dirName(row.cwd)}</span>}
+            {stateAgeLabel && (
+              <span className="ss-meta__state-age" title={`In this state ${stateAgeLabel}`}>
+                {stateAgeLabel}
+              </span>
+            )}
           </div>
         )}
       </div>

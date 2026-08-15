@@ -1,4 +1,4 @@
-import type { AgentId } from '@shared/agents/config'
+import { capabilityAgentId, type AgentId } from '@shared/agents/config'
 import { IconTerminal } from '../components/icons'
 import { BRAND_PULSE_CLASS, brandLogoSrc, brandPulsePlan } from './brandPulse'
 import { GROK_MARK_PATH, GROK_MARK_VIEWBOX } from './grokMark'
@@ -59,10 +59,15 @@ export function BrandPulse({ agentId, size }: { agentId?: AgentId; size: number 
 }
 
 export function AgentIcon({ agentId, size = 16 }: { agentId: AgentId; size?: number }): React.JSX.Element {
-  if (agentId === 'grok') return <GrokMark size={size} />
-  // `brandLogoSrc`, not `AGENT_LOGO[agentId]`: the id can be anything a hand-edited project.json
-  // says, and a prototype key ('constructor') would hand back a Function as the image source.
-  const src = brandLogoSrc(agentId)
+  // A custom agent with `baseAgent` speaks that harness's protocol and should carry its visual
+  // identity too. The renderer registers a live custom-id resolver at boot, so settings edits are
+  // reflected on the next render without duplicating custom-agent lookup logic in every menu.
+  const iconAgentId = capabilityAgentId(agentId)
+  if (iconAgentId === 'grok') return <GrokMark size={size} />
+  // `brandLogoSrc`, not `AGENT_LOGO[iconAgentId]`: the id can be anything a hand-edited
+  // project.json says, and a prototype key ('constructor') would hand back a Function as the image
+  // source.
+  const src = brandLogoSrc(iconAgentId)
   if (src) {
     return <img src={src} width={size} height={size} alt="" style={{ display: 'block' }} />
   }

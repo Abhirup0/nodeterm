@@ -18,6 +18,7 @@ import {
   DEFAULT_BASE_REF,
   type WorktreeEntry
 } from './worktree'
+import { filterWorktrees } from './worktree'
 
 const entry = (path: string, branch: string | null): WorktreeEntry => ({
   path,
@@ -74,44 +75,57 @@ describe('sanitizeWorktreeBranch', () => {
 })
 
 describe('computeWorktreePath', () => {
-  it('builds <userData>/worktrees/<repo>/<branch> with a flattened branch', () => {
-    expect(computeWorktreePath('/u', 'myrepo', 'feature/x')).toBe('/u/worktrees/myrepo/feature-x')
+  it('defaults beside the repository and flattens the branch', () => {
+    expect(computeWorktreePath('/src/myrepo', 'feature/x')).toBe(
+      '/src/myrepo.worktrees/feature-x'
+    )
   })
-  it('suggests NOTHING when the base dir is unknown (never a filesystem-root path)', () => {
-    // An empty base used to produce `/worktrees/<repo>/<branch>` — i.e. the filesystem root,
-    // which the Server Edition (running as root) would happily create.
-    expect(computeWorktreePath('', 'myrepo', 'x')).toBe('')
-    expect(computeWorktreePath('   ', 'myrepo', 'x')).toBe('')
+  it('supports the requested aliases and appends a branch when the template omits it', () => {
+    expect(computeWorktreePath('/src/MyRepo', 'Feature/X', '../$reponame.worktrees')).toBe(
+      '/src/MyRepo.worktrees/feature-x'
+    )
+    expect(computeWorktreePath('/src/MyRepo', 'Feature/X', '../$defaultFolderName.worktrees')).toBe(
+      '/src/MyRepo.worktrees/feature-x'
+    )
+    expect(computeWorktreePath('/src/MyRepo', 'Feature/X', './worktrees')).toBe(
+      '/src/MyRepo/worktrees/feature-x'
+    )
   })
-  it('drops a trailing slash on the base dir', () => {
-    expect(computeWorktreePath('/u/', 'r', 'b')).toBe('/u/worktrees/r/b')
+  it('supports explicit branch tokens, absolute templates, and Windows-style input', () => {
+    expect(computeWorktreePath('/src/repo/', 'topic/a', '/tmp/wt/$branch')).toBe(
+      '/tmp/wt/topic-a'
+    )
+    expect(computeWorktreePath('C:\\src\\repo', 'topic/a', '..\\${repoName}.wt\\${branch}')).toBe(
+      'C:/src/repo.wt/topic-a'
+    )
+  })
+  it('suggests nothing when the repository or branch is unknown', () => {
+    expect(computeWorktreePath('', 'x')).toBe('')
+    expect(computeWorktreePath('   ', 'x')).toBe('')
+    expect(computeWorktreePath('/src/repo', '')).toBe('')
   })
 })
 
 describe('resolveWorktreePath', () => {
-  it('derives the default UNDER the session core userData (the host, for a remote tab)', async () => {
-    // The provider is the SESSION core's `userDataDir()` — a remote tab hands the HOST's base, so
-    // the worktree lands on the machine `git worktree add` runs on, not this client.
+  it('derives the configured default relative to the session repository root', async () => {
     const p = await resolveWorktreePath({
-      userDataDir: () => Promise.resolve('/home/host/.config/nodeterm'),
       repoRoot: '/srv/repos/myapp',
-      branch: 'feature/x'
+      branch: 'feature/x',
+      template: './worktrees'
     })
-    expect(p).toBe('/home/host/.config/nodeterm/worktrees/myapp/feature-x')
+    expect(p).toBe('/srv/repos/myapp/worktrees/feature-x')
   })
-  it('honors an explicit --path and never reads the userData provider', async () => {
+  it('honors an explicit --path', async () => {
     const p = await resolveWorktreePath({
       explicitPath: '  /custom/wt  ',
-      userDataDir: () => Promise.reject(new Error('provider must not be read when --path is given')),
       repoRoot: '/srv/repos/x',
       branch: 'b'
     })
     expect(p).toBe('/custom/wt')
   })
-  it('yields "" when the base dir is unknown and no --path was given', async () => {
+  it('yields "" when the repository root is unknown and no --path was given', async () => {
     const p = await resolveWorktreePath({
-      userDataDir: () => Promise.resolve(''),
-      repoRoot: '/srv/repos/x',
+      repoRoot: '',
       branch: 'b'
     })
     expect(p).toBe('')
@@ -399,5 +413,23 @@ describe('worktreeRemoveMessage', () => {
     expect(worktreeRemoveMessage({ ...base, warning: '3 uncommitted file(s) in the worktree.' })).toContain(
       '⚠ 3 uncommitted file(s) in the worktree.'
     )
+  })
+})
+
+describe('filterWorktrees', () => {
+  const entries = [
+    entry('/repo.worktrees/feature-login', 'feature/login'),
+    entry('/repo.worktrees/fix-api', 'fix/API'),
+    entry('/repo.worktrees/detached', null)
+  ]
+
+  it('matches branch or path without case sensitivity', () => {
+    expect(filterWorktrees(entries, 'LOGIN')).toEqual([entries[0]])
+    expect(filterWorktrees(entries, 'fix api')).toEqual([entries[1]])
+  })
+
+  it('returns every entry for a blank query and none for a miss', () => {
+    expect(filterWorktrees(entries, '  ')).toBe(entries)
+    expect(filterWorktrees(entries, 'not-here')).toEqual([])
   })
 })

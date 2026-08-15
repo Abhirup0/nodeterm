@@ -41,10 +41,10 @@ interface RemoteNodeLike {
 /**
  * Does this node's session live on a REMOTE host?
  *
- * Worktrees are local-only in v1: the path is computed from the LOCAL data dir and `git worktree`
- * runs against the LOCAL filesystem. A node whose tmux session is on another machine must therefore
- * never be moved into one — its session would be destroyed and respawned into a directory that does
- * not exist there, and the dead path would be persisted to `project.json`.
+ * Worktrees are local-only in v1: `git worktree` runs against the project's local filesystem. A
+ * node whose tmux session is on another machine must therefore never be moved into one — its
+ * session would be destroyed and respawned into a directory that does not exist there, and the dead
+ * path would be persisted to `project.json`.
  *
  * An SSH-PROJECT terminal carries BOTH `data.ssh` (the connection it runs on) and
  * `data.sshRemoteTmux` (its tmux server lives on the host), and guarding only one is how the exact
@@ -76,37 +76,87 @@ export function sanitizeWorktreeBranch(input: string): string {
 }
 
 /**
- * Default on-disk location: <userData>/worktrees/<repo>/<branch-flattened>.
- * An unknown base dir yields NO suggestion (empty string) rather than a root-relative
- * `/worktrees/...` — the Server Edition often runs as root and `git worktree add` would
- * cheerfully create that at the filesystem root. Callers must treat '' as "no default".
+ * Global template for new worktrees. It deliberately lives NEXT TO the checkout instead of under
+ * app data: the location is predictable from a shell/file picker, while keeping other worktrees
+ * outside the main checkout avoids nested-repository tooling surprises.
  */
-export function computeWorktreePath(userDataDir: string, repoName: string, branch: string): string {
-  const base = userDataDir.trim().replace(/\/+$/, '')
-  if (!base) return ''
-  const flat = branch.replace(/\//g, '-')
-  return `${base}/worktrees/${repoName}/${flat}`
+export const DEFAULT_WORKTREE_PATH_TEMPLATE = '../${repoName}.worktrees/${branch}'
+
+const WORKTREE_TEMPLATE_TOKEN =
+  /\$\{(repoName|reponame|defaultFolderName|branch)\}|\$(repoName|reponame|defaultFolderName|branch)\b/g
+const WORKTREE_BRANCH_TOKEN = /\$\{branch\}|\$branch\b/
+
+/** Browser-safe lexical path resolution (this shared module is bundled into the renderer). */
+function resolvePathFromRepo(repoRoot: string, configuredPath: string): string {
+  const root = repoRoot.trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  const configured = configuredPath.trim().replace(/\\/g, '/')
+  if (!root || !configured) return ''
+
+  const absolute = configured.startsWith('/') || /^[a-zA-Z]:\//.test(configured)
+  const combined = absolute ? configured : `${root}/${configured}`
+  const drive = combined.match(/^([a-zA-Z]:)\//)?.[1] ?? ''
+  const rooted = combined.startsWith('/') || !!drive
+  const body = drive ? combined.slice(drive.length + 1) : combined.replace(/^\/+/, '')
+  const parts: string[] = []
+  for (const part of body.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (parts.length) parts.pop()
+      else if (!rooted) parts.push(part)
+      continue
+    }
+    parts.push(part)
+  }
+  const prefix = drive ? `${drive}/` : rooted ? '/' : ''
+  return `${prefix}${parts.join('/')}`
+}
+
+/**
+ * Expand a worktree path template relative to the repository root.
+ *
+ * Supported spellings intentionally include both `$name` and `${name}`. `$repoName`, the
+ * lower-case `$reponame` spelling, and `$defaultFolderName` all mean the main checkout's folder
+ * name; the latter is an explicit human-readable alias for users who think of that checkout as the
+ * "default worktree". `$branch` is the filesystem-safe branch slug. When the template omits a
+ * branch token, the slug is appended automatically, so concise bases such as `./worktrees` and
+ * `../$reponame.worktrees` remain collision-safe.
+ */
+export function computeWorktreePath(
+  repoRoot: string,
+  branch: string,
+  template = DEFAULT_WORKTREE_PATH_TEMPLATE
+): string {
+  const root = repoRoot.trim().replace(/[\\/]+$/, '')
+  const repoName = root.split(/[\\/]/).pop() || ''
+  const flatBranch = sanitizeWorktreeBranch(branch).replace(/\//g, '-')
+  if (!root || !repoName || !flatBranch) return ''
+
+  const source = template.trim() || DEFAULT_WORKTREE_PATH_TEMPLATE
+  const hasBranchToken = WORKTREE_BRANCH_TOKEN.test(source)
+  const expanded = source.replace(WORKTREE_TEMPLATE_TOKEN, (_match, braced, plain) => {
+    const token = braced || plain
+    return token === 'branch' ? flatBranch : repoName
+  })
+  const withBranch = hasBranchToken ? expanded : `${expanded.replace(/\/+$/, '')}/${flatBranch}`
+  return resolvePathFromRepo(root, withBranch)
 }
 
 /**
  * Resolve the on-disk worktree directory for a create: an explicit `--path` wins; otherwise the
- * default under the SESSION CORE's writable base (`userDataDir()` — the HOST's userData for a
- * remote tab, so the worktree lands on the machine `git worktree add` runs on, not this client).
- *
- * `userDataDir` is injected (not read off any global) precisely so the path follows the session
- * that runs the git op — the obligation-c fix. Async because the base dir is fetched from the core;
- * a given `--path` short-circuits it, so the provider is never touched when the caller already knows
- * the location. Returns '' when nothing can be derived (an unknown base and no `--path`).
+ * configured template relative to that session's repository root. A remote/relay tab therefore
+ * still resolves on the host filesystem: its `repoRoot` comes from the same session core that runs
+ * the git operation. Kept async for its existing callers/API even though template expansion itself
+ * is synchronous.
  */
 export async function resolveWorktreePath(args: {
   explicitPath?: string
-  userDataDir: () => Promise<string>
   repoRoot: string
   branch: string
+  template?: string
 }): Promise<string> {
   const explicit = args.explicitPath?.trim()
   if (explicit) return explicit
-  return computeWorktreePath(await args.userDataDir(), args.repoRoot.split('/').pop() || 'repo', args.branch)
+  return computeWorktreePath(args.repoRoot, args.branch, args.template)
 }
 
 /** Values the worktree dialog collects. Mapped to a `GroupWorktree` by `worktreeFromCreate`. */
@@ -365,4 +415,14 @@ export function worktreeRemoveMessage(p: WorktreeRemovePrompt): string {
       : ''
   const warn = p.warning ? `\n\n⚠ ${p.warning}` : ''
   return `${who}${what}${body}${optIn}${warn}`
+}
+
+/** Case-insensitive branch/path search for the existing-worktree picker. Every term must match. */
+export function filterWorktrees(entries: WorktreeEntry[], query: string): WorktreeEntry[] {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (!terms.length) return entries
+  return entries.filter((entry) => {
+    const haystack = `${entry.branch ?? ''}\n${entry.path}`.toLowerCase()
+    return terms.every((term) => haystack.includes(term))
+  })
 }

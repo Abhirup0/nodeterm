@@ -16,6 +16,7 @@ import {
   registerAgentHibernate,
   registerAgentRestart,
   restartEligibility,
+  restartSessionId,
   settleRestart,
   summarizeBulkRestart,
   summarizeOutcomes,
@@ -26,7 +27,7 @@ import {
 } from './agent-restart'
 
 describe('exitSequence', () => {
-  it('knows claude, codex, grok and gemini, refuses others', () => {
+  it('knows the documented exit command for each restartable harness', () => {
     expect(exitSequence('claude')).toBe('/exit')
     expect(exitSequence('codex')).toBe('/quit')
     // grok's documented primary is `/quit` (`/exit` is its alias).
@@ -35,9 +36,18 @@ describe('exitSequence', () => {
     // permanently delete the session history we are about to `--resume` into.
     expect(exitSequence('gemini')).toBe('/quit')
     expect(exitSequence('gemini')).not.toContain('--delete')
+    expect(exitSequence('copilot')).toBe('/exit')
     // opencode is resumable but we know no way to ask it to quit, so it is still not a target.
     expect(exitSequence('opencode')).toBeNull()
     expect(exitSequence('my-custom')).toBeNull()
+  })
+})
+
+describe('restartSessionId', () => {
+  it('prefers a live hook id and falls back to the persisted minted id', () => {
+    expect(restartSessionId('live-id', 'minted-id')).toBe('live-id')
+    expect(restartSessionId(undefined, ' minted-id ')).toBe('minted-id')
+    expect(restartSessionId('', null)).toBeUndefined()
   })
 })
 
@@ -56,6 +66,7 @@ describe('restartEligibility', () => {
   it('ok for a resumable agent with a session id in a non-working state', () => {
     expect(restartEligibility('claude', 'waiting', 'abc-123')).toEqual({ ok: true })
     expect(restartEligibility('codex', 'done', 'abc-123')).toEqual({ ok: true })
+    expect(restartEligibility('copilot', undefined, 'abc-123')).toEqual({ ok: true })
   })
   it('treats a blocked (permission prompt) session as busy — /exit would answer the prompt', () => {
     expect(restartEligibility('claude', 'blocked', 'abc')).toEqual({ ok: false, reason: 'working' })
@@ -958,6 +969,18 @@ describe('guardConcurrentRestart', () => {
     await expect(guarded()).rejects.toThrow('ipc died')
     expect(runs).toBe(2)
   })
+
+  it('forwards arguments while keeping the same per-node lock', async () => {
+    const seen: string[] = []
+    const guarded = guardConcurrentRestart('n-args', async (target?: string) => {
+      seen.push(target ?? 'same')
+      return 'restarted' as const
+    })
+
+    expect(await guarded('custom:claude')).toBe('restarted')
+    expect(await guarded()).toBe('restarted')
+    expect(seen).toEqual(['custom:claude', 'same'])
+  })
 })
 
 describe('agent restart registry', () => {
@@ -977,6 +1000,17 @@ describe('agent restart registry', () => {
     const fn = async (): Promise<RestartOutcome> => 'restarted'
     registerAgentRestart('n2', fn)()
     expect(agentRestartFn('n2')).toBeUndefined()
+  })
+
+  it('forwards optional target agent and model to the registered restart', async () => {
+    let seen: [string | undefined, string | undefined] | undefined
+    registerAgentRestart('n3', async (targetAgentId, targetModel) => {
+      seen = [targetAgentId, targetModel]
+      return 'restarted'
+    })
+
+    expect(await agentRestartFn('n3')?.('custom:claude', 'openai/gpt-5')).toBe('restarted')
+    expect(seen).toEqual(['custom:claude', 'openai/gpt-5'])
   })
 })
 

@@ -32,6 +32,8 @@ import {
   remotePaneCommandArgs,
   remotePaneOwnerArgs,
   remoteForegroundArgvArgs,
+  remotePaneProcessArgs,
+  remoteTerminateForegroundArgs,
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
 import { parsePaneCursor } from './pane-cursor'
@@ -77,7 +79,12 @@ import {
 } from './codex-identity-proxy'
 import { ensureNodeToken, ensureRemoteNodeToken, sweepNodeToken } from './agents/node-token-service'
 import { clearNode as clearNodeAgentStatus } from './agent-status-mirror'
-import { hasSharedIdentity, type AgentId } from '../shared/agents/config'
+import { hasSharedIdentity, setCustomAgentBaseResolver, type AgentId } from '../shared/agents/config'
+import { findCustomAgent } from '../shared/agents/custom-agent'
+import { applyCustomAgentEnv, customAgentEnvArgs } from './custom-agent-env'
+import { modelGatewayEnv } from '../shared/agents/model-gateway'
+import { foregroundProcessGroup, parsePaneProcess } from './pane-process'
+import { isShellCommand } from '../shared/agents/pane'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -655,6 +662,8 @@ export class PtyManager {
   private tmuxPath: string | null = null
   private confPath = ''
   private getSettings: () => Settings = () => DEFAULT_SETTINGS
+  /** Literal model-gateway key loaded by the shell's secret service during startup. */
+  private getModelGatewaySecret: () => string | null = () => null
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -1193,8 +1202,19 @@ export class PtyManager {
   }
 
   /** Must run after app is ready (needs userData path). */
-  init(getSettings: () => Settings): void {
+  init(
+    getSettings: () => Settings,
+    getModelGatewaySecret: () => string | null = () => null
+  ): void {
     this.getSettings = getSettings
+    this.getModelGatewaySecret = getModelGatewaySecret
+    // Register the custom-id → baseAgent resolver so the capability predicates in
+    // shared/agents/config (hasHooks, canResume, mintsSessionId, hasPermissionMode,
+    // canControlCanvas, …) resolve a custom agent's INHERITED harness. config.ts takes only an id
+    // (it cannot import the settings store without a cycle/platform split), so the lookup is
+    // injected here: the closure reads LIVE settings, so registering once at init is enough — a
+    // settings update is reflected on the next predicate call.
+    setCustomAgentBaseResolver((id) => findCustomAgent(this.getSettings().customAgents, id)?.baseAgent)
     // Prewarm the login-shell PATH probe now so the first terminal spawn doesn't wait on it —
     // and re-run the tmux probe once it lands: findTmux no longer spawns a login shell of its
     // own, so a tmux living only on the user's shell PATH is invisible until this resolves.
@@ -1329,6 +1349,9 @@ export class PtyManager {
     )
     platform().handle(IPC.ptyTmuxStatus, () => this.tmuxStatus())
     platform().handle(IPC.ptyPaneCommand, (persistKey: string) => this.paneCommand(persistKey))
+    platform().handle(IPC.ptyTerminateForeground, (persistKey: string) =>
+      this.terminateForeground(persistKey)
+    )
   }
 
   /** Feeds the renderer's "tmux not found" banner. Without tmux the app silently degrades to a
@@ -2005,6 +2028,39 @@ export class PtyManager {
       for (const k of AUTH_ENV_STRIP) delete env[k]
     }
 
+    // Shared model gateway: resolve through the node's BASE harness in one shared mapping, then
+    // apply it before custom-agent env. That precedence is intentional: an inheriting custom agent
+    // benefits from the one-click gateway by default, but env values it explicitly declares still
+    // win exactly as they did before this feature. Remote values travel through tmux `-e` below;
+    // do not leak them into the local ssh client process environment.
+    // A plain terminal has no agentId and must never receive provider credentials. The hook env's
+    // historical Claude fallback does not apply here: gateway access is an explicit agent
+    // capability, not a terminal default.
+    const gatewayEnv = options.agentId
+      ? modelGatewayEnv(
+          this.getSettings().modelGateway,
+          options.agentId,
+          options.agentModel,
+          process.env as Record<string, string | undefined>,
+          this.getModelGatewaySecret()
+        )
+      : {}
+    if (!options.sshRemote) {
+      for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
+    }
+
+    // Custom-agent env: merged LAST so it wins over hook + account + PATH/LANG env (required for
+    // the proxy use case — the user's ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL must beat whatever
+    // the account path set). ${env:VAR} is expanded against the live process env. Only the LOCAL
+    // path merges into `env` here; the remote (ssh) path threads the same vars into the tmux `-e`
+    // list below (the local ssh client's env does not propagate to the remote tmux session).
+    if (!options.sshRemote) {
+      const custom = findCustomAgent(this.getSettings().customAgents, options.agentId ?? '')
+      const merged = applyCustomAgentEnv(env, custom, process.env as Record<string, string | undefined>)
+      for (const [k, v] of Object.entries(merged.env)) env[k] = v
+      for (const w of merged.warnings) console.warn(w)
+    }
+
     const settings = this.getSettings()
     let file: string
     let args: string[]
@@ -2080,6 +2136,23 @@ export class PtyManager {
         options.accountId && options.sshRemote.remoteHome
           ? accountTmuxEnvArgs(remoteAccountConfigDirAbs(options.sshRemote.remoteHome, options.accountId))
           : []
+      // Custom-agent env for a REMOTE node: expand ${env:VAR} against the LOCAL process env (the
+      // key stays local; only the resolved VALUE travels over SSH) and thread the results into the
+      // remote tmux `-e` list. PATH is skipped — the local machine can't see the remote box's PATH,
+      // so a locally-resolved PATH would break CLI resolution on the host (recovering it is out of
+      // scope). Applied AFTER the account env so custom env still wins, mirroring the local path.
+      const remoteCustom = findCustomAgent(this.getSettings().customAgents, options.agentId ?? '')
+      const remoteCustomEnv = customAgentEnvArgs(
+        remoteCustom,
+        process.env as Record<string, string | undefined>,
+        { skipPath: true }
+      )
+      for (const w of remoteCustomEnv.warnings) console.warn(w)
+      const remoteCustomEnvArgs = remoteCustomEnv.args.flatMap((kv) => ['-e', kv])
+      const remoteGatewayEnvArgs = Object.entries(gatewayEnv).flatMap(([k, v]) => [
+        '-e',
+        `${k}=${v}`
+      ])
       args = remoteTmuxPtyArgs(
         options.sshRemote.conn,
         options.sshRemote.controlPath,
@@ -2091,7 +2164,12 @@ export class PtyManager {
         // place a foreign value is most at home.
         reqShell,
         options.shellArgs,
-        [...hookExtraEnv, ...remoteAccountEnv],
+        [
+          ...hookExtraEnv,
+          ...remoteAccountEnv,
+          ...remoteGatewayEnvArgs,
+          ...remoteCustomEnvArgs
+        ],
         // Source nodeterm's remote tmux.conf via `-f` (written on connect, Task 2) so a cold-start
         // session gets mouse/clipboard/scrollback. Fail-open: undefined → remote tmux host defaults.
         options.sshRemote.tmuxConfPath
@@ -2120,6 +2198,12 @@ export class PtyManager {
       // The account config dir must ride `-e` like the hook env: the tmux server is shared
       // and long-lived, so session env comes from creation args, not client inheritance.
       const accountEnvArgs = accountDir ? accountTmuxEnvArgs(accountDir) : []
+      // The shared tmux server outlives the app, so the gateway cannot rely on the tmux client's
+      // inherited process env. Emit only the centrally-mapped keys explicitly; read their FINAL
+      // values from `env` so a custom agent override retains last-write precedence.
+      const gatewayEnvArgs = Object.keys(gatewayEnv).flatMap((key) =>
+        typeof env[key] === 'string' ? ['-e', `${key}=${env[key]}`] : []
+      )
       const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',
@@ -2132,6 +2216,7 @@ export class PtyManager {
         ...pathEnvArgs,
         ...langEnvArgs,
         ...accountEnvArgs,
+        ...gatewayEnvArgs,
         '-c',
         cwd,
         '-s',
@@ -2925,6 +3010,54 @@ export class PtyManager {
       return stdout.trim() || null
     } catch {
       return null
+    }
+  }
+
+  /**
+   * Terminate the foreground agent process group in a node's tmux pane without writing anything
+   * into the terminal. This is intentionally narrower than recycling the session: model switching
+   * first stops the harness by PID, then uses the existing recycle path to rebuild the shell with
+   * current gateway environment. A shell-owned pane is always refused.
+   */
+  async terminateForeground(persistKey: string): Promise<boolean> {
+    if (typeof persistKey !== 'string' || !persistKey || persistKey.length > REF_MAX_LEN) return false
+    const target = sessionName(persistKey)
+    const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
+    try {
+      if (sshRemote) {
+        const ssh = findSsh()
+        if (!ssh) return false
+        const { stdout } = await runAsync(
+          ssh,
+          remotePaneProcessArgs(sshRemote.conn, sshRemote.controlPath, target)
+        )
+        const pane = parsePaneProcess(stdout)
+        if (!pane || isShellCommand(pane.command)) return false
+        await runAsync(
+          ssh,
+          remoteTerminateForegroundArgs(sshRemote.conn, sshRemote.controlPath, pane.panePid)
+        )
+        return true
+      }
+      if (!this.tmuxPath) return false
+      const { stdout } = await runAsync(this.tmuxPath, [
+        '-L',
+        TMUX_SOCKET,
+        'display-message',
+        '-p',
+        '-t',
+        target,
+        '#{pane_pid}|#{pane_current_command}'
+      ])
+      const pane = parsePaneProcess(stdout)
+      if (!pane) return false
+      const processTable = await runAsync('ps', ['-o', 'tpgid=', '-p', String(pane.panePid)])
+      const processGroup = foregroundProcessGroup(pane, processTable.stdout)
+      if (!processGroup) return false
+      process.kill(-processGroup, 'SIGTERM')
+      return true
+    } catch {
+      return false
     }
   }
 

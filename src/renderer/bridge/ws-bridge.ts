@@ -206,7 +206,7 @@ const AI_NAMING_UNAVAILABLE = {
  *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
 export function buildRealApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'userDataDir'> {
+): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'agent' | 'userDataDir'> {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
@@ -237,6 +237,8 @@ export function buildRealApi(
     // shell yet" and gives up on its own deadline.
     paneCommand: (persistKey) =>
       client.request(IPC.ptyPaneCommand, persistKey).catch(() => null) as Promise<string | null>,
+    terminateForeground: (persistKey) =>
+      client.request(IPC.ptyTerminateForeground, persistKey).catch(() => false) as Promise<boolean>,
     // No server handler — the session-name poll degrades to no adopted name. A PRE-EXISTING gap,
     // and not any one agent's: `IPC.ptyReadSessionName` has never been registered server-side, so
     // claude's, grok's and gemini's read legs are equally stubbed here (the write leg works on both
@@ -288,12 +290,36 @@ export function buildRealApi(
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
   }
 
+  const agent: NodeTerminalApi['agent'] = {
+    envSnapshot: () => client.request(IPC.envSnapshot) as Promise<Record<string, string>>,
+    previewCommand: (inputs) =>
+      client.request(IPC.agentPreviewCommand, inputs) as ReturnType<
+        NodeTerminalApi['agent']['previewCommand']
+      >,
+    discoverModels: (gateway) =>
+      client.request(IPC.agentDiscoverModels, gateway) as ReturnType<
+        NodeTerminalApi['agent']['discoverModels']
+      >,
+    gatewayCredentialStatus: () =>
+      client.request(IPC.agentGatewayCredentialStatus) as ReturnType<
+        NodeTerminalApi['agent']['gatewayCredentialStatus']
+      >,
+    saveGatewayCredential: (apiKey) =>
+      client.request(IPC.agentGatewayCredentialSave, apiKey) as ReturnType<
+        NodeTerminalApi['agent']['saveGatewayCredential']
+      >,
+    clearGatewayCredential: () =>
+      client.request(IPC.agentGatewayCredentialClear) as ReturnType<
+        NodeTerminalApi['agent']['clearGatewayCredential']
+      >
+  }
+
   // The server's data dir, over the SAME channel the desktop preload uses. It is the writable base
   // the worktree dialog derives its default path from — a stub returning '' would suggest
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, settings, userDataDir }
+  return { pty, workspace, settings, agent, userDataDir }
 }
 
 export function buildGitHubApi(

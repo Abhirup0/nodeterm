@@ -486,6 +486,41 @@ export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, 
     `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`
   )
 }
+
+/** Ask remote tmux for the shell PID and current command as one parseable, bounded record. */
+export function remotePaneProcessArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string
+): string[] {
+  return childArgs(
+    conn,
+    controlPath,
+    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_pid}|#{pane_current_command}'`
+  )
+}
+
+/**
+ * SIGTERM the remote pane's foreground process group, after core has already confirmed tmux is
+ * reporting an agent rather than a shell. The shell re-reads tpgid here to close the process-race
+ * window and refuses its own group (`panePid`) before invoking kill.
+ */
+export function remoteTerminateForegroundArgs(
+  conn: SshConnection,
+  controlPath: string,
+  panePid: number
+): string[] {
+  if (!Number.isSafeInteger(panePid) || panePid <= 0) {
+    throw new Error('invalid-pane-pid')
+  }
+  return childArgs(
+    conn,
+    controlPath,
+    `tpgid=$(ps -o tpgid= -p ${panePid} | tr -d '[:space:]') && ` +
+      `case "$tpgid" in ''|*[!0-9]*) exit 1;; esac && ` +
+      `[ "$tpgid" -gt 0 ] && [ "$tpgid" -ne ${panePid} ] && kill -TERM -- "-$tpgid"`
+  )
+}
 /**
  * Ask the REMOTE tmux for everything the ownership read needs in one round-trip — the remote
  * counterpart of `PtyManager.paneOwner`'s first call. Same single-quoting rule as

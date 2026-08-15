@@ -5,6 +5,7 @@ import type {
 } from '../../shared/github-issues'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import type { SecretStore } from '../secret-store'
 
 export type CommandResult = { ok: boolean; stdout: string; stderr: string }
 export type CommandRunner = (command: string, args: string[]) => Promise<CommandResult>
@@ -33,11 +34,8 @@ export const runGitHubCliCommand: CommandRunner = async (command, args) => {
   }
 }
 
-export interface GitHubSecretStore {
+export interface GitHubSecretStore extends SecretStore {
   readonly availability: GitHubSecretAvailability
-  readForHost(): Promise<string | null>
-  save(token: string): Promise<void>
-  clear(): Promise<void>
 }
 
 export interface ValidatedGitHubIdentity {

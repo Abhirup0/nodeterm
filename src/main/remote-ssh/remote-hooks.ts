@@ -12,6 +12,11 @@ import { isSafeNodeId, isSafeRemoteHome } from '../../core/remote-safety'
 import { hookServer } from '../../core/agents/hook-server'
 import { curlHeaderConfigLine } from '../../core/agents/hook-curl-config-sh'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
+import {
+  buildCopilotHookConfig,
+  COPILOT_HOOK_FILE,
+  isSafeRemoteCopilotHome
+} from '../../core/agents/hooks/copilot'
 
 /**
  * Remote hook scripts get NO Codex thread-identity root.
@@ -215,6 +220,8 @@ export class RemoteHooks {
       await this.installCodexRemote(conn, controlPath, home, remoteDir)
       // 5. grok: our own file in its hooks DIRECTORY, under the HOST's $GROK_HOME.
       await this.installGrokRemote(conn, controlPath, home, remoteDir)
+      // 6. copilot: its own file/grammar under the HOST's $COPILOT_HOME hooks directory.
+      await this.installCopilotRemote(conn, controlPath, home, remoteDir)
       return { endpointPath: endpoint }
     } catch {
       return null // fail-open: agent runs without hooks
@@ -489,6 +496,51 @@ export class RemoteHooks {
     }
   }
 
+  /** Install Copilot's owned hook file using the same config builder as the local installer. */
+  private async installCopilotRemote(
+    conn: SshConnection,
+    controlPath: string,
+    home: string,
+    remoteDir: string
+  ): Promise<void> {
+    try {
+      const copilotHome = await this.resolveCopilotHome(conn, controlPath, home)
+      const config = `${copilotHome.replace(/\/$/, '')}/hooks/${COPILOT_HOOK_FILE}`
+      const script = `${remoteDir}/agent-hooks/copilot.sh`
+      await this.r.run(
+        childArgs(
+          conn,
+          controlPath,
+          `mkdir -p ${posixQuote(`${remoteDir}/agent-hooks`)} && cat > ${posixQuote(script)} && chmod 755 ${posixQuote(script)}`
+        ),
+        buildManagedScript('copilot', REMOTE_IDENTITY_ROOT)
+      )
+      await this.r.run(
+        childArgs(
+          conn,
+          controlPath,
+          `mkdir -p "$(dirname ${posixQuote(config)})" && cat > ${posixQuote(config)}`
+        ),
+        `${JSON.stringify(buildCopilotHookConfig(buildManagedHookCommand(script)), null, 2)}\n`
+      )
+    } catch {
+      /* fail-open: the remote copilot session simply runs without status hooks */
+    }
+  }
+
+  private async resolveCopilotHome(
+    conn: SshConnection,
+    controlPath: string,
+    home: string
+  ): Promise<string> {
+    const { stdout } = await this.r.run(
+      childArgs(conn, controlPath, 'printf %s "${COPILOT_HOME:-}"')
+    )
+    const reported = stdout.trim()
+    const stripped = reported.replace(/\/+$/, '') || '/'
+    return isSafeRemoteCopilotHome(reported) ? stripped : `${home}/.copilot`
+  }
+
   /**
    * Merge the managed claude hook into a REMOTE managed-account config dir's `settings.json`, so an
    * agent that runs under `CLAUDE_CONFIG_DIR=<accountDir>` reports status like the default
@@ -570,6 +622,11 @@ export class RemoteHooks {
       const targets: { pathExpr: string; prelude?: string }[] = [
         { pathExpr: posixQuote(`${remoteHome}/.codex/AGENTS.md`) },
         { pathExpr: posixQuote(`${remoteHome}/.gemini/GEMINI.md`) },
+        {
+          pathExpr: posixQuote(
+            `${await this.resolveCopilotHome(conn, controlPath, remoteHome)}/copilot-instructions.md`
+          )
+        },
         openCodeInstructionsTarget(remoteHome)
       ]
       for (const t of targets) {

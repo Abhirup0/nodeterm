@@ -61,6 +61,7 @@ export type AgentPaneVerdict = 'agent' | 'not-agent' | 'unknown'
 export const AGENT_BINARIES: Record<string, readonly string[]> = {
   claude: ['claude'],
   codex: ['codex'],
+  copilot: ['copilot'],
   gemini: ['gemini'],
   opencode: ['opencode'],
   grok: ['grok']

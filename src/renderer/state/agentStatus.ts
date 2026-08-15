@@ -52,12 +52,12 @@ export interface AgentNodeStatus {
    */
   stateVerified?: boolean
   /**
-   * When this node last CHANGED state — the idle clock the hibernation policy reads
-   * (`terminal/hibernation-policy.ts`). Deliberately not `stateAt`: that one is refreshed by
-   * every same-state event (freshness), while "how long has this session been idle" means "how
-   * long since the turn ended". TRANSIENT — never persisted: a relaunch has seen no events yet,
-   * and a stale stamp read as "idle since before the restart" would hibernate a session the
-   * moment the app came back. Absent ⇒ unknown idle ⇒ never a hibernation candidate.
+   * When this node last CHANGED state (or was explicitly woken) — rendered as the status group's
+   * relative age and also read as the idle clock by `terminal/hibernation-policy.ts`. Deliberately
+   * not `stateAt`: that one is refreshed by every same-state event (freshness), while "how long in
+   * this state" means "how long since the transition". TRANSIENT — never persisted: a relaunch has
+   * seen no events yet, and a stale stamp read as "idle since before the restart" would hibernate a
+   * session the moment the app came back. Absent ⇒ unknown idle ⇒ never a hibernation candidate.
    */
   lastEventAt?: number
   /**
@@ -423,7 +423,9 @@ export function createAgentStatusSession(
         const byId = { ...s.byId }
         for (const [id, v] of Object.entries(byId)) {
           if (v.state === 'working' && now - (v.stateAt ?? 0) > staleMs) {
-            byId[id] = { ...v, state: undefined, stateAt: now }
+            // This is a real transition to Unknown, even though it did not arrive through a hook.
+            // Stamp both clocks so the sidebar age and Eco idle clock begin at the transition.
+            byId[id] = { ...v, state: undefined, stateAt: now, lastEventAt: now }
             changed = true
           }
         }
@@ -506,14 +508,15 @@ export function createAgentStatusSession(
       set((s) => {
         const prev = s.byId[id]
         if (!prev) return s
-        // Cross-surface ACK: opening a session marks its finishes read EVERYWHERE — the notch
+        // Cross-surface ACK: opening a session marks its finish read EVERYWHERE — the notch
         // capsule's green blob, the paired phone's lingering DONE Live Activity, and its Inbox
-        // Finished card (all via the core mirror's `ackDone`).
+        // Finished card (all via the core mirror's `ackDone`). This is READ state only: the live
+        // workflow state remains `done` until a genuine new turn begins.
         //
         // Deliberately gated on NOTHING but the external flag:
         //  - not on the unread flag, because a session you were LOOKING at when it finished never
-        //    got marked unread (the `watching` gate in Canvas), so opening it would be the only
-        //    read signal there ever is — and it was being dropped;
+        //    got marked unread (the `watching` gate in Canvas), so opening it is the only local
+        //    read signal there will ever be;
         //  - not on the node's current state, because a node whose PREVIOUS turn finished while a
         //    new one is already running left the phone showing a Finished card for a result the
         //    user had open on screen.

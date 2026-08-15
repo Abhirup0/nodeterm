@@ -36,6 +36,11 @@ import './index'
 const api = h.exposed.nodeTerminal as NodeTerminalApi
 
 describe('preload sshProject passphrase wiring', () => {
+  it('routes foreground process termination through request IPC', async () => {
+    await api.pty.terminateForeground('node-1')
+    expect(h.invoke).toHaveBeenCalledWith(IPC.ptyTerminateForeground, 'node-1')
+  })
+
   it('exposes GitHub issue data and host-control namespaces on their exact channels', async () => {
     await api.githubIssues.query({ projectId: 'p1', columnId: null, pageSize: 50 })
     await api.githubControl.saveToken('write-only-secret')
