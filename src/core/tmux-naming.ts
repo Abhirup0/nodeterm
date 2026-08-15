@@ -1,6 +1,7 @@
 // Pure tmux naming helpers shared by the PTY manager and the context-link backend.
 // No native/electron imports, so this module is safe to import from unit tests.
 import { randomBytes } from 'crypto'
+import { sanitizePasteText } from './paste-injection'
 
 export const TMUX_SOCKET = 'node-terminal'
 
@@ -47,8 +48,13 @@ export function isSessionName(target: string): boolean {
  * the Enter with it (measured). Every non-empty write puts the text and the Enter in ONE tmux
  * invocation, which is also what makes "the Enter can never fire after a failed text send"
  * structural rather than a rule the caller has to remember.
+ *
+ * Asserts its target like every other builder in this delivery, even though this one quotes
+ * nothing: the rule is "every splice is checked at the splice", and the two builders that had no
+ * buffer of their own were the two that quietly opted out of it.
  */
 export function localTmuxEnterArgs(socket: string, target: string): string[] {
+  assertPasteTarget(target)
   return ['-L', socket, 'send-keys', '-t', target, 'Enter']
 }
 
@@ -176,8 +182,110 @@ export function localTmuxPasteArgs(
  * rule that makes the unquoted splices safe. Throws rather than sanitizing: a caller holding a
  * target this app did not generate is a bug, and `sendText` already turns a throw into `false`.
  */
-export function assertPasteTarget(target: string, buffer: string): void {
+export function assertPasteTarget(target: string, buffer?: string): void {
   if (!isSessionName(target)) throw new Error(`unsafe tmux paste target: ${JSON.stringify(target)}`)
+  if (buffer !== undefined) assertPasteBuffer(buffer)
+}
+
+/** The buffer half on its own, for the one builder that has a buffer and no pane target. */
+export function assertPasteBuffer(buffer: string): void {
   if (!/^nt-paste-[a-z0-9-]+$/.test(buffer))
     throw new Error(`unsafe tmux buffer name: ${JSON.stringify(buffer)}`)
+}
+
+/** `delete-buffer` for a delivery whose paste never ran. See `runPasteDelivery`. */
+export function localTmuxDeleteBufferArgs(socket: string, buffer: string): string[] {
+  assertPasteBuffer(buffer)
+  return ['-L', socket, 'delete-buffer', '-b', buffer]
+}
+
+/**
+ * ── EVERYTHING `sendText` DECIDES, IN ONE TESTED PLACE ──────────────────────────────────────────
+ *
+ * A plan is what to run, what to put on its stdin, and how to clean up if it fails. `sendText` is
+ * a two-line dispatcher over this; a test drives THIS, not a copy of it.
+ *
+ * That split is not decoration. The first version of this change left the composition — sanitize,
+ * empty-body, buffer name — inlined in `sendText`, and the real-tmux test rebuilt the same three
+ * steps in its own helper before calling the argv builder. Both halves were green, and TWO
+ * mutations survived a full suite run: deleting the empty-body branch, and deleting
+ * `sanitizePasteText` at the caller. A test that re-implements the thing it tests cannot see the
+ * thing it tests being deleted. It is a weakening against the version this replaces, where the
+ * sanitize was structural inside `bracketedInjection`; now it is structural here instead.
+ */
+export interface PasteDelivery {
+  /** argv for the delivery process (tmux locally, ssh remotely). */
+  args: string[]
+  /** what goes on its stdin — the payload, or '' when there is none. */
+  body: string
+  /**
+   * argv that removes the private buffer this delivery created, or null when it created none.
+   *
+   * MEASURED LEAK, and the reason this field exists: `load-buffer` succeeds, then `paste-buffer`
+   * fails (a node closed while the write was in flight — "can't find pane"), tmux abandons the
+   * rest of the command list, and the `-d` that would have dropped the buffer never runs. The
+   * payload then sits in the tmux server's buffer stack, which is USER-VISIBLE (`prefix-=`,
+   * `list-buffers`, a phone attaching), for as long as the server lives — days, on a host with
+   * dozens of sessions. `buffer-limit` does not save it: named buffers are not reaped (measured —
+   * 60 named buffers under `buffer-limit 50`, all 60 survived). The payload can be a note push or
+   * a 300 KB scrollback paste. Same story on the remote `nodeterm-rmt` server.
+   */
+  cleanup: string[] | null
+}
+
+/**
+ * The plan for a LOCAL delivery, or null when there is nothing to run at all.
+ *
+ * Three decisions live here and nowhere else:
+ *  - `sanitizePasteText`, so no payload byte can express paste structure. tmux writing the markers
+ *    does not change that: a payload-supplied `ESC[201~` would still close the frame early and
+ *    turn its tail into KEY INPUT.
+ *  - the EMPTY body. `load-buffer -` given zero bytes creates no buffer, so the `paste-buffer`
+ *    after it fails and tmux abandons the list — the Enter with it. `sendText('', { enter: true })`
+ *    is a live call (`Canvas.tsx`'s write verb, `args.text ?? ''`) and means "submit whatever is
+ *    composed", which is what the legacy two-step did, so it becomes a bare Enter.
+ *  - a per-call buffer name, so two concurrent deliveries cannot overwrite each other's payload.
+ */
+export function localPasteDelivery(
+  socket: string,
+  target: string,
+  text: string,
+  enter: boolean
+): PasteDelivery | null {
+  const body = sanitizePasteText(text)
+  if (body.length === 0) {
+    if (!enter) return null
+    return { args: localTmuxEnterArgs(socket, target), body: '', cleanup: null }
+  }
+  const buffer = pasteBufferName()
+  return {
+    args: localTmuxPasteArgs(socket, target, buffer, enter),
+    body,
+    cleanup: localTmuxDeleteBufferArgs(socket, buffer)
+  }
+}
+
+/**
+ * Run a plan. The runner is injected so this is the same code in production and under a real tmux.
+ *
+ * The sweep is fire-and-forget: the delivery has already failed, the caller is already on its
+ * error path, and awaiting a second call would double the worst-case stall (a dead ControlMaster
+ * takes the full `PROC_TIMEOUT_MS` to fail, twice). Its own failure is ignored — `delete-buffer`
+ * against a buffer `-d` already dropped is an expected error, not a problem.
+ */
+export async function runPasteDelivery(
+  plan: PasteDelivery,
+  run: (args: string[], input: string) => Promise<unknown>
+): Promise<boolean> {
+  try {
+    await run(plan.args, plan.body)
+    return true
+  } catch {
+    if (plan.cleanup) {
+      void Promise.resolve(run(plan.cleanup as string[], '')).catch(() => {
+        // best effort: the buffer outliving one failed write is bad, throwing here is worse
+      })
+    }
+    return false
+  }
 }

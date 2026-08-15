@@ -4,7 +4,14 @@ import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
 import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
-import { TMUX_SOCKET, assertPasteTarget } from '../tmux-naming'
+import {
+  TMUX_SOCKET,
+  assertPasteTarget,
+  assertPasteBuffer,
+  pasteBufferName,
+  type PasteDelivery
+} from '../tmux-naming'
+import { sanitizePasteText } from '../paste-injection'
 import { canControlCanvas } from '../../shared/agents/config'
 import { PANE_OWNER_FMT, foregroundArgvArgs } from '../agents/pane-owner'
 // Dependency-free (no node-pty): safe to import from these pure builders.
@@ -267,13 +274,56 @@ export function remoteTmuxPasteArgs(
  * the Enter). It has to bypass `remoteTmuxPasteArgs` because `load-buffer -` given zero bytes
  * creates NO buffer, so the `paste-buffer` after it fails and tmux abandons the rest of the
  * command list — including the Enter. Measured.
+ *
+ * `sessionId` is spliced unquoted like every sibling, and — as of review — asserted like every
+ * sibling. It was the one new builder in this change that opted out. Unreachable today, because
+ * `sessionName()` sanitises to `[A-Za-z0-9_-]` before anything gets here, but a splice that is
+ * safe only because some caller upstream happens to be strict is one refactor from an injection,
+ * and this PR's own rule is that the guarantee lives at the splice.
  */
 export function remoteTmuxEnterArgs(
   conn: SshConnection,
   controlPath: string,
   sessionId: string
 ): string[] {
+  assertPasteTarget(sessionId)
   return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`)
+}
+
+/** `delete-buffer` on the REMOTE server — the sweep for a remote paste that never ran. */
+export function remoteDeleteBufferArgs(
+  conn: SshConnection,
+  controlPath: string,
+  buffer: string
+): string[] {
+  assertPasteBuffer(buffer)
+  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} delete-buffer -b ${buffer}`)
+}
+
+/**
+ * The plan for a REMOTE delivery — the exact mirror of `localPasteDelivery`, and deliberately the
+ * same three decisions (sanitize, empty body, per-call buffer) taken by calling the SAME code
+ * rather than by writing them out again here. Drift between the two legs is how the ESC rule
+ * survived being missing on one of them once already.
+ */
+export function remotePasteDelivery(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string,
+  text: string,
+  enter: boolean
+): PasteDelivery | null {
+  const body = sanitizePasteText(text)
+  if (body.length === 0) {
+    if (!enter) return null
+    return { args: remoteTmuxEnterArgs(conn, controlPath, sessionId), body: '', cleanup: null }
+  }
+  const buffer = pasteBufferName()
+  return {
+    args: remoteTmuxPasteArgs(conn, controlPath, sessionId, buffer, enter),
+    body,
+    cleanup: remoteDeleteBufferArgs(conn, controlPath, buffer)
+  }
 }
 /**
  * Did a FAILED `tmux has-session` probe actually say the session is absent? Only tmux's own

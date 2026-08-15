@@ -26,8 +26,7 @@ import {
   localKillSockets,
   localTmuxKillArgs,
   remoteTmuxPtyArgs,
-  remoteTmuxPasteArgs,
-  remoteTmuxEnterArgs,
+  remotePasteDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
   remotePaneOwnerArgs,
@@ -51,12 +50,10 @@ import {
   TMUX_SOCKET,
   sessionName,
   isSessionName,
-  localTmuxPasteArgs,
-  localTmuxEnterArgs,
-  pasteBufferName
+  localPasteDelivery,
+  runPasteDelivery
 } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
-import { sanitizePasteText } from './paste-injection'
 import { releasePty, type ReleasablePty } from './pty-release'
 import { effectiveSize, type PtySize } from './pty-size'
 import { machOArch, archMismatch } from './macho-arch'
@@ -2835,47 +2832,39 @@ export class PtyManager {
    * raw newlines into the app instead of a paste; `paste-buffer -p` asks the pane itself and has
    * done since tmux 1.7.
    *
-   * `sanitizePasteText` still runs, ONCE, here, for both paths — the payload must not be able to
-   * close the frame and become key input, and tmux inserting the markers does not change that.
+   * ── WHY THIS METHOD IS ONLY A DISPATCHER ───────────────────────────────────────────────────────
    *
-   * An EMPTY payload is handled before the buffer: `load-buffer -` with no bytes creates no
-   * buffer, the `paste-buffer` that follows fails, and tmux aborts the rest of the list — so the
-   * Enter would be lost. Measured. A caller sending `''` with `enter` means "just submit", which
-   * is what the legacy two-step did, so that is what happens.
+   * Everything decided per write — `sanitizePasteText`, the empty-body case, the per-call buffer
+   * name, and the buffer sweep when the paste fails — lives in `localPasteDelivery` /
+   * `remotePasteDelivery` / `runPasteDelivery`, which a real-tmux test drives DIRECTLY.
+   *
+   * That is a correction, not a preference. The first version of this change inlined those
+   * decisions here and let the test rebuild them in its own helper. Both sides were green and two
+   * mutations survived a full run: deleting the empty-body branch, and deleting the sanitize call.
+   * A test that re-implements what it is testing cannot notice the original being removed. So the
+   * composition is exported, both callers use it, and the only thing left in this method is which
+   * transport runs it.
    */
   async sendText(persistKey: string, text: string, opts?: { enter?: boolean }): Promise<boolean> {
     const enter = opts?.enter ?? true
     const target = sessionName(persistKey)
-    const body = sanitizePasteText(text)
-    const buffer = pasteBufferName()
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
-    if (sshRemote) {
-      const ssh = findSsh()
-      if (!ssh) return false
-      try {
-        if (body.length === 0) {
-          if (enter) await runAsync(ssh, remoteTmuxEnterArgs(sshRemote.conn, sshRemote.controlPath, target))
-          return true
-        }
-        await runWithStdin(
-          ssh,
-          remoteTmuxPasteArgs(sshRemote.conn, sshRemote.controlPath, target, buffer, enter),
-          body
-        )
-        return true
-      } catch {
-        return false
-      }
-    }
-    if (!this.tmuxPath) return false
     try {
-      if (body.length === 0) {
-        if (enter) await runAsync(this.tmuxPath, localTmuxEnterArgs(TMUX_SOCKET, target))
-        return true
+      if (sshRemote) {
+        const ssh = findSsh()
+        if (!ssh) return false
+        const plan = remotePasteDelivery(sshRemote.conn, sshRemote.controlPath, target, text, enter)
+        if (!plan) return true
+        return await runPasteDelivery(plan, (args, input) => runWithStdin(ssh, args, input))
       }
-      await runWithStdin(this.tmuxPath, localTmuxPasteArgs(TMUX_SOCKET, target, buffer, enter), body)
-      return true
+      if (!this.tmuxPath) return false
+      const tmuxPath = this.tmuxPath
+      const plan = localPasteDelivery(TMUX_SOCKET, target, text, enter)
+      if (!plan) return true
+      return await runPasteDelivery(plan, (args, input) => runWithStdin(tmuxPath, args, input))
     } catch {
+      // Only a builder throwing (an unsafe target) reaches here — `runPasteDelivery` answers false
+      // rather than throwing, precisely so the sweep cannot be skipped by an early exit.
       return false
     }
   }
