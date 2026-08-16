@@ -40,7 +40,9 @@ describe('buildManagedScript', () => {
     expect(s).not.toContain('-H "X-Nodeterm-Hook-Token')
     expect(s).not.toContain('-H "X-Nodeterm-Node-Token')
     expect((s.match(/\n *curl -sS/g) ?? []).length).toBe(4)
-    expect((s.match(/\n *nt_hook_headers \|/g) ?? []).length).toBe(4)
+    // The two answered POSTs are wrapped in a `{ … ; rm … } &` group that self-deletes the payload
+    // temp file, so `nt_hook_headers |` there is preceded by `{ ` — match either form.
+    expect((s.match(/\n *(\{ )?nt_hook_headers \|/g) ?? []).length).toBe(4)
     expect((s.match(/--config -/g) ?? []).length).toBe(4)
   })
 
@@ -84,7 +86,11 @@ describe('buildManagedScript', () => {
       expect(s).toContain('if [ "$nt_decision" = "allow" ] || [ "$nt_decision" = "deny" ]; then')
       const answered = s.match(/--data-urlencode "nodeterm_answered=\$\{nt_decision\}"/g) ?? []
       expect(answered.length).toBe(2)
-      const backgrounded = s.match(/--data-urlencode "payload=\$\{payload\}" >\/dev\/null 2>&1 &/g) ?? []
+      // Each backgrounded answered POST reads the payload from the temp file and self-deletes it
+      // after curl returns (the file must never outlive its reader).
+      const backgrounded = s.match(
+        /--data-urlencode "payload@\$\{nt_payload_file\}" >\/dev\/null 2>&1; rm -f "\$nt_payload_file" 2>\/dev\/null \|\| :; \} &/g
+      ) ?? []
       expect(backgrounded.length).toBe(2)
       expect(s).toContain('--max-time 1')
     })
@@ -118,6 +124,28 @@ describe('buildManagedScript', () => {
       const codex = buildManagedScript('codex')
       expect(codex).toContain('NODETERM_PERM_WAIT_SECS')
       expect(codex).toContain('/hook/codex')
+    })
+  })
+
+  describe('payload stays OFF curl argv (/proc leak + E2BIG fix)', () => {
+    it('never puts the payload on the command line', () => {
+      // `--data-urlencode "payload=$payload"` would publish the full hook body via
+      // /proc/<pid>/cmdline and cap the event at the kernel argv limit (E2BIG on a big diff).
+      expect(s).not.toContain('payload=${payload}')
+    })
+    it('writes the payload to a 0600 temp file after reading stdin', () => {
+      expect(s).toContain('nt_payload_file="$HOME/.nodeterm/pending/payload-$$.tmp"')
+      expect(s).toContain('(umask 077; printf %s "$payload" > "$nt_payload_file")')
+    })
+    it('every POST reads the payload from the temp file with payload@file', () => {
+      // Four POSTs: request (unix-socket + TCP) and answered (unix-socket + TCP).
+      const atFile = s.match(/--data-urlencode "payload@\$\{nt_payload_file\}"/g) ?? []
+      expect(atFile.length).toBe(4)
+    })
+    it('deletes the temp file on every exit path (hot path, answered, no-transport, timeout)', () => {
+      expect(s).toContain('{ nt_send_request; rm -f "$nt_payload_file" 2>/dev/null || :; } &')
+      expect(s).toContain('if [ "$nt_payload_owned" != 1 ]; then rm -f "$nt_payload_file" 2>/dev/null || :; fi')
+      expect(s).toContain('rm -f "$nt_pending_file" "$nt_payload_file" 2>/dev/null || :')
     })
   })
 
@@ -199,13 +227,16 @@ describe('buildManagedScript', () => {
     })
     it('returns curl exit status from nt_request_post (no `|| true` masking) and returns 1 with no transport', () => {
       // The POST lines end at `>/dev/null 2>&1` (status preserved), NOT `>/dev/null 2>&1 || true`.
-      expect(s).not.toContain('--data-urlencode "payload=${payload}" >/dev/null 2>&1 || true')
+      expect(s).not.toContain('--data-urlencode "payload@${nt_payload_file}" >/dev/null 2>&1 || true')
       expect(s).toContain('  else\n    return 1\n  fi')
     })
     it('perm-wait branch advertises the ask in the FOREGROUND (before the poll), non-perm backgrounds it', () => {
       // Foreground in perm-wait (pendingId reaches primary-or-fallback before the answer poll begins),
       // backgrounded otherwise so a live session's hot path never blocks.
-      expect(s).toContain('if [ -n "$nt_pending" ]; then\n  nt_send_request\nelse\n  nt_send_request &\nfi')
+      expect(s).toContain('if [ -n "$nt_pending" ]; then\n  nt_send_request\nelse\n')
+      // Non-perm-wait backgrounds the POST and self-deletes the payload temp file after it (and its
+      // one fallback retry) return, so the file never outlives its reader.
+      expect(s).toContain('  { nt_send_request; rm -f "$nt_payload_file" 2>/dev/null || :; } &\nfi')
       // The request POST carries nodeterm_pending_id, so the fallback learns the ask too.
       expect(s).toContain('--data-urlencode "nodeterm_pending_id=${nt_pending}"')
     })
