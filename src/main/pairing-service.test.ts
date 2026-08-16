@@ -222,14 +222,16 @@ describe('revokeDevice', () => {
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled'])
   })
 
-  it('a failed revoke rejects to its caller and does not block the next one', async () => {
+  it('a failed revoke reports local:false to its caller and does not block the next one', async () => {
     const service = createPairingService()
     // First rename is agent.json's, inside the failing revoke.
     vi.spyOn(fs, 'rename').mockRejectedValueOnce(
       Object.assign(new Error('EXDEV: cross-device link not permitted, rename'), { code: 'EXDEV' })
     )
 
-    await expect(service.revokeDevice('dev-a')).rejects.toThrow(/EXDEV/)
+    // The failure is REPORTED, not thrown (the server leg still has to run, and the UI turns
+    // `local:false` into a retry note — a rejection here reached nobody).
+    expect((await service.revokeDevice('dev-a')).local).toBe(false)
     // A serializer that chains failures onto its successors would strand every later revoke.
     await service.revokeDevice('dev-b')
 
@@ -254,7 +256,8 @@ describe('revokeDevice', () => {
       return realRename(from, to)
     })
 
-    await expect(service.revokeDevice('dev-a')).rejects.toThrow(/EXDEV/)
+    // …and the half-finished revoke says so (`local:false`) instead of resolving like a clean one.
+    expect((await service.revokeDevice('dev-a')).local).toBe(false)
 
     expect(authKeys()).not.toContain('nodeterm-ios-dev-a') // SSH access really was cut
     expect(deviceIds()).toContain('dev-a') // still listed, so the owner can retry

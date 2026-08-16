@@ -41,6 +41,7 @@ const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const [devices, setDevices] = useState<PairedDevice[]>([])
   const [pendingRevoke, setPendingRevoke] = useState<PairedDevice | null>(null)
+  const [revokeNote, setRevokeNote] = useState('')
 
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
   const updateSettings = useSettings((s) => s.update)
@@ -75,10 +76,30 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
     void refreshDevices()
   }, [refreshDevices])
 
+  // Removing local access and taking the phone's Pro back are DIFFERENT facts, and the second one
+  // used to be missing entirely — Remove unpinned the key here while the server kept minting Pro
+  // for that phone forever. So both legs are surfaced, and only a leg that actually FAILED warns:
+  // 'skipped' means we had nothing to revoke (a free-tier desktop, or a device paired before we
+  // recorded the phone's relay id), and warning there would tell a free user their phone is stuck.
   const revokeDevice = async (device: PairedDevice): Promise<void> => {
     setPendingRevoke(null)
+    setRevokeNote('')
     try {
-      await window.nodeTerminal.pairing.revokeDevice(device.id)
+      const result = await window.nodeTerminal.pairing.revokeDevice(device.id)
+      if (!result.local) {
+        setRevokeNote(`Couldn’t remove “${device.name}” from this machine — try again.`)
+      } else if (result.server === 'failed') {
+        // Not "try again" on its own: the row is already gone from the list, so there is no button
+        // left to press. Name the one thing that does re-run the server leg.
+        setRevokeNote(
+          `Removed “${device.name}” from this machine, but its Pro access couldn’t be revoked, ` +
+            'so that phone may keep Pro. Once this machine is back online, pair it and remove it ' +
+            'again to try again.'
+        )
+      }
+    } catch {
+      // The call itself never got an answer (main is gone, or the surface doesn't support it).
+      setRevokeNote(`Couldn’t remove “${device.name}” — try again.`)
     } finally {
       void refreshDevices()
     }
@@ -260,6 +281,11 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
               ))}
             </ul>
           )}
+          {revokeNote ? (
+            <p className="text-sm" style={{ color: '#ff9f0a' }}>
+              {revokeNote}
+            </p>
+          ) : null}
         </div>
       </SearchableRow>
 

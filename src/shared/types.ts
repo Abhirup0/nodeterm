@@ -2313,6 +2313,26 @@ export interface PairedDevice {
   relayDeviceId?: string
 }
 
+/**
+ * The server leg of a device revoke — three states, because two cannot tell the truth apart.
+ * 'ok' = the backend confirmed; 'failed' = we asked and were refused or could not reach it;
+ * 'skipped' = we did not ask and that is fine (no entitlement to sign with — a free-tier desktop
+ * has no Pro of ours on that phone to reclaim — or no relay device id to name). Only 'failed' is
+ * a warning: reporting 'skipped' as a failure would tell a free user their phone's Pro is stuck.
+ */
+export type DeviceRevokeServerOutcome = 'ok' | 'failed' | 'skipped'
+
+/**
+ * Both legs of a device revoke, reported independently so a half-finished removal can never render
+ * as a clean one (the same discipline as remote/revocation.ts's persisted/killed).
+ */
+export interface DeviceRevokeResult {
+  /** The agent.json entry + authorized_keys line were removed from this machine. */
+  local: boolean
+  /** Whether the phone's Pro entitlement was taken back on the relay backend. */
+  server: DeviceRevokeServerOutcome
+}
+
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
 export interface PairingApi {
   /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
@@ -2330,8 +2350,11 @@ export interface PairingApi {
   openRemoteLoginSettings(): Promise<void>
   /** List paired devices from ~/.nodeterm/agent.json (never includes the token). */
   listDevices(): Promise<PairedDevice[]>
-  /** Revoke a device: remove its registry entry and delete its authorized_keys line. */
-  revokeDevice(id: string): Promise<void>
+  /**
+   * Revoke a device: remove its registry entry, delete its authorized_keys line, and take its Pro
+   * entitlement back on the relay backend. Never rejects for a leg that failed — read the result.
+   */
+  revokeDevice(id: string): Promise<DeviceRevokeResult>
 }
 
 /** Team presence (docs/team-presence.md). All of it is transient — nothing here is persisted. */
