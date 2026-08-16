@@ -141,38 +141,53 @@ export function licensedSeats(): number {
   return seatsFrom(verify(load().token))
 }
 
+/**
+ * How long a license request may take IN TOTAL — headers and body.
+ *
+ * The timer must outlive the `fetch` promise and be cleared only once the body has been read.
+ * Clearing it when the headers arrive (`fetch(…).finally(clearTimeout)`) disarms the abort while
+ * the interesting half is still outstanding, and a response whose body never completes — a captive
+ * portal, a proxy that holds the connection open — then hangs the awaiting IPC handler FOREVER:
+ * the Release button sits on "Releasing…" with no failure and no way back.
+ */
+const REQUEST_TIMEOUT_MS = 8000
+
 async function call(path: string, body: unknown): Promise<{ token?: string; error?: string }> {
   if (!allowed()) return { error: 'disabled' }
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 8000)
     const res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
       signal: ctrl.signal
-    }).finally(() => clearTimeout(t))
+    })
     if (res.status === 204) return {}
     const json = (await res.json().catch(() => ({}))) as { token?: string; error?: string }
     if (!res.ok) return { error: json.error ?? 'network' }
     return json
   } catch {
     return { error: 'offline' }
+  } finally {
+    clearTimeout(t)
   }
 }
 
 // GET helper for the device-bound status poll.
 async function getJson(path: string): Promise<{ active?: boolean; token?: string; error?: string }> {
   if (!allowed()) return { error: 'disabled' }
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 8000)
-    const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal }).finally(() => clearTimeout(t))
+    const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal })
     const json = (await res.json().catch(() => ({}))) as { active?: boolean; token?: string; error?: string }
     if (!res.ok) return { error: json.error ?? 'network' }
     return json
   } catch {
     return { error: 'offline' }
+  } finally {
+    clearTimeout(t)
   }
 }
 
@@ -234,15 +249,17 @@ export function initLicense(onChange?: () => void): void {
     const token = load().token
     if (!token) return { ...EMPTY_DETAIL, error: 'unauthorized' }
     if (!allowed()) return { ...EMPTY_DETAIL, error: 'disabled' }
+    // The timer covers the BODY too — see REQUEST_TIMEOUT_MS. This is the route the Release
+    // button awaits, so a request that never finishes leaves that button spinning for good.
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
     try {
-      const ctrl = new AbortController()
-      const t = setTimeout(() => ctrl.abort(), 8000)
       const res = await fetch(`${API_BASE}${route}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ entitlement: token }),
         signal: ctrl.signal
-      }).finally(() => clearTimeout(t))
+      })
       const json = (await res.json().catch(() => ({}))) as {
         key?: unknown
         used?: unknown
@@ -283,6 +300,8 @@ export function initLicense(onChange?: () => void): void {
       }
     } catch {
       return { ...EMPTY_DETAIL, error: 'offline' }
+    } finally {
+      clearTimeout(t)
     }
   }
 

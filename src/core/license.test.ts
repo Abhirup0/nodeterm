@@ -529,6 +529,44 @@ describe('license detail + release', () => {
     expect((await detail()).error).toBe('unauthorized')
   })
 
+  it('times out a response whose BODY never arrives, instead of hanging the handler forever', async () => {
+    // The 8s abort has to cover the body, not just the headers. A captive portal or a proxy that
+    // holds the connection open answers 200 and then stalls; with the timer cleared as soon as the
+    // headers land, this handler never settles — and the renderer's Release button sits on
+    // "Releasing…" for the rest of the session, with no failure to report and no way back.
+    storeToken()
+    // Captured while setTimeout is still real (this describe fakes only setInterval + Date), so
+    // the guard below can fail FAST if the handler hangs rather than idling until vitest's own
+    // test timeout.
+    const realSetTimeout = globalThis.setTimeout
+    let aborted = false
+    await boot(
+      vi.fn(async (_url: string, init: { signal: AbortSignal }) => ({
+        ok: true,
+        status: 200,
+        // A real fetch body rejects when the request is aborted; before that it just never settles.
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal.addEventListener('abort', () => {
+              aborted = true
+              reject(new Error('The operation was aborted'))
+            })
+          })
+      }))
+    )
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'Date'] })
+    const pending = release()
+    await vi.advanceTimersByTimeAsync(8000)
+    const guard = new Promise<'hung'>((resolve) => realSetTimeout(() => resolve('hung'), 500))
+    const outcome = await Promise.race([pending, guard])
+
+    expect(outcome, 'the release handler never settled').not.toBe('hung')
+    expect(aborted).toBe(true)
+    // A read that could not run is an error — never a license with no devices.
+    expect(outcome).toEqual({ key: null, used: 0, seats: 0, source: null, error: 'network' })
+  })
+
   it('reports an error instead of zero devices when the read fails', async () => {
     storeToken()
     await boot(
