@@ -32,10 +32,22 @@ describe('@xterm/addon-webgl ↔ @xterm/xterm version pair', () => {
     // The exact expression that crashed: a dispose-path read of `_core._store`. 0.18.0 does not
     // contain it; if a future addon build does, the core must be new enough to carry the field —
     // re-verify the release path before loosening this.
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../../../node_modules/@xterm/addon-webgl/lib/addon-webgl.js'),
-      'utf8'
-    )
+    // require.resolve, not a fixed ../../../node_modules path: a git worktree checkout has no
+    // node_modules of its own and resolves modules from the main checkout, so the fixed path was
+    // ENOENT there — the same environment-dependence class as issue #160, red on every worktree.
+    //
+    // The INSTALLED version is asserted first, so a drifted node_modules fails with "you are on
+    // 0.19.0, run npm install" instead of a bare includes() mismatch. Not hypothetical: the very
+    // run that switched to require.resolve found the dev checkout serving 0.19.0 — the exact
+    // addon the 0.18.0 pin exists to keep away from the 5.5 core — because no install had run
+    // since the pin. That is this test doing its job; the assertion just has to say so legibly.
+    const installed = (
+      JSON.parse(
+        fs.readFileSync(require.resolve('@xterm/addon-webgl/package.json'), 'utf8')
+      ) as { version: string }
+    ).version
+    expect(installed, 'installed @xterm/addon-webgl drifted from the 0.18.0 pin — run npm install').toBe('0.18.0')
+    const src = fs.readFileSync(require.resolve('@xterm/addon-webgl/lib/addon-webgl.js'), 'utf8')
     expect(src.includes('_store._isDisposed')).toBe(false)
   })
 })
