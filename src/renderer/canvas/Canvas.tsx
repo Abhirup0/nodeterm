@@ -1906,26 +1906,6 @@ export function Canvas() {
   useEffect(() => registerWorkspaceDirty(markDirty), [markDirty])
 
   const kanbanOpen = useViewMode((s) => !!activeProjectId && viewFor(s, activeProjectId) === 'kanban')
-  // Focus mode (issue #78): one terminal fills the window (reparented into the always-mounted
-  // focus surface below); the chrome hides behind it and reveals on pointer proximity.
-  const focusedId = useFocusNode((s) => s.focusedId)
-  useEffect(() => {
-    document.body.classList.toggle('focus-mode', !!focusedId)
-    return () => document.body.classList.remove('focus-mode')
-  }, [focusedId])
-  useEffect(() => {
-    if (!focusedId) return
-    // Proximity reveal instead of an invisible hover band: a band over the terminal's bottom
-    // edge would eat clicks on the very row a shell keeps its prompt on.
-    const onMove = (e: MouseEvent): void => {
-      document.body.classList.toggle('focus-reveal-bottom', window.innerHeight - e.clientY < 90)
-    }
-    window.addEventListener('mousemove', onMove)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      document.body.classList.remove('focus-reveal-bottom')
-    }
-  }, [focusedId])
   const projectKanban = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId)?.kanban)
   // Fresh default per project — ids must not be shared across projects; NOT persisted
   // until the first edit writes it (spec lazy-default rule).
@@ -5153,15 +5133,51 @@ export function Canvas() {
     [fitView, setViewport, getInternalNode]
   )
 
+  // Focus mode (issue #78): one terminal fills the window (reparented into the always-mounted
+  // focus surface below); the chrome hides behind it and reveals on pointer proximity.
+  const focusedId = useFocusNode((s) => s.focusedId)
+  // Where to land the camera after an exit — set by toggleFocusMode, consumed below AFTER the
+  // body class flips back. goToNode cannot run inside the toggle: the flow wrapper is
+  // display:none while focused (so the WebGL budget can reclaim covered holders), and fitView
+  // math against a 0-sized pane is exactly the origin-jump bug.
+  const focusReturnRef = useRef<string | null>(null)
+  useEffect(() => {
+    document.body.classList.toggle('focus-mode', !!focusedId)
+    if (!focusedId && focusReturnRef.current) {
+      const returnId = focusReturnRef.current
+      focusReturnRef.current = null
+      // Two frames: React Flow re-learns the pane's dimensions from its own ResizeObserver on
+      // the tick after display is restored; framing before that reads a stale/zero size.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const node = nodesRef.current.find((n) => n.id === returnId)
+          if (node) goToNode(node)
+        })
+      )
+    }
+    return () => document.body.classList.remove('focus-mode')
+  }, [focusedId, goToNode])
+  useEffect(() => {
+    if (!focusedId) return
+    // Proximity reveal instead of an invisible hover band: a band over the terminal's bottom
+    // edge would eat clicks on the very row a shell keeps its prompt on.
+    const onMove = (e: MouseEvent): void => {
+      document.body.classList.toggle('focus-reveal-bottom', window.innerHeight - e.clientY < 90)
+    }
+    window.addEventListener('mousemove', onMove)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      document.body.classList.remove('focus-reveal-bottom')
+    }
+  }, [focusedId])
+
   const toggleFocusMode = useCallback(() => {
     const store = useFocusNode.getState()
     if (store.focusedId) {
-      const id = store.focusedId
+      // Landing on the node is DEFERRED to the focus-mode class effect (see focusReturnRef):
+      // the flow pane is still display:none at this point.
+      focusReturnRef.current = store.focusedId
       store.clear()
-      // Land framed on what was just being looked at — goToNode owns the measured/unmeasured
-      // doctrine, so no bare fitView here.
-      const node = nodesRef.current.find((n) => n.id === id)
-      if (node) goToNode(node)
       return
     }
     // The kanban board is an opaque overlay and its card modal already IS a focused view of a

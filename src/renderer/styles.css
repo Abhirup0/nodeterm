@@ -10677,6 +10677,15 @@ body,
 .focus-exit:hover {
   opacity: 1;
 }
+/* The canvas itself goes display:none, not merely covered (review finding on #267): an
+   IntersectionObserver does not model occlusion, so covered-but-displayed terminals kept
+   reporting visible, kept their WebGL contexts, and a full budget then refused the one node
+   filling the screen (tryGrant only evicts HIDDEN holders). display:none zeroes their geometry,
+   they report hidden, the budget reclaims them — and 16+ occluded terminals stop rendering
+   frames nobody can see. Their size votes go null via applyFit's focus gate, like the board. */
+body.focus-mode .flow-wrap {
+  display: none;
+}
 /* Dock reveal: proximity (Canvas toggles `focus-reveal-bottom` on mousemove) or direct hover
    keeps it up once revealed. Lifted above the surface, faded via opacity only. */
 body.focus-mode .dock {

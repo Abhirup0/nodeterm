@@ -1118,6 +1118,12 @@ export function TerminalNode({
     const root = rootRef.current
     const surface = focusSurfaceEl()
     if (!root || !surface) return
+    // Shared mode: the grid teardown must land in THIS commit, before paint. The participation
+    // effect below is passive (after paint), so without this a fullscreen frame paints while the
+    // grid is still registered at the old on-canvas position and the node still wears the
+    // glyph-mode styling (transparent body, rows hidden) — one blank frame per ⌘⇧F. The passive
+    // effect then re-runs with the same answer and no-ops. (Review finding on #267.)
+    glyphSyncRef.current?.(false)
     const home = root.parentElement
     surface.appendChild(root)
     return () => {
@@ -1927,7 +1933,11 @@ export function TerminalNode({
         // keeps its last size (the "parked SOLO subscriber leaves the pty alone" case). When the board
         // closes, the boardOpen effect re-runs applyFit and the `sentCols/sentRows` reset below forces
         // a fresh report of the real fit.
-        if (boardOpenRef.current) {
+        // Focus mode covers this node the same way the board does: the flow wrapper is
+        // display:none (so the WebGL budget can reclaim the hidden holders — review finding on
+        // #267), and a 0-sized container must vote "not viewing", never a clamped tiny grid.
+        const coveredByFocus = focusedNodeId() !== null && focusedNodeId() !== id
+        if (boardOpenRef.current || coveredByFocus) {
           if (sessionId && !boardParked) {
             boardParked = true
             sentCols = 0
@@ -3844,6 +3854,11 @@ export function TerminalNode({
     boardOpenRef.current = boardOpen
     applyFitRef.current?.()
   }, [boardOpen])
+
+  // Focus mode engaged/exited anywhere on the canvas: re-run our size vote (applyFit reads
+  // focusedNodeId() live). Mount-stable — the focused-node subscription above only re-renders
+  // the node whose own membership flipped, and every OTHER terminal is the one being covered.
+  useEffect(() => subscribeFocusedNode(() => applyFitRef.current?.()), [])
 
   const toggleCollapse = () =>
     setNodes((ns) =>
