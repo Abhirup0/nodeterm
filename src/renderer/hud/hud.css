@@ -60,11 +60,13 @@ body {
 .hud-capsule {
   position: absolute;
   top: 0;
-  /* CENTRED on the notch and widened SIDEWAYS, never taller (owner: "notch'a ekstra height
-     vermek istemiyorum"). The mascots occupy only the strip LEFT of the notch; main.ts pads the
-     right by `notch + content` so the black sticks out by the SAME amount on both sides. */
-  left: var(--notch-center-x, 50%);
-  transform: translateX(-50%);
+  /* Widened SIDEWAYS, never taller (owner: "notch'a ekstra height vermek istemiyorum") — and
+     LEFT-ONLY: the right edge is pinned to the notch's right edge, so the capsule can never
+     creep over the menu-bar status items (or swallow their clicks) however many mascots are
+     running. main.ts pads the right by exactly the notch width; the mascots occupy the strip
+     LEFT of it (issue #78). */
+  left: calc(var(--notch-center-x, 50%) + var(--notch-width, 200px) / 2);
+  transform: translateX(-100%);
   /* Shrink-to-fit so however many mascots are running, none clip. */
   width: auto;
   height: auto;
@@ -80,7 +82,9 @@ body {
   will-change: width, max-height;
   transition:
     max-height var(--capsule-dur) var(--capsule-ease),
-    border-radius var(--capsule-dur) var(--capsule-ease);
+    border-radius var(--capsule-dur) var(--capsule-ease),
+    left var(--capsule-dur) var(--capsule-ease),
+    transform var(--capsule-dur) var(--capsule-ease);
 }
 .hud-capsule--hidden {
   display: none; /* idle: no empty black pill */
