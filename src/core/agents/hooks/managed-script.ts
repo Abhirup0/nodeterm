@@ -8,12 +8,40 @@
 // reverse-tunnel endpoint the Mac's RemoteHooks wrote; when the Mac is offline that pipe
 // is dead and the POST fails silently, so the session goes dark — even when the SAME host
 // runs an always-on headless Server Edition whose endpoint file is alive right next to it.
-// So the request POST captures curl's exit status and, on failure, retries ONCE against the
-// freshest OTHER endpoint file among the known candidates (the SSH reverse-tunnel endpoints
-// `~/.nodeterm/hook-endpoint-*.env` + the server-edition dataDir + the desktop userData dirs),
-// sourcing its sock/port/token. The happy path (primary alive) is
-// unchanged — curl succeeds, no candidate scan, no re-POST. A host with no candidate files
-// behaves exactly as before (nothing posts).
+// So the request POST captures curl's exit status and, on failure, walks the OTHER known endpoint
+// files (the SSH reverse-tunnel endpoints `~/.nodeterm/hook-endpoint-*.env` + the server-edition
+// dataDir + the desktop userData dirs), sourcing each one's sock/port/token, until one POST
+// succeeds. The happy path (primary alive) is unchanged — curl succeeds, no candidate scan, no
+// re-POST. A host with no candidate files behaves exactly as before (nothing posts).
+//
+// FALLBACK ORDERING AND BOUND — both were wrong, and the failure was total.
+// v1 picked ONE candidate, the freshest by mtime, and retried exactly once. Measured on a live
+// host with the Mac closed and 8 agents running:
+//     hook-endpoint-project-mrkigsjp-4.env  13:25  the primary — excluded as already tried
+//     hook-endpoint-project-msq9marh-4.env  12:52  another project's tunnel to the SAME Mac, dead
+//     .nodeterm-server/hook-endpoint.env    00:26  the host's own Server Edition — ALIVE
+// The single retry landed on the dead sibling and gave up; the live local endpoint was never
+// tried, and that host's mirror held 0 nodes and 0 events while 8 sessions worked. Two fixes:
+//   1. ORDER BY FAILURE DOMAIN, NOT BY MTIME. Every `hook-endpoint-*.env` tunnel on a host
+//      terminates at the SAME desktop, so they share one fate — mtime ranks a dead sibling above a
+//      listening local server, and the more projects a host has, the deeper the live endpoint is
+//      buried. A LOCAL endpoint (the host's own Server Edition, then a desktop installed on this
+//      host) is written by a process running HERE and fails independently, so locals go first;
+//      tunnels follow, freshest-first among themselves (the live project's endpoint is rewritten
+//      and VERIFIED on every connect, so mtime is a good tie-break WITHIN that group). The cost of
+//      being wrong is asymmetric: preferring a local when a sibling tunnel was in fact alive still
+//      delivers the event (the local instance pushes it) and only loses the desktop's own badge;
+//      preferring tunnels when they are all dead loses the event entirely.
+//   2. TRY SEVERAL, BUT BOUND IT (`nt_fallback_max`, 3). One retry cannot get past even a single
+//      stale sibling. The bound is what keeps the cure from being its own outage: a dead
+//      reverse-tunnel socket is not cheap to fail — sshd ACCEPTS the connection and then never
+//      answers, so each attempt can burn the full `--max-time 1.5`. 3 is chosen against the
+//      candidate list, not picked round: at most 3 local slots exist and the two desktop userData
+//      paths are per-OS (mutually exclusive), so a real host has at most 2 locals — 3 attempts
+//      therefore always reaches a live local endpoint AND still leaves at least one tunnel slot,
+//      while capping the added latency at ~4.5s on a path that has already failed.
+// A single-desktop host — one project, one tunnel, no Server Edition — is untouched: the only
+// candidate is the tried one, the list comes back empty, and nothing else runs.
 //
 // Stale-project self-heal (the glob candidate): a remote session's `NODETERM_HOOK_ENDPOINT` is
 // baked into its tmux session at CREATION (`new-session -A -e …`, which tmux ignores when the
@@ -186,38 +214,63 @@ export function buildManagedScript(
     '  esac',
     'fi',
     '# --- Endpoint failover helpers --------------------------------------------------',
-    '# Source the freshest EXISTING candidate endpoint file, skipping the already-tried path',
-    '# ($1), into NODETERM_HOOK_{SOCK,PORT,TOKEN,VERSION} + NODETERM_NODE_TOKEN_DIR. Returns 0 if one',
-    '# was sourced, else 1.',
-    '# SOCK/PORT are cleared first so a primary-vs-fallback transport switch (e.g. dead SOCK →',
-    '# live PORT) never leaves the stale transport winning in the re-POST below. NODE_TOKEN_DIR is',
-    '# cleared for the same reason and one more: our token belongs to the instance that MINTED it, so',
-    '# carrying our dir into someone else\'s endpoint would point the read at a directory that server',
-    '# cannot verify. Cleared, the newly sourced file sets its own — we then present THAT instance\'s',
-    '# token for this node, or (if it has none) nothing at all, which is honest `legacy`.',
-    'nt_pick_fallback() {',
+    // How many endpoints we may POST to AFTER the primary failed. See the "Fallback ordering and
+    // bound" block comment above buildManagedScript for the full reasoning; the short version:
+    // the ordered list is (at most 3) LOCAL endpoints followed by the reverse tunnels, only one or
+    // two locals can exist on a real host (the two desktop userData paths are per-OS and mutually
+    // exclusive), so 3 attempts always reaches a live local endpoint AND still leaves a tunnel slot.
+    // The cost ceiling is what bounds it: each dead attempt can burn --max-time 1.5s, because an
+    // sshd-held reverse-tunnel socket ACCEPTS and then never answers.
+    'nt_fallback_max=3',
+    '# Print the candidate endpoint files, ONE PER LINE, most-likely-alive first, skipping the',
+    '# already-tried path ($1) and anything unreadable. Ordering, and why it is not mtime:',
+    '#  1. LOCAL endpoints — the host\'s own Server Edition, then a desktop installed on this host.',
+    '#     They are written by a process running HERE, a different failure domain from the tunnels.',
+    '#  2. The per-project SSH reverse tunnels, freshest first (the old whole-list rule, kept as the',
+    '#     tie-break within this group, because the live project\'s endpoint is rewritten and VERIFIED',
+    '#     on every connect).',
+    '# The tunnels all terminate at the SAME desktop, so they share one fate: when the primary tunnel',
+    '# is dead (closed laptop) its siblings are almost always dead too, and mtime happily ranks those',
+    '# siblings above a local endpoint that is actually listening. That is the whole bug — a host with',
+    '# an always-on Server Edition sat silent while every one of its agents ran.',
+    'nt_candidates() {',
     '  nt_tried="$1"',
-    '  set --',
     '  for nt_c in \\',
-    // Unquoted glob (with $HOME itself still quoted): the per-project SSH reverse-tunnel
-    // endpoints. On no match the pattern stays literal and the `-r` test below drops it.
-    '    "$HOME"/.nodeterm/hook-endpoint-*.env \\',
     '    "$HOME/.nodeterm-server/hook-endpoint.env" \\',
     '    "$HOME/.config/node-terminal/hook-endpoint.env" \\',
     '    "$HOME/Library/Application Support/node-terminal/hook-endpoint.env"; do',
     '    [ "$nt_c" = "$nt_tried" ] && continue',
     '    [ -r "$nt_c" ] || continue',
+    '    printf \'%s\\n\' "$nt_c"',
+    '  done',
+    '  set --',
+    // Unquoted glob (with $HOME itself still quoted): the per-project SSH reverse-tunnel
+    // endpoints. On no match the pattern stays literal and the `-r` test below drops it.
+    '  for nt_c in "$HOME"/.nodeterm/hook-endpoint-*.env; do',
+    '    [ "$nt_c" = "$nt_tried" ] && continue',
+    '    [ -r "$nt_c" ] || continue',
     '    set -- "$@" "$nt_c"',
     '  done',
-    '  [ "$#" -gt 0 ] || return 1',
-    '  nt_fresh=$(ls -t "$@" 2>/dev/null | head -n 1)',
-    '  [ -n "$nt_fresh" ] && [ -r "$nt_fresh" ] || return 1',
+    '  [ "$#" -gt 0 ] || return 0',
+    '  ls -t "$@" 2>/dev/null',
+    '}',
+    '# Adopt one candidate endpoint file ($1): source it into NODETERM_HOOK_{SOCK,PORT,TOKEN,VERSION}',
+    '# + NODETERM_NODE_TOKEN_DIR. Returns 0 if it was sourced, else 1.',
+    '# SOCK/PORT are cleared first so a primary-vs-fallback transport switch (e.g. dead SOCK →',
+    '# live PORT) never leaves the stale transport winning in the re-POST below — and, now that we',
+    '# may walk several candidates, so one candidate\'s transport never leaks into the next one.',
+    '# NODE_TOKEN_DIR is cleared for the same reason and one more: our token belongs to the instance',
+    '# that MINTED it, so carrying our dir into someone else\'s endpoint would point the read at a',
+    '# directory that server cannot verify. Cleared, the newly sourced file sets its own — we then',
+    '# present THAT instance\'s token for this node, or (if it has none) nothing at all, which is',
+    '# honest `legacy`.',
+    'nt_adopt() {',
     '  NODETERM_HOOK_SOCK=""',
     '  NODETERM_HOOK_PORT=""',
     '  NODETERM_NODE_TOKEN_DIR=""',
     // stdout swallowed for the same reason as the primary source above (#186): in the perm-wait
     // branch this runs in the FOREGROUND of a hook whose stdout reaches the agent's context.
-    '  . "$nt_fresh" >/dev/null 2>&1 || return 1',
+    '  . "$1" >/dev/null 2>&1 || return 1',
     '  return 0',
     '}',
     '# One request POST against the CURRENT endpoint vars. Returns curl\'s exit status so the',
@@ -248,20 +301,42 @@ export function buildManagedScript(
     '    return 1',
     '  fi',
     '}',
-    '# Request POST with a single fallback retry. On a failed primary POST, source the freshest',
-    '# OTHER endpoint file (nt_pick_fallback) and re-POST with its sock/port/token — so a session',
-    '# whose primary endpoint is dead (offline Mac reverse-tunnel) still reaches an alive server',
-    '# (e.g. the headless Server Edition) sitting right next to it. In the perm-wait branch this',
-    '# also carries nodeterm_pending_id to the fallback, so the phone/canvas still learns the ask.',
+    '# Request POST with a BOUNDED fallback walk. On a failed primary POST, try the OTHER endpoint',
+    '# files in most-likely-alive order (nt_candidates) — at most $nt_fallback_max of them — and stop',
+    '# at the first POST that succeeds. So a session whose primary endpoint is dead (offline Mac',
+    '# reverse-tunnel) still reaches an alive server (e.g. the headless Server Edition) sitting right',
+    '# next to it, EVEN when several equally-dead sibling tunnels are listed ahead of it by mtime —',
+    '# which is what a single freshest-only retry could never get past. In the perm-wait branch this',
+    '# also carries nodeterm_pending_id to whichever endpoint answers, so the phone/canvas still',
+    '# learns the ask.',
+    '# The happy path is untouched: `&& return 0` means a successful primary POST runs no glob, no',
+    '# subshell and no second curl, exactly as before.',
     'nt_send_request() {',
     '  nt_request_post && return 0',
-    '  if nt_pick_fallback "$NODETERM_HOOK_ENDPOINT"; then',
-    '    # The token is re-read HERE, not once at the top: it must come from the dir the endpoint we',
-    '    # just adopted advertises. Reusing the primary\'s would send our kid to a server that cannot',
-    '    # judge it — harmless, but also pointless, and it would hide a real identity behind a legacy.',
+    '  nt_list=$(nt_candidates "$NODETERM_HOOK_ENDPOINT")',
+    '  [ -n "$nt_list" ] || return 1',
+    '  # Split the list on NEWLINES only, so a candidate path containing spaces survives (the macOS',
+    '  # "Application Support" entry already has one). `set -f` for the same span, so a path with a',
+    '  # glob character in it is not re-expanded by the unquoted $nt_list.',
+    '  nt_ifs="$IFS"',
+    '  set -f',
+    '  IFS="\n"',
+    '  set -- $nt_list',
+    '  set +f',
+    '  IFS="$nt_ifs"',
+    '  nt_n=0',
+    '  for nt_ep in "$@"; do',
+    '    nt_n=$((nt_n + 1))',
+    '    [ "$nt_n" -le "$nt_fallback_max" ] || break',
+    '    nt_adopt "$nt_ep" || continue',
+    '    # The token is re-read HERE, per candidate, not once at the top: it must come from the dir',
+    '    # the endpoint we just adopted advertises. Reusing the primary\'s (or the previous',
+    '    # candidate\'s) would send our kid to a server that cannot judge it — harmless, but also',
+    '    # pointless, and it would hide a real identity behind a legacy.',
     '    nt_read_node_token',
-    '    nt_request_post',
-    '  fi',
+    '    nt_request_post && return 0',
+    '  done',
+    '  return 1',
     '}',
     '# Advertise status (+ pendingId in the perm-wait branch). In the perm-wait branch this runs in',
     '# the FOREGROUND so the ask reaches the (primary or fallback) server before the answer-file poll',
