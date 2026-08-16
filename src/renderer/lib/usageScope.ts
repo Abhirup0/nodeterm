@@ -85,6 +85,33 @@ export interface ScopedUsage {
   pillLimits: ClaudeUsage['limits']
 }
 
+/**
+ * What the "Use for new sessions" affordance on one popover account row should be (issue #142).
+ *
+ * `rowAccountId` — null for a machine's system identity (~/.claude), else the managed account id.
+ * `eligible` — the accounts THIS project can launch (already host-filtered, the panel's own rule).
+ * `projectDefaultId` — the raw persisted `project.defaultAccountId`.
+ *
+ * Two decisions in one place, mirroring `resolveNewNodeAccount` at node creation:
+ *  - the persisted default is VALIDATED against `eligible` — a stale id (account since removed)
+ *    marks the System row as default, never a ghost row;
+ *  - a row is only actionable when the project could actually launch it: the system identity, or
+ *    one of the eligible accounts. Anything else (another host's row) is a plain readout.
+ */
+export function accountRowAction(
+  rowAccountId: string | null,
+  eligible: readonly { id: string }[],
+  projectDefaultId: string | undefined
+): 'default' | 'offer' | 'none' {
+  const activeDefault =
+    projectDefaultId && eligible.some((a) => a.id === projectDefaultId)
+      ? projectDefaultId
+      : undefined
+  const actionable = rowAccountId === null || eligible.some((a) => a.id === rowAccountId)
+  if (!actionable) return 'none'
+  return (rowAccountId ?? undefined) === activeDefault ? 'default' : 'offer'
+}
+
 export function scopeUsage(input: ScopeInput): ScopedUsage {
   const { scope, claude, accounts, providers, remote } = input
   if (scope.kind === 'local') {

@@ -5874,6 +5874,37 @@ body,
   background: rgba(var(--tint-rgb), 0.08);
   vertical-align: middle;
 }
+/* "Use for new sessions" affordance + current-default chip on an account row (issue #142).
+   Same chip grammar as __host above; the button reads as quiet text until hovered so the
+   readout stays a readout. */
+.usage-account__default {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.usage-account__use {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: none;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: rgba(var(--tint-rgb), 0.45);
+  background: transparent;
+  cursor: pointer;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.usage-account__use:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
 
 /* ---- Session-memory panel (opened by the system-resource pill) ----
    Same surface, border and shadow as `.usage-popover` above — the two panels open from adjacent
