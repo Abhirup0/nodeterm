@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
 //
-// Settings → Phone, the Revoke button: which of the three revoke outcomes the user is TOLD about.
-// The rule is asymmetric on purpose — 'skipped' is a normal state (a free-tier desktop holds no
-// entitlement to revoke with, and a phone paired before we recorded its relay id has no row we can
-// name), so warning there would tell a free user their phone's Pro is stuck when it never had any.
+// Settings → Phone, the Revoke button: which of the three revoke outcomes the user is TOLD about,
+// and in which voice.
+//   'skipped' → nothing. It is a normal state: a free-tier desktop holds no entitlement to revoke
+//               with, or there was no device left to name. Warning there would tell a free user
+//               their phone's Pro is stuck when it never had any of ours. (A phone paired before
+//               we recorded its relay id is NOT this case — the revoke falls back to our own
+//               pairing id and the server leg does run.)
+//   'ok'      → a receipt, not silence: the phone keeps the pass it already holds for up to 7
+//               days, and users who were told nothing filed that as "removal didn't work".
+//   'failed'  → a warning that does not prescribe waiting, because a 403 never clears by waiting.
 // Only a leg that actually failed may warn, and a failed one always must.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { act } from 'react'
@@ -102,16 +108,22 @@ describe('PhoneSection revoke feedback', () => {
     expect(revokeDevice).toHaveBeenCalledWith('dev-a')
     expect(text).not.toMatch(/Pro access/i)
     expect(text).not.toMatch(/try again/i)
+    // Nor the 7-day receipt: there was no Pro of ours on that phone, so there is nothing that
+    // ends in 7 days. An implementation that prints the receipt for every non-failure passes the
+    // two assertions above.
+    expect(text).not.toMatch(/7 days/i)
   })
 
-  it('says nothing on a clean revoke', async () => {
+  it('says WHEN the phone actually loses Pro on a clean revoke — removal is not instant', async () => {
     stubBridge({ local: true, server: 'ok' })
     mount()
     await act(async () => undefined)
 
     const text = await revokeFlow()
-    expect(text).not.toMatch(/Pro access/i)
+    expect(text).toMatch(/within 7 days/i)
+    // A receipt, not a warning: nothing here asks the user to do anything.
     expect(text).not.toMatch(/try again/i)
+    expect(text).not.toMatch(/Couldn’t/i)
   })
 
   it('warns that the phone kept its Pro when the server leg failed', async () => {
@@ -121,7 +133,12 @@ describe('PhoneSection revoke feedback', () => {
 
     const text = await revokeFlow()
     expect(text).toMatch(/Pro access/i)
-    expect(text).toMatch(/try again/i)
+    // 'failed' also covers a 403 ("not your row") and a 401, which no amount of waiting fixes —
+    // so the copy must not promise that being back online is the fix.
+    expect(text).not.toMatch(/back online/i)
+    // And the retry it does offer must disclose its cost: pairing the phone again RESTORES its Pro.
+    expect(text).toMatch(/pairing restores its Pro/i)
+    expect(text).toMatch(/get in touch/i)
   })
 
   it('warns about the local removal when that is the leg that failed', async () => {

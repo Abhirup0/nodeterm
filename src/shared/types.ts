@@ -2307,8 +2307,11 @@ export interface PairedDevice {
   lastSeenAt: number
   /**
    * The phone's OWN device id — what the relay backend keys its device row on, as opposed to
-   * `id`, which is ours. Absent for devices paired before this field existed, i.e. "there is no
-   * server row we can name". An id, not a secret, which is why it may cross to the renderer.
+   * `id`, which is ours. Absent for devices paired before this field existed; that is NOT "there
+   * is no server row we can name", because a revoke then falls back to `id`, which is the value
+   * the mint sent as the row's key whenever the phone supplied no id of its own (see
+   * `revokeDevice` in main/pairing-service.ts, including the residual case it cannot name). An id,
+   * not a secret, which is why it may cross to the renderer.
    */
   relayDeviceId?: string
 }
