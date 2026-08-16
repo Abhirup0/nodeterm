@@ -107,10 +107,14 @@ adding terminal-session features, extend the interface — do not reach around i
 **React Flow is the single live source of truth** for nodes. There is intentionally no
 separate store mirroring node state — earlier dual-source designs caused sync bugs.
 `src/renderer/state/workspace.ts` holds only pure helpers: the color palette, the node
-factories (`createTerminalNode`, `createAgentNode(agentId, …)`, `createStickyNode`, `createGroupNode`,
-`createEditorNode`, `createDiffNode`), the group transforms (`groupSelectedNodes`,
-`ungroupNodes`, `duplicateNode`), and the `nodeStatesToFlow` / `flowToNodeStates`
-serializers. Node kinds: `terminal | sticky | group | editor | diff`. A node's `data`
+factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agentId, …)`,
+`createAccountLoginNode`, `createStickyNode`, `createGroupNode`, `createEditorNode`,
+`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createDinoNode`), the
+group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
+`nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
+`src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
+subagent | loop | dino` — `subagent` and `loop` are render-only (ephemeral hook-driven viz) and
+never persisted. A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
 initialCommand, filePath, diffStaged`, `agentId` (which agent CLI a terminal node runs —
 persisted), and `accountId` (which managed Claude account a terminal node runs under — immutable,
@@ -160,7 +164,7 @@ Persistence has two layers:
 - **Live terminal sessions** (tmux): terminals continue where they left off across node
   remounts *and* full app restarts, including running processes. See below.
 
-`settings.json` is a separate store (`main/settings-store.ts`, `state/settings.ts`).
+`settings.json` is a separate store (`core/settings-store.ts`, `state/settings.ts`).
 
 ## Projects (tabs)
 
@@ -240,7 +244,8 @@ natively. The hydration that design needed is gone (see the reattach seeding bel
 
 **Copy → the system clipboard, via OSC 52.** `set-clipboard on` **plus** `set -as terminal-features
 ",*:clipboard"`: on copy, tmux emits OSC 52 to the attached client, and the renderer's OSC 52
-handler (`TerminalNode.tsx`, `parseOsc52`) writes the system clipboard. Two traps, both measured on
+handler (`parseOsc52` in `terminal/osc52.ts`, applied in `TerminalNode.tsx`) writes the system
+clipboard. Two traps, both measured on
 tmux 3.4:
 - **The `terminal-overrides ',xterm*:Ms=…'` entry does NOT work on tmux 3.2+** — with it, a copy
   emitted **zero** OSC 52 to the client. `terminal-features` is what actually enables the sequence.
@@ -300,10 +305,12 @@ Lifecycle, by intent:
   out, because the old per-node observers each acquired independently and momentarily overshot the
   cap. Rules: a client granted only after an **acquire debounce** (`WEBGL_ACQUIRE_DEBOUNCE_MS`, so a
   pan-through never grabs a context for a two-frame flash); if granting would exceed the budget,
-  **reclaim on demand from the least-recently-visible HIDDEN holder** (bypassing its release delay);
+  **reclaim on demand from the least-recently-visible HIDDEN holder** (`hiddenAt` LRU order);
   if every holder is currently visible (zoomed way out), the newcomer is NOT granted and **stays on
-  the DOM renderer** — we never push past the budget. A hidden holder keeps its context for
-  `WEBGL_RELEASE_DELAY_MS` (warm for a pan-back) but is the first reclaim candidate. `acquire()`
+  the DOM renderer** — we never push past the budget. A hidden holder keeps its context
+  **indefinitely** (warm for a pan-back of any length) — there is no time-based release; it is
+  reclaimed strictly on demand, either by a visible newcomer that needs its slot or by
+  `releaseAllHiddenGrants` (queued through the drain) under memory pressure. `acquire()`
   returning false (WebGL2 unavailable) doesn't burn a slot; an externally-lost context
   (`onContextLoss`) is reported via `handle.contextLost()`, drops from the accounting, and — for a
   still-VISIBLE client — schedules ONE delayed budget-gated re-grant (sleep/wake GPU resets lose
@@ -316,18 +323,21 @@ Lifecycle, by intent:
   off-screen so it holds no context. Permanent-delete paths call `disposeTerminalOnUnmount(id)` so a
   deleted node disposes instead of parking.
   **Which renderer a terminal uses** is `settings.terminalGpuRendering`, resolved by the single
-  resolver `resolveTerminalRenderer(value, isMac)` (`src/shared/webgl.ts`) to `dom | webgl | shared`:
+  resolver `resolveTerminalRenderer(value)` (`src/shared/webgl.ts`) to `dom | webgl | shared`:
   `'off'` = xterm's DOM renderer, `'on'` = one budgeted WebGL context per terminal (everything the
   paragraph above describes), `'shared'` = **glyphgrid**, ONE canvas-wide WebGL2 context every
   terminal paints into (`src/renderer/glyphgrid/`, reached through `terminal/glyphgrid-attach.ts`;
   the per-terminal budget is OFF in this mode). `'auto'` (the default, and what legacy/unknown values
-  fall back to) = **`shared` on macOS, `webgl` everywhere else**. macOS used to resolve to `dom`
-  because many simultaneous WebGL canvases made its compositor flicker the window or composite
-  terminals black with no JS-visible error; one context does not create that pressure, and the
-  shared renderer was promoted on 2026-08-05 after the full device checklist plus a ≥30-minute soak
-  (`docs/superpowers/plans/2026-08-03-phase1b-device-checklist.md`) — it is **no longer experimental**,
-  and it falls back to the DOM renderer on failure. Non-macOS is deliberately not promoted (no such
-  reports there, so no evidence to move it). The four-way setting stays as the escape hatch.
+  fall back to) = **`webgl` on EVERY platform**, macOS included. The macOS branch has moved twice:
+  it was `dom`, then `shared` on 2026-08-05 (per-terminal WebGL composited terminals black after
+  zoom-out bursts, blamed on the OS compositor), and is now `webgl` — the blackout was root-caused
+  not to context count but to a dependency skew (addon-webgl 0.19's dispose crashed on the 5.5 core
+  and aborted its own DOM-renderer restore; pinned + healed, see
+  `renderer/terminal/webgl-addon-pair.test.ts`). What actually guards macOS is a lower budget,
+  `WEBGL_BUDGET_DESKTOP_MAC` (16, vs 24 elsewhere), capping compositor pressure at every zoom. The
+  four-way setting stays as the escape hatch: `'shared'` is now opt-in only (also where the macOS
+  default points back if the one unconfirmed 2026-07-30 whole-window-flicker report recurs), and
+  `'off'` drops GPU rendering entirely.
 - **Window close / app quit** → clients detach (`PtyManager.killAll()`); the tmux session keeps
   running. `killAll()` deliberately does NOT kill sessions.
 - **Node reopen / app relaunch** (nothing parked) → a new PTY attaches to the same
@@ -410,7 +420,7 @@ tmux only survives an **app** restart — a **machine reboot kills the tmux serv
 reattach (tmux redraws) and `fresh=true` means a cold start (first open OR post-reboot). On a
 cold start the renderer (`TerminalNode.tsx`) reconstructs state instead of relying on the dead
 session (you can't keep a live OS process across a reboot):
-- **Scrollback replay** — `main/scrollback-store.ts` keeps a byte-capped (`256 KB`) snapshot of
+- **Scrollback replay** — `core/scrollback-store.ts` keeps a byte-capped (`256 KB`) snapshot of
   each tmux session's recent output under `<userData>/terminal-scrollback/`, refreshed on a
   timer (`SCROLLBACK_SNAPSHOT_MS`) + on detach/quit (`tmux capture-pane -e`). On a cold start the
   renderer reads it via `pty.readScrollback` and writes it back into xterm (with a "session
@@ -430,15 +440,16 @@ bracketed paste, application-cursor, mouse tracking, origin mode, and the rest. 
 of them: `term.modes.mouseTrackingMode` decides whether a click means "follow this file link"
 (`src/renderer/terminal/file-links.ts:341`).
 
-But `PtyManager.bracketPasteRequested` asks **tmux** for the same class of fact, via
-`#{bracket_paste_flag}` — and that format **first shipped in tmux 3.7** (2026-06-26). Ubuntu 24.04
-LTS ships 3.4, Ubuntu 22.04 → 3.2a, Debian 12/13 → 3.3a/3.5a, Ubuntu 26.04 → 3.6a. On all of those
-it expands to `''` exactly like a bogus name, and the comparison against `'1'` answers **false for
-every pane**. The bundled tmux does not rescue it: `extraResources` places it under `"mac"` only,
-and `bundledTmuxPath` is deliberately the **last** candidate (see the comment at
-`pty-manager.ts:174` — preferring our binary would pair a new client with the user's older running
-*server*, which upstream refuses). On an **SSH project it is unfixable from our side entirely**:
-the remote's tmux is whatever the user's server has.
+We once did the opposite. `PtyManager.bracketPasteRequested` (now **deleted** — see the tombstone
+in `pty-manager.ts`) asked **tmux** for the same class of fact, via `#{bracket_paste_flag}` — and
+that format **first shipped in tmux 3.7** (2026-06-26). Ubuntu 24.04 LTS ships 3.4, Ubuntu 22.04 →
+3.2a, Debian 12/13 → 3.3a/3.5a, Ubuntu 26.04 → 3.6a. On all of those it expanded to `''` exactly
+like a bogus name, and the comparison against `'1'` answered **false for every pane**. The bundled
+tmux did not rescue it: `extraResources` places it under `"mac"` only, and `bundledTmuxPath` is
+deliberately the **last** candidate (see the comment at `pty-manager.ts:245-250` — preferring our
+binary would pair a new client with the user's older running *server*, which upstream refuses). On
+an **SSH project it was unfixable from our side entirely**: the remote's tmux is whatever the
+user's server has.
 
 **The rule this is an instance of: before asking tmux, ssh or `ps` something about a pane, check
 whether the emulator already knows it.** Facts about *what the app in the pane is doing* (VT modes,
@@ -462,19 +473,22 @@ present on every tmux in the field. We do not have to ask whether the app wants 
 tmux to do the framing, and it applies the pane's real state. Measured on 3.4: framed when the app
 requested it, unframed when it did not, correct for a non-active pane, and the whole thing in one
 round trip —
-`tmux load-buffer -b nt - \; paste-buffer -d -p -b nt -t <target> \; send-keys -t <target> Enter`.
+`tmux load-buffer -b nt - \; if-shell -F -t <target> '#{pane_in_mode}' 'send-keys -t <target> -X
+cancel' \; paste-buffer -d -p -r -b nt -t <target> \; send-keys -t <target> Enter` (`-r` keeps
+`\n` as `\n` instead of tmux's default `\n`→`\r` rewrite; see `tmux-naming.ts`).
 
 Two hazards that come with it, both measured:
 - **Copy mode silently unframes.** With `#{pane_in_mode}` = 1, `paste-buffer -p` delivers unframed
   (tmux checks the copy-mode screen, not the app), so a user who scrolled the wheel up gets the
-  one-turn-per-line bug. `send-keys -X cancel` in the same invocation restores it.
+  one-turn-per-line bug. The `if-shell` guard above runs `send-keys -X cancel` first — only when the
+  pane is in copy mode — in the same invocation, restoring it.
 - **`set-buffer -- "$text"` hits ARG_MAX** around 200 KB. Use `load-buffer -` over stdin — and on
   the SSH path that means piping into the remote command rather than putting the text in argv.
 
-And a correction worth keeping, because it inverts what the old comment implied: when
-`bracketPasteRequested` answers false it does **not** refuse — it falls through to the legacy
-two-step, which delivers `line1\nline2\nline3\r`, i.e. raw newlines into the app. It does not
-decline to send a multi-line message; it mangles it.
+There is no longer a probe or a fallback to weigh: `sendText` delivers through `paste-buffer -p`
+**unconditionally** (the plan builders live in `tmux-naming.ts`). The old two-step path — probe
+`#{bracket_paste_flag}`, and on a false answer deliver `line1\nline2\nline3\r`, raw newlines into
+the app that *mangled* every multi-line write on a pre-3.7 tmux — is gone with the probe.
 
 ### Seeding a fresh xterm (`attachReplay` / `seedPaint` in `terminal/terminal-config.ts`)
 
@@ -627,6 +641,22 @@ session.
   `img-src data:`), on a checkerboard backdrop with the pixel dimensions in the header.
 - **diff** (`DiffNode.tsx`) — Monaco diff editor; `diffStaged` chooses HEAD↔index (staged)
   vs index↔working (unstaged) via `git:show-file` + `fs:read`. Read-only.
+- **video** (`VideoNode.tsx`) — a video player; a local file is served over the `nt-media://`
+  protocol (allowlisted on mount via `media.allow`) with native controls; an SSH-project file
+  (`data.sshFs`) is first pulled into the local media cache over the project's ControlMaster
+  (`media.allowSsh`) then played the same way.
+- **web** (`WebNode.tsx`) — an Electron `<webview>` (locked down, no `nodeintegration`) that loads
+  a live `data.url`, or serves local html at `data.filePath` over `nt-media://`.
+- **browser** (`BrowserNode.tsx`) — a navigable Chromium browser wrapping the shared
+  `BrowserSurface` (webview + toolbar); the last top-level URL persists to `data.url`, and the same
+  surface backs the kanban card modal's browser popup.
+- **dino** (`DinoNode.tsx`) — a small self-contained T-Rex-style runner on a canvas (no PTY);
+  high score persists via `data.highScore`.
+- **subagent** / **loop** (`SubagentNode.tsx` / `LoopNode.tsx`) — render-only, hook-driven viz
+  nodes, **never persisted**. `subagent` visualizes a subagent the Claude session spawned (type +
+  task + live timer, expand for its live transcript — subagents have no PTY); `loop` shows a
+  loop/schedule/cron kind + task + per-iteration summaries, Play re-issues the task into the parent
+  terminal's tmux session.
 - **chat** — **REMOVED 2026-07.** The SDK-driven Claude chat node (`ChatNode.tsx`, `main/chat-driver.ts`,
   the `@anthropic-ai/claude-agent-sdk` dependency, and the whole chat-events/chatSessions stack) is
   gone — dropping the bundled SDK also removed a ~240 MB native binary per platform. A persisted `chat`
@@ -645,9 +675,11 @@ Monaco is wired in `renderer/editor/monaco-setup.ts` (language workers bundled v
 The app is a pluggable multi-agent system: Claude Code is one builtin of
 several. Extra terminal-node behavior is driven per agent by a registry + capability lists, a
 shared 4-state model, and a **transient** zustand store `state/agentStatus.ts`
-(`{state, agentId, unread, session, sessionId, loop}` per node id; the live `state` is **not**
-persisted — only `unread`/`session`/`sessionId` go to localStorage under
-`nodeterm.agentStatus`, migrated once from the legacy `nodeterm.claudeStatus` key).
+(`{state, agentId, unread, session, sessionId, loop, hibernated}` per node id; the live `state` is
+**not** persisted — only `unread`/`session`/`sessionId`/`agentId`/`loop`/`hibernated` go to
+localStorage under `nodeterm.agentStatus`, migrated once from the legacy `nodeterm.claudeStatus`
+key. `agentId` is durable because a hand-launched `claude` in a plain terminal is known nowhere
+else, and its context links must keep classifying across restarts).
 
 - **Agent registry + capabilities** — `src/shared/agents/config.ts` holds `AGENT_CONFIG`
   (claude/codex/gemini/copilot/opencode/grok: id, label, spawn command, color, `promptInjectionMode`, …) keyed
@@ -664,8 +696,9 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   memberships below are the ones to check before assuming "claude-only" (all verified against
   `config.ts`, 2026-08-09): the per-node **context meter** is `USAGE_CAPABLE = claude/codex/gemini`;
   the **permission mode** is `PERMISSION_MODE_CAPABLE = claude/grok/gemini/codex`; the session-name
-  sync is **split in two** — `TITLE_READ_CAPABLE = claude/grok/gemini` (read) ⊇ `RENAME_CAPABLE =
-  claude/grok` (write), because gemini names its own sessions but has no rename command;
+  sync is **split in two** — `TITLE_READ_CAPABLE = claude/codex/grok/gemini` (read) ⊇
+  `RENAME_CAPABLE = claude/grok` (write), because gemini and codex name their own sessions but have
+  no rename command (codex's read leg is `readCodexSessionName`);
   **Context Link** spans four builtins
   (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode`, NOT grok/copilot). UI gates
   on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings,
@@ -850,7 +883,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   `NormalizedAgentEvent` from `agent:status`, drives the `agentStatus` store, fires throttled
   (5s/node) background notifications, and records the session id. Header shows a pulsing
   **RUNNING** (working) / **NEEDS YOU** (waiting/blocked) badge.
-- **Hook server (loopback HTTP)** — `src/main/agents/hook-server.ts` is a main-process
+- **Hook server (loopback HTTP)** — `src/core/agents/hook-server.ts` is a main-process
   loopback HTTP server (per-session bearer token, fail-open) that the installed hook scripts
   POST to; it replaced the old `fs.watch` signal-log mechanism. `buildPtyEnv` injects the
   node id + endpoint/token into each spawned session's env; because tmux sessions **outlive
@@ -864,7 +897,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   launch agents with the desktop's permission mode + managed accounts, and SSH slices get their
   **per-host** settings (remote CLI caps + host-matched accounts) injected via
   `remote-status-push`'s `settingsFor` dep.
-- **Hook installers** — `src/main/agents/hooks/` holds per-agent hook services + an installer
+- **Hook installers** — `src/core/agents/hooks/` holds per-agent hook services + an installer
   registry `MANAGED_HOOK_INSTALLERS`. `managed-script.ts` builds the POSIX hook script that
   POSTs to the server (env-gated: a no-op in the user's normal terminals, active only in
   sessions nodeterm spawns; the `claude-signals` string is kept as the idempotency marker that
@@ -932,11 +965,12 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   clock (same-state hook freshness is `stateAt`), and show its short relative age. Missing clocks
   stay last with no made-up timestamp. A click may clear the glow but cannot move the row.
 - **Session name ⇄ node title** — **two lists, because the two directions are separate facts**:
-  `TITLE_READ_CAPABLE` (`canReadTitle` — claude, grok, **gemini**) is the READ leg, `RENAME_CAPABLE`
-  (`canRename` — claude, grok) the WRITE leg, and **read ⊇ write** is an invariant pinned in
-  `config.capabilities.test.ts`. Gemini is the reason: it names its own sessions but has **no rename
-  command** (`/chat save <tag>` is a checkpoint, not a title), so one list for both legs would light
-  the rename UI on a node where the write silently does nothing. The **write** is the same literal
+  `TITLE_READ_CAPABLE` (`canReadTitle` — claude, **codex**, grok, **gemini**) is the READ leg,
+  `RENAME_CAPABLE` (`canRename` — claude, grok) the WRITE leg, and **read ⊇ write** is an invariant
+  pinned in `config.capabilities.test.ts`. Gemini and codex are the reason: they name their own
+  sessions (codex via `readCodexSessionName`) but have **no rename command** (gemini's `/chat save
+  <tag>` is a checkpoint, not a title), so one list for both legs would light the rename UI on a
+  node where the write silently does nothing. The **write** is the same literal
   `/rename <name>` for claude and grok; the **read** legs are per-agent and none may ever
   search another's tree, so the routing lives in ONE place, `core/agent-session-name.ts`
   (`readAgentSessionName(sessionId, accountId?, agentId?, deps?)` — trailing/optional so every pre-grok
@@ -952,7 +986,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   gemini node.
   - **session → title (read, claude):** the authoritative name lives in the transcript `.jsonl`, not the
     OSC terminal title (`/rename` does **not** update OSC — a known Claude gap — so reading the
-    file is the only thing that works after a **resume**). `main/transcript-reader.ts`
+    file is the only thing that works after a **resume**). `core/transcript-reader.ts`
     `readSessionName(sessionId)` resolves the session file **strictly by sessionId** (no cwd
     fallback — that would make every Claude node in one folder resolve to the same newest transcript
     and adopt each other's names) and `pickSessionName` returns the latest `custom-title`'s
@@ -1016,7 +1050,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   (`flowToNodeStates`) nor in undo/dirty. Fan-out is cleared on the next new turn / session-end /
   node close. (Subagents share the parent's process — no PTY.) Each card shows
   duration/tokens/tool-uses and **expands** (click) to a **live transcript**:
-  `main/subagent-tail.ts` resolves the subagent's own transcript file
+  `core/subagent-tail.ts` resolves the subagent's own transcript file
   (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
   `.meta.json`), tails it read-only, formats each line (assistant text + tool calls + results),
   and streams chunks over `agent:subagent-activity` into the store.
@@ -1186,7 +1220,7 @@ persisted — only `unread`/`session`/`sessionId` go to localStorage under
   side by giving each its own config dir. `settings.claudeAccounts` is a list of `ClaudeAccount
   {id, label, email?, host?, pending?, createdAt}` (in `settings.json`; the account **list** is
   config, not credentials). Isolation is **config-dir**, not token storage: a local account's dir
-  is `{userData}/claude-accounts/<id>` (`claudeConfigDirFor` / pure `localAccountConfigDir`),
+  is `{userData}/claude-accounts/<id>` (`claudeConfigDirFor` / pure `accountConfigDir`),
   a **remote** account's is `~/.nodeterm/claude-accounts/<id>` on its `host` (keyed by
   `sshHostKey` = `user@host`; `remoteAccountConfigDir` is `~`-relative for ssh expansion,
   `remoteAccountConfigDirAbs` resolves it against the connection's `remoteHome`). The **claude
@@ -1731,10 +1765,16 @@ again; the grace window was never the thing that was wrong.
   **active project tab** (`.tab__board-toggle`, after the name, before the caret — the view
   belongs to the project; earlier homes were the tab-strip end, then the controls-cluster,
   both rejected in use) plus ⌘⇧B / ⌘K): per-project
-  full-page SESSION board OVER the canvas — cards ARE the project's session nodes (React Flow
-  type `terminal`), derived LIVE from the canvas nodes (title/color/kind/agentId), with
-  RUNNING / NEEDS YOU badges + unread dot from the default `agentStatus` store; click = back to
-  canvas + `focusNodeById`. The canvas stays MOUNTED under the opaque overlay (agent-status
+  full-page board OVER the canvas. It is **dual-source** (PR #90): SESSION cards are the project's
+  session nodes (React Flow type `terminal`), derived LIVE from the canvas nodes
+  (title/color/kind/agentId), with RUNNING / NEEDS YOU badges + unread dot from the default
+  `agentStatus` store (click = back to canvas + `focusNodeById`); GITHUB cards are the repo's
+  issues (`GitHubIssueCardView` via `state/githubIssues.ts`, opened through
+  `GitHubIssueSummaryModal`, a column move that closes/reopens the issue confirms first). A
+  **source filter** (`KanbanSourceFilter`: All / GitHub / Sessions) and a transient per-board
+  **label filter** narrow what shows. **Labels** are a per-project palette (`ProjectKanban` labels,
+  edited inline via the Notion-style `LabelPicker`: create/assign/rename/recolor/delete through the
+  pure `lib/kanban.ts` transforms) plus each GitHub issue's own labels, both filterable. The canvas stays MOUNTED under the opaque overlay (agent-status
   listeners live in Canvas.tsx; `display:none` would 0×0-resize every terminal into a tmux
   SIGWINCH), and canvas-only shortcuts (undo, ⌘T/⌘⇧C, Delete) early-return via `isKanbanOpen`.
   Board data is `project.kanban` ({columns, assignments: [{nodeId, columnId}]}, order = array
@@ -1781,8 +1821,11 @@ again; the grace window was never the thing that was wrong.
   NO separate membership system) — and a Due date (`datetime-local`, red Overdue chip past due;
   cards show mini avatars + a due chip). Data = `kanban.meta [{nodeId, assignees, dueAt, priority}]` (priority low/medium/high/urgent, colored chips)
   (tolerant readers via `cardMeta`; pruned with dead nodes; empty entries dropped). Assign/due
-  changes are logged through the SAME diff funnel (`member-assigned/unassigned`, `due-set/cleared`;
-  unknown future event types render neutrally). Feed rows show ABSOLUTE Trello-style stamps
+  changes are logged through the SAME diff funnel (`member-assigned/unassigned`, `due-set/cleared`,
+  `priority-set/cleared`; agent-to-agent message deliveries are logged as `agent-message` by
+  `agent-message-trace.recordDelivery`, where `from`/`to` are node ids and `title` is the outcome;
+  unknown future event types render neutrally — the `BoardLogEvent.type` union in `shared/types.ts`
+  is the source of truth). Feed rows show ABSOLUTE Trello-style stamps
   (relative in the tooltip). The modal's right third is the **board log** panel (`BoardLogPanel.tsx`, `state/boardLog.ts`):
   per-person comments + card activity from `<cwd>/.nodeterm/board-log.jsonl` — append-only JSONL
   (`core/board-log.ts`: tolerant newest-first parse cap 500; text clamped `BOARD_LOG_TEXT_MAX`
@@ -1842,7 +1885,7 @@ again; the grace window was never the thing that was wrong.
 Voice-to-text input captured via microphone, turned into terminal text via on-device Whisper. Works on desktop (Electron) and Server Edition (browser); iOS support is separate (`nodeterm-ios`, private — see the three-surfaces entry under Conventions).
 
 - **Service seam** (`src/core/speech/`) — `SpeechService` (core) + `PlatformSpeechProvider` interface + shell implementations (`PlatformElectron` / `PlatformServer`). Models are stored under `${dataDir}/speech-models/`, with fenced downloads + orphan sweep (`removeUnusedModels`). Core validates license: **tiny** free (always); **base·small·large-v3-turbo** Pro (via `isPremium()`). One model loaded at a time (FIFO memory management), lazy smart-whisper import degrades to a friendly error if the native dep is unavailable (`"Local whisper is unavailable…"`).
-- **Cloud contract (iOS parity)** — `/v1/transcribe` multipart endpoint (not built yet; SDK `transcribe()` call matches iOS byte-for-byte) for future remote transcription. IPC channels `speech:*` wired in **both** Electron (`src/main/platform-electron.ts`) and Server (`src/server/platform-server.ts`): `speech:request-consent` (Electron mic-prompt only, server always true), `speech:synthesize`, `speech:cancel`, returning `Promise<{text, audio}>`.
+- **Cloud contract (iOS parity)** — `/v1/transcribe` multipart endpoint (not built yet; SDK `transcribe()` call matches iOS byte-for-byte) for future remote transcription. IPC channels `speech:*` (in `src/shared/ipc.ts`) wired in **both** Electron and Server: `speech:transcribe` (returns `Promise<{text}>`), `speech:models`, `speech:model-download`, `speech:model-delete`, `speech:progress` (main/server → renderer download-progress broadcast), and `speech:mic-consent` (Electron mic-prompt only, server always true). There is no `speech:synthesize` / `speech:cancel` and no audio in the reply.
 - **Renderer capture** — `PcmCapture` AudioWorklet (16kHz single-channel PCM, WebAudio or fallback SPN) + DictationOverlay (⌘⇧D dock mic / Cmd key; Settings → Speech section for model choice + progress). **Send** appends text + Enter to the terminal; **Insert** sends text-only via `sendText(…, {enter: false})`. **Nothing auto-submits** (user always decides when to send).
 - **Browser constraints** — `getUserMedia` requires HTTPS or `localhost`; mic permission prompt is the browser's own (not handled by nodeterm). Model downloads land on the **server's data dir** (accessible across sessions).
 - **Electron + native dep** — smart-whisper is externalized + `asarUnpack`'d (not bundled); `postinstall` rebuilds it against Electron's ABI. Device verification of the ABI rebuild is not yet exercised on a dev machine — test paths exist but have not been run in CI.
@@ -1857,7 +1900,7 @@ node-pty, output `dist/`). The app icon is generated from the nodeterm mark by
 (local **unsigned** arm64 `.dmg` smoke test). Production release signing/notarization and the
 update-feed hosting are handled outside this repo.
 
-Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(win)` from `index.ts`):
+Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(onBeforeRestart?)` from `index.ts`):
 runs **only when `app.isPackaged`** (dev = no-op), checks on launch + every 6h, auto-downloads,
 forwards the lifecycle (`update-available` / `download-progress` / `update-downloaded` / errors)
 to the renderer over IPC. `components/UpdateCard.tsx` shows the strip + **Restart to update** →
@@ -1866,7 +1909,7 @@ also fires when the window is unfocused. Exposed via `window.nodeTerminal.update
 macOS *silent* self-install requires a signed+notarized build; unsigned builds still surface
 the card for a manual download.
 
-**Backend check feed** (`src/main/check.ts`, successor to the static `announcements.json`): the
+**Backend check feed** (`src/core/check.ts`, successor to the static `announcements.json`): the
 **main process** calls `GET https://api.nodeterm.dev/v1/check?version=&os=&channel=stable` (so the
 renderer CSP stays `'self'`) on launch + every 6h, cached 5 min, returning `{ messages, update }`.
 Exposed split over two IPC handlers: `announcements.fetch()` → `messages`, `appUpdatePolicy` →
@@ -1876,7 +1919,7 @@ in `localStorage`); `update.mandatory`/`minSupported` flips `UpdateCard` into a 
 update state. The call no-ops under `DO_NOT_TRACK`/`NODETERM_TELEMETRY_DISABLED` or in unpackaged
 builds (unless `NODETERM_API_BASE` targets a local server). Schema example:
 `docs/announcements.example.json`. **Telemetry** (`src/main/telemetry.ts`) is a separate opt-out
-ping to `api.nodeterm.dev/v1/telemetry` (version/OS on launch + daily), gated on
+ping to `api.nodeterm.dev/v1/ping` (version/OS on launch + daily), gated on
 `settings.telemetryEnabled` + the same build/DNT guards; toggle in Settings → Privacy.
 
 ## Conventions
