@@ -9394,7 +9394,9 @@ export function Canvas() {
             onKillSession={killSessionById}
           />
         
-          <UsageIndicator overBoard={kanbanOpen} />
+          {/* Same write path as the TabBar caret menu (project.defaultAccountId + persist) — the
+              popover row is a second, better-placed entrance to the same action (issue #142). */}
+          <UsageIndicator overBoard={kanbanOpen} onSetDefaultAccount={setProjectDefaultAccount} />
 </div>
 
         <PresenceNamePrompt />

@@ -296,6 +296,15 @@ set -su terminal-overrides
 set -su terminal-features
 set -g set-clipboard on
 set -as terminal-features ",*:clipboard"
+# Truecolor passthrough: tmux clamps 24-bit SGR to the 256 palette unless the OUTER terminal is
+# known to speak RGB. The attached client is our xterm.js renderer, which does — declare it via
+# terminal-features like the clipboard entry, never terminal-overrides (see MIGRATION). Issue #78.
+set -as terminal-features ",*:RGB"
+# And advertise it to the programs INSIDE the panes: half the ecosystem checks COLORTERM before
+# emitting 24-bit SGR. Global env, copied into each session at creation — this conf is written and
+# source-filed at connect (warm server) and rides -f on cold start, so it lands before sessions do.
+# The local path passes COLORTERM per session via tmux -e instead (the PATH/LANG precedent).
+set-environment -g COLORTERM truecolor
 # Mouse copy: tmux copies to its buffer AND emits OSC 52. No pipe to a local command — it would run
 # on the REMOTE host, which is nobody's clipboard.
 bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel

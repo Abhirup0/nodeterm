@@ -3,6 +3,8 @@ import { IconBellFilled, IconCircleCheck } from './icons'
 import type { SessionRowVM } from '../lib/sessionList'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
+import { useSettings } from '../state/settings'
+import { contextFillColor, percentNumber, percentText } from '../lib/usageFormat'
 
 export interface SessionRowProps {
   row: SessionRowVM
@@ -15,12 +17,6 @@ export interface SessionRowProps {
   onDragEnd(): void
   /** Status-group mode only: elapsed time since the current state began. */
   stateAgeLabel?: string
-}
-
-function ctxColor(pct: number): string {
-  if (pct > 85) return '#ff453a'
-  if (pct >= 60) return '#ffd60a'
-  return '#30d158'
 }
 
 function dirName(p?: string): string {
@@ -46,6 +42,7 @@ export function SessionRow({
   // unmounting (sidebar close / hover-peek collapse) while the name is still generating.
   const naming = useSessionNaming((s) => !!s.byId[row.id])
   const usage = useContextWindow((s) => (row.sessionId ? s.bySessionId[row.sessionId] : undefined))
+  const percentMode = useSettings((s) => s.settings.usagePercentMode)
 
   const commit = (): void => {
     const t = draft.trim()
@@ -135,8 +132,12 @@ export function SessionRow({
             </span>
           )}
           {row.usesContext && usage && (
-            <span className="ss-ctx" style={{ background: ctxColor(usage.usedPercent) }}>
-              {Math.round(usage.usedPercent)}%
+            <span
+              className="ss-ctx"
+              title={`Context window — ${percentText(usage.usedPercent, percentMode)}`}
+              style={{ background: contextFillColor(usage.usedPercent) }}
+            >
+              {percentNumber(usage.usedPercent, percentMode)}%
             </span>
           )}
           <button

@@ -73,3 +73,21 @@ export function createCrashReloadPolicy(
 export function shouldHideOnClose(platform: NodeJS.Platform | string, quitting: boolean): boolean {
   return platform === 'darwin' && !quitting
 }
+
+export type CloseAction = 'default' | 'hide' | 'leave-fullscreen-then-hide'
+
+/**
+ * What the close-event handler should do. Hiding a FULLSCREEN window without leaving fullscreen
+ * first strands its empty Space as a black screen the user can still swipe to (issue #78, the
+ * known Electron behavior electron/electron#20263) — so fullscreen must be exited, the async
+ * `leave-full-screen` transition awaited, and only THEN the window hidden. The quit path is not
+ * affected: there the window really closes and the app (and its Space) goes away with it.
+ */
+export function closeAction(
+  platform: NodeJS.Platform | string,
+  quitting: boolean,
+  isFullScreen: boolean
+): CloseAction {
+  if (!shouldHideOnClose(platform, quitting)) return 'default'
+  return isFullScreen ? 'leave-fullscreen-then-hide' : 'hide'
+}
