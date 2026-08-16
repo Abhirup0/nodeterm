@@ -10619,3 +10619,72 @@ body,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ================================= Focus mode (issue #78) ==================================
+   One terminal fills the window. The surface is a fixed opaque layer ABOVE the canvas (z 40 —
+   over the sidebar's 12 and the dock's 20, under menus at 46 and dialogs at 55/70), and the
+   focused `.term-node` is REPARENTED into it (TerminalNode's layout effect) — same element,
+   same xterm, no respawn. Chrome is not "hidden": it simply sits under the opaque surface, and
+   the dock is lifted above it (z 41) on pointer proximity / hover. */
+.focus-surface {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: none;
+}
+.focus-surface.is-active {
+  display: block;
+  background: var(--canvas-bg);
+}
+/* The reparented node root: fill the surface edge to edge. width/height 100% still resolve
+   against the surface; the absolute inset pins it regardless of the flow-node sizing props. */
+.focus-surface .term-node {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+}
+/* Canvas-only affordances are meaningless off-canvas: resize grips, link handles, flow ports. */
+.focus-surface .react-flow__resize-control,
+.focus-surface .bridge-handle,
+.focus-surface .react-flow__handle {
+  display: none;
+}
+.focus-exit {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 2;
+  border: 1px solid var(--border);
+  background: rgba(var(--menu-rgb), 0.92);
+  color: var(--text);
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 4px 12px;
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.16s ease-out;
+}
+.focus-exit:hover {
+  opacity: 1;
+}
+/* Dock reveal: proximity (Canvas toggles `focus-reveal-bottom` on mousemove) or direct hover
+   keeps it up once revealed. Lifted above the surface, faded via opacity only. */
+body.focus-mode .dock {
+  z-index: 41;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease-out;
+}
+body.focus-mode.focus-reveal-bottom .dock,
+body.focus-mode .dock:hover {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .focus-exit,
+  body.focus-mode .dock {
+    transition: none;
+  }
+}
