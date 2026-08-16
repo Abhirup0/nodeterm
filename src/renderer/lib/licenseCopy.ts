@@ -4,16 +4,24 @@ import type { LicenseDetail } from '@shared/types'
  * Settings → License wording, derived from the data in ONE place so a sentence cannot promise
  * something the numbers do not say.
  *
- * Two facts shape every branch below:
+ * Three facts shape the branches below:
  *
- * 1. **`error` carries TWO families and only the code word separates them.** A READ that failed
- *    (`unauthorized` | `inactive` | `offline` | `disabled` | `network`) arrives with placeholder
- *    zeros and a null key — rendering those as a device count is the bug this module exists to
- *    prevent. A refused RELEASE (`too_soon` | `not_applicable`) rides on top of the LAST GOOD
- *    read, so its key, source and counts are real; telling that user "could not read your
- *    license" would be equally wrong in the other direction. Hence: error first, then which
- *    family, then the source.
- * 2. **Seats and devices are the same thing by design**, so the copy says "devices" and names
+ * 1. **A reason code is either about the LICENSE or about the CALL, and both arrive in the same
+ *    `error` field.** A refused RELEASE (`too_soon` | `not_applicable`) is about the license: it
+ *    rides on top of the LAST GOOD read, so its key, source and counts are real, and it belongs
+ *    beside them. Everything else — `unauthorized` | `inactive` | `offline` | `disabled` |
+ *    `network` — is about a call that did not deliver, and the route it failed on decides what to
+ *    say: on a READ it means the key and counts are unknown, on a RELEASE it means the action did
+ *    not happen (and, offline, may or may not have). The store therefore never merges a release's
+ *    transport failure onto `detail` (it hands the code back instead), and `releaseFailureSentence`
+ *    is the one place that speaks for it. `isReleaseRefusal` is the shared split so the store and
+ *    the panel cannot disagree about which family a code is in.
+ * 2. **"Your Pro access is unaffected" is a forward-looking promise, so only codes that back it may
+ *    say it.** `offline`/`network`/`disabled` mean we could not look — the entitlement is verified
+ *    locally and nothing changed. `inactive`/`unauthorized` are ANSWERS that this license is not in
+ *    good standing, and the very next refresh may drop Pro; telling that user they are unaffected
+ *    is the same class of lie as rendering a placeholder zero as a device count.
+ * 3. **Seats and devices are the same thing by design**, so the copy says "devices" and names
  *    phones explicitly — a paired phone holds a seat too, and a user who does not know that reads
  *    the cap as broken.
  */
@@ -21,7 +29,7 @@ export function licenseSentence(detail: LicenseDetail | null): string {
   if (!detail) return '' // Before the first read there is nothing to say.
 
   if (detail.error) {
-    // --- Family 2 first: the read was FINE, the action was refused. -----------------------------
+    // --- The read was FINE, the release was refused on terms about the license itself. ----------
     if (detail.error === 'too_soon') {
       const days = detail.retryAfterDays
       // No `?? 30` fallback: a window the server never stated is a date the user would plan
@@ -39,11 +47,28 @@ export function licenseSentence(detail: LicenseDetail | null): string {
       return 'Releasing devices does not apply to this license.'
     }
 
-    // --- Family 1: the READ failed. The counts beside this are placeholders, not a measurement. --
-    // Deliberately not "could not reach the server": `unauthorized` / `inactive` / `disabled` are
-    // answers we DID receive. What is true across the whole family is that we do not know the key
-    // or the count — and that Pro keeps working either way (the entitlement is verified locally).
-    return 'Could not read this license right now, so the key and device count are unknown. Your Pro access is unaffected.'
+    // --- The READ failed. The counts beside this are placeholders, not a measurement. -----------
+    // A RELEASE failure never reaches here: the store keeps those off `detail` (see the module doc
+    // and `isReleaseRefusal`), because "could not read this license" printed over a real key and
+    // real counts is false in both halves.
+    if (detail.error === 'inactive') {
+      // A server ANSWER, not a failure to look. Pro is verified locally so it still works right
+      // now, and saying "unaffected" would promise it keeps working — which it will not.
+      return 'This license is not active, so there is no key or device count to show — and Pro on this Mac will stop when its current entitlement expires.'
+    }
+    if (detail.error === 'unauthorized') {
+      // Also an answer: the server refused this Mac's entitlement. It may recover on the next
+      // refresh, hence "may" — but it is not the "nothing changed" story the codes below tell.
+      return 'This Mac is not authorized on this license, so the key and device count are unavailable — and Pro here may stop when its current entitlement expires.'
+    }
+    if (detail.error === 'offline' || detail.error === 'network' || detail.error === 'disabled') {
+      // Deliberately not "could not reach the server": `disabled` is a build that never asked.
+      // What is true across these three is that we did not get to LOOK — and that Pro keeps
+      // working either way, because the entitlement is verified locally.
+      return 'Could not read this license right now, so the key and device count are unknown. Your Pro access is unaffected.'
+    }
+    // An unrecognized code. Say the part that is certainly true and make no promise we cannot back.
+    return 'Could not read this license right now, so the key and device count are unknown.'
   }
 
   // --- A clean read. What can be said depends entirely on the source the SERVER stated. ---------
@@ -87,4 +112,92 @@ export function licenseSentence(detail: LicenseDetail | null): string {
  */
 export function canReleaseDevices(detail: LicenseDetail | null): boolean {
   return detail?.source === 'keygen'
+}
+
+/**
+ * Whether to tell the user they can paste this key on another Mac.
+ *
+ * A key with no free device is an invitation to an activation that CANNOT succeed — the server
+ * answers `seat_limit` and the user is left holding a key and an error. So the line appears only
+ * while the license has room. `used > seats` (a cap lowered after activation) is over the cap, not
+ * under it, and is excluded by the same comparison.
+ */
+export function canUseKeyElsewhere(detail: LicenseDetail | null): boolean {
+  return !!detail?.key && detail.used < detail.seats
+}
+
+/**
+ * Is this reason code a REFUSAL of the release (about the license), rather than a failure of the
+ * call (about the network / this Mac's standing)?
+ *
+ * The store asks this to decide what may be merged onto `detail`, and the panel's release note is
+ * the complement of it. One definition, because two copies of "which codes are refusals" is
+ * exactly how a transport failure ended up rendered as "could not read this license".
+ */
+export function isReleaseRefusal(code: string | null | undefined): boolean {
+  return code === 'too_soon' || code === 'not_applicable'
+}
+
+/**
+ * What to tell the user when "Release other devices" did not deliver.
+ *
+ * Two families, and conflating them is the whole point of this function existing:
+ *  - the server ANSWERED and refused (`unauthorized` | `inactive`) or we never asked (`disabled`)
+ *    ⇒ nothing was released, and we can say so.
+ *  - the reply never arrived (`offline` | `network`, and any code we do not recognize) ⇒ the
+ *    request may well have LANDED. Claiming "nothing was changed" there sends the user to a retry
+ *    that hits the 30-day throttle, having already spent their release.
+ *
+ * A refusal code returns '' — those ride `detail` and `licenseSentence` speaks for them. One owner
+ * per message; two would print the throttle twice.
+ */
+export function releaseFailureSentence(code: string | null | undefined): string {
+  if (!code || isReleaseRefusal(code)) return ''
+  if (code === 'unauthorized') {
+    return 'Could not release the other devices — this Mac is not authorized on this license. Nothing was released.'
+  }
+  if (code === 'inactive') {
+    return 'Could not release the other devices — this license is not active. Nothing was released.'
+  }
+  if (code === 'disabled') {
+    return 'Could not release the other devices — license requests are switched off in this build. Nothing was released.'
+  }
+  return 'Could not confirm the release — the server could not be reached, so the other devices may or may not have been released. Close and reopen Settings to see the current device count; if the release did land, the next one is only possible after 30 days.'
+}
+
+/**
+ * What to tell someone whose key would not activate.
+ *
+ * The codes come from the server verbatim (`core/license.ts` keeps them), and rendering them
+ * verbatim is what left the flow this whole feature exists for — a buyer at the device cap —
+ * dead-ended in `Could not activate (seat_limit).` Every branch below names an ACTION; the
+ * fallback names one too, and never prints the code, because a word the user cannot look up is
+ * worse than a plain apology.
+ */
+export function activationErrorSentence(code: string | null | undefined): string {
+  if (!code) return ''
+  if (code === 'seat_limit') {
+    // The one code this feature was built around. The remedy lives on a machine that HAS Pro —
+    // this one does not, so "release devices here" would be advice the user cannot follow.
+    return 'This license already has all its devices in use. On a Mac (or phone) where Pro is active, open Settings → License and choose “Release other devices”, then activate here again.'
+  }
+  if (code === 'suspended') {
+    return 'This license has been suspended, so it cannot be activated. Get in touch and we will sort it out.'
+  }
+  if (code === 'expired') {
+    return 'This license has expired. Renew it and then activate again.'
+  }
+  if (code === 'not_found') {
+    return 'No license was found for that key. Check it was pasted in full, or copy it again from your purchase email.'
+  }
+  if (code === 'invalid') {
+    return 'That is not a valid license key. Check it was pasted in full, or copy it again from your purchase email.'
+  }
+  if (code === 'offline' || code === 'network') {
+    return 'Could not reach the server, so the key could not be checked. Check your connection and try again.'
+  }
+  if (code === 'disabled') {
+    return 'License activation is switched off in this build.'
+  }
+  return 'Could not activate this key. Check it was pasted in full and try again — get in touch if it keeps failing.'
 }

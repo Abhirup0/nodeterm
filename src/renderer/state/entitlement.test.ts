@@ -2,10 +2,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { LicenseDetail, NodeTerminalApi } from '@shared/types'
 
 // The license routes answer two DIFFERENT shapes, and that asymmetry is what these tests are about:
-// `detail` states every field, while `release` answers with COUNTS ONLY — no key, no source (and a
-// FAILED release changed nothing on the server at all). So the store replaces on the first and
-// merges on the second; getting that backwards silently blanks the key the user came to copy, or
-// renders "0 of 0 devices" from a call that never ran.
+// `detail` states every field, while `release` answers with COUNTS ONLY — no key, no source. So the
+// store replaces on the first and merges on the second; getting that backwards silently blanks the
+// key the user came to copy, or renders "0 of 0 devices" from a call that never ran.
+//
+// The release's ERROR is split a second time, and that split is the other half of this file: a
+// refusal (`too_soon` / `not_applicable`) is a fact about the license and rides `detail`; anything
+// else is a fact about the CALL, is handed back to the caller, and must leave `detail` alone. Note
+// what is NOT claimed anywhere below: that a failed release changed nothing on the server. For
+// `offline`/`network` the request may well have landed and only the reply been lost.
 
 const detail = vi.fn<() => Promise<LicenseDetail>>()
 const releaseOthers = vi.fn<() => Promise<LicenseDetail>>()
@@ -49,7 +54,7 @@ describe('entitlement store — detail read vs release merge', () => {
 
     // The wire's answer to a successful release: counts only.
     releaseOthers.mockResolvedValue({ ...ZEROS, used: 1, seats: 3, error: null })
-    await useEntitlement.getState().releaseOthers()
+    expect(await useEntitlement.getState().releaseOthers()).toBeNull()
 
     const d = useEntitlement.getState().detail!
     // The key is the ORIGINAL string — not merely truthy, and not absent. A merge that wrote the
@@ -66,7 +71,9 @@ describe('entitlement store — detail read vs release merge', () => {
     await useEntitlement.getState().loadDetail()
 
     releaseOthers.mockResolvedValue({ ...ZEROS, error: 'too_soon', retryAfterDays: 12 })
-    await useEntitlement.getState().releaseOthers()
+    // Null: a refusal is a fact about the license, it rides `detail`, and licenseSentence speaks
+    // for it. Returning it here as well would print the throttle twice, in two wordings.
+    expect(await useEntitlement.getState().releaseOthers()).toBeNull()
 
     const d = useEntitlement.getState().detail!
     // Specifically the PRE-release values: 3, not 0. "Kept the old detail" and "wrote the reply's
@@ -76,6 +83,48 @@ describe('entitlement store — detail read vs release merge', () => {
     expect(d.key).toBe('KEY-ABC')
     expect(d.error).toBe('too_soon')
     expect(d.retryAfterDays).toBe(12)
+  })
+
+  it('a release that FAILED leaves the detail untouched and hands the code back', async () => {
+    const useEntitlement = await freshStore()
+    detail.mockResolvedValue(LOADED)
+    await useEntitlement.getState().loadDetail()
+
+    // Pressing "Release other devices" on a laptop that just lost wifi. Before this split, the
+    // 'offline' code was merged onto `detail` and the panel replaced the device-count line with
+    // "Could not read this license right now…" — while the real key sat in the box above it and
+    // nothing on screen mentioned the release at all.
+    releaseOthers.mockResolvedValue({ ...ZEROS, error: 'offline' })
+    expect(await useEntitlement.getState().releaseOthers()).toBe('offline')
+
+    // Byte for byte the last good read: not the reply's zeros, and not the last read plus an
+    // `error`. An implementation that merges the code and ALSO returns it passes a bare
+    // "returns the code" assertion and still shows the user a failed-read sentence.
+    expect(useEntitlement.getState().detail).toEqual(LOADED)
+  })
+
+  it('does the same for every non-refusal code the release route can answer', async () => {
+    const useEntitlement = await freshStore()
+    detail.mockResolvedValue(LOADED)
+    await useEntitlement.getState().loadDetail()
+
+    // core/license.ts produces all of these on the release route too — the module doc that named
+    // only too_soon/not_applicable was wrong about its own seam, which is how this shipped.
+    for (const error of ['unauthorized', 'inactive', 'disabled', 'network']) {
+      releaseOthers.mockResolvedValue({ ...ZEROS, error })
+      expect(await useEntitlement.getState().releaseOthers(), error).toBe(error)
+      expect(useEntitlement.getState().detail, error).toEqual(LOADED)
+    }
+  })
+
+  it('a failed release with nothing read yet leaves detail null rather than inventing zeros', async () => {
+    const useEntitlement = await freshStore()
+    releaseOthers.mockResolvedValue({ ...ZEROS, error: 'offline' })
+
+    expect(await useEntitlement.getState().releaseOthers()).toBe('offline')
+    // Merging over EMPTY_DETAIL here would publish "0 of 0 devices, no key" as the license's
+    // state, produced entirely by a call that never reached the server.
+    expect(useEntitlement.getState().detail).toBeNull()
   })
 
   it('a 400 not_applicable likewise does not zero the counts', async () => {
