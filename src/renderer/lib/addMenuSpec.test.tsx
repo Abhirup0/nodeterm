@@ -17,6 +17,7 @@ const handlers = (overrides: Partial<AddHandlers> = {}): AddHandlers => ({
   dino: noop,
   openFile: noop,
   newFile: noop,
+  spawnTeam: noop,
   worktree: noop,
   ...overrides
 })
@@ -30,6 +31,7 @@ const allKinds: AddItem['kind'][] = [
   'dino',
   'open-file',
   'new-file',
+  'spawn-team',
   'worktree'
 ]
 
@@ -56,6 +58,7 @@ describe('contentAddItemsToMenuItems', () => {
       'New dino game',
       'Open file…',
       'New file…',
+      'Spawn a team…',
       'New worktree…'
     ])
   })
@@ -87,6 +90,7 @@ describe('contentAddItemsToMenuItems', () => {
       web: () => calls.push('web'),
       sticky: () => calls.push('sticky'),
       dino: () => calls.push('dino'),
+      spawnTeam: () => calls.push('spawnTeam'),
       worktree: () => calls.push('worktree')
     })
     const items = contentAddItemsToMenuItems(CONTENT_ADD_ITEMS, h, {
@@ -96,7 +100,7 @@ describe('contentAddItemsToMenuItems', () => {
     for (const item of items) {
       if ('onClick' in item) item.onClick()
     }
-    expect(calls.sort()).toEqual(['browser', 'dino', 'sticky', 'terminal', 'web', 'worktree'])
+    expect(calls.sort()).toEqual(['browser', 'dino', 'spawnTeam', 'sticky', 'terminal', 'web', 'worktree'])
   })
 })
 
@@ -115,6 +119,7 @@ describe('contentAddItemsToDockRows', () => {
       'dino',
       'open-file',
       'new-file',
+      'spawn-team',
       'worktree'
     ])
     expect(rows.some((r) => r.kind === 'terminal')).toBe(false)
