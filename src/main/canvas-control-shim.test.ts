@@ -11,6 +11,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { CONTROL_SHIM_SCRIPT } from './canvas-control-core'
 import { hookServer, parseControlBody } from '../core/agents/hook-server'
+import { nodeAuthToken } from '../core/agents/node-auth-token'
 import { initPlatform, resetPlatformForTests } from '../core/platform'
 import { fakePlatform } from '../core/platform-fake'
 
@@ -512,5 +513,65 @@ describe('parseControlBody', () => {
 
   it('degrades to an empty command on garbage rather than throwing', () => {
     expect(parseControlBody('not json', 'application/json')).toEqual({ nodeId: '', args: {} })
+  })
+})
+
+describe('sticky through the shim (verified-only verb)', () => {
+  // `sticky` is in `requiresVerified`, so unlike every other shim test these calls must present
+  // the per-node token — the same file-in-a-directory arrangement `buildPtyEnv` hands a real
+  // session. The secret is scoped to this describe so the rest of the suite keeps exercising the
+  // legacy (no-secret) path.
+  const SECRET = Buffer.alloc(32, 7)
+  let tokenDir = ''
+
+  beforeAll(() => {
+    hookServer.setNodeAuthSecret(SECRET)
+    tokenDir = path.join(dir, 'node-tokens')
+    fs.mkdirSync(tokenDir, { recursive: true })
+    fs.writeFileSync(path.join(tokenDir, 'node-1'), `${nodeAuthToken(SECRET, 'node-1')}\n`, {
+      mode: 0o600
+    })
+  })
+
+  afterAll(() => {
+    hookServer.clearNodeAuthSecretForTests()
+  })
+
+  const callVerified = (args: string[]) => callShim(args, { NODETERM_NODE_TOKEN_DIR: tokenDir })
+
+  it('maps the bare positional to --node, title with spaces intact', async () => {
+    await callVerified(['sticky', 'Linear: my tickets', '--text', '# Tickets'])
+    expect(received.at(-1)).toMatchObject({
+      verb: 'sticky',
+      args: { node: 'Linear: my tickets', text: '# Tickets' }
+    })
+  })
+
+  it('carries a markdown body (backticks, #, newlines) verbatim, --create yes riding along', async () => {
+    const md = '# Tickets\n\n- [ENG-1] `fix build` — **urgent**\n- [ENG-2] $PATH & <em>'
+    await callVerified(['sticky', '--node', 'sticky-3', '--append', md, '--create', 'yes'])
+    expect(received.at(-1)).toMatchObject({
+      verb: 'sticky',
+      args: { node: 'sticky-3', append: md, create: 'yes' }
+    })
+  })
+
+  it('a body starting with -- arrives as an empty text plus a junk flag (the renderer refuses it)', async () => {
+    // The shim peek rule cannot express a two-token value that starts with `--`; what matters is
+    // the failure MODE: the junk key is observable, so parseStickyArgs can refuse instead of
+    // treating the empty --text as a legal clear and silently wiping the note. Its unit test pins
+    // the refusal; this pins the wire shape it detects.
+    await callVerified(['sticky', '--node', 'n1', '--text', '--- rule'])
+    const args = received.at(-1)?.args ?? {}
+    expect(args.text).toBe('')
+    expect(Object.keys(args).some((k) => !['node', 'text', 'append', 'create'].includes(k))).toBe(true)
+  })
+
+  it('without the token, sticky is refused with its own one-sentence refusal', async () => {
+    const before = received.length
+    await expect(callShim(['sticky', '--node', 'n1', '--text', 'x'])).rejects.toMatchObject({
+      stderr: expect.stringContaining('Sticky write refused.')
+    })
+    expect(received.length).toBe(before)
   })
 })

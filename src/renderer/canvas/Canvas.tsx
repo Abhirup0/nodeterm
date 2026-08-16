@@ -183,6 +183,7 @@ import {
   sourceIsControlCapable,
   storedNodeListing
 } from '../lib/controlRouting'
+import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
 import {
   FIT_NODE_OPTIONS,
   absolutePosition,
@@ -589,11 +590,14 @@ function toKanbanSession(n: CanvasNode): KanbanSession | null {
     const text = ((n.data.text as string) ?? '').trim()
     return {
       id: n.id,
-      // A note has no title of its own — its first line is the card label.
-      title: text.split('\n')[0].slice(0, 80) || 'Note',
+      // A note has no title of its own — its first line is the card label. Bodies are markdown
+      // now, so a leading heading marker is presentation, not part of the label.
+      title: text.split('\n')[0].replace(/^#{1,6}\s+/, '').slice(0, 80) || 'Note',
       color: (n.data.color as string) ?? NODE_COLORS[2],
       kind: 'sticky',
       text,
+      textUpdatedAt: n.data.textUpdatedAt as number | undefined,
+      textUpdatedBy: n.data.textUpdatedBy as string | undefined,
       // Sticky cards never open a live terminal — the modal reads no spawn info.
       spawn: {}
     }
@@ -6363,6 +6367,100 @@ export function Canvas() {
         const { projects, activeProjectId: activeId } = useProjects.getState()
         const route = routeControlSource(projects, activeId, sourceNodeId)
         if (route.kind === 'switch' || route.kind === 'reopen') {
+          // `sticky` is store-answered like send/reply, for the same G5 reason (see
+          // STORE_ANSWERED_VERBS): its headline use is a SCHEDULED sync run, and travelling here
+          // would yank the human's view to the sync agent's project on every run. The write lands
+          // in the owning project's SERIALIZED nodes via `applyNodeMutation` — the same store the
+          // next whole-file save writes and the project load reads — then `writeDisk` persists it
+          // (the renameSession non-active branch's exact pattern). A note created this way skips
+          // the decorative rope edge; it appears when the project is next opened.
+          if (verb === 'sticky') {
+            const project = projects.find((p) => p.id === route.projectId)
+            const storedSrc = project?.nodes.find((n) => n.id === sourceNodeId)
+            if (!project || !storedSrc || !sourceIsControlCapable(storedSrc.agentId)) {
+              reply({ ok: false, error: 'source node is not a control-capable agent' })
+              return
+            }
+            const parsed = parseStickyArgs(args)
+            if ('error' in parsed) {
+              reply({ ok: false, error: `sticky: ${parsed.error}` })
+              return
+            }
+            const resolved = resolveStickyRef(
+              project.nodes.map((n) => ({
+                id: n.id,
+                sticky: (n.kind ?? 'terminal') === 'sticky',
+                title: n.title ?? ''
+              })),
+              parsed.ref
+            )
+            if ('error' in resolved) {
+              reply({ ok: false, error: `sticky: ${resolved.error}` })
+              return
+            }
+            const stamp = {
+              textUpdatedAt: Date.now(),
+              textUpdatedBy: oneLine(storedSrc.title ?? '') || sourceNodeId
+            }
+            if ('id' in resolved) {
+              const target = project.nodes.find((n) => n.id === resolved.id)
+              if (!target) {
+                reply({ ok: false, error: `sticky: no node with id ${resolved.id}` })
+                return
+              }
+              const next = applyStickyWrite(target.text ?? '', parsed.write)
+              if ('error' in next) {
+                reply({ ok: false, error: `sticky: ${next.error}` })
+                return
+              }
+              useProjects
+                .getState()
+                .applyNodeMutation(route.projectId, {
+                  op: 'upsert',
+                  node: { ...target, text: next.text, ...stamp }
+                })
+              void writeDisk()
+              reply({
+                ok: true,
+                message: `note "${target.title || 'Note'}" (${resolved.id}): ${
+                  next.mode === 'append' ? 'appended' : 'replaced'
+                }`
+              })
+              return
+            }
+            if (!parsed.create) {
+              reply({
+                ok: false,
+                error: `sticky: no note matches "${parsed.ref}" — check \`list\`, or pass --create yes to create it`
+              })
+              return
+            }
+            const next = applyStickyWrite('', parsed.write)
+            if ('error' in next) {
+              reply({ ok: false, error: `sticky: ${next.error}` })
+              return
+            }
+            // Below the stored source node — the live path's placeBelow, off serialized state.
+            // One-level parent resolution mirrors the live path's srcGroup handling.
+            const parent = storedSrc.parentId
+              ? project.nodes.find((n) => n.id === storedSrc.parentId)
+              : undefined
+            const center = {
+              x: storedSrc.position.x + (parent?.position.x ?? 0) + (storedSrc.size?.width ?? 600) / 2,
+              y: storedSrc.position.y + (parent?.position.y ?? 0) + (storedSrc.size?.height ?? 400) + 290
+            }
+            const node = createStickyNode(project.nodes.length, center)
+            node.data.title = oneLine(parsed.ref) || 'Note'
+            node.data.text = next.text
+            node.data.textUpdatedAt = stamp.textUpdatedAt
+            node.data.textUpdatedBy = stamp.textUpdatedBy
+            useProjects
+              .getState()
+              .applyNodeMutation(route.projectId, { op: 'upsert', node: flowToNodeStates([node])[0] })
+            void writeDisk()
+            reply({ ok: true, message: `created note "${node.data.title}" (${node.id})` })
+            return
+          }
           if (!needsLiveCanvas(verb)) {
             const rows = storedNodeListing(projects.find((p) => p.id === route.projectId)?.nodes ?? [])
             reply({
@@ -7312,6 +7410,92 @@ export function Canvas() {
             reply({ ok: true, message: `renamed ${id} to "${title}"` })
             return
           }
+          case 'sticky': {
+            // Write INTO a note (issue #144): the door for "sync Linear/Jira/GitHub onto the
+            // canvas" — a scheduled agent turn rewrites one titled note; nodeterm ships no
+            // integration. NOT confirm-gated, deliberately: a sync loop confirming a dialog every
+            // run is a sync loop the user turns off, and unlike `write` nothing here reaches a
+            // PTY — the text lands in node data (sanitized markdown on render) and the note wears
+            // a "who wrote it, when" stamp instead of a dialog. The hook server admits the verb
+            // for VERIFIED callers only (`requiresVerified`), so the stamp's byline cannot be
+            // forged by a bearer-holder naming someone else's node id.
+            const parsed = parseStickyArgs(args)
+            if ('error' in parsed) {
+              reply({ ok: false, error: `sticky: ${parsed.error}` })
+              return
+            }
+            const resolved = resolveStickyRef(
+              nodesRef.current.map((nd) => ({
+                id: nd.id,
+                sticky: nd.type === 'sticky',
+                title: (nd.data.title as string) ?? ''
+              })),
+              parsed.ref
+            )
+            if ('error' in resolved) {
+              reply({ ok: false, error: `sticky: ${resolved.error}` })
+              return
+            }
+            if ('id' in resolved) {
+              const target = nodesRef.current.find((nd) => nd.id === resolved.id)
+              if (!target) {
+                reply({ ok: false, error: `sticky: no node with id ${resolved.id}` })
+                return
+              }
+              // Validate against the snapshot for the REPLY, but re-apply inside the updater
+              // against the freshest text: nodesRef only advances on render commit, so two
+              // near-simultaneous appends validated off the same snapshot must still compose
+              // (updaters chain) instead of the second silently overwriting the first.
+              const precheck = applyStickyWrite((target.data.text as string) ?? '', parsed.write)
+              if ('error' in precheck) {
+                reply({ ok: false, error: `sticky: ${precheck.error}` })
+                return
+              }
+              const stamp = { textUpdatedAt: Date.now(), textUpdatedBy: srcTitle }
+              setNodes((ns) =>
+                ns.map((nd) => {
+                  if (nd.id !== resolved.id) return nd
+                  const fresh = applyStickyWrite((nd.data.text as string) ?? '', parsed.write)
+                  // The precheck passed; a failure here is only the cap racing a concurrent
+                  // append — keep the node whole rather than half-apply.
+                  if ('error' in fresh) return nd
+                  return { ...nd, data: { ...nd.data, text: fresh.text, ...stamp } }
+                })
+              )
+              markDirty()
+              reply({
+                ok: true,
+                message: `note "${(target.data.title as string) || 'Note'}" (${resolved.id}): ${
+                  precheck.mode === 'append' ? 'appended' : 'replaced'
+                }`
+              })
+              return
+            }
+            // No note matches. `--create yes` turns exactly the not-found case into a new note
+            // titled after the ref — never a typo'd id or an ambiguous title, which errored above.
+            if (!parsed.create) {
+              reply({
+                ok: false,
+                error: `sticky: no note matches "${parsed.ref}" — check \`list\`, or pass --create yes to create it`
+              })
+              return
+            }
+            const next = applyStickyWrite('', parsed.write)
+            if ('error' in next) {
+              reply({ ok: false, error: `sticky: ${next.error}` })
+              return
+            }
+            const node = createStickyNode(nodesRef.current.length, placeBelow())
+            // `oneLine` at the door, exactly as `rename`: this title is composed into `list`
+            // output, the board and the phone.
+            node.data.title = oneLine(parsed.ref) || 'Note'
+            node.data.text = next.text
+            node.data.textUpdatedAt = Date.now()
+            node.data.textUpdatedBy = srcTitle
+            const newId = addAndConnect(node)
+            reply({ ok: true, message: `created note "${node.data.title}" (${newId})` })
+            return
+          }
           case 'write': {
             if (!args.node) {
               reply({ ok: false, error: 'write requires --node' })
@@ -7657,7 +7841,15 @@ export function Canvas() {
   // reads the same data.text path).
   const editStickyText = useCallback(
     (nodeId: string, text: string) => {
-      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, text } } : n)))
+      // A hand edit clears the agent-sync stamp (see StickyNode): it vouches for "an agent wrote
+      // this", which stops being true on the first keystroke.
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, text, textUpdatedAt: undefined, textUpdatedBy: undefined } }
+            : n
+        )
+      )
       markDirty()
     },
     [setNodes, markDirty]

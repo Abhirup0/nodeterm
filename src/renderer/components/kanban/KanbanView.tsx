@@ -38,6 +38,9 @@ export interface KanbanSession {
   agentId?: string
   /** Sticky note body — shown in the expanded detail row. */
   text?: string
+  /** Sticky-only: last canvas-control `sticky` write (cleared on hand edits) — the modal's stamp. */
+  textUpdatedAt?: number
+  textUpdatedBy?: string
   /** Browser node URL (kind 'browser' only) — shown on the card, opened in the modal webview. */
   url?: string
   /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the

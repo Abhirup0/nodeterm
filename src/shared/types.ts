@@ -266,6 +266,13 @@ export interface CanvasNodeState {
   sshFs?: boolean
   // sticky-only
   text?: string
+  /**
+   * sticky-only: last canvas-control `sticky` write — when, and the title of the agent node that
+   * wrote it. The stamp means "an agent synced this", not "last touched": a hand edit clears both,
+   * so a stale stamp can never vouch for text the user has since rewritten.
+   */
+  textUpdatedAt?: number
+  textUpdatedBy?: string
   // dino-only: best score reached in the T-Rex Runner game.
   highScore?: number
   // editor / diff
