@@ -371,6 +371,8 @@ const api: NodeTerminalApi = {
     activate: (key: string) => ipcRenderer.invoke(IPC.licenseActivate, key),
     deactivate: () => ipcRenderer.invoke(IPC.licenseDeactivate),
     getStatus: () => ipcRenderer.invoke(IPC.licenseStatus),
+    detail: () => ipcRenderer.invoke(IPC.licenseDetail),
+    releaseOthers: () => ipcRenderer.invoke(IPC.licenseRelease),
     onChange: (listener) => {
       const handler = (_e: unknown, s: Parameters<typeof listener>[0]) => listener(s)
       ipcRenderer.on(IPC.licenseChanged, handler)

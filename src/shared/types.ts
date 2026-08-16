@@ -2161,6 +2161,35 @@ export interface LicenseStatus {
   error: string | null
 }
 
+/**
+ * Where the entitlement behind this install came from. A verified entitlement's licenseId is NOT
+ * always a keygen license id: an App Store purchase on a paired phone bridges Pro to the desktop
+ * and mints `apple:<txn>`, and `free:` exists too. For those the server makes zero keygen calls
+ * and answers `key: null, used: 0, seats: 0` — genuinely "device counting does not apply here",
+ * which is a different fact from a failed read and from a keygen license with no devices yet.
+ */
+export type LicenseSource = 'keygen' | 'apple' | 'free'
+
+/** What Settings → License shows: the key to copy and how much of the device cap is in use.
+ *  A failed read is an ERROR, never "0 devices" — the two are different facts. */
+export interface LicenseDetail {
+  /** The license key to copy. `null` on a 200 is legitimate (a keygen policy that hides keys, a
+   *  license predating the column, a non-keygen source) — it is NOT an error. */
+  key: string | null
+  /** Devices currently activated. May EXCEED `seats` if a cap was lowered after activation. */
+  used: number
+  seats: number
+  /** The source the server stated, or null when it stated none — every error reply, and the
+   *  release route's 200, which answers with counts only. Never inferred locally. */
+  source: LicenseSource | null
+  /** Null on success; a stable reason code otherwise ('unauthorized' | 'inactive' | 'offline' |
+   *  'disabled' | 'too_soon' | 'not_applicable' | 'network'). A failed read is an error, never
+   *  "0 devices". */
+  error: string | null
+  /** Days until another release is allowed — only set with error === 'too_soon'. */
+  retryAfterDays?: number
+}
+
 export interface LicenseApi {
   /** Open Stripe checkout bound to this device and poll for the entitlement (no key paste).
    * `target` picks the link: 'seats' = the add-seats (quantity) link, else base Pro (default).
@@ -2174,6 +2203,13 @@ export interface LicenseApi {
   getStatus(): Promise<LicenseStatus>
   /** Fires when the license status changes. Returns unsubscribe. */
   onChange(listener: (s: LicenseStatus) => void): () => void
+  /** The license key + device usage for this machine's license. Authorized by the stored
+   *  entitlement token — never by deviceId. */
+  detail(): Promise<LicenseDetail>
+  /** Deactivate every device on this license except this one. Throttled server-side to once
+   *  per 30 days (error 'too_soon' + retryAfterDays). Answers with COUNTS only: no key and no
+   *  source ride a successful release, so callers must merge rather than replace. */
+  releaseOthers(): Promise<LicenseDetail>
 }
 
 export interface RemoteHostApi {
@@ -2308,6 +2344,39 @@ export interface PairedDevice {
   pairedAt: number
   /** epoch-ms the host agent last saw this device (0 = never). */
   lastSeenAt: number
+  /**
+   * The phone's OWN device id — what the relay backend keys its device row on, as opposed to
+   * `id`, which is ours. Absent for devices paired before this field existed; that is NOT "there
+   * is no server row we can name", because a revoke then falls back to `id`, which is the value
+   * the mint sent as the row's key whenever the phone supplied no id of its own (see
+   * `revokeDevice` in main/pairing-service.ts, including the residual case it cannot name). An id,
+   * not a secret, which is why it may cross to the renderer.
+   */
+  relayDeviceId?: string
+}
+
+/**
+ * The server leg of a device revoke — three states, because two cannot tell the truth apart.
+ * 'ok' = the backend confirmed; 'failed' = we asked and were refused or could not reach it;
+ * 'skipped' = we did not ask and that is fine (no entitlement to sign with — a free-tier desktop
+ * has no Pro of ours on that phone to reclaim — or no such device to name). Only 'failed' is a
+ * warning: reporting 'skipped' as a failure would tell a free user their phone's Pro is stuck.
+ *
+ * 'ok' is the backend's 204, which is idempotent and reveals nothing about WHICH row it applied
+ * to — see the residual-leak note on `revokeDevice` in main/pairing-service.ts before treating it
+ * as proof that a particular phone lost Pro.
+ */
+export type DeviceRevokeServerOutcome = 'ok' | 'failed' | 'skipped'
+
+/**
+ * Both legs of a device revoke, reported independently so a half-finished removal can never render
+ * as a clean one (the same discipline as remote/revocation.ts's persisted/killed).
+ */
+export interface DeviceRevokeResult {
+  /** The agent.json entry + authorized_keys line were removed from this machine. */
+  local: boolean
+  /** Whether the phone's Pro entitlement was taken back on the relay backend. */
+  server: DeviceRevokeServerOutcome
 }
 
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
@@ -2327,8 +2396,11 @@ export interface PairingApi {
   openRemoteLoginSettings(): Promise<void>
   /** List paired devices from ~/.nodeterm/agent.json (never includes the token). */
   listDevices(): Promise<PairedDevice[]>
-  /** Revoke a device: remove its registry entry and delete its authorized_keys line. */
-  revokeDevice(id: string): Promise<void>
+  /**
+   * Revoke a device: remove its registry entry, delete its authorized_keys line, and take its Pro
+   * entitlement back on the relay backend. Never rejects for a leg that failed — read the result.
+   */
+  revokeDevice(id: string): Promise<DeviceRevokeResult>
 }
 
 /** Team presence (docs/team-presence.md). All of it is transient — nothing here is persisted. */

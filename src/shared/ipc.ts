@@ -168,6 +168,8 @@ export const IPC = {
   licenseStatus: 'license:status',
   licenseChanged: 'license:changed',
   licenseUpgrade: 'license:upgrade',
+  licenseDetail: 'license:detail',
+  licenseRelease: 'license:release',
   appRestartToUpdate: 'app:restart-to-update',
   announcementsFetch: 'announcements:fetch',
   usageFetch: 'usage:fetch',

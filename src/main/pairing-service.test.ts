@@ -37,9 +37,16 @@ vi.mock('os', async (importOriginal) => {
   }
 })
 
+// The relay mint stamps this host's anonymous device id, which is read out of the CorePlatform's
+// userData dir — uninitialized here, and its throw would be swallowed into a silent LAN-only
+// pairing. Pinned to a constant so the mint body is fully assertable.
+vi.mock('../core/device-id', () => ({ getDeviceId: () => 'test-host-device-id' }))
+
 import os from 'os'
-import { createPairingService } from './pairing-service'
+import { createPairingService, type PairingRelayDeps } from './pairing-service'
 import { rewriteKeyComment, type DeviceEntry } from './pairing-core'
+import { genKeyPair, publicKeyToB64 } from './remote/e2ee'
+import type { Settings } from '../shared/types'
 
 const HOME = os.homedir()
 const AGENT_JSON = path.join(HOME, '.nodeterm', 'agent.json')
@@ -215,14 +222,16 @@ describe('revokeDevice', () => {
     expect(results.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled'])
   })
 
-  it('a failed revoke rejects to its caller and does not block the next one', async () => {
+  it('a failed revoke reports local:false to its caller and does not block the next one', async () => {
     const service = createPairingService()
     // First rename is agent.json's, inside the failing revoke.
     vi.spyOn(fs, 'rename').mockRejectedValueOnce(
       Object.assign(new Error('EXDEV: cross-device link not permitted, rename'), { code: 'EXDEV' })
     )
 
-    await expect(service.revokeDevice('dev-a')).rejects.toThrow(/EXDEV/)
+    // The failure is REPORTED, not thrown (the server leg still has to run, and the UI turns
+    // `local:false` into a retry note — a rejection here reached nobody).
+    expect((await service.revokeDevice('dev-a')).local).toBe(false)
     // A serializer that chains failures onto its successors would strand every later revoke.
     await service.revokeDevice('dev-b')
 
@@ -247,7 +256,8 @@ describe('revokeDevice', () => {
       return realRename(from, to)
     })
 
-    await expect(service.revokeDevice('dev-a')).rejects.toThrow(/EXDEV/)
+    // …and the half-finished revoke says so (`local:false`) instead of resolving like a clean one.
+    expect((await service.revokeDevice('dev-a')).local).toBe(false)
 
     expect(authKeys()).not.toContain('nodeterm-ios-dev-a') // SSH access really was cut
     expect(deviceIds()).toContain('dev-a') // still listed, so the owner can retry
@@ -293,6 +303,110 @@ describe('pairing POST vs revoke', () => {
       expect(keys).toContain(`nodeterm-ios-${deviceId}`) // …and so did the pairing
       expect(keys).toContain(KEY_OTHER)
       expect(deviceIds()).toEqual(['dev-b', deviceId])
+    } finally {
+      service.stop()
+    }
+  })
+})
+
+describe('pairing remembers the phone’s relay device id', () => {
+  // Two ids are in play and only ONE of them means anything to the relay backend: the desktop
+  // mints a local `deviceId` (it stamps the authorized_keys comment), while `relay_devices` is
+  // keyed on the id the PHONE sends. agent.json used to keep only the local one — the phone's was
+  // computed for the mint and thrown away — so "Remove device" had no way to name the row the
+  // server holds.
+  const hostKeys = genKeyPair()
+  const relayDeps = (): PairingRelayDeps => ({
+    getSettings: () => ({ phoneAccessEnabled: true }) as unknown as Settings,
+    getEntitlement: () => null,
+    loadHostKeyPair: async () => hostKeys,
+    relayEndpoint: 'wss://relay.example/ws',
+    apiBase: 'https://api.example',
+    relayAllowed: () => true
+  })
+
+  const devices = (): DeviceEntry[] => (agentJson().devices as DeviceEntry[] | undefined) ?? []
+  const paired = (id: string): DeviceEntry => {
+    const entry = devices().find((d) => d.id === id)
+    if (!entry) throw new Error(`no agent.json entry for ${id}`)
+    return entry
+  }
+
+  it('persists the id the phone sent, alongside the local one it does not replace', async () => {
+    const service = createPairingService()
+    try {
+      const started = await service.start(() => {})
+      const { token, pairPort } = JSON.parse(started.payload) as { token: string; pairPort: number }
+
+      const respText = await post(pairPort, {
+        token,
+        publicKey: freshEd25519Line(),
+        deviceName: 'New Phone',
+        deviceId: 'phone-abc'
+      })
+
+      const { deviceId } = JSON.parse(respText) as { deviceId: string }
+      expect(paired(deviceId).relayDeviceId).toBe('phone-abc')
+      // The local id still stamps the key line and still identifies the entry — the new field is
+      // an addition, not a rename.
+      expect(deviceId).not.toBe('phone-abc')
+      expect(authKeys()).toContain(`nodeterm-ios-${deviceId}`)
+    } finally {
+      service.stop()
+    }
+  })
+
+  it('falls back to the local id when the phone sent none, so the two coincide', async () => {
+    const service = createPairingService()
+    try {
+      const started = await service.start(() => {})
+      const { token, pairPort } = JSON.parse(started.payload) as { token: string; pairPort: number }
+
+      const respText = await post(pairPort, {
+        token,
+        publicKey: freshEd25519Line(),
+        deviceName: 'Quiet Phone'
+      })
+
+      const { deviceId } = JSON.parse(respText) as { deviceId: string }
+      expect(paired(deviceId).relayDeviceId).toBe(deviceId)
+    } finally {
+      service.stop()
+    }
+  })
+
+  it('sends the SAME id to /v1/relay/device that it records, and sends nothing else new', async () => {
+    // Computing `phoneDeviceId` earlier (so persistDevice can have it) must not change one byte
+    // of the mint body — this pins the whole body, so a reorder that accidentally passed the
+    // LOCAL id, or added a field, fails here rather than in production.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ deviceToken: 'device-token', hostId: 'host-id', exp: 0 })
+    } as unknown as Response)
+    const service = createPairingService(relayDeps())
+    try {
+      const started = await service.start(() => {})
+      const { token, pairPort } = JSON.parse(started.payload) as { token: string; pairPort: number }
+
+      const respText = await post(pairPort, {
+        token,
+        publicKey: freshEd25519Line(),
+        deviceName: 'Relay Phone',
+        deviceId: 'phone-relay-1'
+      })
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit]
+      expect(url).toBe('https://api.example/v1/relay/device')
+      expect(JSON.parse(String(init.body))).toEqual({
+        deviceId: 'phone-relay-1',
+        hostDeviceId: 'test-host-device-id',
+        hostPublicKeyB64: publicKeyToB64(hostKeys.publicKey),
+        label: 'Relay Phone'
+      })
+
+      const { deviceId } = JSON.parse(respText) as { deviceId: string }
+      expect(paired(deviceId).relayDeviceId).toBe('phone-relay-1')
     } finally {
       service.stop()
     }

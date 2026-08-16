@@ -221,6 +221,10 @@ export function buildStubApi(): Omit<
       deactivate: U('license.deactivate'),
       // Renderer has no catch here and silently degrades to the free tier on rejection.
       getStatus: U('license.getStatus'),
+      // Server Edition has no license layer at all (initLicense runs only in src/main), so these
+      // reject rather than answer a fabricated "0 devices" — the same degrade as getStatus above.
+      detail: U('license.detail'),
+      releaseOthers: U('license.releaseOthers'),
       onChange: noopUnsub
     },
     contextLink: {
