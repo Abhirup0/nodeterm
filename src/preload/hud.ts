@@ -20,6 +20,9 @@ export interface HudRow {
   activity?: string
   contextPercent?: number
   subagents: HudSubagentRow[]
+  /** A finished turn the user has not looked at yet (the sessions sidebar's `unread` mark) — the
+   *  row's sort tier and its "Unread" badge. */
+  unread: boolean
   updatedAt: number
 }
 export interface HudPush {

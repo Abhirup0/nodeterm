@@ -46,9 +46,23 @@ the HUD window via a `getHudWindow()`/`sendToHud()` singleton (mirror `main-wind
 Row shape sent to the HUD:
 ```ts
 { nodeId, agentId, title, model?, state: 'working'|'needsYou'|'done'|'idle',
-  prompt?, activity?, contextPercent?,
+  prompt?, activity?, contextPercent?, unread,
   subagents: [{ id, label?, state: 'working'|'done' }], updatedAt }
 ```
+- **row order = STATE PRIORITY, not recency** (`hudRowRank`): `needsYou` → unread `done` →
+  `working` → `idle`, the sessions sidebar's own section order (`STATUS_GROUP_ORDER`,
+  renderer/lib/sessionList.ts) — the owner asked the notch to follow the sidebar's model. Ties
+  inside a tier break on **first appearance** (the accum Map's insertion order), a fact no feed
+  event can change. The rows used to sort on `updatedAt` DESC, and `updatedAt` is bumped by every
+  event including the `onNodeNowChange` activity/context ticks, so a busy session climbed to the
+  top every few seconds and — because the panel draws only the first `HUD_ROW_CAP` rows — each
+  climb also evicted the last row and handed it back: the reported "keeps reshuffling, things
+  disappear and come back". `updatedAt` still drives the row's reltime tag and the staleness
+  watchdog; it is simply no longer doing double duty as the row's position.
+- **`unread`** is the done latch said out loud (`state === 'done' && !doneSeen`) — the same mark
+  the sidebar carries. It was previously readable only as "the row exists at all", which is
+  invisible beside five other rows and looks like a glitch when a phone-side read-ack retires the
+  row. The renderer draws it as an **Unread** badge on the title line.
 - **`prompt` is clipped at the mirror's `PROMPT_MAX` (120)** — `firstPromptLine` imports that
   constant rather than keeping its own number, because the phone's Live Activity line is fed by the
   SAME `onNodeStateChange` seam and the two surfaces must not show one prompt at two lengths.
@@ -112,10 +126,18 @@ the transparent rest of the window stays click-through. Hidden entirely when idl
   (driven by `max-height`, so content of unknown height animates) → the rows box, bottom corners
   still rounded, top still fused — a spring-ish `--capsule-dur` (~220 ms) `--capsule-ease` expand
   from the notch, NOT a separate floating panel. Rows fade in and start below the bar line
-  (`padding-top: calc(var(--bar) + 4px)`). Up to ~6 session rows, newest-active first. Each row:
-  animated mascot/green check + title + `model · reltime` tag (blue working / gray idle / green
+  (`padding-top: calc(var(--bar) + 4px)`). `HUD_ROW_CAP` (6) session rows in the pushed
+  (state-priority) order. Each row:
+  animated mascot/green check + title + an **Unread** badge when `row.unread` + `model · reltime`
+  tag (blue working / gray idle / green
   done) + a `You: <prompt>` (or `activity`) second line + a `▸ N subagents` disclosure (child rows:
-  label + state). A **Go** button (or row-tap) → IPC → main mirrors the notification-click handler:
+  label + state). Because the order is now meaningful, a cut row is a real omission, so the cap is
+  disclosed instead of silent: a `+N more · 1 needs you · 2 unread` footer counts what is hidden by
+  tier (the sidebar answers the same question with `projectSignalCounts`; the notch has no room for
+  a badge per section) and clicking it draws the full list — the cap and the counting are the pure
+  `splitPanelRows` / `overflowLabel` (`src/renderer/hud/panel-rows.ts`, unit-tested). Note main
+  pushes ALL rows: the collapsed indicator aggregates over the whole array, so capping in main
+  would silently drop a working agent's mascot. A **Go** button (or row-tap) → IPC → main mirrors the notification-click handler:
   `getMainWindow().show()/focus()` + `sendToMain(app:focus-node, nodeId)` → `Canvas.focusNodeById`,
   and clears that node's done latch.
 - **Dismissing a row**: hovering a row reveals a `×` (right-click on the row does the same) →
