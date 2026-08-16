@@ -156,7 +156,12 @@ export interface HookEventMeta {
 }
 
 /**
- * Control verbs that admit ONLY a `verified` caller — the agent-messaging verbs.
+ * Control verbs that admit ONLY a `verified` caller — the agent-messaging verbs, plus `sticky`.
+ *
+ * `sticky` is here because its whole accountability story is the byline: it is deliberately not
+ * confirm-gated, and the note's "↻ <agent> · when" stamp is what replaces the dialog — a stamp
+ * forged by any bearer-holding process naming someone else's node id would be worse than no stamp.
+ * Like the messaging verbs it is NEW, so fail-closed from day one strands nobody.
  *
  * A route that admits only `verified` is untouched by the foreign-kid escape: an invented kid is
  * FOREIGN, therefore `legacy` (invariant 3, required or cross-instance failover dies), therefore
@@ -172,7 +177,7 @@ export interface HookEventMeta {
  * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
  * of every hatch and is the test that fails if either half of this comment stops being true.
  */
-export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', 'notify'])
+export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', 'notify', 'sticky'])
 
 /**
  * The refusal for a messaging verb: one sentence, no diagnosis, no hint about tokens or restarts —
@@ -180,6 +185,15 @@ export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', '
  * attacker and a lie to nobody else.
  */
 export const MESSAGING_CONTROL_REFUSAL = 'Agent messaging refused.'
+
+/** Same one-sentence posture for the verified-only sticky verb — named for what was refused,
+ *  because "agent messaging refused" answering a note write is a diagnosis-delaying lie. */
+export const STICKY_CONTROL_REFUSAL = 'Sticky write refused.'
+
+/** The verified-only refusal, worded for the verb that was refused. */
+export function verifiedRefusalFor(verb: string): string {
+  return verb === 'sticky' ? STICKY_CONTROL_REFUSAL : MESSAGING_CONTROL_REFUSAL
+}
 
 class HookServer {
   private server: Server | null = null
@@ -488,12 +502,13 @@ class HookServer {
           // `decision` is what the escape hatch and the warning window can reach, and neither may
           // reach these. See `requiresVerified` for the whole argument.
           if (requiresVerified.has(verb) && verdict !== 'verified') {
+            const refusal = verifiedRefusalFor(verb)
             if (wantsText) {
               res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
-              res.end(`${MESSAGING_CONTROL_REFUSAL}\n`)
+              res.end(`${refusal}\n`)
             } else {
               res.writeHead(403, { 'content-type': 'application/json' })
-              res.end(JSON.stringify({ ok: false, error: MESSAGING_CONTROL_REFUSAL }))
+              res.end(JSON.stringify({ ok: false, error: refusal }))
             }
             return
           }

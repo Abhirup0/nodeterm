@@ -7,8 +7,18 @@ import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
 import { IPC } from '../shared/ipc'
+
+// Debug log ring (issue #78): capture the process console from the first line — a packaged app
+// swallows it entirely, and the boot path is where the interesting warnings are. The ring is
+// in-memory and redacted at its push boundary; the panel/IPC side is gated on the setting.
+const logBuffer = new LogBuffer()
+installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
+import { allowGuestNavigation } from './webview-nav'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { LogBuffer } from '../core/log-buffer'
+import { installLogSink, splitTag } from '../core/log-sink'
+import { registerLogHandlers } from '../core/log-handlers'
 import {
   registerBrowserGuest,
   type BrowserGuest,
@@ -58,7 +68,7 @@ import {
   isValidPendingId,
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
-import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose, createCrashReloadPolicy } from './main-window'
+import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
 import { installKeydownIntercepts } from './keydown-intercept'
 import {
   initNotchHud,
@@ -611,10 +621,24 @@ function createWindow(): BrowserWindow {
   // outlives its window (tmux sessions, hook server, updater); destroying the window
   // would leave every window-bound subsystem (agent-status forwarding, tails, updater,
   // license events) pointing at a dead webContents after a dock-reopen.
+  // A fullscreen window must LEAVE fullscreen before it hides: hiding in place strands the
+  // window's empty Space as a black screen (issue #78 / electron/electron#20263). The
+  // transition is async, so the hide waits for `leave-full-screen`; `leavingFullScreen`
+  // keeps a second ⌘W during the transition from stacking another listener.
+  let leavingFullScreen = false
   win.on('close', (e) => {
-    if (shouldHideOnClose(process.platform, quitting)) {
-      e.preventDefault()
+    const action = closeAction(process.platform, quitting, win.isFullScreen())
+    if (action === 'default') return
+    e.preventDefault()
+    if (action === 'hide') {
       win.hide()
+    } else if (!leavingFullScreen) {
+      leavingFullScreen = true
+      win.once('leave-full-screen', () => {
+        leavingFullScreen = false
+        if (!win.isDestroyed() && !quitting) win.hide()
+      })
+      win.setFullScreen(false)
     }
   })
 
@@ -656,11 +680,26 @@ app.whenReady().then(async () => {
   // window's setWindowOpenHandler / will-navigate above don't cover it). Registered once at
   // startup for all current and future guests.
   app.on('web-contents-created', (_e, contents) => {
+    // Mirror renderer consoles into the debug ring (issue #78) — a packaged app swallows them
+    // too, and React error boundaries report through console.error. All webContents kinds:
+    // the main window and webview guests alike.
+    contents.on('console-message', (event) => {
+      try {
+        const level = event.level === 'error' ? 'error' : event.level === 'warning' ? 'warn' : 'info'
+        // Keep the renderer's own [tag] prefixes — the deliberate field traces ([nodeterm]
+        // healed-swap strands, [glyphgrid] attach/geometry warnings) are exactly what this panel
+        // is for, and they triage by tag. Untagged lines fall back to 'renderer'.
+        const { tag, rest } = splitTag(String(event.message ?? ''))
+        logBuffer.push({ level, tag: tag || 'renderer', msg: rest })
+      } catch {
+        /* logging must never break a page */
+      }
+    })
     if (contents.getType() !== 'webview') return
-    // Web nodes may only show http(s) pages or local content we serve via the jailed
-    // nt-media:// scheme.
+    // Web nodes may only show http(s) pages, jailed nt-media:// content, or origin-gated
+    // local file:// pages (policy + tests in webview-nav.ts).
     contents.on('will-navigate', (e, url) => {
-      if (!/^https?:\/\//i.test(url) && !/^nt-media:\/\//i.test(url)) e.preventDefault()
+      if (!allowGuestNavigation(contents.getURL(), url)) e.preventDefault()
     })
     // A browser node's guest requested a new window → open it as another browser node
     // (never a real popup). Only http(s); other schemes are dropped. The map is consulted
@@ -1082,6 +1121,7 @@ app.whenReady().then(async () => {
     }
   }
   registerBoardLogHandlers(corePlatform, boardLogRouter)
+  registerLogHandlers(corePlatform, logBuffer, () => settingsStore.get().debugLogPanel)
 
   // Agent messaging (the `send`/`reply` control verbs). Canvas.tsx forwards the validated verb
   // here; everything that authorizes or performs the delivery reads MAIN's stores. See
@@ -1258,7 +1298,12 @@ app.whenReady().then(async () => {
   // 'show' guarantees a regular window has established the app's Dock presence first.
   const notchTunables = (): NotchHudTunables => {
     const s = settingsStore.get()
-    return { enabled: s.notchHud, notchWidth: s.notchWidth, hoverExpand: s.notchHoverExpand }
+    return {
+      enabled: s.notchHud,
+      notchWidth: s.notchWidth,
+      hoverExpand: s.notchHoverExpand,
+      percentMode: s.usagePercentMode
+    }
   }
   const startNotchHud = (): void =>
     initNotchHud({ getNodeTitle: displayTitleFor }, notchTunables())
@@ -1301,11 +1346,15 @@ app.whenReady().then(async () => {
   // GRANTED-MODE FALLBACK (spec: 2026-07-21-push-grants; owner-approved "B"). The desktop ALSO
   // wires the SSH-possession push grants the Server Edition uses (src/server/index.ts) — a phone
   // that reached this Mac by plain SSH drops a signed, device-scoped grant at
-  // `~/.nodeterm/push-grants/<deviceId>.grant` on the Mac's own fs. `resolveTarget` keeps a SINGLE
-  // sender: host-mode only when a relay identity is present AND a phone is paired; else (unpaired,
-  // or no identity) it falls through to the grants. So a plain-SSH phone gets pushes for
-  // Mac-tracked sessions with NO QR pairing, and QR-pairing later flips `hasPairedPhone` true →
-  // host-mode automatically (grants suppressed — no double-push to the same phone).
+  // `~/.nodeterm/push-grants/<deviceId>.grant` on the Mac's own fs. `resolveSendTarget` sends BOTH
+  // legs whenever both are live — host mode for the relay-paired phones, one Bearer POST per grant
+  // for the SSH-only ones. It used to be either/or (host wins), which meant a SINGLE relay-paired
+  // phone silenced every SSH-only phone on this Mac: host mode fans out over the backend's
+  // `relay_devices` rows, where an SSH-only phone has no row at all. The per-device exclusion that
+  // would prevent the reverse cost (a phone that is paired AND granted gets two pushes) is not
+  // expressible here — a grant is keyed by the phone's deviceId, `loadApprovedDevices` stores only
+  // NaCl box pubkeys, and nothing on this machine maps one to the other. See the long note on
+  // `resolveSendTarget` in core/push-notify.ts.
   const pushGrants = createGrantsAccessor()
   // ...and the REMOTE half of the same idea. A Mac-driven SSH project's phone can only reach the
   // HOST, so its grant is dropped there, not here — without this sweep an SSH-only user got no
@@ -1313,7 +1362,10 @@ app.whenReady().then(async () => {
   // by a timer below; `get()` is sync so it can sit behind `getGrants`. See
   // core/remote-push-grants.ts.
   const remoteGrants = createRemoteGrantsCache()
-  /** Local grants first (this machine's own phone), then the hosts' — deduped per device inside. */
+  /** Local grants first (this machine's own phone), then the hosts'. ORDER MATTERS: one phone that
+   *  reached both this Mac and an SSH host dropped a different token on each, and push-notify's
+   *  `dedupeGrantsByDevice` keeps the FIRST occurrence per deviceId — so the local token, the one
+   *  that needs no host round-trip to stay fresh, is the survivor. */
   const allPushGrants = (): PushGrant[] => [...pushGrants.get(), ...remoteGrants.get()]
   /** A 401/403 could be on either side's token; neither accessor knows the other's. */
   const markPushGrantDead = (grant: string): void => {
@@ -2311,6 +2363,10 @@ app.whenReady().then(async () => {
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     },
+    // A phone may be reading the mirror's `usage` block even with the window unfocused: relay-paired
+    // (approved device) or SSH-with-a-push-grant. When so, keep polling on the background cadence so
+    // the phone's bars/resets stay live instead of fossilizing at the last focused poll.
+    mirrorMayBeRead: () => pushHasPairedPhone || allPushGrants().length > 0,
     // Remote (SSH host) Claude usage. Same shape as the Context Link remote deps: core owns the
     // command and the parsing, main owns the ControlMaster. `sshProjectManager` is assigned just
     // below, so both closures read it lazily — they only ever run after a project has connected.

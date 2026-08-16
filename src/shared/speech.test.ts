@@ -3,8 +3,10 @@ import {
   WHISPER_MODELS,
   whisperModel,
   WHISPER_DOWNLOAD_BASE,
+  hasSpeechModel,
   modelAfterDownload,
   modelAfterDelete,
+  SPEECH_MODEL_NONE,
   type ModelDownloadState
 } from './speech'
 import { DEFAULT_SETTINGS } from './types'
@@ -28,13 +30,18 @@ describe('whisper model catalog', () => {
     expect(WHISPER_DOWNLOAD_BASE).toBe('https://huggingface.co/ggerganov/whisper.cpp/resolve/main/')
   })
 
-  it('speech settings default to free local dictation', () => {
+  it('speech settings default to dictation OFF — nothing downloads until the user asks (#143)', () => {
     expect(DEFAULT_SETTINGS.speech).toEqual({
       engine: 'whisper',
-      model: 'tiny',
+      model: SPEECH_MODEL_NONE,
       language: 'auto',
       shortcut: 'Cmd+Alt'
     })
+  })
+
+  it('hasSpeechModel reads None as off and any id as on', () => {
+    expect(hasSpeechModel(SPEECH_MODEL_NONE)).toBe(false)
+    expect(hasSpeechModel('tiny')).toBe(true)
   })
 })
 
@@ -60,6 +67,10 @@ describe('modelAfterDownload', () => {
     // A removed/renamed model in an old settings file has nothing behind it either.
     expect(modelAfterDownload(list(['base', true]), 'ancient', 'base')).toBe('base')
   })
+
+  it('adopts out of the None state — starting a download IS asking for dictation (#143)', () => {
+    expect(modelAfterDownload(list(['base', true]), SPEECH_MODEL_NONE, 'base')).toBe('base')
+  })
 })
 
 describe('modelAfterDelete', () => {
@@ -73,5 +84,11 @@ describe('modelAfterDelete', () => {
 
   it('answers null when nothing is downloaded — there is nothing truthful to select', () => {
     expect(modelAfterDelete(list(['tiny', false], ['small', false]), 'tiny')).toBeNull()
+  })
+
+  it('NEVER heals an explicit None — deleting a leftover model keeps dictation off (#143)', () => {
+    // With None selected and another model still on disk, the old fallback would have re-adopted
+    // it behind the user's back. An unset state is a legitimate value, not a dangling pointer.
+    expect(modelAfterDelete(list(['tiny', true], ['small', true]), SPEECH_MODEL_NONE)).toBeNull()
   })
 })

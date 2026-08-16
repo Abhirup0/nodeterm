@@ -115,6 +115,25 @@ vi.mock('child_process', () => {
 const SOLO = 42
 
 /**
+ * Hermetic tmux resolution (issue #160). Without this, `init()` → `ensureTmux()` → `findTmux()`
+ * probes the REAL machine: `fs.existsSync` on the fixed install paths, then the login-shell PATH,
+ * then the bundled binary. Two ways that made this file's answer depend on the host:
+ *  - a machine with no tmux installed never actually tested the tmux-backed manager (every
+ *    `tmuxManager()` silently exercised the plain-shell fallback instead);
+ *  - under ~16 parallel workers a transient EMFILE makes `existsSync` swallow the error and
+ *    answer FALSE for a tmux that IS installed — every candidate misses, the manager silently
+ *    falls back to a plain shell, and all of this file's "expected 1 tmux call, got 0"
+ *    assertions fail at once. That is issue #160's run A (44 failures), unreproducible alone.
+ * Pinning the first fixed candidate makes tmux resolution a function of the code under test, not
+ * of the host's fd budget. No real tmux is ever invoked: node-pty and child_process are mocked
+ * above, and ensureTmux's `source-file` push goes through the mocked execFileSync.
+ */
+vi.mock('./tmux-hint', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./tmux-hint')>()),
+  findFixedTmux: () => '/usr/bin/tmux'
+}))
+
+/**
  * A machine with pty devices to spare, always.
  *
  * Without this the real probe runs a `readdir('/dev')` against the DEVELOPER's host, and

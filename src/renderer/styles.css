@@ -3040,7 +3040,77 @@ body,
   color: rgba(192, 202, 245, 0.4);
 }
 
-.sticky-node.collapsed .sticky-node__body {
+/* Rendered-markdown twin of the textarea body: same box, click flips into the textarea. */
+.sticky-node__view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text);
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.sticky-node__placeholder {
+  color: rgba(192, 202, 245, 0.4);
+}
+
+.sticky-node__md > :first-child {
+  margin-top: 0;
+}
+.sticky-node__md > :last-child {
+  margin-bottom: 0;
+}
+.sticky-node__md p,
+.sticky-node__md ul,
+.sticky-node__md ol {
+  margin: 0 0 6px;
+}
+.sticky-node__md ul,
+.sticky-node__md ol {
+  padding-left: 18px;
+}
+.sticky-node__md h1,
+.sticky-node__md h2,
+.sticky-node__md h3,
+.sticky-node__md h4 {
+  margin: 8px 0 4px;
+  font-size: 13px;
+}
+.sticky-node__md h1 {
+  font-size: 15px;
+}
+.sticky-node__md h2 {
+  font-size: 14px;
+}
+.sticky-node__md pre {
+  background: rgba(0, 0, 0, calc(0.25 * var(--shadow-k) + 0.08));
+  padding: 6px 8px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.sticky-node__md code {
+  font-size: 12px;
+}
+.sticky-node__md a {
+  color: var(--accent);
+}
+
+/* "↻ <agent> · 5m ago" — present only while the body is the untouched agent-synced text. */
+.sticky-node__stamp {
+  flex: 0 0 auto;
+  padding: 3px 10px 5px;
+  font-size: 10px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.sticky-node.collapsed .sticky-node__body,
+.sticky-node.collapsed .sticky-node__view,
+.sticky-node.collapsed .sticky-node__stamp {
   display: none;
 }
 
@@ -4723,6 +4793,15 @@ body,
   padding: 8px 10px;
 }
 
+.confirm__textarea {
+  /* Task prose, not a one-liner: fixed comfortable height, user-growable. `font-family` because
+     a bare textarea falls back to the UA monospace default, unlike input. */
+  font-family: inherit;
+  line-height: 1.45;
+  min-height: 76px;
+  resize: vertical;
+}
+
 .confirm__input:focus {
   outline: none;
   border-color: var(--accent);
@@ -4869,6 +4948,135 @@ body,
   align-items: center;
   justify-content: center;
   background: rgba(10, 12, 18, 0.5);
+}
+
+/* --- Debug log panel (issue #78) — same overlay family as the shortcuts panel ------------- */
+.logpanel {
+  width: 860px;
+  max-width: 94vw;
+  height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: rgba(var(--menu-rgb), 0.99);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, calc(0.6 * var(--shadow-k)));
+  overflow: hidden;
+}
+.logpanel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.logpanel__head h2 {
+  margin: 0 6px 0 0;
+  font-size: 14px;
+  color: var(--text-strong);
+  white-space: nowrap;
+}
+.logpanel__chips {
+  display: flex;
+  gap: 4px;
+}
+.logpanel__chip {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.logpanel__chip.is-on {
+  background: rgba(var(--tint-rgb), 0.08);
+  color: var(--text);
+}
+.logpanel__chip--warn.is-on {
+  color: var(--warn);
+}
+.logpanel__chip--error.is-on {
+  color: var(--danger);
+}
+.logpanel__filter {
+  flex: 1;
+  min-width: 80px;
+  background: rgba(var(--tint-rgb), 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 9px;
+}
+.logpanel__filter:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.logpanel__act {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.logpanel__act:hover {
+  background: rgba(var(--tint-rgb), 0.08);
+}
+.logpanel__feed {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.logpanel__row {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px;
+  align-items: baseline;
+}
+.logpanel__row:hover {
+  background: rgba(var(--tint-rgb), 0.04);
+}
+.logpanel__time {
+  color: var(--muted-2);
+  flex: none;
+}
+.logpanel__level {
+  flex: none;
+  width: 42px;
+  text-transform: uppercase;
+  font-size: 10px;
+  color: var(--muted);
+}
+.logpanel__level--warn {
+  color: var(--warn);
+}
+.logpanel__level--error {
+  color: var(--danger);
+}
+.logpanel__tag {
+  color: var(--accent);
+  flex: none;
+}
+.logpanel__msg {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+}
+.logpanel__row--debug .logpanel__msg {
+  color: var(--muted);
+}
+.logpanel__empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 32px 0;
+  font-family: inherit;
 }
 
 .shortcuts {
@@ -5873,6 +6081,37 @@ body,
   color: rgba(var(--tint-rgb), 0.55);
   background: rgba(var(--tint-rgb), 0.08);
   vertical-align: middle;
+}
+/* "Use for new sessions" affordance + current-default chip on an account row (issue #142).
+   Same chip grammar as __host above; the button reads as quiet text until hovered so the
+   readout stays a readout. */
+.usage-account__default {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.usage-account__use {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: none;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: rgba(var(--tint-rgb), 0.45);
+  background: transparent;
+  cursor: pointer;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.usage-account__use:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 /* ---- Session-memory panel (opened by the system-resource pill) ----
@@ -8468,6 +8707,25 @@ body,
   padding: 14px 16px;
   font-family: inherit;
 }
+/* Rendered-markdown twin of .kanban-modal__sticky: same box, click flips into the textarea.
+   The markdown inside uses the note's own .sticky-node__md rules — one set of typography, so the
+   canvas and the card cannot disagree about how a heading or a code block reads. */
+.kanban-modal__sticky-view {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  color: rgba(var(--tint-rgb), 0.9);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.kanban-modal__sticky-view .sticky-node__stamp {
+  padding: 8px 0 0;
+}
+
 .kanban-modal__pane {
   position: relative; /* anchors the markdown-view overlay */
   flex: 1;
@@ -10498,4 +10756,114 @@ body,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ================================ Polish pass (issue #78) ==================================
+   Enter animations for the shared overlay shells + quiet scrollbars. Rules of the pass:
+   transform/opacity ONLY (nothing that forces layout — terminals must keep streaming at 60fps),
+   one-shot on mount (no exit mechanism: every shell hard-unmounts via `{open && portal}`, and
+   keeping portals alive for an exit tween would thread a closing state through 15 dialogs — the
+   kanban modal set this precedent and it reads fine), and the existing token palette only.
+   NEVER animate a shell that CONTAINS a terminal: there the constraint is stronger than
+   "no layout" — an animating `transform` on an ancestor of a glyph-attached terminal
+   desynchronizes the shared canvas (grid origins are measured from the DOM rect, the canvas
+   draws from the camera), so such a shell must leave the shared renderer for the duration,
+   the way `dragging` already does. Today's selectors are overlays/menus/drawers/tooltips only. */
+
+@keyframes nt-overlay-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes nt-surface-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes nt-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes nt-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Scrims fade fast — they must never make the surface feel late. */
+.confirm-overlay,
+.sc-overlay,
+.palette-overlay,
+.drawer-overlay {
+  animation: nt-overlay-fade 0.12s ease-out;
+}
+/* Dialog-family surfaces pop with the kanban modal's spring curve. */
+.confirm,
+.shortcuts,
+.palette {
+  animation: nt-surface-pop 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* Menus are twitch surfaces — barely-there settle, never a bounce. */
+.ctx-menu,
+.tab-menu {
+  animation: nt-menu-in 0.12s ease-out;
+}
+/* Drawers slide in from their anchored edge (they open right-aligned). */
+.drawer {
+  animation: nt-drawer-in 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tooltip {
+  animation: nt-overlay-fade 0.12s ease-out;
+}
+
+/* Same contract as the mascot pulse above: motion is decoration; everything must read without it. */
+@media (prefers-reduced-motion: reduce) {
+  .confirm-overlay,
+  .sc-overlay,
+  .palette-overlay,
+  .drawer-overlay,
+  .confirm,
+  .shortcuts,
+  .palette,
+  .ctx-menu,
+  .tab-menu,
+  .drawer,
+  .tooltip {
+    animation: none;
+  }
+}
+
+/* --- Quiet scrollbars everywhere -----------------------------------------------------------
+   The standard properties, not ::-webkit-scrollbar: `scrollbar-color` INHERITS (set once on
+   :root), `scrollbar-width` does not (hence the `*`), and on macOS they keep the native
+   overlay behavior — thumbs appear on scroll instead of reserving a chunky gutter, which is
+   what made the default bars read as foreign controls in every panel. Setting a standard
+   property also makes Chromium ignore an element's ::-webkit-scrollbar rules, so the three
+   deliberately-HIDDEN scrollbars (tab strip, xterm viewports) keep working through the
+   `scrollbar-width: none` they already declare, and the banner/menu custom thumbs converge on
+   this same thin themed look instead of their hand-rolled webkit variants. */
+:root {
+  scrollbar-color: rgba(var(--tint-rgb), 0.22) transparent;
+}
+* {
+  scrollbar-width: thin;
 }

@@ -89,7 +89,15 @@ export function routeControlSource(
  * and that early-exit are the same decision stated once each, and `controlRouting.test.ts` pins
  * this half.
  */
-const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set(['list', 'send', 'reply'])
+/*
+ * `sticky` is store-answered for the send/reply reason, not the list reason: its headline use is
+ * a SCHEDULED agent rewriting one note every few minutes, and routing is by SOURCE — so a live
+ * requirement would yank the human's view to the sync agent's project on every run (G5), which is
+ * exactly the behaviour that gets the sync loop turned off. The write lands in the owning
+ * project's serialized nodes (`applyNodeMutation`, the same path peer mutations take) when that
+ * project is not the active one; the live canvas handles it when it is.
+ */
+const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set(['list', 'send', 'reply', 'sticky'])
 
 /**
  * Does this verb have to run against the LIVE canvas? Everything that creates, moves, writes to or

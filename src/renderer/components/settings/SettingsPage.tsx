@@ -25,6 +25,7 @@ import { TeamAccessSection } from './sections/TeamAccessSection'
 import { SshSection } from './sections/SshSection'
 import { UpdatesSection } from './sections/UpdatesSection'
 import { PrivacySection } from './sections/PrivacySection'
+import { DebugSection } from './sections/DebugSection'
 import { GitHubIssuesSection } from './sections/GitHubIssuesSection'
 import { ModelGatewaySection } from './sections/ModelGatewaySection'
 
@@ -94,6 +95,7 @@ export function SettingsPage({
             <SshSection isActive={active === 'ssh'} />
             <UpdatesSection isActive={active === 'updates'} />
             <PrivacySection isActive={active === 'privacy'} />
+            <DebugSection isActive={active === 'debug'} />
           </div>
         </main>
       </SettingsSearchContext.Provider>

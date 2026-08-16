@@ -266,6 +266,13 @@ export interface CanvasNodeState {
   sshFs?: boolean
   // sticky-only
   text?: string
+  /**
+   * sticky-only: last canvas-control `sticky` write — when, and the title of the agent node that
+   * wrote it. The stamp means "an agent synced this", not "last touched": a hand edit clears both,
+   * so a stale stamp can never vouch for text the user has since rewritten.
+   */
+  textUpdatedAt?: number
+  textUpdatedBy?: string
   // dino-only: best score reached in the T-Rex Runner game.
   highScore?: number
   // editor / diff
@@ -462,6 +469,28 @@ export interface BoardLogReadResult {
 /** The board-log surface on `window.nodeTerminal`. Project-routed: the main/server side resolves
  *  the project to a local cwd, a desktop SSH connection, or unsupported. `append` is
  *  fire-and-forget-safe (resolves `false` on any failure, never throws). */
+/** One captured debug-log line (issue #78). `seq` is monotonic across the process lifetime so
+ *  subscribers can dedupe batches against the snapshot they filled from. */
+export interface LogRecord {
+  seq: number
+  /** Epoch ms. */
+  ts: number
+  level: 'debug' | 'info' | 'warn' | 'error'
+  /** The `[subsystem]` prefix convention the codebase logs with; '' when absent. */
+  tag: string
+  msg: string
+}
+
+export interface LogApi {
+  /** The whole ring, oldest-first — the panel's initial fill. */
+  snapshot(): Promise<LogRecord[]>
+  /** Empty the ring (the panel's Clear button). */
+  clear(): void
+  /** Subscribe to batched pushes; returns an unsubscribe. Batches may overlap the snapshot
+   *  around the subscribe edge — dedupe by `seq`. */
+  onBatch(cb: (batch: LogRecord[]) => void): () => void
+}
+
 export interface BoardLogApi {
   /** Append one entry. Resolves `false` on any failure (unsupported project, fs/exec error). */
   append(projectId: string, entry: BoardLogEntry): Promise<boolean>
@@ -1092,6 +1121,10 @@ export interface Settings {
    *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
    *  install count also rides the /v1/check call and is NOT gated on this toggle — see core/check.ts. */
   telemetryEnabled: boolean
+  /** Debug log panel (issue #78): captures the app's own console into an in-memory, redacted
+   *  ring and unlocks the log viewer. Default off — a debugging tool, not a daily surface.
+   *  Toggle in Settings → Application → Debug. */
+  debugLogPanel: boolean
   /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
    *  (end-to-end encrypted). Default on — the host only admits SAS-approved, pinned devices, so
    *  an un-paired install just keeps an idle listener. Toggle in Settings → Phone. */
@@ -1222,6 +1255,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,
+  debugLogPanel: false,
   phoneAccessEnabled: true,
   mobilePushEnabled: true,
   mobilePushNeedsYou: true,
@@ -1235,7 +1269,12 @@ export const DEFAULT_SETTINGS: Settings = {
   notchHud: true,
   notchWidth: 168,
   notchHoverExpand: true,
-  speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
+  // model: '' = the explicit "no dictation" state (SPEECH_MODEL_NONE, issue #143). Dictation is
+  // opt-in: nothing is selected — and so nothing downloads and no shortcut records — until the
+  // user picks a model in onboarding or Settings → Speech. Existing installs keep whatever their
+  // settings.json already says (the merge only fills ABSENT keys), so nobody's working dictation
+  // is switched off by an upgrade.
+  speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 
 export interface SettingsApi {
@@ -2412,6 +2451,7 @@ export interface NodeTerminalApi {
   license: LicenseApi
   contextLink: ContextLinkApi
   boardLog: BoardLogApi
+  logs: LogApi
   githubIssues: import('./github-issues').GitHubIssuesApi
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi

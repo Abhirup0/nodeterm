@@ -18,6 +18,8 @@ import type { GitHubControlApi, GitHubIssuesApi } from '../../shared/github-issu
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
   type BoardLogApi,
+  type LogApi,
+  type LogRecord,
   type BoardLogReadResult,
   type ChatTranscriptResult,
   type ClaudeApi,
@@ -381,7 +383,7 @@ export function buildGitHubApi(
  */
 export function buildFilesApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context' | 'boardLog'> {
+): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context' | 'boardLog' | 'logs'> {
   const fs: FsApi = {
     list: (dirPath) => client.request(IPC.fsList, dirPath) as ReturnType<FsApi['list']>,
     read: (filePath) => client.request(IPC.fsRead, filePath) as Promise<string>,
@@ -518,7 +520,22 @@ export function buildFilesApi(
     }
   }
 
-  return { fs, git, files, context, boardLog }
+  // Same core on the server, so the log ring is real over the bridge — the panel debugs the
+  // Server Edition process, which is exactly where a packaged-app console is least visible.
+  const logs: LogApi = {
+    snapshot: () => client.request(IPC.logSnapshot) as Promise<LogRecord[]>,
+    clear: () => client.cast(IPC.logClear),
+    onBatch: (cb) => {
+      const unsub = client.subscribe(IPC.logBatch, cb as Listener)
+      client.cast(IPC.logSubscribe)
+      return () => {
+        unsub()
+        client.cast(IPC.logUnsubscribe)
+      }
+    }
+  }
+
+  return { fs, git, files, context, boardLog, logs }
 }
 
 /**
