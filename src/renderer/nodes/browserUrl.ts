@@ -27,9 +27,11 @@ function googleSearch(query: string): string {
 }
 
 /**
- * Turn an address-bar / start-page entry into a navigable http(s) URL, or a Google search for
- * free text. Returns null only for empty input. localhost/127.0.0.1 default to http (dev servers);
- * other bare hosts to https. Non-http schemes (file:/javascript:/…) are searched, never navigated.
+ * Turn an address-bar / start-page entry into a navigable http(s)/file URL, or a Google search
+ * for free text. Returns null only for empty input. localhost/127.0.0.1 default to http (dev
+ * servers); other bare hosts to https. file:// loads local pages; a non-localhost "host" in a
+ * file URL (file://path/to/x) is folded into the path — on this local-only browser it can only
+ * be a mistyped absolute path. Other schemes (javascript:/data:/…) are searched, never navigated.
  */
 export function searchOrUrl(input: string): string | null {
   const raw = input.trim()
@@ -40,6 +42,14 @@ export function searchOrUrl(input: string): string | null {
     if (/^https?:\/\//i.test(raw)) {
       try {
         return new URL(raw).toString()
+      } catch {
+        return googleSearch(raw)
+      }
+    }
+    if (/^file:/i.test(raw)) {
+      try {
+        const u = new URL(raw)
+        return u.host ? new URL(`file:///${u.host}${u.pathname}${u.search}${u.hash}`).toString() : u.toString()
       } catch {
         return googleSearch(raw)
       }
