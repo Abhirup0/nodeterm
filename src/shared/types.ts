@@ -2317,8 +2317,12 @@ export interface PairedDevice {
  * The server leg of a device revoke — three states, because two cannot tell the truth apart.
  * 'ok' = the backend confirmed; 'failed' = we asked and were refused or could not reach it;
  * 'skipped' = we did not ask and that is fine (no entitlement to sign with — a free-tier desktop
- * has no Pro of ours on that phone to reclaim — or no relay device id to name). Only 'failed' is
- * a warning: reporting 'skipped' as a failure would tell a free user their phone's Pro is stuck.
+ * has no Pro of ours on that phone to reclaim — or no such device to name). Only 'failed' is a
+ * warning: reporting 'skipped' as a failure would tell a free user their phone's Pro is stuck.
+ *
+ * 'ok' is the backend's 204, which is idempotent and reveals nothing about WHICH row it applied
+ * to — see the residual-leak note on `revokeDevice` in main/pairing-service.ts before treating it
+ * as proof that a particular phone lost Pro.
  */
 export type DeviceRevokeServerOutcome = 'ok' | 'failed' | 'skipped'
 

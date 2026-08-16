@@ -86,17 +86,24 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
     setRevokeNote('')
     try {
       const result = await window.nodeTerminal.pairing.revokeDevice(device.id)
+      // Additive, not exclusive: both legs can fail at once (an unwritable ~/.ssh while offline),
+      // and being told only half of that leaves the other half to be discovered by accident.
+      const notes: string[] = []
       if (!result.local) {
-        setRevokeNote(`Couldn’t remove “${device.name}” from this machine — try again.`)
-      } else if (result.server === 'failed') {
-        // Not "try again" on its own: the row is already gone from the list, so there is no button
-        // left to press. Name the one thing that does re-run the server leg.
-        setRevokeNote(
-          `Removed “${device.name}” from this machine, but its Pro access couldn’t be revoked, ` +
-            'so that phone may keep Pro. Once this machine is back online, pair it and remove it ' +
-            'again to try again.'
+        notes.push(`Couldn’t remove “${device.name}” from this machine — try again.`)
+      }
+      if (result.server === 'failed') {
+        // Not a bare "try again": on a successful local removal the row is already gone from the
+        // list, so there is no button left to press. Name the one thing that does re-run the
+        // server leg — the phone sends the same stable device id every time it pairs, and the
+        // backend upserts the row on that id, so pairing again makes the next Revoke land.
+        notes.push(
+          (result.local ? `Removed “${device.name}” from this machine, but its` : 'Its') +
+            ' Pro access couldn’t be revoked, so that phone may keep Pro. Once this machine is' +
+            ' back online, pair it and remove it again to try again.'
         )
       }
+      setRevokeNote(notes.join(' '))
     } catch {
       // The call itself never got an answer (main is gone, or the surface doesn't support it).
       setRevokeNote(`Couldn’t remove “${device.name}” — try again.`)

@@ -192,15 +192,19 @@ describe('createPairingService().revokeDevice', () => {
     expect(authKeys()).toBe(`${KEY_OTHER}\n`)
   })
 
-  it('skips the server when the device predates relayDeviceId (nothing we can name)', async () => {
+  // A device paired before `relayDeviceId` was recorded is the population this whole task exists
+  // to protect, and skipping it was a real leak: when the phone sent no id of its own, the mint
+  // keyed the row on OUR per-pairing id — the same value `revokeDevice` is called with — so the
+  // row can be named after all. (That id is a randomUUID per pairing, never this desktop's own
+  // `getDeviceId()`, which is not a key in relay_devices at all.)
+  it('falls back to our own id for a device paired before relayDeviceId was recorded', async () => {
     seed(undefined)
     const fetchMock = vi.fn(async () => ({ ok: true, status: 204 }))
     vi.stubGlobal('fetch', fetchMock)
     const service = createPairingService(relayDeps('TOKEN'))
 
-    expect(await service.revokeDevice('dev-a')).toEqual({ local: true, server: 'skipped' })
-    // Falling back to our own id would ask the backend about a row that cannot exist.
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await service.revokeDevice('dev-a')).toEqual({ local: true, server: 'ok' })
+    expect(fetchBody(fetchMock)).toEqual({ deviceId: 'dev-a', entitlement: 'TOKEN' })
     expect(deviceIds()).toEqual([])
   })
 
@@ -249,6 +253,9 @@ describe('createPairingService().revokeDevice', () => {
     expect(fetchBody(fetchMock)).toEqual({ deviceId: 'phone-relay-1', entitlement: 'TOKEN' })
   })
 
+  // The fallback above is licensed by there BEING a device — an id that names no pairing names no
+  // row either, and asking about it would be a request we cannot justify (and a 204 we would then
+  // report as 'ok').
   it('skips the server for an id that is not in the registry', async () => {
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
