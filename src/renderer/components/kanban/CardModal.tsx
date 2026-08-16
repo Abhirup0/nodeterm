@@ -13,6 +13,7 @@ import { CardMetaBar } from './CardMetaBar'
 import { ModalTerminal } from './ModalTerminal'
 import { BrowserSurface } from '../../nodes/BrowserSurface'
 import { NoteMarkdown } from '../NoteMarkdown'
+import { relativeTime } from '../../lib/relativeTime'
 
 interface CardModalProps {
   session: KanbanSession
@@ -214,16 +215,39 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
               ) : (
                 <div
                   className="kanban-modal__sticky-view"
+                  role="button"
+                  tabIndex={0}
                   onClick={(e) => {
-                    // A link click opens externally; it must not also flip into edit mode.
+                    // A link click opens externally; it must not also flip into edit mode — and
+                    // neither must the click that ends a drag-selection (it would destroy the
+                    // selection the user just made to copy it).
                     if ((e.target as HTMLElement).closest('a')) return
+                    const sel = window.getSelection()
+                    if (sel && !sel.isCollapsed) return
                     setEditingNote(true)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'A') {
+                      e.preventDefault()
+                      setEditingNote(true)
+                    }
                   }}
                 >
                   {session.text ? (
-                    <NoteMarkdown text={session.text} className="kanban-modal__sticky-md" />
+                    // The SAME md class the canvas note renders with, so the two surfaces cannot
+                    // disagree about how a heading or a code block reads.
+                    <NoteMarkdown text={session.text} className="sticky-node__md" />
                   ) : (
                     <span className="kanban-modal__placeholder">Write a note…</span>
+                  )}
+                  {typeof session.textUpdatedAt === 'number' && (
+                    <div
+                      className="sticky-node__stamp"
+                      title={new Date(session.textUpdatedAt).toLocaleString()}
+                    >
+                      ↻ {session.textUpdatedBy || 'agent'} ·{' '}
+                      {relativeTime(session.textUpdatedAt, Date.now())}
+                    </div>
                   )}
                 </div>
               )

@@ -13,9 +13,13 @@ export function NoteMarkdown({ text, className }: { text: string; className?: st
   const [html, setHtml] = useState<string | null>(null)
   useEffect(() => {
     let alive = true
-    void import('../lib/markdown').then((md) => {
-      if (alive) setHtml(md.renderMarkdown(text, { breaks: true }))
-    })
+    import('../lib/markdown')
+      .then((md) => {
+        if (alive) setHtml(md.renderMarkdown(text, { breaks: true }))
+      })
+      // A failed chunk load (offline dev server, torn update) keeps the raw-text fallback below —
+      // an unhandled rejection here would surface as a global error for a cosmetic miss.
+      .catch(() => {})
     return () => {
       alive = false
     }

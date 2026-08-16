@@ -16,7 +16,7 @@ import os from 'os'
 import path from 'path'
 import { initPlatform, resetPlatformForTests } from '../platform'
 import { fakePlatform } from '../platform-fake'
-import { hookServer, MESSAGING_CONTROL_REFUSAL, requiresVerified } from './hook-server'
+import { hookServer, MESSAGING_CONTROL_REFUSAL, requiresVerified, verifiedRefusalFor } from './hook-server'
 import { nodeAuthToken } from './node-auth-token'
 import { TOLERANT_CONTROL_VERBS } from './node-identity-policy'
 import { DESTRUCTIVE_VERBS } from '../../shared/control-verbs'
@@ -77,7 +77,9 @@ describe('send/reply require `verified` — and controlPolicy is NOT the decider
       for (const verb of requiresVerified) {
         const legacy = await post(verb, 'n-src')
         expect(legacy.status, `${verb} legacy strict=${String(strict)}`).toBe(403)
-        expect(((await legacy.json()) as { error: string }).error).toBe(MESSAGING_CONTROL_REFUSAL)
+        // The refusal is worded for the refused verb ("agent messaging refused" answering a note
+        // write would be a diagnosis-delaying lie) but keeps the same one-sentence posture.
+        expect(((await legacy.json()) as { error: string }).error).toBe(verifiedRefusalFor(verb))
 
         // The invented-kid escape: a token minted under ANOTHER secret is a foreign kid, which
         // invariant 3 requires to be `legacy` — it walks past the latch and the window. Not here.
@@ -135,11 +137,14 @@ describe('where the verbs sit in the routing tables', () => {
     }
   })
 
-  it('the verified-only set is exactly the messaging verbs', () => {
+  it('the verified-only set is exactly the messaging verbs plus sticky', () => {
     // Pins that nothing ELSE ever drifts in: adding a SHIPPED verb here would strand its legacy
     // population with no hatch, which is the one thing this set must never be casually grown by.
     // `notify` (folded in from #98, Task 5.2) is a messaging verb like the other two — it writes
-    // into another agent's pane — so it takes the same gate.
-    expect([...requiresVerified].sort()).toEqual(['notify', 'reply', 'send'])
+    // into another agent's pane — so it takes the same gate. `sticky` (issue #144) is here
+    // because its "↻ <agent> · when" stamp replaces the confirm dialog, and a byline any
+    // bearer-holder could forge would be worse than no byline; it shipped verified-only from
+    // day one, so no legacy population is stranded.
+    expect([...requiresVerified].sort()).toEqual(['notify', 'reply', 'send', 'sticky'])
   })
 })

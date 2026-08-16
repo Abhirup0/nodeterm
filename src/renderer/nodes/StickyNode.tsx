@@ -1,10 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xyflow/react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { NoteMarkdown } from '../components/NoteMarkdown'
-import { formatTimeAgo } from '../lib/usageFormat'
+import { relativeTime } from '../lib/relativeTime'
 
 /**
  * A sticky note node: a colored, resizable card with free-text content.
@@ -33,6 +33,16 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [editingText, setEditingText] = useState(false)
   const collapsed = !!data.collapsed
   const stampAt = data.textUpdatedAt as number | undefined
+  // The stamp is the accountability surface a confirm dialog was traded for, so its label must
+  // not FREEZE at "just now" on an idle canvas (React Flow memoizes node renders): tick it every
+  // minute while a stamp is showing. `relativeTime` (not formatTimeAgo) — it takes `now` as a
+  // parameter, has a day unit, and clamps a peer-clock-skewed future timestamp to "just now".
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (stampAt === undefined) return
+    const t = setInterval(() => setNow(Date.now()), 60_000)
+    return () => clearInterval(t)
+  }, [stampAt])
 
   const toggleCollapse = () =>
     setNodes((ns) =>
@@ -171,11 +181,23 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
       ) : (
         <div
           className="sticky-node__view nodrag nowheel"
+          role="button"
+          tabIndex={0}
           onClick={(e) => {
             // A link click opens externally (main's will-navigate guard); it must not ALSO flip
             // the note into edit mode under the reader.
             if ((e.target as HTMLElement).closest('a')) return
+            // Finishing a drag-selection fires a click at the common ancestor — flipping into the
+            // textarea there would destroy the selection the user just made to copy it.
+            const sel = window.getSelection()
+            if (sel && !sel.isCollapsed) return
             setEditingText(true)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.target as HTMLElement).tagName !== 'A') {
+              e.preventDefault()
+              setEditingText(true)
+            }
           }}
         >
           {((data.text as string) ?? '') !== '' ? (
@@ -187,7 +209,7 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
       )}
       {typeof stampAt === 'number' && (
         <div className="sticky-node__stamp" title={new Date(stampAt).toLocaleString()}>
-          ↻ {(data.textUpdatedBy as string) || 'agent'} · {formatTimeAgo(stampAt)}
+          ↻ {(data.textUpdatedBy as string) || 'agent'} · {relativeTime(stampAt, now)}
         </div>
       )}
     </div>

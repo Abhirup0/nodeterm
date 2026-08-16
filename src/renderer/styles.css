@@ -8538,7 +8538,9 @@ body,
   padding: 14px 16px;
   font-family: inherit;
 }
-/* Rendered-markdown twin of .kanban-modal__sticky: same box, click flips into the textarea. */
+/* Rendered-markdown twin of .kanban-modal__sticky: same box, click flips into the textarea.
+   The markdown inside uses the note's own .sticky-node__md rules — one set of typography, so the
+   canvas and the card cannot disagree about how a heading or a code block reads. */
 .kanban-modal__sticky-view {
   flex: 1;
   min-width: 0;
@@ -8551,20 +8553,8 @@ body,
   user-select: text;
   -webkit-user-select: text;
 }
-.kanban-modal__sticky-md > :first-child {
-  margin-top: 0;
-}
-.kanban-modal__sticky-md > :last-child {
-  margin-bottom: 0;
-}
-.kanban-modal__sticky-md pre {
-  background: rgba(0, 0, 0, calc(0.25 * var(--shadow-k) + 0.08));
-  padding: 8px 10px;
-  border-radius: 6px;
-  overflow-x: auto;
-}
-.kanban-modal__sticky-md a {
-  color: var(--accent);
+.kanban-modal__sticky-view .sticky-node__stamp {
+  padding: 8px 0 0;
 }
 
 .kanban-modal__pane {
