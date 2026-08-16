@@ -135,6 +135,15 @@ export interface DeviceEntry {
   token: string
   pairedAt: number
   lastSeenAt: number
+  /**
+   * The PHONE's own device id, as sent to `/v1/relay/device` — the key `relay_devices` is stored
+   * under. `id` above is ours (it stamps the authorized_keys comment) and means nothing to the
+   * backend, so without this a removal could not tell the server WHICH row to revoke.
+   * Absent for devices paired before this field existed; equal to `id` when the phone sent no id
+   * of its own. Recorded for a LAN-only pairing too — the phone identifies itself either way — so
+   * its presence names a row the server MAY hold, not one it certainly does.
+   */
+  relayDeviceId?: string
 }
 
 /** The device shape safe to expose to the renderer (no `token`). */
@@ -169,9 +178,18 @@ export function removeDevice(devices: DeviceEntry[], id: string): DeviceEntry[] 
   return devices.filter((d) => d.id !== id)
 }
 
-/** Strip the secret `token` from each device before handing the list to the renderer. */
+/**
+ * Strip the secret `token` from each device before handing the list to the renderer. Built field
+ * by field on purpose: spreading the entry would carry the token out with every future field.
+ */
 export function toPublicDevices(devices: DeviceEntry[]): PublicDevice[] {
-  return devices.map(({ id, name, pairedAt, lastSeenAt }) => ({ id, name, pairedAt, lastSeenAt }))
+  return devices.map(({ id, name, pairedAt, lastSeenAt, relayDeviceId }) => ({
+    id,
+    name,
+    pairedAt,
+    lastSeenAt,
+    relayDeviceId
+  }))
 }
 
 /** Minimal shape of `os.networkInterfaces()` we need — kept structural so tests can fake it. */

@@ -570,6 +570,12 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         const deviceId = randomUUID()
         const agentToken = randomBytes(24).toString('base64url')
         const name = normalizeDeviceName(body.deviceName)
+        // The phone's OWN id — the key the relay backend stores its device row under, and the
+        // only one it would recognize in a later revoke. Resolved here rather than at the mint
+        // below so the registry entry can carry it; the fallback (phone sent none ⇒ our id) is
+        // unchanged, and the mint still reads this same value.
+        const phoneDeviceId =
+          typeof body.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : deviceId
         // One unit, and queued behind any in-flight revoke: a pairing that interleaves with one
         // would either append onto the inode the revoke is about to rename over, or lose its
         // agent.json entry to the revoke's stale read.
@@ -580,17 +586,14 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
             name,
             token: agentToken,
             pairedAt: Date.now(),
-            lastSeenAt: 0
+            lastSeenAt: 0,
+            relayDeviceId: phoneDeviceId
           })
         })
         // Provision relay access for the phone when enabled + Pro. Any failure ⇒ LAN-only: we
         // never fail the pairing over a relay hiccup (the phone still got its SSH key installed).
         let relayFields: { relay?: RelayPairingBlock; relayDeviceToken?: string } = {}
         if (relayCtx) {
-          const phoneDeviceId =
-            typeof body.deviceId === 'string' && body.deviceId.trim()
-              ? body.deviceId.trim()
-              : deviceId
           const minted = await mintRelayDevice(relayDeps!.apiBase, {
             entitlement: relayCtx.entitlement,
             deviceId: phoneDeviceId,

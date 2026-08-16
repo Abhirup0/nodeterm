@@ -2305,6 +2305,12 @@ export interface PairedDevice {
   pairedAt: number
   /** epoch-ms the host agent last saw this device (0 = never). */
   lastSeenAt: number
+  /**
+   * The phone's OWN device id — what the relay backend keys its device row on, as opposed to
+   * `id`, which is ours. Absent for devices paired before this field existed, i.e. "there is no
+   * server row we can name". An id, not a secret, which is why it may cross to the renderer.
+   */
+  relayDeviceId?: string
 }
 
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
