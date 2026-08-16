@@ -9,6 +9,7 @@ import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../
 import { createGrokMarkSvg } from '../lib/grokMark'
 import { createCopilotMarkSvg } from '../lib/copilotMark'
 import { buildIndicator, orderIndicatorAgents } from './indicator'
+import { HUD_ROW_CAP, overflowLabel, splitPanelRows } from './panel-rows'
 import { percentText } from '../lib/usageFormat'
 import codexPet from '../assets/pet-codex.webp'
 
@@ -29,6 +30,8 @@ interface HudRow {
   activity?: string
   contextPercent?: number
   subagents: HudSubagentRow[]
+  /** Finished and not yet looked at — the sidebar's `unread` mark, ranked + labelled here. */
+  unread: boolean
   updatedAt: number
 }
 interface HudPush {
@@ -80,6 +83,10 @@ let hoverExpand = true
 let percentMode: 'used' | 'remaining' = 'remaining'
 // Which subagent disclosures the user has opened (by nodeId), preserved across re-renders.
 const openSubs = new Set<string>()
+// The user clicked "+N more" — draw every pushed row instead of the first HUD_ROW_CAP. Reset when
+// the panel closes: the cap is the glance default, and an expansion is about the panel in front of
+// you, not a preference.
+let showAllRows = false
 
 // ---- Interaction: click-through hotspot + expand/collapse ----------------------------------
 
@@ -111,6 +118,10 @@ indicator.addEventListener('click', () => {
 function setExpanded(next: boolean): void {
   if (expanded === next) return
   expanded = next
+  if (!expanded && showAllRows) {
+    showAllRows = false
+    renderPanel(latestRows)
+  }
   capsule.classList.toggle('expanded', expanded)
   syncCapsuleOverhang() // expanded: drop the padding so the panel gets the full width
   window.hud.setExpanded(expanded)
@@ -246,7 +257,9 @@ function renderIndicator(rows: HudRow[]): void {
 
 function renderPanel(rows: HudRow[]): void {
   panel.replaceChildren()
-  const shown = rows.slice(0, 6)
+  // Rows arrive in state-priority order (main's `hudRowRank`), so the cap always cuts from the
+  // least urgent end — but it still cuts, and what it cut is counted below rather than dropped.
+  const { shown, hidden } = splitPanelRows(rows, showAllRows ? rows.length : HUD_ROW_CAP)
   shown.forEach((row, i) => {
     // Dithered pixel separator between rows (agent-notch's DitherSeparator).
     if (i > 0) {
@@ -256,6 +269,22 @@ function renderPanel(rows: HudRow[]): void {
     }
     panel.append(buildRow(row))
   })
+  const label = overflowLabel(hidden)
+  if (label || showAllRows) panel.append(buildMore(label))
+}
+
+/** The "+N more · 2 unread" footer — click to draw the rest (the panel scrolls), click again to
+ *  return to the glance-sized list. */
+function buildMore(label: string | undefined): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'hud-panel__more'
+  el.textContent = showAllRows ? 'Show fewer' : (label ?? '')
+  el.addEventListener('click', (e) => {
+    e.stopPropagation()
+    showAllRows = !showAllRows
+    renderPanel(latestRows)
+  })
+  return el
 }
 
 function buildRow(row: HudRow): HTMLElement {
@@ -274,7 +303,19 @@ function buildRow(row: HudRow): HTMLElement {
 
   const title = document.createElement('div')
   title.className = 'hud-row__title'
-  title.textContent = row.title
+  const name = document.createElement('span')
+  name.className = 'hud-row__name'
+  name.textContent = row.title
+  title.append(name)
+  // Say "unread" out loud. The row's mere existence used to be the only sign that a finished
+  // session was new for you — invisible next to five other rows, and indistinguishable from a
+  // glitch when it vanished on a read-ack from the phone. Same word the sessions sidebar uses.
+  if (row.unread) {
+    const badge = document.createElement('span')
+    badge.className = 'hud-row__badge'
+    badge.textContent = 'Unread'
+    title.append(badge)
+  }
 
   const tag = document.createElement('div')
   tag.className = `hud-row__tag hud-row__tag--${row.state}`
@@ -333,10 +374,13 @@ function buildRow(row: HudRow): HTMLElement {
   return el
 }
 
+// Sub-line fallback wording, borrowed from the sessions sidebar's labels (STATE_LABEL /
+// STATUS_GROUP_LABEL in renderer/lib/sessionList.ts) so one session does not have two names on two
+// surfaces. `done` reads "Done" — the "new for you" half of it is the Unread badge's job.
 function stateLabel(state: HudRow['state']): string {
-  if (state === 'working') return 'Working…'
+  if (state === 'working') return 'Running'
   if (state === 'needsYou') return 'Needs you'
-  if (state === 'done') return 'Finished'
+  if (state === 'done') return 'Done'
   return 'Idle'
 }
 

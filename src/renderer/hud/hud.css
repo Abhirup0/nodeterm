@@ -334,7 +334,17 @@ body {
   justify-content: center;
   width: 22px;
 }
+/* Title cell = name + optional Unread badge. The cell is the flex line; the NAME carries the
+   ellipsis (a grid item defaults to min-width:auto, so min-width:0 is what lets it shrink instead
+   of pushing the tag column off the row). */
 .hud-row__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.hud-row__name {
   font-family: var(--hud-mono);
   font-size: 12px;
   font-weight: 600;
@@ -342,6 +352,21 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* "Unread" — a finished turn you have not looked at. Green, the same ink as the done check and the
+   collapsed capsule's blob, so the three read as one signal. Never shrinks: the badge is the point
+   of the row, the title is what gives way. */
+.hud-row__badge {
+  flex-shrink: 0;
+  font-family: var(--hud-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: #30d158;
+  background: rgba(48, 209, 88, 0.16);
+  border-radius: 5px;
+  padding: 1px 5px;
 }
 .hud-row__tag {
   grid-column: 3;
@@ -379,6 +404,19 @@ body {
 .hud-row__sub b {
   color: #c7c7cc;
   font-weight: 600;
+}
+
+/* "+N more · 2 unread" — what the 6-row cap left out, since the list is now ranked and a cut row
+   is a real omission. Click toggles the full list (the panel already scrolls past --panel-max-h). */
+.hud-panel__more {
+  font-family: var(--hud-mono);
+  font-size: 10px;
+  color: #8e8e93;
+  padding: 7px 8px 2px;
+  cursor: pointer;
+}
+.hud-panel__more:hover {
+  color: #f2f2f7;
 }
 
 /* Dithered pixel separator between rows (agent-notch's DitherSeparator: a sparse row of gray
