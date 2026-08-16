@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
 import { IPC } from '../shared/ipc'
 import { writeFilesToClipboard } from './clipboard-files'
+import { allowGuestNavigation } from './webview-nav'
 import { registerFsHandlers } from '../core/fs-handlers'
 import {
   registerBrowserGuest,
@@ -671,10 +672,10 @@ app.whenReady().then(async () => {
   // startup for all current and future guests.
   app.on('web-contents-created', (_e, contents) => {
     if (contents.getType() !== 'webview') return
-    // Web nodes may only show http(s) pages or local content we serve via the jailed
-    // nt-media:// scheme.
+    // Web nodes may only show http(s) pages, jailed nt-media:// content, or origin-gated
+    // local file:// pages (policy + tests in webview-nav.ts).
     contents.on('will-navigate', (e, url) => {
-      if (!/^https?:\/\//i.test(url) && !/^nt-media:\/\//i.test(url)) e.preventDefault()
+      if (!allowGuestNavigation(contents.getURL(), url)) e.preventDefault()
     })
     // A browser node's guest requested a new window → open it as another browser node
     // (never a real popup). Only http(s); other schemes are dropped. The map is consulted
@@ -2337,6 +2338,10 @@ app.whenReady().then(async () => {
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     },
+    // A phone may be reading the mirror's `usage` block even with the window unfocused: relay-paired
+    // (approved device) or SSH-with-a-push-grant. When so, keep polling on the background cadence so
+    // the phone's bars/resets stay live instead of fossilizing at the last focused poll.
+    mirrorMayBeRead: () => pushHasPairedPhone || allPushGrants().length > 0,
     // Remote (SSH host) Claude usage. Same shape as the Context Link remote deps: core owns the
     // command and the parsing, main owns the ControlMaster. `sshProjectManager` is assigned just
     // below, so both closures read it lazily — they only ever run after a project has connected.

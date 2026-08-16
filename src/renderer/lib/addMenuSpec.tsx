@@ -24,6 +24,7 @@ import {
   IconBranch,
   IconDino,
   IconEditor,
+  IconGroup,
   IconNote,
   IconRemote,
   IconTerminal,
@@ -47,6 +48,7 @@ export type AddItem =
   | { kind: 'dino' }
   | { kind: 'open-file' }
   | { kind: 'new-file' } // requiresCwd
+  | { kind: 'spawn-team' }
   | { kind: 'worktree' } // disabledOnSsh
 
 /**
@@ -65,6 +67,7 @@ export const CONTENT_ADD_ITEMS: readonly AddItem[] = [
   { kind: 'dino' },
   { kind: 'open-file' },
   { kind: 'new-file' },
+  { kind: 'spawn-team' },
   { kind: 'worktree' }
 ] as const
 
@@ -93,6 +96,8 @@ export interface AddHandlers {
   dino: (at?: AddPos) => void
   openFile: (at?: AddPos) => void
   newFile: (at?: AddPos) => void
+  /** Opens the Spawn-a-team dialog (issue #78); `at` is where the conductor node will land. */
+  spawnTeam: (at?: AddPos) => void
   worktree: (at?: AddPos) => void
 }
 
@@ -147,6 +152,9 @@ export function contentAddItemsToMenuItems(
         if (ctx.hasCwd) {
           out.push({ label: 'New file…', icon: <IconEditor />, onClick: () => void handlers.newFile(at) })
         }
+        break
+      case 'spawn-team':
+        out.push({ label: 'Spawn a team…', icon: <IconGroup />, onClick: () => handlers.spawnTeam(at) })
         break
       case 'worktree':
         out.push({
@@ -218,6 +226,9 @@ export function contentAddItemsToDockRows(
         if (ctx.hasCwd) {
           out.push({ kind: 'new-file', label: 'New file…', icon: <IconEditor />, onClick: () => void handlers.newFile() })
         }
+        break
+      case 'spawn-team':
+        out.push({ kind: 'spawn-team', label: 'Spawn a team…', icon: <IconGroup />, onClick: () => handlers.spawnTeam() })
         break
       case 'worktree':
         out.push({

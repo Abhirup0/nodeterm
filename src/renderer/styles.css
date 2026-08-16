@@ -4793,6 +4793,15 @@ body,
   padding: 8px 10px;
 }
 
+.confirm__textarea {
+  /* Task prose, not a one-liner: fixed comfortable height, user-growable. `font-family` because
+     a bare textarea falls back to the UA monospace default, unlike input. */
+  font-family: inherit;
+  line-height: 1.45;
+  min-height: 76px;
+  resize: vertical;
+}
+
 .confirm__input:focus {
   outline: none;
   border-color: var(--accent);
@@ -10620,7 +10629,6 @@ body,
   white-space: nowrap;
 }
 
-/* ================================= Focus mode (issue #78) ==================================
    One terminal fills the window. The surface is a fixed opaque layer ABOVE the canvas (z 40 —
    over the sidebar's 12 and the dock's 20, under menus at 46 and dialogs at 55/70), and the
    focused `.term-node` is REPARENTED into it (TerminalNode's layout effect) — same element,
@@ -10688,3 +10696,110 @@ body.focus-mode .dock:hover {
     transition: none;
   }
 }
+=======
+/* ================================ Polish pass (issue #78) ==================================
+   Enter animations for the shared overlay shells + quiet scrollbars. Rules of the pass:
+   transform/opacity ONLY (nothing that forces layout — terminals must keep streaming at 60fps),
+   one-shot on mount (no exit mechanism: every shell hard-unmounts via `{open && portal}`, and
+   keeping portals alive for an exit tween would thread a closing state through 15 dialogs — the
+   kanban modal set this precedent and it reads fine), and the existing token palette only. */
+
+@keyframes nt-overlay-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes nt-surface-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes nt-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes nt-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Scrims fade fast — they must never make the surface feel late. */
+.confirm-overlay,
+.sc-overlay,
+.palette-overlay,
+.drawer-overlay {
+  animation: nt-overlay-fade 0.12s ease-out;
+}
+/* Dialog-family surfaces pop with the kanban modal's spring curve. */
+.confirm,
+.shortcuts,
+.palette {
+  animation: nt-surface-pop 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* Menus are twitch surfaces — barely-there settle, never a bounce. */
+.ctx-menu,
+.tab-menu {
+  animation: nt-menu-in 0.12s ease-out;
+}
+/* Drawers slide in from their anchored edge (they open right-aligned). */
+.drawer {
+  animation: nt-drawer-in 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.tooltip {
+  animation: nt-overlay-fade 0.12s ease-out;
+}
+
+/* Same contract as the mascot pulse above: motion is decoration; everything must read without it. */
+@media (prefers-reduced-motion: reduce) {
+  .confirm-overlay,
+  .sc-overlay,
+  .palette-overlay,
+  .drawer-overlay,
+  .confirm,
+  .shortcuts,
+  .palette,
+  .ctx-menu,
+  .tab-menu,
+  .drawer,
+  .tooltip {
+    animation: none;
+  }
+}
+
+/* --- Quiet scrollbars everywhere -----------------------------------------------------------
+   The standard properties, not ::-webkit-scrollbar: `scrollbar-color` INHERITS (set once on
+   :root), `scrollbar-width` does not (hence the `*`), and on macOS they keep the native
+   overlay behavior — thumbs appear on scroll instead of reserving a chunky gutter, which is
+   what made the default bars read as foreign controls in every panel. Setting a standard
+   property also makes Chromium ignore an element's ::-webkit-scrollbar rules, so the three
+   deliberately-HIDDEN scrollbars (tab strip, xterm viewports) keep working through the
+   `scrollbar-width: none` they already declare, and the banner/menu custom thumbs converge on
+   this same thin themed look instead of their hand-rolled webkit variants. */
+:root {
+  scrollbar-color: rgba(var(--tint-rgb), 0.22) transparent;
+}
+* {
+  scrollbar-width: thin;
+}
+
+/* ================================= Focus mode (issue #78) ===========================
