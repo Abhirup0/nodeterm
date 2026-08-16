@@ -108,7 +108,7 @@ function setExpanded(next: boolean): void {
   if (expanded === next) return
   expanded = next
   capsule.classList.toggle('expanded', expanded)
-  syncCapsuleSymmetry() // expanded: drop the padding so the panel gets the full width
+  syncCapsuleOverhang() // expanded: drop the padding so the panel gets the full width
   window.hud.setExpanded(expanded)
 }
 
@@ -367,24 +367,26 @@ function buildSubItem(s: HudSubagentRow): HTMLElement {
 
 // ---- Render + geometry ---------------------------------------------------------------------
 
-// The capsule is CENTRED on the notch and its content (the mascots) occupies only the strip LEFT of
-// it, so we pad the right by `notch + content` — that makes the black stick out by exactly the same
-// amount on both sides (owner: "soldan ne kadar genişlettiysen sağdan da o kadar"). The content width
-// is measured, not guessed, so it stays symmetric as slots come and go.
-function syncCapsuleSymmetry(): void {
+// The capsule grows LEFT-ONLY: its right edge stays flush with the notch's right edge, and the
+// content (the mascots) occupies only the strip LEFT of the notch — the right padding covers
+// exactly the notch itself, nothing more. This retires the earlier symmetric growth ("soldan ne
+// kadar genişlettiysen sağdan da o kadar"): on a crowded menu bar the symmetric right-hand
+// overhang sat ON TOP of the status items, and because the capsule is the click-through hotspot,
+// hovering there also swallowed their clicks (issue #78 — grow-left approved by the owner there).
+function syncCapsuleOverhang(): void {
   if (expanded) {
     capsule.style.paddingRight = ''
     return
   }
   const ext = indicator.offsetWidth
-  capsule.style.paddingRight = ext > 0 ? `${notchWidthPx + ext}px` : ''
+  capsule.style.paddingRight = ext > 0 ? `${notchWidthPx}px` : ''
 }
 
 function render(rows: HudRow[]): void {
   latestRows = rows
   renderIndicator(rows)
   renderPanel(rows)
-  syncCapsuleSymmetry()
+  syncCapsuleOverhang()
   // Idle → hide the whole capsule (no empty black pill); active → the fused capsule shows.
   capsule.classList.toggle('hud-capsule--hidden', rows.length === 0)
   // Auto-collapse if there is nothing to show.
