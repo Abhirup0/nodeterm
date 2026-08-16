@@ -183,6 +183,7 @@ import {
   sourceIsControlCapable,
   storedNodeListing
 } from '../lib/controlRouting'
+import { applyStickyWrite, resolveStickyRef } from '../lib/stickyWrite'
 import {
   FIT_NODE_OPTIONS,
   absolutePosition,
@@ -7312,6 +7313,80 @@ export function Canvas() {
             reply({ ok: true, message: `renamed ${id} to "${title}"` })
             return
           }
+          case 'sticky': {
+            // Write INTO a note (issue #144): the door for "sync Linear/Jira/GitHub onto the
+            // canvas" — a scheduled agent turn rewrites one titled note; nodeterm ships no
+            // integration. NOT confirm-gated, deliberately: a sync loop confirming a dialog every
+            // run is a sync loop the user turns off, and unlike `write` nothing here reaches a
+            // PTY — the text lands in node data (sanitized markdown on render) and the note wears
+            // a "who wrote it, when" stamp instead of a dialog.
+            const resolved = resolveStickyRef(
+              nodesRef.current.map((nd) => ({
+                id: nd.id,
+                sticky: nd.type === 'sticky',
+                title: (nd.data.title as string) ?? ''
+              })),
+              args.node ?? ''
+            )
+            if ('error' in resolved) {
+              reply({ ok: false, error: `sticky: ${resolved.error}` })
+              return
+            }
+            if ('id' in resolved) {
+              const target = nodesRef.current.find((nd) => nd.id === resolved.id)
+              if (!target) {
+                reply({ ok: false, error: `sticky: no node with id ${resolved.id}` })
+                return
+              }
+              const next = applyStickyWrite((target.data.text as string) ?? '', {
+                text: args.text,
+                append: args.append
+              })
+              if ('error' in next) {
+                reply({ ok: false, error: `sticky: ${next.error}` })
+                return
+              }
+              const stamp = { textUpdatedAt: Date.now(), textUpdatedBy: srcTitle }
+              setNodes((ns) =>
+                ns.map((nd) =>
+                  nd.id === resolved.id ? { ...nd, data: { ...nd.data, text: next.text, ...stamp } } : nd
+                )
+              )
+              markDirty()
+              reply({
+                ok: true,
+                message: `note "${(target.data.title as string) || 'Note'}" (${resolved.id}): ${
+                  next.mode === 'append' ? 'appended' : 'replaced'
+                }`
+              })
+              return
+            }
+            // No note matches. `--create` (value-less flag) turns exactly the not-found case into
+            // a new note titled after the ref — never a typo'd id or an ambiguous title, which
+            // errored above.
+            if (!('create' in args)) {
+              reply({
+                ok: false,
+                error: `sticky: no note matches "${args.node}" — check \`list\`, or pass --create to create it`
+              })
+              return
+            }
+            const next = applyStickyWrite('', { text: args.text, append: args.append })
+            if ('error' in next) {
+              reply({ ok: false, error: `sticky: ${next.error}` })
+              return
+            }
+            const node = createStickyNode(nodesRef.current.length, placeBelow())
+            // `oneLine` at the door, exactly as `rename`: this title is composed into `list`
+            // output, the board and the phone.
+            node.data.title = oneLine(args.node ?? '') || 'Note'
+            node.data.text = next.text
+            node.data.textUpdatedAt = Date.now()
+            node.data.textUpdatedBy = srcTitle
+            const newId = addAndConnect(node)
+            reply({ ok: true, message: `created note "${node.data.title}" (${newId})` })
+            return
+          }
           case 'write': {
             if (!args.node) {
               reply({ ok: false, error: 'write requires --node' })
@@ -7657,7 +7732,15 @@ export function Canvas() {
   // reads the same data.text path).
   const editStickyText = useCallback(
     (nodeId: string, text: string) => {
-      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, text } } : n)))
+      // A hand edit clears the agent-sync stamp (see StickyNode): it vouches for "an agent wrote
+      // this", which stops being true on the first keystroke.
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, text, textUpdatedAt: undefined, textUpdatedBy: undefined } }
+            : n
+        )
+      )
       markDirty()
     },
     [setNodes, markDirty]

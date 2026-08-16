@@ -12,6 +12,7 @@ import { BoardLogPanel } from './BoardLogPanel'
 import { CardMetaBar } from './CardMetaBar'
 import { ModalTerminal } from './ModalTerminal'
 import { BrowserSurface } from '../../nodes/BrowserSurface'
+import { NoteMarkdown } from '../NoteMarkdown'
 
 interface CardModalProps {
   session: KanbanSession
@@ -42,6 +43,9 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   const [editingTitle, setEditingTitle] = useState(false)
   const [title, setTitle] = useState(session.title)
   const [searchOpen, setSearchOpen] = useState(false)
+  // Sticky body: rendered markdown until clicked, the plain textarea while editing (mirrors
+  // StickyNode's toggle, so the canvas and the card can't disagree about how a note reads).
+  const [editingNote, setEditingNote] = useState(false)
   const agentSessionId = useAgentStatus((st) => st.byId[session.id]?.sessionId)
   const [naming, setNaming] = useState(false)
   // Comments & activity panel: OPEN by default in the modal; the header 💬 collapses it. The
@@ -57,11 +61,15 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
     setNaming(false)
     if (r.ok) onRename(r.message)
   }
-  // Ref mirror: the capture-phase listener below closes over stale state otherwise.
+  // Ref mirrors: the capture-phase listener below closes over stale state otherwise.
   const editingTitleRef = useRef(false)
   useEffect(() => {
     editingTitleRef.current = editingTitle
   }, [editingTitle])
+  const editingNoteRef = useRef(false)
+  useEffect(() => {
+    editingNoteRef.current = editingNote
+  }, [editingNote])
 
   useEffect(() => {
     pushDialog(id)
@@ -76,6 +84,13 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
         e.preventDefault()
         e.stopPropagation()
         setEditingTitle(false)
+        return
+      }
+      // Same for a sticky-body edit: Esc drops back to the rendered note, not out of the modal.
+      if (editingNoteRef.current) {
+        e.preventDefault()
+        e.stopPropagation()
+        setEditingNote(false)
         return
       }
       // Terminal focused → Esc belongs to the SESSION (agent "esc to interrupt"), not the modal.
@@ -180,12 +195,38 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           {/* Body is a flex row: the card's own pane (2/3) + the board-log panel (1/3, all kinds). */}
           <div className="kanban-modal__main">
             {session.kind === 'sticky' ? (
-              <textarea
-                className="kanban-modal__sticky"
-                value={session.text ?? ''}
-                placeholder="Write a note…"
-                onChange={(e) => onEditSticky(e.target.value)}
-              />
+              editingNote ? (
+                <textarea
+                  className="kanban-modal__sticky"
+                  value={session.text ?? ''}
+                  placeholder="Write a note…"
+                  autoFocus
+                  onChange={(e) => onEditSticky(e.target.value)}
+                  onBlur={() => setEditingNote(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setEditingNote(false)
+                    }
+                  }}
+                />
+              ) : (
+                <div
+                  className="kanban-modal__sticky-view"
+                  onClick={(e) => {
+                    // A link click opens externally; it must not also flip into edit mode.
+                    if ((e.target as HTMLElement).closest('a')) return
+                    setEditingNote(true)
+                  }}
+                >
+                  {session.text ? (
+                    <NoteMarkdown text={session.text} className="kanban-modal__sticky-md" />
+                  ) : (
+                    <span className="kanban-modal__placeholder">Write a note…</span>
+                  )}
+                </div>
+              )
             ) : (
               <div className="kanban-modal__pane" data-kind={session.kind}>
                 {session.kind === 'terminal' ? (

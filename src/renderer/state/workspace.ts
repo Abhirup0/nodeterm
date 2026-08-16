@@ -76,6 +76,10 @@ export interface NodeData {
   shell?: string
   cwd?: string
   text?: string
+  /** sticky-only: last canvas-control `sticky` write (when / by which agent node). Cleared on a
+   *  hand edit — the stamp means "an agent synced this", not "last touched". */
+  textUpdatedAt?: number
+  textUpdatedBy?: string
   filePath?: string
   /**
    * editor/diff-only: true once this node's `filePath` was confirmed gone — e.g. a worktree
@@ -1298,6 +1302,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         shell: n.shell,
         cwd: n.cwd,
         text: n.text,
+        textUpdatedAt: n.textUpdatedAt,
+        textUpdatedBy: n.textUpdatedBy,
         filePath: n.filePath,
         fileMissing: n.fileMissing,
         url: n.url,
@@ -1364,6 +1370,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         shell: n.data.shell,
         cwd: n.data.cwd,
         text: n.data.text,
+        textUpdatedAt: n.data.textUpdatedAt,
+        textUpdatedBy: n.data.textUpdatedBy,
         filePath: n.data.filePath,
         fileMissing: n.data.fileMissing,
         url: n.data.url,

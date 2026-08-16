@@ -3,6 +3,8 @@ import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xy
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import { COLLAPSED_HEIGHT, NODE_COLORS, type CanvasNode } from '../state/workspace'
 import { ColumnPill } from '../components/kanban/ColumnPill'
+import { NoteMarkdown } from '../components/NoteMarkdown'
+import { formatTimeAgo } from '../lib/usageFormat'
 
 /**
  * A sticky note node: a colored, resizable card with free-text content.
@@ -23,7 +25,14 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const [editingTitle, setEditingTitle] = useState(false)
   /** The value editing started with, so Escape can put it back. */
   const [titleBefore, setTitleBefore] = useState('')
+  /**
+   * The body is a rendered-markdown view until it is clicked, then the same textarea as before
+   * (blur renders it again) — the sticky half of issue #144, where an agent-synced note (tickets,
+   * status) should read as a document, not as raw markup in a textarea.
+   */
+  const [editingText, setEditingText] = useState(false)
   const collapsed = !!data.collapsed
+  const stampAt = data.textUpdatedAt as number | undefined
 
   const toggleCollapse = () =>
     setNodes((ns) =>
@@ -139,13 +148,48 @@ export function StickyNode({ id, data, selected }: NodeProps<CanvasNode>) {
         </button>
       </div>
 
-      <textarea
-        className="sticky-node__body nodrag nowheel"
-        value={data.text ?? ''}
-        placeholder="Write a note…"
-        spellCheck={false}
-        onChange={(e) => updateNodeData(id, { text: e.target.value })}
-      />
+      {editingText ? (
+        <textarea
+          className="sticky-node__body nodrag nowheel"
+          value={data.text ?? ''}
+          placeholder="Write a note…"
+          spellCheck={false}
+          autoFocus
+          // A hand edit clears the agent-sync stamp: it vouches for "an agent wrote this", which
+          // stops being true on the first keystroke.
+          onChange={(e) =>
+            updateNodeData(id, { text: e.target.value, textUpdatedAt: undefined, textUpdatedBy: undefined })
+          }
+          onBlur={() => setEditingText(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              setEditingText(false)
+            }
+          }}
+        />
+      ) : (
+        <div
+          className="sticky-node__view nodrag nowheel"
+          onClick={(e) => {
+            // A link click opens externally (main's will-navigate guard); it must not ALSO flip
+            // the note into edit mode under the reader.
+            if ((e.target as HTMLElement).closest('a')) return
+            setEditingText(true)
+          }}
+        >
+          {((data.text as string) ?? '') !== '' ? (
+            <NoteMarkdown text={data.text as string} className="sticky-node__md" />
+          ) : (
+            <span className="sticky-node__placeholder">Write a note…</span>
+          )}
+        </div>
+      )}
+      {typeof stampAt === 'number' && (
+        <div className="sticky-node__stamp" title={new Date(stampAt).toLocaleString()}>
+          ↻ {(data.textUpdatedBy as string) || 'agent'} · {formatTimeAgo(stampAt)}
+        </div>
+      )}
     </div>
     </>
   )

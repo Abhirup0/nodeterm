@@ -98,6 +98,20 @@ describe('canvas-control shim', () => {
     expect(received.at(-1)?.args).toEqual({ path: '/tmp/a b.png' })
     await callShim(['close', 'node-9'])
     expect(received.at(-1)?.args).toEqual({ node: 'node-9' })
+    await callShim(['sticky', 'Linear: my tickets', '--text', '# Tickets'])
+    expect(received.at(-1)).toMatchObject({
+      verb: 'sticky',
+      args: { node: 'Linear: my tickets', text: '# Tickets' }
+    })
+  })
+
+  it('carries a markdown sticky body (backticks, #, newlines) verbatim, --create riding along', async () => {
+    const md = '# Tickets\n\n- [ENG-1] `fix build` — **urgent**\n- [ENG-2] $PATH & <em>'
+    await callShim(['sticky', '--node', 'sticky-3', '--append', md, '--create'])
+    expect(received.at(-1)).toMatchObject({
+      verb: 'sticky',
+      args: { node: 'sticky-3', append: md, create: '' }
+    })
   })
 
   it('accepts a trailing flag with no value', async () => {
