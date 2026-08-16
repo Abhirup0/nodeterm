@@ -161,6 +161,8 @@ import { promptDialog } from '../components/promptDialog'
 import { UpgradeDialog } from '../components/UpgradeDialog'
 import { RemotePicker } from '../components/RemotePicker'
 import { WorktreeDialog } from '../components/WorktreeDialog'
+import { SpawnTeamDialog } from '../components/SpawnTeamDialog'
+import { conductorPrompt } from '../lib/spawnTeamPrompt'
 import { NotifyConsentDialog } from '../components/NotifyConsentDialog'
 import { SessionsSidebar } from '../components/SessionsSidebar'
 import type { SessionNodeInput } from '../lib/sessionList'
@@ -3570,7 +3572,13 @@ export function Canvas() {
   useEffect(() => useSystemAccount.getState().ensure(), [])
 
   const addAgentNode = useCallback(
-    (agentId: AgentId, center?: { x: number; y: number }, groupId?: string, accountId?: string) => {
+    (
+      agentId: AgentId,
+      center?: { x: number; y: number },
+      groupId?: string,
+      accountId?: string,
+      initialPrompt?: string
+    ) => {
       const project = useProjects.getState().getProject(activeProjectId)
       const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
       // Funnel through resolveNewNodeAccount so the project default applies even without an
@@ -3586,7 +3594,7 @@ export function Canvas() {
           ns.length,
           cwd,
           center ?? emptyNodePos(),
-          undefined,
+          initialPrompt,
           project?.ssh,
           account,
           activePermissionMode(agentId)
@@ -3596,6 +3604,27 @@ export function Canvas() {
       markDirty()
     },
     [setNodes, markDirty, activeProjectId, emptyNodePos, cwdForNewNodeIn, parentInto]
+  )
+
+  // "Spawn a team…" (issue #78): the dialog collects the task; this opens ONE conductor node
+  // pre-prompted with it. The conductor's own manage-nodeterm-canvas skill does the role split
+  // and the fan-out — the app ships no model, so the entry point deliberately adds no plumbing.
+  const [spawnTeamDialog, setSpawnTeamDialog] = useState<{ at?: { x: number; y: number } } | null>(
+    null
+  )
+  const spawnTeam = useCallback(
+    (v: { task: string; worktrees: boolean }) => {
+      const at = spawnTeamDialog?.at
+      setSpawnTeamDialog(null)
+      addAgentNode(
+        useSettings.getState().settings.defaultAgent ?? 'claude',
+        at,
+        undefined,
+        undefined,
+        conductorPrompt({ task: v.task, worktrees: v.worktrees })
+      )
+    },
+    [addAgentNode, spawnTeamDialog]
   )
 
   // Open a terminal node that ssh's into a saved server. `screenPos` (a pane/dock cursor) is
@@ -5765,6 +5794,7 @@ export function Canvas() {
       dino: (at) => addDino(at),
       openFile: (at) => void openFileDialog(at),
       newFile: (at) => void newProjectFile(at),
+      spawnTeam: (at) => setSpawnTeamDialog({ at }),
       worktree: (at) => openWorktreeDialog(null, at)
     }),
     [
@@ -8855,6 +8885,14 @@ export function Canvas() {
         note: isSshProject ? WORKTREE_SSH_HINT : undefined,
         run: () => openWorktreeDialog(null)
       },
+      {
+        id: 'spawn-team',
+        label: 'Spawn a team…',
+        // Searchable synonyms — this is the entry people will look for by intent, not by name.
+        hint: 'orchestrate parallelize delegate agents conductor',
+        icon: <IconGroup />,
+        run: () => setSpawnTeamDialog({})
+      },
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       { id: 'clone-repo', label: 'Clone repository…', icon: <IconProject />, run: () => setCloneDialogOpen(true) },
       {
@@ -9689,6 +9727,15 @@ export function Canvas() {
         />
       )}
 
+      {spawnTeamDialog && (
+        <SpawnTeamDialog
+          worktreesAvailable={!isSshProject && !!worktreeRepoRoot}
+          worktreeNote={isSshProject ? WORKTREE_SSH_HINT : 'not a git repository'}
+          onSubmit={spawnTeam}
+          onCancel={() => setSpawnTeamDialog(null)}
+        />
+      )}
+
       {moveTarget && (
         <ConfirmDialog
           message="Move this terminal into the worktree? Its session restarts and any running process ends."
@@ -9791,6 +9838,7 @@ export function Canvas() {
         onRedo={redo}
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
+        onSpawnTeam={() => setSpawnTeamDialog({})}
         onAddDino={addDino}
         onAddAgent={(aid, accountId) => addAgentNode(aid, undefined, undefined, accountId)}
         onOpenFile={() => void openFileDialog()}
