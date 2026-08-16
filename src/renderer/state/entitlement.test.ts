@@ -135,6 +135,12 @@ describe('entitlement store — detail read vs release merge', () => {
     const useEntitlement = await freshStore()
     detail.mockResolvedValue(LOADED)
     await useEntitlement.getState().loadDetail()
+    // Leave an OPTIONAL field in state first. Every other field is stated by the incoming reply,
+    // so `{...prev, ...next}` is byte-identical to a replace and nothing could tell them apart;
+    // `retryAfterDays` is the one thing a merge would carry over, so it is the discriminator.
+    releaseOthers.mockResolvedValue({ ...ZEROS, error: 'too_soon', retryAfterDays: 12 })
+    await useEntitlement.getState().releaseOthers()
+    expect(useEntitlement.getState().detail!.retryAfterDays).toBe(12)
 
     // The same install re-read after the entitlement moved to an App Store purchase: no key, no
     // machines, source 'apple'. Merging here would keep a key that is no longer this license's
@@ -144,12 +150,15 @@ describe('entitlement store — detail read vs release merge', () => {
     await useEntitlement.getState().loadDetail()
 
     expect(useEntitlement.getState().detail).toEqual(apple)
+    expect(useEntitlement.getState().detail!.retryAfterDays).toBeUndefined()
   })
 
   it('a failed read replaces too — its error is the state, not a footnote on stale counts', async () => {
     const useEntitlement = await freshStore()
     detail.mockResolvedValue(LOADED)
     await useEntitlement.getState().loadDetail()
+    releaseOthers.mockResolvedValue({ ...ZEROS, error: 'too_soon', retryAfterDays: 12 })
+    await useEntitlement.getState().releaseOthers()
 
     detail.mockResolvedValue({ ...ZEROS, error: 'offline' })
     await useEntitlement.getState().loadDetail()
@@ -160,5 +169,7 @@ describe('entitlement store — detail read vs release merge', () => {
     // read's own answer, so the store forwards them rather than papering over with the last ones.
     expect(d.key).toBeNull()
     expect(d.used).toBe(0)
+    // …and the refused release's retry window does not survive a fresh read (see above).
+    expect(d.retryAfterDays).toBeUndefined()
   })
 })

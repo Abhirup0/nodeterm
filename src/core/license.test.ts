@@ -486,6 +486,9 @@ describe('license detail + release', () => {
     // server makes zero keygen calls for it and answers 200 with no key and no machines — those
     // zeros mean "device counting does not apply here", NOT "the read failed". `source` is the
     // only thing that tells the two apart, and the UI hides the release action on it.
+    //
+    // This is also the fixture that stops the malformed-2xx guard below from OVER-firing: these
+    // zeros are stated numbers, so they must still read as a success.
     storeToken()
     await boot(vi.fn(async () => jsonResponse({ key: null, used: 0, seats: 0, source: 'apple' })))
 
@@ -586,15 +589,33 @@ describe('license detail + release', () => {
     expect(d.seats).toBe(3)
   })
 
-  it('accepts only real numbers as counts, so nothing renders as NaN or as a string', async () => {
-    // The contract says numbers. A body that says otherwise is malformed, and `json.used ?? 0`
-    // would forward whatever it holds — "3" into a meter, or NaN out of arithmetic on it.
+  it('a 2xx whose counts are not numbers is a FAILED READ, not a license with no devices', async () => {
+    // The scenario: a captive portal or corporate proxy answers the POST with a 200 HTML page, or
+    // a bad deploy answers `200 {}` / `200 {"used":"3"}`. Coercing those to zeros with error null
+    // renders "0 of 0 devices" and an empty key as fact — a subscriber told they have no license.
     storeToken()
     await boot(vi.fn(async () => jsonResponse({ key: 'K', used: '3', seats: null, source: 'keygen' })))
 
-    const d = await detail()
-    expect(d.used).toBe(0)
-    expect(d.seats).toBe(0)
+    expect(await detail()).toEqual({
+      key: null,
+      used: 0,
+      seats: 0,
+      source: null,
+      error: 'network'
+    })
+
+    // The 200 HTML page: the body does not parse at all.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new SyntaxError('Unexpected token <')
+        }
+      }))
+    )
+    expect((await detail()).error).toBe('network')
   })
 
   it('refuses to call the server with no stored entitlement', async () => {
@@ -635,6 +656,11 @@ describe('license detail + release', () => {
     await boot(
       vi.fn(async () => jsonResponse({ key: 'K', used: 1, seats: 3, source: 'paddle' }))
     )
-    expect((await detail()).source).toBeNull()
+    const d = await detail()
+    expect(d.source).toBeNull()
+    // …and it stays a SUCCESS. Stamping an error here would hide the whole panel over a reply that
+    // carried a perfectly good key and device count.
+    expect(d.error).toBeNull()
+    expect(d.key).toBe('K')
   })
 })

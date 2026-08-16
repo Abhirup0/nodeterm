@@ -119,8 +119,10 @@ function licenseSourceOf(v: unknown): LicenseSource | null {
   return typeof v === 'string' && LICENSE_SOURCES.includes(v) ? (v as LicenseSource) : null
 }
 
-function countOf(v: unknown): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : 0
+/** A count the server actually stated. A string, null or NaN is not one — see the 2xx guard in
+ * `licenseCall`, where "we could not read the body" must stay distinct from "no devices". */
+function isCount(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
 }
 
 function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
@@ -253,20 +255,29 @@ export function initLicense(onChange?: () => void): void {
         // The server's own reason code (401 unauthorized / 402 inactive / 429 too_soon /
         // 400 not_applicable) is kept verbatim: the UI tells those four apart. `retryAfterDays`
         // rides only 429 and is the whole content of that answer.
-        const days = countOf(json.retryAfterDays)
+        const days = isCount(json.retryAfterDays) ? json.retryAfterDays : 0
         return {
           ...EMPTY_DETAIL,
           error: typeof json.error === 'string' && json.error ? json.error : 'network',
           ...(days > 0 ? { retryAfterDays: days } : {})
         }
       }
+      // A 2xx we could not READ is a failed read, not a license with no devices. A captive portal
+      // or corporate proxy answers this POST with a 200 HTML page, and a bad deploy can answer
+      // `200 {}` or `200 {"used":"3"}` — coercing any of those to 0 while leaving `error` null
+      // renders "0 of 0 devices" and an empty key AS FACT, which is the one thing this route
+      // exists to prevent. Both counts must be real numbers; the legitimate non-keygen 200 states
+      // exactly that (`{key:null, used:0, seats:0, source:'apple'}`) and is untouched.
+      if (!isCount(json.used) || !isCount(json.seats)) {
+        return { ...EMPTY_DETAIL, error: 'network' }
+      }
       return {
         // `key: null` on a 200 is a real state (a keygen policy that hides keys, a license older
         // than the column, a non-keygen source) — a success, not a failed read.
         key: typeof json.key === 'string' ? json.key : null,
         // Never clamped against seats: a cap lowered after activation makes used > seats real.
-        used: countOf(json.used),
-        seats: countOf(json.seats),
+        used: json.used,
+        seats: json.seats,
         source: licenseSourceOf(json.source),
         error: null
       }
