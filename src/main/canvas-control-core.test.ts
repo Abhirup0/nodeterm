@@ -256,6 +256,18 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts say a busy target is QUEUED, not refused (deliver-on-idle, PR 7)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // PR 7 replaced "busy target is refused with targetBusy" with a bounded deliver-on-idle
+      // queue. The prose must describe the queue, and must NOT reassert the pre-PR-7 claim — an
+      // orchestrating agent that reads "busy = hard refusal" polls or gives up instead of trusting
+      // the queue. This test reddens on a revert to the old sentence.
+      expect(body.toLowerCase()).toContain('queued')
+      expect(body).not.toMatch(/busy target answers `targetBusy` instead/i)
+      expect(body).not.toMatch(/delivered only\s+when the target is verifiably\s+idle/i)
+    }
+  })
+
   it('renders the RETRYABLE table — the table is the source, not a re-typed copy', () => {
     const body = buildCanvasSkillBody('/x/shim.sh')
     const yesAt = body.indexOf('Worth retrying')
