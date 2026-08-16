@@ -9,6 +9,7 @@ import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../
 import { createGrokMarkSvg } from '../lib/grokMark'
 import { createCopilotMarkSvg } from '../lib/copilotMark'
 import { buildIndicator, orderIndicatorAgents } from './indicator'
+import { percentText } from '../lib/usageFormat'
 import codexPet from '../assets/pet-codex.webp'
 
 // Local mirror of the preload's HUD contract (src/preload/hud.ts) — kept self-contained so this
@@ -38,6 +39,7 @@ interface HudPush {
   notchCenterX: number
   hasNotch: boolean
   hoverExpand: boolean
+  percentMode?: 'used' | 'remaining'
 }
 interface HudApi {
   onRows(cb: (push: HudPush) => void): () => void
@@ -74,6 +76,8 @@ let latestRows: HudRow[] = []
 let notchWidthPx = 168
 // Hover-to-expand (settings.notchHoverExpand). Off = the capsule only expands on click.
 let hoverExpand = true
+// settings.usagePercentMode — the same number/label the other context surfaces render (issue #78).
+let percentMode: 'used' | 'remaining' = 'remaining'
 // Which subagent disclosures the user has opened (by nodeId), preserved across re-renders.
 const openSubs = new Set<string>()
 
@@ -277,7 +281,9 @@ function buildRow(row: HudRow): HTMLElement {
   const parts: string[] = []
   if (row.model) parts.push(row.model)
   parts.push(reltime(row.updatedAt))
-  if (typeof row.contextPercent === 'number') parts.push(`${Math.round(row.contextPercent)}%`)
+  // Labeled, not a bare number: "42% used" / "58% left" per the display setting — the label is
+  // what keeps a context percentage from reading as provider quota.
+  if (typeof row.contextPercent === 'number') parts.push(percentText(row.contextPercent, percentMode))
   tag.textContent = parts.join(' · ')
 
   const sub = document.createElement('div')
@@ -400,6 +406,7 @@ function applyGeometry(push: HudPush): void {
   }
   if (typeof push.notchCenterX === 'number') rs.setProperty('--notch-center-x', `${push.notchCenterX}px`)
   if (typeof push.hoverExpand === 'boolean') hoverExpand = push.hoverExpand
+  if (push.percentMode === 'used' || push.percentMode === 'remaining') percentMode = push.percentMode
   // No physical notch → draw a standalone floating pill instead of fusing to y=0.
   document.documentElement.classList.toggle('notchless', push.hasNotch === false)
 }
