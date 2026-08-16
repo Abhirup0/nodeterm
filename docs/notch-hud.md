@@ -93,12 +93,13 @@ the click-through hotspot (`pointerenter` → main `setIgnoreMouse(false)`, leav
 the transparent rest of the window stays click-through. Hidden entirely when idle (no empty pill).
 
 - **Collapsed capsule**: never taller than the real notch (owner: "notch'a ekstra height vermek
-  istemiyorum"). It is `--bar` tall (`max-height`), shrink-to-fit wide, anchored at the notch's
-  horizontal centre, and the mascots are vertically centred in that strip — the notch reads as
-  WIDER, not taller, so the Dynamic-Island bulge below the bar line was dropped (`--capsule-drop` is
-  now `0px` and only survives for the expand math). The content occupies the strip LEFT of the
-  notch, so `syncCapsuleSymmetry` pads the right by `notchWidth + measured content width` and the
-  black sticks out by the same amount on both sides. The collapsed content is decided by ONE pure
+  istemiyorum"). It is `--bar` tall (`max-height`), shrink-to-fit wide, its RIGHT edge pinned
+  to the notch's right edge, and the mascots are vertically centred in that strip — the notch reads
+  as WIDER, not taller, so the Dynamic-Island bulge below the bar line was dropped (`--capsule-drop`
+  is now `0px` and only survives for the expand math). The content occupies the strip LEFT of the
+  notch and `syncCapsuleOverhang` pads the right by exactly the notch width, so the capsule grows
+  LEFT-ONLY. (It used to grow symmetrically; on a crowded menu bar the right-hand overhang covered
+  the status items and — being the click-through hotspot — swallowed their clicks. Issue #78.) The collapsed content is decided by ONE pure
   rule, `buildIndicator` (`src/renderer/hud/indicator.ts`, unit-tested with `orderIndicatorAgents`):
   a slot per agent kind that is working: claude → 2-frame coral pixel mascot walking; codex → the pet
   spritesheet first-row crop (`image-rendering: pixelated`); grok/gemini/opencode → their own brand

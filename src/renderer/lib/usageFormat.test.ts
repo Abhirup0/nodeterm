@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { barFillPercent, formatModelLabel, percentNumber, severityColor } from './usageFormat'
+import { barFillPercent, contextFillColor, formatModelLabel, percentNumber, severityColor } from './usageFormat'
 
 describe('formatModelLabel', () => {
   it('formats family + version ids', () => {
@@ -58,5 +58,23 @@ describe('barFillPercent', () => {
     const left = 100 - 92
     expect(severityColor(null, left)).toBe('#ff453a')
     expect(barFillPercent(92, 'used')).not.toBe(barFillPercent(92, 'remaining'))
+  })
+})
+
+// One definition for every context surface — ContextMeter, the session-row chip and the notch
+// HUD each carried their own copy of these thresholds before issue #78.
+describe('contextFillColor', () => {
+  it('is keyed to USED context: green low, yellow from 60, red past 85', () => {
+    expect(contextFillColor(0)).toBe('#30d158')
+    expect(contextFillColor(59)).toBe('#30d158')
+    expect(contextFillColor(60)).toBe('#ffd60a')
+    expect(contextFillColor(85)).toBe('#ffd60a')
+    expect(contextFillColor(86)).toBe('#ff453a')
+  })
+
+  it('is the inverse scale of the quota colors — the two must not be conflated', () => {
+    // 90% USED context is red; 90% REMAINING quota is green. Same number, opposite meaning.
+    expect(contextFillColor(90)).toBe('#ff453a')
+    expect(severityColor(null, 90)).toBe('#30d158')
   })
 })

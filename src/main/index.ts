@@ -58,7 +58,7 @@ import {
   isValidPendingId,
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
-import { setMainWindow, getMainWindow, sendToMain, shouldHideOnClose, createCrashReloadPolicy } from './main-window'
+import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
 import { installKeydownIntercepts } from './keydown-intercept'
 import {
   initNotchHud,
@@ -611,10 +611,24 @@ function createWindow(): BrowserWindow {
   // outlives its window (tmux sessions, hook server, updater); destroying the window
   // would leave every window-bound subsystem (agent-status forwarding, tails, updater,
   // license events) pointing at a dead webContents after a dock-reopen.
+  // A fullscreen window must LEAVE fullscreen before it hides: hiding in place strands the
+  // window's empty Space as a black screen (issue #78 / electron/electron#20263). The
+  // transition is async, so the hide waits for `leave-full-screen`; `leavingFullScreen`
+  // keeps a second ⌘W during the transition from stacking another listener.
+  let leavingFullScreen = false
   win.on('close', (e) => {
-    if (shouldHideOnClose(process.platform, quitting)) {
-      e.preventDefault()
+    const action = closeAction(process.platform, quitting, win.isFullScreen())
+    if (action === 'default') return
+    e.preventDefault()
+    if (action === 'hide') {
       win.hide()
+    } else if (!leavingFullScreen) {
+      leavingFullScreen = true
+      win.once('leave-full-screen', () => {
+        leavingFullScreen = false
+        if (!win.isDestroyed() && !quitting) win.hide()
+      })
+      win.setFullScreen(false)
     }
   })
 
@@ -1258,7 +1272,12 @@ app.whenReady().then(async () => {
   // 'show' guarantees a regular window has established the app's Dock presence first.
   const notchTunables = (): NotchHudTunables => {
     const s = settingsStore.get()
-    return { enabled: s.notchHud, notchWidth: s.notchWidth, hoverExpand: s.notchHoverExpand }
+    return {
+      enabled: s.notchHud,
+      notchWidth: s.notchWidth,
+      hoverExpand: s.notchHoverExpand,
+      percentMode: s.usagePercentMode
+    }
   }
   const startNotchHud = (): void =>
     initNotchHud({ getNodeTitle: displayTitleFor }, notchTunables())
