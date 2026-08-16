@@ -8,7 +8,7 @@ import path from 'path'
 import crypto from 'node:crypto'
 import { platform } from './platform'
 import { IPC } from '../shared/ipc'
-import type { LicenseStatus } from '../shared/types'
+import type { LicenseDetail, LicenseSource, LicenseStatus } from '../shared/types'
 import { getDeviceId } from './device-id'
 import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
 
@@ -104,6 +104,23 @@ function verify(token: string | undefined): Payload | null {
 // count. Inactive/free/invalid → 0.
 function seatsFrom(p: Payload | null): number {
   return p ? Math.max(PRO_FREE_SEATS, p.seats ?? PRO_FREE_SEATS) : 0
+}
+
+/** Every failure answers with this shape plus a reason code: zeros that are NEVER a device count.
+ * The renderer must read `error` first — "we could not look" and "you have no devices" are
+ * different facts, and rendering the first as the second is the bug this whole route exists for. */
+const EMPTY_DETAIL: LicenseDetail = { key: null, used: 0, seats: 0, source: null, error: null }
+
+const LICENSE_SOURCES: readonly string[] = ['keygen', 'apple', 'free']
+
+/** The source decides whether the UI offers "release other devices" at all, so an unrecognized
+ * word degrades to "none stated" (action hidden) rather than reaching the renderer as data. */
+function licenseSourceOf(v: unknown): LicenseSource | null {
+  return typeof v === 'string' && LICENSE_SOURCES.includes(v) ? (v as LicenseSource) : null
+}
+
+function countOf(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
 function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
@@ -206,6 +223,60 @@ export function initLicense(onChange?: () => void): void {
   }
 
   platform().handle(IPC.licenseStatus, () => statusFrom(load().token))
+
+  // Both routes are authorized by the stored entitlement token. Sending a deviceId instead would
+  // hand a key — which works on ANY machine — to whoever learned an id that rides query strings,
+  // telemetry and relay pairing. The token is the only credential on the wire here, and it goes
+  // in the BODY, never the URL.
+  const licenseCall = async (route: string): Promise<LicenseDetail> => {
+    const token = load().token
+    if (!token) return { ...EMPTY_DETAIL, error: 'unauthorized' }
+    if (!allowed()) return { ...EMPTY_DETAIL, error: 'disabled' }
+    try {
+      const ctrl = new AbortController()
+      const t = setTimeout(() => ctrl.abort(), 8000)
+      const res = await fetch(`${API_BASE}${route}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ entitlement: token }),
+        signal: ctrl.signal
+      }).finally(() => clearTimeout(t))
+      const json = (await res.json().catch(() => ({}))) as {
+        key?: unknown
+        used?: unknown
+        seats?: unknown
+        source?: unknown
+        error?: unknown
+        retryAfterDays?: unknown
+      }
+      if (!res.ok) {
+        // The server's own reason code (401 unauthorized / 402 inactive / 429 too_soon /
+        // 400 not_applicable) is kept verbatim: the UI tells those four apart. `retryAfterDays`
+        // rides only 429 and is the whole content of that answer.
+        const days = countOf(json.retryAfterDays)
+        return {
+          ...EMPTY_DETAIL,
+          error: typeof json.error === 'string' && json.error ? json.error : 'network',
+          ...(days > 0 ? { retryAfterDays: days } : {})
+        }
+      }
+      return {
+        // `key: null` on a 200 is a real state (a keygen policy that hides keys, a license older
+        // than the column, a non-keygen source) — a success, not a failed read.
+        key: typeof json.key === 'string' ? json.key : null,
+        // Never clamped against seats: a cap lowered after activation makes used > seats real.
+        used: countOf(json.used),
+        seats: countOf(json.seats),
+        source: licenseSourceOf(json.source),
+        error: null
+      }
+    } catch {
+      return { ...EMPTY_DETAIL, error: 'offline' }
+    }
+  }
+
+  platform().handle(IPC.licenseDetail, () => licenseCall('/v1/license/detail'))
+  platform().handle(IPC.licenseRelease, () => licenseCall('/v1/license/release'))
 
   // Device-bound upgrade: open Stripe checkout (carrying our deviceId), then poll the status
   // endpoint until the webhook has bound + minted the entitlement. Status arrives via broadcast.

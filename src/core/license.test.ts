@@ -5,7 +5,7 @@ import { promises as fsp } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { IPC } from '../shared/ipc'
-import type { LicenseStatus } from '../shared/types'
+import type { LicenseDetail, LicenseStatus } from '../shared/types'
 
 // One temp userData dir per run; hoisted so the entitlement-key mock factory can see it.
 const h = vi.hoisted(() => ({
@@ -373,5 +373,268 @@ describe('license seats entitlement', () => {
     } finally {
       delete process.env.NODETERM_CHECKOUT_URL
     }
+  })
+})
+
+describe('license detail + release', () => {
+  let fake: import('./platform-fake').FakePlatform
+
+  beforeEach(async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'Date'] })
+    h.userData = mkdtempSync(path.join(tmpdir(), 'nt-license-detail-'))
+    writeFileSync(path.join(h.userData, 'device-id'), 'test-device')
+    delete process.env.DO_NOT_TRACK
+    delete process.env.NODETERM_TELEMETRY_DISABLED
+    process.env.NODETERM_API_BASE = 'http://127.0.0.1:1'
+    // The launch refresh must not succeed here: rejecting it keeps the stored token intact
+    // (offline grace) so every assertion below runs against the token the test wrote.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+    vi.resetModules()
+    const { initPlatform } = await import('./platform')
+    const { fakePlatform } = await import('./platform-fake')
+    fake = fakePlatform({ userDataDir: h.userData, isPackaged: false })
+    initPlatform(fake)
+  })
+
+  afterEach(async () => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+    const { resetPlatformForTests } = await import('./platform')
+    resetPlatformForTests()
+    delete process.env.DO_NOT_TRACK
+    rmSync(h.userData, { recursive: true, force: true })
+  })
+
+  const TOKEN = mint(HOUR / 1000)
+
+  function storeToken(token = TOKEN): void {
+    writeFileSync(path.join(h.userData, 'license.json'), JSON.stringify({ token }))
+  }
+
+  /** Non-2xx reply shaped like our API's error bodies. */
+  function errorResponse(status: number, body: unknown): {
+    ok: boolean
+    status: number
+    json: () => Promise<unknown>
+  } {
+    return { ok: false, status, json: async () => body }
+  }
+
+  /**
+   * Boot the service, let its launch refresh SETTLE, and only then install the fetch mock the
+   * assertions are about. initLicense() fires an un-awaited refresh; installing the mock first
+   * would make `mock.calls[0]` that refresh — so a handler that never called fetch at all could
+   * still satisfy a "the request carried X" assertion.
+   */
+  async function boot(fetchMock: ReturnType<typeof vi.fn>): Promise<void> {
+    const { initLicense } = await import('./license')
+    initLicense()
+    await refreshed()
+    vi.stubGlobal('fetch', fetchMock)
+  }
+
+  const detail = (): Promise<LicenseDetail> =>
+    fake.handlers[IPC.licenseDetail]() as Promise<LicenseDetail>
+  const release = (): Promise<LicenseDetail> =>
+    fake.handlers[IPC.licenseRelease]() as Promise<LicenseDetail>
+
+  it('sends the stored entitlement token, never a deviceId', async () => {
+    storeToken()
+    const fetchMock = vi.fn(async (_url: string, _init: { method: string; body: string }) =>
+      jsonResponse({ key: 'KEY-ABC', used: 2, seats: 3, source: 'keygen' })
+    )
+    await boot(fetchMock)
+
+    expect(await detail()).toEqual({
+      key: 'KEY-ABC',
+      used: 2,
+      seats: 3,
+      source: 'keygen',
+      error: null
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toContain('/v1/license/detail')
+    // A key works on ANY machine, so the request that reveals one is authorized by the signed
+    // entitlement and by nothing else. deviceId rides query strings, telemetry and relay pairing.
+    expect(String(url)).not.toContain(TOKEN)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body) as Record<string, unknown>
+    expect(body.entitlement).toBe(TOKEN) // the stored token itself, not merely "something truthy"
+    expect(Object.keys(body)).toEqual(['entitlement']) // …and nothing else travels with it
+  })
+
+  it('release posts to its own route, not to detail', async () => {
+    storeToken()
+    const fetchMock = vi.fn(async (_url: string, _init: { body: string }) =>
+      jsonResponse({ used: 1, seats: 3 })
+    )
+    await boot(fetchMock)
+
+    const r = await release()
+    expect(r.error).toBeNull()
+    expect(r.used).toBe(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(String(url)).toContain('/v1/license/release')
+    expect(String(url)).not.toContain('/v1/license/detail')
+    expect((JSON.parse(init.body) as { entitlement: string }).entitlement).toBe(TOKEN)
+  })
+
+  it('carries the source, so a non-keygen entitlement is not read as a failed count', async () => {
+    // An App Store purchase on a paired phone bridges Pro to the desktop as `apple:<txn>`. The
+    // server makes zero keygen calls for it and answers 200 with no key and no machines — those
+    // zeros mean "device counting does not apply here", NOT "the read failed". `source` is the
+    // only thing that tells the two apart, and the UI hides the release action on it.
+    storeToken()
+    await boot(vi.fn(async () => jsonResponse({ key: null, used: 0, seats: 0, source: 'apple' })))
+
+    expect(await detail()).toEqual({
+      key: null,
+      used: 0,
+      seats: 0,
+      source: 'apple',
+      error: null
+    })
+  })
+
+  it('a 200 with key null is a success, not the 402 inactive story', async () => {
+    // A keygen policy may hide keys, and licenses predating the `key` column have none stored.
+    // Reporting that as a failure would tell a paying subscriber their license is inactive.
+    storeToken()
+    await boot(vi.fn(async () => jsonResponse({ key: null, used: 2, seats: 3, source: 'keygen' })))
+
+    expect(await detail()).toEqual({ key: null, used: 2, seats: 3, source: 'keygen', error: null })
+  })
+
+  it('402 inactive is an error with no source claimed', async () => {
+    storeToken()
+    await boot(vi.fn(async () => errorResponse(402, { error: 'inactive' })))
+
+    expect(await detail()).toEqual({
+      key: null,
+      used: 0,
+      seats: 0,
+      source: null,
+      error: 'inactive'
+    })
+  })
+
+  it('401 unauthorized keeps the server-stated reason instead of a generic network error', async () => {
+    storeToken()
+    await boot(vi.fn(async () => errorResponse(401, { error: 'unauthorized' })))
+    expect((await detail()).error).toBe('unauthorized')
+  })
+
+  it('reports an error instead of zero devices when the read fails', async () => {
+    storeToken()
+    await boot(
+      vi.fn(async () => {
+        throw new Error('down')
+      })
+    )
+
+    expect(await detail()).toEqual({
+      key: null,
+      used: 0,
+      seats: 0,
+      source: null,
+      error: 'offline'
+    })
+  })
+
+  it('surfaces the 30-day throttle with its retry window', async () => {
+    storeToken()
+    await boot(vi.fn(async () => errorResponse(429, { error: 'too_soon', retryAfterDays: 12 })))
+
+    // toEqual, not toMatchObject: the retry window is the whole point of this reply, and the
+    // server side asserts only the error code — so if `retryAfterDays` is dropped anywhere
+    // between the wire and the renderer, this is what fails.
+    expect(await release()).toEqual({
+      key: null,
+      used: 0,
+      seats: 0,
+      source: null,
+      error: 'too_soon',
+      retryAfterDays: 12
+    })
+  })
+
+  it('keeps not_applicable distinguishable from a plain bad request', async () => {
+    // 'not_applicable' = this entitlement is not keygen-backed, so releasing means nothing. The
+    // UI hides the action on `source`; this is the server-side floor under that, not a failure.
+    storeToken()
+    await boot(vi.fn(async () => errorResponse(400, { error: 'not_applicable' })))
+    expect((await release()).error).toBe('not_applicable')
+
+    vi.stubGlobal('fetch', vi.fn(async () => errorResponse(400, { error: 'bad_request' })))
+    expect((await release()).error).toBe('bad_request')
+  })
+
+  it('an error body with no reason code falls back to network, and never to success', async () => {
+    storeToken()
+    await boot(vi.fn(async () => errorResponse(500, {})))
+    expect((await detail()).error).toBe('network')
+  })
+
+  it('reports used above seats verbatim — a cap can be lowered after activation', async () => {
+    storeToken()
+    await boot(vi.fn(async () => jsonResponse({ key: 'K', used: 5, seats: 3, source: 'keygen' })))
+
+    const d = await detail()
+    expect(d.used).toBe(5) // never clamped to the cap: over-cap is a real, reportable state
+    expect(d.seats).toBe(3)
+  })
+
+  it('accepts only real numbers as counts, so nothing renders as NaN or as a string', async () => {
+    // The contract says numbers. A body that says otherwise is malformed, and `json.used ?? 0`
+    // would forward whatever it holds — "3" into a meter, or NaN out of arithmetic on it.
+    storeToken()
+    await boot(vi.fn(async () => jsonResponse({ key: 'K', used: '3', seats: null, source: 'keygen' })))
+
+    const d = await detail()
+    expect(d.used).toBe(0)
+    expect(d.seats).toBe(0)
+  })
+
+  it('refuses to call the server with no stored entitlement', async () => {
+    // No license.json at all.
+    const fetchMock = vi.fn()
+    await boot(fetchMock)
+
+    expect(await detail()).toEqual({
+      key: null,
+      used: 0,
+      seats: 0,
+      source: null,
+      error: 'unauthorized'
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('honors the telemetry kill switch without inventing a device count', async () => {
+    storeToken()
+    const fetchMock = vi.fn(async () => jsonResponse({ key: 'K', used: 2, seats: 3, source: 'keygen' }))
+    await boot(fetchMock)
+    process.env.DO_NOT_TRACK = '1'
+
+    expect(await detail()).toEqual({
+      key: null,
+      used: 0,
+      seats: 0,
+      source: null,
+      error: 'disabled'
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('ignores a source it does not recognize rather than passing it through', async () => {
+    // The value decides whether a destructive-ish action is offered, so an unknown word degrades
+    // to "no source stated" (the action stays hidden) instead of reaching the UI as data.
+    storeToken()
+    await boot(
+      vi.fn(async () => jsonResponse({ key: 'K', used: 1, seats: 3, source: 'paddle' }))
+    )
+    expect((await detail()).source).toBeNull()
   })
 })
