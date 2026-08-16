@@ -1258,7 +1258,12 @@ app.whenReady().then(async () => {
   // 'show' guarantees a regular window has established the app's Dock presence first.
   const notchTunables = (): NotchHudTunables => {
     const s = settingsStore.get()
-    return { enabled: s.notchHud, notchWidth: s.notchWidth, hoverExpand: s.notchHoverExpand }
+    return {
+      enabled: s.notchHud,
+      notchWidth: s.notchWidth,
+      hoverExpand: s.notchHoverExpand,
+      percentMode: s.usagePercentMode
+    }
   }
   const startNotchHud = (): void =>
     initNotchHud({ getNodeTitle: displayTitleFor }, notchTunables())

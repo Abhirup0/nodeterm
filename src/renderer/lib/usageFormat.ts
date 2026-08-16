@@ -44,6 +44,19 @@ export function formatModelLabel(model: string | null): string | null {
   return version ? `${family} ${version}` : family
 }
 
+/**
+ * Fill color for a CONTEXT-WINDOW meter: green while low, yellow from 60% used, red past 85%.
+ * Keyed to USED percent — the inverse scale of `barColor`/`severityColor`, which are keyed to
+ * REMAINING provider quota. The two measure different things and must not share thresholds.
+ * One definition for every context surface (ContextMeter, session rows, the notch HUD) — each
+ * used to carry its own copy of these numbers (issue #78).
+ */
+export function contextFillColor(usedPercent: number): string {
+  if (usedPercent > 85) return '#ff453a'
+  if (usedPercent >= 60) return '#ffd60a'
+  return '#30d158'
+}
+
 /** Bar color by remaining quota: green > 40%, yellow 20–40%, red < 20%. */
 export function barColor(leftPercent: number): string {
   if (leftPercent > 40) return '#30d158'
