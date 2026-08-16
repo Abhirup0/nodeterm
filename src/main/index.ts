@@ -1320,11 +1320,15 @@ app.whenReady().then(async () => {
   // GRANTED-MODE FALLBACK (spec: 2026-07-21-push-grants; owner-approved "B"). The desktop ALSO
   // wires the SSH-possession push grants the Server Edition uses (src/server/index.ts) — a phone
   // that reached this Mac by plain SSH drops a signed, device-scoped grant at
-  // `~/.nodeterm/push-grants/<deviceId>.grant` on the Mac's own fs. `resolveTarget` keeps a SINGLE
-  // sender: host-mode only when a relay identity is present AND a phone is paired; else (unpaired,
-  // or no identity) it falls through to the grants. So a plain-SSH phone gets pushes for
-  // Mac-tracked sessions with NO QR pairing, and QR-pairing later flips `hasPairedPhone` true →
-  // host-mode automatically (grants suppressed — no double-push to the same phone).
+  // `~/.nodeterm/push-grants/<deviceId>.grant` on the Mac's own fs. `resolveSendTarget` sends BOTH
+  // legs whenever both are live — host mode for the relay-paired phones, one Bearer POST per grant
+  // for the SSH-only ones. It used to be either/or (host wins), which meant a SINGLE relay-paired
+  // phone silenced every SSH-only phone on this Mac: host mode fans out over the backend's
+  // `relay_devices` rows, where an SSH-only phone has no row at all. The per-device exclusion that
+  // would prevent the reverse cost (a phone that is paired AND granted gets two pushes) is not
+  // expressible here — a grant is keyed by the phone's deviceId, `loadApprovedDevices` stores only
+  // NaCl box pubkeys, and nothing on this machine maps one to the other. See the long note on
+  // `resolveSendTarget` in core/push-notify.ts.
   const pushGrants = createGrantsAccessor()
   // ...and the REMOTE half of the same idea. A Mac-driven SSH project's phone can only reach the
   // HOST, so its grant is dropped there, not here — without this sweep an SSH-only user got no
@@ -1332,7 +1336,10 @@ app.whenReady().then(async () => {
   // by a timer below; `get()` is sync so it can sit behind `getGrants`. See
   // core/remote-push-grants.ts.
   const remoteGrants = createRemoteGrantsCache()
-  /** Local grants first (this machine's own phone), then the hosts' — deduped per device inside. */
+  /** Local grants first (this machine's own phone), then the hosts'. ORDER MATTERS: one phone that
+   *  reached both this Mac and an SSH host dropped a different token on each, and push-notify's
+   *  `dedupeGrantsByDevice` keeps the FIRST occurrence per deviceId — so the local token, the one
+   *  that needs no host round-trip to stay fresh, is the survivor. */
   const allPushGrants = (): PushGrant[] => [...pushGrants.get(), ...remoteGrants.get()]
   /** A 401/403 could be on either side's token; neither accessor knows the other's. */
   const markPushGrantDead = (grant: string): void => {
