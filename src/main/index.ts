@@ -17,7 +17,7 @@ import { writeFilesToClipboard } from './clipboard-files'
 import { allowGuestNavigation } from './webview-nav'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { LogBuffer } from '../core/log-buffer'
-import { installLogSink } from '../core/log-sink'
+import { installLogSink, splitTag } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
 import {
   registerBrowserGuest,
@@ -686,7 +686,11 @@ app.whenReady().then(async () => {
     contents.on('console-message', (event) => {
       try {
         const level = event.level === 'error' ? 'error' : event.level === 'warning' ? 'warn' : 'info'
-        logBuffer.push({ level, tag: 'renderer', msg: String(event.message ?? '') })
+        // Keep the renderer's own [tag] prefixes — the deliberate field traces ([nodeterm]
+        // healed-swap strands, [glyphgrid] attach/geometry warnings) are exactly what this panel
+        // is for, and they triage by tag. Untagged lines fall back to 'renderer'.
+        const { tag, rest } = splitTag(String(event.message ?? ''))
+        logBuffer.push({ level, tag: tag || 'renderer', msg: rest })
       } catch {
         /* logging must never break a page */
       }
