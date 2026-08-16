@@ -19,15 +19,22 @@ export interface InitClaudeUsageOpts {
   localAccounts?: () => string[]
   onCacheUpdate?: () => void
   remote?: RemoteUsageDeps
+  /** "A phone may be reading the agent-status mirror" (paired / has a push grant). When true the
+   *  background poll runs even while the window is unfocused, so the phone's `usage` block stays
+   *  fresh instead of freezing into fossil bars. See UsageServiceOptions.mirrorMayBeRead. */
+  mirrorMayBeRead?: () => boolean
 }
 
 /** Start the usage service on the focused-window poll gate and return it, so the caller can wire
  *  the agent-status mirror's `usage` provider off its `snapshot()`. */
 export function initClaudeUsage(win: BrowserWindow, opts: InitClaudeUsageOpts = {}): UsageService {
-  // Poll only while the window is focused, and re-check on focus — the usage endpoint has a
-  // tight request budget and this data is informational, so an unattended app should not spend it.
+  // Poll while the window is focused (for the pill) OR while a phone may be reading the mirror (for
+  // the phone's `usage` block) — a focus-only gate froze the phone's bars into fossils whenever the
+  // Mac was backgrounded, the same starvation the Server Edition avoids by polling ungated. The
+  // usage endpoint has a tight budget, so a pure-desktop user with no phone still only polls on focus.
   const service = startUsageService({
     shouldPoll: () => win.isFocused(),
+    mirrorMayBeRead: opts.mirrorMayBeRead,
     localAccounts: opts.localAccounts,
     onCacheUpdate: opts.onCacheUpdate,
     remote: opts.remote
