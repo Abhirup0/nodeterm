@@ -10634,7 +10634,12 @@ body,
    transform/opacity ONLY (nothing that forces layout — terminals must keep streaming at 60fps),
    one-shot on mount (no exit mechanism: every shell hard-unmounts via `{open && portal}`, and
    keeping portals alive for an exit tween would thread a closing state through 15 dialogs — the
-   kanban modal set this precedent and it reads fine), and the existing token palette only. */
+   kanban modal set this precedent and it reads fine), and the existing token palette only.
+   NEVER animate a shell that CONTAINS a terminal: there the constraint is stronger than
+   "no layout" — an animating `transform` on an ancestor of a glyph-attached terminal
+   desynchronizes the shared canvas (grid origins are measured from the DOM rect, the canvas
+   draws from the camera), so such a shell must leave the shared renderer for the duration,
+   the way `dragging` already does. Today's selectors are overlays/menus/drawers/tooltips only. */
 
 @keyframes nt-overlay-fade {
   from {
