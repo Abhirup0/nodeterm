@@ -31,6 +31,9 @@ import {
 } from '../core/model-gateway-credentials'
 import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { LogBuffer } from '../core/log-buffer'
+import { installLogSink } from '../core/log-sink'
+import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
@@ -282,6 +285,12 @@ export async function startServer(
       return cwd ? { kind: 'local', cwd } : { kind: 'unsupported' }
     }
   })
+
+  // Debug log ring (issue #78) — same core registrar as desktop. Headless is where a swallowed
+  // console hurts most; the browser-side panel reads this process's ring over the bridge.
+  const logBuffer = new LogBuffer()
+  installLogSink(logBuffer)
+  registerLogHandlers(platform, logBuffer, () => settingsStore.get().debugLogPanel)
 
   // Agent status pipeline — mirrors the desktop boot order in src/main/index.ts:
   // mirror-init → wire the hook-server listeners onto the platform → install the managed hook

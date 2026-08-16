@@ -831,6 +831,17 @@ export function Canvas() {
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  // Debug log panel (issue #78). Settings' "Open" button fires the event (the dialog can't
+  // reach Canvas state directly), and the settings dialog closes so the panel is visible.
+  const [logPanelOpen, setLogPanelOpen] = useState(false)
+  useEffect(() => {
+    const onOpen = (): void => {
+      setSettingsOpen(false)
+      setLogPanelOpen(true)
+    }
+    window.addEventListener('nodeterm:open-log-panel', onOpen)
+    return () => window.removeEventListener('nodeterm:open-log-panel', onOpen)
+  }, [])
   // First-run setup tour (agents / dictation / kanban / notifications) — see OnboardingFlow.
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   // One-shot mobile-launch announcement for established installs — see MobileLaunchCard.
@@ -8855,6 +8866,18 @@ export function Canvas() {
         note: isSshProject ? WORKTREE_SSH_HINT : undefined,
         run: () => openWorktreeDialog(null)
       },
+      ...(useSettings.getState().settings.debugLogPanel
+        ? [
+            {
+              id: 'debug-log',
+              label: 'Show debug log',
+              hint: 'console diagnostics troubleshoot',
+              section: 'View',
+              icon: <IconGear />,
+              run: () => setLogPanelOpen(true)
+            } satisfies Command
+          ]
+        : []),
       { id: 'new-project', label: 'New project', icon: <IconProject />, run: () => addProject() },
       { id: 'clone-repo', label: 'Clone repository…', icon: <IconProject />, run: () => setCloneDialogOpen(true) },
       {
