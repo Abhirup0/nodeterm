@@ -7,9 +7,18 @@ import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
 import { IPC } from '../shared/ipc'
+
+// Debug log ring (issue #78): capture the process console from the first line — a packaged app
+// swallows it entirely, and the boot path is where the interesting warnings are. The ring is
+// in-memory and redacted at its push boundary; the panel/IPC side is gated on the setting.
+const logBuffer = new LogBuffer()
+installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { allowGuestNavigation } from './webview-nav'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { LogBuffer } from '../core/log-buffer'
+import { installLogSink, splitTag } from '../core/log-sink'
+import { registerLogHandlers } from '../core/log-handlers'
 import {
   registerBrowserGuest,
   type BrowserGuest,
@@ -671,6 +680,21 @@ app.whenReady().then(async () => {
   // window's setWindowOpenHandler / will-navigate above don't cover it). Registered once at
   // startup for all current and future guests.
   app.on('web-contents-created', (_e, contents) => {
+    // Mirror renderer consoles into the debug ring (issue #78) — a packaged app swallows them
+    // too, and React error boundaries report through console.error. All webContents kinds:
+    // the main window and webview guests alike.
+    contents.on('console-message', (event) => {
+      try {
+        const level = event.level === 'error' ? 'error' : event.level === 'warning' ? 'warn' : 'info'
+        // Keep the renderer's own [tag] prefixes — the deliberate field traces ([nodeterm]
+        // healed-swap strands, [glyphgrid] attach/geometry warnings) are exactly what this panel
+        // is for, and they triage by tag. Untagged lines fall back to 'renderer'.
+        const { tag, rest } = splitTag(String(event.message ?? ''))
+        logBuffer.push({ level, tag: tag || 'renderer', msg: rest })
+      } catch {
+        /* logging must never break a page */
+      }
+    })
     if (contents.getType() !== 'webview') return
     // Web nodes may only show http(s) pages, jailed nt-media:// content, or origin-gated
     // local file:// pages (policy + tests in webview-nav.ts).
@@ -1097,6 +1121,7 @@ app.whenReady().then(async () => {
     }
   }
   registerBoardLogHandlers(corePlatform, boardLogRouter)
+  registerLogHandlers(corePlatform, logBuffer, () => settingsStore.get().debugLogPanel)
 
   // Agent messaging (the `send`/`reply` control verbs). Canvas.tsx forwards the validated verb
   // here; everything that authorizes or performs the delivery reads MAIN's stores. See

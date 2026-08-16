@@ -136,6 +136,16 @@ export const IPC = {
   contextLinkInfo: 'context-link:info',
   /** Board-log (`.nodeterm/board-log.jsonl`): request/response append + read, routed per project
    *  (local cwd / desktop-ssh / unsupported) in core/board-log-handlers.ts. */
+  /** Debug log panel (issue #78) — invoke: the whole ring (LogRecord[]) for the initial fill. */
+  logSnapshot: 'log:snapshot',
+  /** Fire-and-forget ref-counted subscribe/unsubscribe for the batched logBatch pushes. */
+  logSubscribe: 'log:subscribe',
+  logUnsubscribe: 'log:unsubscribe',
+  /** main→renderer push: a LogRecord[] batch. Flows only while ≥1 panel is subscribed AND the
+   *  debugLogPanel setting is on; the client dedupes by seq. */
+  logBatch: 'log:batch',
+  /** Fire-and-forget: empty the ring. */
+  logClear: 'log:clear',
   boardLogAppend: 'board-log:append',
   boardLogRead: 'board-log:read',
   /** Fire-and-forget ref-counted subscribe/unsubscribe: the first subscriber for a project starts

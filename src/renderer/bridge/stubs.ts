@@ -11,7 +11,7 @@
 // benign value, and everything else rejects with a coded error.
 //
 // The object is `satisfies Omit<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'fs' | 'git'
-// | 'files' | 'context' | 'boardLog' | 'dialog'>`, so the TypeScript compiler is the completeness test: if
+// | 'files' | 'context' | 'boardLog' | 'logs' | 'dialog'>`, so the TypeScript compiler is the completeness test: if
 // `NodeTerminalApi` gains a member, this file fails to typecheck until the stub is declared.
 
 import {
@@ -112,6 +112,7 @@ export function buildStubApi(): Omit<
   | 'files'
   | 'context'
   | 'boardLog'
+  | 'logs'
   | 'githubIssues'
   | 'githubControl'
   | 'canvas'
@@ -415,6 +416,7 @@ export function buildStubApi(): Omit<
     | 'files'
     | 'context'
     | 'boardLog'
+    | 'logs'
     | 'githubIssues'
     | 'githubControl'
     | 'canvas'

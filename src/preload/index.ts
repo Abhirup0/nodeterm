@@ -7,6 +7,7 @@ import type {
   Project,
   PtyCreateOptions,
   PtyPressure,
+  LogRecord,
   RecycledInfo,
   RelayPeerPending,
   RemoteUsageQuery,
@@ -564,6 +565,19 @@ const api: NodeTerminalApi = {
       return () => {
         ipcRenderer.removeListener(ch, handler)
         ipcRenderer.send(IPC.boardLogUnsubscribe, projectId)
+      }
+    }
+  },
+  logs: {
+    snapshot: () => ipcRenderer.invoke(IPC.logSnapshot),
+    clear: () => ipcRenderer.send(IPC.logClear),
+    onBatch: (cb) => {
+      const handler = (_e: unknown, batch: LogRecord[]): void => cb(batch)
+      ipcRenderer.on(IPC.logBatch, handler)
+      ipcRenderer.send(IPC.logSubscribe)
+      return () => {
+        ipcRenderer.removeListener(IPC.logBatch, handler)
+        ipcRenderer.send(IPC.logUnsubscribe)
       }
     }
   },
