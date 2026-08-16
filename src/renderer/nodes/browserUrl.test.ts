@@ -35,7 +35,15 @@ describe('searchOrUrl', () => {
   it('Google-searches free text and non-http schemes', () => {
     expect(searchOrUrl('how to code')).toBe('https://www.google.com/search?q=how%20to%20code')
     expect(searchOrUrl('weather')).toBe('https://www.google.com/search?q=weather')
-    expect(searchOrUrl('file:///etc/passwd')).toBe('https://www.google.com/search?q=file%3A%2F%2F%2Fetc%2Fpasswd')
+    expect(searchOrUrl('javascript:alert(1)')).toBe('https://www.google.com/search?q=javascript%3Aalert(1)')
+    expect(searchOrUrl('data:text/html,x')).toBe('https://www.google.com/search?q=data%3Atext%2Fhtml%2Cx')
+  })
+  it('navigates file:// URLs to local files', () => {
+    expect(searchOrUrl('file:///home/me/page.html')).toBe('file:///home/me/page.html')
+  })
+  it('folds a mistyped file host into the path (file://path/… → file:///path/…)', () => {
+    expect(searchOrUrl('file://path/to/my/file.html')).toBe('file:///path/to/my/file.html')
+    expect(searchOrUrl('file://localhost/x.html')).toBe('file:///x.html')
   })
   it('returns null for empty', () => {
     expect(searchOrUrl('   ')).toBeNull()

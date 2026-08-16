@@ -186,6 +186,17 @@ export interface UsageServiceOptions {
    */
   shouldPoll?: () => boolean
   /**
+   * Override the poll gate when the phone-facing MIRROR needs fresh data even though the shell's
+   * own `shouldPoll` says no. On desktop `shouldPoll` is "is the window focused" — for the PILL —
+   * but the phone reads the agent-status mirror's `usage` block with no window focused at all, so a
+   * focus-only gate froze that block into fossil bars whenever the Mac was in the background (the
+   * same "nobody connected ≠ nobody looking" bug the Server Edition already runs UNGATED to avoid).
+   * When this returns true the background poll fires regardless of `shouldPoll`, at the same 15-min
+   * cadence (4 req/hour/account — well inside the endpoint budget). Default: never (desktop wires it
+   * to "a phone is paired / has a push grant"; the Server Edition leaves it unset and polls anyway).
+   */
+  mirrorMayBeRead?: () => boolean
+  /**
    * Local managed accounts to poll ALONGSIDE the system account on the background cadence (spec:
    * mobile-usage-inbox). Returns their account ids (settings' non-`host`, non-`pending` claude
    * accounts). The shell owns this because settings live in the shell. Absent ⇒ system only.
@@ -231,6 +242,7 @@ export interface UsageService {
  */
 export function startUsageService(opts: UsageServiceOptions = {}): UsageService {
   const shouldPoll = opts.shouldPoll ?? ((): boolean => true)
+  const mirrorMayBeRead = opts.mirrorMayBeRead ?? ((): boolean => false)
 
   // Per-account caches keyed by `accountId ?? ''`. The empty key is the system account, the only
   // one that's proactively polled + pushed; managed-account rows fetch on demand from the popover.
@@ -404,7 +416,9 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   // system row. Each account is one request per cadence; the request-budget gate (`shouldPoll`)
   // still fronts the whole sweep.
   const pollAll = (): void => {
-    if (!shouldPoll()) return
+    // Fire when the shell wants it (focused pill) OR when a phone may be reading the mirror — the
+    // latter keeps the phone's `usage` block fresh on a backgrounded desktop instead of fossilizing.
+    if (!shouldPoll() && !mirrorMayBeRead()) return
     // Fire-and-forget: a poll that lands after shutdown (or a test's platform reset) throws
     // from platform()-dependent fetch paths — in an un-awaited chain that is an unhandled
     // rejection, not a signal (same hardening as push()'s broadcast).

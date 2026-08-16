@@ -19,6 +19,8 @@ interface DockProps {
   canRedo: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
+  /** Opens the Spawn-a-team dialog (issue #78) — the conductor lands at the Dock's default spot. */
+  onSpawnTeam: () => void
   onAddDino: () => void
   onAddAgent: (agentId: AgentId, accountId?: string) => void
   onOpenFile: () => void
@@ -51,6 +53,7 @@ export function Dock({
   canRedo,
   onAddTerminal,
   onAddSticky,
+  onSpawnTeam,
   onAddDino,
   onAddAgent,
   onOpenFile,
@@ -126,6 +129,7 @@ export function Dock({
     browser: onAddBrowser,
     web: onAddWeb,
     sticky: onAddSticky,
+    spawnTeam: onSpawnTeam,
     dino: onAddDino,
     openFile: onOpenFile,
     newFile: onNewFile,
