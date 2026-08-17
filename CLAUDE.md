@@ -1235,6 +1235,13 @@ else, and its context links must keep classifying across restarts).
     = **bit-for-bit legacy behavior** (no env touched). Inherited by **Branch** (the
     terminal→chat fork it also fed is gone — the SDK chat node was removed 2026-07). A pending
     (not-yet-logged-in) account resolves to `undefined` until it completes.
+  - **`ClaudeAccount.color` (optional)** — a per-account default node color (Settings → Accounts)
+    that beats the agent's own brand color in `createAgentNode`, so a second login is recognizable
+    on the canvas. Read through `accountNodeColor` off the SAME `boundAccountId` that stamps
+    `data.accountId`, so the color and the binding cannot drift. Applied **at creation** and baked
+    into `data.color` like any other node color: a hand-picked node color is never overwritten and
+    editing the account later repaints nothing. Unset / stale id / non-claude agent ⇒ the agent's
+    color, unchanged.
   - **Env injection** — `pty-manager` sets `CLAUDE_CONFIG_DIR` in the spawn env AND as a tmux `-e`
     (local); for a remote node it emits an **absolute-path** remote tmux `-e` built from the
     connection-cached `remoteHome` (skipped **fail-open** if home is unresolved). `AUTH_ENV_STRIP`
