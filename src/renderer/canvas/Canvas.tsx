@@ -5068,6 +5068,32 @@ export function Canvas() {
     setNodes((ns) => ns.map((n) => ({ ...n, selected: true })))
   }, [setNodes])
 
+  // Pane-level "Tidy canvas": packs every top-level node (terminal, agent, sticky, editor, diff,
+  // group frame — a frame moves as one unit, its children ride along untouched) into a
+  // non-overlapping grid via the same `arrangeNodes` selection/canvas-control already use.
+  // `arrangeNodes` no-ops on a mixed-container id set (workspace.ts commonParentId), which is why
+  // only top-level ids (`!n.parentId`) are collected here — a populated group frame would
+  // otherwise silently block the whole action. Sorted by current (y, x) first so the packed grid
+  // roughly preserves the canvas's existing reading order instead of falling back to array/
+  // persistence order (which puts every group frame first).
+  const hasArrangeableNodes = useCallback((): boolean => {
+    return nodesRef.current.filter((n) => !n.parentId).length >= 2
+  }, [])
+  const arrangeAllNodes = useCallback(() => {
+    if (isKanbanOpen(useProjects.getState().activeProjectId)) return
+    const targets = nodesRef.current
+      .filter((n) => !n.parentId)
+      .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+    // Fewer than 2 nodes: nothing to tidy — and running arrangeNodes anyway would still emit a
+    // fresh node array (a no-op position rewrite), triggering an undo entry + markDirty + a
+    // project.json write for a canvas that visibly didn't change.
+    if (targets.length < 2) return
+    const ids = targets.map((n) => n.id)
+    setNodes((ns) => arrangeNodes(ns, ids, { layout: 'grid' }))
+    markDirty()
+    fitAll()
+  }, [setNodes, markDirty, fitAll])
+
   const toggleCollapseNodes = useCallback(
     (ids: string[]) => {
       const set = new Set(ids)
@@ -5850,6 +5876,11 @@ export function Canvas() {
           // wrapper the command palette's Fit view uses). #227 swapped this to bare fitView, which
           // loses that framing and lets sidebar/HUD chrome cover part of the fitted content.
           { label: 'Fit view', icon: <IconFit />, onClick: fitAll },
+          // Hidden below 2 top-level nodes — same reasoning as restart-idle-agents just below:
+          // with 0 or 1 node the action can only be a visual no-op that still writes project.json.
+          ...(hasArrangeableNodes()
+            ? [{ label: 'Tidy canvas', icon: <IconGrid />, onClick: arrangeAllNodes } as MenuItem]
+            : []),
           // Project-wide: restart every idle agent CLI in place (new model pickup). Hidden on a
           // canvas with no restartable agent node — there it could only ever report "0 restarted".
           ...(hasRestartableAgents()
@@ -5872,6 +5903,8 @@ export function Canvas() {
       addCtx,
       selectAll,
       fitAll,
+      arrangeAllNodes,
+      hasArrangeableNodes,
       hasRestartableAgents,
       restartIdleAgents
     ]
@@ -8925,6 +8958,18 @@ export function Canvas() {
         run: () => void connectRemote()
       },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: fitAll },
+      // Hidden below 2 top-level nodes — see arrangeAllNodes.
+      ...(hasArrangeableNodes()
+        ? [
+            {
+              id: 'arrange-all',
+              label: 'Tidy canvas',
+              hint: 'arrange grid layout organize clean up',
+              icon: <IconGrid />,
+              run: arrangeAllNodes
+            } as Command
+          ]
+        : []),
       { id: 'zoom-100', label: 'Zoom to 100%', icon: <IconFit />, run: zoomTo100 },
       { id: 'save', label: 'Save', icon: <IconSave />, run: () => void persist() },
       // Hidden when the canvas has no restartable agent node — the row would have nothing to act
@@ -9030,7 +9075,9 @@ export function Canvas() {
     addSshTerminal,
     hasRestartableAgents,
     restartIdleAgents,
-    zoomTo100
+    zoomTo100,
+    arrangeAllNodes,
+    hasArrangeableNodes
   ])
 
   // Build the palette's command list only when its inputs change — the inline `buildCommands()`
