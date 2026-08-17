@@ -30,8 +30,12 @@ jobs:
           # network blip — after every asset had uploaded — which skipped the publish gate and
           # stranded v0.2.23 as a prerelease. The ephemeral Linux runner below keeps its cache.
 
+      # caffeinate on EVERY long-running step in this job, not just build+upload: the Air
+      # sleeping during npm ci or the tmux compile cancels the step just the same (the
+      # v0.3.1 attempt died mid tmux build). -dims only blocks idle sleep — a closed lid
+      # still sleeps the machine — but it removes the "opened the lid, walked away" window.
       - name: Install dependencies
-        run: npm ci
+        run: caffeinate -dims npm ci
 
       # The bundled tmux (resources/bin/tmux → <app>/Contents/Resources/bin/tmux via the mac
       # extraResources entry). Without a tmux on the machine the app silently degrades to plain
@@ -53,7 +57,7 @@ jobs:
       # Rosetta (the cross slice is configured with --host, so no test binary is ever executed) and
       # npm packages (node stdlib only).
       - name: Build bundled tmux (universal, static libevent + utf8proc)
-        run: node scripts/build-tmux.mjs
+        run: caffeinate -dims node scripts/build-tmux.mjs
 
       - name: Build, sign & notarize
         run: |
