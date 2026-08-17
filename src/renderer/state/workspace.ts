@@ -3,6 +3,7 @@ import type { CanvasMutation, CanvasNodeState, ClaudeAccount, NodeKind, PendingL
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
+import { accountNodeColor } from '@shared/agents/account-color'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
@@ -14,6 +15,7 @@ import { useSettings } from './settings'
 // single implementation lives in src/shared and is shared with the relay host + the canvas-sync
 // reflector.
 export { applyCanvasMutation } from '@shared/canvas-mutations'
+export { accountNodeColor } from '@shared/agents/account-color'
 import { sanitizeInboundNode } from '@shared/node-exec'
 
 /** Preset color palette — macOS system colors (dark mode). */
@@ -369,15 +371,6 @@ export function resolveNewNodeAccount(
   const id = explicit ?? project?.defaultAccountId
   // A stale default (account since removed) must not stamp dead ids onto new nodes.
   return id && accounts.some((a) => a.id === id) ? id : undefined
-}
-
-export function accountNodeColor(
-  accountId: string | undefined,
-  accounts: ClaudeAccount[]
-): string | undefined {
-  if (!accountId) return undefined
-  const color = accounts.find((a) => a.id === accountId)?.color?.trim()
-  return color || undefined
 }
 
 /**

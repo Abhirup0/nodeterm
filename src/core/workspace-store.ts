@@ -872,13 +872,25 @@ export class WorkspaceStore {
    * that read the file first lands last, and the node the phone was told about ("true", card shown)
    * never existed. Queued, the append reads what the save just wrote and the save cannot un-write it.
    */
-  appendRemoteNode(projectId: string, input: RemoteNodeInput, now = new Date()): Promise<boolean> {
-    const run = this.saveChain.then(() => this.appendRemoteNodeNow(projectId, input, now))
+  appendRemoteNode(
+    projectId: string,
+    input: RemoteNodeInput,
+    now = new Date(),
+    accountColor?: string
+  ): Promise<boolean> {
+    const run = this.saveChain.then(() =>
+      this.appendRemoteNodeNow(projectId, input, now, accountColor)
+    )
     this.saveChain = run.catch(() => {})
     return run
   }
 
-  private async appendRemoteNodeNow(projectId: string, input: RemoteNodeInput, now: Date): Promise<boolean> {
+  private async appendRemoteNodeNow(
+    projectId: string,
+    input: RemoteNodeInput,
+    now: Date,
+    accountColor?: string
+  ): Promise<boolean> {
     const e = this.index?.entries.find((x) => x.id === projectId && x.cwd)
     if (!e?.cwd) return false
     const file = projectFilePath(e.cwd)
@@ -888,7 +900,7 @@ export class WorkspaceStore {
     } catch {
       return false
     }
-    const updated = appendProjectNode(raw, input, now)
+    const updated = appendProjectNode(raw, input, now, accountColor)
     if (updated === null) return false
     try {
       await writeAtomic(file, updated)
