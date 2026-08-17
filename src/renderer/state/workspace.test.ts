@@ -566,6 +566,27 @@ describe('accountId on Claude node factories', () => {
   })
 })
 
+describe('model on agent node factory', () => {
+  it('stamps agentModel and threads --model into the launch command for a switch-capable agent', () => {
+    const node = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, undefined, undefined, 'claude-sonnet-5')
+    expect(node.data.agentModel).toBe('claude-sonnet-5')
+    expect(node.data.initialCommand).toContain('--model')
+    expect(node.data.initialCommand).toContain('claude-sonnet-5')
+  })
+  it('omits agentModel and the --model flag when no model is given', () => {
+    const node = createAgentNode('claude', 0)
+    expect(node.data.agentModel).toBeUndefined()
+    expect(node.data.initialCommand).not.toContain('--model')
+  })
+  it('drops the model (no --model) for a non-switch-capable agent', () => {
+    // gemini is not in MODEL_SWITCH_CAPABLE — withAgentModel no-ops, and agentModel is still stamped
+    // (it is harmless to persist; the point is the launch line carries no --model).
+    const node = createAgentNode('gemini', 0, undefined, undefined, undefined, undefined, undefined, undefined, 'gemini-2.5')
+    expect(node.data.agentModel).toBe('gemini-2.5')
+    expect(node.data.initialCommand).not.toContain('--model')
+  })
+})
+
 describe('accountId serialization', () => {
   it('round-trips data.accountId on a terminal node', () => {
     const node = {

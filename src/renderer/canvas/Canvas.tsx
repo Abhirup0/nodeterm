@@ -4930,7 +4930,15 @@ export function Canvas() {
   // agent's native transcript to a handoff file (main) and open a target node that reads it
   // and continues. The source node stays. Mirrors branchClaude's placement.
   const transferConversation = useCallback(
-    async (sourceNodeId: string, targetAgentId: AgentId, at?: { x: number; y: number }) => {
+    async (
+      sourceNodeId: string,
+      targetAgentId: AgentId,
+      at?: { x: number; y: number },
+      /** A model chosen from the Transfer submenu's nested model list. Applied to the NEW node's
+       *  launch (`--model <value>`) when the target is MODEL_SWITCH_CAPABLE; silently dropped
+       *  otherwise (the target's own default model). Persisted as `data.agentModel`. */
+      model?: string
+    ) => {
       const source = nodesRef.current.find((n) => n.id === sourceNodeId) as CanvasNode | undefined
       if (!source) return
       const sourceAgentId = source.data.agentId
@@ -4988,7 +4996,9 @@ export function Canvas() {
         source.data.accountId,
         // The mode belongs to the node being OPENED, so it is gated on the TARGET agent — a
         // handoff into grok must not inherit claude's version gate.
-        activePermissionMode(targetAgentId)
+        activePermissionMode(targetAgentId),
+        // A model picked from the Transfer submenu (only offered for switch-capable targets).
+        model
       )
       node.selected = true
       const placed = placeSpawned(node, at ?? besideNode(source))
@@ -5412,7 +5422,9 @@ export function Canvas() {
             sourceAgentId: agentIdOf(ids[0]),
             sessionId: useAgentStatus.getState().byId[ids[0]]?.sessionId,
             disabledAgents: useSettings.getState().settings.disabledAgents,
-            customAgents: useSettings.getState().settings.customAgents
+            customAgents: useSettings.getState().settings.customAgents,
+            gatewayModels,
+            relaySession: session.source === 'relay'
           }, transferConversation)
         : []),
       ...(isHidden('collapse', hidden)
@@ -8052,62 +8064,70 @@ export function Canvas() {
     (e: React.MouseEvent, projectId: string, id: string) => {
       e.preventDefault()
       e.stopPropagation()
-      setMenu({
-        x: e.clientX,
-        y: e.clientY,
-        items: [
-          { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
-          {
-            label: 'Rename',
-            icon: <IconEditor />,
-            onClick: () => {
-              void promptDialog({ message: 'Rename session' }).then((t) => {
-                if (t && t.trim()) renameSession(projectId, id, t.trim())
-              })
-            }
-          },
-          {
-            label: 'Duplicate',
-            icon: <IconDuplicate />,
-            onClick: () => {
-              if (projectId === activeProjectId) duplicateNodes([id])
-              else {
-                useProjects.getState().duplicateNode(projectId, id)
-                void writeDisk()
-              }
-            }
-          },
-          // Transfer conversation to another agent — the SAME submenu the canvas node right-click
-          // has. Only valid for the ACTIVE project's canvas: transferConversation reads the source
-          // node out of `nodesRef.current` (the live React Flow nodes), which only holds the active
-          // project. For a non-active project the block is empty (no submenu appears), matching the
-          // Duplicate guard's active-project branch.
-          ...(projectId === activeProjectId
-            ? transferConversationItems(id, undefined, {
-                sourceAgentId: agentIdOf(id),
-                sessionId: useAgentStatus.getState().byId[id]?.sessionId,
-                disabledAgents: useSettings.getState().settings.disabledAgents,
-                customAgents: useSettings.getState().settings.customAgents
-              }, transferConversation)
-            : []),
-          {
-            label: 'Close',
-            icon: <IconTrash />,
-            danger: true,
-            onClick: () => closeSession(projectId, id)
+      // Session-list-specific rows that have no canvas analogue: Go to (focus) and Rename (the
+      // sidebar's prompt-dialog rename). These stay on top for every project.
+      const head: MenuItem[] = [
+        { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
+        {
+          label: 'Rename',
+          icon: <IconEditor />,
+          onClick: () => {
+            void promptDialog({ message: 'Rename session' }).then((t) => {
+              if (t && t.trim()) renameSession(projectId, id, t.trim())
+            })
           }
-        ]
-      })
+        }
+      ]
+      // For the ACTIVE project, reuse the SAME single-node menu the canvas right-click builds —
+      // full parity (Color, Group, Duplicate, Branch, Collapse, Markdown view, Refresh terminal,
+      // Restart agent, Restart agent and shell, Reopen session as, Switch model, Transfer with its
+      // nested model submenus) so the two surfaces can't drift. `selectionItems` reads the live
+      // node from `nodesRef.current` (active-project only), which is exactly why this is gated.
+      // `at` is undefined: the row has no flow position, so spawned nodes (Duplicate/Branch/
+      // Transfer) place beside the source — the same as the row's existing Transfer behavior.
+      //
+      // The canvas menu ends in a destructive "Delete" (deleteNodes). The session row's analogue
+      // is non-destructive "Close" (closeSession — hides the tab, keeps the tmux session), so the
+      // trailing Delete is swapped for Close rather than offered beside it.
+      const body: MenuItem[] =
+        projectId === activeProjectId
+          ? (() => {
+              const full = selectionItems([id])
+              // Drop the canvas menu's trailing "Delete" (destructive deleteNodes) and any
+              // separator left dangling before it, then append the session row's non-destructive
+              // "Close". Found by label rather than fixed index so this stays correct if the canvas
+              // menu's tail changes — Delete is the only 'Delete'-labelled row.
+              const withoutDelete = full.filter((it) => !('label' in it && it.label === 'Delete'))
+              return [
+                ...tidySeparators(withoutDelete),
+                { type: 'separator' },
+                { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+              ]
+            })()
+          : [
+              // Non-active project: the shared rows read the active canvas's live nodes + per-node
+              // registered closures, which don't exist here. Keep the narrow set that works for any
+              // project (Duplicate defers to the store; the rest are list-level).
+              {
+                label: 'Duplicate',
+                icon: <IconDuplicate />,
+                onClick: () => {
+                  useProjects.getState().duplicateNode(projectId, id)
+                  void writeDisk()
+                }
+              },
+              { type: 'separator' },
+              { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+            ]
+      setMenu({ x: e.clientX, y: e.clientY, items: [...head, ...body] })
     },
     [
       activeProjectId,
       focusNodeById,
       renameSession,
-      duplicateNodes,
       closeSession,
       writeDisk,
-      agentIdOf,
-      transferConversation
+      selectionItems
     ]
   )
 
