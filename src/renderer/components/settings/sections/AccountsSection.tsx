@@ -3,7 +3,7 @@ import type { ClaudeAccount } from '@shared/types'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
-import { isAccountLoginNode } from '../../../state/workspace'
+import { isAccountLoginNode, NODE_COLORS } from '../../../state/workspace'
 import { useProjects } from '../../../state/projects'
 import { useSshConn } from '../../../state/sshConn'
 import { ConfirmDialog } from '../../ConfirmDialog'
@@ -11,6 +11,7 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
+import { cn } from '@renderer/ui/cn'
 
 const ROWS = {
   accounts: {
@@ -79,6 +80,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
   const setLabel = (id: string, label: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
+
+  const setColor = (id: string, color?: string): void =>
+    applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
 
   // The open project whose SSH host matches a remote account (needed for the ssh context of
   // waitLogin / remove). Undefined for local accounts, or when no such project is open.
@@ -282,6 +286,40 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   {account.email && !account.pending ? (
                     <p className="text-[12px] text-muted">{account.email}</p>
                   ) : null}
+                  <div
+                    role="group"
+                    aria-label={`Default node color for ${account.label}`}
+                    className="flex flex-wrap items-center gap-2 pt-1"
+                  >
+                    <span className="text-[12px] text-muted">Node color</span>
+                    <button
+                      type="button"
+                      aria-label="Default"
+                      aria-pressed={!account.color}
+                      title="Use the agent's own color"
+                      onClick={() => setColor(account.id, undefined)}
+                      className={cn(
+                        'flex size-5 items-center justify-center rounded-full border-2 text-[11px] text-muted',
+                        account.color ? 'border-transparent bg-fill-weak' : 'border-text bg-fill-weak'
+                      )}
+                    >
+                      ✕
+                    </button>
+                    {NODE_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        aria-label={c}
+                        aria-pressed={account.color === c}
+                        onClick={() => setColor(account.id, c)}
+                        style={{ background: c }}
+                        className={cn(
+                          'size-5 rounded-full border-2',
+                          account.color === c ? 'border-text' : 'border-transparent'
+                        )}
+                      />
+                    ))}
+                  </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {account.pending
@@ -377,8 +415,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
           <p className="text-[12px] leading-relaxed text-muted">
             Accounts are isolated Claude logins. New Claude nodes pick an account from the add
-            menus; each node keeps its account for life. Remote accounts live on an SSH host and are
-            only offered in that host&apos;s projects.
+            menus; each node keeps its account for life. A node color applies to nodes opened under
+            that account from then on — existing ones keep the color they have. Remote accounts live
+            on an SSH host and are only offered in that host&apos;s projects.
           </p>
         </div>
       </SearchableRow>

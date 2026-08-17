@@ -877,6 +877,7 @@ export interface ClaudeAccount {
   host?: string
   /** True until `claude /login` completes in the account dir and the email is captured. */
   pending?: boolean
+  color?: string
   createdAt: number
 }
 

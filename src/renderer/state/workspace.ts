@@ -371,6 +371,15 @@ export function resolveNewNodeAccount(
   return id && accounts.some((a) => a.id === id) ? id : undefined
 }
 
+export function accountNodeColor(
+  accountId: string | undefined,
+  accounts: ClaudeAccount[]
+): string | undefined {
+  if (!accountId) return undefined
+  const color = accounts.find((a) => a.id === accountId)?.color?.trim()
+  return color || undefined
+}
+
 /**
  * Creates a terminal node that launches the given agent on open. Title, color, and the
  * launch command come from the resolved agent config (builtin or custom); the node carries
@@ -387,7 +396,10 @@ export function createAgentNode(
   accountId?: string,
   permissionMode?: AgentPermissionMode
 ): CanvasNode {
-  const { label, color } = resolveAgent(agentId)
+  const { label, color: agentColor } = resolveAgent(agentId)
+  const boundAccountId = accountId && agentId === 'claude' ? accountId : undefined
+  const color =
+    accountNodeColor(boundAccountId, useSettings.getState().settings.claudeAccounts) ?? agentColor
   // A per-builtin launch-command override (Settings -> Agents -> Launch commands) replaces the bare
   // CLI in the assembled command. Threaded into the shared assembler below as `launchCmdOverride`
   // so fresh launch, cold-restore resume and in-place restart all pick it up identically. Custom
@@ -463,7 +475,7 @@ export function createAgentNode(
       agentId,
       // Accounts are inherently Claude-only — never stamp one onto another agent's node. A custom
       // agent inheriting claude is still its own agent; account binding stays claude-the-builtin.
-      ...(accountId && agentId === 'claude' ? { accountId } : {}),
+      ...(boundAccountId ? { accountId: boundAccountId } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),

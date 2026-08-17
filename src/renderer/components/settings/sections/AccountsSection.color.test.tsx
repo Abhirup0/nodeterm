@@ -1,0 +1,89 @@
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { createRoot, type Root } from 'react-dom/client'
+import { act } from 'react'
+import { AccountsSection } from './AccountsSection'
+import { useSettings } from '../../../state/settings'
+import { DEFAULT_SETTINGS, type ClaudeAccount } from '@shared/types'
+
+const account: ClaudeAccount = { id: 'a1', label: 'work', createdAt: 0 }
+
+function renderSection(accounts: ClaudeAccount[]): { host: HTMLElement; root: Root } {
+  useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeAccounts: accounts } })
+  const host = document.createElement('div')
+  document.body.appendChild(host)
+  const root = createRoot(host)
+  act(() => {
+    root.render(<AccountsSection isActive />)
+  })
+  return { host, root }
+}
+
+function swatch(host: HTMLElement, label: string, name: string): HTMLButtonElement {
+  const group = host.querySelector(`[aria-label="Default node color for ${label}"]`)
+  expect(group).toBeTruthy()
+  const btn = Array.from(group!.querySelectorAll('button')).find(
+    (b) => b.getAttribute('aria-label') === name
+  )
+  expect(btn, `no swatch "${name}"`).toBeTruthy()
+  return btn as HTMLButtonElement
+}
+
+const colorOf = (id: string): string | undefined =>
+  useSettings.getState().settings.claudeAccounts.find((a) => a.id === id)?.color
+
+beforeEach(() => {
+  document.body.innerHTML = ''
+  ;(window as unknown as { nodeTerminal: unknown }).nodeTerminal = {
+    usage: { fetch: async () => null }
+  }
+})
+
+afterEach(() => {
+  useSettings.setState({ settings: DEFAULT_SETTINGS })
+})
+
+describe('AccountsSection — default node color', () => {
+  it('stores the picked color on the account', () => {
+    const { host, root } = renderSection([account])
+    act(() => {
+      swatch(host, 'work', '#0a84ff').click()
+    })
+    expect(colorOf('a1')).toBe('#0a84ff')
+    root.unmount()
+  })
+
+  it('clears the color back to the agent default', () => {
+    const { host, root } = renderSection([{ ...account, color: '#0a84ff' }])
+    act(() => {
+      swatch(host, 'work', 'Default').click()
+    })
+    expect(colorOf('a1')).toBeUndefined()
+    root.unmount()
+  })
+
+  it('marks the picked swatch as selected', () => {
+    const { host, root } = renderSection([{ ...account, color: '#0a84ff' }])
+    expect(swatch(host, 'work', '#0a84ff').getAttribute('aria-pressed')).toBe('true')
+    expect(swatch(host, 'work', '#32d74b').getAttribute('aria-pressed')).toBe('false')
+    expect(swatch(host, 'work', 'Default').getAttribute('aria-pressed')).toBe('false')
+    root.unmount()
+  })
+
+  it('marks Default as selected while no color is set', () => {
+    const { host, root } = renderSection([account])
+    expect(swatch(host, 'work', 'Default').getAttribute('aria-pressed')).toBe('true')
+    root.unmount()
+  })
+
+  it('colors one account without touching the other', () => {
+    const other: ClaudeAccount = { id: 'a2', label: 'personal', createdAt: 0, color: '#ff453a' }
+    const { host, root } = renderSection([account, other])
+    act(() => {
+      swatch(host, 'work', '#0a84ff').click()
+    })
+    expect(colorOf('a1')).toBe('#0a84ff')
+    expect(colorOf('a2')).toBe('#ff453a')
+    root.unmount()
+  })
+})
