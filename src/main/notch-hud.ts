@@ -103,7 +103,7 @@ export interface NotchHudTunables {
   /** Expand the panel on hover (else click-only). */
   hoverExpand: boolean
   /** settings.usagePercentMode — how the rows' context percentages render ("42% used" / "58% left"). */
-  percentMode: 'used' | 'remaining'
+  percentMode: 'used' | 'remaining' | 'tokens'
 }
 
 /** Clamp a hand-editable width to something that can't push the capsule off the display. */
@@ -125,7 +125,7 @@ class NotchHudController {
 
   constructor(
     private deps: NotchHudDeps,
-    private tunables: { notchWidth: number; hoverExpand: boolean; percentMode: 'used' | 'remaining' }
+    private tunables: { notchWidth: number; hoverExpand: boolean; percentMode: 'used' | 'remaining' | 'tokens' }
   ) {
     this.onSetIgnoreMouse = (_e, ignore) => {
       // Ignore-mouse ON = click-through (the strip is transparent to the app beneath); OFF while the
@@ -243,7 +243,7 @@ class NotchHudController {
   }
 
   /** Apply live tunables and re-push, so a slider drag moves the capsule as you drag. */
-  setTunables(t: { notchWidth: number; hoverExpand: boolean; percentMode: 'used' | 'remaining' }): void {
+  setTunables(t: { notchWidth: number; hoverExpand: boolean; percentMode: 'used' | 'remaining' | 'tokens' }): void {
     this.tunables = { notchWidth: t.notchWidth, hoverExpand: t.hoverExpand, percentMode: t.percentMode }
     this.schedulePush()
   }
