@@ -1,7 +1,7 @@
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
-import { readFile } from 'fs/promises'
+import { readFile, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
 import { existsSync, statSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
@@ -1149,7 +1149,7 @@ app.whenReady().then(async () => {
       return { kind: 'unsupported' }
     }
   }
-  registerBoardLogHandlers(corePlatform, boardLogRouter)
+  const boardLog = registerBoardLogHandlers(corePlatform, boardLogRouter)
   registerLogHandlers(corePlatform, logBuffer, () => settingsStore.get().debugLogPanel)
 
   // Agent messaging (the `send`/`reply` control verbs). Canvas.tsx forwards the validated verb
@@ -2530,6 +2530,8 @@ app.whenReady().then(async () => {
         projectCwd?: string
         sourceControlCapable?: boolean
         capabilityOn?: boolean
+        sourceTitle?: string
+        browserTitle?: string
       }
     ) => {
       const resolve = pendingBrowserResolve.get(payload.requestId)
@@ -2542,7 +2544,9 @@ app.whenReady().then(async () => {
               projectId: payload.projectId ?? '',
               projectCwd: payload.projectCwd,
               sourceControlCapable: payload.sourceControlCapable === true,
-              capabilityOn: payload.capabilityOn === true
+              capabilityOn: payload.capabilityOn === true,
+              sourceTitle: payload.sourceTitle,
+              browserTitle: payload.browserTitle
             }
           : { ok: false, refusal: payload.refusal ?? 'source node is not on an open canvas' }
       )
@@ -2551,7 +2555,7 @@ app.whenReady().then(async () => {
   // Ask the renderer to resolve a source node — the `ask` closure `resolveBrowserTarget` races
   // against its own 2s timeout. The renderer NEVER runs a CDP command; it answers existence + project
   // + capability only.
-  const askRendererResolve = (sourceNodeId: string): Promise<BrowserResolve> => {
+  const askRendererResolve = (sourceNodeId: string, browserNodeId: string): Promise<BrowserResolve> => {
     const w = getMainWindow()
     if (!w || w.isDestroyed()) {
       return Promise.resolve({ ok: false, refusal: 'source node is not on an open canvas' })
@@ -2560,7 +2564,9 @@ app.whenReady().then(async () => {
     const answered = new Promise<BrowserResolve>((resolve) => {
       pendingBrowserResolve.set(requestId, resolve)
     })
-    w.webContents.send(IPC.browserControlResolve, { requestId, sourceNodeId })
+    // `browserNodeId` rides along so the renderer can report the browser node's title for the cookie
+    // trace; it is NOT part of the security decision (owner + capability + allowlist stay main-side).
+    w.webContents.send(IPC.browserControlResolve, { requestId, sourceNodeId, browserNodeId })
     return answered.finally(() => pendingBrowserResolve.delete(requestId))
   }
   // The `browser` verb's whole main-side drive: parse (pure), identity belt, resolve round-trip, then
@@ -2576,14 +2582,24 @@ app.whenReady().then(async () => {
     // Identity is checked first (the belt to hook-server's verified-only gate for STRICT verbs): a
     // non-verified caller learns nothing, and no resolve round-trip is even made.
     if (!verified) return { ok: false, error: STRICT_CONTROL_REFUSAL, message: STRICT_CONTROL_REFUSAL }
-    const resolve = await resolveBrowserTarget(parsed.node, () => askRendererResolve(nodeId))
+    const resolve = await resolveBrowserTarget(parsed.node, () => askRendererResolve(nodeId, parsed.node))
     const result = await driveBrowser(
       { call: parsed, ownerNodeId: nodeId, verified, resolve },
       {
         ledger: browserLedger,
         refs: browserRefs,
         sessionFor: browserSessionFor,
-        revoke: (id) => pushBrowserLeases(revokeBrowserNode(id, browserRevocation, { userStopped: true }))
+        revoke: (id) => pushBrowserLeases(revokeBrowserNode(id, browserRevocation, { userStopped: true })),
+        // The cookie-read trace (PR 9): appended in-process, BEFORE the read, through the same board-log
+        // routing the IPC handler uses. A false return (no reachable log / write failed) refuses the read.
+        appendBoardLog: (projectId, entry) => boardLog.append(projectId, entry),
+        // The screenshot jail + write (PR 9). realpath/lstat canonicalize the project-dir jail; writeFile
+        // lands the PNG. All node:fs — never a caller path reaching CDP.
+        screenshotIO: {
+          realpath: (p) => fsRealpath(p),
+          lstat: (p) => fsLstat(p),
+          writeFile: (p, d) => fsWriteFile(p, d)
+        }
       }
     )
     return result.ok

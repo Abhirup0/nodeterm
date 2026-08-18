@@ -138,6 +138,9 @@ export function sourceIsControlCapable(agentId: unknown): boolean {
 export interface BrowserResolveNode {
   id: string
   agentId?: unknown
+  /** The node's display title — reported so main can make the cookie-read trace human-readable
+   *  (PR 9). Never a security input. */
+  title?: string
 }
 export interface BrowserResolveProject {
   id: string
@@ -154,17 +157,23 @@ export type BrowserResolveAnswer =
       projectCwd?: string
       sourceControlCapable: boolean
       capabilityOn: boolean
+      /** The owner (source) agent node's title and the driven browser node's title — for the cookie
+       *  trace only. Empty string when unknown; main falls back to the node id. */
+      sourceTitle: string
+      browserTitle: string
     }
 
 export function answerBrowserResolve(
   project: BrowserResolveProject | undefined,
-  sourceNodeId: string
+  sourceNodeId: string,
+  browserNodeId?: string
 ): BrowserResolveAnswer {
   // No open project owns the source, or the node is not on its canvas: a named, non-revoking
   // refusal. (Same class as every other verb's "source node is not on an open canvas".)
   if (!project) return { ok: false, refusal: 'source node is not on an open canvas' }
   const node = project.nodes.find((n) => n.id === sourceNodeId)
   if (!node) return { ok: false, refusal: 'source node is not on an open canvas' }
+  const browserNode = browserNodeId ? project.nodes.find((n) => n.id === browserNodeId) : undefined
   return {
     ok: true,
     projectId: project.id,
@@ -173,7 +182,9 @@ export function answerBrowserResolve(
     // LIVE read — the drive-time capability check the whole feature's safety rests on. A project.json
     // hand-edit that flipped the switch off is reflected here the next time an agent drives, which is
     // exactly drive time.
-    capabilityOn: projectCapabilityGrantedFor(project, 'agentBrowserControl')
+    capabilityOn: projectCapabilityGrantedFor(project, 'agentBrowserControl'),
+    sourceTitle: typeof node.title === 'string' ? node.title : '',
+    browserTitle: typeof browserNode?.title === 'string' ? browserNode.title : ''
   }
 }
 
