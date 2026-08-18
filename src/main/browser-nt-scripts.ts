@@ -26,18 +26,25 @@ export const NT_SCRIPTS = Object.freeze({
   /** The document title. */
   readTitle: 'function(){ return document.title }',
 
-  /** A map of interactable elements: a ref index, a tag, a short label and the element centre in
-   *  viewport coordinates (what a later Input.dispatchMouseEvent aims at). Read-only. */
+  /** A map of interactable elements: a ref index, role, accessible NAME (never a field's value), id,
+   *  input type, whether a field is FILLED (a boolean — never the value), a link's absolute href, and
+   *  the element centre in viewport coordinates (what a later Input.dispatchMouseEvent aims at).
+   *  Read-only. Off-screen (zero-box), display:none and aria-hidden elements are skipped by
+   *  construction, which is what keeps a hidden CSRF input and an aria-hidden block out of the map. */
   readMap:
-    'function(){ var els = document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=link],[onclick]"); var out = []; for (var i = 0; i < els.length; i++) { var el = els[i]; var r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) continue; out.push({ ref: i, tag: el.tagName, type: el.getAttribute("type"), text: (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").replace(/\\s+/g, " ").trim().slice(0, 80), x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height }); } return out }',
+    'function(){ var els = document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=link],[onclick]"); var out = []; for (var i = 0; i < els.length; i++) { var el = els[i]; var r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) continue; if (el.closest && el.closest("[aria-hidden=true]")) continue; var tag = el.tagName.toLowerCase(); var role = el.getAttribute("role") || (tag === "a" ? "link" : tag === "button" ? "button" : tag); var isField = tag === "input" || tag === "textarea" || tag === "select"; var name = (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").replace(/\\s+/g, " ").trim().slice(0, 80); out.push({ ref: i, tag: tag, role: role, id: el.id || "", type: el.getAttribute("type"), name: name, href: tag === "a" ? el.href : null, filled: isField ? (el.value ? true : false) : null, x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height }); } return out }',
 
   /** Every visible link as { href, text }. Read-only. */
   readLinks:
     'function(){ var as = document.querySelectorAll("a[href]"); var out = []; for (var i = 0; i < as.length; i++) { out.push({ href: as[i].href, text: (as[i].innerText || "").replace(/\\s+/g, " ").trim().slice(0, 120) }); } return out }',
 
-  /** The visible text of a selector (or the whole body when none is given). Read-only, capped. */
+  /** The visible text of a selector (or the whole body when none is given), plus the untruncated
+   *  length so main can announce an in-band truncation. Capped at the hard ceiling (60000) so a huge
+   *  page never ships megabytes over CDP; main applies the caller's --max (<= ceiling) to the text.
+   *  innerText semantics exclude <script>, <style>, display:none and aria-hidden BY CONSTRUCTION.
+   *  Read-only. */
   readText:
-    'function(sel){ var el = sel ? document.querySelector(sel) : document.body; return el ? (el.innerText || "").slice(0, 20000) : null }',
+    'function(sel){ var el = sel ? document.querySelector(sel) : document.body; if (!el) return null; var t = el.innerText || ""; return { text: t.slice(0, 60000), total: t.length } }',
 
   /** Re-locate a ref from readMap and return its current centre and tag, or null if it is gone. The
    *  ref is re-resolved against the SAME enumeration; generation staleness is enforced in main. */

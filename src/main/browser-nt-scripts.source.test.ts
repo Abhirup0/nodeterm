@@ -40,6 +40,14 @@ describe('NT_SCRIPTS is a frozen table of literals', () => {
     expect(isNtScript('function(){return 1}')).toBe(false)
   })
 
+  it('readMap reports whether a field is FILLED but never returns its value (Task 7.5)', () => {
+    // The whole point of `--read map`: a password's fill STATE is useful, its value is a credential.
+    // The returned object literal must never carry a `value:` key. Reading `el.value` to compute the
+    // boolean is fine (no assignment); RETURNING it is the leak this pins against.
+    expect(NT_SCRIPTS.readMap).toContain('filled:')
+    expect(NT_SCRIPTS.readMap).not.toMatch(/value\s*:/)
+  })
+
   it('every script is a pure reader — none clicks, navigates, submits or writes', () => {
     // Every EFFECT goes through Input.* or Page.*, which is also why the effects are traceable.
     for (const s of Object.values(NT_SCRIPTS)) {
