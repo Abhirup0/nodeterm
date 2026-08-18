@@ -48,10 +48,12 @@ export class BrowserControlLedger {
    * Record ownership of a freshly opened browser node. Returns false — and changes NOTHING — if the
    * id is already claimed: there is NO handoff, claim or transfer (S8's `claimUserTab` is dropped),
    * so a live browser node's owner never changes and the user's own browsing never becomes an
-   * agent's. A blank `browserNodeId` or `ownerNodeId` is refused (there is no anonymous owner).
+   * agent's. A blank `browserNodeId`, `ownerNodeId` or `projectId` is refused: there is no anonymous
+   * owner, and a project-less entry is meaningless (it would also make `releaseByProject('')` match
+   * it) — the belt to main's wiring guard against a future reply-shape that drops the project id.
    */
   claim(browserNodeId: string, e: AgentBrowserEntry): boolean {
-    if (!browserNodeId || !e.ownerNodeId) return false
+    if (!browserNodeId || !e.ownerNodeId || !e.projectId) return false
     if (this.entries.has(browserNodeId)) return false
     this.entries.set(browserNodeId, { ...e })
     return true

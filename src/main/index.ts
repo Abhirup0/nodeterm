@@ -2360,10 +2360,14 @@ app.whenReady().then(async () => {
     // browser-ownership-source.test.ts (ownership is NEVER read from Project.ropes).
     if (verb === 'open-browser' && verified && result.ok) {
       const opened = result.result as { id?: string; projectId?: string; partition?: string } | undefined
-      if (opened?.id && opened.partition) {
+      // Refuse to record an entry with no owning project: `releaseByProject('')` would match it, and
+      // a project-less ownership record is meaningless. Fail-closed against future reply-shape drift
+      // — today `partition` is present only when agentBrowserPartition(projectId) succeeded, so a
+      // non-empty safe projectId always rides with it.
+      if (opened?.id && opened.partition && opened.projectId) {
         browserLedger.claim(opened.id, {
           ownerNodeId: nodeId,
-          projectId: opened.projectId ?? '',
+          projectId: opened.projectId,
           partition: opened.partition,
           navGeneration: 0,
           leaseActiveUntil: 0,

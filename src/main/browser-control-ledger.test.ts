@@ -48,6 +48,15 @@ describe('BrowserControlLedger', () => {
     expect(l.get('browser-3', '')).toBe(null)
   })
 
+  it('claim refuses a blank projectId — a project-less entry is meaningless and would poison releaseByProject(\'\')', () => {
+    // Belt to main's wiring guard: if a future open-browser reply ever drops the project id, no
+    // ownership is recorded rather than an entry that releaseByProject('') would sweep.
+    const l = new BrowserControlLedger()
+    expect(l.claim('browser-3', entry({ projectId: '' }))).toBe(false)
+    expect(l.get('browser-3', 'claude-1')).toBe(null)
+    expect(l.releaseByProject('')).toEqual([])
+  })
+
   it('release drops ownership — a released id is undrivable and re-claimable', () => {
     const l = new BrowserControlLedger()
     l.claim('browser-3', entry({ ownerNodeId: 'claude-1' }))
