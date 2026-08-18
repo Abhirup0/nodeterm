@@ -45,6 +45,7 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
         <BrowserSurface
           nodeId={id}
           url={(data.url as string) ?? ''}
+          partition={data.partition as string | undefined}
           onUrlChange={(u) => updateNodeData(id, { url: u })}
           onTitleChange={(t) => updateNodeData(id, { title: t })}
         />

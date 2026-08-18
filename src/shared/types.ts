@@ -285,6 +285,13 @@ export interface CanvasNodeState {
   fileMissing?: boolean
   /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
   url?: string
+  /**
+   * browser-only: the Electron session partition for an AGENT-opened browser node
+   * (`persist:nt-agent-browser-<projectId>`), set once at creation and never mutated. Absent for a
+   * USER-opened node (default session, no migration). Persisted so the jar survives reopen; carried
+   * through untouched on Server Edition / mobile, where a browser node renders with no <webview>.
+   */
+  partition?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
