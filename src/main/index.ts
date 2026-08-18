@@ -15,6 +15,7 @@ const logBuffer = new LogBuffer()
 installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { allowGuestNavigation } from './webview-nav'
+import { BrowserControlLedger } from './browser-control-ledger'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
@@ -2322,6 +2323,9 @@ app.whenReady().then(async () => {
       timer: NodeJS.Timeout
     }
   >()
+  // Who owns which agent-opened browser node, THIS app run only. In-memory, never persisted, never
+  // read from project.json (Task 4.3/4.4). Consumed by PR 5 (attach/lease), PR 6 (indicator/Stop).
+  const browserLedger = new BrowserControlLedger()
   ipcMain.on(
     IPC.agentControlResult,
     (
@@ -2335,11 +2339,11 @@ app.whenReady().then(async () => {
       pending.resolve(payload)
     }
   )
-  hookServer.setControlHandler(async ({ verb, nodeId, args }) => {
+  hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
     const target = getMainWindow()
     if (!target) return { ok: false, error: 'window unavailable' }
     const requestId = randomUUID()
-    return await new Promise((resolve) => {
+    const result = await new Promise<{ ok: boolean; message?: string; result?: unknown; error?: string }>((resolve) => {
       const timer = setTimeout(() => {
         pendingControl.delete(requestId)
         resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
@@ -2347,6 +2351,31 @@ app.whenReady().then(async () => {
       pendingControl.set(requestId, { resolve, timer })
       target.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
     })
+    // Record browser ownership the moment an open-browser succeeds — and ONLY when the caller's
+    // identity verdict for THIS request was `verified` (main's own verdict, not anything off the
+    // wire or project.json). A `legacy`/warned caller may open a browser but owns nothing, so it
+    // can drive nothing. The owner is the verified caller (`nodeId`); the project id + partition
+    // ride along from the renderer's reply for release-by-project and the indicator. This is the
+    // browser sibling of pane-ownership's record-at-fresh-spawn. See browser-control-ledger.ts and
+    // browser-ownership-source.test.ts (ownership is NEVER read from Project.ropes).
+    if (verb === 'open-browser' && verified && result.ok) {
+      const opened = result.result as { id?: string; projectId?: string; partition?: string } | undefined
+      // Refuse to record an entry with no owning project: `releaseByProject('')` would match it, and
+      // a project-less ownership record is meaningless. Fail-closed against future reply-shape drift
+      // — today `partition` is present only when agentBrowserPartition(projectId) succeeded, so a
+      // non-empty safe projectId always rides with it.
+      if (opened?.id && opened.partition && opened.projectId) {
+        browserLedger.claim(opened.id, {
+          ownerNodeId: nodeId,
+          projectId: opened.projectId,
+          partition: opened.partition,
+          navGeneration: 0,
+          leaseActiveUntil: 0,
+          openedAt: Date.now()
+        })
+      }
+    }
+    return result
   })
   initMediaProtocol()
 

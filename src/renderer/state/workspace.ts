@@ -92,6 +92,14 @@ export interface NodeData {
   fileMissing?: boolean
   /** web-only: live URL to load in the web (webview) node. */
   url?: string
+  /**
+   * browser-only: the Electron session partition for this <webview>. Set ONCE at creation for an
+   * AGENT-opened node (`agentBrowserPartition`, `persist:nt-agent-browser-<projectId>`) and never
+   * mutated — [MEASURED, Electron 42.8.1] `partition` is honoured only at attach. Absent (undefined)
+   * for a USER-opened node, which keeps the default session (no migration, no lost logins). Carried
+   * through persistence untouched on Server Edition / mobile, where a browser node has no <webview>.
+   */
+  partition?: string
   diffStaged?: boolean
   commitOid?: string
   /** dino-only: best score reached in the T-Rex Runner game. */
@@ -633,11 +641,20 @@ export function createWebNode(
   }
 }
 
-/** Creates a navigable browser node (Electron <webview>) starting at `url` ('' = blank). */
+/**
+ * Creates a navigable browser node (Electron <webview>) starting at `url` ('' = blank).
+ *
+ * `partition` is set ONLY for an AGENT-opened node (`open-browser`), to its per-project session jar
+ * (`agentBrowserPartition`). A USER-opened node passes none and keeps the default session, unchanged
+ * — the zero-migration path, so nobody loses a login on upgrade. It is written once here and never
+ * mutated: [MEASURED, Electron 42.8.1] `<webview partition>` is honoured only at attach, so a later
+ * change would be a silent no-op anyway (docs/superpowers/probes/2026-08-browser-partition.md).
+ */
 export function createBrowserNode(
   index: number,
   url: string,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  partition?: string
 ): CanvasNode {
   const title = url ? url.replace(/^https?:\/\//, '').slice(0, 40) : 'Browser'
   return {
@@ -651,7 +668,8 @@ export function createBrowserNode(
       title,
       color: '#0a84ff',
       group: null,
-      ...(url ? { url } : {})
+      ...(url ? { url } : {}),
+      ...(partition ? { partition } : {})
     }
   }
 }
@@ -1307,6 +1325,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         filePath: n.filePath,
         fileMissing: n.fileMissing,
         url: n.url,
+        partition: n.partition,
         diffStaged: n.diffStaged,
         commitOid: n.commitOid,
         highScore: n.highScore,
@@ -1375,6 +1394,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         filePath: n.data.filePath,
         fileMissing: n.data.fileMissing,
         url: n.data.url,
+        partition: n.data.partition,
         diffStaged: n.data.diffStaged,
         commitOid: n.data.commitOid,
         highScore: n.data.highScore,

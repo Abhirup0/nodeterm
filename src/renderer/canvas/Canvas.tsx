@@ -217,6 +217,7 @@ import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { isSafeQuickOpenRelPath } from '@shared/quick-open-filter'
+import { agentBrowserPartition } from '@shared/browser-partition'
 
 /** The real `sshProject.connect`, bound once. Passed into `connectHostAttachment` rather than
  *  reached for inside it, so that helper stays testable without an Electron preload. */
@@ -585,6 +586,7 @@ function toKanbanSession(n: CanvasNode): KanbanSession | null {
       color: (n.data.color as string) ?? NODE_COLORS[0],
       kind: 'browser',
       url: n.data.url as string | undefined,
+      partition: n.data.partition as string | undefined,
       spawn: {}
     }
   }
@@ -6947,8 +6949,22 @@ export function Canvas() {
               reply({ ok: false, error: 'open-browser requires a valid http(s) --url' })
               return
             }
-            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow()))
-            reply({ ok: true, message: `opened browser ${id}`, result: { id } })
+            // An agent-opened browser gets its OWN per-project session jar — never the default
+            // session the user's own browsing lives in (Probe A: a partition-less <webview> shares
+            // session.defaultSession). The project id becomes a persisted storage key, so it must
+            // pass isSafeNodeId; agentBrowserPartition returns null when it does not, and we refuse
+            // the open rather than fall back to the shared jar (fail-closed).
+            const partition = agentBrowserPartition(ctlProject?.id ?? '')
+            if (!partition) {
+              reply({ ok: false, error: "open-browser: this project's id cannot be used as a browser session key" })
+              return
+            }
+            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow(), partition))
+            // Return the project id + partition so main can record ownership in its in-memory
+            // ledger (browser-control-ledger.ts). Main gates the claim on its OWN `verified` verdict
+            // and keys it to the verified caller — these fields are descriptive (release-by-project,
+            // the indicator), never the authorization boundary.
+            reply({ ok: true, message: `opened browser ${id}`, result: { id, projectId: ctlProject?.id, partition } })
             return
           }
           case 'group': {

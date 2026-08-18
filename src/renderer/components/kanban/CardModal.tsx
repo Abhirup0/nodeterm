@@ -270,6 +270,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
                     key={session.id}
                     nodeId={session.id}
                     url={session.url ?? ''}
+                    partition={session.partition}
                     onUrlChange={(u) => onBrowserNav({ url: u })}
                     onTitleChange={(t) => onBrowserNav({ title: t })}
                   />
