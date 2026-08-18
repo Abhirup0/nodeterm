@@ -6,7 +6,8 @@ import {
   normalizeBindingForCommand,
   getEffectiveBindings,
   bindingIdentity,
-  findKeybindingConflicts
+  findKeybindingConflicts,
+  sanitizeKeybindingOverrides
 } from './keybindings'
 import { parseShortcut } from './shortcut'
 
@@ -165,5 +166,63 @@ describe('findKeybindingConflicts', () => {
     expect(
       findKeybindingConflicts({ 'canvas.fitAll': [], 'canvas.groupSelection': [] }, true)
     ).toEqual([])
+  })
+})
+
+describe('sanitizeKeybindingOverrides', () => {
+  it('passes through a clean override map', () => {
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+T'] }, true)
+    expect(r).toEqual({ overrides: { 'node.newTerminal': ['Cmd+Shift+T'] }, warnings: [] })
+  })
+  it('canonicalizes spellings', () => {
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['shift+cmd+t'] }, true)
+    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+  })
+  it('drops unknown ids with a warning, keeps the rest', () => {
+    const r = sanitizeKeybindingOverrides(
+      { 'node.selfDestruct': ['Cmd+X'], 'canvas.undo': [] }, true
+    )
+    expect(r.overrides).toEqual({ 'canvas.undo': [] })
+    expect(r.warnings.some((w) => w.includes('node.selfDestruct'))).toBe(true)
+  })
+  it('drops an invalid binding string but keeps valid siblings', () => {
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+T', 'T'] }, true)
+    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+    expect(r.warnings.length).toBe(1)
+  })
+  it('a non-empty list that is entirely invalid falls back to defaults, not disabled', () => {
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['T', '+++'] }, true)
+    expect(r.overrides).toEqual({})
+    expect(r.warnings.length).toBeGreaterThan(0)
+  })
+  it('an explicit empty array still means disabled', () => {
+    expect(sanitizeKeybindingOverrides({ 'canvas.undo': [] }, true).overrides).toEqual({
+      'canvas.undo': []
+    })
+  })
+  it('strips BOTH sides of a conflicting override pair, naming the titles', () => {
+    const r = sanitizeKeybindingOverrides(
+      { 'canvas.fitAll': ['Cmd+P'], 'canvas.groupSelection': ['Cmd+P'] }, true
+    )
+    expect(r.overrides).toEqual({})
+    expect(r.warnings.some((w) =>
+      w.includes('Fit all nodes in view') && w.includes('Group selection')
+    )).toBe(true)
+  })
+  it('an override conflicting with a DEFAULT strips only the override', () => {
+    const r = sanitizeKeybindingOverrides({ 'canvas.fitAll': ['Cmd+K'] }, true)
+    expect(r.overrides).toEqual({})
+    expect(r.warnings.some((w) => w.includes('Command palette'))).toBe(true)
+  })
+  it('non-object / non-array shapes degrade to empty with a warning', () => {
+    expect(sanitizeKeybindingOverrides('nope', true).overrides).toEqual({})
+    expect(sanitizeKeybindingOverrides({ 'canvas.undo': 'Cmd+Z' }, true).overrides).toEqual({})
+  })
+  it('is a fixpoint: sanitizing its own output adds nothing', () => {
+    const once = sanitizeKeybindingOverrides(
+      { 'canvas.fitAll': ['Cmd+P'], 'node.newTerminal': ['Cmd+Shift+T'] }, true
+    )
+    const twice = sanitizeKeybindingOverrides(once.overrides, true)
+    expect(twice).toEqual({ overrides: once.overrides, warnings: [] })
   })
 })

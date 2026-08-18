@@ -253,3 +253,63 @@ export function findKeybindingConflicts(
   }
   return conflicts
 }
+
+/** Validate a raw `settings.keybindings` value (hand-editable JSON) into a safe override map.
+ *  Loops until conflict-free so one bad edit cannot leave ambiguous dispatch. The load path
+ *  applies the result and warns; the Settings UI runs the same function pre-save and BLOCKS
+ *  instead — one detector, two surfacings (design.md D3). */
+export function sanitizeKeybindingOverrides(
+  raw: unknown,
+  isMac: boolean
+): { overrides: KeybindingOverrides; warnings: string[] } {
+  const warnings: string[] = []
+  const overrides: Partial<Record<CommandId, string[]>> = {}
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    if (raw !== undefined && raw !== null) warnings.push('keybindings must be an object; ignored.')
+    return { overrides, warnings }
+  }
+  for (const [id, value] of Object.entries(raw)) {
+    if (!isCommandId(id)) {
+      warnings.push(`Unknown command "${id}" ignored.`)
+      continue
+    }
+    if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+      warnings.push(`Bindings for "${id}" must be an array of strings; ignored.`)
+      continue
+    }
+    const def = COMMANDS_BY_ID.get(id)!
+    const normalized: string[] = []
+    for (const s of value as string[]) {
+      const r = normalizeBindingForCommand(def, s, isMac)
+      if (r.ok) {
+        if (!normalized.includes(r.value)) normalized.push(r.value)
+      } else {
+        warnings.push(`Binding "${s}" for "${id}" ignored: ${r.error}`)
+      }
+    }
+    // A list that HAD entries and lost every one of them falls back to defaults rather than
+    // being stored as `[]`: `[]` means "disabled", so a typo in a hand-edited settings.json
+    // would silently turn a working shortcut off. An explicit `[]` in the input still disables.
+    if (value.length > 0 && normalized.length === 0) {
+      warnings.push(`All bindings for "${id}" were invalid; falling back to defaults.`)
+      continue
+    }
+    overrides[id] = normalized
+  }
+  // Strip overridden participants of any remaining conflict until none are left. Bounded:
+  // each pass removes at least one override or exits.
+  for (;;) {
+    const conflicts = findKeybindingConflicts(overrides, isMac)
+    if (conflicts.length === 0) break
+    for (const conflict of conflicts) {
+      const titles = conflict.commandIds
+        .map((cid) => COMMANDS_BY_ID.get(cid)?.title ?? cid)
+        .join(', ')
+      warnings.push(`Conflicting shortcut ${conflict.binding} between: ${titles}. Overrides dropped.`)
+      for (const cid of conflict.commandIds) {
+        if (overrides[cid] !== undefined) delete overrides[cid]
+      }
+    }
+  }
+  return { overrides, warnings }
+}
