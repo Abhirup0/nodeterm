@@ -21,7 +21,20 @@ export const IPC = {
   /** The foreground command of a node's tmux pane (`#{pane_current_command}`) — how the in-place
    *  agent restart sees that the CLI has exited and a shell owns the pane again. */
   ptyPaneCommand: 'pty:pane-command',
+  /** Renderer → core: SIGTERM the non-shell foreground process group in this node's pane.
+   *  Model switching uses this instead of typing an exit slash-command into an agent composer. */
+  ptyTerminateForeground: 'pty:terminate-foreground',
   ptyReadSessionName: 'pty:read-session-name',
+  /** Shell → renderer: this MACHINE's pty-device pressure band changed (core/pty-pressure.ts).
+   *  Payload: `PtyPressure` — `{ level, usage, ceiling }`. Sent on band CHANGES only, and re-sent
+   *  for a held band at most once every five minutes; `level: 'none'` is what clears the banner.
+   *  Desktop only — see the Server Edition note beside the monitor in src/server/index.ts. */
+  ptyPressure: 'pty:pressure',
+  /** Renderer → main: the user clicked "Fix automatically…" on the pty-pressure banner. Raises
+   *  `kern.tty.ptmx_max` now AND installs a LaunchDaemon so it survives reboot, via ONE
+   *  administrator-privileges osascript (macOS's own password dialog). Resolves
+   *  `PtyLimitFixResult`. NEVER invoked on the app's own initiative — see main/ptmx-limit.ts. */
+  ptyRaiseDeviceLimit: 'pty:raise-device-limit',
   claudeReadTranscript: 'claude:read-transcript',
   chatReadTranscript: 'chat:read-transcript',
   claudeAccountsAdd: 'claude-accounts:add',
@@ -29,18 +42,57 @@ export const IPC = {
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
   claudeCliCaps: 'claude-cli:caps',
+  /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
+  codexIdentityCaps: 'codex-identity:caps',
+  /** main/server → renderer: a Codex node's identity mode changed ('shared' | 'plain'). The
+   *  'plain' events are what make the launcher's fallback visible instead of silent. */
+  codexIdentity: 'codex-identity:event',
+  /** Renderer → main: a snapshot of the main process's `process.env`, used to expand `${env:VAR}`
+   *  tokens in custom-agent launch commands and the Settings preview (the renderer has no
+   *  `process.env` of its own). Values are strings; undefined entries are omitted.
+   *  DESKTOP-WINDOW-ONLY: registered via raw `ipcMain.handle`, never `platform().handle` — a
+   *  peer-dispatchable full-env dump is the credential-leak class PR #195 closed. The
+   *  browser/relay bridges answer `{}` locally and expansion degrades to the missing-env
+   *  refusal. */
+  envSnapshot: 'env:snapshot',
+  /** Renderer → core: fetch an OpenAI-compatible model catalogue without browser CORS. */
+  agentDiscoverModels: 'agent:discover-models',
+  /** Renderer → core secret boundary for a literal model-gateway API key. The value is write-only;
+   *  status returns only presence + storage protection. */
+  agentGatewayCredentialStatus: 'agent:gateway-credential-status',
+  agentGatewayCredentialSave: 'agent:gateway-credential-save',
+  agentGatewayCredentialClear: 'agent:gateway-credential-clear',
   transcriptSearch: 'transcript:search',
   appToggleMarkdown: 'app:toggle-markdown',
   appCloseNode: 'app:close-node',
+  /** main → renderer: ⌘/Ctrl+0 ("actual size"). Intercepted in `before-input-event` because
+   *  Electron's default View menu binds that accelerator to `resetZoom`, which resets the WINDOW's
+   *  page zoom rather than the canvas's. */
+  appZoomActualSize: 'app:zoom-actual-size',
   appCloseWindow: 'app:close-window',
+  /** Main → renderer: the native application menu's "Settings…" item (⌘,) was clicked. The
+   *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */
+  appOpenSettings: 'app:open-settings',
   appFocusWindow: 'app:focus-window',
+  /** Native View menu → renderer: toggle the Snap-to-Grid arrange mode. */
+  appToggleAutoAlign: 'app:toggle-auto-align',
+  /** Native View menu → renderer: fit the canvas to its nodes. */
+  appFitView: 'app:fit-view',
+  /** Native View menu → renderer: toggle the kanban / canvas view. */
+  appToggleKanban: 'app:toggle-kanban',
   /** Write text to the system clipboard from the MAIN process. Renderer-side `clipboard` access is
    *  deprecated in Electron; the renderer sends this instead (fire-and-forget). */
   clipboardWrite: 'clipboard:write',
+  /** Copy local files as file references (not bytes/text) to the macOS system clipboard. */
+  clipboardWriteFiles: 'clipboard:write-files',
   appNotify: 'app:notify',
   appOpenNotificationSettings: 'app:open-notification-settings',
   appFocusNode: 'app:focus-node',
   appSetBadge: 'app:set-badge',
+  /** Main → renderer: the host (or this process's own RSS) crossed a memory-pressure watermark,
+   *  so the renderer should run its reclaim levers now (hidden WebGL contexts, parked terminals).
+   *  Payload: `'warning' | 'critical'`. Re-fired at most once a minute — see core/memory-pressure. */
+  appMemoryPressure: 'app:memory-pressure',
   agentStatus: 'agent:status',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
@@ -63,12 +115,18 @@ export const IPC = {
   /** hud → main: a HUD row was clicked — focus the node in nodeterm + clear its done latch.
    *  Arg: `nodeId: string`. Reuses the notification-click focus path. */
   hudFocusNode: 'hud:focus-node',
-  /** hud → main: the panel expanded/collapsed. `true` clears every done latch (you looked). */
+  /** hud → main: the panel expanded/collapsed. Arg: `expanded: boolean`. Marks NOTHING as read —
+   *  the handler is deliberately a no-op (notch-hud.ts `onExpanded`). It used to clear every done
+   *  latch ("you looked"), which with three finished sessions waiting meant opening the panel and
+   *  clicking one silently swallowed the other two. Read is strictly per row: `hudFocusNode` clears
+   *  that row, `hudDismiss` hides one by hand. Still wired because the expand state may drive more
+   *  main-side behavior later. */
   hudExpanded: 'hud:expanded',
   /** hud → main: dismiss one HUD row by hand (a stuck session). Arg: `nodeId: string`. */
   hudDismiss: 'hud:dismiss',
   agentControl: 'agent:control',
   agentControlResult: 'agent:control-result',
+  agentMessageDeliver: 'agent:message-deliver',
   /** Canvas sync: a client casts its local node mutations here; the core reflector
    *  (src/core/canvas-sync.ts) stamps each with the total order (`seq`) and sends it back out on the
    *  SAME channel to EVERY attached client — the sender included, whose copy is its ack (see
@@ -78,6 +136,16 @@ export const IPC = {
   contextLinkInfo: 'context-link:info',
   /** Board-log (`.nodeterm/board-log.jsonl`): request/response append + read, routed per project
    *  (local cwd / desktop-ssh / unsupported) in core/board-log-handlers.ts. */
+  /** Debug log panel (issue #78) — invoke: the whole ring (LogRecord[]) for the initial fill. */
+  logSnapshot: 'log:snapshot',
+  /** Fire-and-forget ref-counted subscribe/unsubscribe for the batched logBatch pushes. */
+  logSubscribe: 'log:subscribe',
+  logUnsubscribe: 'log:unsubscribe',
+  /** main→renderer push: a LogRecord[] batch. Flows only while ≥1 panel is subscribed AND the
+   *  debugLogPanel setting is on; the client dedupes by seq. */
+  logBatch: 'log:batch',
+  /** Fire-and-forget: empty the ring. */
+  logClear: 'log:clear',
   boardLogAppend: 'board-log:append',
   boardLogRead: 'board-log:read',
   /** Fire-and-forget ref-counted subscribe/unsubscribe: the first subscriber for a project starts
@@ -100,6 +168,8 @@ export const IPC = {
   licenseStatus: 'license:status',
   licenseChanged: 'license:changed',
   licenseUpgrade: 'license:upgrade',
+  licenseDetail: 'license:detail',
+  licenseRelease: 'license:release',
   appRestartToUpdate: 'app:restart-to-update',
   announcementsFetch: 'announcements:fetch',
   usageFetch: 'usage:fetch',
@@ -115,6 +185,13 @@ export const IPC = {
   usageSetProviderCookie: 'usage:set-provider-cookie',
   /** Which cookie providers have one stored — lets the UI show state without handling secrets. */
   usageCookieProviders: 'usage:cookie-providers',
+  /** Per-session memory breakdown for the scoped machine. On demand only — never polled: the
+   *  local sweep walks the whole process table, and the SSH one is an exec on someone else's
+   *  host. */
+  sessionMemory: 'session-memory:read',
+  /** The scoped machine's RAM (available/total) — the cheap read behind the system-resource
+   *  pill. Safe to poll locally; NOT polled for an SSH scope. */
+  sessionMemoryHost: 'session-memory:host',
   contextUpdate: 'context:update',
   contextEnsure: 'context:ensure',
   // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the
@@ -163,6 +240,8 @@ export const IPC = {
   workspaceProbeFolder: 'workspace:probe-folder',
   // main → renderer events
   workspaceMigrated: 'workspace:migrated',
+  /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */
+  workspaceCorruptRecovered: 'workspace:corrupt-recovered',
   workspaceExternalChange: 'workspace:external-change',
   githubIssuesSubscribe: 'githubIssues:subscribe',
   githubIssuesUnsubscribe: 'githubIssues:unsubscribe',
@@ -193,6 +272,8 @@ export const IPC = {
   filesDownloadTicket: 'files:download-ticket',
   /** Persist pasted/dropped bytes that have no path here, and answer their absolute path. */
   filesSaveUpload: 'files:save-upload',
+  /** Write a canvas image into the project's own `.nodeterm/images/` (see core/canvas-images.ts). */
+  filesSaveCanvasImage: 'files:save-canvas-image',
   settingsLoad: 'settings:load',
   settingsSave: 'settings:save',
   sshList: 'ssh:list',
@@ -215,6 +296,7 @@ export const IPC = {
   sshFsWrite: 'sshFs:write',
   sshFsMkdir: 'sshFs:mkdir',
   sshFsExists: 'sshFs:exists',
+  sshFsQuickOpen: 'sshFs:quick-open',
   sshProjectStatus: 'ssh-project:status',
   /** main → renderer: an SSH project's identity file is passphrase-protected and the ssh-agent
    *  does not hold the key (or the last answer was wrong), so show a prompt.

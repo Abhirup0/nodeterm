@@ -18,7 +18,7 @@ import type { SshServer } from '@shared/ssh'
 
 const SERVER: SshServer = { id: 's1', label: 'testbox', host: 'h.example.com', user: 'u' }
 
-describe('SshProjectDialog browse-master teardown', () => {
+describe('SshProjectDialog', () => {
   let root: Root | undefined
   let host: HTMLElement
   let connect: ReturnType<typeof vi.fn>
@@ -65,6 +65,82 @@ describe('SshProjectDialog browse-master teardown', () => {
     if (!b) throw new Error(`no button containing "${text}"`)
     return b
   }
+  const setInputValue = (input: HTMLInputElement, value: string): void => {
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, value)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+  const serverButtons = (): HTMLButtonElement[] =>
+    [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Saved SSH servers"] button')]
+
+  it('keeps a large server collection in its own scroll region above the actions', () => {
+    useSshServers.setState({
+      servers: Array.from({ length: 25 }, (_, index) => ({
+        id: `server-${index}`,
+        label: `Server ${index}`,
+        host: `host-${index}.example.com`,
+        user: 'matt'
+      }))
+    })
+    render()
+
+    const list = document.querySelector<HTMLElement>('[aria-label="Saved SSH servers"]')
+    expect(list).not.toBeNull()
+    if (!list) return
+    const cancel = buttonByText('Cancel')
+    expect(serverButtons()).toHaveLength(25)
+    expect(list.style.flex).toBe('1 1 auto')
+    expect(list.style.minHeight).toBe('0px')
+    expect(list.style.overflowY).toBe('auto')
+    expect(serverButtons().every((button) => button.style.flexShrink === '0')).toBe(true)
+    expect(list.contains(cancel)).toBe(false)
+    expect(cancel.parentElement?.style.flexShrink).toBe('0')
+    expect(list.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('filters saved servers by label, host, user, and user-at-host without case sensitivity', () => {
+    useSshServers.setState({
+      servers: [
+        { id: 'prod', label: 'Production', host: 'api.example.com', user: 'deploy' },
+        { id: 'stage', label: 'Staging', host: 'stage.internal', user: 'ubuntu' }
+      ]
+    })
+    render()
+    const filter = document.querySelector<HTMLInputElement>('[aria-label="Filter saved SSH servers"]')
+    expect(filter).not.toBeNull()
+    if (!filter) return
+
+    setInputValue(filter, 'PRODUCTION')
+    expect(serverButtons().map((button) => button.textContent)).toEqual([
+      expect.stringContaining('Production')
+    ])
+    setInputValue(filter, '  API.EXAMPLE.COM  ')
+    expect(serverButtons().map((button) => button.textContent)).toEqual([
+      expect.stringContaining('Production')
+    ])
+    setInputValue(filter, 'UBUNTU')
+    expect(serverButtons().map((button) => button.textContent)).toEqual([
+      expect.stringContaining('Staging')
+    ])
+    setInputValue(filter, 'ubuntu@stage.internal')
+    expect(serverButtons().map((button) => button.textContent)).toEqual([
+      expect.stringContaining('Staging')
+    ])
+    setInputValue(filter, '')
+    expect(serverButtons()).toHaveLength(2)
+  })
+
+  it('shows a no-results message instead of server rows when the filter has no match', () => {
+    render()
+    const filter = document.querySelector<HTMLInputElement>('[aria-label="Filter saved SSH servers"]')
+    expect(filter).not.toBeNull()
+    if (!filter) return
+    setInputValue(filter, 'missing-host')
+    expect(serverButtons()).toHaveLength(0)
+    expect(document.body.textContent).toContain('No saved servers match')
+  })
 
   it('cancelling DURING connecting still tears the browse master down (mark-before-await)', () => {
     const onClose = render()
@@ -92,5 +168,89 @@ describe('SshProjectDialog browse-master teardown', () => {
     click(buttonByText('Cancel')) // the pick step's Cancel: no connect was ever issued
     expect(disconnect).not.toHaveBeenCalled()
     expect(onClose).toHaveBeenCalled()
+  })
+})
+
+// Where the browse LANDS when the machine has a default folder configured. `listDir` cannot report
+// a missing directory — it echoes the path back with `dirs: []` whether the folder is gone or
+// merely empty — so existence is checked against the PARENT's listing. Getting that wrong drops
+// the user into a nonexistent path with "Use this folder" enabled.
+describe('SshProjectDialog default folder', () => {
+  let root: Root | undefined
+  let host: HTMLElement
+  let listDir: ReturnType<typeof vi.fn>
+
+  const WITH_DEFAULT: SshServer = { ...SERVER, remoteCwd: '/home/u/projects/app' }
+
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    listDir = vi.fn(async (_id: string, dir: string) => ({ path: dir, dirs: [] }))
+    ;(window as unknown as { nodeTerminal: unknown }).nodeTerminal = {
+      sshProject: {
+        connect: vi.fn(async () => ({ controlPath: '/tmp/cm' })),
+        disconnect: vi.fn(async () => {}),
+        listDir,
+        mkdir: vi.fn(async () => true)
+      }
+    }
+    useSshServers.setState({ servers: [WITH_DEFAULT] })
+  })
+
+  afterEach(() => {
+    act(() => root?.unmount())
+    root = undefined
+    host.remove()
+  })
+
+  const open = async (): Promise<void> => {
+    root = createRoot(host)
+    await act(async () => {
+      root!.render(<SshProjectDialog onCreate={vi.fn()} onManage={vi.fn()} onClose={vi.fn()} />)
+    })
+    await act(async () => {
+      const row = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('testbox')
+      )!
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+  }
+
+  it('lands in the configured default folder when it exists', async () => {
+    listDir.mockImplementation(async (_id: string, dir: string) => ({
+      path: dir,
+      dirs: dir === '/home/u/projects' ? ['app'] : []
+    }))
+
+    await open()
+
+    expect(listDir).toHaveBeenCalledWith(expect.any(String), '/home/u/projects/app')
+  })
+
+  it('an EMPTY default folder is still the right place to land', async () => {
+    // The regression a `dirs.length === 0` test would introduce: a real, empty default folder is
+    // indistinguishable from a missing one by its own listing, so it must be judged by the parent.
+    listDir.mockImplementation(async (_id: string, dir: string) => ({
+      path: dir,
+      dirs: dir === '/home/u/projects' ? ['app'] : []
+    }))
+
+    await open()
+
+    const landed = listDir.mock.calls.at(-1)
+    expect(landed?.[1]).toBe('/home/u/projects/app')
+  })
+
+  it('falls back to ~ when the configured default is gone', async () => {
+    // The parent lists without it: the folder was renamed or deleted on the host since it was set.
+    listDir.mockImplementation(async (_id: string, dir: string) => ({
+      path: dir,
+      dirs: dir === '/home/u/projects' ? ['something-else'] : []
+    }))
+
+    await open()
+
+    expect(listDir).not.toHaveBeenCalledWith(expect.any(String), '/home/u/projects/app')
+    expect(listDir.mock.calls.at(-1)?.[1]).toBe('~')
   })
 })

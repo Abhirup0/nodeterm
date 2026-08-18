@@ -10,6 +10,7 @@ export type SettingsSectionId =
   | 'usage'
   | 'accounts'
   | 'custom-agents'
+  | 'model-gateway'
   | 'notifications'
   | 'commit'
   | 'tmux'
@@ -21,6 +22,7 @@ export type SettingsSectionId =
   | 'ssh'
   | 'updates'
   | 'privacy'
+  | 'debug'
 
 export interface SettingsSectionRef {
   id: SettingsSectionId
@@ -45,6 +47,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'agents', title: 'Agents' },
       { id: 'accounts', title: 'Accounts' },
       { id: 'custom-agents', title: 'Custom agents' },
+      { id: 'model-gateway', title: 'Model gateway' },
       { id: 'usage', title: 'Usage' },
       { id: 'commit', title: 'Commit messages' }
     ]
@@ -87,7 +90,8 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     sections: [
       { id: 'license', title: 'License' },
       { id: 'updates', title: 'Updates' },
-      { id: 'privacy', title: 'Privacy' }
+      { id: 'privacy', title: 'Privacy' },
+      { id: 'debug', title: 'Debug' }
     ]
   }
 ]

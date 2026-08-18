@@ -66,6 +66,26 @@ at it (`NODETERM_HOOK_ENDPOINT`) along with `NODETERM_NODE_ID`. So the design ru
    installed. It now mirrors the local `hookServer.buildPtyEnv` exactly, `canControlCanvas`
    gate included.
 
+### Flag syntax, and why a verb must not depend on it
+
+Flags are `--flag value` or `--flag=value`, and a flag may carry no value at all, anywhere on the
+line. The `=` form is the **only** way to pass a value that itself starts with `--`
+(`open-terminal --cmd=--version`); written as two tokens, a leading `--` is read as the next flag,
+so `--text --oops` sends an empty `--text` plus a stray `--oops`.
+
+That is a deliberate trade. The loop used to consume the token after any `--flag`
+*unconditionally*, so `--read --node b1` became `arg.read=--node` with `b1` dropped, and a
+valueless flag was expressible only as the last token on the line. Both failures were **silent** —
+the request stayed well-formed and the server answered about the wrong flag, which sends the next
+debugger to the verb table instead of to the shim.
+
+**The staleness window this lives in:** the shim is rewritten locally at every app boot, but onto
+an SSH host only inside `RemoteHooks.setup()`, i.e. **on connect**. An already-connected SSH
+project keeps the shim it was handed, so a parser improvement reaches remote agent nodes only
+after a reconnect, with nothing on the wire to say which loop is running — the same shape as the
+managed hook script's stale window. New verbs are therefore designed to parse identically under
+both loops: give every flag a value and the old and new loops agree.
+
 ### Gating and failure behavior
 
 Install is gated on **both** a resolved remote `$HOME` (every remote path must be absolute — a

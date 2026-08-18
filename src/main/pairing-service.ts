@@ -34,7 +34,7 @@ import {
   type PublicDevice,
   type RelayPairingBlock
 } from './pairing-core'
-import type { Settings } from '../shared/types'
+import type { DeviceRevokeResult, DeviceRevokeServerOutcome, Settings } from '../shared/types'
 import { publicKeyToB64, deriveSharedKey, encrypt, decrypt, type KeyPair } from './remote/e2ee'
 import { hostIdFromPublicKeyB64 } from './remote/relay-id'
 import { getDeviceId } from '../core/device-id'
@@ -69,7 +69,17 @@ interface RelayDeviceResponse {
 /** Mint a relay device token so a freshly-paired phone can reach this host over the relay. */
 async function mintRelayDevice(
   apiBase: string,
-  body: { entitlement: string | null; deviceId: string; hostPublicKeyB64: string; label?: string }
+  body: {
+    entitlement: string | null
+    deviceId: string
+    hostPublicKeyB64: string
+    label?: string
+    /** The phone's previous device token, relayed from the pair request: the backend's C2
+     *  proof-of-possession demands it for FREE-tier re-registration — without it every free
+     *  re-pair 403'd into a silent LAN-only pairing (the desktop can never hold this token
+     *  itself; only the phone can supply it). */
+    priorDeviceToken?: string
+  }
 ): Promise<RelayDeviceResponse | null> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 8000)
@@ -79,8 +89,17 @@ async function mintRelayDevice(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(
         body.entitlement
-          ? body
-          : { deviceId: body.deviceId, hostDeviceId: getDeviceId(), hostPublicKeyB64: body.hostPublicKeyB64, label: body.label }
+          ? // hostDeviceId rides the ENTITLED mint too: without it the row lands with
+            // hostDev=null and the backend's same-desktop C2 allowance can never match a
+            // later free re-pair from this same machine (decoded live from a reauth log).
+            { ...body, hostDeviceId: getDeviceId() }
+          : {
+              deviceId: body.deviceId,
+              hostDeviceId: getDeviceId(),
+              hostPublicKeyB64: body.hostPublicKeyB64,
+              label: body.label,
+              priorDeviceToken: body.priorDeviceToken
+            }
       ),
       signal: ctrl.signal
     })
@@ -90,6 +109,51 @@ async function mintRelayDevice(
     return { deviceToken: json.deviceToken, hostId: json.hostId ?? '', exp: json.exp ?? 0 }
   } catch {
     return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** How long a revoke waits for the backend before calling it unreachable. */
+const REVOKE_TIMEOUT_MS = 8000
+
+/**
+ * Take a paired phone's Pro entitlement back. Until this existed, Remove was purely local — the
+ * peer key was unpinned and the socket cut, while the server kept minting Pro for that phone
+ * forever.
+ *
+ * Three outcomes, because two cannot tell the truth here:
+ *  - 'ok'      the route answered 204. It is deliberately idempotent and reveals nothing about
+ *              WHICH of its four cases applied (revoked it / unknown device / the row carries a
+ *              'free:'/'apple:' id so there was nothing of ours on it / already revoked) — all
+ *              four mean the phone holds no entitlement of ours, which is what we asked for.
+ *  - 'failed'  we asked and were refused (403 = someone else's row, 401 = the token did not
+ *              verify) or could not reach the server. The caller must NOT report a clean removal.
+ *  - 'skipped' we did not ask, and that is a normal state: a free-tier desktop holds no
+ *              entitlement to sign the request with (and has no Pro of ours on that phone to
+ *              reclaim), or there is no device (and so no row) to name at all.
+ *
+ * `relayDeviceId` is phone-supplied, unvalidated text, so it rides the JSON body — never a URL.
+ */
+export async function revokeRelayDevice(
+  apiBase: string,
+  relayDeviceId: string,
+  entitlement: string | null
+): Promise<DeviceRevokeServerOutcome> {
+  // Authorization for anything that moves a license is the signed entitlement, never a deviceId.
+  if (!entitlement || !relayDeviceId || !apiBase) return 'skipped'
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), REVOKE_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${apiBase}/v1/relay/device/revoke`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: relayDeviceId, entitlement }),
+      signal: ctrl.signal
+    })
+    return res.ok ? 'ok' : 'failed'
+  } catch {
+    return 'failed'
   } finally {
     clearTimeout(timer)
   }
@@ -136,10 +200,22 @@ export interface PairingStartResult {
   payload: string
   /** True when 127.0.0.1:22 accepted a connection — sshd is (probably) running. */
   sshOpen: boolean
+  /** What the QR on screen will mint: 'ok' = carries a relay block, 'dev' = unpackaged build
+   *  (relayAllowed() off — the QR is LAN-only regardless of the toggle), 'off' = toggle off.
+   *  Known at start, so the UI can warn BESIDE the QR instead of after the pairing. */
+  relayPlan: 'ok' | 'dev' | 'off'
 }
 
 /** Fired once when pairing finishes: ok=true → a key was installed, ok=false → timeout/cancel. */
-export type PairingDone = { ok: boolean }
+export type PairingDone = {
+  ok: boolean
+  /** Only on ok=true: did the pairing come with a relay leg? 'off' = toggle disabled,
+   *  'failed' = enabled but the mint failed (the SILENT LAN-only degrade that cost a
+   *  field debugging session — surface it, never swallow it), 'dev' = unpackaged build,
+   *  where relayAllowed() disables the relay regardless of the toggle — a self-builder
+   *  running `npm run dev` would otherwise read 'off' while staring at an ON toggle. */
+  relay?: 'ok' | 'off' | 'failed' | 'dev'
+}
 
 export interface PairingService {
   /** Begin pairing; resolves once the listener is up. `onDone` fires exactly once later. */
@@ -148,8 +224,13 @@ export interface PairingService {
   stop(): void
   /** All paired devices (token stripped) from ~/.nodeterm/agent.json. */
   listDevices(): Promise<PublicDevice[]>
-  /** Revoke a device: drop its agent.json entry AND delete its authorized_keys line. */
-  revokeDevice(id: string): Promise<void>
+  /**
+   * Revoke a device: drop its agent.json entry, delete its authorized_keys line, AND take its Pro
+   * entitlement back on the relay backend. The two legs are reported separately — see
+   * `DeviceRevokeResult`; this never throws, because a failure the caller cannot see is exactly
+   * how the server leg went missing in the first place.
+   */
+  revokeDevice(id: string): Promise<DeviceRevokeResult>
   /** Live re-probe of sshd (127.0.0.1:22), for the Remote Login warning's auto-clear. */
   probeSsh(): Promise<boolean>
 }
@@ -169,22 +250,39 @@ async function readAgentJson(): Promise<Record<string, unknown>> {
   }
 }
 
-/** Write agent.json atomically (0600), creating ~/.nodeterm (0700) if needed. */
-async function writeAgentJson(obj: Record<string, unknown>): Promise<void> {
-  await fs.mkdir(AGENT_DIR, { recursive: true, mode: 0o700 })
-  await fs.chmod(AGENT_DIR, 0o700).catch(() => {})
-  const tmp = `${AGENT_JSON_PATH}.tmp`
-  await fs.writeFile(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 })
-  await fs.chmod(tmp, 0o600).catch(() => {})
-  await fs.rename(tmp, AGENT_JSON_PATH)
-  await fs.chmod(AGENT_JSON_PATH, 0o600).catch(() => {})
-}
+/** Paired with `process.pid` in the temp names below: the counter makes a name unique WITHIN this
+ *  process, the pid makes it unique ACROSS processes (it restarts at 0 in every new one). Same
+ *  scheme as agent-status-mirror's local write (src/core/agent-status-mirror.ts). */
+let writeSeq = 0
 
-/** Persist a device into agent.json, preserving all other fields the host agent wrote. */
-async function persistDevice(entry: DeviceEntry): Promise<void> {
-  const obj = await readAgentJson()
-  const devices = upsertDevice(readDevices(obj), entry)
-  await writeAgentJson({ ...obj, devices })
+/**
+ * Remove agent.json temps no writer in THIS process owns: the legacy fixed `agent.json.tmp`
+ * (written by builds from before per-call names) and any `agent.json.<pid>.<seq>.tmp` whose pid is
+ * not ours. Best effort — a failure here must never break (or skip) the write that follows.
+ *
+ * agent.json is not config: every device entry carries the `agentToken` bearer the phone presents
+ * on the host-agent WebSocket, so an orphan is a live credential at 0600 that nothing will ever
+ * overwrite — a unique name is never written twice. Temps bearing our own pid are untouchable: one
+ * may belong to a concurrent write sitting between its `writeFile` and its `rename`, and deleting
+ * it would recreate the exact race the unique names fixed. A foreign pid can in theory be the HOST
+ * AGENT mid-write; ~/.nodeterm is shared with it and has no lock to begin with, and the worst case
+ * is that process's rename failing cleanly (ENOENT, rethrown to its caller) instead of a forgotten
+ * token file sitting on disk forever.
+ */
+async function sweepStaleAgentTmp(): Promise<void> {
+  try {
+    const base = path.basename(AGENT_JSON_PATH)
+    for (const entry of await fs.readdir(AGENT_DIR)) {
+      if (!entry.startsWith(base) || !entry.endsWith('.tmp')) continue
+      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>'
+      const owner = /^\.(\d+)\.\d+$/.exec(middle)?.[1]
+      if (middle === '' || (owner && owner !== String(process.pid))) {
+        await fs.rm(path.join(AGENT_DIR, entry), { force: true }).catch(() => undefined)
+      }
+    }
+  } catch {
+    // A dir we cannot read is not a reason to fail (or skip) the write below.
+  }
 }
 
 /** Detect the machine's display name (macOS ComputerName, else hostname). */
@@ -244,23 +342,6 @@ async function appendAuthorizedKey(keyLine: string): Promise<void> {
   await fs.chmod(AUTH_KEYS_PATH, 0o600)
 }
 
-/** Delete every authorized_keys line stamped for `deviceId`, rewriting the file atomically (0600). */
-async function removeAuthorizedKeysForDevice(deviceId: string): Promise<void> {
-  let content: string
-  try {
-    content = await fs.readFile(AUTH_KEYS_PATH, 'utf8')
-  } catch {
-    return // no file → nothing to revoke
-  }
-  const next = filterAuthorizedKeys(content, deviceId)
-  if (next === content) return
-  const tmp = `${AUTH_KEYS_PATH}.tmp`
-  await fs.writeFile(tmp, next, { mode: 0o600 })
-  await fs.chmod(tmp, 0o600).catch(() => {})
-  await fs.rename(tmp, AUTH_KEYS_PATH)
-  await fs.chmod(AUTH_KEYS_PATH, 0o600).catch(() => {})
-}
-
 /** Read the whole request body (capped), rejecting oversized payloads. */
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -284,6 +365,93 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
   let server: Server | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   let onDoneCb: ((result: PairingDone) => void) | null = null
+
+  /**
+   * Serializes every mutation of agent.json / authorized_keys. Both are read-modify-write over a
+   * whole file and both entry points are unserialized — each `pairing:revoke-device` invoke is
+   * independent (src/main/index.ts) and the pairing POST arrives on its own connection — so two
+   * overlapping mutations each read the ORIGINAL file and write back a copy carrying only their
+   * own change. The revoke case is the dangerous one: the loser's stale read republishes the
+   * device the winner just revoked, key line and agent token both, so a revoked phone silently
+   * keeps SSH and host-agent access. Same idiom as SshStore's writeChain.
+   */
+  let mutateChain: Promise<void> = Promise.resolve()
+  const serialize = <T>(fn: () => Promise<T>): Promise<T> => {
+    // Both arms run `fn`: one mutation failing must not cancel the ones queued behind it…
+    const run = mutateChain.then(fn, fn)
+    // …nor surface on them, while the caller still sees ITS OWN failure.
+    mutateChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  /**
+   * Write agent.json atomically (0600), creating ~/.nodeterm (0700) if needed.
+   *
+   * Lives INSIDE the factory, below `serialize`, so no code path outside this closure can reach
+   * it unchained — the same by-construction guarantee as GitHubControlStore's private write().
+   * Overlapping entry points (the pairing POST, renderer revokes) are ordered by the chain; the
+   * per-call temp name covers the writers the chain cannot see — the host agent is a separate
+   * PROCESS writing this same ~/.nodeterm (`writeSeq` stays module-level so a second service
+   * instance in THIS process keeps counting instead of restarting into colliding names), and a
+   * crash between tmp-write and rename.
+   */
+  async function writeAgentJson(obj: Record<string, unknown>): Promise<void> {
+    await fs.mkdir(AGENT_DIR, { recursive: true, mode: 0o700 })
+    await fs.chmod(AGENT_DIR, 0o700).catch(() => {})
+    await sweepStaleAgentTmp()
+    const tmp = `${AGENT_JSON_PATH}.${process.pid}.${++writeSeq}.tmp`
+    try {
+      await fs.writeFile(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 })
+      await fs.chmod(tmp, 0o600).catch(() => {})
+      await fs.rename(tmp, AGENT_JSON_PATH)
+    } catch (e) {
+      // A unique name never self-heals the way the fixed one did (the next write just reused it),
+      // and here a leaked temp IS a leaked credential: only this cleanup — or a later run's sweep,
+      // once this pid is dead — will ever collect it. The error still propagates.
+      await fs.rm(tmp, { force: true }).catch(() => {})
+      throw e
+    }
+    await fs.chmod(AGENT_JSON_PATH, 0o600).catch(() => {})
+  }
+
+  /** Persist a device into agent.json, preserving all other fields the host agent wrote. */
+  async function persistDevice(entry: DeviceEntry): Promise<void> {
+    const obj = await readAgentJson()
+    const devices = upsertDevice(readDevices(obj), entry)
+    await writeAgentJson({ ...obj, devices })
+  }
+
+  /**
+   * Delete every authorized_keys line stamped for `deviceId`, rewriting the file atomically
+   * (0600). In the closure below `serialize` for the same by-construction reason as
+   * writeAgentJson; the per-call temp name covers the chain-invisible writers and the crash
+   * window — a spliced line is a key sshd rejects, i.e. the keys that were supposed to SURVIVE
+   * the revoke stop working. No orphan sweep here (unlike agent.json): these are PUBLIC keys, so
+   * a stray temp is litter rather than a credential.
+   */
+  async function removeAuthorizedKeysForDevice(deviceId: string): Promise<void> {
+    let content: string
+    try {
+      content = await fs.readFile(AUTH_KEYS_PATH, 'utf8')
+    } catch {
+      return // no file → nothing to revoke
+    }
+    const next = filterAuthorizedKeys(content, deviceId)
+    if (next === content) return
+    const tmp = `${AUTH_KEYS_PATH}.${process.pid}.${++writeSeq}.tmp`
+    try {
+      await fs.writeFile(tmp, next, { mode: 0o600 })
+      await fs.chmod(tmp, 0o600).catch(() => {})
+      await fs.rename(tmp, AUTH_KEYS_PATH)
+    } catch (e) {
+      // A unique name never self-heals the way the fixed one did (the next write just reused it),
+      // so a failed write has to remove its own temp — otherwise every failed revoke leaves
+      // another orphan copy of the user's key file in ~/.ssh forever. The error still propagates.
+      await fs.rm(tmp, { force: true }).catch(() => {})
+      throw e
+    }
+    await fs.chmod(AUTH_KEYS_PATH, 0o600).catch(() => {})
+  }
 
   const cleanup = (): void => {
     if (timer) {
@@ -396,7 +564,13 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         // {epk, box}. Derive the shared key from the ephemeral public key + our secret and open
         // the box to recover the SAME {token, publicKey, deviceId} JSON. A present-but-undecryptable
         // envelope is a hard 400 — we never fall through to parsing ciphertext as plaintext.
-        let body: { token?: unknown; publicKey?: unknown; deviceName?: unknown; deviceId?: unknown }
+        let body: {
+          token?: unknown
+          publicKey?: unknown
+          deviceName?: unknown
+          deviceId?: unknown
+          priorDeviceToken?: unknown
+        }
         let sealed: Uint8Array | null = null // the shared key, set only on the encrypted path
         if (typeof outer.epk === 'string') {
           if (!hostKeys) {
@@ -429,6 +603,7 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
             publicKey?: unknown
             deviceName?: unknown
             deviceId?: unknown
+            priorDeviceToken?: unknown
           }
         }
         if (body.token !== token) {
@@ -445,27 +620,37 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         const deviceId = randomUUID()
         const agentToken = randomBytes(24).toString('base64url')
         const name = normalizeDeviceName(body.deviceName)
-        await appendAuthorizedKey(rewriteKeyComment(publicKey, deviceId))
-        await persistDevice({
-          id: deviceId,
-          name,
-          token: agentToken,
-          pairedAt: Date.now(),
-          lastSeenAt: 0
+        // The phone's OWN id — the key the relay backend stores its device row under, and the
+        // only one it would recognize in a later revoke. Resolved here rather than at the mint
+        // below so the registry entry can carry it; the fallback (phone sent none ⇒ our id) is
+        // unchanged, and the mint still reads this same value.
+        const phoneDeviceId =
+          typeof body.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : deviceId
+        // One unit, and queued behind any in-flight revoke: a pairing that interleaves with one
+        // would either append onto the inode the revoke is about to rename over, or lose its
+        // agent.json entry to the revoke's stale read.
+        await serialize(async () => {
+          await appendAuthorizedKey(rewriteKeyComment(publicKey, deviceId))
+          await persistDevice({
+            id: deviceId,
+            name,
+            token: agentToken,
+            pairedAt: Date.now(),
+            lastSeenAt: 0,
+            relayDeviceId: phoneDeviceId
+          })
         })
         // Provision relay access for the phone when enabled + Pro. Any failure ⇒ LAN-only: we
         // never fail the pairing over a relay hiccup (the phone still got its SSH key installed).
         let relayFields: { relay?: RelayPairingBlock; relayDeviceToken?: string } = {}
         if (relayCtx) {
-          const phoneDeviceId =
-            typeof body.deviceId === 'string' && body.deviceId.trim()
-              ? body.deviceId.trim()
-              : deviceId
           const minted = await mintRelayDevice(relayDeps!.apiBase, {
             entitlement: relayCtx.entitlement,
             deviceId: phoneDeviceId,
             hostPublicKeyB64: relayCtx.block.hostPublicKeyB64,
-            label: name
+            label: name,
+            priorDeviceToken:
+              typeof body.priorDeviceToken === 'string' ? body.priorDeviceToken : undefined
           })
           if (minted?.deviceToken) {
             relayFields = {
@@ -491,14 +676,27 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         } else {
           send(res, 200, JSON.stringify(responseObj), 'application/json')
         }
-        finish({ ok: true })
+        finish({
+          ok: true,
+          relay: relayCtx
+            ? relayFields.relayDeviceToken
+              ? 'ok'
+              : 'failed'
+            : relayDeps && !relayDeps.relayAllowed()
+              ? 'dev'
+              : 'off'
+        })
       } catch (err) {
         send(res, 500, 'pairing failed')
         console.warn('[pairing] request failed:', err)
       }
     }
 
-    return { payload, sshOpen }
+    return {
+      payload,
+      sshOpen,
+      relayPlan: relayCtx ? 'ok' : relayDeps && !relayDeps.relayAllowed() ? 'dev' : 'off'
+    }
   }
 
   const stop = (): void => {
@@ -510,11 +708,65 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     return toPublicDevices(readDevices(await readAgentJson()))
   }
 
-  const revokeDevice = async (id: string): Promise<void> => {
-    const obj = await readAgentJson()
-    const devices = removeDevice(readDevices(obj), id)
-    await writeAgentJson({ ...obj, devices })
-    await removeAuthorizedKeysForDevice(id)
+  // One unit: agent.json and authorized_keys must not be revoked half-way by an interleaving writer.
+  //
+  // authorized_keys goes FIRST, and the order is load-bearing on partial failure. That file is full
+  // shell access; agent.json holds the host-agent bearer token and the device the UI lists. If the
+  // second step fails, revoking the SSH key first leaves the BIGGER capability already gone and the
+  // device still listed — visible to its owner, with the Revoke button still there to finish the
+  // job. The reverse order fails the other way: the device disappears from the list while its key
+  // is still live, so the owner believes it revoked and has no way left to retry.
+  //
+  // The relay device id is read BEFORE either write and kept even when the local leg fails: the
+  // entitlement is what authorizes the server leg, not the local write's success, and a phone the
+  // user asked to remove should stop being minted Pro either way.
+  const revokeDevice = async (id: string): Promise<DeviceRevokeResult> => {
+    const { local, relayId, found } = await serialize(async () => {
+      const entry = readDevices(await readAgentJson()).find((d) => d.id === id)
+      const relayId = entry?.relayDeviceId
+      const found = !!entry
+      try {
+        await removeAuthorizedKeysForDevice(id)
+        const obj = await readAgentJson()
+        const devices = removeDevice(readDevices(obj), id)
+        await writeAgentJson({ ...obj, devices })
+        return { local: true, relayId, found }
+      } catch (err) {
+        // Reported, not thrown: `local:false` is what the UI turns into "try again", and the
+        // server leg below is still worth running. The detail belongs in the log.
+        console.warn('[pairing] local revoke failed:', err)
+        return { local: false, relayId, found }
+      }
+    })
+    // A device paired before `relayDeviceId` was recorded still falls back to OUR id — which is
+    // not a guess. `id` is the per-pairing `randomUUID()` above, and when the phone sent no id of
+    // its own the mint sent exactly this value as the row's `deviceId` (see `phoneDeviceId`), so
+    // the row really is keyed on it. It is NOT this desktop's machine id (`getDeviceId()`), which
+    // is never a key in `relay_devices` — it lives only in the non-key `host_device_id` column,
+    // and /v1/relay/host-token writes no row at all — so this cannot reach the desktop's own
+    // registration. Nor can it reach a stranger's: the route authorizes by the row's licenseId /
+    // hostDeviceId and answers 403 otherwise, and 204 (no write) for a row carrying a
+    // 'free:'/'apple:' id — which is what keeps an Apple purchase bridged to this desktop safe.
+    //
+    // RESIDUAL LEAK, deliberately not closed here: a pre-Task-12 pairing where the phone DID send
+    // its own id (every iOS build since 2026-07-10 does) has a row keyed by a value we never
+    // recorded, and the backend's 204 reveals nothing — so this reports 'ok' having asked about a
+    // row that is not that phone's, and the phone keeps Pro. The desktop cannot name that row at
+    // all; re-pairing the phone records its id (the phone's id is stable and the mint upserts on
+    // it), after which a removal revokes for real. Closing it properly needs a
+    // server-side "devices for this host" read, which does not exist yet.
+    //
+    // Deliberately OUTSIDE the mutation chain: this is a network round trip, and holding the
+    // agent.json/authorized_keys queue open for it would stall a concurrent pairing POST behind
+    // an unreachable backend. No local state depends on the answer.
+    const server = found
+      ? await revokeRelayDevice(
+          relayDeps?.apiBase ?? '',
+          relayId ?? id,
+          relayDeps?.getEntitlement() ?? null
+        )
+      : 'skipped'
+    return { local, server }
   }
 
   return { start, stop, listDevices, revokeDevice, probeSsh }

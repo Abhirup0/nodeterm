@@ -7,8 +7,9 @@ import { SshProjectManager, lastSshErrorLine } from './ssh-project'
 import { AskpassServer } from './ssh-askpass'
 import { AppSshAgent } from './ssh-agent'
 import { controlPathFor } from '../../core/remote-ssh/control-master'
+import type { SshConnection } from '@shared/ssh'
 
-const conn = { host: 'h', user: 'u' }
+const conn: SshConnection = { host: 'h', user: 'u' }
 
 function makeMgr() {
   const statuses: string[] = []
@@ -165,6 +166,55 @@ describe('SshProjectManager', () => {
     expect(write).toBeDefined()
     expect(write?.stdin).toContain('set -g mouse on')
     expect(calls.some((c) => c.args.join(' ').includes(`source-file '/home/u/.nodeterm/tmux.conf'`))).toBe(true)
+  })
+
+  /**
+   * SECURITY — the remote `$HOME` is a HOST ANSWER, i.e. data. Both places `ssh-project` reads it
+   * validate it (`isSafeRemoteHome`) before it becomes a remote path: `connect`, where it steers
+   * the tmux.conf write AND is retained as `remoteHome` (which the PTY manager then splices into a
+   * tmux `-e CLAUDE_CONFIG_DIR=…` pair), and `uploadFile`, which resolves it on demand.
+   *
+   * These two sites had NO test in the first version of this fix — reverting them left the suite
+   * green, which made the mutation claim wrong. That is what these pin.
+   */
+  const mgrWithHome = (home: string) => {
+    const calls: { args: string[]; stdin?: string }[] = []
+    const run = vi.fn(async (args: string[], stdin?: string) => {
+      calls.push({ args, stdin })
+      return args.join(' ').includes('printf %s') ? { code: 0, stdout: home } : { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    return { mgr, calls }
+  }
+
+  it('connect REFUSES a remote $HOME carrying a newline (no path built, nothing retained)', async () => {
+    const { mgr, calls } = mgrWithHome('/home/u\nid > /tmp/pwned')
+    const { tmuxConfPath } = await mgr.connect('p1', conn)
+    // Fail-open: the features needing an absolute home are off, the connection itself still works.
+    expect(tmuxConfPath).toBeUndefined()
+    expect(mgr.remoteHomeFor('p1')).toBeUndefined()
+    // and the hostile bytes reached no remote command line.
+    expect(calls.some((c) => c.args.join(' ').includes('id > /tmp/pwned'))).toBe(false)
+  })
+
+  it('connect ACCEPTS a home with a space (the validator must not break real macOS homes)', async () => {
+    const { mgr } = mgrWithHome('/Users/Enes Kirca')
+    const { tmuxConfPath } = await mgr.connect('p1', conn)
+    expect(tmuxConfPath).toBe('/Users/Enes Kirca/.nodeterm/tmux.conf')
+    expect(mgr.remoteHomeFor('p1')).toBe('/Users/Enes Kirca')
+  })
+
+  it('uploadFile REFUSES a probed $HOME carrying a newline', async () => {
+    const { mgr } = mgrWithHome('/home/u\nid')
+    await mgr.connect('p1', conn) // connect also refuses it, so upload must re-probe and refuse too
+    expect(await mgr.uploadFile('p1', '/local/f.png', 'f.png')).toBeNull()
   })
 
   it('connect leaves tmuxConfPath undefined when the remote conf write fails (no -f to a missing conf)', async () => {
@@ -756,6 +806,98 @@ describe('SshProjectManager', () => {
       expect(rmSpy).not.toHaveBeenCalled() // nothing to clean
       // Only the connect loop's `-O check` runs, no extra leftover-probe round-trip.
       expect(checks.length).toBeGreaterThanOrEqual(1)
+    })
+  })
+
+  // --- the reverse hook tunnel came back --------------------------------------------------------
+  //
+  // Hook POSTs are fire-and-forget, so every agent event fired while the master was down is gone.
+  // Production hangs the working-agent resync off this hook; the gate it needs is "a master was
+  // genuinely (re-)established", which connect()'s own control flow already answers.
+  describe('tunnel-verified hook', () => {
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    /** A manager whose remote hook tunnel VERIFIES: `$HOME` resolves and the verify curl answers
+     *  204, exactly as in the live-orphan tests above (the shared `makeMgr` runner answers neither,
+     *  so its tunnel never verifies and no endpoint path is ever produced). No leftover socket, so
+     *  connect() takes the ordinary fresh-master path — a genuine establish. */
+    function makeVerifiedMgr(
+      onTunnelVerified: (projectId: string, controlPath: string, conn: SshConnection) => void,
+      httpCode = '204'
+    ) {
+      vi.spyOn(fs, 'mkdir').mockResolvedValue(undefined as never)
+      vi.spyOn(fs, 'stat').mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+      const run = vi.fn(async (args: string[]) => {
+        const j = args.join(' ')
+        if (j.includes('$HOME')) return { code: 0, stdout: '/home/u' }
+        if (j.includes('%{http_code}')) return { code: 0, stdout: httpCode }
+        return { code: 0, stdout: '' }
+      })
+      return new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run,
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn(),
+        onTunnelVerified
+      })
+    }
+
+    it('fires after a genuine re-establish, naming the project, its control path and its connection', async () => {
+      const onTunnelVerified = vi.fn()
+      const mgr = makeVerifiedMgr(onTunnelVerified)
+      await mgr.connect('p1', conn, '/remote/cwd')
+      // The connection rides along because the resync builds its own remote commands with it.
+      expect(onTunnelVerified).toHaveBeenCalledWith('p1', controlPathFor('p1'), conn)
+    })
+
+    it('fires only once the project entry is written — the resync needs the cached remote $HOME', async () => {
+      // Ordering, not decoration. The resync's transcript leg resolves the host's transcript root
+      // through `remoteHomeForControlPath`, and that reads the field off the project entry — which
+      // is created at master spawn WITHOUT it. Firing before the entry update therefore handed the
+      // locator `undefined` every single time, not occasionally. That leg is the only one that can
+      // tell "the CLI still owns the pane but the turn ended" (a finished Claude sitting at its
+      // prompt) from "still working"; without it the feature degrades to catching an exited CLI.
+      let mgr: SshProjectManager | undefined
+      let homeAtHookTime: string | undefined | 'hook-never-fired' = 'hook-never-fired'
+      mgr = makeVerifiedMgr((_projectId, controlPath) => {
+        homeAtHookTime = mgr?.remoteHomeForControlPath(controlPath)
+      })
+      await mgr.connect('p1', conn, '/remote/cwd')
+      expect(homeAtHookTime).toBe('/home/u')
+    })
+
+    it('does NOT fire on the reuse branch — a live master never lost its tunnel', async () => {
+      const onTunnelVerified = vi.fn()
+      const mgr = makeVerifiedMgr(onTunnelVerified)
+      await mgr.connect('p1', conn, '/remote/cwd')
+      onTunnelVerified.mockClear()
+      await mgr.connect('p1', conn, '/remote/cwd') // `-O check` answers → early return
+      expect(onTunnelVerified).not.toHaveBeenCalled()
+    })
+
+    it('does NOT fire when the tunnel failed verification (there is nothing to resync through)', async () => {
+      const onTunnelVerified = vi.fn()
+      const mgr = makeVerifiedMgr(onTunnelVerified, '000') // dead listener → setup() returns null
+      await mgr.connect('p1', conn, '/remote/cwd')
+      expect(onTunnelVerified).not.toHaveBeenCalled()
+    })
+
+    it('a THROWING hook still leaves the connect successful — the resync is never load-bearing', async () => {
+      // The contract is structural, not a property of today's callback: what this hook drives will
+      // grow, and a throw inside it must never surface to the user as a dead SSH project. Same rule
+      // as `onStatus` above, which used to abort connect() mid-flight.
+      const mgr = makeVerifiedMgr(() => {
+        throw new Error('resync blew up')
+      })
+      const res = await mgr.connect('p1', conn, '/remote/cwd')
+      expect(res.controlPath).toBe(controlPathFor('p1'))
+      // Everything AFTER the hook still ran: the connect result is complete, not truncated.
+      expect(res.hookEndpointPath).toBe('/home/u/.nodeterm/hook-endpoint-p1.env')
+      expect(res.remoteHome).toBe('/home/u')
     })
   })
 
@@ -1875,5 +2017,96 @@ describe('lastSshErrorLine', () => {
     const out = lastSshErrorLine(long)!
     expect(out.endsWith('…')).toBe(true)
     expect(out.length).toBeLessThanOrEqual(201)
+  })
+})
+
+/**
+ * Remote nodes were permanently `legacy`: the endpoint file advertised
+ * `$HOME/.nodeterm/node-tokens` and nothing ever wrote it. The connect is where that dir gets
+ * filled, on exactly the terms the canvas-control install already uses.
+ */
+describe('SshProjectManager — per-node tokens on the host', () => {
+  /** A runner for a connect whose reverse hook tunnel VERIFIES (curl answers 204), which is what
+   *  sets `hookEndpointPath` — the gate the token write shares with the canvas-control install. */
+  function verifiedRun() {
+    return vi.fn(async (args: string[], _stdin?: string) => {
+      const j = args.join(' ')
+      if (j.includes('$HOME')) return { code: 0, stdout: '/home/u' }
+      if (j.includes('%{http_code}')) return { code: 0, stdout: '204' }
+      return { code: 0, stdout: '' }
+    })
+  }
+  /** The connect fires the write without awaiting it (best-effort setup must not delay a
+   *  terminal), so the assertions run after the microtask queue drains. */
+  const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
+
+  afterEach(() => vi.restoreAllMocks())
+
+  it('materialises every canvas node id on the host, tokens on STDIN', async () => {
+    const run = verifiedRun()
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn(),
+      nodeIdsForProject: (id) => (id === 'p1' ? ['node-1', 'node-2'] : []),
+      nodeTokenMinter: () => (nodeId) => `kid12345.mac-of-${nodeId}`
+    })
+    await mgr.connect('p1', conn)
+    await settle()
+    const cmds = run.mock.calls.map(([a]) => (a as string[]).join(' '))
+    // tmp + rename (`cat >` truncates, so writing straight at the file leaves an EMPTY token
+    // behind when the host is out of quota or disk — see RemoteHooks.writeNodeTokens).
+    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-1.tmp' '/home/u/.nodeterm/node-tokens/node-1'"))).toBe(true)
+    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-2.tmp' '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
+    // never on a command line — the host's process table is readable by its other users.
+    expect(cmds.some((c) => c.includes('mac-of-node-1'))).toBe(false)
+    const write = run.mock.calls.find(([a]) =>
+      (a as string[]).join(' ').includes("node-tokens/node-1'")
+    )
+    expect(write?.[1]).toBe('kid12345.mac-of-node-1\n')
+  })
+
+  it('writes nothing when this instance has no node-auth secret (legacy everywhere)', async () => {
+    const run = verifiedRun()
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn(),
+      nodeIdsForProject: () => ['node-1'],
+      nodeTokenMinter: () => null
+    })
+    await mgr.connect('p1', conn)
+    await settle()
+    expect(run.mock.calls.some(([a]) => (a as string[]).join(' ').includes('node-tokens'))).toBe(false)
+  })
+
+  it('writeNodeTokenForNode covers a node created AFTER the connect', async () => {
+    const run = verifiedRun()
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn(),
+      nodeIdsForProject: () => [],
+      nodeTokenMinter: () => (nodeId) => `kid12345.mac-of-${nodeId}`
+    })
+    const { controlPath } = await mgr.connect('p1', conn)
+    await settle()
+    run.mockClear()
+    await mgr.writeNodeTokenForNode(controlPath, 'node-9')
+    const cmds = run.mock.calls.map(([a]) => (a as string[]).join(' '))
+    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-9.tmp' '/home/u/.nodeterm/node-tokens/node-9'"))).toBe(true)
+    // an unknown control path is a no-op, not a throw
+    run.mockClear()
+    await expect(mgr.writeNodeTokenForNode('/nope.sock', 'node-9')).resolves.toBeUndefined()
+    expect(run.mock.calls).toHaveLength(0)
   })
 })

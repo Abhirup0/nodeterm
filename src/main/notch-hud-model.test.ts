@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import type { NormalizedAgentEvent } from '@shared/agents/normalize'
 import type { NodeStateChange, NodeNowChange, MirrorFile } from '../core/agent-status-mirror'
+import { PROMPT_MAX, firstLine } from '../core/agent-status-mirror'
 import {
   createHudModel,
   bucketState,
   firstPromptLine,
-  buildIndicator,
+  hudRowRank,
   HUD_STALE_DROP_MS,
   type HudRow,
   WORKING_STALE_MS
@@ -44,6 +45,14 @@ describe('firstPromptLine', () => {
     const clipped = firstPromptLine(long, 10)!
     expect(clipped.length).toBe(10)
     expect(clipped.endsWith('…')).toBe(true)
+  })
+
+  it('clips at the mirror’s PROMPT_MAX by default, so both surfaces say the same sentence', () => {
+    // The HUD row and the phone's Live Activity line are fed by the same seams and must not show
+    // one prompt at two lengths (the HUD used to clip at 140 while the mirror clipped at 120).
+    const clipped = firstPromptLine('y'.repeat(300))!
+    expect(clipped.length).toBe(PROMPT_MAX)
+    expect(clipped).toBe(firstLine('y'.repeat(300), PROMPT_MAX))
   })
 })
 
@@ -203,19 +212,95 @@ describe('6h drop', () => {
   })
 })
 
-describe('buildIndicator + ordering', () => {
-  it('lists distinct working agents and flags done-unseen', () => {
+// The collapsed-indicator aggregation is NOT here: it is the renderer's pure `buildIndicator`
+// (src/renderer/hud/indicator.ts + indicator.test.ts), the only side that draws it.
+describe('row ordering — state priority, never recency', () => {
+  it('ranks needsYou → unread done → working → idle (the sidebar’s section order)', () => {
+    expect(hudRowRank({ state: 'needsYou', unread: false })).toBeLessThan(
+      hudRowRank({ state: 'done', unread: true })
+    )
+    expect(hudRowRank({ state: 'done', unread: true })).toBeLessThan(
+      hudRowRank({ state: 'working', unread: false })
+    )
+    expect(hudRowRank({ state: 'working', unread: false })).toBeLessThan(
+      hudRowRank({ state: 'idle', unread: false })
+    )
+    // A `done` that is no longer unread is not a "new for you" row — it ranks with idle, never
+    // above a session that is still running.
+    expect(hudRowRank({ state: 'done', unread: false })).toBe(hudRowRank({ state: 'idle', unread: false }))
+  })
+
+  it('orders the built rows by tier, regardless of how recently each moved', () => {
     const m = createHudModel()
-    m.applyStateChange(stateChange({ nodeId: 'a', state: 'working', agentId: 'claude', ts: T0 + 1 }))
-    m.applyStateChange(stateChange({ nodeId: 'b', state: 'working', agentId: 'codex', ts: T0 + 2 }))
-    m.applyStateChange(stateChange({ nodeId: 'c', state: 'working', agentId: 'claude', ts: T0 + 3 }))
-    m.applyStateChange(stateChange({ nodeId: 'd', state: 'done', agentId: 'gemini', ts: T0 + 4 }))
+    // Deliberately created oldest-tier-first and with recency running the OTHER way: under the old
+    // `updatedAt` sort this came out exactly reversed.
+    m.applyStateChange(stateChange({ nodeId: 'w1', state: 'working', agentId: 'claude', ts: T0 + 1 }))
+    m.applyStateChange(stateChange({ nodeId: 'd1', state: 'done', agentId: 'gemini', ts: T0 + 2 }))
+    m.applyStateChange(stateChange({ nodeId: 'w2', state: 'working', agentId: 'codex', ts: T0 + 3 }))
+    m.applyStateChange(stateChange({ nodeId: 'n1', state: 'needsYou', agentId: 'claude', ts: T0 + 4 }))
     const rows = m.buildRows(T0 + 10, titleOf)
-    // newest-active first
-    expect(rows.map((r) => r.nodeId)).toEqual(['d', 'c', 'b', 'a'])
-    const ind = buildIndicator(rows)
-    expect(ind.workingAgents.sort()).toEqual(['claude', 'codex'])
-    expect(ind.doneUnseen).toBe(true)
+    expect(rows.map((r) => r.nodeId)).toEqual(['n1', 'd1', 'w1', 'w2'])
+    expect(rows.map((r) => r.state)).toEqual(['needsYou', 'done', 'working', 'working'])
+  })
+
+  it('an activity tick does NOT move a row (the reshuffle regression)', () => {
+    const m = createHudModel()
+    for (const id of ['a', 'b', 'c']) {
+      m.applyStateChange(stateChange({ nodeId: id, state: 'working', agentId: 'claude', ts: T0 }))
+    }
+    const before = m.buildRows(T0, titleOf).map((r) => r.nodeId)
+    expect(before).toEqual(['a', 'b', 'c'])
+    // Every tool call pushes one of these. `updatedAt` moves (it still drives reltime + the
+    // watchdog) — the ROW must not.
+    m.applyNowChange(nowChange({ nodeId: 'c', ts: T0 + 5_000, activity: 'Editing a.ts' }))
+    m.applyNowChange(nowChange({ nodeId: 'b', ts: T0 + 9_000, contextPercent: 12 }))
+    expect(m.buildRows(T0 + 10_000, titleOf).map((r) => r.nodeId)).toEqual(['a', 'b', 'c'])
+    expect(rowFor(m.buildRows(T0 + 10_000, titleOf), 'c')?.updatedAt).toBe(T0 + 5_000)
+  })
+
+  it('breaks ties by first appearance, which no feed event can change', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'first', state: 'working', ts: T0 + 100 }))
+    m.applyStateChange(stateChange({ nodeId: 'second', state: 'working', ts: T0 + 50 }))
+    m.applyStateChange(stateChange({ nodeId: 'third', state: 'working', ts: T0 + 75 }))
+    // Timestamps are shuffled; appearance order is not.
+    expect(m.buildRows(T0 + 200, titleOf).map((r) => r.nodeId)).toEqual(['first', 'second', 'third'])
+    // A subagent burst + a new turn on the youngest row still doesn't hoist it.
+    m.applyAgentEvent({ nodeId: 'third', agentId: 'claude', kind: 'subagent-start', toolUseId: 't1' } as never)
+    m.applyAgentEvent({ nodeId: 'third', agentId: 'claude', kind: 'state', newTurn: true, task: 'go' } as never)
+    expect(m.buildRows(T0 + 300, titleOf).map((r) => r.nodeId)).toEqual(['first', 'second', 'third'])
+    // Only a real STATE move relocates a row — and then only to its new tier.
+    m.applyStateChange(stateChange({ nodeId: 'third', state: 'needsYou', ts: T0 + 400 }))
+    expect(m.buildRows(T0 + 400, titleOf).map((r) => r.nodeId)).toEqual(['third', 'first', 'second'])
+  })
+
+  it('keeps the panel’s first 6 rows STABLE across ticks (what the cap used to churn)', () => {
+    const m = createHudModel()
+    const ids = ['n1', 'n2', 'n3', 'n4', 'n5', 'n6', 'n7']
+    for (const id of ids) {
+      m.applyStateChange(stateChange({ nodeId: id, state: 'working', agentId: 'claude', ts: T0 }))
+    }
+    const window = (): string[] => m.buildRows(T0 + 60_000, titleOf).slice(0, 6).map((r) => r.nodeId)
+    const first = window()
+    expect(first).toEqual(['n1', 'n2', 'n3', 'n4', 'n5', 'n6'])
+    // The 7th session ticking away is exactly what used to evict the 6th row and then hand it back.
+    for (let i = 1; i <= 5; i++) {
+      m.applyNowChange(nowChange({ nodeId: 'n7', ts: T0 + i * 1_000, activity: `step ${i}` }))
+      expect(window()).toEqual(first)
+    }
+  })
+})
+
+describe('unread', () => {
+  it('marks a finished-and-unlooked-at row, and nothing else', () => {
+    const m = createHudModel()
+    m.applyStateChange(stateChange({ nodeId: 'done', state: 'done' }))
+    m.applyStateChange(stateChange({ nodeId: 'busy', state: 'working' }))
+    m.applyStateChange(stateChange({ nodeId: 'ask', state: 'needsYou' }))
+    const rows = m.buildRows(T0, titleOf)
+    expect(rowFor(rows, 'done')?.unread).toBe(true)
+    expect(rowFor(rows, 'busy')?.unread).toBe(false)
+    expect(rowFor(rows, 'ask')?.unread).toBe(false)
   })
 })
 

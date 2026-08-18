@@ -18,15 +18,21 @@ import type { GitHubControlApi, GitHubIssuesApi } from '../../shared/github-issu
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
   type BoardLogApi,
+  type LogApi,
+  type LogRecord,
   type BoardLogReadResult,
   type ChatTranscriptResult,
   type ClaudeApi,
   type ClaudeCliCaps,
+  type CodexApi,
+  type CodexIdentityCaps,
+  UNKNOWN_CODEX_IDENTITY_CAPS,
   type ContextApi,
   type DownloadTicket,
   type FilesApi,
   type FsApi,
   type GitApi,
+  type MemInfo,
   type NodeTerminalApi,
   type PresenceApi,
   type PtyApi,
@@ -36,6 +42,8 @@ import {
   type ProviderUsage,
   type RemoteAccountUsage,
   type RemoteUsageQuery,
+  type SessionMemoryQuery,
+  type SessionMemoryReport,
   type Settings,
   type SpeechApi,
   type SpeechModelInfo,
@@ -200,7 +208,7 @@ const AI_NAMING_UNAVAILABLE = {
  *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
 export function buildRealApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'userDataDir'> {
+): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'agent' | 'userDataDir'> {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
@@ -209,7 +217,9 @@ export function buildRealApi(
       client.cast(IPC.ptyResize, sessionId, cols, rows, viewerId),
     setFlow: (sessionId, resume, viewerId) => client.cast(IPC.ptyFlow, sessionId, resume, viewerId),
     kill: (sessionId, viewerId) => client.cast(IPC.ptyKill, sessionId, viewerId),
-    destroy: (persistKey) => client.cast(IPC.ptyDestroy, persistKey),
+    // The trailing flag rides as a plain boolean; the core handler re-checks `=== true`.
+    destroy: (persistKey, opts) =>
+      client.cast(IPC.ptyDestroy, persistKey, opts?.everySocket === true),
     recycle: (persistKey) => client.cast(IPC.ptyRecycle, persistKey),
     // No server handler — degrade gracefully (never reject the boot path).
     generateName: () => Promise.resolve(AI_NAMING_UNAVAILABLE),
@@ -229,11 +239,16 @@ export function buildRealApi(
     // shell yet" and gives up on its own deadline.
     paneCommand: (persistKey) =>
       client.request(IPC.ptyPaneCommand, persistKey).catch(() => null) as Promise<string | null>,
+    terminateForeground: (persistKey, expectedAgentId) =>
+      client.request(IPC.ptyTerminateForeground, persistKey, expectedAgentId).catch(() => false) as Promise<boolean>,
     // No server handler — the session-name poll degrades to no adopted name. A PRE-EXISTING gap,
-    // not a grok one: `IPC.ptyReadSessionName` has never been registered server-side, so claude's
-    // read leg is equally stubbed here (the write leg works on both surfaces — it goes through
-    // pty.sendText). Fixing it means moving the routing into core and registering it from both
-    // shells, exactly as `core/transcript-ipc.ts` did for the ⌘M transcript channels.
+    // and not any one agent's: `IPC.ptyReadSessionName` has never been registered server-side, so
+    // claude's, grok's and gemini's read legs are equally stubbed here (the write leg works on both
+    // surfaces — it goes through pty.sendText). The routing itself is already in core
+    // (`core/agent-session-name.ts`) and the server already threads gemini's path association into
+    // its session-name SWEEP, which is what keeps the phone's names correct; only this per-node poll
+    // is missing. Fixing it means registering the channel from both shells, exactly as
+    // `core/transcript-ipc.ts` did for the ⌘M transcript channels.
     readSessionName: () => Promise.resolve(''),
     onData: (sessionId, listener) =>
       client.subscribe(IPC.ptyData(sessionId), listener as Listener),
@@ -261,6 +276,8 @@ export function buildRealApi(
       client.request(IPC.workspaceProbeFolder, folder) as ReturnType<WorkspaceApi['probeFolder']>,
     // REAL: core broadcasts IPC.workspaceMigrated after a v2→v3 migration (workspace-store.ts).
     onMigrated: (cb) => client.subscribe(IPC.workspaceMigrated, cb as Listener),
+    // REAL: core broadcasts IPC.workspaceCorruptRecovered from the load path (workspace-store.ts).
+    onCorruptRecovered: (cb) => client.subscribe(IPC.workspaceCorruptRecovered, cb as Listener),
     // Deliberate degrade: the external-change WATCHER (core/workspace-watcher.ts) is only started
     // by the desktop shell (src/main/index.ts), so the server never broadcasts
     // IPC.workspaceExternalChange and there is nothing to subscribe to. Effect in the browser:
@@ -275,12 +292,36 @@ export function buildRealApi(
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
   }
 
+  const agent: NodeTerminalApi['agent'] = {
+    // Deliberately NOT a request: the server registers no env-snapshot handler (a full host-env
+    // dump answerable by any authenticated WS client is the PR #195 leak class at the RPC layer).
+    // An empty snapshot makes `${env:VAR}` expansion surface every referenced var as missing, and
+    // the launch paths refuse rather than type a mangled line.
+    envSnapshot: () => Promise.resolve({}),
+    discoverModels: (gateway) =>
+      client.request(IPC.agentDiscoverModels, gateway) as ReturnType<
+        NodeTerminalApi['agent']['discoverModels']
+      >,
+    gatewayCredentialStatus: () =>
+      client.request(IPC.agentGatewayCredentialStatus) as ReturnType<
+        NodeTerminalApi['agent']['gatewayCredentialStatus']
+      >,
+    saveGatewayCredential: (apiKey) =>
+      client.request(IPC.agentGatewayCredentialSave, apiKey) as ReturnType<
+        NodeTerminalApi['agent']['saveGatewayCredential']
+      >,
+    clearGatewayCredential: () =>
+      client.request(IPC.agentGatewayCredentialClear) as ReturnType<
+        NodeTerminalApi['agent']['clearGatewayCredential']
+      >
+  }
+
   // The server's data dir, over the SAME channel the desktop preload uses. It is the writable base
   // the worktree dialog derives its default path from — a stub returning '' would suggest
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, settings, userDataDir }
+  return { pty, workspace, settings, agent, userDataDir }
 }
 
 export function buildGitHubApi(
@@ -342,7 +383,7 @@ export function buildGitHubApi(
  */
 export function buildFilesApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context' | 'boardLog'> {
+): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context' | 'boardLog' | 'logs'> {
   const fs: FsApi = {
     list: (dirPath) => client.request(IPC.fsList, dirPath) as ReturnType<FsApi['list']>,
     read: (filePath) => client.request(IPC.fsRead, filePath) as Promise<string>,
@@ -446,7 +487,13 @@ export function buildFilesApi(
     // Also real, and the direction that matters here: the browser holds the bytes, the terminal
     // runs on the server, so a pasted image only becomes nameable once the server has written it.
     saveUpload: (name, dataBase64) =>
-      client.request(IPC.filesSaveUpload, name, dataBase64) as Promise<string | null>
+      client.request(IPC.filesSaveUpload, name, dataBase64) as Promise<string | null>,
+    // Real too, and for the same reason: the browser holds the bytes and the project folder is on
+    // the server, so only the server can put a canvas image where the canvas will find it again.
+    saveCanvasImage: (projectId, name, dataBase64) =>
+      client.request(IPC.filesSaveCanvasImage, projectId, name, dataBase64) as Promise<
+        string | null
+      >
   }
 
   const context: ContextApi = {
@@ -473,7 +520,22 @@ export function buildFilesApi(
     }
   }
 
-  return { fs, git, files, context, boardLog }
+  // Same core on the server, so the log ring is real over the bridge — the panel debugs the
+  // Server Edition process, which is exactly where a packaged-app console is least visible.
+  const logs: LogApi = {
+    snapshot: () => client.request(IPC.logSnapshot) as Promise<LogRecord[]>,
+    clear: () => client.cast(IPC.logClear),
+    onBatch: (cb) => {
+      const unsub = client.subscribe(IPC.logBatch, cb as Listener)
+      client.cast(IPC.logSubscribe)
+      return () => {
+        unsub()
+        client.cast(IPC.logUnsubscribe)
+      }
+    }
+  }
+
+  return { fs, git, files, context, boardLog, logs }
 }
 
 /**
@@ -606,6 +668,31 @@ function buildUsageApi(client: RpcClient): Pick<NodeTerminalApi, 'usage'> {
 }
 
 /**
+ * Real, not a stub: the same core service (`startSessionMemoryService`) registers these channels in
+ * the server shell, so the browser gets a genuine per-session breakdown of the machine it is served
+ * from — the one it is actually looking at.
+ *
+ * The query is forwarded VERBATIM. `remote` is the renderer's own "this scope is an SSH host"
+ * claim and is one of TWO independent sources the service ORs to decide which machine answers;
+ * `projectId` is the only thing naming that machine. A layer that drops or rewrites either turns a
+ * remote query into a local sweep, and this machine's sessions get published under the host's name.
+ *
+ * Neither member catches: a transport failure must not be laundered into `{ok:false}` / `null`,
+ * which are the service's own words for "the sweep could not run" and "RAM unreadable". The panel
+ * shows a failed request as a failed request.
+ */
+export function buildSessionMemoryApi(client: RpcClient): Pick<NodeTerminalApi, 'sessionMemory'> {
+  return {
+    sessionMemory: {
+      read: (q?: SessionMemoryQuery) =>
+        client.request(IPC.sessionMemory, q) as Promise<SessionMemoryReport>,
+      host: (q?: SessionMemoryQuery) =>
+        client.request(IPC.sessionMemoryHost, q) as Promise<MemInfo | null>
+    }
+  }
+}
+
+/**
  * Build the `claude` namespace over an RpcClient. `cliCaps` is a REAL handler on the server
  * (`registerClaudeCliIpc` runs in the server shell too), so the browser resolves the very same
  * `--permission-mode auto` version gate as desktop instead of silently no-opping into "auto
@@ -618,6 +705,22 @@ function buildUsageApi(client: RpcClient): Pick<NodeTerminalApi, 'usage'> {
  * only real member is a capability probe — the Server Edition gets the real reader from
  * `buildTranscriptApi` below instead, which the relay does not use.
  */
+/**
+ * The `codex` namespace over an RpcClient — a REAL implementation, not a stub, because the answer
+ * has to come from the machine the pty runs on. Today the Server Edition's handler deliberately
+ * answers `{ shared: false }` (see server/handlers/index.ts); wiring that side later needs nothing
+ * here. A failed request degrades to the same conservative answer: the launch path reads it.
+ */
+export function buildCodexApi(client: RpcClient): CodexApi {
+  return {
+    identityCaps: () =>
+      (client.request(IPC.codexIdentityCaps) as Promise<CodexIdentityCaps>).catch(
+        () => UNKNOWN_CODEX_IDENTITY_CAPS
+      ),
+    onIdentity: (listener) => client.subscribe(IPC.codexIdentity, listener as Listener)
+  }
+}
+
 export function buildClaudeApi(client: RpcClient, stub: ClaudeApi): ClaudeApi {
   return {
     ...stub,
@@ -776,7 +879,9 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildPresenceApi(client),
     ...buildSpeechApi(client),
     ...buildUsageApi(client),
+    ...buildSessionMemoryApi(client),
     ...buildGitHubApi(client),
+    codex: buildCodexApi(client),
     // `claude` is assembled from two builders: `cliCaps` from the relay-shared one, and the
     // transcript reader from the Server-Edition-only one (which also supplies `chat`).
     ...(() => {

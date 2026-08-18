@@ -6,9 +6,12 @@ import type {
   NodeTerminalApi,
   Project,
   PtyCreateOptions,
+  PtyPressure,
+  LogRecord,
   RecycledInfo,
   RelayPeerPending,
   RemoteUsageQuery,
+  SessionMemoryQuery,
   UpdateInfo,
   UpdateProgress,
   Workspace,
@@ -60,7 +63,8 @@ const api: NodeTerminalApi = {
     setFlow: (sessionId, resume, viewerId) =>
       ipcRenderer.send(IPC.ptyFlow, sessionId, resume, viewerId),
     kill: (sessionId, viewerId) => ipcRenderer.send(IPC.ptyKill, sessionId, viewerId),
-    destroy: (persistKey) => ipcRenderer.send(IPC.ptyDestroy, persistKey),
+    destroy: (persistKey, opts) =>
+      ipcRenderer.send(IPC.ptyDestroy, persistKey, opts?.everySocket === true),
     recycle: (persistKey) => ipcRenderer.send(IPC.ptyRecycle, persistKey),
     generateName: (persistKey, cwd) => ipcRenderer.invoke(IPC.ptyGenerateName, persistKey, cwd),
     generateGroupName: (memberKeys, cwd) =>
@@ -71,6 +75,8 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.ptySendText, persistKey, text, opts?.enter),
     tmuxStatus: () => ipcRenderer.invoke(IPC.ptyTmuxStatus),
     paneCommand: (persistKey) => ipcRenderer.invoke(IPC.ptyPaneCommand, persistKey),
+    terminateForeground: (persistKey, expectedAgentId) =>
+      ipcRenderer.invoke(IPC.ptyTerminateForeground, persistKey, expectedAgentId),
     readSessionName: (sessionId, accountId, agentId) =>
       ipcRenderer.invoke(IPC.ptyReadSessionName, sessionId, accountId, agentId),
     onData: (sessionId, listener) => {
@@ -119,6 +125,11 @@ const api: NodeTerminalApi = {
       const h = (_e: unknown, kind?: WorkspaceMigrationKind) => cb(kind ?? 'v2')
       ipcRenderer.on(IPC.workspaceMigrated, h)
       return () => ipcRenderer.removeListener(IPC.workspaceMigrated, h)
+    },
+    onCorruptRecovered: (cb: (backupFile: string) => void) => {
+      const h = (_e: unknown, backupFile: string) => cb(backupFile)
+      ipcRenderer.on(IPC.workspaceCorruptRecovered, h)
+      return () => ipcRenderer.removeListener(IPC.workspaceCorruptRecovered, h)
     },
     onExternalChange: (cb: (project: Project) => void) => {
       const h = (_e: unknown, p: Project) => cb(p)
@@ -190,8 +201,8 @@ const api: NodeTerminalApi = {
     connect: (projectId, conn, remoteCwd) =>
       ipcRenderer.invoke(IPC.sshConnectProject, projectId, conn, remoteCwd),
     disconnect: (projectId) => ipcRenderer.invoke(IPC.sshDisconnectProject, projectId),
-    killSessions: (projectId, nodeIds) =>
-      ipcRenderer.invoke(IPC.sshKillSessions, projectId, nodeIds),
+    killSessions: (projectId, nodeIds, opts) =>
+      ipcRenderer.invoke(IPC.sshKillSessions, projectId, nodeIds, opts),
     listDir: (projectId, dir) => ipcRenderer.invoke(IPC.sshListDir, projectId, dir),
     mkdir: (projectId, dir) => ipcRenderer.invoke(IPC.sshMkdir, projectId, dir),
     uploadFile: (projectId, localPath, fileName) =>
@@ -224,7 +235,9 @@ const api: NodeTerminalApi = {
     write: (projectId: string, path: string, content: string) =>
       ipcRenderer.invoke(IPC.sshFsWrite, projectId, path, content),
     mkdir: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsMkdir, projectId, p),
-    exists: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsExists, projectId, p)
+    exists: (projectId: string, p: string) => ipcRenderer.invoke(IPC.sshFsExists, projectId, p),
+    quickOpen: (projectId: string, cwd: string) =>
+      ipcRenderer.invoke(IPC.sshFsQuickOpen, projectId, cwd)
   },
   git: {
     status: (cwd) => ipcRenderer.invoke(IPC.gitStatus, cwd),
@@ -279,7 +292,8 @@ const api: NodeTerminalApi = {
   },
   clipboard: {
     // Route to the MAIN process: renderer-side `clipboard` access is deprecated in Electron.
-    writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text)
+    writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text),
+    writeFiles: (paths: string[]) => ipcRenderer.invoke(IPC.clipboardWriteFiles, paths)
   },
   shell: {
     reveal: (path: string) => ipcRenderer.send(IPC.shellReveal, path),
@@ -317,7 +331,9 @@ const api: NodeTerminalApi = {
     // already on this machine" (local project).
     downloadTicket: (p: string) => ipcRenderer.invoke(IPC.filesDownloadTicket, p),
     saveUpload: (name: string, dataBase64: string) =>
-      ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64)
+      ipcRenderer.invoke(IPC.filesSaveUpload, name, dataBase64),
+    saveCanvasImage: (projectId: string, name: string, dataBase64: string) =>
+      ipcRenderer.invoke(IPC.filesSaveCanvasImage, projectId, name, dataBase64)
   },
   updates: {
     onAvailable: (listener) => {
@@ -355,6 +371,8 @@ const api: NodeTerminalApi = {
     activate: (key: string) => ipcRenderer.invoke(IPC.licenseActivate, key),
     deactivate: () => ipcRenderer.invoke(IPC.licenseDeactivate),
     getStatus: () => ipcRenderer.invoke(IPC.licenseStatus),
+    detail: () => ipcRenderer.invoke(IPC.licenseDetail),
+    releaseOthers: () => ipcRenderer.invoke(IPC.licenseRelease),
     onChange: (listener) => {
       const handler = (_e: unknown, s: Parameters<typeof listener>[0]) => listener(s)
       ipcRenderer.on(IPC.licenseChanged, handler)
@@ -377,6 +395,14 @@ const api: NodeTerminalApi = {
       ipcRenderer.on(IPC.usageUpdate, handler)
       return () => ipcRenderer.removeListener(IPC.usageUpdate, handler)
     }
+  },
+  // The query is forwarded VERBATIM: `remote` is the renderer's own "this scope is an SSH host"
+  // claim, which the core service ORs with its own `isRemoteProject`. Normalizing it here (say,
+  // dropping a `false`, or defaulting the object) would silently re-open the misattribution this
+  // surface exists to prevent — one machine's sessions published under another's name.
+  sessionMemory: {
+    read: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemory, q),
+    host: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemoryHost, q)
   },
   context: {
     onUpdate: (listener) => {
@@ -403,10 +429,26 @@ const api: NodeTerminalApi = {
       return () => ipcRenderer.removeListener(IPC.canvasMut, handler)
     }
   },
+  codex: {
+    identityCaps: () => ipcRenderer.invoke(IPC.codexIdentityCaps),
+    onIdentity: (listener) => {
+      const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
+      ipcRenderer.on(IPC.codexIdentity, handler)
+      return () => ipcRenderer.removeListener(IPC.codexIdentity, handler)
+    }
+  },
   claude: {
     cliCaps: () => ipcRenderer.invoke(IPC.claudeCliCaps),
     readTranscript: (sessionId, cwd, accountId, nodeId) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId, nodeId)
+  },
+  agent: {
+    envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),
+    discoverModels: (settings) => ipcRenderer.invoke(IPC.agentDiscoverModels, settings),
+    gatewayCredentialStatus: () => ipcRenderer.invoke(IPC.agentGatewayCredentialStatus),
+    saveGatewayCredential: (apiKey) =>
+      ipcRenderer.invoke(IPC.agentGatewayCredentialSave, apiKey),
+    clearGatewayCredential: () => ipcRenderer.invoke(IPC.agentGatewayCredentialClear)
   },
   chat: {
     readTranscript: (sessionId, cwd, accountId, nodeId) =>
@@ -528,10 +570,29 @@ const api: NodeTerminalApi = {
       }
     }
   },
+  logs: {
+    snapshot: () => ipcRenderer.invoke(IPC.logSnapshot),
+    clear: () => ipcRenderer.send(IPC.logClear),
+    onBatch: (cb) => {
+      const handler = (_e: unknown, batch: LogRecord[]): void => cb(batch)
+      ipcRenderer.on(IPC.logBatch, handler)
+      ipcRenderer.send(IPC.logSubscribe)
+      return () => {
+        ipcRenderer.removeListener(IPC.logBatch, handler)
+        ipcRenderer.send(IPC.logUnsubscribe)
+      }
+    }
+  },
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),
+  onZoomActualSize: subscribe(IPC.appZoomActualSize),
+  // Native View menu → renderer.
+  onToggleAutoAlign: subscribe(IPC.appToggleAutoAlign),
+  onFitView: subscribe(IPC.appFitView),
+  onToggleKanban: subscribe(IPC.appToggleKanban),
+  onOpenSettings: subscribe(IPC.appOpenSettings),
   closeWindow: () => ipcRenderer.send(IPC.appCloseWindow),
   focusWindow: () => ipcRenderer.send(IPC.appFocusWindow),
   setBadgeCount: (count) => ipcRenderer.send(IPC.appSetBadge, count),
@@ -545,6 +606,17 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.appFocusNode, handler)
     return () => ipcRenderer.removeListener(IPC.appFocusNode, handler)
   },
+  onMemoryPressure: (listener) => {
+    const handler = (_e: unknown, severity: 'warning' | 'critical') => listener(severity)
+    ipcRenderer.on(IPC.appMemoryPressure, handler)
+    return () => ipcRenderer.removeListener(IPC.appMemoryPressure, handler)
+  },
+  onPtyPressure: (listener) => {
+    const handler = (_e: unknown, reading: PtyPressure) => listener(reading)
+    ipcRenderer.on(IPC.ptyPressure, handler)
+    return () => ipcRenderer.removeListener(IPC.ptyPressure, handler)
+  },
+  raisePtyDeviceLimit: () => ipcRenderer.invoke(IPC.ptyRaiseDeviceLimit),
   answerPermission: (payload) => ipcRenderer.invoke(IPC.agentAnswerPermission, payload),
   ackDone: (nodeId) => {
     void ipcRenderer.invoke(IPC.agentAckDone, nodeId)
@@ -569,7 +641,10 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.agentControl, handler)
     return () => ipcRenderer.removeListener(IPC.agentControl, handler)
   },
-  sendAgentControlResult: (payload) => ipcRenderer.send(IPC.agentControlResult, payload)
+  sendAgentControlResult: (payload) => ipcRenderer.send(IPC.agentControlResult, payload),
+  agentMessage: {
+    deliver: (req) => ipcRenderer.invoke(IPC.agentMessageDeliver, req)
+  }
 }
 
 contextBridge.exposeInMainWorld('nodeTerminal', api)

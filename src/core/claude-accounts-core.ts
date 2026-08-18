@@ -6,8 +6,15 @@ import path from 'path'
 /** Shape of a valid account id (uuid / opaque token). Shared by every path builder so a bad id
  *  can never traverse out of the accounts root — locally OR on a remote host over ssh. */
 const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/
+/** The same rule as a predicate, for callers that must REFUSE a bad id rather than throw on it —
+ *  `project-node-append` validates the account id a phone sends over the relay before writing it
+ *  into a project file. One definition: a second copy of this alphabet would drift out of step
+ *  with the path builders it exists to protect. */
+export function isSafeAccountId(accountId: string): boolean {
+  return ACCOUNT_ID_RE.test(accountId)
+}
 function assertAccountId(accountId: string): void {
-  if (!ACCOUNT_ID_RE.test(accountId)) {
+  if (!isSafeAccountId(accountId)) {
     throw new Error(`invalid account id: ${JSON.stringify(accountId)}`)
   }
 }
@@ -59,21 +66,40 @@ export function transcriptRootFor(
 /**
  * Jail predicate for a hook-reported LOCAL `transcript_path`: hook POSTs can arrive over the
  * remote reverse tunnel, so a forged POST must not make the app read an arbitrary local file.
- * Legitimate local transcripts live under exactly two roots:
- *   - the system default `~/.claude/projects`, and
- *   - a managed account's `{userData}/claude-accounts/<accountId>/projects`.
+ * Legitimate local transcripts live under exactly these roots:
+ *   - claude's system default `~/.claude/projects`,
+ *   - a managed account's `{userData}/claude-accounts/<accountId>/projects`,
+ *   - gemini's `~/.gemini/tmp` (its chats are `<project>/chats/session-*.jsonl`), and
+ *   - codex's `<codexHome>/sessions` (its rollouts are `YYYY/MM/DD/rollout-*.jsonl`).
  * For the account root the `<accountId>` segment is validated with `ACCOUNT_ID_RE` (dots barred,
  * so `..` can never sneak in) and the very next segment must be `projects` — a prefix match on
  * `{userData}/claude-accounts` alone is NOT enough (it would accept `…/claude-accounts/x/.ssh`).
  * `abs` must already be resolved/normalized by the caller (e.g. `path.resolve(tp)`).
+ *
+ * `codexHomeDir` is where codex keeps its state — `$CODEX_HOME` when the user has moved it, which
+ * `core/usage/codex-usage.ts`'s `codexHome()` already resolves for the usage reader. Trailing and
+ * optional, defaulting to `<homeDir>/.codex`, so every pre-existing caller is unchanged. It is a
+ * PARAMETER rather than an env read because this module is pure path math: the shells own the env.
+ * Getting it wrong fails CLOSED (a relocated codex home would silently never fill its meter, not
+ * leak anything) — which is the quieter and therefore worse failure, hence the parameter.
  */
 export function isSafeLocalTranscriptPath(
   abs: string,
   homeDir: string,
-  userDataPath: string
+  userDataPath: string,
+  codexHomeDir?: string
 ): boolean {
   const legacyRoot = path.join(homeDir, '.claude', 'projects')
   if (abs === legacyRoot || abs.startsWith(legacyRoot + path.sep)) return true
+  // gemini and codex keep their transcripts in their OWN trees, which the context meter for those
+  // agents reads (core/gemini-session.ts, core/codex-session.ts). Each root is the narrowest one
+  // that holds them — the same directories `handoff/locate.ts` already walks to find a session
+  // file. Deliberately NOT `$HOME`: this predicate exists precisely so a forged POST cannot aim a
+  // read at `~/.ssh/id_rsa`, and a home-wide allowance would hand that straight back.
+  const geminiRoot = path.join(homeDir, '.gemini', 'tmp')
+  if (abs === geminiRoot || abs.startsWith(geminiRoot + path.sep)) return true
+  const codexRoot = path.join(codexHomeDir || path.join(homeDir, '.codex'), 'sessions')
+  if (abs === codexRoot || abs.startsWith(codexRoot + path.sep)) return true
   const accountsRoot = path.join(userDataPath, 'claude-accounts')
   if (abs !== accountsRoot && !abs.startsWith(accountsRoot + path.sep)) return false
   // Relative to the accounts root: expect `<accountId>/projects[/…]`. Because `abs` is normalized

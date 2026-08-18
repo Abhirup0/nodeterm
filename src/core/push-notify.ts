@@ -61,14 +61,91 @@ export interface PushNotifyEvent {
   /** question only: the AskUserQuestion `multiSelect` flag — the picker accepts multiple choices.
    *  Rides the `nt` block so the phone renders multi-select. Omitted when absent/false. */
   multiSelect?: boolean
+  /** Unix **MILLISECONDS** — see `TS_UNIT` below. Forwarded verbatim from `InboxEvent.ts`
+   *  (`Date.now()` in agent-status-mirror); never divided, never re-stamped here. */
   ts: number
 }
 
-/** Where a batch is sent: the relay host (legacy) or, in granted mode, a list of grants to
- *  fan the same body out over (once each, Bearer-authorized). */
-type SendTarget =
-  | { mode: 'host'; id: PushHostIdentity }
-  | { mode: 'grants'; grants: PushGrant[] }
+/** The unit EVERY `ts` in this file's payloads carries: Unix **milliseconds**, straight from the
+ *  agent-status mirror (`InboxEvent.ts` / `NodeStateChange.ts` / `NodeNowChange.ts`, all
+ *  `Date.now()`). The mirror is the source of truth for the whole timestamp story — the phone
+ *  already divides `InboxEvent.ts` / `installedAt` / `resetsAt` by 1000 to build a `Date`, and the
+ *  Live Activity `ContentState.ts` is the same field from the same producer. A second producer that
+ *  writes SECONDS into one of these fields (an iOS foreground poll stamping
+ *  `Date().timeIntervalSince1970`, say) disagrees with this one by a factor of 1000 and makes every
+ *  comparison — "is this update newer than what I'm showing?" — nonsense. Nothing in this file may
+ *  scale a `ts`: forward the mirror's number or don't send one. */
+export const TS_UNIT = 'unix-ms' as const
+
+/** Where a batch is sent. BOTH legs can be live at once: `host` is the relay-identity POST the
+ *  backend fans out over its `relay_devices` rows, `grants` is one Bearer-authorized POST per
+ *  SSH-possession grant. `null` on either side means that leg has no destination. */
+interface SendTarget {
+  host: PushHostIdentity | null
+  grants: PushGrant[]
+}
+
+/**
+ * One POST per DEVICE, not per grant FILE.
+ *
+ * `src/main`'s `allPushGrants` concatenates this machine's `~/.nodeterm/push-grants` with a sweep of
+ * every connected SSH host, and one phone that reached two of them dropped a DIFFERENT token on
+ * each — so the same `deviceId` can appear twice in the merged list and would earn that phone two
+ * notifications for one event. (`remote-push-grants`'s cache dedupes only within its own half.)
+ * First occurrence wins, which is why main puts the local grants first; a 401/403 on the survivor
+ * marks it dead and the next send promotes the other, the same self-healing the remote cache does.
+ */
+function dedupeGrantsByDevice(grants: readonly PushGrant[]): PushGrant[] {
+  const seen = new Set<string>()
+  const out: PushGrant[] = []
+  for (const g of grants) {
+    if (seen.has(g.deviceId)) continue
+    seen.add(g.deviceId)
+    out.push(g)
+  }
+  return out
+}
+
+/**
+ * The single targeting rule, shared by BOTH senders (`createPushNotify` and `createLiveUpdatePush`
+ * each had their own copy of it, and a copy is a thing that drifts). The per-sender gates — the
+ * master switch, DNT/packaged, the live-activities sub-gate — stay with their sender; this answers
+ * only "who does a batch go to".
+ *
+ * **It is a UNION, not an either/or.** It used to return host-mode the moment a phone was
+ * relay-paired and never look at the grants at all, to avoid double-pushing a phone that was both
+ * paired AND granted. The goal was right, the granularity was wrong: host mode fans out over the
+ * backend's `relay_devices` rows, and an SSH-ONLY phone has no row there — its grant was its only
+ * route — so ONE relay-paired phone silenced every other phone on the machine, with no error
+ * anywhere. A duplicate notification is a cheap regression; a phone that never rings is not.
+ *
+ * The correct exclusion is per DEVICE, and this process cannot express it: a `PushGrant` is keyed by
+ * the phone's `deviceId` (the grant filename), while the relay-paired registry
+ * (`remote-approved-devices.json`, read by `loadApprovedDevices`) stores nothing but base64 NaCl box
+ * PUBLIC KEYS — and this service is only told `hasPairedPhone: boolean` in the first place. The two
+ * identifiers never meet on the desktop: the phone's own deviceId is seen exactly once, transiently,
+ * during a LAN QR pair (`pairing-service.ts`'s `phoneDeviceId`, spent on the `/v1/relay/device` mint
+ * and never persisted), and not at all on the relay-only path where an unknown phone is pinned by
+ * pubkey after the SAS prompt. So neither core nor `src/main` can subtract the paired phones from
+ * the grant list today.
+ *
+ * Consequence, stated plainly: a phone that is BOTH relay-paired to this machine AND has dropped a
+ * grant it can reach receives TWO pushes for one event. Closing that needs the overlap to be
+ * knowable — either the backend does it (it sees the relay device row AND the grant's deviceId, so
+ * it is the only party holding both halves) or the desktop starts persisting the phone's deviceId
+ * beside its pinned pubkey at pair time. Both are protocol changes, not a filter we can add here.
+ */
+function resolveSendTarget(
+  getHostIdentity: () => PushHostIdentity | null,
+  getGrants: (() => PushGrant[]) | undefined
+): SendTarget | null {
+  const id = getHostIdentity()
+  // The paired-phone gate is host-mode only — a grant IS the phone's opt-in.
+  const host = id && id.hasPairedPhone ? id : null
+  const grants = dedupeGrantsByDevice(getGrants?.() ?? [])
+  if (!host && grants.length === 0) return null
+  return { host, grants }
+}
 
 /** POST a JSON body with the shared timeout, swallowing network errors (no retry queue — the phone
  *  still polls the mirror). Returns the Response (so granted mode can read 401/403) or null on a
@@ -104,11 +181,11 @@ export interface PushNotifyDeps {
   subscribe: (cb: (e: InboxEvent) => void) => () => void
   /** The standing relay host identity, or null when none is configured/available. */
   getHostIdentity: () => PushHostIdentity | null
-  /** Granted mode (SSH-possession push grants; spec: 2026-07-21-push-grants). When there is no
-   *  usable relay host identity but grants exist, the batch is POSTed once PER grant with
-   *  `Authorization: Bearer <grant>` (no host identity fields) — the Server Edition's path. Optional:
-   *  the desktop leaves it unwired (it uses its relay identity; a host that is both paired AND
-   *  granted would double-push the same phone). */
+  /** Granted mode (SSH-possession push grants; spec: 2026-07-21-push-grants). The batch is POSTed
+   *  once PER grant with `Authorization: Bearer <grant>` (no host identity fields) — the Server
+   *  Edition's only path, and the desktop's route to any phone that reaches it over plain SSH.
+   *  Sent ALONGSIDE host mode when both are live, never instead of it: see `resolveSendTarget` for
+   *  why the exclusion cannot be done per device here, and what that costs. */
   getGrants?: () => PushGrant[]
   /** Mark a grant dead after a 401/403 (dropped until its file changes). Paired with `getGrants`. */
   markGrantDead?: (grant: string) => void
@@ -191,18 +268,15 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
     return true
   }
 
-  /** Resolve where a batch goes: the relay host (byte-identical legacy behavior) when a paired host
-   *  identity is available; else, in granted mode, the live grant list; else null (inert). The
-   *  master + DNT/packaged gates apply to both modes; the paired-phone gate is host-mode only (a
-   *  grant IS the phone's opt-in). */
+  /** Resolve where a batch goes. The master + DNT/packaged gates are this sender's; the rule for
+   *  WHO gets it is the shared `resolveSendTarget` (both senders call it, so they cannot drift). */
   function resolveTarget(): SendTarget | null {
     if (!allowed()) return null
     if (!deps.mobilePushEnabled()) return null
-    const id = deps.getHostIdentity()
-    if (id && id.hasPairedPhone) return { mode: 'host', id }
-    const grants = deps.getGrants?.() ?? []
-    if (grants.length > 0) return { mode: 'grants', grants }
-    return null
+    return resolveSendTarget(
+      () => deps.getHostIdentity(),
+      deps.getGrants ? () => deps.getGrants!() : undefined
+    )
   }
 
   function scheduleFlush(): void {
@@ -250,6 +324,7 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
       ...(nodeTitle ? { nodeTitle } : {}),
       ...(e.options && e.options.length > 0 ? { options: e.options } : {}),
       ...(e.multiSelect ? { multiSelect: true } : {}),
+      // Unix MILLISECONDS (TS_UNIT): the mirror's InboxEvent.ts (Date.now()), forwarded verbatim.
       ts: e.ts
     }
     // Presence-aware deferral: if the user is at the desktop right now, hold the alert instead of
@@ -290,17 +365,17 @@ export function createPushNotify(deps: PushNotifyDeps): PushNotifyHandle {
     if (buffer.length > 0) scheduleFlush()
 
     const url = `${apiBase}/v1/push/notify`
-    if (target.mode === 'host') {
-      // Legacy relay-identity body — byte-identical to the pre-grants shape.
+    if (target.host) {
+      // Relay-identity body — byte-identical to the pre-grants shape.
       await postJson(fetchImpl, url, {
-        hostDeviceId: target.id.hostDeviceId,
-        hostPublicKeyB64: target.id.hostPublicKeyB64,
-        hostLabel: target.id.hostLabel,
+        hostDeviceId: target.host.hostDeviceId,
+        hostPublicKeyB64: target.host.hostPublicKeyB64,
+        hostLabel: target.host.hostLabel,
         events
       })
-      return
     }
-    // Granted mode: one POST per live grant, Bearer-authorized, NO host identity fields —
+    // …and the grants, in the SAME flush (see resolveSendTarget: a paired phone must not silence
+    // the SSH-only ones). One POST per live grant, Bearer-authorized, NO host identity fields —
     // just `hostLabel` (os.hostname(), injected). A 401/403 marks that grant dead.
     const label = deps.hostLabel?.()
     for (const g of target.grants) {
@@ -378,11 +453,27 @@ export interface LiveUpdateItem {
   multiSelect?: boolean
   /** approval needsYou only: the deterministic hook-reply ticket, letting an intent answer. */
   pendingId?: string
+  /** done only: the turn ended because the user INTERRUPTED it (Esc/Ctrl-C), not because it
+   *  finished. Omitted when false/absent, and never sent off a done edge — the backend also forces
+   *  it null on non-done content-state. Without it the phone had only the `message` STRING
+   *  ('Stopped' vs 'Finished') to tell the two apart, so a wording change silently altered
+   *  behaviour. A consumer that CELEBRATES a completion must skip this (same rule as the notch
+   *  HUD's `doneSeen`) — nothing was accomplished, so there is nothing to go and read. */
+  interrupted?: boolean
+  /** done only: this end came from the stale-working SWEEP (nobody heard from the session for
+   *  WORKING_STALE_MS, so it is presumed gone), NOT from the session itself. Same omission rules and
+   *  the same "never celebrate it" contract as `interrupted` — but a DIFFERENT fact: `interrupted`
+   *  is "you stopped it", `stale` is "we lost the host". The mirror sends message:'Stopped' for
+   *  both, which is exactly why the phone cannot infer this from the text. */
+  stale?: boolean
   /** true on a state EDGE (start / needsYou / end, and the working update that follows an answered
    *  needs-you) — a user-visible state change. Absent on the ≥20s activity/context coalesced ticks.
    *  The backend uses it for APNs priority: an edge is priority 10, a tick priority 5 (iOS delays
    *  priority-5 liveactivity pushes, which was leaving the island up minutes after an answer). */
   edge?: boolean
+  /** Unix **MILLISECONDS** (`TS_UNIT`) — the mirror's `Date.now()`, forwarded verbatim. This is the
+   *  field the iOS Live Activity reads as `ContentState.ts`; it is ms on both producers (the push
+   *  below and the phone's own foreground poll), so it is compared, never mixed with seconds. */
   ts: number
 }
 
@@ -394,8 +485,8 @@ export interface LiveUpdateDeps {
   /** The standing relay host identity, or null when none is configured/available. */
   getHostIdentity: () => PushHostIdentity | null
   /** Granted mode (SSH-possession push grants; spec: 2026-07-21-push-grants). See the identical
-   *  field on `PushNotifyDeps`: no usable host identity + grants present ⇒ one POST per grant,
-   *  Bearer-authorized, no host fields. Desktop leaves it unwired. */
+   *  field on `PushNotifyDeps`: one POST per grant, Bearer-authorized, no host fields, sent
+   *  ALONGSIDE host mode when both are live (`resolveSendTarget`). */
   getGrants?: () => PushGrant[]
   /** Mark a grant dead after a 401/403 (dropped until its file changes). Paired with `getGrants`. */
   markGrantDead?: (grant: string) => void
@@ -440,6 +531,21 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
   // Per-node coalescing of activity/context ticks.
   const lastNowSentAt = new Map<string, number>()
   const pendingNow = new Map<string, NodeNowChange>()
+  /**
+   * The last STATE we told the phone about, per node. A now-tick carries no state of its own
+   * (`NodeNowChange` has none — the notch HUD, the other consumer of that seam, correctly never
+   * reads one), yet it has to send something, and it used to hardcode `working`. Two producers
+   * fire a tick at exactly the wrong moment — the raw `Stop` hook clears the activity, and the
+   * context tail's 1 s poll lands the turn's final usage record — so a tick would be parked for up
+   * to `coalesceMs` and then assert "working" AFTER the end had already gone out, flipping the
+   * island back to Working with nothing left to end it.
+   *
+   * So ticks are now told what the node's state actually is, and are dropped entirely once it is
+   * no longer working. Undefined = we have not seen an edge for this node yet; a tick then still
+   * goes out as working, which is the pre-existing behaviour for a node whose activity we learn
+   * about before its first edge.
+   */
+  const lastStateSent = new Map<string, NodeStateChange['state']>()
   let batchTimer: ReturnType<typeof setTimeout> | null = null
   let coalesceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -449,15 +555,16 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
     return true
   }
 
+  /** This sender's own gates (master + live-activities sub-gate + DNT/packaged), then the SHARED
+   *  targeting rule — the same one `createPushNotify` uses, so the two cannot drift apart. */
   function resolveTarget(): SendTarget | null {
     if (!allowed()) return null
     if (!deps.mobilePushEnabled()) return null
     if (!deps.mobileLiveActivities()) return null
-    const id = deps.getHostIdentity()
-    if (id && id.hasPairedPhone) return { mode: 'host', id }
-    const grants = deps.getGrants?.() ?? []
-    if (grants.length > 0) return { mode: 'grants', grants }
-    return null
+    return resolveSendTarget(
+      () => deps.getHostIdentity(),
+      deps.getGrants ? () => deps.getGrants!() : undefined
+    )
   }
 
   function nodeTitleOf(nodeId: string): string | undefined {
@@ -479,11 +586,22 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
 
   function onStateChange(c: NodeStateChange): void {
     if (!resolveTarget()) return
+    // This edge is newer than anything coalescing for the node, and a tick asserts `working` —
+    // so a parked one must never be allowed to land after it and undo it. Drop it and record the
+    // state, which also gates any tick that arrives later in the same turn (see lastStateSent).
+    lastStateSent.set(c.nodeId, c.state)
+    pendingNow.delete(c.nodeId)
     const title = nodeTitleOf(c.nodeId)
     // kind/options/multiSelect/pendingId ride only a needsYou edge (spec:
     // interactive-push-live-activities addendum) — belt-and-braces gate on state so a working/done
     // edge never carries them (the backend also nulls them on non-needsYou content-state).
     const needsYou = c.state === 'needsYou'
+    // interrupted/stale are the WHY of an end edge, and they ride done edges only — same
+    // belt-and-braces gate as the needsYou block above (the backend nulls them off done too).
+    // They are forwarded because 'Stopped' is the mirror's message for BOTH the interrupt and the
+    // stale sweep: without these flags the phone cannot tell "you stopped it" from "we lost the
+    // host", and both are indistinguishable from a real completion except by that string.
+    const done = c.state === 'done'
     buffer.push({
       nodeId: c.nodeId,
       ...(title ? { nodeTitle: title } : {}),
@@ -502,6 +620,10 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
       ...(needsYou && c.options && c.options.length > 0 ? { options: c.options } : {}),
       ...(needsYou && c.multiSelect ? { multiSelect: true } : {}),
       ...(needsYou && c.pendingId ? { pendingId: c.pendingId } : {}),
+      ...(done && c.interrupted ? { interrupted: true } : {}),
+      ...(done && c.stale ? { stale: true } : {}),
+      // Unix MILLISECONDS (TS_UNIT): the mirror's NodeStateChange.ts (Date.now()), forwarded
+      // verbatim. This lands in the phone's Live Activity ContentState.ts — do not scale it.
       ts: c.ts
     })
     scheduleFlush()
@@ -517,6 +639,8 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
       state: 'working',
       ...(c.activity ? { activity: c.activity.slice(0, LIVE_ACTIVITY_MAX) } : {}),
       ...(typeof c.contextPercent === 'number' ? { contextPercent: c.contextPercent } : {}),
+      // Unix MILLISECONDS (TS_UNIT): the mirror's NodeNowChange.ts (Date.now()), forwarded
+      // verbatim — the same field, same unit, as the state-edge sender above.
       ts: c.ts
     })
     scheduleFlush()
@@ -549,6 +673,12 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
 
   function onNowChange(c: NodeNowChange): void {
     if (!resolveTarget()) return
+    // A tick describes work in progress. Once the node has left `working` (needs-you, or an end)
+    // there is nothing for it to say, and saying `working` would contradict the edge we just sent.
+    if ((lastStateSent.get(c.nodeId) ?? 'working') !== 'working') {
+      pendingNow.delete(c.nodeId)
+      return
+    }
     const t = now()
     const last = lastNowSentAt.get(c.nodeId) ?? -Infinity
     if (t - last >= coalesceMs) {
@@ -574,17 +704,17 @@ export function createLiveUpdatePush(deps: LiveUpdateDeps): LiveUpdateHandle {
     if (buffer.length > 0) scheduleFlush()
 
     const url = `${apiBase}/v1/push/live-update`
-    if (target.mode === 'host') {
-      // Legacy relay-identity body — byte-identical to the pre-grants shape.
+    if (target.host) {
+      // Relay-identity body — byte-identical to the pre-grants shape.
       await postJson(fetchImpl, url, {
-        hostDeviceId: target.id.hostDeviceId,
-        hostPublicKeyB64: target.id.hostPublicKeyB64,
-        hostLabel: target.id.hostLabel,
+        hostDeviceId: target.host.hostDeviceId,
+        hostPublicKeyB64: target.host.hostPublicKeyB64,
+        hostLabel: target.host.hostLabel,
         updates
       })
-      return
     }
-    // Granted mode: one POST per live grant, Bearer-authorized, NO host identity fields.
+    // …and the grants, in the SAME flush (see resolveSendTarget). One POST per live grant,
+    // Bearer-authorized, NO host identity fields.
     const label = deps.hostLabel?.()
     for (const g of target.grants) {
       const res = await postJson(

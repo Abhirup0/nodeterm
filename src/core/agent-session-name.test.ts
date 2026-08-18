@@ -28,12 +28,74 @@ describe('readAgentSessionName', () => {
     rememberGrokSessionDir('shared-id', path.join(root, 'gs1'))
     expect(await readAgentSessionName('shared-id', undefined, 'claude')).toBeNull()
     expect(await readAgentSessionName('shared-id')).toBeNull()
-    expect(await readAgentSessionName('shared-id', undefined, 'codex')).toBeNull()
     forgetGrokSession('shared-id')
+  })
+
+  it("routes codex to its app-server reader, never to claude's transcript scan", async () => {
+    // codex's name lives in the shared app-server's Thread.name — there is no file to find. With
+    // no server listening the honest answer is null; what matters is that it did not fall through
+    // to claude's resolver, which SCANS ~/.claude/projects on a cache miss (once a minute, per
+    // node, for a guaranteed miss) and can hand back a stranger's session name via its cwd leg.
+    process.env.CODEX_HOME = path.join(root, 'no-such-codex-home')
+    expect(await readAgentSessionName('thread-1', undefined, 'codex')).toBeNull()
+    expect(await readAgentSessionName('thread-1', 'acct-2', 'codex')).toBeNull()
+    delete process.env.CODEX_HOME
   })
 
   it('answers null for an empty session id without asking either reader', async () => {
     expect(await readAgentSessionName('', undefined, 'grok')).toBeNull()
     expect(await readAgentSessionName('')).toBeNull()
+  })
+
+  // The gemini leg. Neither reader may ever search the other's tree: claude's resolver SCANS
+  // ~/.claude/projects on a cache miss, so an unrouted gemini node would pay that scan on every
+  // poll (4s per node, then 15s) for a guaranteed null.
+  it("routes a gemini session to its own transcript, via the tail's path", async () => {
+    const p = path.join(root, 'session-gem.jsonl')
+    // The shape the fixture measures: the name is the `update_topic` tool call's `args.title`.
+    writeFileSync(
+      p,
+      JSON.stringify({
+        id: 'm1',
+        type: 'gemini',
+        toolCalls: [{ id: 'update_topic__a', name: 'update_topic', args: { title: 'Verifying Test Environment' } }]
+      }) + '\n'
+    )
+    const asked: string[] = []
+    const name = await readAgentSessionName('gem1', undefined, 'gemini', {
+      geminiPathFor: (id) => (asked.push(id), id === 'gem1' ? p : undefined)
+    })
+    expect(name).toBe('Verifying Test Environment')
+    expect(asked).toEqual(['gem1'])
+  })
+
+  it('answers null for a gemini session no hook has been seen for', async () => {
+    // `pathFor` is fed only by hook POSTs. No path = nothing to read, and null is the honest
+    // answer — never a fall-through to claude's reader, which would scan for a foreign id.
+    expect(
+      await readAgentSessionName('gem-unknown', undefined, 'gemini', { geminiPathFor: () => undefined })
+    ).toBeNull()
+    // No deps at all (the Server Edition before its tail exists, or any pre-gemini caller).
+    expect(await readAgentSessionName('gem-unknown', undefined, 'gemini')).toBeNull()
+  })
+
+  it('answers null when the gemini transcript cannot be read, without throwing', async () => {
+    expect(
+      await readAgentSessionName('gem2', undefined, 'gemini', {
+        geminiPathFor: () => path.join(root, 'does-not-exist.jsonl')
+      })
+    ).toBeNull()
+  })
+
+  it("never asks gemini's path resolver for another agent's session", async () => {
+    const asked: string[] = []
+    const geminiPathFor = (id: string): undefined => {
+      asked.push(id)
+      return undefined
+    }
+    await readAgentSessionName('shared-id', undefined, 'claude', { geminiPathFor })
+    await readAgentSessionName('shared-id', undefined, 'grok', { geminiPathFor })
+    await readAgentSessionName('shared-id', undefined, undefined, { geminiPathFor })
+    expect(asked).toEqual([])
   })
 })

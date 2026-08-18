@@ -7,7 +7,7 @@ export type AgentState = 'working' | 'waiting' | 'blocked' | 'done'
 export interface NormalizedAgentEvent {
   nodeId: string
   agentId: AgentId
-  kind: 'state' | 'subagent-start' | 'subagent-end' | 'recurring' | 'session'
+  kind: 'state' | 'subagent-start' | 'subagent-end' | 'recurring' | 'session' | 'background-task'
   state?: AgentState
   // done only: the turn ended because the user interrupted (Esc/Ctrl-C) — the renderer
   // skips the completion alert/unread for these (the user was right there).
@@ -53,6 +53,27 @@ export interface NormalizedAgentEvent {
   tokens?: number
   toolUses?: number
   result?: string
+  /**
+   * The POST that produced this event presented a per-node token the running instance had minted
+   * for THIS node id. Set by the hook server, never by a normalizer.
+   *
+   * It is a LABEL, not a permission: `false` covers every client that predates the token, the
+   * phone, and the documented cross-instance failover, so no consumer may treat it as "reject".
+   */
+  verified?: boolean
+  /**
+   * The revision of the managed hook script that posted this event (`MANAGED_SCRIPT_REVISION`,
+   * sent as `X-Nodeterm-Hook-Client`). Set by the hook server, never by a normalizer.
+   *
+   * `undefined` means the client sent no stamp — a script that predates the header, i.e. one that
+   * also predates per-node identity. That is a DISTINCT state from `verified: false`, and telling
+   * them apart is the entire point: a session with no token file needs "retry after its next turn",
+   * a session running an old script needs "reconnect the project / restart the app", and before
+   * this field the two were indistinguishable on the wire.
+   *
+   * Like `verified` it is a LABEL: nothing may refuse a POST because of it.
+   */
+  clientRevision?: number
   // recurring
   recurringKind?: 'loop' | 'schedule' | 'cron'
   /** The recurring job was REMOVED (e.g. CronDelete) — take the card down. */
@@ -95,6 +116,8 @@ interface ClaudePayload {
     prompt?: string
     skill?: string
     cron?: string
+    /** Bash only: the task was launched as a background shell (`run_in_background: true`). */
+    run_in_background?: boolean
   }
   tool_response?: {
     status?: string
@@ -184,6 +207,14 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
           task: p.tool_input?.prompt
         }
       }
+    }
+    // A background shell task lives INSIDE the CLI process: /exit kills it silently. This event
+    // is the stamp Eco hibernation and the bulk restart exclude on (see hibernation-policy /
+    // planBulkRestart). PreToolUse only, and `=== true` — an absent or false flag is a foreground
+    // command, which the generic "working" below already covers. Claude-only: no other dialect
+    // carries the field (closed set, CLAUDE.md agent rule 7).
+    if (ev === 'PreToolUse' && tool === 'Bash' && p.tool_input?.run_in_background === true) {
+      return { ...base, kind: 'background-task' }
     }
     // Any other tool use is just "working".
     return { ...base, kind: 'state', state: 'working' }
@@ -304,13 +335,19 @@ export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | nul
   return null
 }
 
-// Gemini hook payload. Event name is read defensively (some builds use
-// `hook_event_name`/`hookEventName`); a session id may be present under `session_id`.
+// Gemini hook payload. Its envelope is snake_case and claude-shaped — every event carries
+// `session_id`, `transcript_path`, `cwd`, `hook_event_name` and `timestamp` (gemini 0.54.4's own
+// `docs/hooks/reference.md:48-58`). The event name is still read defensively (`hookEventName` /
+// `event`) because older builds spelled it differently and those payloads cost nothing to accept.
 interface GeminiPayload {
   hook_event_name?: string
   hookEventName?: string
   event?: string
   session_id?: string
+  /** Notification only (reference.md:272-285). The documented type is `"ToolPermission"`. */
+  notification_type?: string
+  /** Notification only: the alert's summary — shown on the needs-you badge (reference.md:279). */
+  message?: string
 }
 
 export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | null {
@@ -327,7 +364,91 @@ export function normalizeGemini(env: RawHookEnvelope): NormalizedAgentEvent | nu
     return { ...base, kind: 'state', state: 'working' }
   }
   if (ev === 'AfterAgent') return { ...base, kind: 'state', state: 'done' }
-  // Gemini has no waiting/blocked states.
+  // `source` is startup|resume|clear and `reason` is exit|clear|logout|prompt_input_exit|other
+  // (reference.md:250-251, 265-266). Neither changes what a session boundary MEANS to us, so both
+  // phases map unconditionally — a `/clear` really is one session ending and another beginning.
+  if (ev === 'SessionStart') return { ...base, kind: 'session', sessionPhase: 'start' }
+  if (ev === 'SessionEnd') return { ...base, kind: 'session', sessionPhase: 'end' }
+  if (ev === 'Notification') {
+    // Gemini's ONE ask-the-user signal (reference.md:272-285, "for example, Tool Permissions"), and
+    // the reason this event was worth subscribing to: without it a node waiting on a permission
+    // answer sat on RUNNING, because the last hook we heard was `BeforeTool`.
+    //
+    // `blocked` rather than `waiting` for two reasons: normalizeClaude already uses it for a
+    // permission ask (every consumer treats the two alike), and BUSY_STATES then refuses an
+    // in-place restart on this node — correct, since `/quit` typed into a permission prompt would
+    // ANSWER the prompt instead of quitting. That refusal only became REACHABLE for gemini once
+    // gemini joined `EXIT_SEQUENCES` (agent-restart.ts): `restartEligibility` returns
+    // `not-resumable` before it ever consults BUSY_STATES, so until then no gemini node could be
+    // restarted at all, blocked or otherwise.
+    //
+    // A CLOSED match, not a substring: the docs name exactly ONE type (reference.md:278), and an
+    // unknown future one must stay a no-op — a badge that sticks on a finished node is a failure
+    // this codebase has shipped before. Grok is the cautionary tale: there
+    // `type.includes('permission')` turned a notification that fires before every tool call into a
+    // strobing NEEDS YOU. Widening this "to be safe" is the unsafe direction.
+    //
+    // Nothing here can be answered from our side: the hook is observability only and its
+    // flow-control fields are ignored (reference.md:284-285), so this reports state and no more —
+    // no `pendingId`, unlike claude's deterministic-approval path.
+    if (p.notification_type === 'ToolPermission') {
+      return { ...base, kind: 'state', state: 'blocked', lastMessage: p.message }
+    }
+    return null
+  }
+  return null
+}
+
+// GitHub Copilot CLI hook payload. Its event names and snake_case envelope intentionally resemble
+// Claude's, but its event set and notification vocabulary are a separate protocol contract. Keep a
+// dedicated normalizer so a future change in one harness cannot silently change the other's state.
+interface CopilotPayload {
+  hook_event_name?: string
+  session_id?: string
+  prompt?: string
+  notification_type?: string
+  message?: string
+  last_assistant_message?: string
+}
+
+export function normalizeCopilot(env: RawHookEnvelope): NormalizedAgentEvent | null {
+  const p = env.payload as CopilotPayload
+  const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.session_id }
+
+  if (p.hook_event_name === 'SessionStart') {
+    return { ...base, kind: 'session', sessionPhase: 'start' }
+  }
+  if (p.hook_event_name === 'SessionEnd') {
+    return { ...base, kind: 'session', sessionPhase: 'end' }
+  }
+  if (p.hook_event_name === 'UserPromptSubmit') {
+    return { ...base, kind: 'state', state: 'working', task: p.prompt, newTurn: true }
+  }
+  if (
+    p.hook_event_name === 'PreToolUse' ||
+    p.hook_event_name === 'PostToolUse' ||
+    p.hook_event_name === 'PostToolUseFailure'
+  ) {
+    return { ...base, kind: 'state', state: 'working' }
+  }
+  if (p.hook_event_name === 'Stop') {
+    return {
+      ...base,
+      kind: 'state',
+      state: 'done',
+      lastMessage: p.last_assistant_message
+    }
+  }
+  if (p.hook_event_name === 'Notification') {
+    // Closed matches only. Informational/background notification types must never create a sticky
+    // NEEDS YOU badge on a finished parent session.
+    if (p.notification_type === 'permission_prompt') {
+      return { ...base, kind: 'state', state: 'blocked', lastMessage: p.message }
+    }
+    if (p.notification_type === 'elicitation_dialog') {
+      return { ...base, kind: 'state', state: 'waiting', lastMessage: p.message }
+    }
+  }
   return null
 }
 
@@ -593,5 +714,6 @@ export function normalizeFor(agentId: AgentId, env: RawHookEnvelope): Normalized
   if (agentId === 'gemini') return normalizeGemini(env)
   if (agentId === 'opencode') return normalizeOpencode(env)
   if (agentId === 'grok') return normalizeGrok(env)
+  if (agentId === 'copilot') return normalizeCopilot(env)
   return null
 }

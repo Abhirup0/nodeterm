@@ -8,9 +8,11 @@
     "strict": true,
     "skipLibCheck": true,
     "types": ["node", "electron-vite/node"],
-    "baseUrl": ".",
+    // Path values are relative to this file's own directory, so no "baseUrl" is
+    // needed to anchor them. TypeScript 7 drops "baseUrl" entirely; this form
+    // resolves identically on 5.x and 7.x.
     "paths": {
-      "@shared/*": ["src/shared/*"]
+      "@shared/*": ["./src/shared/*"]
     }
   },
   "include": [

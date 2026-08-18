@@ -1,11 +1,14 @@
 import { useState } from 'react'
-import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId } from '@shared/agents/config'
+import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId, type BuiltinAgentId } from '@shared/agents/config'
+import type { CustomAgent } from '@shared/types'
 import { formatShortcut, isHoldChord } from '@shared/shortcut'
+import { hasSpeechModel } from '@shared/speech'
 import { hintLabel } from '@shared/platform-utils'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { accountsForProject, sshAccountsHint } from '../state/workspace'
+import { CONTENT_ADD_ITEMS, contentAddItemsToDockRows, type AddHandlers } from '../lib/addMenuSpec'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -16,11 +19,19 @@ interface DockProps {
   canRedo: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
+  /** Opens the Spawn-a-team dialog (issue #78) — the conductor lands at the Dock's default spot. */
+  onSpawnTeam: () => void
   onAddDino: () => void
   onAddAgent: (agentId: AgentId, accountId?: string) => void
   onOpenFile: () => void
   onAddRemote: () => void
   onConnectRemote: () => void
+  // Content nodes the Dock used to omit (it lagged the pane menu). Now derived from the same
+  // spec as every other add-menu, so the Dock "+" and the canvas right-click stay in parity.
+  onAddBrowser: () => void
+  onAddWeb: () => void
+  onNewFile: () => void
+  onAddWorktree: () => void
   onUndo: () => void
   onRedo: () => void
   onSave: () => void
@@ -42,11 +53,16 @@ export function Dock({
   canRedo,
   onAddTerminal,
   onAddSticky,
+  onSpawnTeam,
   onAddDino,
   onAddAgent,
   onOpenFile,
   onAddRemote,
   onConnectRemote,
+  onAddBrowser,
+  onAddWeb,
+  onNewFile,
+  onAddWorktree,
   onUndo,
   onRedo,
   onSave,
@@ -57,7 +73,17 @@ export function Dock({
   dictateActive
 }: DockProps) {
   const [menuOpen, setMenuOpen] = useState(false)
+  // Which builtin's flyout submenu is open (at most one). A builtin earns a flyout only when it has
+  // ≥1 inheriting custom agent (one with a `baseAgent` matching it); otherwise it stays a flat
+  // button, byte-identical to before this nesting existed.
+  const [openSub, setOpenSub] = useState<BuiltinAgentId | null>(null)
   const dictationShortcut = useSettings((s) => s.settings.speech.shortcut)
+  const speechEngine = useSettings((s) => s.settings.speech.engine)
+  const speechModel = useSettings((s) => s.settings.speech.model)
+  // Whisper with the explicit None selection = dictation off (issue #143). The mic stays visible
+  // and clickable — the overlay it opens says where to turn dictation on — but the tooltip is
+  // honest about the state instead of promising a shortcut that will only warn.
+  const dictationOff = speechEngine === 'whisper' && !hasSpeechModel(speechModel)
   const customAgents = useSettings((s) => s.settings.customAgents)
   const disabledAgents = useSettings((s) => s.settings.disabledAgents)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
@@ -72,10 +98,47 @@ export function Dock({
     ? activeProject?.defaultAccountId
     : undefined
 
+  // Group enabled custom agents by their declared base harness. A builtin with a non-empty group
+  // gets a flyout submenu (the base itself + its inheriting customs, and for Claude the account
+  // rows); a builtin with an empty group stays flat. Baseless custom agents render flat after the
+  // builtins, exactly as they did before.
+  const enabledCustoms = customAgents.filter((c) => !disabledAgents.includes(c.id))
+  const inheritingByBase = new Map<BuiltinAgentId, CustomAgent[]>()
+  for (const c of enabledCustoms) {
+    if (!c.baseAgent) continue
+    const arr = inheritingByBase.get(c.baseAgent) ?? []
+    arr.push(c)
+    inheritingByBase.set(c.baseAgent, arr)
+  }
+  const baselessCustoms = enabledCustoms.filter((c) => !c.baseAgent)
+
   const pick = (fn: () => void) => () => {
     fn()
     setMenuOpen(false)
   }
+
+  // Derive the content rows from the shared add-menu spec (the same list the pane right-click and
+  // the sidebar "+" use), so the Dock can no longer lag the canvas menu on which kinds are addable.
+  // Terminal + agents + "New Remote Connection" stay Dock-local (agents have bespoke flyouts;
+  // remote-connection is a different flow than the pane menu's remote picker).
+  const hasCwd = !!(activeProject?.ssh?.remoteCwd ?? activeProject?.cwd)
+  const isSshProject = !!activeProject?.ssh
+  const dockAddHandlers: AddHandlers = {
+    terminal: onAddTerminal,
+    remote: onAddRemote,
+    browser: onAddBrowser,
+    web: onAddWeb,
+    sticky: onAddSticky,
+    spawnTeam: onSpawnTeam,
+    dino: onAddDino,
+    openFile: onOpenFile,
+    newFile: onNewFile,
+    worktree: onAddWorktree
+  }
+  const contentRows = contentAddItemsToDockRows(CONTENT_ADD_ITEMS, dockAddHandlers, {
+    hasCwd,
+    isSshProject
+  })
 
   return (
     <>
@@ -93,60 +156,114 @@ export function Dock({
               <span>Remote…</span>
             </button>
             {BUILTIN_AGENT_IDS.filter((aid) => !disabledAgents.includes(aid)).flatMap((aid) => {
-              const base = (
-                <button key={aid} onClick={pick(() => onAddAgent(aid))}>
-                  <AgentIcon agentId={aid} size={18} />
-                  <span>{AGENT_CONFIG[aid].label}</span>
-                </button>
-              )
-              if (aid !== 'claude') return [base]
-              // SSH project with no accounts on its host: a disabled row saying where this
-              // host's accounts come from (local accounts are correctly invisible here).
-              const acctHint = sshAccountsHint(activeProject, localAccounts)
-              if (acctHint) {
+              const inheriting = inheritingByBase.get(aid) ?? []
+              // No inheriting customs → the builtin stays a flat button (with Claude's account
+              // rows), byte-identical to before nesting existed.
+              if (inheriting.length === 0) {
+                const base = (
+                  <button key={aid} onClick={pick(() => onAddAgent(aid))}>
+                    <AgentIcon agentId={aid} size={18} />
+                    <span>{AGENT_CONFIG[aid].label}</span>
+                  </button>
+                )
+                if (aid !== 'claude') return [base]
+                // SSH project with no accounts on its host: a disabled row saying where this
+                // host's accounts come from (local accounts are correctly invisible here).
+                const acctHint = sshAccountsHint(activeProject, localAccounts)
+                if (acctHint) {
+                  return [
+                    base,
+                    <button key={`${aid}-acct-hint`} disabled title={acctHint}>
+                      <AgentIcon agentId={aid} size={18} />
+                      <span>No accounts on this host yet</span>
+                    </button>
+                  ]
+                }
+                // Claude picks up one flat entry per logged-in local account.
+                if (localAccounts.length === 0) return [base]
                 return [
                   base,
-                  <button key={`${aid}-acct-hint`} disabled title={acctHint}>
-                    <AgentIcon agentId={aid} size={18} />
-                    <span>No accounts on this host yet</span>
-                  </button>
+                  ...localAccounts.map((a) => (
+                    <button key={`${aid}-${a.id}`} onClick={pick(() => onAddAgent(aid, a.id))}>
+                      <AgentIcon agentId={aid} size={18} />
+                      <span>
+                        Claude — {a.label}
+                        {a.id === defaultAccountId ? ' ✓' : ''}
+                      </span>
+                    </button>
+                  ))
                 ]
               }
-              // Claude picks up one flat entry per logged-in local account (dock can't nest).
-              if (localAccounts.length === 0) return [base]
+              // Has inheriting customs → render as a flyout submenu. The parent button still
+              // launches the base harness in one click (preserving today's behavior); hovering it
+              // reveals the base's variants — its account rows (Claude) and the inheriting customs.
+              const acctHint = sshAccountsHint(activeProject, localAccounts)
               return [
-                base,
-                ...localAccounts.map((a) => (
-                  <button key={`${aid}-${a.id}`} onClick={pick(() => onAddAgent(aid, a.id))}>
+                <div
+                  key={aid}
+                  className="dock-menu__has-sub"
+                  onMouseEnter={() => setOpenSub(aid)}
+                  onMouseLeave={() => setOpenSub((cur) => (cur === aid ? null : cur))}
+                >
+                  <button onClick={pick(() => onAddAgent(aid))}>
                     <AgentIcon agentId={aid} size={18} />
-                    <span>
-                      Claude — {a.label}
-                      {a.id === defaultAccountId ? ' ✓' : ''}
-                    </span>
+                    <span>{AGENT_CONFIG[aid].label}</span>
+                    <span className="dock-menu__chevron">▸</span>
                   </button>
-                ))
+                  {openSub === aid && (
+                    <div className="dock-menu__sub">
+                      {aid === 'claude' && localAccounts.length > 0 && (
+                        <>
+                          <div className="dock-menu__sub-label">Accounts</div>
+                          {localAccounts.map((a) => (
+                            <button
+                              key={a.id}
+                              onClick={pick(() => onAddAgent(aid, a.id))}
+                            >
+                              <AgentIcon agentId={aid} size={18} />
+                              <span>
+                                {a.label}
+                                {a.id === defaultAccountId ? ' ✓' : ''}
+                              </span>
+                            </button>
+                          ))}
+                        </>
+                      )}
+                      {aid === 'claude' && acctHint && (
+                        <button disabled title={acctHint}>
+                          <AgentIcon agentId={aid} size={18} />
+                          <span>No accounts on this host yet</span>
+                        </button>
+                      )}
+                      <div className="dock-menu__sub-label">Custom</div>
+                      {inheriting.map((c) => (
+                        <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
+                          <AgentIcon agentId={c.id} size={18} />
+                          <span>{c.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               ]
             })}
-            {customAgents
-              .filter((c) => !disabledAgents.includes(c.id))
-              .map((c) => (
-                <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
-                  <AgentIcon agentId={c.id} size={18} />
-                  <span>{c.label}</span>
-                </button>
-              ))}
-            <button onClick={pick(onAddSticky)}>
-              <NoteIcon />
-              <span>Sticky Note</span>
-            </button>
-            <button onClick={pick(onAddDino)}>
-              <DinoIcon />
-              <span>Dino Game</span>
-            </button>
-            <button onClick={pick(onOpenFile)}>
-              <EditorIcon />
-              <span>Open file…</span>
-            </button>
+            {baselessCustoms.map((c) => (
+              <button key={c.id} onClick={pick(() => onAddAgent(c.id))}>
+                <AgentIcon agentId={c.id} size={18} />
+                <span>{c.label}</span>
+              </button>
+            ))}
+            {contentRows.map((row) => (
+              <button
+                key={row.kind}
+                disabled={row.disabled}
+                title={row.hint}
+                onClick={pick(row.onClick)}
+              >
+                {row.icon}
+                <span>{row.label}</span>
+              </button>
+            ))}
             <button onClick={pick(onConnectRemote)}>
               <RemoteIcon />
               <span>New Remote Connection</span>
@@ -183,9 +300,11 @@ export function Dock({
         <button
           className={`dock-btn${dictateActive ? ' active' : ''}`}
           title={
-            isHoldChord(dictationShortcut)
-              ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
-              : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
+            dictationOff
+              ? 'Dictation off — choose a model in Settings → Speech'
+              : isHoldChord(dictationShortcut)
+                ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
+                : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
           }
           onClick={onDictate}
         >
@@ -264,34 +383,6 @@ function TerminalIcon() {
     <svg {...S}>
       <rect x="3" y="4" width="18" height="16" rx="2" />
       <path d="M7 9l3 3-3 3M13 15h4" />
-    </svg>
-  )
-}
-function NoteIcon() {
-  return (
-    <svg {...S}>
-      <path d="M4 4h16v11l-5 5H4z" />
-      <path d="M20 15h-5v5" />
-    </svg>
-  )
-}
-function DinoIcon() {
-  return (
-    <svg width={18} height={18} viewBox="0 0 24 24" fill="currentColor" stroke="none">
-      <rect x="3" y="11" width="6" height="3" />
-      <rect x="8" y="9" width="11" height="7" />
-      <rect x="14" y="3" width="7" height="7" />
-      <rect x="21" y="7" width="2" height="2" />
-      <rect x="18" y="12" width="2" height="3" />
-      <rect x="9" y="16" width="2" height="5" />
-      <rect x="14" y="16" width="2" height="5" />
-    </svg>
-  )
-}
-function EditorIcon() {
-  return (
-    <svg {...S}>
-      <path d="M9 8l-4 4 4 4M15 8l4 4-4 4" />
     </svg>
   )
 }

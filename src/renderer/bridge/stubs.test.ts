@@ -66,7 +66,17 @@ describe('bridge stubs', () => {
     // UpdatePolicy — a `null` here was a TypeError on every Server Edition page load.
     await expect(s.updates.getPolicy()).resolves.toEqual({ minSupported: null, mandatory: false })
     await expect(s.usage.fetch()).resolves.toBeNull()
+    // `ok:false` is load-bearing: the stub means "we could not measure", and an `ok:true` with no
+    // rows would render as "nothing on this machine is using memory" — a confident wrong answer on
+    // exactly the surface (the relay tab) where the sessions live on somebody else's machine.
+    await expect(s.sessionMemory.read()).resolves.toEqual({ ok: false, rows: [], mem: null })
+    await expect(s.sessionMemory.host()).resolves.toBeNull()
     await expect(s.license.getStatus()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    // The license layer runs only in src/main, so the key + device cap cannot be read here. These
+    // must REJECT rather than resolve a fabricated LicenseDetail — an `{used:0, seats:0}` with a
+    // null error would render "0 of 0 devices" and an empty key as fact in Settings → License.
+    await expect(s.license.detail()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.license.releaseOthers()).rejects.toMatchObject({ code: E_UNSUPPORTED })
   })
 
   it('shell.openExternal opens a new browser tab; reveal/openPath are documented no-ops', () => {

@@ -1,3 +1,4 @@
+import { tmuxUpdateEnvironmentLine } from './agents/model-gateway'
 /**
  * Pure helpers for launching the system `ssh` binary as a terminal session program.
  * No Electron, no node-pty — unit-testable in isolation.
@@ -113,6 +114,69 @@ export function sshExtraArgsEnableLocalExec(extraArgs: string | undefined): bool
 export interface SshServer extends SshConnection {
   id: string
   label: string
+  /** Where browsing this machine STARTS: the folder the "New remote" project dialog opens at, and
+   *  the folder Test connection dials. It is a starting point, not an inherited default — a node's
+   *  cwd comes from the project or node it was created in, never from here. Absent means `~`. */
+  remoteCwd?: string
+}
+
+/**
+ * Stable live-connection scope for an SSH host ATTACHED to a canvas project — i.e. a remote node
+ * living in a project that is not itself that endpoint's SSH project.
+ *
+ * Scoped by project AND endpoint, so two projects attaching the same host get their own
+ * ControlMaster (and their own reconnect loop), and one project attaching two hosts gets two. The
+ * endpoint is FNV-1a hashed rather than embedded: this id reaches the filesystem as part of the
+ * ControlMaster socket path, where a raw `user@host:port` would both leak the inventory and blow
+ * the sun_path length budget on a long hostname.
+ */
+export function sshAttachmentId(projectId: string, conn: SshConnection): string {
+  const input = `${conn.user}\0${conn.host}\0${conn.port ?? 22}`
+  let hash = 2166136261
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `attached-${projectId}-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+/**
+ * Connection scope used by a remote node inside a project.
+ *
+ * An SSH PROJECT owns its ControlMaster under the project id — that is the whole of today's
+ * model, and this returns exactly that whenever the project's own binding already reaches the
+ * node's machine. A remote node embedded in a LOCAL project (or in an SSH project bound to a
+ * DIFFERENT machine) owns a host attachment instead, under the stable project × endpoint id.
+ *
+ * Every consumer of that connection — spawn (`resolveSshRemote`), reconnect (`SshReconnector`),
+ * upload — must make the same choice, or a node resolves a master that was opened for someone
+ * else. Hence one function rather than the rule written out at each site.
+ *
+ * ## Why the project's binding wins on a HOST match, user and port included
+ *
+ * A node's `ssh` is a SNAPSHOT persisted into the canvas, and an SSH project's canvas lives in
+ * `<remoteCwd>/.nodeterm/project.json` ON THE HOST — shared with everyone who opens that folder.
+ * So the `user` (and port) on a node is whoever created it, not whoever is reading it: alice's
+ * nodes say `alice@box`, and when bob opens the same project as `bob@box` every one of them would
+ * ask for a second master dialing `alice@box` — which fails for bob, or worse sits on an askpass
+ * prompt. The project's binding is the authority on how THIS user reaches that machine, so a node
+ * naming the same host is served by it.
+ *
+ * The cost is a deliberate one: inside an SSH project you cannot pin a node to a second ACCOUNT on
+ * the same host. A different machine still gets its own attachment, which is the case this is for.
+ */
+export function sshConnectionIdForProject(
+  projectId: string,
+  conn: SshConnection,
+  projectServer?: SshConnection
+): string {
+  // `conn.host` is checked explicitly: a node whose binding lost its host (bad persisted data)
+  // must not match a LOCAL project's absent one through `undefined === undefined` and get served
+  // from a master that was never opened for it. Unroutable either way — but failing as an
+  // attachment ends at `requireRemote` refusing the spawn, which is the safe direction.
+  return conn.host && projectServer?.host === conn.host
+    ? projectId
+    : sshAttachmentId(projectId, conn)
 }
 
 /**
@@ -216,6 +280,11 @@ set -g default-terminal "xterm-256color"
 set -sg escape-time 10
 set -g destroy-unattached off
 setw -g aggressive-resize on
+# Credentials travel HERE, not on argv: over SSH the gateway/custom env is sourced from a 0600
+# file into the remote tmux client's environment, and update-environment copies the listed names
+# into the session at create/attach. The old '-e KEY=VALUE' route parked the values on the LOCAL
+# ssh client's command line for the whole session (and on the remote process table at creation).
+${tmuxUpdateEnvironmentLine()}
 # OSC 52 to the client, which writes the LOCAL clipboard. BOTH lines are needed on tmux 3.2+ — see
 # remoteTmuxConf's doc comment before touching either.
 # MIGRATION — do not remove. Older versions of this file blanked smcup/rmcup/indn via
@@ -227,6 +296,15 @@ set -su terminal-overrides
 set -su terminal-features
 set -g set-clipboard on
 set -as terminal-features ",*:clipboard"
+# Truecolor passthrough: tmux clamps 24-bit SGR to the 256 palette unless the OUTER terminal is
+# known to speak RGB. The attached client is our xterm.js renderer, which does — declare it via
+# terminal-features like the clipboard entry, never terminal-overrides (see MIGRATION). Issue #78.
+set -as terminal-features ",*:RGB"
+# And advertise it to the programs INSIDE the panes: half the ecosystem checks COLORTERM before
+# emitting 24-bit SGR. Global env, copied into each session at creation — this conf is written and
+# source-filed at connect (warm server) and rides -f on cold start, so it lands before sessions do.
+# The local path passes COLORTERM per session via tmux -e instead (the PATH/LANG precedent).
+set-environment -g COLORTERM truecolor
 # Mouse copy: tmux copies to its buffer AND emits OSC 52. No pipe to a local command — it would run
 # on the REMOTE host, which is nobody's clipboard.
 bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel

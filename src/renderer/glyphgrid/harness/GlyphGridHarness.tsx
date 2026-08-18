@@ -151,7 +151,7 @@ export function GlyphGridHarness() {
     // context has been created — the brief's order acquired a context it then dropped on the
     // floor unreferenced (the one thing this harness exists to count).
     const raster = createCanvasRasterizer(
-      { family: 'monospace', sizePx: 14, cellW: CELL_W, cellH: CELL_H },
+      { family: 'monospace', sizePx: 14, cellW: CELL_W, cellH: CELL_H, weight: 400, weightBold: 700 },
       ATLAS_PX
     )
     if (!raster) {

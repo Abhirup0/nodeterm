@@ -1,12 +1,19 @@
 // Types shared across the main, preload, and renderer processes.
 
+import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
-import type { AgentId, AgentPermissionMode, PromptInjectionMode } from './agents/config'
+import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
+import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
+import type {
+  ModelDiscoveryResult,
+  ModelGatewayCredentialStatus,
+  ModelGatewaySettings
+} from './agents/model-gateway'
 
 export interface PtyCreateOptions {
   shell?: string
@@ -21,11 +28,21 @@ export interface PtyCreateOptions {
    */
   persistKey?: string
   /**
+   * The machine-local id (`IndexEntryV3.id`) of the project this node belongs to, as the renderer
+   * knows it at the create call. Recorded in the runtime pane-ownership ledger on a GENUINE FRESH
+   * spawn (`agents/pane-ownership.ts`) so agent messaging can prove which project actually spawned
+   * a pane rather than trusting the git-shared, forgeable `project.json`. Optional: absent ⇒ the
+   * pane is left unproven and messaging to it fails closed (never derived from the file id).
+   */
+  ownerProjectId?: string
+  /**
    * Which agent runs in this session (claude/codex/gemini/custom). Drives the hook env
    * injected at spawn. Defaults to 'claude' for backward compat; the renderer passes a
    * real value in a later phase.
    */
   agentId?: AgentId
+  /** Per-node model override. Applied through the node's base harness on launch/cold restore. */
+  agentModel?: string
   /** Managed Claude account: inject CLAUDE_CONFIG_DIR for this account into the session env. */
   accountId?: string
   /**
@@ -127,6 +144,21 @@ export interface PtyCreateResult {
    */
   coAttachMouse?: boolean
   /**
+   * This session is TMUX-BACKED (local or remote) — it survives losing this client, so killing our
+   * pty client only detaches us and everything running in the session keeps going.
+   *
+   * False = the plain-shell fallback (no tmux installed, tmux switched off, or a node with no
+   * persistKey): the pty IS the shell, and killing it kills the shell and every process under it —
+   * an agent CLI mid-task included. The renderer needs the difference because several of its
+   * levers dispose a terminal purely as a CACHE (the park window, the park LRU cap, the
+   * memory-pressure drop), a call that is only cheap when tmux is underneath. See
+   * `renderer/terminal/park-budget.ts` (`canDisposePark`) and issue #126.
+   *
+   * Absent = unknown (a core older than this field, over the relay): the renderer must then assume
+   * the historical behavior (persistent), never protect on a guess.
+   */
+  persistent?: boolean
+  /**
    * REFUSED: this node's session was permanently destroyed by ANOTHER client, so nothing was
    * spawned (`sessionId` is empty) — the terminal shows the "closed by <name>" state instead.
    *
@@ -208,6 +240,8 @@ export interface CanvasNodeState {
   cwd?: string
   /** Which agent runs in this terminal node (claude/codex/gemini/custom). */
   agentId?: AgentId
+  /** Model selected for this agent node through the shared model gateway. */
+  agentModel?: string
   /** Set while this node is armed but not yet launched — see PendingLaunch. */
   pendingLaunch?: PendingLaunch
   /**
@@ -216,6 +250,14 @@ export interface CanvasNodeState {
    * and immutable for the node's lifetime. Undefined = system default (~/.claude).
    */
   accountId?: string
+  /**
+   * Agents in `SESSION_ID_CAPABLE` (claude): the session id nodeterm minted and launched this
+   * node's CLI with (`--session-id`). Persisted so a cold restore can resume even when no hook
+   * ever delivered an id — the SSH reverse tunnel is the only path that carries one, and a node
+   * whose tunnel was down came back as a blank conversation with its transcript intact on disk.
+   * The hook-fed id still wins when known: `/clear` and `--fork-session` mint a new one in-CLI.
+   */
+  agentSessionId?: string
   /** When set, the terminal runs `ssh` to this host on the local PTY; persisted (auto-reconnects). */
   ssh?: import('./ssh').SshConnection
   /** When true (SSH-project terminals), the node runs in REMOTE tmux on `ssh` rather than `ssh`-on-local-PTY. */
@@ -224,6 +266,13 @@ export interface CanvasNodeState {
   sshFs?: boolean
   // sticky-only
   text?: string
+  /**
+   * sticky-only: last canvas-control `sticky` write — when, and the title of the agent node that
+   * wrote it. The stamp means "an agent synced this", not "last touched": a hand edit clears both,
+   * so a stale stamp can never vouch for text the user has since rewritten.
+   */
+  textUpdatedAt?: number
+  textUpdatedBy?: string
   // dino-only: best score reached in the T-Rex Runner game.
   highScore?: number
   // editor / diff
@@ -374,9 +423,13 @@ export interface BoardLogEvent {
     | 'due-cleared'
     | 'priority-set'
     | 'priority-cleared'
+    /** An agent-to-agent message delivery. `from`/`to` are NODE IDS (not column names) and `title`
+     *  is the delivery's outcome kind — a trace that cannot answer "did it land?" answers the only
+     *  question anyone asks it with silence. Written by `agent-message-trace.recordDelivery`. */
+    | 'agent-message'
   from?: string
   to?: string
-  /** Column title for column-added/deleted; card title for card-created. */
+  /** Column title for column-added/deleted; card title for card-created; outcome for agent-message. */
   title?: string
 }
 
@@ -416,6 +469,28 @@ export interface BoardLogReadResult {
 /** The board-log surface on `window.nodeTerminal`. Project-routed: the main/server side resolves
  *  the project to a local cwd, a desktop SSH connection, or unsupported. `append` is
  *  fire-and-forget-safe (resolves `false` on any failure, never throws). */
+/** One captured debug-log line (issue #78). `seq` is monotonic across the process lifetime so
+ *  subscribers can dedupe batches against the snapshot they filled from. */
+export interface LogRecord {
+  seq: number
+  /** Epoch ms. */
+  ts: number
+  level: 'debug' | 'info' | 'warn' | 'error'
+  /** The `[subsystem]` prefix convention the codebase logs with; '' when absent. */
+  tag: string
+  msg: string
+}
+
+export interface LogApi {
+  /** The whole ring, oldest-first — the panel's initial fill. */
+  snapshot(): Promise<LogRecord[]>
+  /** Empty the ring (the panel's Clear button). */
+  clear(): void
+  /** Subscribe to batched pushes; returns an unsubscribe. Batches may overlap the snapshot
+   *  around the subscribe edge — dedupe by `seq`. */
+  onBatch(cb: (batch: LogRecord[]) => void): () => void
+}
+
 export interface BoardLogApi {
   /** Append one entry. Resolves `false` on any failure (unsupported project, fs/exec error). */
   append(projectId: string, entry: BoardLogEntry): Promise<boolean>
@@ -441,6 +516,27 @@ export interface Project {
   /** Permission mode for new Claude TERMINAL (CLI) sessions in this project. SDK chat nodes are
    *  not covered — the chat driver still runs in `default`. Unset = use the global setting. */
   defaultPermissionMode?: AgentPermissionMode
+  /**
+   * Per-project capability switch: agents may drive browser nodes THEY opened in this project.
+   * GIT-SHARED (rides .nodeterm/project.json) and therefore hostile input — the raw bit is read
+   * ONLY through `projectCapabilityFlagInFile` (@shared/project-capabilities, strict `=== true`,
+   * own-property), and it is NEVER a grant by itself: grants go through
+   * `projectCapabilityGrantedFor` (@shared/project-capability-consent), which also requires this
+   * machine's recorded 'kept' answer below.
+   */
+  agentBrowserControl?: boolean
+  /** Per-project capability switch: agents may message other agent nodes in this project. Same
+   *  rules as `agentBrowserControl` above — git-shared hostile input, strict `=== true` read,
+   *  never a grant without this machine's recorded 'kept' (`projectCapabilityGrantedFor`). */
+  agentMessaging?: boolean
+  /**
+   * MACHINE-LOCAL record of what this machine's user ANSWERED for each capability switch —
+   * 'kept' or 'declined', not a bare bit, because a declined switch whose hostile `true`
+   * re-arrives via git must be refused and re-noticed, never silently granted (PR #213 C1).
+   * Persisted on `IndexEntryV3.capabilityAck`, NEVER written into the shared project file
+   * (workspace-files.test.ts / capability-notice tests pin that the file bytes are unchanged).
+   */
+  capabilityAck?: import('./project-capability-consent').CapabilityAckMap
   /** Best dino-game score in this project — new dino nodes seed from it, so the record survives closing the node. */
   dinoHighScore?: number
   /** Kanban task board — shared via .nodeterm/project.json like nodes. */
@@ -510,6 +606,30 @@ export interface TmuxStatus {
   platform: string
 }
 
+/**
+ * How close THIS MACHINE is to `kern.tty.ptmx_max`, the system-wide pty-device ceiling that took
+ * the whole app down in the 2026-08-11 field report (every spawn failing with a bare
+ * `posix_spawnp failed.`). See core/pty-pressure.ts for the bands.
+ */
+export type PtyPressureLevel = 'none' | 'elevated' | 'critical'
+
+/** A pty-pressure reading, as broadcast on `IPC.ptyPressure`. `null` = could not be measured. */
+export interface PtyPressure {
+  level: PtyPressureLevel
+  /** `/dev/ttys*` entries in existence right now. */
+  usage: number | null
+  /** `kern.tty.ptmx_max`. */
+  ceiling: number | null
+}
+
+/** Outcome of the banner's "Fix automatically…" button (macOS only) — see main/ptmx-limit.ts. */
+export type PtyLimitFixResult =
+  | { ok: true; ceiling: number }
+  /** `canceled` = the user dismissed macOS's own admin-password dialog. Not an error to retry.
+   *  `busy` = a password dialog from another window/reload is already up. Both are SILENT for the
+   *  renderer: nothing failed, so neither may raise an error toast. */
+  | { ok: false; error: string; canceled?: boolean; busy?: boolean }
+
 export interface PtyApi {
   /** Starts a new PTY session; returns its sessionId and whether the session was freshly
    *  created (cold start) vs reattached to a still-running tmux session (warm). */
@@ -532,8 +652,14 @@ export interface PtyApi {
    *  node attached; absent ⇒ the PRIMARY view. */
   kill(sessionId: string, viewerId?: string): void
   /** Permanently ends the persistent session for a node (kills its tmux session) because the node
-   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it. */
-  destroy(persistKey: string): void
+   *  is being DELETED. Co-viewers get `onClosed` and must not respawn it.
+   *
+   *  `everySocket` (optional, trailing) widens a kill for a session we hold NOTHING for to every
+   *  local tmux socket the name could be on. Opt-in for one caller — the session-memory panel's
+   *  speculative kill of a row it swept off either socket. An ordinary node-× must not set it: it
+   *  takes the same unheld branch after an app restart, and `nodeterm-rmt` holds sessions another
+   *  machine's nodeterm SSHed in to spawn. */
+  destroy(persistKey: string, opts?: { everySocket?: boolean }): void
   /** Ends a node's persistent session so the SAME node id respawns in a new cwd ("move into
    *  worktree"). Same tmux kill as `destroy`, opposite intent: the node stays on the canvas, so
    *  co-viewers get `onRecycled` (restart + re-attach), never the permanent closed state. */
@@ -557,6 +683,11 @@ export interface PtyApi {
    *  node persistKey. null when it is unknown — no session, no tmux, or the query failed — which
    *  callers must read as "not observed", never as evidence of a particular command. */
   paneCommand(persistKey: string): Promise<string | null>
+  /** Terminate the foreground process group in a node's pane. Returns false when the pane/process
+   *  cannot be safely identified; it never kills the pane's login shell. When `expectedAgentId` is
+   *  given, the kill happens only if that harness actually owns the foreground group (argv-verified)
+   *  — so a stale menu can never SIGTERM vim or a build the user started in the pane. */
+  terminateForeground(persistKey: string, expectedAgentId?: string): Promise<boolean>
   /** The agent session's display name (`/rename` name, else auto name) read from the agent's own
    *  session store, resolved strictly by sessionId; null if unknown. Keeps a node title in sync with
    *  the `/resume` name (e.g. after resume) without cross-contaminating same-folder sessions.
@@ -602,6 +733,10 @@ export interface WorkspaceApi {
    *  project folders; `exec` = the custom shell / advanced ssh args of already-open projects moved
    *  out of the shared project file into this machine's own workspace index (@shared/node-exec). */
   onMigrated(cb: (kind: WorkspaceMigrationKind) => void): () => void
+  /** Fired once per run when a load found the workspace index unreadable and preserved it as
+   *  `workspace.json.corrupt-<ts>` (the payload). The projects themselves are untouched — their
+   *  canvases live in each <cwd>/.nodeterm/project.json — so the note tells the user to re-add them. */
+  onCorruptRecovered(cb: (backupFile: string) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
 }
@@ -615,6 +750,8 @@ export interface DialogApi {
 
 export interface ClipboardApi {
   writeText(text: string): void
+  /** Copy local files so Finder and other file-aware macOS apps can paste them. */
+  writeFiles(paths: string[]): Promise<boolean>
 }
 
 export interface ShellApi {
@@ -665,6 +802,15 @@ export interface FilesApi {
    * (too large, unwritable); callers drop that file the way a failed drop does.
    */
   saveUpload(name: string, dataBase64: string): Promise<string | null>
+  /**
+   * Persist raw bytes (base64) as a CANVAS image and resolve its ABSOLUTE path. Unlike
+   * `saveUpload` the file is durable: a canvas image node is persisted in `project.json`, so its
+   * file cannot live in a staging area that is swept after a week. The directory is derived from
+   * `projectId` on the receiving side — the caller never names a path — and is the project's own
+   * git-shared `.nodeterm/images/` when it has a local cwd, else a durable app-local folder.
+   * Resolves null when it could not be written; callers drop that file like a failed drop.
+   */
+  saveCanvasImage(projectId: string, name: string, dataBase64: string): Promise<string | null>
 }
 
 export interface MediaApi {
@@ -689,14 +835,31 @@ export interface BrowserApi {
   onBrowserNewWindow(listener: (e: { url: string; sourceNodeId: string }) => void): () => void
 }
 
-/** A user-defined agent (BYO CLI). In no capability list, so it gets only spawn +
- * terminal-title + process status (no hooks/branch/loop/bridge). */
+/** A user-defined agent (BYO CLI). With no `baseAgent` it is in no capability list, so it gets
+ * only spawn + terminal-title + process status (no hooks/branch/loop/bridge). With a `baseAgent`
+ * it inherits that builtin harness's capabilities (hooks, resume, permission modes, canvas
+ * control) and prompt convention — the use case being a harness-compatible CLI pointed at your
+ * own inference proxy, where you want to KEEP nodeterm's integration while redirecting the calls. */
 export interface CustomAgent {
   /** Stable id of the form 'custom:<uuid>'. Used as the node's agentId. */
   id: string
   label: string
+  /** Base launch command. Blank when `baseAgent` is set means "use the base harness's command"
+   * (so a claude-compatible proxy needs zero launch config). */
   launchCmd: string
-  promptInjectionMode: PromptInjectionMode
+  /** Prompt convention. Optional: inherited from `baseAgent` when set, else defaults to 'argv'. */
+  promptInjectionMode?: PromptInjectionMode
+  /** Optional builtin harness to inherit capabilities + prompt convention from. */
+  baseAgent?: BuiltinAgentId
+  /** Env vars injected at spawn, merged LAST so they win over hook/account env (required for the
+   *  proxy case — your ANTHROPIC_AUTH_TOKEN must beat any account env). Values support
+   *  `${env:VAR}` / `${env:VAR:fallback}` expansion at spawn time against the live OS env. */
+  env?: Record<string, string>
+  /** Extra argv inserted after `launchCmd`, before the prompt/flags. Free-text, shell-split.
+   *  Supports `${env:…}` expansion. Blank = none. */
+  args?: string
+  /** Node color. Falls back to `baseAgent`'s color (or the default grey). */
+  color?: string
 }
 
 /**
@@ -774,18 +937,40 @@ export interface Settings {
   /** Empty string = use the system default shell. */
   defaultShell: string
   gridSize: number
+  /** Drag-time snap: while ON, dragging a node rounds its position to the grid. A live editor in
+   *  BehaviorSection; the canvas reads it for the React Flow `snapToGrid` prop. Distinct from
+   *  `autoAlignGrid` (a one-shot arrange-all), which is a mode, not a drag constraint. */
   snapToGrid: boolean
+  /** Snap-to-grid MODE (like a desktop "Auto arrange"): while ON, every node is snapped to the
+   *  grid at the moment the mode is turned on (the existing one-shot `alignToGrid` run over all
+   *  node ids). Toggled from the native View menu (with a checkmark) and Settings → Behavior.
+   *  Distinct from `snapToGrid` (drag-time snap) — turning this on arranges once; it does not
+   *  constrain future drags. v1: arrange-all-on-enable only. */
+  autoAlignGrid: boolean
   /** Default size (px) for NEW terminal/agent nodes on the canvas. Existing nodes keep
    *  whatever size they were saved with; other node kinds keep their own defaults. */
   defaultNodeWidth: number
   defaultNodeHeight: number
-  /** Sessions sidebar: collapse inactive projects and re-focus the list on every project
-   *  switch (the historical behavior). Off = every project defaults to expanded and a
-   *  project switch never touches the user's expand/collapse choices. */
+  /** Sessions sidebar: the DEFAULT for a project row the user never toggled — on (historical)
+   *  keeps the active project expanded and collapses the others, off leaves everything expanded.
+   *  Explicit toggles live in `sidebarCollapsedItems` and always win. */
   sidebarAutoCollapse: boolean
+  /** Persisted disclosure choices for the sessions tree, keyed `project:<id>` and
+   *  `project:<id>:group:<groupId>` (true = collapsed). Pruned on every write against the live
+   *  tree, so a deleted frame or project cannot grow settings.json forever. */
+  sidebarCollapsedItems: Record<string, boolean>
+  /** Sessions sidebar top-level grouping. 'project' (the default, the historical behavior) groups
+   *  sessions under their project; 'status' flattens across projects and regroups by live agent
+   *  status so sessions needing attention float to the top. Remote/relay sessions have no live
+   *  status in the sidebar and show as idle in either mode. */
+  sidebarGrouping: 'project' | 'status'
   /** Fallback view for projects the user hasn't explicitly toggled (canvas or the kanban board).
    *  Personal machine-local preference; per-project explicit choices override it. */
   defaultProjectView: 'canvas' | 'kanban'
+  /** New-worktree path template, resolved relative to the repository root. Supports `$repoName`
+   *  (`$reponame` and `$defaultFolderName` aliases) plus `$branch`; both `$x` and `${x}` forms.
+   *  A missing branch token is appended automatically. */
+  worktreePathTemplate: string
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
@@ -804,16 +989,43 @@ export interface Settings {
    * tmux's buffer, and it never reached the browser.
    */
   terminalMiddleClickPaste: boolean
-  /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). Trades away scroll-to-pan,
-   *  so it's opt-in — best for mouse users; trackpads keep two-finger pan when off. */
+  /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). On macOS a two-finger trackpad
+   *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
+   *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
+  /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
+   *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
+   *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
+  trackpadPan: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map
    *  directly (grab cursor), for mouse users who pan constantly; box-select then moves to
    *  Shift+drag (React Flow's selectionKeyCode). */
   canvasDragMode: 'select' | 'pan'
+  /**
+   * Browser memory saver: release a browser/web node's page after it has been hidden for
+   * `BROWSER_DISCARD_MS` (5 min), reloading it from its URL when it is shown again. Each
+   * `<webview>` is a whole Chromium renderer process and the canvas caps nothing, so an
+   * afternoon of opened pages is otherwise permanently resident. On by default — the cost is a
+   * reload (and the lost back/forward stack, which a webview cannot serialize), not lost work.
+   */
+  browserMemorySaver: boolean
   accent: string
   tmuxEnabled: boolean
+  /**
+   * Reach a released tmux session with a control-mode (`tmux -C`) client instead of respawning its
+   * terminal — the shadow clients in pty-manager.ts (`shadowAttach`) and the shared background-write
+   * client behind `backgroundWrite`. A control client holds ZERO pty devices, which is the whole
+   * point: the machine-wide `kern.tty.ptmx_max` ceiling is what a canvas of idle terminals runs into
+   * first (see pty-devices.ts).
+   *
+   * ON by default, and read at those two entry points only: switching it off means this process
+   * spawns no `tmux -C` child at all, and a released session is simply unreachable again — exactly
+   * the behavior of the release before it. It is a kill switch for one soak release, not a feature
+   * toggle: nothing user-visible depends on it (the mechanism has no production caller yet), so it
+   * has no settings row and is flipped in settings.json.
+   */
+  ptyShadowClients: boolean
   /** GPU (WebGL) terminal rendering. 'off' routes every terminal to xterm's DOM renderer.
    *  'auto' (default) = one WebGL context PER TERMINAL everywhere except macOS, where it is
    *  'shared'. Repeated macOS field reports (whole-window flicker; terminals compositing black
@@ -830,6 +1042,9 @@ export interface Settings {
    *  renderer. See `resolveTerminalRenderer` (shared/webgl.ts) for the full history. */
   terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
+  /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
+   *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
+  offscreenTerminalMinutes: number
   /** AI commit message agent: a local coding-agent CLI run read-only. */
   commitAgent: 'claude' | 'codex' | 'custom'
   /** For commitAgent='custom': command template; {prompt} placeholder optional (else stdin). */
@@ -857,6 +1072,15 @@ export interface Settings {
   soundVolume: number
   /** User-defined agents (BYO CLI) appended to the Add menus. */
   customAgents: CustomAgent[]
+  /** One gateway root + non-secret credential reference used by model-switch-capable harnesses. */
+  modelGateway: ModelGatewaySettings
+  /** Per-builtin-agent launch command overrides (Settings → Agents → Launch commands). The value
+   *  replaces the bare CLI name everywhere a launch line is built — new sessions, cold-restore
+   *  relaunches and in-place restarts, with the usual flags (`--resume`, `--permission-mode`, the
+   *  prompt) appended after it — so a wrapper script that picks an account or sets env vars runs
+   *  wherever the agent would. Empty/absent = the builtin default, byte-identical to before this
+   *  setting existed. Keyed by builtin id only: custom agents already own their `launchCmd`. */
+  agentLaunchCommands: Partial<Record<BuiltinAgentId, string>>
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
@@ -884,13 +1108,26 @@ export interface Settings {
    *  driver runs in `default`). Overridable per project via Project.defaultPermissionMode.
    *  `auto` is version-gated: CLIs below 2.1.71 reject the value, so it degrades to no flag. */
   claudePermissionMode: AgentPermissionMode
+  /** "Eco": exit the agent CLI of a session that has been idle AND offscreen for
+   *  `agentHibernationIdleMinutes`, reclaiming its RAM; the conversation is resumed automatically
+   *  when the node is viewed again. Default OFF — opt-in, because it stops a real process.
+   *  Scheduled/loop agents and sessions with live subagents are never touched
+   *  (renderer/terminal/hibernation-policy.ts explains why). */
+  agentHibernationEnabled: boolean
+  /** How long a session must be idle + offscreen before "Eco" hibernates it (minutes). */
+  agentHibernationIdleMinutes: number
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-OUT (default on):
    *  version/OS only, nothing personal, client IP never stored. Turn it off in Settings → Privacy
    *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
    *  install count also rides the /v1/check call and is NOT gated on this toggle — see core/check.ts. */
   telemetryEnabled: boolean
+  /** Debug log panel (issue #78): captures the app's own console into an in-memory, redacted
+   *  ring and unlocks the log viewer. Default off — a debugging tool, not a daily surface.
+   *  Toggle in Settings → Application → Debug. */
+  debugLogPanel: boolean
   /** Keep a standing relay host connection so a paired phone can reach this Mac from anywhere
-   *  (end-to-end encrypted). Default off. Toggle in Settings → Phone. */
+   *  (end-to-end encrypted). Default on — the host only admits SAS-approved, pinned devices, so
+   *  an un-paired install just keeps an idle listener. Toggle in Settings → Phone. */
   phoneAccessEnabled: boolean
   /** Send APNs push notifications to relay-paired phones when an agent needs approval, asks a
    *  question, or finishes a turn (spec: apns-push). Default on — it only fires for users who
@@ -933,6 +1170,16 @@ export interface Settings {
   notchHoverExpand: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
+  /** Per-node hook identity enforcement (src/core/agents/node-identity-policy.ts).
+   *
+   *  The ONLY optional key in this interface, and deliberately so: it is a TRI-state, and the two
+   *  non-default states are opposite escape hatches. Absent (the default — it is not in
+   *  DEFAULT_SETTINGS) follows `NODE_IDENTITY_STRICT_AFTER`, so the rollout has one schedule for
+   *  everybody. `true` opts in to strict enforcement before that date. `false` keeps the warning
+   *  window open past it and releases the trust-on-first-proof latch, so a user whose upgrade
+   *  strands a live session gets their canvas back without downgrading the app. Neither value ever
+   *  admits a forged token. */
+  hookIdentityStrict?: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -957,19 +1204,27 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultShell: '',
   gridSize: 24,
   snapToGrid: false,
+  autoAlignGrid: false,
   defaultNodeWidth: 640,
   defaultNodeHeight: 440,
   sidebarAutoCollapse: true,
+  sidebarCollapsedItems: {},
+  sidebarGrouping: 'project',
   defaultProjectView: 'canvas',
+  worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
+  trackpadPan: true,
   canvasDragMode: 'select',
+  browserMemorySaver: true,
   accent: '#0a84ff',
   tmuxEnabled: true,
+  ptyShadowClients: true,
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
+  offscreenTerminalMinutes: 10,
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
@@ -981,6 +1236,8 @@ export const DEFAULT_SETTINGS: Settings = {
   soundEffects: true,
   soundVolume: 0.5,
   customAgents: [],
+  modelGateway: { baseUrl: '', apiKey: '' },
+  agentLaunchCommands: {},
   claudeAccounts: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.
@@ -995,10 +1252,15 @@ export const DEFAULT_SETTINGS: Settings = {
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
   // (settings hydrate merges over DEFAULT_SETTINGS) — a deliberate behavior change.
   claudePermissionMode: 'auto',
+  // Opt-in: hibernation exits a live CLI, so nobody gets it without asking. The 30-minute floor
+  // is deliberately long — shorter windows exit sessions the user is between turns on.
+  agentHibernationEnabled: false,
+  agentHibernationIdleMinutes: 30,
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,
-  phoneAccessEnabled: false,
+  debugLogPanel: false,
+  phoneAccessEnabled: true,
   mobilePushEnabled: true,
   mobilePushNeedsYou: true,
   mobilePushDone: true,
@@ -1014,7 +1276,12 @@ export const DEFAULT_SETTINGS: Settings = {
   notchHud: true,
   notchWidth: 168,
   notchHoverExpand: true,
-  speech: { engine: 'whisper', model: 'tiny', language: 'auto', shortcut: 'Cmd+Alt' },
+  // model: '' = the explicit "no dictation" state (SPEECH_MODEL_NONE, issue #143). Dictation is
+  // opt-in: nothing is selected — and so nothing downloads and no shortcut records — until the
+  // user picks a model in onboarding or Settings → Speech. Existing installs keep whatever their
+  // settings.json already says (the merge only fills ABSENT keys), so nobody's working dictation
+  // is switched off by an upgrade.
+  speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+Alt' },
 }
 
 export interface SettingsApi {
@@ -1109,8 +1376,17 @@ export interface SshProjectApi {
    * Authoritative teardown on project delete: works regardless of whether the nodes are
    * mounted, and must be awaited BEFORE disconnect (which kills the master). `nodeIds` are
    * raw node ids; main maps them to `nt-<id>` session names.
+   *
+   * `everySocket` widens the kill to every tmux socket on the host rather than the `nodeterm-rmt`
+   * one an SSH project spawns on. Opt-in for ONE caller — the session-memory panel, whose rows are
+   * swept off both sockets. Project deletion stays narrow: `node-terminal` on that host belongs to
+   * a nodeterm running ON it, not to us.
    */
-  killSessions(projectId: string, nodeIds: string[]): Promise<void>
+  killSessions(
+    projectId: string,
+    nodeIds: string[],
+    opts?: { everySocket?: boolean }
+  ): Promise<void>
   /** List remote sub-directories of `path` (default ~). */
   listDir(projectId: string, path: string): Promise<{ path: string; dirs: string[] }>
   /** Create a remote directory (mkdir -p). Resolves false when not connected or the mkdir fails. */
@@ -1164,6 +1440,8 @@ export interface SshFsApi {
   write(projectId: string, path: string, content: string): Promise<boolean>
   mkdir(projectId: string, path: string): Promise<boolean>
   exists(projectId: string, path: string): Promise<boolean>
+  /** ⌘K Quick Open index of the project's remoteCwd: root-relative `/`-paths ([] on failure). */
+  quickOpen(projectId: string, cwd: string): Promise<string[]>
 }
 
 export interface GitFileChange {
@@ -1457,6 +1735,98 @@ export interface ProviderUsage {
   status: 'unavailable' | 'fetching' | 'ok' | 'error'
 }
 
+/** Host memory snapshot in MB. `null` from any reader means "could not read" — never "zero".
+ *  Shared because it crosses the wire for the system-resource pill; core reads it, the renderer
+ *  renders it. */
+export interface MemInfo {
+  availableMb: number
+  totalMb: number
+  /**
+   * Swap, and the kernel's own stall accounting. **Optional on purpose, and their absence is the
+   * darwin contract.**
+   *
+   * `availableMb` alone cannot see a host that has already spent its overflow reserve: a machine
+   * with 10.5 GB "available" and 84% of its swap consumed reads as healthy under a 10%-of-RAM
+   * watermark, which is exactly the state the 2026-08-03 swap-thrash lockup was in. These fields
+   * carry the two host-wide facts that DO see it.
+   *
+   * Only the Linux reader populates them (`/proc/meminfo` for swap, `/proc/pressure/memory` for
+   * PSI — both world-readable, measured on a `hidepid=invisible` host where a non-root uid can read
+   * neither another user's processes nor their tmux socket). `parseVmStat` leaves every one of them
+   * undefined, so no macOS reading can ever satisfy a swap or PSI term: darwin cannot start firing
+   * on a signal that was never measured there.
+   *
+   * A consumer must treat `undefined` as NO SIGNAL, never as zero — a zero here reads as
+   * "swap totally exhausted" / "no stall", and both are claims the reader has not earned.
+   */
+  /** Total swap in MB; `0` legitimately means "this host has no swap configured". */
+  swapTotalMb?: number
+  /** Free swap in MB. */
+  swapFreeMb?: number
+  /** `/proc/pressure/memory` `some avg60` — % of the last minute at least one task stalled on memory. */
+  psiSomeAvg60?: number
+  /** `/proc/pressure/memory` `full avg60` — % of the last minute EVERY task was stalled. Thrash. */
+  psiFullAvg60?: number
+}
+
+/** One nt- session's memory, as the panel renders it. */
+export interface SessionMemoryRow {
+  /** tmux session name, `nt-<nodeId>`. */
+  session: string
+  /** The canvas node id — the session name minus the `nt-` prefix. */
+  nodeId: string
+  panePid: number
+  /** The pane's own process. */
+  selfMb: number
+  /** Everything below it (MCP servers, headless browsers, …). */
+  childrenMb: number
+  childCount: number
+  totalMb: number
+  /** `#{pane_current_command}` — the agent/shell label. */
+  command: string
+}
+
+/**
+ * `ok: false` means the sweep could not run (no tmux binary, unreadable process table). It is NOT
+ * the same as an empty `rows` with `ok: true`, which means "we looked and there are no sessions".
+ * Collapsing the two would make the panel report "nothing is using memory" at exactly the moment
+ * it failed to measure.
+ */
+export interface SessionMemoryReport {
+  ok: boolean
+  rows: SessionMemoryRow[]
+  mem: MemInfo | null
+}
+
+/**
+ * What the renderer asks for: the machine a project runs ON, never "this machine" implicitly.
+ * `remote: true` is the renderer saying it already knows (from `usageScope`) that the active
+ * project is an SSH one; the shell's own `isRemoteProject` is a second, independent confirmation,
+ * so a project the shell has not (yet) registered as connected still cannot be answered with the
+ * local machine's sessions.
+ */
+export interface SessionMemoryQuery {
+  projectId?: string
+  remote?: boolean
+}
+
+/**
+ * Per-session memory for the machine the ACTIVE PROJECT runs on — the same scoping rule the usage
+ * indicator follows (`usageScope`), for the same reason: a number is meaningless without the
+ * machine it describes.
+ *
+ * Both members are on-demand only, never polled: a remote answer costs an ssh exec plus a `ps` of
+ * somebody else's whole process table. Pass the query through verbatim — `remote` is one of the two
+ * independent sources the service uses to decide which host answers.
+ */
+export interface SessionMemoryApi {
+  /** Per-session breakdown for the scoped machine. `ok:false` = the sweep could not run, which is
+   *  NOT an empty `rows` with `ok:true` ("we looked, there are none"). */
+  read(q?: SessionMemoryQuery): Promise<SessionMemoryReport>
+  /** The scoped machine's RAM. `null` = could not read (never "zero"). */
+  host(q?: SessionMemoryQuery): Promise<MemInfo | null>
+}
+
 /** Claude Code subscription usage snapshot for the bottom-left indicator. */
 export interface ClaudeUsage {
   /**
@@ -1666,6 +2036,14 @@ export interface ClaudeCliCaps {
   /** `"tui": "fullscreen"` in settings.json is only understood by Claude Code >= 2.1.89. Gates
    *  whether nodeterm writes that key (write-if-absent) so sessions render fullscreen in tmux. */
   fullscreenTui: boolean
+  /**
+   * Whether this CLI accepts `--session-id <uuid>`, which lets nodeterm MINT a node's session id
+   * instead of waiting to learn it from a hook. Detected by reading `claude --help`, not by
+   * comparing versions: the version this flag first shipped in is not documented anywhere we can
+   * check, and a guessed floor is the one mistake that would be fatal here — an unknown flag makes
+   * the CLI exit, so a wrong guess kills every claude launch rather than degrading.
+   */
+  sessionIdFlag: boolean
 }
 
 /** The answer whenever the CLI version can't be determined: no `auto` flag → bare command, and no
@@ -1673,7 +2051,54 @@ export interface ClaudeCliCaps {
 export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
   version: null,
   autoPermissionMode: false,
-  fullscreenTui: false
+  fullscreenTui: false,
+  sessionIdFlag: false
+}
+
+/** Whether a Codex node launched on this machine right now would get a managed shared identity.
+ *  Fed by core/codex-identity-caps.ts; the unknown answer is `false`, i.e. plain `codex`. */
+export interface CodexIdentityCaps {
+  shared: boolean
+  /** Absolute path of the installed launcher, or null when it could not be written. */
+  launcherPath: string | null
+  /** Does the installed `codex` accept `--remote`? Feature-detected from its own `--help`. The one
+   *  precondition that cannot be recovered from at runtime: the launcher execs, and a CLI without
+   *  the flag dies on a usage error where no fallback is left. Unknown ⇒ false ⇒ plain codex, and
+   *  "not probed" counts as unknown: when `appServer` is false the help spawns are skipped, so this
+   *  reads false whatever the CLI's help page would have said. */
+  remoteFlag: boolean
+  /** Can this INSTALL run a shared app-server at all? `codex app-server daemon start` needs the
+   *  standalone runtime the Codex installer manages; an npm (or snap) install has the `--remote`
+   *  flag in its help and no such runtime, so it can never serve a shared identity. Unknown ⇒
+   *  false ⇒ plain codex. */
+  appServer: boolean
+}
+
+/** The answer before the probe has run, and the one the Server Edition gives on purpose. */
+export const UNKNOWN_CODEX_IDENTITY_CAPS: CodexIdentityCaps = {
+  shared: false,
+  launcherPath: null,
+  remoteFlag: false,
+  appServer: false
+}
+
+/** A Codex node's identity mode, as reported by the node's own launcher at spawn time.
+ *  `plain` carries the machine-readable reason the managed identity was unavailable. */
+export interface CodexIdentityEvent {
+  nodeId: string
+  mode: 'shared' | 'plain'
+  reason?: string
+}
+
+/** The Codex-specific surface. Small on purpose: everything else a Codex node needs already goes
+ *  through the shared agent/pty APIs. */
+export interface CodexApi {
+  /** Would a Codex node launched right now get a managed shared identity on this machine?
+   *  Never rejects — the unknown answer is `{ shared: false }`, i.e. plain `codex`. */
+  identityCaps(): Promise<CodexIdentityCaps>
+  /** Fires when a Codex node's launcher reports its identity mode. `plain` is the fallback, and
+   *  this event is what stops that fallback being silent. Returns unsubscribe. */
+  onIdentity(listener: (e: CodexIdentityEvent) => void): () => void
 }
 
 export interface ClaudeApi {
@@ -1697,6 +2122,24 @@ export interface ClaudeApi {
 }
 
 export type HandoffResult = { filePath: string } | { error: string }
+
+/** Agent launch/gateway IPC. The renderer has no `process.env`; `${env:VAR}` expansion runs
+ *  renderer-side against the `envSnapshot()` cache (src/renderer/lib/agentEnv.ts), so the
+ *  Settings preview and the typed launch command share one assembler AND one environment — they
+ *  cannot drift by construction. */
+export interface AgentApi {
+  /** A string-only snapshot of the main process environment (undefined entries omitted), for
+   *  expanding `${env:VAR}` tokens in launch commands and the Settings preview. Desktop-window
+   *  only: the browser/relay bridges resolve `{}` (a host env dump must never cross to a peer —
+   *  the PR #195 leak class), and expansion there degrades to the missing-env refusal. */
+  envSnapshot(): Promise<Record<string, string>>
+  /** Query the configured gateway's OpenAI-compatible `/v1/models` endpoint. Never rejects. */
+  discoverModels(settings: ModelGatewaySettings): Promise<ModelDiscoveryResult>
+  /** Literal gateway credentials are write-only in the renderer. */
+  gatewayCredentialStatus(): Promise<ModelGatewayCredentialStatus>
+  saveGatewayCredential(apiKey: string): Promise<ModelGatewayCredentialStatus>
+  clearGatewayCredential(): Promise<ModelGatewayCredentialStatus>
+}
 
 export interface HandoffApi {
   /**
@@ -1725,6 +2168,35 @@ export interface LicenseStatus {
   error: string | null
 }
 
+/**
+ * Where the entitlement behind this install came from. A verified entitlement's licenseId is NOT
+ * always a keygen license id: an App Store purchase on a paired phone bridges Pro to the desktop
+ * and mints `apple:<txn>`, and `free:` exists too. For those the server makes zero keygen calls
+ * and answers `key: null, used: 0, seats: 0` — genuinely "device counting does not apply here",
+ * which is a different fact from a failed read and from a keygen license with no devices yet.
+ */
+export type LicenseSource = 'keygen' | 'apple' | 'free'
+
+/** What Settings → License shows: the key to copy and how much of the device cap is in use.
+ *  A failed read is an ERROR, never "0 devices" — the two are different facts. */
+export interface LicenseDetail {
+  /** The license key to copy. `null` on a 200 is legitimate (a keygen policy that hides keys, a
+   *  license predating the column, a non-keygen source) — it is NOT an error. */
+  key: string | null
+  /** Devices currently activated. May EXCEED `seats` if a cap was lowered after activation. */
+  used: number
+  seats: number
+  /** The source the server stated, or null when it stated none — every error reply, and the
+   *  release route's 200, which answers with counts only. Never inferred locally. */
+  source: LicenseSource | null
+  /** Null on success; a stable reason code otherwise ('unauthorized' | 'inactive' | 'offline' |
+   *  'disabled' | 'too_soon' | 'not_applicable' | 'network'). A failed read is an error, never
+   *  "0 devices". */
+  error: string | null
+  /** Days until another release is allowed — only set with error === 'too_soon'. */
+  retryAfterDays?: number
+}
+
 export interface LicenseApi {
   /** Open Stripe checkout bound to this device and poll for the entitlement (no key paste).
    * `target` picks the link: 'seats' = the add-seats (quantity) link, else base Pro (default).
@@ -1738,6 +2210,13 @@ export interface LicenseApi {
   getStatus(): Promise<LicenseStatus>
   /** Fires when the license status changes. Returns unsubscribe. */
   onChange(listener: (s: LicenseStatus) => void): () => void
+  /** The license key + device usage for this machine's license. Authorized by the stored
+   *  entitlement token — never by deviceId. */
+  detail(): Promise<LicenseDetail>
+  /** Deactivate every device on this license except this one. Throttled server-side to once
+   *  per 30 days (error 'too_soon' + retryAfterDays). Answers with COUNTS only: no key and no
+   *  source ride a successful release, so callers must merge rather than replace. */
+  releaseOthers(): Promise<LicenseDetail>
 }
 
 export interface RemoteHostApi {
@@ -1771,7 +2250,7 @@ export interface RemoteHostApi {
   reject(id: string): void
   /**
    * Start/stop the standing (phone) relay host so a paired phone can reach this Mac from anywhere.
-   * Mirrors `settings.phoneAccessEnabled`; the host also honors the Pro gate internally.
+   * Mirrors `settings.phoneAccessEnabled`.
    */
   setPhoneAccess(enabled: boolean): void
 }
@@ -1872,16 +2351,49 @@ export interface PairedDevice {
   pairedAt: number
   /** epoch-ms the host agent last saw this device (0 = never). */
   lastSeenAt: number
+  /**
+   * The phone's OWN device id — what the relay backend keys its device row on, as opposed to
+   * `id`, which is ours. Absent for devices paired before this field existed; that is NOT "there
+   * is no server row we can name", because a revoke then falls back to `id`, which is the value
+   * the mint sent as the row's key whenever the phone supplied no id of its own (see
+   * `revokeDevice` in main/pairing-service.ts, including the residual case it cannot name). An id,
+   * not a secret, which is why it may cross to the renderer.
+   */
+  relayDeviceId?: string
+}
+
+/**
+ * The server leg of a device revoke — three states, because two cannot tell the truth apart.
+ * 'ok' = the backend confirmed; 'failed' = we asked and were refused or could not reach it;
+ * 'skipped' = we did not ask and that is fine (no entitlement to sign with — a free-tier desktop
+ * has no Pro of ours on that phone to reclaim — or no such device to name). Only 'failed' is a
+ * warning: reporting 'skipped' as a failure would tell a free user their phone's Pro is stuck.
+ *
+ * 'ok' is the backend's 204, which is idempotent and reveals nothing about WHICH row it applied
+ * to — see the residual-leak note on `revokeDevice` in main/pairing-service.ts before treating it
+ * as proof that a particular phone lost Pro.
+ */
+export type DeviceRevokeServerOutcome = 'ok' | 'failed' | 'skipped'
+
+/**
+ * Both legs of a device revoke, reported independently so a half-finished removal can never render
+ * as a clean one (the same discipline as remote/revocation.ts's persisted/killed).
+ */
+export interface DeviceRevokeResult {
+  /** The agent.json entry + authorized_keys line were removed from this machine. */
+  local: boolean
+  /** Whether the phone's Pro entitlement was taken back on the relay backend. */
+  server: DeviceRevokeServerOutcome
 }
 
 /** Phone-pairing (nodeterm iOS "scan a QR" flow) bridge. */
 export interface PairingApi {
   /** Start the one-shot LAN listener; resolves with the QR payload + an SSH-reachable hint. */
-  start(): Promise<{ payload: string; sshOpen: boolean }>
+  start(): Promise<{ payload: string; sshOpen: boolean; relayPlan?: 'ok' | 'dev' | 'off' }>
   /** Cancel an in-flight pairing (e.g. when the settings section unmounts). */
   stop(): Promise<void>
   /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
-  onDone(cb: (result: { ok: boolean }) => void): () => void
+  onDone(cb: (result: { ok: boolean; relay?: 'ok' | 'off' | 'failed' | 'dev' }) => void): () => void
   /** Live re-probe of 127.0.0.1:22, so the Remote Login warning can clear the moment the user
    *  flips the toggle in System Settings (polled by the UI only while the warning is showing). */
   probeSsh(): Promise<boolean>
@@ -1891,8 +2403,11 @@ export interface PairingApi {
   openRemoteLoginSettings(): Promise<void>
   /** List paired devices from ~/.nodeterm/agent.json (never includes the token). */
   listDevices(): Promise<PairedDevice[]>
-  /** Revoke a device: remove its registry entry and delete its authorized_keys line. */
-  revokeDevice(id: string): Promise<void>
+  /**
+   * Revoke a device: remove its registry entry, delete its authorized_keys line, and take its Pro
+   * entitlement back on the relay backend. Never rejects for a leg that failed — read the result.
+   */
+  revokeDevice(id: string): Promise<DeviceRevokeResult>
 }
 
 /** Team presence (docs/team-presence.md). All of it is transient — nothing here is persisted. */
@@ -1943,12 +2458,17 @@ export interface NodeTerminalApi {
   license: LicenseApi
   contextLink: ContextLinkApi
   boardLog: BoardLogApi
+  logs: LogApi
   githubIssues: import('./github-issues').GitHubIssuesApi
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
+  sessionMemory: SessionMemoryApi
   context: ContextApi
   canvas: CanvasApi
+  codex: CodexApi
   claude: ClaudeApi
+  /** Custom-agent launch/preview (env-var expansion + command assembly). */
+  agent: AgentApi
   chat: ChatApi
   claudeAccounts: ClaudeAccountsApi
   transcripts: TranscriptsApi
@@ -1962,6 +2482,18 @@ export interface NodeTerminalApi {
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
   onCloseNode(listener: () => void): () => void
+  /** Fires when the user presses Cmd/Ctrl+0 (zoom the canvas back to 100%). Desktop only: the
+   *  key is intercepted in main because Electron's default View menu owns the accelerator. In the
+   *  Server Edition the renderer's own keydown handler sees the key and this is a no-op stub. */
+  onZoomActualSize(listener: () => void): () => void
+  /** Native View menu → Snap to Grid toggle. Returns unsubscribe. */
+  onToggleAutoAlign(listener: () => void): () => void
+  /** Native View menu → Fit View. Returns unsubscribe. */
+  onFitView(listener: () => void): () => void
+  /** Native View menu → Toggle Kanban / Canvas view. Returns unsubscribe. */
+  onToggleKanban(listener: () => void): () => void
+  /** Fires when the native app menu's "Settings…" item (⌘,) is clicked. Returns unsubscribe. */
+  onOpenSettings(listener: () => void): () => void
   /** Close the application window (Cmd/Ctrl+W fallback when no node is selected). */
   closeWindow(): void
   /** Bring the app window to the foreground (show + OS focus). Called after a file is DROPPED
@@ -1983,6 +2515,23 @@ export interface NodeTerminalApi {
   openNotificationSettings(): Promise<void>
   /** Fires when a notification is clicked, asking the renderer to focus a node. Returns unsubscribe. */
   onFocusNode(listener: (nodeId: string) => void): () => void
+  /** Fires when the shell's memory-pressure monitor (core/memory-pressure.ts) sees the host — or
+   *  this process's own RSS — cross a watermark: the renderer answers by running its reclaim
+   *  levers (hidden WebGL contexts, parked terminals). At most one fire a minute, so the levers
+   *  need only be idempotent, not cheap. Returns unsubscribe. Server Edition: never fires (the
+   *  pressure levers run host-side there; a browser tab's memory belongs to the browser). */
+  onMemoryPressure(listener: (severity: 'warning' | 'critical') => void): () => void
+  /** Fires when THIS MACHINE's pty-device pressure band changes (core/pty-pressure.ts): the
+   *  renderer raises/lowers the banner that warns before `kern.tty.ptmx_max` stops every new
+   *  terminal from opening. Band changes only, re-sent for a held band at most once every five
+   *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
+   *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
+  onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
+   *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
+   *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
+   *  dialog resolves `{ ok: false, canceled: true }`, which is not an error to report or retry. */
+  raisePtyDeviceLimit(): Promise<PtyLimitFixResult>
   /** Answer a Claude permission request via the deterministic hook-reply channel (spec:
    *  docs/hook-reply-approvals.md). Writes the one-line answer file the held hook is polling
    *  (`~/.nodeterm/pending/<pendingId>.answer`) on the host the agent runs on — the LOCAL fs for a
@@ -2022,4 +2571,10 @@ export interface NodeTerminalApi {
     result?: unknown
     error?: string
   }): void
+  /** Agent messaging (the `send`/`reply` control verbs): run one delivery in main, where the
+   *  scope check, the per-project switch, flow control and the pane probes all live. The reply is
+   *  already rendered as a control reply — Canvas forwards it verbatim. */
+  agentMessage: {
+    deliver(req: AgentMessageDeliverRequest): Promise<AgentMessageReply>
+  }
 }

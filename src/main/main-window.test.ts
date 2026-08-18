@@ -5,6 +5,8 @@ import {
   sendToMain,
   mainWindowClientIds,
   shouldHideOnClose,
+  closeAction,
+  createCrashReloadPolicy,
   type MainWindowLike
 } from './main-window'
 
@@ -110,6 +112,41 @@ describe('main-window tracking', () => {
   })
 })
 
+// Field bug (2026-08-10): a dead renderer left the window permanently blank — the
+// render-process-gone handler dropped pty clients but nothing ever reloaded the page.
+describe('createCrashReloadPolicy', () => {
+  it('reloads after a crashed renderer', () => {
+    const onCrash = createCrashReloadPolicy()
+    expect(onCrash('crashed', 0)).toBe('reload')
+  })
+
+  it('reloads after an OOM kill', () => {
+    const onCrash = createCrashReloadPolicy()
+    expect(onCrash('oom', 0)).toBe('reload')
+  })
+
+  it('ignores a clean exit and spends no reload budget on it', () => {
+    const onCrash = createCrashReloadPolicy({ maxReloads: 1 })
+    expect(onCrash('clean-exit', 0)).toBe('ignore')
+    expect(onCrash('crashed', 1)).toBe('reload') // budget untouched
+  })
+
+  it('gives up when crashes keep coming inside the window (no reload loop)', () => {
+    const onCrash = createCrashReloadPolicy({ maxReloads: 2, windowMs: 60_000 })
+    expect(onCrash('crashed', 0)).toBe('reload')
+    expect(onCrash('crashed', 1_000)).toBe('reload')
+    expect(onCrash('crashed', 2_000)).toBe('give-up')
+  })
+
+  it('restores the budget once earlier reloads age out of the window', () => {
+    const onCrash = createCrashReloadPolicy({ maxReloads: 2, windowMs: 60_000 })
+    onCrash('crashed', 0)
+    onCrash('crashed', 1_000)
+    expect(onCrash('crashed', 2_000)).toBe('give-up')
+    expect(onCrash('crashed', 61_500)).toBe('reload') // both grants aged out
+  })
+})
+
 describe('shouldHideOnClose', () => {
   it('hides instead of closing on macOS while the app is not quitting', () => {
     expect(shouldHideOnClose('darwin', false)).toBe(true)
@@ -120,5 +157,22 @@ describe('shouldHideOnClose', () => {
   it('never intercepts close on other platforms', () => {
     expect(shouldHideOnClose('win32', false)).toBe(false)
     expect(shouldHideOnClose('linux', false)).toBe(false)
+  })
+})
+
+describe('closeAction', () => {
+  it('hides a windowed macOS close', () => {
+    expect(closeAction('darwin', false, false)).toBe('hide')
+  })
+  it('leaves fullscreen before hiding — hiding in place strands a black Space (issue #78)', () => {
+    expect(closeAction('darwin', false, true)).toBe('leave-fullscreen-then-hide')
+  })
+  it('lets the close through when quitting, fullscreen or not', () => {
+    expect(closeAction('darwin', true, true)).toBe('default')
+    expect(closeAction('darwin', true, false)).toBe('default')
+  })
+  it('never intercepts on other platforms, fullscreen included', () => {
+    expect(closeAction('linux', false, true)).toBe('default')
+    expect(closeAction('win32', false, true)).toBe('default')
   })
 })

@@ -44,6 +44,19 @@ export function formatModelLabel(model: string | null): string | null {
   return version ? `${family} ${version}` : family
 }
 
+/**
+ * Fill color for a CONTEXT-WINDOW meter: green while low, yellow from 60% used, red past 85%.
+ * Keyed to USED percent — the inverse scale of `barColor`/`severityColor`, which are keyed to
+ * REMAINING provider quota. The two measure different things and must not share thresholds.
+ * One definition for every context surface (ContextMeter, session rows, the notch HUD) — each
+ * used to carry its own copy of these numbers (issue #78).
+ */
+export function contextFillColor(usedPercent: number): string {
+  if (usedPercent > 85) return '#ff453a'
+  if (usedPercent >= 60) return '#ffd60a'
+  return '#30d158'
+}
+
 /** Bar color by remaining quota: green > 40%, yellow 20–40%, red < 20%. */
 export function barColor(leftPercent: number): string {
   if (leftPercent > 40) return '#30d158'
@@ -71,11 +84,7 @@ export function severityColor(severity: string | null, leftPercent: number): str
   }
 }
 
-/**
- * The percentage a limit renders as, honouring the used/remaining display setting. Only the
- * NUMBER flips — the bar always fills with what is left (a fuel gauge), because inverting the
- * fill per mode would also invert what the severity colours appear to mean.
- */
+/** The percentage a limit renders as, honouring the used/remaining display setting. */
 export function percentText(usedPercent: number, mode: 'used' | 'remaining'): string {
   return mode === 'used'
     ? `${Math.round(usedPercent)}% used`
@@ -85,4 +94,14 @@ export function percentText(usedPercent: number, mode: 'used' | 'remaining'): st
 /** Compact form for the pill: the bare number, no suffix (the segment label follows it). */
 export function percentNumber(usedPercent: number, mode: 'used' | 'remaining'): number {
   return Math.round(mode === 'used' ? usedPercent : 100 - usedPercent)
+}
+
+/**
+ * Bar fill, honouring the used/remaining display setting — the fill tracks the same quantity as
+ * the adjacent number, so "92% used" shows a nearly-full bar instead of a barely-visible sliver.
+ * Color is a separate call (`severityColor`/`barColor`) keyed to the true remaining percentage,
+ * never to this value, so severity red/yellow/green doesn't flip meaning with the mode.
+ */
+export function barFillPercent(usedPercent: number, mode: 'used' | 'remaining'): number {
+  return mode === 'used' ? usedPercent : 100 - usedPercent
 }

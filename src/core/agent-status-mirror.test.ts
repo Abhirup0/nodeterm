@@ -30,6 +30,8 @@ import {
   onNodeNowChange,
   onInboxActionable,
   isEventUnresolved,
+  trimInboxFeed,
+  workingNodes,
   _resetForTest,
   _snapshot,
   _inboxSnapshot,
@@ -43,6 +45,7 @@ import {
   type MirrorUsage,
   type NodeStateChange,
   type NodeNowChange,
+  type InboxEvent,
   sweepStaleWorking
 } from './agent-status-mirror'
 
@@ -491,6 +494,63 @@ describe('inbox event production (via recordAgentEvent)', () => {
     expect(_inboxSnapshot().events[0].resolved).toBe(true)
   })
 
+  // A CLI that exits mid-turn (`/exit`, Ctrl-C, a crash) is the one transition that MEANS "this
+  // session is over", and it used to emit nothing: `reduceEntry` resets it to `state: undefined`
+  // while every `end` was keyed on the edge into `done`. It escaped the rescue too, because
+  // `sweepStaleWorking` matches `state === 'working'` — which the reset had just stopped being
+  // true. The phone was left holding a card nothing would ever end.
+  describe('a session that ends mid-turn ends its Live Activity', () => {
+    const edgesFor = (fn: () => void): NodeStateChange[] => {
+      const edges: NodeStateChange[] = []
+      const un = onNodeStateChange((c) => edges.push(c))
+      fn()
+      un()
+      return edges
+    }
+
+    it('emits an end when the agent quits while WORKING', () => {
+      recordAgentEvent(ev({ state: 'working', newTurn: true }))
+      const edges = edgesFor(() => recordAgentEvent(ev({ kind: 'session', sessionPhase: 'end' })))
+      expect(edges).toHaveLength(1)
+      expect(edges[0]).toMatchObject({ event: 'end', state: 'done' })
+    })
+
+    it('emits an end when the agent quits while it was BLOCKED on an approval', () => {
+      // The worst case: the card carries Approve/Deny buttons for a hook ticket that is now gone.
+      recordAgentEvent(ev({ state: 'blocked', lastMessage: 'Approve write' }))
+      const edges = edgesFor(() => recordAgentEvent(ev({ kind: 'session', sessionPhase: 'end' })))
+      expect(edges).toHaveLength(1)
+      expect(edges[0]).toMatchObject({ event: 'end', state: 'done' })
+    })
+
+    it('stays silent when the turn already finished — the done edge spoke for it', () => {
+      recordAgentEvent(ev({ state: 'working', newTurn: true }))
+      recordAgentEvent(ev({ state: 'done' }))
+      const edges = edgesFor(() => recordAgentEvent(ev({ kind: 'session', sessionPhase: 'end' })))
+      expect(edges).toEqual([])
+    })
+
+    it('stays silent for an idle node and for a session START', () => {
+      // Nothing was live → nothing to end.
+      expect(edgesFor(() => recordAgentEvent(ev({ kind: 'session', sessionPhase: 'end' })))).toEqual(
+        []
+      )
+      // A SessionStart also resets to idle, but ending there would kill the activity of the turn
+      // that is just beginning.
+      recordAgentEvent(ev({ state: 'working', newTurn: true }))
+      expect(edgesFor(() => recordAgentEvent(ev({ kind: 'session', sessionPhase: 'start' })))).toEqual(
+        []
+      )
+    })
+
+    it('adds no inbox card — the session going away is not news for the feed', () => {
+      recordAgentEvent(ev({ state: 'working', newTurn: true }))
+      const before = _inboxSnapshot().events.length
+      recordAgentEvent(ev({ kind: 'session', sessionPhase: 'end' }))
+      expect(_inboxSnapshot().events.length).toBe(before)
+    })
+  })
+
   it('synthetic "answered" working transition resolves the open approval and adds no new ask', () => {
     // The deterministic-approval answered signal (built exactly as the hook POST / desktop optimistic
     // flip does) is a working state → it goes through the same blocked→working path a normal resume
@@ -574,6 +634,105 @@ describe('inbox event production (via recordAgentEvent)', () => {
     expect(ib.nodes.x).toBeUndefined()
     expect(ib.events).toHaveLength(1)
     expect(ib.events[0].resolved).toBe(true)
+  })
+})
+
+// P2-7: on a busy multi-agent host the global 50-event cap evicted a node's `done` (and its live
+// ask) within minutes, so `ackDone` no-op'd (a retained DONE card on the phone never dismissed) and
+// the phone lost that node's newest-done / end-reason. The feed now keeps each node's newest done +
+// newest UNRESOLVED ask past the cut, in the same `events` array every reader already walks.
+describe('per-node retention past the cap (P2-7)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  /** Push one `done` inbox event for `nodeId` (a working-start pushes no feed event). */
+  function pushDone(nodeId: string, detail: string): void {
+    recordAgentEvent(ev({ nodeId, state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId, state: 'done', lastMessage: detail }))
+  }
+
+  it("keeps a node's newest done when >CAP newer events from other nodes would evict it", () => {
+    pushDone('slow', 'Slow node finished') // the load-bearing done, pushed first (oldest)
+    // A busy sibling floods the feed well past the cap.
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    const events = _inboxSnapshot().events
+    const slow = events.filter((e) => e.nodeId === 'slow')
+    // The slow node's single done SURVIVES despite being far outside the newest-CAP window.
+    expect(slow).toHaveLength(1)
+    expect(slow[0].kind).toBe('done')
+    expect(slow[0].detail).toBe('Slow node finished')
+
+    // ...and ackDone now finds + resolves it and fires exactly one ack 'end' seam (the bug: a no-op).
+    const changes: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => changes.push(c))
+    ackDone('slow')
+    off()
+    expect(_inboxSnapshot().events.find((e) => e.nodeId === 'slow')!.resolved).toBe(true)
+    expect(changes).toHaveLength(1)
+    expect(changes[0]).toMatchObject({ nodeId: 'slow', event: 'end', state: 'done', ack: true })
+  })
+
+  it("keeps a node's newest UNRESOLVED ask past the cap (isEventUnresolved stays true)", () => {
+    recordAgentEvent(ev({ nodeId: 'ask', state: 'blocked', lastMessage: 'Approve deploy?' }))
+    const askId = _inboxSnapshot().events.find((e) => e.nodeId === 'ask')!.id
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    const ask = _inboxSnapshot().events.filter((e) => e.nodeId === 'ask')
+    expect(ask).toHaveLength(1)
+    expect(ask[0].kind).toBe('approval')
+    expect(ask[0].resolved).toBeUndefined()
+    // The push-notify present→away hold reads this — it must still see the held event as live.
+    expect(isEventUnresolved('ask', askId)).toBe(true)
+  })
+
+  it('does NOT retain a RESOLVED ask past the cap — it drops with plain history', () => {
+    recordAgentEvent(ev({ nodeId: 'ask', state: 'blocked', lastMessage: 'Approve deploy?' }))
+    recordAgentEvent(ev({ nodeId: 'ask', state: 'working', newTurn: true })) // leaves blocked → resolved
+    expect(_inboxSnapshot().events.find((e) => e.nodeId === 'ask')!.resolved).toBe(true)
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    // The resolved ask is no longer protected, so the cap evicts it like any other history.
+    expect(_inboxSnapshot().events.some((e) => e.nodeId === 'ask')).toBe(false)
+  })
+
+  it('still bounds plain history to the cap (only the load-bearing extras survive)', () => {
+    pushDone('slow', 'Slow node finished') // one protected out-of-window survivor
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    const events = _inboxSnapshot().events
+    const busy = events.filter((e) => e.nodeId === 'busy')
+    // The busy node's own history is still capped — the oldest turns fell off the front.
+    expect(busy).toHaveLength(INBOX_EVENTS_CAP)
+    expect(busy.some((e) => e.detail === 'busy turn 0')).toBe(false)
+    expect(busy[busy.length - 1].detail).toBe(`busy turn ${INBOX_EVENTS_CAP + 9}`)
+    // Total = the CAP window + the single protected survivor, not unbounded growth.
+    expect(events).toHaveLength(INBOX_EVENTS_CAP + 1)
+  })
+
+  it('trimInboxFeed (pure): drops resolved asks & old history, keeps newest done + unresolved ask', () => {
+    const mk = (id: string, nodeId: string, kind: InboxEvent['kind'], resolved?: boolean): InboxEvent => ({
+      id,
+      ts: Number(id.split('-')[0]),
+      nodeId,
+      kind,
+      title: id,
+      ...(resolved ? { resolved: true } : {})
+    })
+    // oldest→newest; cap 3 keeps the last 3 wholesale, older survive only if protected.
+    const feed = [
+      mk('1-1', 'A', 'approval', true), // resolved ask, out of window → DROP
+      mk('2-1', 'B', 'question'), // unresolved ask, out of window → KEEP
+      mk('3-1', 'C', 'done'), // newest done for C, out of window → KEEP
+      mk('4-1', 'D', 'done'),
+      mk('5-1', 'D', 'done'),
+      mk('6-1', 'D', 'done')
+    ]
+    const kept = trimInboxFeed(feed, 3)
+    expect(kept.map((e) => e.id)).toEqual(['2-1', '3-1', '4-1', '5-1', '6-1'])
+    // A no-op below the cap returns the same reference (order untouched).
+    const small = [mk('1-1', 'A', 'done')]
+    expect(trimInboxFeed(small, 3)).toBe(small)
   })
 })
 
@@ -1583,6 +1742,35 @@ describe('idle_prompt rescue (Esc that ran no Stop hook)', () => {
     expect(next.state).toBe('done')
     expect(next.updatedAt).toBe(1000)
   })
+
+  it('marks the RESCUED done as inferred, so a consumer can tell it from a turn end', () => {
+    // A node blocked on an approval is also "idle at its prompt". Messaging's gate 2 refuses this
+    // shape, and it can only refuse what the entry remembers.
+    const working = reduceEntry(undefined, ev({ state: 'working' }), 1000)
+    const rescued = reduceEntry(working, ev({ state: 'done', idle: true }), 2000)
+    expect(rescued).toMatchObject({ state: 'done', idleInferred: true })
+    const genuine = reduceEntry(undefined, ev({ state: 'done' }), 1000)
+    expect(genuine.idleInferred).toBeUndefined()
+  })
+
+  it('a later genuine turn-end CLEARS the marker — it describes the current state only', () => {
+    const working = reduceEntry(undefined, ev({ state: 'working' }), 1000)
+    const rescued = reduceEntry(working, ev({ state: 'done', idle: true }), 2000)
+    expect(rescued.idleInferred).toBe(true)
+    const nextTurn = reduceEntry(rescued, ev({ state: 'working', newTurn: true }), 3000)
+    expect(nextTurn.idleInferred).toBeUndefined()
+    const ended = reduceEntry(nextTurn, ev({ state: 'done' }), 4000)
+    expect(ended.idleInferred).toBeUndefined()
+  })
+
+  it('an idle event that commits NOTHING leaves the marker alone', () => {
+    // The rescue may only move a node that is still `working`; on a blocked node it returns early
+    // and must not stamp a state it did not commit.
+    const blocked = reduceEntry(undefined, ev({ state: 'blocked' }), 1000)
+    const next = reduceEntry(blocked, ev({ state: 'done', idle: true }), 2000)
+    expect(next.state).toBe('blocked')
+    expect(next.idleInferred).toBeUndefined()
+  })
 })
 
 
@@ -1697,5 +1885,342 @@ describe('recordAgentEvent — codex request_user_input broadcast conversion', (
     const out = recordAgentEvent(ev({ agentId: 'codex', state: 'done' }))
     expect(out.state).toBe('waiting')
     expect(_snapshot().n1.state).toBe('waiting')
+  })
+})
+
+describe('workingNodes', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('lists only the nodes currently believed to be working, with their identity', () => {
+    recordAgentEvent(ev({ nodeId: 'n1', agentId: 'claude', state: 'working', sessionId: 's1' }))
+    recordAgentEvent(ev({ nodeId: 'n2', agentId: 'claude', state: 'done', sessionId: 's2' }))
+
+    expect(workingNodes()).toEqual([{ nodeId: 'n1', agentId: 'claude', sessionId: 's1' }])
+  })
+
+  it('is empty when nothing is working', () => {
+    recordAgentEvent(ev({ nodeId: 'n3', agentId: 'codex', state: 'done' }))
+    expect(workingNodes()).toEqual([])
+  })
+})
+
+describe('reduceEntry records whether the state transition was verified', () => {
+  it('a verified state transition stamps verifiedAt and sets stateVerified', () => {
+    const e = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    expect(e.state).toBe('done')
+    expect(e.stateVerified).toBe(true)
+    expect(e.verifiedAt).toBe(1000)
+  })
+
+  it('an UNVERIFIED transition clears stateVerified — a later legacy event un-proves an earlier proof', () => {
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ state: 'working', verified: false, newTurn: true }), 2000)
+    expect(b.stateVerified).toBe(false)
+    // verifiedAt is NOT cleared: it is "when we last saw proof", which stays true.
+    expect(b.verifiedAt).toBe(1000)
+  })
+
+  it('an event that does not change state does not fabricate proof', () => {
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: false }), 1000)
+    const b = reduceEntry(a, ev({ kind: 'context', verified: true } as never), 2000)
+    expect(b.stateVerified).toBe(false)
+  })
+
+  it('a held-off late working leaves the proof of the done it did not override', () => {
+    // The done-holdoff deliberately does not commit the state, so it must not restate the proof
+    // either — the entry still describes the `done`, and that done WAS verified.
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ state: 'working', verified: false }), 1000 + DONE_HOLDOFF_MS - 1)
+    expect(b.state).toBe('done')
+    expect(b.stateVerified).toBe(true)
+  })
+
+  it('a VERIFIED session boundary still drops the proof — idle is not a proven state', () => {
+    // The `false` at that call site is explicit, so it needs a case where `ev.verified` is true
+    // and the answer is still false; without this, passing `ev.verified === true` there would be
+    // an untested equivalent. What a SessionStart proves is that a token holder started a
+    // session, not that the node is idle-and-accounted-for, and gate 2 reads `done` anyway.
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ kind: 'session', sessionPhase: 'start', verified: true }), 2000)
+    expect(b.state).toBeUndefined()
+    expect(b.stateVerified).toBe(false)
+    expect(b.verifiedAt).toBe(1000)
+  })
+
+  it('a session boundary drops the proof with the state it was about', () => {
+    // SessionStart/End reset the node to idle. A `stateVerified: true` left standing beside a
+    // state of `undefined` would assert proof about a state that no longer exists.
+    const a = reduceEntry(undefined, ev({ state: 'done', verified: true }), 1000)
+    const b = reduceEntry(a, ev({ kind: 'session', sessionPhase: 'start' }), 2000)
+    expect(b.state).toBeUndefined()
+    expect(b.stateVerified).toBe(false)
+    expect(b.verifiedAt).toBe(1000)
+  })
+})
+
+describe('the request_user_input hold carries its own evidence', () => {
+  // MEASURED on the first version of this PR: a verified `waiting` at t=1000 followed by a
+  // TOKENLESS `done` produced { state: 'waiting', stateVerified: true, updatedAt: 2000 }. The hold
+  // was the one branch that wrote `next.state` without co-writing the proof, so the label survived
+  // an event that never presented a token — and since /hook/* is fail-open by contract, any caller
+  // can replay that event forever, refreshing `updatedAt` so the entry never expires either.
+  it('a TOKENLESS done that gets held to waiting un-proves the entry', () => {
+    const a = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, verified: true }), 1000)
+    expect(a.stateVerified).toBe(true)
+    const b = reduceEntry(a, ev({ state: 'done', verified: false }), 2000)
+    expect(b.state).toBe('waiting')
+    expect(b.stateVerified).toBe(false)
+    expect(b.verifiedAt).toBe(1000) // "we once saw proof" is still true
+  })
+
+  it('stays false however many times the tokenless event is replayed', () => {
+    let e = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, verified: true }), 1000)
+    for (let i = 0; i < 98; i++) e = reduceEntry(e, ev({ state: 'done', verified: false }), 2000 + i)
+    expect(e.state).toBe('waiting')
+    expect(e.stateVerified).toBe(false)
+  })
+
+  it('and a VERIFIED held done proves it — the flag tracks the event, not the branch', () => {
+    const a = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, verified: false }), 1000)
+    const b = reduceEntry(a, ev({ state: 'done', verified: true }), 2000)
+    expect(b.state).toBe('waiting')
+    expect(b.stateVerified).toBe(true)
+    expect(b.verifiedAt).toBe(2000)
+  })
+
+  it('carries the client stamp on that edge too', () => {
+    const a = reduceEntry(undefined, ev({ state: 'waiting', awaitingInput: true, clientRevision: 3 }), 1000)
+    const b = reduceEntry(a, ev({ state: 'done' }), 2000)
+    expect(b.clientRevision).toBeUndefined() // the held event carried no stamp — say so
+  })
+})
+
+describe('a restored entry is never proof', () => {
+  let dir = ''
+  beforeEach(() => {
+    _resetForTest()
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-restored-'))
+  })
+  afterEach(() => {
+    _resetForTest()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('is marked, and carries no proof, however the file was written', () => {
+    const file = path.join(dir, 'agent-status.json')
+    // `stateVerified: true` cannot come out of buildFile — but a hand-edited, downgraded or
+    // future-written file is not a thing this process controls, and the restore is what gate 2
+    // would read. Force the hostile shape.
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        v: 1,
+        updatedAt: Date.now(),
+        nodes: { n1: { state: 'done', agentId: 'claude', stateVerified: true, updatedAt: Date.now() } }
+      })
+    )
+    initAgentStatusMirror(file)
+    expect(_snapshot().n1?.state).toBe('done')
+    expect(_snapshot().n1?.restored).toBe(true)
+    expect(_snapshot().n1?.stateVerified).toBe(false)
+  })
+
+  it('the first live event that COMMITS a state clears `restored`', () => {
+    // `newTurn` matters here and the first draft of this test omitted it: at now=5 against a
+    // restored `done` stamped 0, a bare `working` is inside the done-holdoff, commits nothing, and
+    // therefore — correctly — leaves the entry restored. A genuine UserPromptSubmit is what
+    // actually replaces the state that came off disk.
+    const a = { state: 'done', stateVerified: false, restored: true, updatedAt: 0 } as MirrorEntry
+    const b = reduceEntry(a, ev({ state: 'working', newTurn: true, verified: true }), 5)
+    expect(b.restored).toBeUndefined()
+    expect(b.state).toBe('working')
+  })
+
+  // THIS ASSERTION USED TO SAY THE OPPOSITE, and it was wrong in the direction that matters.
+  // `restored` means "this entry's STATE came off disk at boot" — that is what its docblock says
+  // and what gate 2 will read it as. The first version cleared it on ANY event, so a `context`
+  // event left `restored` gone while `state` and `updatedAt` were still the six-hour-old on-disk
+  // ones: a future `!restored && state === 'done'` would then admit a stale restored `done` after
+  // one tool event. Not exploitable while `stateVerified` is the real input, but a loaded gun.
+  it('an event that commits NO state leaves it restored — a context event is not a state', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    const b = reduceEntry(a, ev({ kind: 'context' } as never), 999)
+    expect(b.restored).toBe(true)
+    expect(b.state).toBe('done')
+    expect(b.updatedAt).toBe(111) // still the on-disk stamp — nothing about the state is new
+  })
+
+  it('a HELD-OFF late working leaves it restored — the state is still the restored one', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    expect(reduceEntry(a, ev({ state: 'working' }), 111 + 500).restored).toBe(true)
+  })
+
+  it('the idle RESCUE leaves it restored — it returns before committing anything', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    expect(reduceEntry(a, ev({ state: 'done', idle: true }), 999).restored).toBe(true)
+  })
+
+  it('a session boundary clears it — that DOES commit a state (idle)', () => {
+    const a = { state: 'done', restored: true, updatedAt: 111 } as MirrorEntry
+    const b = reduceEntry(a, ev({ kind: 'session', sessionPhase: 'start' }), 999)
+    expect(b.restored).toBeUndefined()
+    expect(b.state).toBeUndefined()
+  })
+
+  it('the request_user_input hold clears it — it commits `waiting`', () => {
+    const a = { state: 'waiting', awaitingInput: true, restored: true, updatedAt: 111 } as MirrorEntry
+    const b = reduceEntry(a, ev({ state: 'done' }), 999)
+    expect(b.state).toBe('waiting')
+    expect(b.restored).toBeUndefined()
+  })
+
+  it('buildFile\'s allowlist keeps neither field on disk (its sibling above covers the restore)', () => {
+    const file = path.join(dir, 'agent-status.json')
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        v: 1,
+        updatedAt: Date.now(),
+        nodes: { n1: { state: 'done', stateVerified: true, restored: true, updatedAt: Date.now() } }
+      })
+    )
+    initAgentStatusMirror(file)
+    const doc = buildFile(_snapshot(), Date.now())
+    expect('stateVerified' in doc.nodes.n1).toBe(false)
+    expect('restored' in doc.nodes.n1).toBe(false)
+  })
+})
+
+// `clearNode` had NO production caller, so deleting a node told the live surfaces nothing: the
+// notch HUD kept its needs-you/done row until the 6 h prune and the phone's Live Activity for it
+// was never ended. It now fires the one end edge those surfaces listen for.
+describe('clearNode (permanent node destroy) fires the end edge', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  it('fires ONE end edge for a node deleted mid-turn, carrying its identity', () => {
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+    recordAgentEvent(ev({ nodeId: 'n1', sessionId: 's1', state: 'working', newTurn: true }))
+    edges.length = 0
+
+    clearNode('n1')
+
+    expect(edges).toHaveLength(1)
+    expect(edges[0]).toMatchObject({
+      nodeId: 'n1',
+      agentId: 'claude',
+      sessionId: 's1',
+      event: 'end',
+      state: 'done'
+    })
+    off()
+  })
+
+  it('fires the end edge for a node deleted while BLOCKED, and pushes no inbox event', () => {
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'blocked', lastMessage: 'Approve?' }))
+    const feedBefore = _inboxSnapshot().events.length
+    edges.length = 0
+
+    clearNode('n1')
+
+    expect(edges).toHaveLength(1)
+    expect(edges[0]).toMatchObject({ nodeId: 'n1', event: 'end', state: 'done' })
+    // The node is GONE — there is nothing left to read or act on, so no feed card is produced.
+    expect(_inboxSnapshot().events).toHaveLength(feedBefore)
+    // Its unanswered card is archived rather than dropped (unchanged behavior).
+    expect(_inboxSnapshot().events[0].resolved).toBe(true)
+    off()
+  })
+
+  it('fires NOTHING for an already-done node — the done edge already ended that card', () => {
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'done' }))
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+
+    clearNode('n1')
+
+    expect(edges).toEqual([])
+    off()
+  })
+
+  it('fires NOTHING for an idle node, or one the mirror never saw', () => {
+    const edges: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => edges.push(c))
+    // A session end resets the node to idle (state undefined) — and fires its own end edge.
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n1', kind: 'session', sessionPhase: 'end' }))
+    edges.length = 0
+
+    clearNode('n1')
+    clearNode('never-seen')
+
+    expect(edges).toEqual([])
+    off()
+  })
+})
+
+// The feed's only bound was INBOX_EVENTS_CAP, so an unresolved approval on a node nobody came back
+// to stayed a red "Needs you" card with the tray badge lit forever.
+describe('inbox event age prune (flush)', () => {
+  let dir: string
+  let file: string
+  let nowSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    _resetForTest()
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-'))
+    file = path.join(dir, 'agent-status.json')
+    initAgentStatusMirror(file)
+    nowSpy = vi.spyOn(Date, 'now')
+  })
+
+  afterEach(() => {
+    nowSpy.mockRestore()
+    _resetForTest()
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('drops events older than EXPIRE_MS — unresolved AND resolved alike — on the flush that finds them', async () => {
+    nowSpy.mockReturnValue(1_000_000)
+    // An UNRESOLVED ask nobody ever answered: the red card + the lit tray badge.
+    recordAgentEvent(ev({ nodeId: 'old', state: 'blocked', lastMessage: 'Approve?' }))
+    // A RESOLVED done: the phone's archive/history.
+    recordAgentEvent(ev({ nodeId: 'arch', state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'arch', state: 'done', lastMessage: 'All done.' }))
+    ackDone('arch')
+    expect(_inboxSnapshot().events).toHaveLength(2)
+    expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
+    expect(_inboxSnapshot().events[1].resolved).toBe(true)
+
+    // A fresh ask arrives just past the window on the two above.
+    nowSpy.mockReturnValue(1_000_000 + EXPIRE_MS + 1)
+    recordAgentEvent(ev({ nodeId: 'new', state: 'blocked', lastMessage: 'Approve me?' }))
+
+    await flush()
+
+    // Both aged kinds are gone from memory; only the fresh card survives.
+    expect(_inboxSnapshot().events.map((e) => e.nodeId)).toEqual(['new'])
+    // ...and the FILE the phone reads agrees on the SAME flush: `buildFile` passes `inbox` through
+    // verbatim, so a prune placed after it would leave the aged card on disk for one more write —
+    // and an abandoned node schedules none.
+    const doc = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    expect(doc.inbox.events.map((e: { nodeId: string }) => e.nodeId)).toEqual(['new'])
+  })
+
+  it('keeps an unresolved ask INSIDE the window — a human may still be coming back to answer it', async () => {
+    nowSpy.mockReturnValue(1_000_000)
+    recordAgentEvent(ev({ nodeId: 'n1', state: 'blocked', lastMessage: 'Approve?' }))
+
+    nowSpy.mockReturnValue(1_000_000 + EXPIRE_MS - 1)
+    await flush()
+
+    expect(_inboxSnapshot().events).toHaveLength(1)
+    expect(_inboxSnapshot().events[0].resolved).toBeUndefined()
   })
 })

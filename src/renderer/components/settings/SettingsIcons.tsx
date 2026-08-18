@@ -63,6 +63,14 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
       <path d="M8 5.5v5M5.5 8h5" />
     </>
   ),
+  'model-gateway': (
+    <>
+      <circle cx="4" cy="8" r="1.6" />
+      <circle cx="12" cy="4" r="1.6" />
+      <circle cx="12" cy="12" r="1.6" />
+      <path d="M5.6 7.4 10.4 4.6M5.6 8.6l4.8 2.8" />
+    </>
+  ),
   notifications: (
     <>
       <path d="M4.8 7a3.2 3.2 0 0 1 6.4 0c0 3 1.1 3.9 1.1 3.9H3.7S4.8 10 4.8 7Z" />
@@ -119,7 +127,14 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
     </>
   ),
   updates: <path d="M8 2.6v7M5 6.6 8 9.6l3-3M3.6 12.6h8.8" />,
-  privacy: <path d="M8 2.4 12.4 4.2V8c0 3-2 4.8-4.4 5.6C5.6 12.8 3.6 11 3.6 8V4.2Z" />
+  privacy: <path d="M8 2.4 12.4 4.2V8c0 3-2 4.8-4.4 5.6C5.6 12.8 3.6 11 3.6 8V4.2Z" />,
+  // A tiny bug (the debug section).
+  debug: (
+    <>
+      <circle cx="8" cy="9" r="3.5" />
+      <path d="M8 5.5V3.5M4.9 6.6 3.4 5.1M11.1 6.6l1.5-1.5M4.5 9H2.5M13.5 9h-2M4.9 11.4l-1.5 1.5M11.1 11.4l1.5 1.5" />
+    </>
+  )
 }
 
 export function SectionIcon({ id }: { id: SettingsSectionId }): React.JSX.Element {

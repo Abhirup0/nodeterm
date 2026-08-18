@@ -40,6 +40,8 @@ function eventBody(e: BoardLogEvent): string {
       return `set priority → ${e.to ?? ''}`.trimEnd()
     case 'priority-cleared':
       return `removed the priority`
+    case 'agent-message':
+      return `sent a message to ${e.to ?? 'another node'} (${e.title ?? 'unknown outcome'})`
     default:
       // A newer peer may write event types this build doesn't know — show them neutrally.
       return `updated this card`

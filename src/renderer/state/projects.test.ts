@@ -44,6 +44,38 @@ describe('openFolderProject', () => {
   })
 })
 
+describe('adopting a folder whose canvas is shared (no id in the file)', () => {
+  // The file names no project any more, so `probeFolder` mints one per adoption. Re-opening the
+  // same folder must therefore be answered by the CWD lookup, never by a second adoption — that
+  // lookup is the only thing standing between "open my repo again" and a duplicate tab.
+  const probed = (id: string) => ({
+    id, name: 'my-app', color: '#7aa2f7', cwd: '/Users/me/dev/my-app',
+    viewport: { x: 0, y: 0, zoom: 1 },
+    nodes: [{
+      id: 'term-a', kind: 'terminal' as const, position: { x: 0, y: 0 },
+      size: { width: 1, height: 1 }, title: 'a', color: '#fff', group: null
+    }]
+  })
+
+  it('re-opening the same folder yields ONE project, keyed by cwd', () => {
+    const first = useProjects.getState().adoptProject(probed('project-minted-1'))
+    expect(first.id).toBe('project-minted-1')
+    const again = useProjects.getState().openFolderProject('/Users/me/dev/my-app')
+    expect(again.id).toBe(first.id)
+    expect(useProjects.getState().projects).toHaveLength(1)
+    expect(useProjects.getState().projects[0].nodes.map((n) => n.id)).toEqual(['term-a'])
+  })
+
+  it('a SECOND folder holding the same canvas becomes its own project', () => {
+    const a = useProjects.getState().adoptProject(probed('project-minted-1'))
+    const b = useProjects.getState()
+      .adoptProject({ ...probed('project-minted-2'), cwd: '/Users/me/dev/my-app-worktree' })
+    expect(b.id).not.toBe(a.id)
+    expect(useProjects.getState().projects.map((p) => p.cwd))
+      .toEqual(['/Users/me/dev/my-app', '/Users/me/dev/my-app-worktree'])
+  })
+})
+
 describe('toWorkspace', () => {
   // Tripwire for Stage 4a: a project's session binding is RUNTIME-ONLY (resolved by
   // src/renderer/session/session.ts `sessionForProject`). The persisted workspace shape must
@@ -68,6 +100,46 @@ describe('toWorkspace', () => {
     }))
     const ws = useProjects.getState().toWorkspace()
     expect(ws.projects.map((p) => p.id)).toEqual([normal.id])
+  })
+})
+
+// Regression (field bug 2026-08-10): `reloadActiveProject` used to re-run Canvas's load effect by
+// flipping the active id to '' and back on a microtask. React coalesces both writes into ONE
+// render, so the effect's dependency never changed and the reload silently never happened: the
+// store held disk's version while React Flow still showed the old nodes, and the next debounced
+// persist wrote those old nodes back over disk. A monotonic nonce is a dependency that always
+// changes, even for a reload of the SAME project.
+describe('requestReload', () => {
+  it('bumps a monotonic nonce on every call', () => {
+    const start = useProjects.getState().reloadNonce
+    useProjects.getState().requestReload()
+    expect(useProjects.getState().reloadNonce).toBe(start + 1)
+    useProjects.getState().requestReload()
+    useProjects.getState().requestReload()
+    expect(useProjects.getState().reloadNonce).toBe(start + 3)
+  })
+
+  it('leaves the active project (and the projects) untouched — it only nudges the effect', () => {
+    const p = useProjects.getState().openFolderProject('/Users/me/dev/my-app')
+    useProjects.getState().requestReload()
+    const s = useProjects.getState()
+    expect(s.activeProjectId).toBe(p.id)
+    expect(s.projects).toHaveLength(1)
+  })
+
+  // hydrate() replaces the persisted dimensions only: a nonce that reset on load would let a
+  // pre-hydrate reload request be re-delivered (or lost) after it.
+  it('survives hydrate, so the nonce never goes backwards', () => {
+    useProjects.getState().requestReload()
+    const n = useProjects.getState().reloadNonce
+    useProjects.getState().hydrate({ version: 2, activeProjectId: '', projects: [] })
+    expect(useProjects.getState().reloadNonce).toBe(n)
+  })
+
+  // The nonce is a RUNTIME nudge, never part of the shared workspace file.
+  it('is not persisted', () => {
+    useProjects.getState().requestReload()
+    expect(JSON.stringify(useProjects.getState().toWorkspace())).not.toMatch(/reloadNonce/)
   })
 })
 
@@ -138,5 +210,18 @@ describe('openSshProject', () => {
     const alt = { id: 's3', label: 'alt', host: 'h', user: 'root', port: 2222 } as never
     const other = useProjects.getState().openSshProject('app · alt', { server: alt, remoteCwd: '~/app' })
     expect(other.id).not.toBe(first.id)
+  })
+})
+
+describe('setProjectColor', () => {
+  it('updates the project color', () => {
+    const p = useProjects.getState().addProject('demo', '/tmp/demo')
+    useProjects.getState().setProjectColor(p.id, '#ff453a')
+    expect(useProjects.getState().getProject(p.id)?.color).toBe('#ff453a')
+  })
+
+  it('ignores unknown project ids', () => {
+    useProjects.getState().setProjectColor('nope', '#ff453a')
+    expect(useProjects.getState().projects).toHaveLength(0)
   })
 })

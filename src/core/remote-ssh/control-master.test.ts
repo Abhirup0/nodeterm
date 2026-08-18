@@ -5,14 +5,25 @@ import {
   masterArgs,
   childArgs,
   remoteTmuxHasSessionArgs,
-  remoteTmuxSendKeysArgs,
+  remoteTmuxPasteArgs,
+  remoteFramedDelivery,
+  remoteTmuxEnterArgs,
   probeSaysAbsent,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
+  remotePaneProcessArgs,
+  remoteTerminateForegroundArgs,
+  remoteListSessionsArgs,
+  parseRemoteSessionNames,
   remoteTmuxPtyArgs,
   listDirArgs,
   mkDirArgs,
   RMT_TMUX_SOCKET,
+  KILL_TMUX_SOCKETS,
+  localKillSockets,
+  localTmuxKillArgs,
+  remoteTmuxKillArgs,
+  remoteTmuxKillEverySocketArgs,
   hookForwardArgs,
   hookForwardCancelArgs,
   remoteHookEnvArgs,
@@ -133,47 +144,79 @@ describe('remoteTmuxHasSessionArgs', () => {
   })
 })
 
-describe('remoteTmuxSendKeysArgs', () => {
+describe('remoteTmuxPasteArgs', () => {
   const TMUX = `tmux -L ${RMT_TMUX_SOCKET}`
-  /** The remote command is a paste-aware conditional: framed atomic send when the pane's app
-   *  requested bracketed paste, the legacy two-step send otherwise (issue #47). */
-  const conditional = (session: string, framed: string, legacy: string): string =>
-    `if [ "$(${TMUX} display-message -p -t ${session} '#{bracket_paste_flag}' 2>/dev/null)" = 1 ]; then ${framed}; else ${legacy}; fi`
+  const BUF = 'nt-paste-deadbeef'
+  const cmd = (session: string, enter: boolean): string =>
+    remoteTmuxPasteArgs(conn, '/s.sock', session, BUF, enter).slice(-1)[0]
 
-  it('sends literal text with -l -- (no Enter) when enter is false', () => {
-    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', false)
-    expect(args).toEqual([
+  it('is ONE remote tmux invocation: buffer from stdin, gated copy-mode cancel, paste, Enter', () => {
+    expect(remoteTmuxPasteArgs(conn, '/s.sock', 'nt-x', BUF, true)).toEqual([
       ...childPrefix,
       'deploy@h.example.com',
-      conditional(
-        'nt-x',
-        `${TMUX} send-keys -t nt-x -l -- '\x1b[200~hello\x1b[201~'`,
-        `${TMUX} send-keys -t nt-x -l -- 'hello'`
-      )
+      `${TMUX} load-buffer -b ${BUF} - ';' ` +
+        `if-shell -F -t nt-x '#{pane_in_mode}' 'send-keys -t nt-x -X cancel' ';' ` +
+        `paste-buffer -d -p -r -b ${BUF} -t nt-x ';' send-keys -t nt-x Enter`
     ])
   })
-  it('appends Enter inside the framed write; legacy branch keeps the && two-step', () => {
-    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'hello', true)
-    expect(args[args.length - 1]).toBe(
-      conditional(
-        'nt-x',
-        `${TMUX} send-keys -t nt-x -l -- '\x1b[200~hello\x1b[201~\r'`,
-        `${TMUX} send-keys -t nt-x -l -- 'hello' && ${TMUX} send-keys -t nt-x Enter`
-      )
+
+  it('omits the Enter for a dictation insert (enter:false)', () => {
+    expect(cmd('nt-x', false)).not.toContain('send-keys -t nt-x Enter')
+    expect(cmd('nt-x', false).endsWith(`paste-buffer -d -p -r -b ${BUF} -t nt-x`)).toBe(true)
+  })
+
+  // The rule this PR is here to enforce: the payload is not on the command line at all, so there
+  // is no `posixQuote` of an attacker-influenced body left to get wrong, and no MAX_ARG_STRLEN.
+  it('carries NO payload — the text reaches the remote tmux over stdin', () => {
+    const line = cmd('nt-x', true)
+    expect(line).toContain(`load-buffer -b ${BUF} -`)
+    expect(line).not.toContain('send-keys -t nt-x -l')
+    expect(line).not.toContain('set-buffer')
+  })
+
+  // The version floor, stated as a negative. `#{bracket_paste_flag}` first shipped in tmux 3.7;
+  // on the REMOTE host's older tmux it expanded to '' and the old conditional took its `else`
+  // branch, delivering raw newlines. Nothing may reintroduce a dependency on it.
+  it('never probes #{bracket_paste_flag} — the framing decision belongs to `paste-buffer -p`', () => {
+    const line = cmd('nt-x', true)
+    expect(line).not.toContain('bracket_paste_flag')
+    expect(line).not.toContain('display-message')
+    expect(line).toContain('paste-buffer -d -p -r')
+  })
+
+  // `-r` is load-bearing: without it tmux rewrites every `\n` in the buffer to `\r`, which is a
+  // submit per line — the exact bug the frame exists to prevent.
+  it('keeps -r so a newline stays a newline', () => {
+    expect(cmd('nt-x', true)).toContain('-p -r')
+  })
+
+  // `#{...}` at the start of a word is a COMMENT to the remote sh; the inner command must arrive
+  // as one tmux argument. Both are single-quoted, and `control-master.realsh.test.ts`'s sibling
+  // (`tmux-paste.realtmux.test.ts`) runs this very line through a real sh into a real tmux.
+  it('quotes the format and the inner command so the remote shell passes them through', () => {
+    expect(cmd('nt-x', true)).toContain(`if-shell -F -t nt-x '#{pane_in_mode}' 'send-keys -t nt-x -X cancel'`)
+  })
+
+  it('refuses a session id this app did not generate — it is spliced unquoted', () => {
+    expect(() => remoteTmuxPasteArgs(conn, '/s.sock', 'nt-x; kill-server', BUF, true)).toThrow(
+      /unsafe tmux paste target/
+    )
+    expect(() => remoteTmuxPasteArgs(conn, '/s.sock', 'nt-x', "buf'; id; #", true)).toThrow(
+      /unsafe tmux buffer name/
     )
   })
-  it('single-quote-escapes a single quote in the text (the \'\\\'\' idiom)', () => {
-    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', `it's`, false)
-    expect(args[args.length - 1]).toContain(`${TMUX} send-keys -t nt-x -l -- 'it'\\''s'`)
-    expect(args[args.length - 1]).toContain(`'\x1b[200~it'\\''s\x1b[201~'`)
-  })
-  it('keeps a multiline text as one literal token (single-quoted, newlines preserved)', () => {
-    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', 'line one\nline two', false)
-    expect(args[args.length - 1]).toContain(`${TMUX} send-keys -t nt-x -l -- 'line one\nline two'`)
-  })
-  it('guards leading-dash text from being read as a send-keys option (-l --)', () => {
-    const args = remoteTmuxSendKeysArgs(conn, '/s.sock', 'nt-x', '-not-an-option', false)
-    expect(args[args.length - 1]).toContain(`${TMUX} send-keys -t nt-x -l -- '-not-an-option'`)
+})
+
+describe('remoteTmuxEnterArgs', () => {
+  // `sendText('', { enter: true })` means "submit what is composed". It cannot ride the paste
+  // command list: `load-buffer -` with zero bytes creates no buffer, the paste fails, and tmux
+  // abandons the rest of the list — the Enter with it.
+  it('sends a bare Enter and nothing else', () => {
+    expect(remoteTmuxEnterArgs(conn, '/s.sock', 'nt-x')).toEqual([
+      ...childPrefix,
+      'deploy@h.example.com',
+      `tmux -L ${RMT_TMUX_SOCKET} send-keys -t nt-x Enter`
+    ])
   })
 })
 
@@ -197,6 +240,54 @@ describe('remotePaneCommandArgs', () => {
   })
 })
 
+describe('remote foreground process termination', () => {
+  it('reads pane pid + command through the existing ControlMaster', () => {
+    const args = remotePaneProcessArgs(conn, '/s.sock', 'nt-x')
+    expect(args[args.length - 1]).toBe(
+      `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t nt-x '#{pane_pid}|#{pane_current_command}'`
+    )
+  })
+
+  it('revalidates the foreground group and never targets the pane shell group', () => {
+    const args = remoteTerminateForegroundArgs(conn, '/s.sock', 33293)
+    const command = args[args.length - 1]
+    expect(command).toContain('ps -o tpgid= -p 33293')
+    expect(command).toContain('[ "$tpgid" -ne 33293 ]')
+    expect(command).toContain('kill -TERM -- "-$tpgid"')
+  })
+
+  it('refuses an invalid pane pid before building a remote shell command', () => {
+    expect(() => remoteTerminateForegroundArgs(conn, '/s.sock', -1)).toThrow('invalid-pane-pid')
+  })
+})
+
+describe('remoteListSessionsArgs', () => {
+  it('asks the remote nodeterm tmux socket for session names only', () => {
+    const args = remoteListSessionsArgs(conn, '/cm/p1')
+    const cmd = args[args.length - 1]
+    expect(cmd).toContain('tmux -L nodeterm-rmt list-sessions')
+    expect(cmd).toContain('#{session_name}')
+  })
+
+  it('routes over the given control path', () => {
+    expect(remoteListSessionsArgs(conn, '/cm/p1').join(' ')).toContain('/cm/p1')
+  })
+})
+
+describe('parseRemoteSessionNames', () => {
+  it('returns one entry per non-empty line, trimmed', () => {
+    expect(parseRemoteSessionNames('nt-a\nnt-b\n')).toEqual(['nt-a', 'nt-b'])
+  })
+
+  it('ignores blank lines and surrounding whitespace', () => {
+    expect(parseRemoteSessionNames('\n  nt-a  \n\n')).toEqual(['nt-a'])
+  })
+
+  it('is empty for empty output — a host with no sessions is an answer, not a failure', () => {
+    expect(parseRemoteSessionNames('')).toEqual([])
+  })
+})
+
 describe('remoteTmuxPtyArgs', () => {
   it('runs the remote tmux command as a forced-TTY child (-t then childArgs)', () => {
     const args = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-x', '/srv/app')
@@ -210,12 +301,51 @@ describe('remoteTmuxPtyArgs', () => {
       '-e', 'NODETERM_NODE_ID=nt-x'
     ])
     const cmd = args[args.length - 1]
-    expect(cmd).toContain('new-session -A -e NODETERM_HOOK_ENDPOINT=/r/ep.env -e NODETERM_NODE_ID=nt-x -s')
+    // Each token is posix-quoted: this is ONE remote shell line, and the pair values carry the raw
+    // node id (see control-master.injection.test.ts for the injection this closes).
+    expect(cmd).toContain(
+      `new-session -A '-e' 'NODETERM_HOOK_ENDPOINT=/r/ep.env' '-e' 'NODETERM_NODE_ID=nt-x' -s`
+    )
   })
   it('threads confPath to remoteTmuxCommand as a `-f` source before new-session', () => {
     const args = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], '/home/u/.nodeterm/tmux.conf')
     const cmd = args[args.length - 1]
     expect(cmd).toContain(`-f '/home/u/.nodeterm/tmux.conf' new-session -A`)
+  })
+
+  describe('sessionEnv prologue (argv-free credential delivery)', () => {
+    it('prepends a bounded wait + source + rm before the tmux command', () => {
+      const args = remoteTmuxPtyArgs(
+        conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], '/home/u/.nodeterm/tmux.conf',
+        { file: '/home/u/.nodeterm/env/nt-x.env', extraKeys: [] }
+      )
+      const cmd = args[args.length - 1]
+      // The credential file is SOURCED, then removed — never a value on the command line.
+      expect(cmd).toContain(". '/home/u/.nodeterm/env/nt-x.env'")
+      expect(cmd).toContain("rm -f '/home/u/.nodeterm/env/nt-x.env'")
+      expect(cmd).toMatch(/while \[ ! -f '\/home\/u\/\.nodeterm\/env\/nt-x\.env' \]/)
+      // The prologue runs BEFORE the tmux new-session it guards.
+      expect(cmd.indexOf(". '")).toBeLessThan(cmd.indexOf('new-session'))
+    })
+
+    it('appends custom (non-gateway) env NAMES to update-environment — names only, never values', () => {
+      const args = remoteTmuxPtyArgs(
+        conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], undefined,
+        { file: '/h/.nodeterm/env/nt-x.env', extraKeys: ['MY_CUSTOM_TOKEN'] }
+      )
+      const cmd = args[args.length - 1]
+      expect(cmd).toContain('set-option -ga update-environment MY_CUSTOM_TOKEN')
+    })
+
+    it('drops a non-identifier env name at the splice point (belt to session-env.ts braces)', () => {
+      const args = remoteTmuxPtyArgs(
+        conn, '/s.sock', 'nt-x', '/srv/app', undefined, undefined, [], undefined,
+        { file: '/h/.nodeterm/env/nt-x.env', extraKeys: ['BAD;NAME', 'GOOD_ONE'] }
+      )
+      const cmd = args[args.length - 1]
+      expect(cmd).toContain('update-environment GOOD_ONE')
+      expect(cmd).not.toContain('BAD;NAME')
+    })
   })
 })
 
@@ -260,9 +390,10 @@ describe('hook forwarding', () => {
     ])
     expect(remoteHookEnvArgs('/ep', 'n1', '1')).not.toContain('NODETERM_CANVAS_CONTROL=1')
   })
-  it('remoteEndpointFileContents writes SOCK/TOKEN/VERSION', () => {
-    expect(remoteEndpointFileContents('/r.sock', 'tok', '1')).toBe(
-      'NODETERM_HOOK_SOCK=/r.sock\nNODETERM_HOOK_TOKEN=tok\nNODETERM_HOOK_VERSION=1\n'
+  it('remoteEndpointFileContents writes SOCK/TOKEN/VERSION and the remote token dir', () => {
+    expect(remoteEndpointFileContents('/r.sock', 'tok', '2', '/home/u/.nodeterm/node-tokens')).toBe(
+      'NODETERM_HOOK_SOCK=/r.sock\nNODETERM_HOOK_TOKEN=tok\nNODETERM_HOOK_VERSION=2\n' +
+        'NODETERM_NODE_TOKEN_DIR=/home/u/.nodeterm/node-tokens\n'
     )
   })
 })
@@ -350,5 +481,106 @@ describe('probeSaysAbsent (has-session probe discrimination)', () => {
     expect(probeSaysAbsent(new Error('plain'))).toBe(false)
     expect(probeSaysAbsent(undefined)).toBe(false)
     expect(probeSaysAbsent(null)).toBe(false)
+  })
+})
+
+describe('killing a session by name (both sockets, exact target)', () => {
+  // Two nodeterm tmux sockets live on every host at once: `node-terminal` for a nodeterm running ON
+  // the machine, `nodeterm-rmt` for one SSH-ing INTO it. The session-memory sweep lists BOTH, so a
+  // kill routed to one of them promised something it could not do for every row off the other — a
+  // host running its own nodeterm-server is exactly that shape.
+  it('covers both sockets a nodeterm session can live on', () => {
+    expect([...KILL_TMUX_SOCKETS].sort()).toEqual(['node-terminal', 'nodeterm-rmt'])
+  })
+
+  it('targets the session EXACTLY — never tmux prefix matching', () => {
+    // A speculative kill misses by design, and a miss is when tmux falls back to fnmatch and then
+    // to prefix matching. Node ids end in a counter, so `nt-a-1` is a prefix of `nt-a-12`: without
+    // `=` a miss could kill a different session.
+    expect(localTmuxKillArgs('node-terminal', 'nt-a-1')).toEqual([
+      '-L', 'node-terminal', 'kill-session', '-t', '=nt-a-1'
+    ])
+    expect(remoteTmuxKillArgs(conn, '/s.sock', 'nt-a-1').at(-1)).toContain('-t =nt-a-1')
+  })
+
+  it('aims a local destroy at the socket we hold, whatever the caller asked for', () => {
+    // Holding the session means we KNOW which socket it is on, so the fan-out flag is irrelevant:
+    // one kill either way. This is what keeps the ordinary node-x path at exactly one kill.
+    expect(localKillSockets('node-terminal')).toEqual(['node-terminal'])
+    expect(localKillSockets('node-terminal', true)).toEqual(['node-terminal'])
+  })
+
+  it('fans a socket-less kill out only when the caller opts in', () => {
+    // Holding nothing means the name is all we have — but the unheld branch is NOT rare (an
+    // ordinary node-x on a node never mounted in this process takes it), so the blast radius is
+    // the caller's to ask for. Only the session-memory panel, which swept BOTH sockets, does.
+    expect(localKillSockets(null)).toEqual(['node-terminal'])
+    expect([...localKillSockets(null, true)].sort()).toEqual(['node-terminal', 'nodeterm-rmt'])
+  })
+
+  it('keeps the remote default on the ssh socket, and overrides it explicitly', () => {
+    expect(remoteTmuxKillArgs(conn, '/s.sock', 'nt-x').at(-1)).toBe(
+      `tmux -L ${RMT_TMUX_SOCKET} kill-session -t =nt-x`
+    )
+    expect(remoteTmuxKillArgs(conn, '/s.sock', 'nt-x', 'node-terminal').at(-1)).toBe(
+      'tmux -L node-terminal kill-session -t =nt-x'
+    )
+  })
+
+  it('kills a name on EVERY remote socket, one ssh invocation each', () => {
+    const runs = remoteTmuxKillEverySocketArgs(conn, '/s.sock', 'nt-x')
+    expect(runs).toHaveLength(2)
+    expect(runs.map((r) => r.at(-1)).sort()).toEqual([
+      'tmux -L node-terminal kill-session -t =nt-x',
+      `tmux -L ${RMT_TMUX_SOCKET} kill-session -t =nt-x`
+    ])
+    // Each is a complete child-ssh argv, not a bare command.
+    for (const r of runs) expect(r.slice(0, childPrefix.length)).toEqual(childPrefix)
+  })
+})
+
+/**
+ * The remote leg of the messaging envelope's delivery — the exact mirror of `localFramedDelivery`
+ * (see tmux-naming.test.ts for the local twin and the full argument): payload byte-for-byte over
+ * stdin, `paste-buffer -r` with NO `-p` (the bytes already carry their frame), no trailing Enter
+ * (the composed `\r` rides inside the paste), and a refusal for anything that is not
+ * `bracketedInjection` output — this is the one plan that does not sanitize, so it must not accept
+ * what sanitize would have caught.
+ */
+describe('remoteFramedDelivery', () => {
+  const TMUX = `tmux -L ${RMT_TMUX_SOCKET}`
+  const PASTE_START = '\x1b[200~'
+  const PASTE_END = '\x1b[201~'
+  const framed = (inner: string): string => PASTE_START + inner + PASTE_END + '\r'
+
+  it('moves the payload byte-for-byte and never re-frames (-r, no -p, no Enter)', () => {
+    const payload = framed('line one\nline two')
+    const plan = remoteFramedDelivery(conn, '/s.sock', 'nt-x', payload)!
+    expect(plan.body).toBe(payload)
+    const line = plan.args.slice(-1)[0]
+    const buf = /-b (nt-paste-[0-9a-f]{12}) /.exec(line)?.[1]
+    expect(buf).toBeTruthy()
+    expect(plan.args).toEqual([
+      ...childPrefix,
+      'deploy@h.example.com',
+      `${TMUX} load-buffer -b ${buf} - ';' ` +
+        `if-shell -F -t nt-x '#{pane_in_mode}' 'send-keys -t nt-x -X cancel' ';' ` +
+        `paste-buffer -d -r -b ${buf} -t nt-x`
+    ])
+    expect(line).not.toContain('-p -r')
+    expect(line).not.toContain('Enter')
+    expect(plan.cleanup?.slice(-1)[0]).toBe(`${TMUX} delete-buffer -b ${buf}`)
+  })
+
+  it('refuses a payload that is not a well-formed, pre-sanitized frame', () => {
+    expect(() => remoteFramedDelivery(conn, '/s.sock', 'nt-x', 'naked\r')).toThrow(/framed/)
+    expect(() => remoteFramedDelivery(conn, '/s.sock', 'nt-x', framed(`a${PASTE_END}b`))).toThrow(/framed/)
+    expect(remoteFramedDelivery(conn, '/s.sock', 'nt-x', '')).toBeNull()
+  })
+
+  it('refuses an unsafe target like every sibling builder', () => {
+    expect(() => remoteFramedDelivery(conn, '/s.sock', 'nt-x; kill-server', framed('x'))).toThrow(
+      /unsafe tmux paste target/
+    )
   })
 })

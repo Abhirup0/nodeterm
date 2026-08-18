@@ -1,9 +1,85 @@
 import { describe, it, expect } from 'vitest'
-import { normalizeClaude, normalizeCodex, normalizeFor, type RawHookEnvelope } from './normalize'
+import {
+  normalizeClaude,
+  normalizeCodex,
+  normalizeCopilot,
+  normalizeFor,
+  type RawHookEnvelope
+} from './normalize'
 
 function env(payload: Record<string, unknown>): RawHookEnvelope {
   return { nodeId: 'n1', agentId: 'claude', payload }
 }
+
+function copilotEnv(payload: Record<string, unknown>): RawHookEnvelope {
+  return { nodeId: 'n1', agentId: 'copilot', payload }
+}
+
+describe('normalizeCopilot', () => {
+  it('maps session boundaries and captures the CLI session id', () => {
+    expect(normalizeCopilot(copilotEnv({ hook_event_name: 'SessionStart', session_id: 's1' }))).toEqual({
+      nodeId: 'n1',
+      agentId: 'copilot',
+      sessionId: 's1',
+      kind: 'session',
+      sessionPhase: 'start'
+    })
+    expect(normalizeCopilot(copilotEnv({ hook_event_name: 'SessionEnd', session_id: 's1' }))).toMatchObject({
+      kind: 'session',
+      sessionPhase: 'end'
+    })
+  })
+
+  it('maps turn and tool lifecycle without treating a failed tool as a finished turn', () => {
+    expect(
+      normalizeCopilot(copilotEnv({ hook_event_name: 'UserPromptSubmit', prompt: 'fix it' }))
+    ).toMatchObject({ state: 'working', newTurn: true, task: 'fix it' })
+    for (const hook_event_name of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
+      expect(normalizeCopilot(copilotEnv({ hook_event_name })), hook_event_name).toMatchObject({
+        state: 'working'
+      })
+    }
+    expect(
+      normalizeCopilot(
+        copilotEnv({ hook_event_name: 'Stop', last_assistant_message: 'finished' })
+      )
+    ).toMatchObject({ state: 'done', lastMessage: 'finished' })
+  })
+
+  it('maps only the documented needs-user notifications', () => {
+    expect(
+      normalizeCopilot(
+        copilotEnv({
+          hook_event_name: 'Notification',
+          notification_type: 'permission_prompt',
+          message: 'Approve command?'
+        })
+      )
+    ).toMatchObject({ state: 'blocked', lastMessage: 'Approve command?' })
+    expect(
+      normalizeCopilot(
+        copilotEnv({
+          hook_event_name: 'Notification',
+          notification_type: 'elicitation_dialog',
+          message: 'Which option?'
+        })
+      )
+    ).toMatchObject({ state: 'waiting', lastMessage: 'Which option?' })
+    for (const notification_type of ['agent_idle', 'agent_completed', 'unknown_future_type']) {
+      expect(
+        normalizeCopilot(copilotEnv({ hook_event_name: 'Notification', notification_type })),
+        notification_type
+      ).toBeNull()
+    }
+  })
+
+  it('routes through the shared dispatcher', () => {
+    expect(normalizeFor('copilot', copilotEnv({ hook_event_name: 'Stop' }))).toMatchObject({
+      agentId: 'copilot',
+      state: 'done'
+    })
+  })
+})
 
 describe('normalizeClaude — turn-end signals', () => {
   it('Stop → done, not interrupted', () => {
@@ -147,6 +223,57 @@ describe('normalizeClaude — recurring (cron/schedule/loop)', () => {
   it('CronDelete PreToolUse → recurring END (clears the cron card)', () => {
     const e = normalizeClaude(env({ hook_event_name: 'PreToolUse', tool_name: 'CronDelete' }))
     expect(e).toMatchObject({ kind: 'recurring', recurringEnd: true })
+  })
+})
+
+describe('normalizeClaude — background shell tasks', () => {
+  // A background shell task lives INSIDE the CLI process, so `/exit` (Eco hibernation, the bulk
+  // restart) kills it silently. This event is the stamp those two exclude on.
+  it('claude PreToolUse Bash with run_in_background=true is a background-task event', () => {
+    const e = normalizeClaude(
+      env({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'sleep 999', run_in_background: true }
+      })
+    )
+    expect(e?.kind).toBe('background-task')
+  })
+
+  // The mutation guard: dropping the `tool_name` check, the `ev` check, or matching truthily
+  // instead of `=== true` each flips a row here — the truthy match flips two. Those two
+  // truthy-but-not-`true` rows are what pin the strict compare: the boolean rows below are both
+  // falsy, so on their own they would pass a `!!p.tool_input?.run_in_background` implementation.
+  it('foreground Bash, false/absent/truthy-non-true flags, PostToolUse and other tools stay generic working', () => {
+    for (const payload of [
+      { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'ls' } },
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls', run_in_background: false }
+      },
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        // A hand-rolled/forwarded payload could carry 1 or "true"; only a real boolean counts.
+        tool_input: { command: 'ls', run_in_background: 1 }
+      },
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls', run_in_background: 'true' }
+      },
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls', run_in_background: true }
+      },
+      { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { run_in_background: true } }
+    ]) {
+      const e = normalizeClaude(env(payload))
+      expect(e?.kind, JSON.stringify(payload)).toBe('state')
+      expect(e?.state, JSON.stringify(payload)).toBe('working')
+    }
   })
 })
 

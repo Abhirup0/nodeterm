@@ -34,8 +34,26 @@ export type HookSettings = Settings
  * Every instance now writes identical bytes to the same stable path — which is also where the SSH
  * remote installer already puts it (`$HOME/.nodeterm/agent-hooks/`), so local and remote agree.
  */
-function scriptPathFor(scriptFileName: string): string {
+export function managedHookScriptPath(scriptFileName: string): string {
   return path.join(homedir(), '.nodeterm', 'agent-hooks', scriptFileName)
+}
+
+/** Write one stable, guarded hook target for any local agent installer. */
+export function installManagedHookScript(agentId: string, scriptFileName: string): string | null {
+  const scriptPath = managedHookScriptPath(scriptFileName)
+  try {
+    mkdirSync(path.dirname(scriptPath), { recursive: true })
+    writeFileSync(scriptPath, buildManagedScript(agentId), 'utf8')
+  } catch (e) {
+    console.warn(`[agent-hooks] ${agentId} script write failed`, e)
+    return null
+  }
+  try {
+    chmodSync(scriptPath, 0o755)
+  } catch {
+    /* fail open */
+  }
+  return scriptPath
 }
 
 /**
@@ -132,19 +150,8 @@ export interface InstallHooksOptions {
 export function installHooksInto(opts: InstallHooksOptions): void {
   const { agentId, scriptFileName, configPath, events } = opts
 
-  const sp = scriptPathFor(scriptFileName)
-  try {
-    mkdirSync(path.dirname(sp), { recursive: true })
-    writeFileSync(sp, buildManagedScript(agentId), 'utf8')
-  } catch (e) {
-    console.warn(`[agent-hooks] ${agentId} script write failed`, e)
-    return
-  }
-  try {
-    chmodSync(sp, 0o755)
-  } catch {
-    /* fail open */
-  }
+  const sp = installManagedHookScript(agentId, scriptFileName)
+  if (!sp) return
 
   const command = buildManagedHookCommand(sp)
   let config: Settings = {}

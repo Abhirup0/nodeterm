@@ -9,6 +9,14 @@ completion notifications, the notch capsule, kanban cards, the phone mirror — 
 `hasHooks('grok')` became true. Each further capability is one membership-list edit plus the one
 leaf that list gates.
 
+> Sibling documents: **`docs/gemini-agent.md`** is the same write-up for gemini. There is no
+> per-agent document for codex; its `--ask-for-approval` mapping and the reasoning behind every value
+> live in **`src/shared/agents/approval-mode.ts`** (`CODEX_MODES`) and its test. The distilled rules
+> both branches produced are the
+> **"Adding a new agent"** section of `CLAUDE.md`. Rows below that name another agent were
+> re-verified against `src/shared/agents/config.ts` on 2026-08-09; verify them there, not against
+> either document, when they matter.
+
 > **Read the caveat before trusting any field name here.** There is no grok binary and no grok
 > account on the machine this integration was implemented on. Facts marked *measured* come from the
 > plan's reading of the shipped 1.0.0 binary and its docs
@@ -29,10 +37,10 @@ is the cost of adding the next agent to the same list.
 |---|---|---|
 | `AGENT_HOOK_TARGETS` | **joined** | Five things: a pure normalizer for grok's dialect (`normalizeGrok`, `src/shared/agents/normalize.ts`); a subscription list restricted to the events `normalizeGrok` actually maps — nine of the fourteen grok documents (`GROK_HOOK_EVENTS`, `src/shared/agents/hook-events.ts`); an installer able to write a **per-event matcher**, which meant widening the shared installer's event type to `ManagedHookEvent` (`core/agents/hooks/install-helper.ts`); one definition of grok's path algebra (`core/agents/grok-paths.ts`); and a raw-listener branch in **both** shells (`src/main/index.ts`, `src/server/agent-status.ts`) to derive the session directory, because grok's envelope carries no transcript path. |
 | `RESUMABLE_AGENTS` | **joined** (pre-branch) | `resumeCommand('grok', id)` → `grok --resume <id>`, and a session id that reaches the renderer — which it does, off every hook payload. |
-| `RENAME_CAPABLE` | **joined** | A **read** leg that resolves a session's own name *without searching* (`core/grok-session.ts`, keyed off the hook-fed `sessionId → session dir` map), a **write** leg byte-identical to claude's (`/rename <name>` typed into the pane via `pty.sendText`; grok also accepts `/title`), and one routing rule for the two readers — `readAgentSessionName` in `core/agent-session-name.ts`, serving the desktop IPC handler *and* both shells' session-name sweeps. Routing is not cosmetic: claude's resolver scans `~/.claude/projects` on a cache miss, so an unrouted grok node paid that scan on every poll for a guaranteed null — a mounted node polls every **4 s** until the name first resolves and **15 s** after (`TerminalNode.tsx`), and the mirror's own `SESSION_NAME_SWEEP_MS` sweep adds one pass a minute. |
-| `PERMISSION_MODE_CAPABLE` | **joined** | Grok shares claude's flag **spelling** and value vocabulary (`--permission-mode auto\|plan\|acceptEdits\|bypassPermissions`; our `manual` = no flag = grok's own `default`) — that is the whole membership requirement. Two things had to change around it: claude's `auto` **version gate** had to become agent-scoped (`activePermissionMode(agentId)`, `renderer/state/permissionMode.ts`), and the flag had to be emitted **before** grok's `--`. See §6. |
+| `RENAME_CAPABLE` + `TITLE_READ_CAPABLE` | **joined both** | A **read** leg that resolves a session's own name *without searching* (`core/grok-session.ts`, keyed off the hook-fed `sessionId → session dir` map), a **write** leg byte-identical to claude's (`/rename <name>` typed into the pane via `pty.sendText`; grok also accepts `/title`), and one routing rule for the readers — `readAgentSessionName` in `core/agent-session-name.ts`, serving the desktop IPC handler *and* both shells' session-name sweeps. The list SPLIT in two after the grok branch (2026-08-09): `TITLE_READ_CAPABLE` is the read leg and `RENAME_CAPABLE` the write leg, because **gemini** names its own sessions but has no rename command. Grok is in both, so nothing about its behaviour changed — but a future agent must pick per leg, and every `RENAME_CAPABLE` member must also be `TITLE_READ_CAPABLE` (pinned in `config.capabilities.test.ts`). Routing is not cosmetic: claude's resolver scans `~/.claude/projects` on a cache miss, so an unrouted grok node paid that scan on every poll for a guaranteed null — a mounted node polls every **4 s** until the name first resolves and **15 s** after (`TerminalNode.tsx`), and the mirror's own `SESSION_NAME_SWEEP_MS` sweep adds one pass a minute. |
+| `PERMISSION_MODE_CAPABLE` | **joined** | Grok shares claude's flag **spelling** and value vocabulary (`--permission-mode auto\|plan\|acceptEdits\|bypassPermissions`; our `manual` = no flag = grok's own `default`), which is why *its* membership needed no translation. Two things had to change around it: claude's `auto` **version gate** had to become agent-scoped (`activePermissionMode(agentId)`, `renderer/state/permissionMode.ts`), and the flag had to be emitted **before** grok's `--`. See §6. **Sharing the spelling is no longer what membership means:** the list is now `claude, grok, gemini, codex` (2026-08-09) and the last two spell it their own way (`--approval-mode`, `--ask-for-approval`), translated per agent in `src/shared/agents/approval-mode.ts` — which is also where `withPermissionMode` now lives, moved one layer up to break a `config ↔ approval-mode` cycle. |
 | `CANVAS_CONTROL_CAPABLE` | **joined** | Nothing new to install: grok scans `~/.claude/skills` by default for Claude Code compatibility, which is exactly where `manage-nodeterm-canvas` is already written (locally, and on an SSH host by `RemoteHooks.installCanvasControl`). Membership is what sets `NODETERM_CANVAS_CONTROL=1` in the session env — `hook-server.buildPtyEnv` locally, `remoteHookEnvArgs` remotely, both through the single `canControlCanvas` predicate — i.e. what makes the sh+curl shim anything other than a no-op. **Unverified:** `grok inspect --json` was never run (§8). |
-| `USAGE_CAPABLE` (the per-node context meter) | **not joined** | Needs a real `signals.json` yielding **both** a used-token count **and** the window total. A percentage against a guessed denominator is a wrong number presented as a fact, so no total ⇒ no meter. Task 5 of the plan stops at its capture step. Do not confuse this with grok *billing* usage — see the note below. |
+| `USAGE_CAPABLE` (the per-node context meter) | **not joined** | Needs a real `signals.json` yielding **both** a used-token count **and** the window total. A percentage against a guessed denominator is a wrong number presented as a fact, so no total ⇒ no meter. Task 5 of the plan stops at its capture step. (For reference, the list is now `claude, codex, gemini`; grok and **opencode** are the two builtins outside it. Codex states its own denominator in its rollout; gemini's comes from its model id through `geminiWindowFor`, mirroring the CLI's own `tokenLimit`. See `docs/gemini-agent.md` §4 — and note that **joining this list also switches on two features that read CLAUDE's transcript**, which is a trap grok will hit too: `docs/gemini-agent.md` §1.) Do not confuse this with grok *billing* usage — see the note below. |
 | `CONTEXT_LINK_CAPABLE` | **not joined** | Needs a parser for `updates.jsonl` pinned by a real fixture, plus a locator in `core/context-link.ts`. Task 10 stops at its capture step. (For reference, this list is `claude, codex, gemini, opencode` — grok is the only builtin outside it.) |
 | `SUBAGENT_CAPABLE` | **not joined** | Needs the `spawn_subagent` `PreToolUse`/`PostToolUse` payload fields, including whatever marks a **background** launch. Task 11 stops at its capture step. |
 | `BRANCH_CAPABLE` | not joined | Branch sends claude's `/branch` and resumes by claude's session id; grok has no counterpart. |
@@ -45,7 +53,8 @@ conflated them. Grok has been a **billing usage provider** since main's `a2353f2
 `src/core/usage/grok-usage.ts` reads the CLI's own sign-in and reports weekly credits + monthly
 budget; it is registered in `usage-service.ts`'s provider list and has its own Settings → Usage row
 (`UsageSection.tsx`, `shared/usage-limits.ts`). That already works. `USAGE_CAPABLE` is the
-**per-node context-window meter** in the node header, and it is still claude-only. The one place the
+**per-node context-window meter** in the node header, which grok still has no numbers for — it is no
+longer a claude-only feature, though: codex and gemini joined on 2026-08-09. The one place the
 two touch is `$GROK_HOME`: `grok-usage.ts`'s `grokHome()` now delegates to `grokHomeDir()` in
 `core/agents/grok-paths.ts`, so there is exactly one definition of that rule.
 
@@ -285,8 +294,10 @@ them. Prompt-less and `--resume` paths were never affected.
 composed `createAgentNode` (`renderer/state/workspace.ts`): a `withPermissionMode` unit test passes
 while the composed command line is wrong, because `withPermissionMode` only ever appends to whatever
 it is handed. `createAgentNode` is where the two opposite conventions are decided — flag **last** for
-an agent with no separator (claude, byte-identical to what nodeterm has always emitted), flag
-**before** the separator otherwise — so that is where a regression is visible. The resume shape
+an agent with no separator (claude, and since 2026-08-09 gemini and codex too, all byte-identical to
+what nodeterm has always emitted), flag **before** the separator otherwise — so that is where a
+regression is visible. Grok is still the only agent that declares a separator at all (pinned in
+`config.capabilities.test.ts`), so it is still the only agent taking the second branch. The resume shape
 (`grok --resume <id> --permission-mode X`) is composed outside `createAgentNode` and is pinned in
 `agent-restart.test.ts` on the **composed string** — the test calls the same two functions
 `TerminalNode` calls (`resumeCommand` then `withPermissionMode`) and composes them itself, so it
@@ -295,7 +306,10 @@ catches a change in either function but not a change in the component's call sit
 **In-place restart** ("Restart agent (resume)") works for grok: `EXIT_SEQUENCES.grok = '/quit'`
 (its `/exit` is an alias; the documented primary is what we type) plus `resumeCommand` is the whole
 entry. The refusal while a session is `working` or `blocked` is agent-agnostic (`BUSY_STATES`) and
-needs no grok branch — typing `/quit` into a permission prompt would *answer* it. The **single-node**
+needs no grok branch — typing `/quit` into a permission prompt would *answer* it. That table is now
+`claude: '/exit'`, `codex/grok/gemini: '/quit'`; gemini joined on 2026-08-09, and its entry must stay
+**bare** because `/quit --delete` exits *and permanently deletes* the session history — the exact
+conversation a restart exists to resume (`docs/gemini-agent.md` §6). The **single-node**
 action lives in the node context menu only; the pane menu and the command palette host the **bulk**
 "restart idle agents" action. Neither has a header button (`HIDEABLE_HEADER_BUTTONS` is refresh / mic /
 ai-name / comments).
@@ -313,10 +327,10 @@ ai-name / comments).
 | In-place restart + cold-restore resume | yes | yes | N/A |
 | Canvas control | yes, via `~/.claude/skills` + the sh+curl shim (unverified) | **not wired at all** — `agent:control` has no server handler; pre-existing, unchanged by grok | N/A — no canvas |
 | Context links | **not implemented for grok** (§1) | not wired at all (`initContextLink` is never called from `src/server`) | N/A |
-| Context meter | **not implemented for grok** (§1) | idem | idem |
+| Context meter | **not implemented for grok** (§1) | the meter itself IS wired server-side (both shells create the per-agent tails — it is codex and gemini that use them, `docs/gemini-agent.md` §4); grok simply has no numbers to feed it on either surface | idem |
 | Managed accounts | **deliberately N/A** — accounts are a claude config-dir mechanism. `createAgentNode` never stamps an `accountId` onto a non-claude node, and `CLAUDE_CONFIG_DIR` is irrelevant to `~/.grok/hooks`. A grok node in a managed-account project must still report status (checklist 7) | idem | idem |
 | Brand logo | the **official** xAI mark, INLINED in `agentIcons.tsx` as `GrokMark` rather than shipped as an asset — it is a single monochrome path, so `fill="currentColor"` inherits the label colour and is correct in both themes. The other four marks are multi-colour and stay `<img src>` assets, where `currentColor` cannot inherit | same component, for free | the phone draws its own icons — **follow-up owed** |
-| Working indicator | the **brand mark, breathing** — no critter. `AgentMascot` renders the same `GrokMark` the menus use, pulsing with a `currentColor` drop-shadow bloom, and the notch strip builds the identical glyph from `lib/grokMark.ts` (`createGrokMarkSvg`), so one agent is never two things on two surfaces | **N/A** — no notch there; the canvas badge indicator works | the phone has its own SwiftUI renderer |
+| Working indicator | the **brand mark, breathing** — no critter. Since 2026-08-09 this is a THREE-agent mechanism (grok, gemini, opencode) driven by one pure decision, `brandPulsePlan` in `lib/brandPulse.ts`, with a thin renderer per surface: `BrandPulse` for the React badge (`AgentMascot` no longer imports `GrokMark`) and `workingMascot` for the notch strip. Grok is the only `kind: 'inline'` case — its mark is a single monochrome path from `lib/grokMark.ts` (`createGrokMarkSvg` in the HUD) pulsing with a `currentColor` drop-shadow bloom; the other marks are multi-colour assets whose bloom takes the label colour instead of their own ink. One decision, so an agent is never two things on two surfaces. See docs/mascot-sprites.md | **N/A** — no notch there; the canvas badge indicator works | the phone has its own SwiftUI renderer |
 | Fullscreen TUI setting | **N/A** — grok runs full-screen by default, so `claude-tui.ts` has no grok analogue | idem | idem |
 | Deterministic hook-reply approvals (phone Approve/Deny) | **claude-only** — `pty-manager` arms `NODETERM_PERM_WAIT_SECS` only for claude, and grok does not subscribe `PermissionRequest` at all | idem | a grok node's approvals are not answerable from the phone |
 | Kanban card + card modal | badges and the 💬 comments panel work (derived from the same nodes and the same status store); the meter row has nothing to show for grok | same | the iOS board is a separate read/move mirror |

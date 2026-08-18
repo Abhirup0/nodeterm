@@ -16,6 +16,7 @@ import {
   onNodeNowChange,
   recordAgentEvent,
   recordRawToolEvent,
+  sweepStaleWorking,
   initAgentStatusMirror,
   _resetForTest,
   type InboxEvent,
@@ -547,27 +548,116 @@ describe('createPushNotify', () => {
       h.stop()
     })
 
-    it('a paired host identity WINS: grants are never consulted (no double-push)', async () => {
-      const getGrants = vi.fn(() => GRANTS)
+  })
+
+  // The regression this matrix exists for: targeting used to be either/or — one relay-paired phone
+  // made `resolveTarget` return host mode and never look at the grants, and since host mode fans out
+  // over the backend's `relay_devices` rows (where an SSH-only phone has no row), that ONE pairing
+  // silenced every SSH-only phone on the machine. Both legs now send. See resolveSendTarget for why
+  // the per-device exclusion is not expressible on the desktop.
+  describe('send-target matrix (host + grants)', () => {
+    const GRANTS = [
+      { deviceId: 'dev-A', grant: 'tok-A' },
+      { deviceId: 'dev-B', grant: 'tok-B' }
+    ]
+
+    it('paired ONLY (no grants) → host mode alone, byte-identical to the legacy body', async () => {
       const em = makeEmitter()
-      // getHostIdentity defaults to the paired IDENTITY via baseDeps.
-      const h = createPushNotify(baseDeps({ subscribe: em.subscribe, getGrants, hostLabel: () => 'niova' }))
+      const h = createPushNotify(baseDeps({ subscribe: em.subscribe, getGrants: () => [] }))
       em.emit(iev({ nodeId: 'a', title: 'A' }))
       await vi.advanceTimersByTimeAsync(2000)
       expect(fetchMock).toHaveBeenCalledTimes(1)
-      const body = bodyOf()
-      expect(body.hostDeviceId).toBe('host-device-1')
+      expect(bodyOf().hostDeviceId).toBe('host-device-1')
       expect(fetchMock.mock.calls[0][1].headers.authorization).toBeUndefined()
-      expect(getGrants).not.toHaveBeenCalled()
       h.stop()
     })
-  })
 
-  describe('single-sender matrix (granted vs host)', () => {
-    // paired → host only, and neither → inert, are covered in the granted-mode block above. This
-    // pins the third leg: an UNPAIRED host identity (identity present, no phone pinned) must fall
-    // THROUGH to granted mode — the desktop granted-mode fallback (spec: 2026-07-21-push-grants).
-    it('unpaired host identity + grants → GRANTED mode only (host fields absent)', async () => {
+    it('granted ONLY (no paired phone) → one Bearer POST per grant, no host fields', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({
+          subscribe: em.subscribe,
+          getHostIdentity: () => null,
+          getGrants: () => GRANTS,
+          hostLabel: () => 'niova'
+        })
+      )
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls.map((c) => c[1].headers.authorization)).toEqual([
+        'Bearer tok-A',
+        'Bearer tok-B'
+      ])
+      for (const c of fetchMock.mock.calls) expect(JSON.parse(c[1].body)).not.toHaveProperty('hostDeviceId')
+      h.stop()
+    })
+
+    it('BOTH: a relay-paired phone must NOT silence the granted (SSH-only) ones', async () => {
+      const em = makeEmitter()
+      // getHostIdentity defaults to the PAIRED identity via baseDeps.
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, getGrants: () => GRANTS, hostLabel: () => 'niova' })
+      )
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      // Host leg first, then one per grant — three POSTs, all carrying the same event.
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      const [host, ...granted] = fetchMock.mock.calls
+      expect(JSON.parse(host[1].body).hostDeviceId).toBe('host-device-1')
+      expect(host[1].headers.authorization).toBeUndefined()
+      expect(granted.map((c) => c[1].headers.authorization)).toEqual(['Bearer tok-A', 'Bearer tok-B'])
+      for (const c of granted) {
+        const body = JSON.parse(c[1].body)
+        expect(body).not.toHaveProperty('hostDeviceId')
+        expect(body).not.toHaveProperty('hostPublicKeyB64')
+        expect(body.hostLabel).toBe('niova')
+        expect(body.events[0].title).toBe('A')
+      }
+      h.stop()
+    })
+
+    // The one overlap the desktop CAN see: the same phone dropped a grant on this Mac AND on an SSH
+    // host it reaches (src/main's allPushGrants concatenates both lists), so the same deviceId shows
+    // up twice with different tokens. First occurrence wins — main puts the local grants first.
+    it('OVERLAP: two grants for the same deviceId collapse to ONE POST (first wins)', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({
+          subscribe: em.subscribe,
+          getHostIdentity: () => null,
+          getGrants: () => [
+            { deviceId: 'dev-A', grant: 'tok-local' },
+            { deviceId: 'dev-A', grant: 'tok-remote' },
+            { deviceId: 'dev-B', grant: 'tok-B' }
+          ],
+          hostLabel: () => 'niova'
+        })
+      )
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls.map((c) => c[1].headers.authorization)).toEqual([
+        'Bearer tok-local',
+        'Bearer tok-B'
+      ])
+      h.stop()
+    })
+
+    it('NEITHER (no paired phone, no grants) → inert', async () => {
+      const em = makeEmitter()
+      const h = createPushNotify(
+        baseDeps({ subscribe: em.subscribe, getHostIdentity: () => null, getGrants: () => [] })
+      )
+      em.emit(iev({ nodeId: 'a', title: 'A' }))
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(fetchMock).not.toHaveBeenCalled()
+      h.stop()
+    })
+
+    // Third leg: an UNPAIRED host identity (identity present, no phone pinned) must fall THROUGH to
+    // granted mode — the desktop granted-mode fallback (spec: 2026-07-21-push-grants).
+    it('unpaired host identity + grants → GRANTED only (host fields absent)', async () => {
       const em = makeEmitter()
       const getGrants = vi.fn(() => [{ deviceId: 'd', grant: 'tok-X' }])
       const h = createPushNotify(
@@ -824,6 +914,105 @@ describe('createLiveUpdatePush', () => {
     h.stop()
   })
 
+  // A now-tick carries no state of its own, so it used to hardcode `state: 'working'` — and it can
+  // sit parked for the whole coalesce window. Two producers fire one at exactly the wrong moment
+  // (the raw Stop hook clears the activity; the context tail's 1 s poll lands the turn's final
+  // usage record), so a tick would land AFTER the end and flip the island back to Working, with no
+  // further edge left to end it.
+  describe('a coalesced tick can never resurrect a finished session', () => {
+    it('drops a PARKED tick when the state edge that supersedes it goes out', async () => {
+      const { h, st, nw } = wire()
+      clock = 0
+      nw.emit({ nodeId: 'a', activity: 'Editing a.ts', ts: 0 }) // leading edge → sent
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      // A tick parked inside the window…
+      clock = 5000
+      nw.emit({ nodeId: 'a', activity: 'Editing b.ts', ts: 5000 })
+      // …then the turn ends.
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', ts: 6000 } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(liveBodyOf(1).updates[0]).toMatchObject({ event: 'end', state: 'done' })
+      // Past the coalesce window: the parked tick must NOT flush behind the end.
+      clock = 30000
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      h.stop()
+    })
+
+    it('drops a tick that arrives AFTER the end (the 1 s context tail lands late)', async () => {
+      const { h, st, nw } = wire()
+      clock = 0
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', ts: 0 } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      clock = 2000
+      nw.emit({ nodeId: 'a', activity: 'Editing late.ts', contextPercent: 42, ts: 2000 })
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(fetchMock).toHaveBeenCalledTimes(1) // nothing followed the end
+      h.stop()
+    })
+
+    it('also refuses a tick once the node is NEEDS-YOU (it would drop the buttons)', async () => {
+      const { h, st, nw } = wire()
+      clock = 0
+      st.emit({
+        nodeId: 'a',
+        event: 'update',
+        state: 'needsYou',
+        kind: 'approval',
+        pendingId: 'p1',
+        ts: 0
+      } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      clock = 2000
+      nw.emit({ nodeId: 'a', activity: 'Running tests', ts: 2000 })
+      await vi.advanceTimersByTimeAsync(30000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      h.stop()
+    })
+
+    it('a working node keeps ticking, and a re-entry into working resumes them', async () => {
+      const { h, st, nw } = wire()
+      clock = 0
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 0 } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      // Still working → the tick goes out as before.
+      clock = 2000
+      nw.emit({ nodeId: 'a', activity: 'Editing a.ts', ts: 2000 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(liveBodyOf(1).updates[0]).toMatchObject({ state: 'working', activity: 'Editing a.ts' })
+      // needsYou silences ticks…
+      clock = 30000
+      st.emit({ nodeId: 'a', event: 'update', state: 'needsYou', ts: 30000 } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      // …and answering it (back to working) lets them through again.
+      clock = 60000
+      st.emit({ nodeId: 'a', event: 'update', state: 'working', ts: 60000 } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      clock = 90000
+      nw.emit({ nodeId: 'a', activity: 'Editing c.ts', ts: 90000 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(5)
+      expect(liveBodyOf(4).updates[0]).toMatchObject({ state: 'working', activity: 'Editing c.ts' })
+      h.stop()
+    })
+
+    it('a node we have seen no edge for still ticks (unchanged pre-edge behaviour)', async () => {
+      const { h, nw } = wire()
+      clock = 0
+      nw.emit({ nodeId: 'never-edged', activity: 'Editing a.ts', ts: 0 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(liveBodyOf(0).updates[0]).toMatchObject({ state: 'working' })
+      h.stop()
+    })
+  })
+
   it('a state edge is NOT subject to the now-coalesce window', async () => {
     const { h, st, nw } = wire()
     clock = 0
@@ -989,6 +1178,137 @@ describe('createLiveUpdatePush', () => {
     })
   })
 
+  // The mirror sends message:'Stopped' for BOTH an interrupt and the stale sweep, and 'Finished'
+  // for a real completion — so the phone was deciding WHY a turn ended from a display STRING, and
+  // could not tell "you stopped it" from "we lost the host" at all. These two flags are the
+  // structured answer; they ride done edges only.
+  describe('done-edge end reason (interrupted / stale)', () => {
+    it('forwards interrupted:true on an interrupted done edge', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', message: 'Stopped', interrupted: true, ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u.interrupted).toBe(true)
+      expect(u).not.toHaveProperty('stale')
+      h.stop()
+    })
+
+    it('forwards stale:true on a sweep-produced done edge', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', message: 'Stopped', stale: true, ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u.stale).toBe(true)
+      expect(u).not.toHaveProperty('interrupted')
+      h.stop()
+    })
+
+    it('omits both on a real completion (a plain done edge)', async () => {
+      const { h, st } = wire()
+      st.emit({ nodeId: 'a', event: 'end', state: 'done', message: 'Finished', ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u).not.toHaveProperty('interrupted')
+      expect(u).not.toHaveProperty('stale')
+      h.stop()
+    })
+
+    it('never carries either on a working/needsYou edge even if the change object has them', async () => {
+      const { h, st } = wire()
+      // Belt-and-braces: only a done edge may carry an end reason.
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', interrupted: true, stale: true, ts: 1 } as NodeStateChange)
+      st.emit({
+        nodeId: 'b',
+        event: 'update',
+        state: 'needsYou',
+        message: 'Approve',
+        interrupted: true,
+        stale: true,
+        ts: 2
+      } as NodeStateChange)
+      await vi.advanceTimersByTimeAsync(1000)
+      const updates = liveBodyOf().updates
+      expect(updates).toHaveLength(2)
+      for (const u of updates) {
+        expect(u).not.toHaveProperty('interrupted')
+        expect(u).not.toHaveProperty('stale')
+      }
+      h.stop()
+    })
+
+    it('now-update (activity/context) ticks never carry an end reason', async () => {
+      const { h, nw } = wire()
+      clock = 0
+      nw.emit({ nodeId: 'a', activity: 'Editing a.ts', contextPercent: 10, ts: 0 })
+      await vi.advanceTimersByTimeAsync(1000)
+      const u = liveBodyOf().updates[0]
+      expect(u).not.toHaveProperty('interrupted')
+      expect(u).not.toHaveProperty('stale')
+      h.stop()
+    })
+
+    describe('via the real mirror', () => {
+      let dir: string
+      beforeEach(() => {
+        _resetForTest()
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'push-endreason-'))
+        initAgentStatusMirror(path.join(dir, 'agent-status.json'))
+      })
+      afterEach(() => {
+        _resetForTest()
+        fs.rmSync(dir, { recursive: true, force: true })
+      })
+
+      function ev(p: Partial<NormalizedAgentEvent>): NormalizedAgentEvent {
+        return { nodeId: 'n1', agentId: 'claude', kind: 'state', ...p } as NormalizedAgentEvent
+      }
+
+      it("an interrupted turn rides as interrupted:true — and its message is the sweep's own 'Stopped'", async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true }))
+        recordAgentEvent(ev({ state: 'done', interrupted: true }))
+        await vi.advanceTimersByTimeAsync(1000)
+        const end = liveBodyOf().updates.find((u: Record<string, unknown>) => u.event === 'end')!
+        expect(end.interrupted).toBe(true)
+        expect(end).not.toHaveProperty('stale')
+        // The very collision this feature exists for: the string is the SAME as the sweep's.
+        expect(end.message).toBe('Stopped')
+        h.stop()
+      })
+
+      it('a sweep-presumed-gone session rides as stale:true under that same message', async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true }))
+        // Nobody heard from it for the stale window → the sweep fires the synthetic end.
+        expect(sweepStaleWorking(Date.now() + 60 * 60_000, 20 * 60_000)).toEqual(['n1'])
+        await vi.advanceTimersByTimeAsync(1000)
+        const end = liveBodyOf().updates.find((u: Record<string, unknown>) => u.event === 'end')!
+        expect(end.stale).toBe(true)
+        expect(end).not.toHaveProperty('interrupted')
+        expect(end.message).toBe('Stopped')
+        h.stop()
+      })
+
+      it('a real completion carries neither flag', async () => {
+        const h = createLiveUpdatePush(
+          liveDeps({ subscribeStateChange: onNodeStateChange, subscribeNowChange: onNodeNowChange })
+        )
+        recordAgentEvent(ev({ state: 'working', newTurn: true }))
+        recordAgentEvent(ev({ state: 'done', lastMessage: 'Done' }))
+        await vi.advanceTimersByTimeAsync(1000)
+        const end = liveBodyOf().updates.find((u: Record<string, unknown>) => u.event === 'end')!
+        expect(end.message).toBe('Finished')
+        expect(end).not.toHaveProperty('interrupted')
+        expect(end).not.toHaveProperty('stale')
+        h.stop()
+      })
+    })
+  })
+
   describe('state-edge marking (edge flag)', () => {
     it('marks every state edge (start/needsYou/end) with edge:true', async () => {
       const { h, st } = wire()
@@ -1107,15 +1427,39 @@ describe('createLiveUpdatePush', () => {
       h.stop()
     })
 
-    it('a paired host identity WINS: grants are never consulted (no double-push)', async () => {
-      const getGrants = vi.fn(() => GRANTS)
-      const { h, st } = wire({ getGrants, hostLabel: () => 'niova' })
+    // Same rule as createPushNotify's send-target matrix (both senders call resolveSendTarget, so
+    // they cannot drift): a relay-paired phone must not silence the SSH-only ones. The live-update
+    // stream is where it bites hardest — a granted phone would show an island that never moves.
+    it('BOTH: a relay-paired phone must NOT silence the granted (SSH-only) ones', async () => {
+      const { h, st } = wire({ getGrants: () => GRANTS, hostLabel: () => 'niova' })
+      st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      const [host, ...granted] = fetchMock.mock.calls
+      expect(JSON.parse(host[1].body).hostDeviceId).toBe('host-device-1')
+      expect(host[1].headers.authorization).toBeUndefined()
+      expect(granted.map((c) => c[1].headers.authorization)).toEqual(['Bearer tok-A', 'Bearer tok-B'])
+      for (const c of granted) {
+        const body = JSON.parse(c[1].body)
+        expect(body).not.toHaveProperty('hostDeviceId')
+        expect(body.updates[0]).toMatchObject({ nodeId: 'a', event: 'start', state: 'working' })
+      }
+      h.stop()
+    })
+
+    it('OVERLAP: two grants for the same deviceId collapse to ONE POST (first wins)', async () => {
+      const { h, st } = wire({
+        getHostIdentity: () => null,
+        getGrants: () => [
+          { deviceId: 'dev-A', grant: 'tok-local' },
+          { deviceId: 'dev-A', grant: 'tok-remote' }
+        ],
+        hostLabel: () => 'niova'
+      })
       st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: 1 })
       await vi.advanceTimersByTimeAsync(1000)
       expect(fetchMock).toHaveBeenCalledTimes(1)
-      expect(liveBodyOf().hostDeviceId).toBe('host-device-1')
-      expect(fetchMock.mock.calls[0][1].headers.authorization).toBeUndefined()
-      expect(getGrants).not.toHaveBeenCalled()
+      expect(fetchMock.mock.calls[0][1].headers.authorization).toBe('Bearer tok-local')
       h.stop()
     })
 
@@ -1167,5 +1511,105 @@ describe('live-update: the You: prompt line', () => {
     // An end edge never carries a stale You: line.
     expect(items.find((i: any) => i.state === 'done')?.prompt).toBeUndefined()
     h.stop()
+  })
+})
+
+// ---- ts unit -------------------------------------------------------------------------------
+//
+// Every `ts` this file emits is Unix MILLISECONDS, forwarded verbatim from the agent-status mirror
+// (Date.now()). The trap this pins: the iOS Live Activity's ContentState.ts has TWO producers —
+// these pushes and the phone's own foreground poll — and a producer that writes seconds disagrees
+// with the other by a factor of 1000, so every "is this newer than what I'm showing?" comparison
+// silently inverts. The assertions below are exact, so any scaling (× or ÷ 1000) fails them.
+describe('push payload ts is Unix MILLISECONDS (the mirror is the source)', () => {
+  // A real ms epoch: 2025-10-09T07:33:20Z. Its seconds form (1_760_000_000) is 1000× smaller, which
+  // is what the toBe below rejects.
+  const TS_MS = 1_760_000_000_000
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    fetchMock = vi.fn().mockResolvedValue({ ok: true })
+    clock = 0
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('ALERT path (/v1/push/notify) forwards the mirror InboxEvent.ts unscaled', async () => {
+    const em = makeEmitter()
+    const h = createPushNotify(baseDeps({ subscribe: em.subscribe }))
+    em.emit(iev({ nodeId: 'a', title: 'A', ts: TS_MS }))
+    await vi.advanceTimersByTimeAsync(2000)
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body).events[0]
+    expect(sent.ts).toBe(TS_MS)
+    expect(sent.ts).toBeGreaterThan(1e12) // ms scale, not seconds
+    h.stop()
+  })
+
+  it('LIVE-UPDATE state edge forwards the mirror NodeStateChange.ts unscaled', async () => {
+    const st = emitter<NodeStateChange>()
+    const h = createLiveUpdatePush({
+      subscribeStateChange: st.subscribe,
+      subscribeNowChange: () => () => {},
+      getHostIdentity: () => IDENTITY,
+      mobilePushEnabled: () => true,
+      mobileLiveActivities: () => true,
+      isPackaged: () => true,
+      env: {},
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      now: () => clock,
+      batchWindowMs: 1000
+    })
+    st.emit({ nodeId: 'a', event: 'start', state: 'working', ts: TS_MS })
+    await vi.advanceTimersByTimeAsync(1000)
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body).updates[0]
+    expect(sent.ts).toBe(TS_MS)
+    expect(sent.ts).toBeGreaterThan(1e12)
+    h.stop()
+  })
+
+  it('LIVE-UPDATE now-tick forwards the mirror NodeNowChange.ts unscaled', async () => {
+    const nw = emitter<NodeNowChange>()
+    const h = createLiveUpdatePush({
+      subscribeStateChange: () => () => {},
+      subscribeNowChange: nw.subscribe,
+      getHostIdentity: () => IDENTITY,
+      mobilePushEnabled: () => true,
+      mobileLiveActivities: () => true,
+      isPackaged: () => true,
+      env: {},
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      now: () => clock,
+      batchWindowMs: 1000,
+      coalesceMs: 20000
+    })
+    nw.emit({ nodeId: 'a', activity: 'Editing a.ts', ts: TS_MS })
+    await vi.advanceTimersByTimeAsync(1000)
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body).updates[0]
+    expect(sent.ts).toBe(TS_MS)
+    expect(sent.ts).toBeGreaterThan(1e12)
+    h.stop()
+  })
+
+  it('the mirror really does stamp ms (both seams, end to end)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'push-ts-'))
+    try {
+      _resetForTest()
+      initAgentStatusMirror(path.join(dir, 'agent-status.json'))
+      const inbox: InboxEvent[] = []
+      const edges: NodeStateChange[] = []
+      onInboxActionable((e) => inbox.push(e))
+      onNodeStateChange((c) => edges.push(c))
+      const before = Date.now()
+      recordAgentEvent({ nodeId: 'n1', agentId: 'claude', kind: 'state', state: 'blocked', lastMessage: 'Approve' } as NormalizedAgentEvent)
+      const after = Date.now()
+      expect(inbox[0].ts).toBeGreaterThanOrEqual(before)
+      expect(inbox[0].ts).toBeLessThanOrEqual(after)
+      expect(edges[0].ts).toBeGreaterThanOrEqual(before)
+      expect(edges[0].ts).toBeLessThanOrEqual(after)
+    } finally {
+      _resetForTest()
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

@@ -11,11 +11,12 @@
 // benign value, and everything else rejects with a coded error.
 //
 // The object is `satisfies Omit<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'fs' | 'git'
-// | 'files' | 'context' | 'boardLog' | 'dialog'>`, so the TypeScript compiler is the completeness test: if
+// | 'files' | 'context' | 'boardLog' | 'logs' | 'dialog'>`, so the TypeScript compiler is the completeness test: if
 // `NodeTerminalApi` gains a member, this file fails to typecheck until the stub is declared.
 
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_CODEX_IDENTITY_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
   type NotifyPayload,
@@ -111,6 +112,7 @@ export function buildStubApi(): Omit<
   | 'files'
   | 'context'
   | 'boardLog'
+  | 'logs'
   | 'githubIssues'
   | 'githubControl'
   | 'canvas'
@@ -152,7 +154,8 @@ export function buildStubApi(): Omit<
       readBinary: U('sshFs.readBinary'),
       write: U('sshFs.write'),
       mkdir: U('sshFs.mkdir'),
-      exists: U('sshFs.exists')
+      exists: U('sshFs.exists'),
+      quickOpen: U('sshFs.quickOpen')
     },
     clipboard: {
       // Clipboard API → execCommand → visible error. `navigator.clipboard` only exists in a SECURE
@@ -165,7 +168,9 @@ export function buildStubApi(): Omit<
           return
         }
         copyViaExecCommand(text)
-      }
+      },
+      // A browser cannot place host-local file references on the viewer's OS clipboard.
+      writeFiles: async (): Promise<boolean> => false
     },
     shell: {
       // no filesystem-reveal in a browser; intentionally inert (see docs/SERVER.md)
@@ -216,6 +221,10 @@ export function buildStubApi(): Omit<
       deactivate: U('license.deactivate'),
       // Renderer has no catch here and silently degrades to the free tier on rejection.
       getStatus: U('license.getStatus'),
+      // Server Edition has no license layer at all (initLicense runs only in src/main), so these
+      // reject rather than answer a fabricated "0 devices" — the same degrade as getStatus above.
+      detail: U('license.detail'),
+      releaseOthers: U('license.releaseOthers'),
       onChange: noopUnsub
     },
     contextLink: {
@@ -243,11 +252,41 @@ export function buildStubApi(): Omit<
       cookieProviders: () => Promise.resolve({}),
       onUpdate: noopUnsub
     },
+    sessionMemory: {
+      // Superseded by the real WS-backed namespace in ws-bridge (the core session-memory service
+      // runs in the server shell too), so nothing reaches these in a live browser session. Kept
+      // only to satisfy `satisfies NodeTerminalApi`.
+      //
+      // Where it DOES stay in force is the relay tab, which shares this stub surface: there the
+      // renderer runs on the guest while the sessions live on the host, so answering at all would
+      // describe the wrong machine. `ok:false` / `null` are the service's own words for "could not
+      // measure" — the one honest answer, and never mistakable for "nothing is using memory".
+      read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
+      host: () => Promise.resolve(null)
+    },
+    codex: {
+      // Overridden by the real WS-backed namespace in ws-bridge. The stub's answer is the same
+      // one the Server Edition gives on purpose (see server/handlers/index.ts): no shared
+      // identity, so every Codex launch line stays the bare `codex`.
+      identityCaps: () => Promise.resolve(UNKNOWN_CODEX_IDENTITY_CAPS),
+      onIdentity: noopUnsub
+    },
     claude: {
       // Overridden by the real WS-backed namespace in ws-bridge; the stub still answers with the
       // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
+    },
+    agent: {
+      // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers
+      // an empty env, so `${env:VAR}` expansion reports every referenced var as missing and the
+      // launch/preview paths degrade to the missing-env refusal instead of a host-env dump.
+      envSnapshot: () => Promise.resolve({}),
+      discoverModels: () => Promise.resolve({ models: [], error: 'Model discovery is unavailable.' }),
+      gatewayCredentialStatus: () =>
+        Promise.resolve({ hasStoredKey: false, storage: 'unavailable' }),
+      saveGatewayCredential: U('agent.saveGatewayCredential'),
+      clearGatewayCredential: U('agent.clearGatewayCredential')
     },
     chat: {
       readTranscript: U('chat.readTranscript')
@@ -310,6 +349,15 @@ export function buildStubApi(): Omit<
     },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,
+    // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the
+    // renderer's own keydown handler is the whole path there.
+    onZoomActualSize: noopUnsub,
+    // Native app-menu events (desktop-only — the Server Edition has no native menu). Stubs so the
+    // bridge satisfies NodeTerminalApi; the canvas only wires real listeners on desktop.
+    onToggleAutoAlign: noopUnsub,
+    onFitView: noopUnsub,
+    onToggleKanban: noopUnsub,
+    onOpenSettings: noopUnsub,
     closeWindow: noop,
     // Best-effort: a browser tab can't force itself frontmost the way the desktop BrowserWindow
     // can, but `window.focus()` still helps when the page is merely blurred (not another OS app).
@@ -335,8 +383,33 @@ export function buildStubApi(): Omit<
     },
     openNotificationSettings: pnoop,
     onFocusNode: noopUnsub,
+    // Server Edition v1: the memory-pressure levers run HOST-side only (the session reaper, driven
+    // by the same core monitor in src/server/index.ts). A browser tab's own memory — its WebGL
+    // contexts and parked terminals — belongs to the browser, which already discards and reclaims
+    // on its own terms; pushing our levers over the wire would fight it, not help it. Deliberate
+    // no-op, not an oversight.
+    onMemoryPressure: noopUnsub,
+    // Same asymmetry, one step further: the desktop's pty-pressure banner exists to offer "Fix
+    // automatically…", which ends in macOS's admin-password dialog on the HOST's physical display.
+    // A browser tab cannot answer that prompt, so the host keeps the reaper leg and says nothing
+    // here (see the note beside createPtyPressureMonitor in src/server/index.ts). The fix itself
+    // rejects rather than pretending, so a stray call can never look like it worked.
+    onPtyPressure: noopUnsub,
+    raisePtyDeviceLimit: async () => ({
+      ok: false as const,
+      error: 'Raising the terminal limit must be done on the machine running the server.'
+    }),
     onAgentControl: noopUnsub,
-    sendAgentControlResult: noop
+    sendAgentControlResult: noop,
+    // Messaging never runs in the browser: `onAgentControl` above is inert here, so no dispatch
+    // can ever reach this. It answers the honest terminal refusal all the same, so a stray call
+    // can never look like it delivered.
+    agentMessage: {
+      deliver: async () => ({
+        ok: false as const,
+        error: 'Agent messaging is only available in the desktop app. Do not retry.'
+      })
+    }
   } satisfies Omit<
     NodeTerminalApi,
     | 'pty'
@@ -347,6 +420,7 @@ export function buildStubApi(): Omit<
     | 'files'
     | 'context'
     | 'boardLog'
+    | 'logs'
     | 'githubIssues'
     | 'githubControl'
     | 'canvas'

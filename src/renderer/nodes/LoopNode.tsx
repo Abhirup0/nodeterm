@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
+import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import type { CanvasNode } from '../state/workspace'
 import { useAgentNodes } from '../state/agentNodes'
-import { useAgentStatus } from '../state/agentStatus'
+import { applyLoopDismiss } from '../lib/loopCard'
 import { useSession } from '../session/session'
 
 /**
@@ -36,11 +37,14 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // Manual dismiss: cron/schedule cards persist across turns/sessions/restarts, so a job
   // removed while the app wasn't watching (or one the user just wants gone) needs an ×.
   // Dismissing only drops the CARD — it does not touch the cron job itself.
+  //
+  // …which is why the whole decision lives in `lib/loopCard.ts`, shared with the card's
+  // right-click "Dismiss card": a cron/schedule dismiss MARKS the entry rather than clearing it,
+  // because that entry is the only record that a wakeup is pending — and the guard that keeps Eco
+  // mode from `/exit`ing the CLI it lives in.
   const dismiss = (e: React.MouseEvent) => {
     e.stopPropagation()
-    const parentId = id.replace(/^loop-/, '')
-    useAgentStatus.getState().setLoop(parentId, false)
-    useAgentNodes.getState().clearLoop(parentId)
+    applyLoopDismiss(id.replace(/^loop-/, ''))
   }
 
   // The cards are `selectable: false` in React Flow (a rubber band must not sweep a fan-out
@@ -49,7 +53,7 @@ export function LoopNode({ id, data, selected }: NodeProps<CanvasNode>) {
 
   return (
     <div onPointerDownCapture={select} className={`loop-node${active ? ' working' : ''}`}>
-      <NodeResizer isVisible={selected} minWidth={180} minHeight={84} color="#bf7af0" />
+      <NodeResizer isVisible={selected} minWidth={NODE_MIN_SIZES.loop.width} minHeight={NODE_MIN_SIZES.loop.height} color="#bf7af0" />
       <Handle type="target" position={Position.Top} isConnectable={false} />
       <div className="loop-node__head nodrag" onClick={toggle} style={{ cursor: 'pointer' }}>
         <button

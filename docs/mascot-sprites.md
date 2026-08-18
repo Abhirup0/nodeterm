@@ -28,24 +28,40 @@ Quadrant char → (UL, UR, LL, LR) sub-pixel bits:
 - **Walk**: frame index = `floor(t × 2.5) % 2` (≈ 2.5 steps/s).
 - **Bob**: vertical offset alternates with the frame (±0.5–1.5 px scaled to render size).
 
-## Grok — the brand mark, breathing (no critter)
+## Grok, gemini and opencode — the brand mark, breathing (no critter)
 
-Grok has **no sprite**. It had an original quadrant critter first; standing next to two real
-mascots it read as neither, so the working indicator became the glyph grok actually has — its
-official mark, pulsing with a bloom instead of walking.
+These three have **no sprite**. Grok had an original quadrant critter first; standing next to two
+real mascots it read as neither, so the working indicator became the glyph the agent actually has —
+its official mark, pulsing with a bloom instead of walking. gemini and opencode then joined the same
+mechanism (2026-08-09): they had been falling through to the plain dot, which says "something is
+happening" but not *who*.
 
-- Geometry + path: `src/renderer/lib/grokMark.ts`, shared by the React badge (`AgentMascot` via
-  `GrokMark`) and the notch HUD, which builds DOM imperatively (`createGrokMarkSvg`). One source, so
-  the two surfaces cannot show different marks.
-- The mark is a single monochrome path painted in `currentColor`, and the **bloom is a drop-shadow of
-  that same colour**. That is what makes it theme-correct with no ink of its own: light-on-dark in
-  the dark theme and on the notch's black capsule, dark-on-light in the light theme. A fixed glow
-  colour would have vanished into one of the two backgrounds — the trap the retired sprite had to
-  solve with a measured mid-tone.
-- Two shadows, tight + wide (`0 0 1px` + `0 0 4px`): the tight one keeps the thin diagonal strokes
-  from washing out at 13–16 px, the wide one is the glow.
+- The DECISION is the pure `brandPulsePlan` in `src/renderer/lib/brandPulse.ts` — deliberately
+  React-free, because it has two consumers with nothing in common: the React canvas badge
+  (`AgentMascot` → `BrandPulse` in `lib/agentIcons.tsx`) and the notch HUD, which builds DOM
+  imperatively (`workingMascot` in `hud/main.ts`). One decision, two thin renderers, so an agent is
+  never two things on two surfaces. `AgentMascot` no longer imports `GrokMark` at all.
+- **Two kinds of mark**, which is the whole reason the plan has a `kind`:
+  - `inline` — **grok only**: a single monochrome path from `src/renderer/lib/grokMark.ts`
+    (`createGrokMarkSvg` for the HUD), painted in `currentColor`.
+  - `asset` — claude, codex, gemini, opencode: multi-colour SVGs carrying their own fills, loaded as
+    an `<img src>` / `background-image`, so `currentColor` has nothing to inherit there. (claude and
+    codex have their own sprite art and reach the pulse only through menus, not the badge.)
+- The **bloom is a drop-shadow of the element's `color`**, which is exactly right for a monochrome
+  mark and approximate for the assets: gemini's gradient mark blooms in the label colour, not its own
+  ink. Accepted — the halo reads as a glow either way, and per-mark bloom colours would mean an ink
+  table. For grok it is what makes the mark theme-correct with no ink of its own: light-on-dark in the
+  dark theme and on the notch's black capsule, dark-on-light in the light theme. A fixed glow colour
+  would have vanished into one of the two backgrounds — the trap the retired sprite had to solve with
+  a measured mid-tone.
+- Two shadows, tight + wide (`0 0 1px` + `0 0 4px`): the tight one keeps thin strokes from washing out
+  at 13–16 px, the wide one is the glow.
 - `prefers-reduced-motion` freezes it at the LIT end of the cycle, so a working node reads as awake
   rather than dimmed.
+- The HUD paints its mark as a CSS `background-image` and **must** quote the URL
+  (`brandPulseBackground`): Vite inlines these small SVGs as data URIs carrying literal `'` and, for
+  three of the four, literal `(`/`)`, so an unquoted `url(…)` terminates early and the declaration is
+  dropped — an empty box, silently.
 
 ## Codex pet (spritesheet asset)
 

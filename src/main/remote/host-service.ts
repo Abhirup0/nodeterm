@@ -28,6 +28,7 @@ import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '..
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
 import * as fsOps from '../../core/fs-ops'
+import type { RemoteNodeInput } from '../../core/project-node-append'
 import { getStoredEntitlement, isPremium } from '../../core/license'
 import { publicKeyToB64, type KeyPair } from './e2ee'
 import { loadOrCreateHostKeyPair, HostKeyLockedError } from './host-identity'
@@ -47,6 +48,11 @@ export const API_BASE = process.env.NODETERM_API_BASE || 'https://api.nodeterm.d
 const textEncoder = new TextEncoder()
 const textDecoder = new TextDecoder()
 
+/** How long `pty.attach` waits for the `fresh` probe before answering "warm" and moving on. A
+ *  local `tmux has-session` is ~10 ms; this only bounds the pathological case, because the probe
+ *  now precedes the attach response and its own timeout is 6 s. */
+const FRESH_PROBE_BUDGET_MS = 750
+
 // --- pure host handlers (RPC/frame <-> pty-manager) -------------------------
 
 // The slice of pty-manager the host needs. PtyManager satisfies this; tests pass a fake.
@@ -60,6 +66,9 @@ export interface HostPtyManager {
   ): string
   /** Current visible screen of a node's tmux session, for the attach snapshot. */
   captureSnapshot(persistKey: string): Promise<string>
+  /** Does a tmux session for this node id exist RIGHT NOW? Asked before `attachDetached`, which
+   *  CREATES one when it doesn't — so the client can tell a warm join from a cold start. */
+  sessionExists(persistKey: string): Promise<boolean>
   /** `clientId` identifies WHO typed (the bridged phone's presence peer), so the keystroke can be
    *  attributed to it — null when this session has no peer, which just means it is not badged. */
   write(clientId: number | null, sessionId: string, data: string): void
@@ -182,7 +191,7 @@ export function createHostHandlers(
   git?: HostGitOps,
   // Registers a phone-started session as a project node (WorkspaceStore.appendRemoteNode).
   // Absent ⇒ `projects.registerNode` is not served.
-  registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+  registerNode?: (projectId: string, node: RemoteNodeInput) => Promise<boolean>
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -242,10 +251,12 @@ export function createHostHandlers(
   }
 
   /**
-   * Attach a mirrored terminal to the host's EXISTING tmux session for `nodeId`: respond with the
-   * streamId, send a SNAPSHOT of the current screen (so the client paints it before any live
-   * output), then start streaming live output via `attachDetached`. Falls back to plain create
-   * semantics when no session exists yet (attachDetached creates one; the snapshot is empty).
+   * Attach a mirrored terminal to the host's tmux session for `nodeId`: respond with the streamId
+   * (and whether the session had to be CREATED — `fresh`), send a SNAPSHOT of the current screen
+   * (so the client paints it before any live output), then start streaming live output via
+   * `attachDetached`. Falls back to plain create semantics when no session exists yet
+   * (attachDetached creates one; the snapshot is empty) — which is exactly what `fresh` reports,
+   * so the client can run its cold restore instead of sitting in a bare login shell.
    */
   function handleAttach(req: RpcRequest): void {
     const p = asRecord(req.params)
@@ -261,14 +272,29 @@ export function createHostHandlers(
     const stream: Stream = { sessionId: '', persistKey: nodeId, seq: 0, paused: false }
     const sinks = makeSinks(streamId, stream)
 
-    // Reserve the stream and respond up front so the client can route Input/Resize frames; the
-    // snapshot + live attach then proceed. Capturing the screen is async (a tmux side-call).
+    // Reserve the stream, then respond so the client can route Input/Resize frames; the snapshot
+    // + live attach then proceed. Capturing the screen is async (a tmux side-call).
     streams.set(streamId, stream)
-    socket.respond(req.id, true, { streamId })
 
-    void pty
-      .captureSnapshot(nodeId)
-      .catch(() => '')
+    // `fresh` — did this attach CREATE the session, or join a live one? It has to be asked BEFORE
+    // `attachDetached`, whose `tmux new-session -A` creates when the session is gone; afterwards
+    // it always exists and the answer is meaningless. Without it a mirrored client could not tell
+    // "I joined your running agent" from "I just made you an empty login shell in $HOME", which is
+    // what put a bare `~ %` prompt under a Claude node's title on the phone once the host's tmux
+    // server had died. The agent transport has reported this all along; the relay did not.
+    //
+    // Bounded, and fail-safe toward "warm": a probe that is slow or unprobeable answers `false`,
+    // so a client that cold-restores on `fresh` types nothing into a session that may be live.
+    // The bound matters because this now precedes the RPC response and `has-session` can sit on
+    // the 6 s probe timeout when tmux itself is wedged.
+    void (async () => {
+      const existed = await Promise.race([
+        pty.sessionExists(nodeId).catch(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(true), FRESH_PROBE_BUDGET_MS))
+      ])
+      socket.respond(req.id, true, { streamId, fresh: !existed })
+      return pty.captureSnapshot(nodeId).catch(() => '')
+    })()
       .then((snapshot) => {
         // The stream may have been killed/closed while the capture was in flight.
         if (!streams.has(streamId)) return
@@ -417,11 +443,19 @@ export function createHostHandlers(
       socket.respond(req.id, false, { message: 'projects.registerNode requires projectId and node.id.' })
       return
     }
-    const input: { id: string; title?: string; agentId?: string } = { id }
+    const input: RemoteNodeInput = { id }
     const title = str(node.title)
     if (title !== undefined) input.title = title
     const agentId = str(node.agentId)
     if (agentId !== undefined) input.agentId = agentId
+    // The managed Claude account the phone launched this session under (its CLAUDE_CONFIG_DIR).
+    // The direct-SSH registration path has always persisted it; this leg used to drop it on the
+    // floor, so an off-LAN session under account X came back as the system account and every
+    // account-scoped reader (transcript, context meter, find bar) then resolved against the wrong
+    // root — and a cold restore resumed it as the wrong identity. Validated in the registrar
+    // (appendProjectNode), which refuses the whole append rather than register a wrong identity.
+    const accountId = str(node.accountId)
+    if (accountId !== undefined) input.accountId = accountId
     void registerNode(projectId, input)
       .then((registered) => socket.respond(req.id, true, { registered }))
       .catch(() => socket.respond(req.id, true, { registered: false }))
@@ -694,7 +728,7 @@ export interface HostSessionOptions {
   /** Typed, jailed `git.*` bridge (see HostGitOps). Optional: absent ⇒ the verbs are not served. */
   git?: HostGitOps
   /** Registers a phone-started session as a project node (`projects.registerNode`). Optional. */
-  registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+  registerNode?: (projectId: string, node: RemoteNodeInput) => Promise<boolean>
   /** Extra fs/git jail roots beyond the shared canvas's node cwds — production passes the
    *  workspace's local project cwds: the phone browses EVERY project over `projects.list`, so a
    *  canvas-only jail denied whichever project the desktop didn't happen to have focused. */

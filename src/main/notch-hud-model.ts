@@ -5,9 +5,11 @@
 // table, and the normalized agent-event stream for prompt + subagents, plus context-update for the
 // model) into the row array the HUD renderer draws. Kept separate from the window so vitest can
 // cover the state→bucket mapping, subagent grouping, the done latch, the 6h drop, and the
-// prompt/model join without an Electron runtime. Imports only TYPES from core, never electron.
+// prompt/model join without an Electron runtime. Imports TYPES from core plus the one shared
+// clipping constant (PROMPT_MAX) — never electron.
 
 import type { NormalizedAgentEvent, AgentState } from '../shared/agents/normalize'
+import { PROMPT_MAX } from '../core/agent-status-mirror'
 import type { NodeStateChange, NodeNowChange, MirrorFile } from '../core/agent-status-mirror'
 import { WORKING_STALE_MS } from '@shared/agents/stale'
 
@@ -42,18 +44,53 @@ export interface HudRow {
   activity?: string
   contextPercent?: number
   subagents: HudSubagentRow[]
-  /** Last-change time (ms) — drives ordering + the row's "reltime" tag. */
+  /**
+   * A finished turn the user has not looked at yet — the sessions sidebar's `unread` mark
+   * (renderer/lib/sessionList.ts), which is what the HUD's done latch has always meant.
+   *
+   * It used to be implicit: a seen `done` demotes to `idle` and idle rows are not emitted, so
+   * "unread" was readable ONLY as "the row exists at all". That is unreadable from the user's side
+   * — a row that vanishes when the phone acks it looks like a glitch rather than a read receipt —
+   * so the fact is now stated on the row, labelled by the renderer and ranked by `hudRowRank`.
+   */
+  unread: boolean
+  /** Last-change time (ms) — drives the row's "reltime" tag and the staleness watchdog. NOT the
+   *  row order: see `hudRowRank` for why sorting by this is what made the panel reshuffle. */
   updatedAt: number
 }
 
-/** Collapsed-indicator aggregation: which agent kinds are actively working, and whether any
- *  finished-but-unseen session should show the green "done" blob. */
-export interface HudIndicator {
-  /** Distinct agentIds that have at least one working node (drives a walking mascot slot each). */
-  workingAgents: string[]
-  /** True if any row is a finished-but-unseen (`done`) session. */
-  doneUnseen: boolean
+/**
+ * Row order tiers, and the ONE reason the HUD does not sort by recency.
+ *
+ * `needsYou` → unread `done` → `working` → `idle`: what must be acted on, then what is new for
+ * you, then what is merely live, then what has settled. This is the sessions sidebar's own section
+ * order (`STATUS_GROUP_ORDER` in renderer/lib/sessionList.ts) — the model the owner asked the notch
+ * to follow — so the two surfaces rank a session the same way and can share its vocabulary.
+ *
+ * The rows used to be sorted `updatedAt` descending, and `updatedAt` is bumped by EVERY feed event
+ * including `applyNowChange` — the activity/context ticks a working session emits per tool call. So
+ * a busy session climbed to the top every few seconds, and since the panel draws only the first
+ * `HUD_ROW_CAP` rows, each climb also changed MEMBERSHIP: the last row dropped off and came back.
+ * That was the reported bug ("keeps reshuffling — things disappear and come back"). A tick says
+ * nothing about a session's importance, so it must not move the row.
+ */
+const ROW_RANK: Record<HudRowState, number> = { needsYou: 0, done: 1, working: 2, idle: 3 }
+
+/**
+ * The tier a row sorts in (lower = higher up the panel). A `done` row that is no longer unread
+ * ranks with `idle`: the tier is "new for you", not "finished". (Today the latch demotes such a row
+ * to `idle` before it is ever built, so this only matters if that ever changes — the rank must not
+ * quietly promote a read session above a running one.)
+ */
+export function hudRowRank(row: Pick<HudRow, 'state' | 'unread'>): number {
+  if (row.state === 'done' && !row.unread) return ROW_RANK.idle
+  return ROW_RANK[row.state]
 }
+
+// The collapsed-indicator aggregation used to be duplicated here (`buildIndicator`/`HudIndicator`)
+// with no production caller — the HUD renderer, which is the only thing that draws it, cannot
+// import src/main. It lived on as dead code and drifted (it never learned the `needsYou` dot the
+// renderer draws). The single definition is now `buildIndicator` in src/renderer/hud/indicator.ts.
 
 interface NodeAccum {
   agentId?: string
@@ -82,8 +119,17 @@ export function bucketState(s: AgentState): Exclude<HudRowState, 'idle'> {
   return 'needsYou' // waiting | blocked
 }
 
-/** First non-empty line of a prompt/message, trimmed and clipped — the second-line summary. */
-export function firstPromptLine(text: string | undefined, max = 140): string | undefined {
+/**
+ * First non-empty line of a prompt/message, trimmed and clipped — the second-line summary.
+ *
+ * The default clip is the mirror's `PROMPT_MAX`, the SAME constant the phone's Live Activity line
+ * is cut at (core/agent-status-mirror.ts): both surfaces are fed by `onNodeStateChange` /
+ * `onNodeNowChange` and are meant to say the same sentence, so one prompt must not appear at two
+ * lengths. The HUD's own 140 was never load-bearing — `.hud-row__sub` is a single nowrap line with
+ * `text-overflow: ellipsis` inside a ~400 px panel, so the visible cut is the CSS one either way.
+ * `max` stays a parameter so the helper is reusable for any other clip.
+ */
+export function firstPromptLine(text: string | undefined, max = PROMPT_MAX): string | undefined {
   if (!text) return undefined
   const line = text
     .split('\n')
@@ -111,7 +157,7 @@ export interface HudModel {
   dismiss(nodeId: string): void
   /** Drop nodes gone from the mirror + idle > 6h. Returns true if anything changed. */
   prune(now: number): boolean
-  /** Build the row array (active sessions, newest-active first), joining titles in. */
+  /** Build the row array (active sessions, in `hudRowRank` order), joining titles in. */
   buildRows(now: number, getTitle: (nodeId: string) => string | undefined): HudRow[]
 }
 
@@ -281,7 +327,13 @@ export function createHudModel(): HudModel {
   }
 
   function buildRows(now: number, getTitle: (nodeId: string) => string | undefined): HudRow[] {
-    const rows: HudRow[] = []
+    // Collected in `nodes` iteration order — a Map iterates in INSERTION order, and an accum is
+    // inserted exactly once (`ensure` sets only when the key is absent; nothing re-sets a live
+    // key), so this index is "the order these sessions first appeared to the HUD". That is the
+    // tiebreak below: it is a fact no feed event can change, which is precisely what `updatedAt`
+    // was not. A pruned node that later returns re-enters at the end of its tier — the only way a
+    // row moves within a tier, and it is a genuinely new session as far as the HUD is concerned.
+    const rows: { row: HudRow; seen: number }[] = []
     for (const [nodeId, a] of nodes) {
       const state = displayState(a, now)
       // The HUD shows active sessions only — nothing when a node is idle/seen.
@@ -292,20 +344,29 @@ export function createHudModel(): HudModel {
       a.dismissedAt = undefined
       const model = a.sessionId ? modelBySession.get(a.sessionId) : undefined
       rows.push({
-        nodeId,
-        agentId: a.agentId,
-        title: getTitle(nodeId) || 'Session',
-        ...(model ? { model } : {}),
-        state,
-        ...(a.prompt ? { prompt: a.prompt } : {}),
-        ...(a.activity ? { activity: a.activity } : {}),
-        ...(typeof a.contextPercent === 'number' ? { contextPercent: a.contextPercent } : {}),
-        subagents: [...a.subagents.values()],
-        updatedAt: a.updatedAt
+        row: {
+          nodeId,
+          agentId: a.agentId,
+          title: getTitle(nodeId) || 'Session',
+          ...(model ? { model } : {}),
+          state,
+          ...(a.prompt ? { prompt: a.prompt } : {}),
+          ...(a.activity ? { activity: a.activity } : {}),
+          ...(typeof a.contextPercent === 'number' ? { contextPercent: a.contextPercent } : {}),
+          subagents: [...a.subagents.values()],
+          // The latch, said out loud: a finished turn nobody has looked at. `noteFocus` / a
+          // read-ack from the phone clears `doneSeen`, which retires the row entirely.
+          unread: state === 'done' && !a.doneSeen,
+          updatedAt: a.updatedAt
+        },
+        seen: rows.length
       })
     }
-    rows.sort((x, y) => y.updatedAt - x.updatedAt)
-    return rows
+    // Tier first, first-appearance second. Deliberately NOT `updatedAt` on either axis (see
+    // `hudRowRank`): a row moves only when the SESSION's state moves, so an activity tick can
+    // neither reorder the panel nor push the last row out of the cap and back in.
+    rows.sort((x, y) => hudRowRank(x.row) - hudRowRank(y.row) || x.seen - y.seen)
+    return rows.map((r) => r.row)
   }
 
   return {
@@ -319,19 +380,4 @@ export function createHudModel(): HudModel {
     prune,
     buildRows
   }
-}
-
-/** Pure collapsed-indicator aggregation from the built rows. */
-export function buildIndicator(rows: HudRow[]): HudIndicator {
-  const workingAgents: string[] = []
-  let doneUnseen = false
-  for (const r of rows) {
-    if (r.state === 'working') {
-      const id = r.agentId || 'unknown'
-      if (!workingAgents.includes(id)) workingAgents.push(id)
-    } else if (r.state === 'done') {
-      doneUnseen = true
-    }
-  }
-  return { workingAgents, doneUnseen }
 }

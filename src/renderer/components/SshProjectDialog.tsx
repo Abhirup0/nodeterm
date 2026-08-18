@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useDialogStack } from './dialog-stack'
 import { useSshServers } from '../state/sshServers'
@@ -30,7 +30,8 @@ const ROW_STYLE: React.CSSProperties = {
   borderRadius: 8,
   color: 'var(--text)',
   fontSize: 13,
-  cursor: 'pointer'
+  cursor: 'pointer',
+  flexShrink: 0
 }
 
 /** Basename of an absolute remote path (for the project label). */
@@ -58,6 +59,7 @@ function parentDir(p: string): string {
  */
 export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDialogProps) {
   const servers = useSshServers((s) => s.servers)
+  const [serverFilter, setServerFilter] = useState('')
   const [step, setStep] = useState<Step>('pick')
   const [server, setServer] = useState<SshServer | null>(null)
   const [path, setPath] = useState('~')
@@ -70,6 +72,15 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
   // Stable id for the temporary browse master, generated once.
   const browseIdRef = useRef(`ssh-browse-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
   const connectBegunRef = useRef(false)
+  const visibleServers = useMemo(() => {
+    const query = serverFilter.trim().toLowerCase()
+    if (!query) return servers
+    return servers.filter((saved) =>
+      [saved.label, saved.host, saved.user, `${saved.user}@${saved.host}`].some((value) =>
+        value.toLowerCase().includes(query)
+      )
+    )
+  }, [servers, serverFilter])
 
   // Tear down the temporary browse master (best-effort) once it's no longer needed.
   const disconnectBrowse = useCallback(() => {
@@ -97,6 +108,21 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
 
   // Disconnect the browse master if the dialog unmounts without an explicit close.
   useEffect(() => () => disconnectBrowse(), [disconnectBrowse])
+
+  /** Does `dir` exist on the remote? Asked of its PARENT's listing, because a `listDir` of a
+   *  missing directory succeeds and answers `{ path: dir, dirs: [] }`. `~` is taken on faith. */
+  const dirExists = useCallback(async (dir: string): Promise<boolean> => {
+    if (dir === '~') return true
+    try {
+      const parent = await window.nodeTerminal.sshProject.listDir(
+        browseIdRef.current,
+        parentDir(dir)
+      )
+      return parent.dirs.includes(baseName(dir))
+    } catch {
+      return false
+    }
+  }, [])
 
   const list = useCallback(async (dir: string) => {
     const res = await window.nodeTerminal.sshProject.listDir(browseIdRef.current, dir)
@@ -133,7 +159,16 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
         // outlived the dialog for the rest of the app run.
         connectBegunRef.current = true
         await window.nodeTerminal.sshProject.connect(browseIdRef.current, srv)
-        await list('~')
+        // Land in the machine's DEFAULT folder when it has one (Settings → Remote (SSH)); the
+        // point of configuring it is not to browse from `~` to the same place every time.
+        //
+        // A stale default must not dead-end the dialog, and `listDir` cannot say so on its own:
+        // it echoes the path back and returns `dirs: []` whether the folder is missing or merely
+        // empty (`ls` failing is not an error it surfaces). So EXISTENCE is checked against the
+        // parent's listing before landing there — which also keeps a real, empty default working,
+        // unlike treating an empty listing as the failure signal.
+        const start = srv.remoteCwd?.trim() || '~'
+        await list((await dirExists(start)) ? start : '~')
         setStep('browse')
       } catch (err) {
         setError((err as Error)?.message || 'Could not connect to the server.')
@@ -153,20 +188,55 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
   const body = (() => {
     if (step === 'pick') {
       return (
-        <>
-          <p className="confirm__msg" style={{ fontWeight: 600 }}>
+        <div
+          style={{
+            display: 'flex',
+            flex: '1 1 auto',
+            flexDirection: 'column',
+            minHeight: 0
+          }}
+        >
+          <p className="confirm__msg" style={{ flex: '0 0 auto', overflow: 'visible', fontWeight: 600 }}>
             Connect over SSH
           </p>
-          <p className="confirm__msg">
+          <p className="confirm__msg" style={{ flex: '0 0 auto', overflow: 'visible' }}>
             Pick a saved server to host this project's terminals.
           </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, margin: '6px 0 14px' }}>
+          {servers.length > 0 && (
+            <Input
+              autoFocus
+              aria-label="Filter saved SSH servers"
+              placeholder="Filter by label, host, or user"
+              value={serverFilter}
+              onChange={(event) => setServerFilter(event.target.value)}
+              className="mb-2"
+              style={{ flexShrink: 0 }}
+            />
+          )}
+          <div
+            role="group"
+            aria-label="Saved SSH servers"
+            style={{
+              display: 'flex',
+              flex: '1 1 auto',
+              minHeight: 0,
+              overflowY: 'auto',
+              overscrollBehavior: 'contain',
+              flexDirection: 'column',
+              gap: 6,
+              margin: '6px 0 14px'
+            }}
+          >
             {servers.length === 0 ? (
-              <p className="confirm__msg" style={{ opacity: 0.7 }}>
+              <p className="confirm__msg" style={{ flex: '0 0 auto', margin: 0, opacity: 0.7 }}>
                 No saved servers yet.
               </p>
+            ) : visibleServers.length === 0 ? (
+              <p className="confirm__msg" style={{ flex: '0 0 auto', margin: 0, opacity: 0.7 }}>
+                No saved servers match “{serverFilter.trim()}”.
+              </p>
             ) : (
-              servers.map((s) => (
+              visibleServers.map((s) => (
                 <button
                   key={s.id}
                   style={ROW_STYLE}
@@ -191,7 +261,7 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
               ))
             )}
           </div>
-          <div className="confirm__actions">
+          <div className="confirm__actions" style={{ flexShrink: 0 }}>
             <Button onClick={close}>Cancel</Button>
             <Button
               variant="primary"
@@ -203,7 +273,7 @@ export function SshProjectDialog({ onCreate, onManage, onClose }: SshProjectDial
               Add server…
             </Button>
           </div>
-        </>
+        </div>
       )
     }
     if (step === 'connecting') {

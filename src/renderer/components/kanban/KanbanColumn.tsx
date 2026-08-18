@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useLayoutEffect, useRef, useState } from 'react'
 import type { KanbanColumn as KanbanColumnT } from '@shared/types'
 import { NODE_COLORS } from '../../state/workspace'
 import { SessionCard } from './SessionCard'
@@ -61,8 +61,28 @@ export const KanbanColumn = memo(function KanbanColumn({
   const [title, setTitle] = useState(column?.title ?? '')
   const [swatchesOpen, setSwatchesOpen] = useState(false)
   const [newMenuOpen, setNewMenuOpen] = useState(false)
+  // The "+ New session" menu normally drops DOWN (top:100%); a column near the window's bottom edge
+  // would push it off-screen, so we flip it UP when it doesn't fit below. Measured on open.
+  const [menuUp, setMenuUp] = useState(false)
+  const newMenuRef = useRef<HTMLDivElement>(null)
   // Trello-style drop highlight: counted enter/leave (dragleave fires when crossing children).
   const [dragOverCount, setDragOverCount] = useState(0)
+
+  useLayoutEffect(() => {
+    if (!newMenuOpen) {
+      setMenuUp(false)
+      return
+    }
+    const el = newMenuRef.current
+    if (!el) return
+    // Measured while rendered DOWN. If its bottom clears the viewport AND there's more room above
+    // the trigger than below it, flip up. (getBoundingClientRect includes the current position.)
+    const rect = el.getBoundingClientRect()
+    const overflowsBelow = rect.bottom > window.innerHeight - 8
+    const spaceAbove = rect.top // menu top ≈ just under the button
+    const spaceBelow = window.innerHeight - rect.top
+    if (overflowsBelow && spaceAbove > spaceBelow) setMenuUp(true)
+  }, [newMenuOpen])
 
   const colId = column?.id ?? null
   // Binds this column's id onto the shared card-drop handler; stable while the parent's is.
@@ -195,7 +215,7 @@ export const KanbanColumn = memo(function KanbanColumn({
       </div>
       <div className="kanban-col__footer">
         {newMenuOpen && (
-          <div className="kanban-col__newmenu">
+          <div ref={newMenuRef} className={menuUp ? 'kanban-col__newmenu kanban-col__newmenu--up' : 'kanban-col__newmenu'}>
             {createOptions.map((o) => (
               <button
                 key={o.key}

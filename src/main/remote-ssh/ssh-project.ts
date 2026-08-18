@@ -8,9 +8,12 @@ import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, t
 import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
 import { findExecutableSync, shellPathNow } from '../../core/exec-path'
+import { isSafeRemoteHome } from '../../core/remote-safety'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
 import { allowMediaPath } from '../media-protocol'
 import { remoteAccountConfigDir, isSupportedClaudeVersion } from '../../core/claude-accounts-core'
+import type { PushGrant } from '../../core/push-grants'
+import { REMOTE_GRANT_SCAN_CMD, parseRemoteGrants } from '../../core/remote-push-grants'
 import { supportsAutoPermissionMode, supportsFullscreenTui } from '../../shared/agents/config'
 import {
   controlPathFor,
@@ -20,6 +23,7 @@ import {
   exitMasterArgs,
   checkMasterArgs,
   remoteTmuxKillArgs,
+  remoteTmuxKillEverySocketArgs,
   childArgs,
   scpArgs,
   scpDownArgs,
@@ -28,6 +32,12 @@ import {
 import { claudeVersionProbeCommand, parseClaudeVersionProbe } from '../../core/remote-ssh/claude-version-probe'
 import { RemoteHooks } from './remote-hooks'
 import { hookServer } from '../../core/agents/hook-server'
+import {
+  nodeIdsForCanvas,
+  remoteNodeTokenMinter,
+  setRemoteNodeTokenWriter
+} from '../../core/agents/node-token-service'
+import { setRemoteSessionEnvWriter } from '../../core/remote-ssh/session-env'
 import { askpassServer } from './ssh-askpass'
 import { appSshAgent } from './ssh-agent'
 import { sessionName } from '../../core/tmux-naming'
@@ -77,6 +87,14 @@ interface Runners {
   /** The last SSH connection just went away through a user-facing disconnect. Production schedules
    *  the app-private agent's shutdown, which is what "forget the key" actually means. */
   onIdle?: () => void
+  /** A project's reverse hook tunnel was just VERIFIED on a freshly established master. Production
+   *  resyncs that project's working agents: hook events lost while the tunnel was down are gone for
+   *  good, so a node can be stranded at `working` until the 20-minute stale sweep. Deliberately not
+   *  called on the reuse branch — a master that answered `-O check` never lost its tunnel. The
+   *  `conn` rides along because the resync builds its own remote commands (the host's tmux session
+   *  list, a pane probe) and the alternative — looking the connection back up by control path —
+   *  would add a public accessor for a fact this call site already holds. */
+  onTunnelVerified?: (projectId: string, controlPath: string, conn: SshConnection) => void
   /** Synchronous one-shot ssh, for `disconnectAll()` only: `before-quit` is sync, so an awaited
    *  `-O exit` never lands and the daemonized ControlPersist master survives the app. */
   runSync?: (args: string[]) => void
@@ -94,6 +112,14 @@ interface Runners {
    *  FILE was in play, which is the signature of a credential held only in the user's own agent,
    *  and selects the hint that names the fix (see connectOnce's failure tail). */
   askpassAsked?: (masterPid?: number) => boolean
+  /** The node ids of this project's persisted canvas — the nodes whose per-node tokens have to
+   *  exist ON THE HOST for a remote session to be anything but `legacy`. Injected (rather than
+   *  read from the workspace store here) so the manager stays a pure unit under test. Absent ⇒ no
+   *  tokens are materialised, which is the pre-identity behavior. */
+  nodeIdsForProject?: (projectId: string) => string[]
+  /** Mints this instance's per-node token, or null when there is no node-auth secret at all
+   *  (legacy everywhere). Resolved per pass so one connect's tokens all come from one secret. */
+  nodeTokenMinter?: () => ((nodeId: string) => string) | null
 }
 
 /** Backoff after a FAILED remote claude probe (no markers = claude not found on that attempt).
@@ -522,8 +548,13 @@ export class SshProjectManager {
         // unresolved home just disables the remote context meter / subagent transcript / search.
         let remoteHome: string | undefined
         try {
+          // Validated, not merely non-empty: this string is interpolated into remote command
+          // lines (the tmux.conf write below) and into the tmux `-e CLAUDE_CONFIG_DIR=…` pair the
+          // PTY manager builds, so a host answer carrying a newline would be a command separator.
+          // Same fail-open direction as the catch — an unusable answer just disables the features
+          // that need an absolute remote home. See `isSafeRemoteHome`.
           const r = await this.r.run(childArgs(conn, controlPath, 'printf %s "$HOME"'))
-          if (r.code === 0 && r.stdout.trim()) remoteHome = r.stdout.trim()
+          if (r.code === 0 && isSafeRemoteHome(r.stdout.trim())) remoteHome = r.stdout.trim()
         } catch {
           // fail-open
         }
@@ -561,6 +592,11 @@ export class SshProjectManager {
         if (remoteHome && hookEndpointPath) {
           void this.remoteHooks.installCanvasControl(conn, controlPath, remoteHome)
           void this.remoteHooks.installContextLink(conn, controlPath, remoteHome)
+          // Per-node tokens for every node of this project (the endpoint file written just above
+          // is what tells the host's hook script where to find them, which is also why this is
+          // gated on `hookEndpointPath`: a token nothing can be pointed at is a wasted round-trip).
+          // Same not-awaited best-effort terms as the two installs.
+          void this.materialiseNodeTokens(projectId, conn, controlPath, remoteHome)
         }
         // Same ownership check the failure path makes below, and for the same reason: the setup
         // above is several remote round-trips, and a disconnect + reconnect inside that window
@@ -575,6 +611,34 @@ export class SshProjectManager {
           entry.remoteHome = remoteHome
           entry.tmuxConfPath = tmuxConfPath
           this.r.onStatus({ projectId, status: 'connected' })
+          // The tunnel is live again on a master we just established (the reuse branch returned long
+          // before this line), so this is exactly the moment the hook events lost while it was down
+          // can be reconstructed from the host.
+          //
+          // Position is load-bearing, and it is HERE rather than beside `setup()` for three reasons.
+          // (1) The resync's transcript leg resolves the host's transcript root through
+          // `remoteHomeForControlPath`, which reads `entry.remoteHome` — written one line above.
+          // Firing before that left the locator without a remote $HOME on EVERY connect (the entry
+          // is created at master spawn without the field), and that leg is the only one that can
+          // tell a finished agent sitting at its prompt from one still working. (2) It is past the
+          // ownership check, so a superseded attempt no longer resyncs against an entry it does not
+          // own. (3) It stays inside `if (hookEndpointPath)`, so a tunnel that failed verification
+          // still never fires it — there would be nothing to reconstruct through.
+          //
+          // Fire-and-forget: the resync runs several remote round trips and must never delay (or
+          // fail) the connect that is already reporting `connected`. The try/catch is the contract,
+          // not politeness: what this hook drives will grow, and a throw inside it would surface to
+          // the user as a dead SSH project — the connect fails, the entry is left half-built, and
+          // the reason is a repair job that was only ever best-effort. A resync must never cost the
+          // user the connection that is already reporting `connected`. (`onStatus` above carries the
+          // same guard for the same hard-won reason.) Do not tidy away.
+          if (hookEndpointPath) {
+            try {
+              this.r.onTunnelVerified?.(projectId, controlPath, conn)
+            } catch {
+              // undecided changes nothing: the stale sweep remains the backstop, as before this hook
+            }
+          }
         }
         // Probe the REMOTE claude CLI once per connect, `--permission-mode auto` only exists in
         // >= 2.1.71 and the host's CLI may be older than the local one. NOT awaited: the answer is
@@ -680,7 +744,7 @@ export class SshProjectManager {
       let home = c.remoteHome
       if (!home) {
         const r = await this.r.run(childArgs(c.conn, c.controlPath, 'printf %s "$HOME"'))
-        if (r.code === 0 && r.stdout.trim()) home = r.stdout.trim()
+        if (r.code === 0 && isSafeRemoteHome(r.stdout.trim())) home = r.stdout.trim()
       }
       if (!home) return null
       const token = `${Date.now().toString(36)}${(this.uploadSeq++).toString(36)}`
@@ -831,17 +895,38 @@ export class SshProjectManager {
    * regardless of whether the nodes were mounted (only the active project's nodes are). `nodeIds`
    * are raw node ids; we map each to its `nt-<id>` session name (the same name `spawnSession` /
    * `remoteTmuxHasSessionArgs` use). Best-effort per id, a missing session is ignored.
+   *
+   * `everySocket` widens the kill to EVERY tmux socket on the host instead of just the
+   * `nodeterm-rmt` one an SSH project spawns on, and it is **opt-in for one caller**. The
+   * session-memory panel passes rows swept off BOTH of the host's sockets — a host that runs its
+   * own `nodeterm-server` keeps those on `node-terminal` — and such a row used to get a confirm
+   * reading "this stops its tmux session" followed by a kill aimed at the other socket, so nothing
+   * died. Project deletion deliberately stays narrow: it knows its own nodes, they are all on the
+   * project's own socket, and speculating at `node-terminal` would aim at sessions belonging to a
+   * nodeterm running ON that host. See `KILL_TMUX_SOCKETS`.
    */
-  async killSessions(projectId: string, nodeIds: string[]): Promise<void> {
+  async killSessions(
+    projectId: string,
+    nodeIds: string[],
+    opts?: { everySocket?: boolean }
+  ): Promise<void> {
     const c = this.conns.get(projectId)
     if (!c) return
+    // `=== true`, not truthy: this value arrives from a renderer over IPC / the ws bridge.
+    const everySocket = opts?.everySocket === true
     await Promise.all(
-      nodeIds.map((id) =>
-        this.r.run(remoteTmuxKillArgs(c.conn, c.controlPath, sessionName(id))).then(
-          () => undefined,
-          () => undefined
+      nodeIds
+        .flatMap((id) =>
+          everySocket
+            ? remoteTmuxKillEverySocketArgs(c.conn, c.controlPath, sessionName(id))
+            : [remoteTmuxKillArgs(c.conn, c.controlPath, sessionName(id))]
         )
-      )
+        .map((args) =>
+          this.r.run(args).then(
+            () => undefined,
+            () => undefined
+          )
+        )
     )
   }
 
@@ -898,6 +983,83 @@ export class SshProjectManager {
   /** The resolved remote `$HOME` for a connected project, if known. */
   remoteHomeFor(projectId: string): string | undefined {
     return this.conns.get(projectId)?.remoteHome
+  }
+
+  /**
+   * Write this project's per-node tokens onto its host (connect path). Everything about it is
+   * best-effort: no minter (no secret ⇒ legacy everywhere) or no node ids ⇒ not a single remote
+   * command, and `RemoteHooks.writeNodeTokens` never throws.
+   */
+  private async materialiseNodeTokens(
+    projectId: string,
+    conn: SshConnection,
+    controlPath: string,
+    remoteHome: string
+  ): Promise<void> {
+    try {
+      const mint = this.r.nodeTokenMinter?.()
+      if (!mint) return
+      const ids = this.r.nodeIdsForProject?.(projectId) ?? []
+      if (!ids.length) return
+      await this.remoteHooks.writeNodeTokens(conn, controlPath, remoteHome, ids, mint)
+    } catch {
+      /* fail-open: an identity file must never be able to fail a connect */
+    }
+  }
+
+  /**
+   * Materialise ONE node's token on the host that serves `controlPath` — the SPAWN path (see
+   * `ensureRemoteNodeToken`). A node created after the project connected would otherwise have no
+   * token on the host until the next reconnect, i.e. for a long-lived project, never.
+   *
+   * Keyed by control path rather than project id because that is what a pty session carries.
+   * Gated on the same two facts the connect path is: a resolved `$HOME` (every remote path must be
+   * absolute) and a verified tunnel (`hookEndpointPath` ⇒ the endpoint file that names the token
+   * dir actually exists on the host).
+   */
+  /**
+   * Stage a per-session env file on the host (0600, content over stdin — values never touch an
+   * argv on either machine). The spawn path fires this and forgets it; the remote command's
+   * bounded wait bridges the race, and a write that never lands only costs the agent its
+   * gateway/custom env (it fails loudly in its own pane). Path safety: `remotePath` is built
+   * core-side from the connection's VALIDATED remote $HOME (`isSafeRemoteHome`) plus the
+   * sanitized tmux session name, and is `posixQuote`d again here at the splice point.
+   */
+  async writeSessionEnvFile(controlPath: string, remotePath: string, content: string): Promise<void> {
+    try {
+      for (const c of this.conns.values()) {
+        if (c.controlPath !== controlPath) continue
+        // Refuse a path that is not under a known-safe home shape — belt to the builder's braces.
+        if (/[\0\n\r'"`$\\]/.test(remotePath) || !remotePath.startsWith('/')) return
+        const dir = remotePath.slice(0, remotePath.lastIndexOf('/'))
+        await this.r.run(
+          childArgs(
+            c.conn,
+            c.controlPath,
+            `umask 077; mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(remotePath)}`
+          ),
+          content
+        )
+        return
+      }
+    } catch {
+      /* fail-open: never let an env write reach a pty spawn */
+    }
+  }
+
+  async writeNodeTokenForNode(controlPath: string, nodeId: string): Promise<void> {
+    try {
+      for (const c of this.conns.values()) {
+        if (c.controlPath !== controlPath) continue
+        if (!c.remoteHome || !c.hookEndpointPath) return
+        const mint = this.r.nodeTokenMinter?.()
+        if (!mint) return
+        await this.remoteHooks.writeNodeTokens(c.conn, c.controlPath, c.remoteHome, [nodeId], mint)
+        return
+      }
+    } catch {
+      /* fail-open: never let a token write reach a pty spawn */
+    }
   }
 
   /**
@@ -1028,6 +1190,37 @@ export class SshProjectManager {
         }
       } catch {
         // best-effort per host, a failed sweep just leaves the acks for the next tick
+      }
+    }
+    return out
+  }
+
+  /**
+   * Read the SSH-possession push grants the phone dropped on the connected hosts
+   * (`~/.nodeterm/push-grants/<deviceId>.grant`) — the remote counterpart of the local
+   * `push-grants` scan, and the reason an SSH-only user got no push notifications at all: in the
+   * phone→host→Mac topology the grant lands on the HOST, while the process with something to push
+   * (this one) only ever scanned its own `$HOME`. See core/remote-push-grants.ts.
+   *
+   * One command per connected HOST (deduped by host key — projects sharing a host share
+   * `$HOME/.nodeterm/push-grants`). The command is fully literal, and unlike the ack sweep it
+   * consumes nothing: a grant stays valid until the phone re-mints it. Best-effort per host; a
+   * disconnected/failed project simply contributes nothing (the cache keeps the last sweep).
+   */
+  async readRemoteGrants(): Promise<PushGrant[]> {
+    const seenHosts = new Set<string>()
+    const out: PushGrant[] = []
+    for (const c of this.conns.values()) {
+      const hk = sshHostKey(c.conn)
+      if (seenHosts.has(hk)) continue
+      seenHosts.add(hk)
+      try {
+        const { code, stdout } = await this.r.run(
+          childArgs(c.conn, c.controlPath, REMOTE_GRANT_SCAN_CMD)
+        )
+        if (code === 0 && stdout) out.push(...parseRemoteGrants(stdout))
+      } catch {
+        // best-effort per host — a failed read just keeps the previous sweep's grants
       }
     }
     return out
@@ -1381,7 +1574,11 @@ export function resolvePassphrasePrompt(requestId: string, value: string | null)
 
 export function initSshProject(
   onConnected?: (projectId: string) => void,
-  askpassScriptPath?: string
+  askpassScriptPath?: string,
+  /** Passed straight through to the manager's `onTunnelVerified` (see Runners). It lives on the
+   *  caller because the resync it drives needs main's agent-status funnel and transcript readers,
+   *  none of which this module knows about. */
+  onTunnelVerified?: (projectId: string, controlPath: string, conn: SshConnection) => void
 ): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()
@@ -1436,6 +1633,7 @@ export function initSshProject(
     // see scheduleStop — the connect dialog's throwaway browse master disconnects right before the
     // real project connects).
     onIdle: () => appSshAgent.scheduleStop(),
+    onTunnelVerified,
     askpassWasCancelled: (masterPid) => askpassServer.wasCancelledBy(masterPid),
     askpassIsPrompting: () => askpassServer.isPromptingAny(),
     askpassAsked: (masterPid) => askpassServer.askedBy(masterPid),
@@ -1477,6 +1675,10 @@ export function initSshProject(
         )
       }),
     getHook: () => ({ port: hookServer.getPort(), token: hookServer.getToken(), version: hookServer.getVersion() }),
+    // Per-node identity for REMOTE nodes. Both come from the same module the local materialiser
+    // uses, so one canvas cannot be judged by two different rules depending on where it runs.
+    nodeIdsForProject: (projectId) => nodeIdsForCanvas(projectId),
+    nodeTokenMinter: () => remoteNodeTokenMinter(),
     onStatus: (e) => {
       // sendToMain resolves the window AT SEND TIME (see main-window.ts): the `win` captured here
       // is destroyed and recreated by a macOS close/reopen, and sending to the stale reference is
@@ -1491,6 +1693,16 @@ export function initSshProject(
         // a UI that cannot hear us changes nothing about the connection itself
       }
     }
+  })
+  // The spawn-path leg of the remote materialiser: `pty-manager` (core) reaches the ControlMaster
+  // through this registration, because the runner that owns it lives here, in main.
+  setRemoteNodeTokenWriter((controlPath, nodeId) => {
+    void mgr.writeNodeTokenForNode(controlPath, nodeId)
+  })
+  // Same seam, same shape: the pty spawn path stages a remote session's env file (gateway/custom
+  // values, argv-free) through the manager that owns the ssh runner. See core/remote-ssh/session-env.ts.
+  setRemoteSessionEnvWriter((controlPath, remotePath, content) => {
+    void mgr.writeSessionEnvFile(controlPath, remotePath, content)
   })
   // Registered after `mgr` exists so the dialog can name the server: the askpass request carries
   // the asking master's pid, and only the manager can map it back to a connection.
@@ -1511,8 +1723,10 @@ export function initSshProject(
   ipcMain.handle(IPC.sshDisconnectProject, (_e, projectId: string) =>
     mgr.disconnect(projectId, { final: true })
   )
-  ipcMain.handle(IPC.sshKillSessions, (_e, projectId: string, nodeIds: string[]) =>
-    mgr.killSessions(projectId, nodeIds)
+  ipcMain.handle(
+    IPC.sshKillSessions,
+    (_e, projectId: string, nodeIds: string[], opts?: { everySocket?: boolean }) =>
+      mgr.killSessions(projectId, nodeIds, opts)
   )
   ipcMain.handle(IPC.sshListDir, (_e, projectId: string, dir: string) => mgr.listDir(projectId, dir))
   ipcMain.handle(IPC.sshMkdir, (_e, projectId: string, dir: string) => mgr.makeDir(projectId, dir))

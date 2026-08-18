@@ -121,7 +121,7 @@ then **Send** (nothing auto-submits). Your voice never leaves the machine.
 ### Node kinds
 
 🖥 **Terminal** (xterm + tmux, AI naming) · 🤖 **Agent** (Claude Code / Codex / Gemini /
-opencode / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂 **Group**
+GitHub Copilot / opencode / Grok / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂 **Group**
 (bind to a **git worktree** for agent-per-branch) · ✏️ **Editor** (Monaco, ⌘S) ·
 🔀 **Diff** · 🌐 **Web / Video**
 
@@ -129,7 +129,9 @@ opencode / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂
 
 - **Session continuity (tmux)** — terminals keep running across node remounts *and* full
   app restarts, including live processes; machine reboots restore scrollback and resume
-  agent sessions (`claude --resume`).
+  agent sessions (`claude --resume`). The macOS app **ships its own tmux**, so this works
+  with nothing installed; a tmux already on your system is always used in preference to it,
+  and terminals opened before an upgrade stay as they were until you refresh the node.
 - **Talk to your terminal** — on-device Whisper dictation (⌘⇧D): speak, review, send.
 - **Agent superpowers** — **context links** so agent nodes read each other's transcripts
   on demand; Claude-only **branch a conversation** and **managed accounts** for several
@@ -213,7 +215,9 @@ detects your platform. Everything is also listed at
 ## 🛠 Build from source
 
 Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
-survive restarts).
+survive restarts). A source checkout does **not** carry the bundled tmux: run
+`node scripts/build-tmux.mjs` once on macOS to build it into `resources/bin/tmux` (the
+release job does this automatically), or just install tmux yourself.
 
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall)
@@ -265,7 +269,10 @@ under [`docs/`](./docs) for deeper notes.
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. Questions or bug reports are also happy at
+Issues and pull requests are welcome. **Start with [CONTRIBUTING.md](./CONTRIBUTING.md)** —
+setup, the process-boundary rules, and the house rules that come up in review.
+[CLAUDE.md](./CLAUDE.md) is the deep reference behind them (and is loaded automatically if
+you work with an AI coding agent). Questions or bug reports are also happy at
 [nodeterm.dev/support](https://nodeterm.dev/support) / support@nodeterm.dev. nodeterm is licensed under the
 [Business Source License 1.1](https://mariadb.com/bsl11/) — you can use, modify,
 and redistribute it freely, including in production, except offering it as a

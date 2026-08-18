@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, promises as fs, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
+import { IPC } from '../shared/ipc'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import { SettingsStore } from './settings-store'
@@ -37,6 +38,27 @@ describe('SettingsStore nested-default merge', () => {
     expect(s.fontSize).toBe(15)
   })
 
+  it('turns pty shadow clients ON for an existing settings.json that predates the flag', () => {
+    writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ tmuxEnabled: true }), 'utf-8')
+    const store = new SettingsStore()
+    store.init()
+    // Every install that upgrades into this release has a settings.json without the key. If the
+    // shallow merge did not carry the default through, the feature would be off for exactly the
+    // population it needs its soak release from.
+    expect(store.get().ptyShadowClients).toBe(true)
+  })
+
+  it('keeps an explicit ptyShadowClients:false — the kill switch survives a load', () => {
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ ptyShadowClients: false }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().ptyShadowClients).toBe(false)
+  })
+
   it('leaves an already-modern speech object alone', () => {
     writeFileSync(
       path.join(dir, 'settings.json'),
@@ -61,6 +83,20 @@ describe('SettingsStore nested-default merge', () => {
     const store = new SettingsStore()
     store.init()
     expect(store.get().speech).toEqual(DEFAULT_SETTINGS.speech)
+  })
+
+  it('fills missing model-gateway fields without losing a saved endpoint', () => {
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ modelGateway: { baseUrl: 'https://bifrost.example.test' } }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().modelGateway).toEqual({
+      baseUrl: 'https://bifrost.example.test',
+      apiKey: ''
+    })
   })
 
   it("defaults everything when settings.json does not exist", () => {
@@ -107,5 +143,122 @@ describe('SettingsStore nested-default merge', () => {
       expect(load(null).get().terminalGpuRendering).toBe('auto')
       expect(load({ mode: 'shared' }).get().terminalGpuRendering).toBe('auto')
     })
+  })
+})
+
+describe('settings:save atomic write', () => {
+  let dir: string
+  let fake: ReturnType<typeof fakePlatform>
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'nodeterm-settings-race-'))
+    fake = fakePlatform({ userDataDir: dir })
+    initPlatform(fake)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    resetPlatformForTests()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const tmpsLeft = async (): Promise<string[]> =>
+    (await fs.readdir(dir)).filter((f) => f.endsWith('.tmp'))
+
+  // Nothing serializes the settings:save handler, and it has overlapping callers in both builds:
+  // on the desktop the renderer's coalesced timer save, the `beforeunload` flush that fires
+  // outside that window, and any still-in-flight earlier save are all fire-and-forget
+  // (src/renderer/state/settings.ts); on the Server Edition every WS frame is dispatched
+  // concurrently (src/server/ws.ts). One fixed `${file}.tmp` name means two of them share a single
+  // tmp file: one writer's rename publishes the other's half-written bytes, or moves the file out
+  // from under it entirely and the loser's rename fails.
+  it('overlapping saves never reuse a tmp name (no torn write, no leftovers)', async () => {
+    const settingsPath = path.join(dir, 'settings.json')
+    // save() calls are serialized by the store's saveChain, so their writes arrive one after the
+    // other — uniqueness is carried by the `<pid>.<seq>` name alone. That name is what protects
+    // writers that bypass the chain (a second `nodeterm-server --data-dir X` process on the same
+    // dir) and the crash window between tmp-write and rename, so it stays pinned here.
+    const tmps: string[] = []
+    const realWriteFile = fs.writeFile
+    vi.spyOn(fs, 'writeFile').mockImplementation((async (p: any, ...rest: any[]) => {
+      if (String(p).startsWith(settingsPath)) tmps.push(String(p))
+      return (realWriteFile as any)(p, ...rest)
+    }) as any)
+
+    new SettingsStore().registerIpc()
+    // Payloads that differ in LENGTH, not just one byte: a spliced result then keeps a tail of the
+    // longer write and fails JSON.parse, instead of quietly parsing as the shorter one.
+    const save = (fontSize: number): Promise<void> =>
+      fake.handlers[IPC.settingsSave]({ ...DEFAULT_SETTINGS, fontSize }) as Promise<void>
+    await Promise.all([save(9), save(100)])
+    vi.restoreAllMocks()
+
+    expect(new Set(tmps).size).toBe(2) // each write owned its own tmp file
+    const final = JSON.parse(await fs.readFile(settingsPath, 'utf-8'))
+    expect(final.fontSize).toBe(100) // one COMPLETE snapshot won — and FIFO makes it the last call
+    // …and nothing is left for the next writer to inherit.
+    expect(await tmpsLeft()).toEqual([])
+  })
+
+  it('overlapping saves land in call order — the disk and the cache agree afterwards', async () => {
+    const settingsPath = path.join(dir, 'settings.json')
+    // Slow down only the FIRST settings write: unserialized, the second save completes and renames
+    // first, and the delayed first rename lands LAST — the disk says 9 while the cache (and every
+    // listener) says 100, and they disagree until the next boot re-reads the file. Serialized,
+    // the second save waits its turn and the last CALL wins both.
+    const realWriteFile = fs.writeFile
+    let delayed = false
+    vi.spyOn(fs, 'writeFile').mockImplementation((async (p: any, ...rest: any[]) => {
+      if (String(p).startsWith(settingsPath) && !delayed) {
+        delayed = true
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      return (realWriteFile as any)(p, ...rest)
+    }) as any)
+
+    const store = new SettingsStore()
+    store.registerIpc()
+    const save = (fontSize: number): Promise<void> =>
+      fake.handlers[IPC.settingsSave]({ ...DEFAULT_SETTINGS, fontSize }) as Promise<void>
+    await Promise.all([save(9), save(100)])
+    vi.restoreAllMocks()
+
+    const final = JSON.parse(await fs.readFile(settingsPath, 'utf-8'))
+    expect(final.fontSize).toBe(100) // the LAST save wins the disk…
+    expect(store.get().fontSize).toBe(100) // …and memory agrees with it
+  })
+
+  it('a failed rename removes its own temp, rejects the save, and fires no listener', async () => {
+    const store = new SettingsStore()
+    const fired: number[] = []
+    store.onChange((s) => fired.push(s.fontSize))
+    store.registerIpc()
+    // EXDEV is the realistic one: /tmp on another filesystem than the target.
+    vi.spyOn(fs, 'rename').mockRejectedValueOnce(
+      Object.assign(new Error('EXDEV: cross-device link not permitted, rename'), { code: 'EXDEV' })
+    )
+
+    await expect(
+      fake.handlers[IPC.settingsSave]({ ...DEFAULT_SETTINGS, fontSize: 21 })
+    ).rejects.toThrow(/EXDEV/)
+    // A unique tmp name is never reused, so the failed write has to have cleaned up after itself.
+    expect(await tmpsLeft()).toEqual([])
+    // …and the save's observers must not be told about a save that never landed.
+    expect(fired).toEqual([])
+  })
+
+  it('writes settings.json owner-only, like every other store this app persists', async () => {
+    // The temp is created with an explicit restrictive mode BEFORE any bytes land, and the rename
+    // carries that mode onto settings.json. Without it the file lands at the umask default (0644):
+    // group/world-readable, and created under a predictable `<file>.<pid>.<seq>.tmp` name that a
+    // same-uid process could pre-create as a symlink for the write to follow. Every other writer
+    // in this store family already passes 0o600; this one was the outlier.
+    const store = new SettingsStore()
+    store.registerIpc()
+
+    await fake.handlers[IPC.settingsSave]({ ...DEFAULT_SETTINGS, fontSize: 19 })
+
+    const mode = (await fs.stat(path.join(dir, 'settings.json'))).mode & 0o777
+    expect(mode).toBe(0o600)
   })
 })

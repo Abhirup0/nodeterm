@@ -41,15 +41,13 @@ const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const [devices, setDevices] = useState<PairedDevice[]>([])
   const [pendingRevoke, setPendingRevoke] = useState<PairedDevice | null>(null)
+  // What the last revoke has to say, and whether it is a WARNING or a receipt. A successful
+  // removal owes the user a sentence too (the phone keeps Pro for a few days), and printing that
+  // in the warning colour would read as a failure.
+  const [revokeNote, setRevokeNote] = useState<{ text: string; warn: boolean } | null>(null)
 
   const phoneAccessEnabled = useSettings((s) => s.settings.phoneAccessEnabled)
   const updateSettings = useSettings((s) => s.update)
-
-  const togglePhoneAccess = (next: boolean): void => {
-    updateSettings({ phoneAccessEnabled: next })
-    // Start/stop the standing relay host immediately.
-    window.nodeTerminal.remoteHost.setPhoneAccess(next)
-  }
 
   const refreshDevices = useCallback(async (): Promise<void> => {
     try {
@@ -60,20 +58,81 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
   }, [])
 
   // The shared pairing machine (also behind the top-right quick-pair popover); a completed
-  // pairing refreshes the device list below.
-  const { phase, qr, sshOpen, sshHealed, error, busy, start, stop, reset } = usePhonePairing(
-    () => void refreshDevices()
+  // pairing refreshes the device list below — and drops the last revoke note, which names a device
+  // by name and would otherwise outlive the very phone it warns about being re-paired.
+  const { phase, qr, sshOpen, sshHealed, relayResult, relayPlan, error, busy, start, stop, reset } = usePhonePairing(
+    () => {
+      setRevokeNote(null)
+      void refreshDevices()
+    }
   )
+
+  const togglePhoneAccess = (next: boolean): void => {
+    updateSettings({ phoneAccessEnabled: next })
+    // Start/stop the standing relay host immediately.
+    window.nodeTerminal.remoteHost.setPhoneAccess(next)
+    // The relay block is baked into the QR when the listener STARTS — a code already on
+    // screen doesn't know about this flip, and scanning it would still produce a LAN-only
+    // pairing (the field failure: works at home, dies on cellular). Regenerate; start()
+    // cancels the old listener silently.
+    if (phase === 'waiting') void start()
+  }
 
   // Load the paired-device list on mount.
   useEffect(() => {
     void refreshDevices()
   }, [refreshDevices])
 
+  // Removing local access and taking the phone's Pro back are DIFFERENT facts, and the second one
+  // used to be missing entirely — Remove unpinned the key here while the server kept minting Pro
+  // for that phone forever. So both legs are surfaced:
+  //  - 'skipped' says nothing. It means we had nothing of ours to revoke — a free-tier desktop
+  //    holds no entitlement to sign the request with, or the device was already gone from the
+  //    registry — and warning there would tell a free user their phone's Pro is stuck when it
+  //    never had any of ours. (A device paired before we recorded the phone's relay id does NOT
+  //    land here: it falls back to our own pairing id, which is the row's key in that case, so the
+  //    server leg really does run — see `revokeDevice` in main/pairing-service.ts.)
+  //  - 'ok' still owes a sentence: the phone keeps the entitlement it already holds until that
+  //    expires, so Pro does not stop the instant the row goes. Saying nothing produced exactly the
+  //    support mail this branch exists to end ("I removed it and it still has Pro").
+  //  - 'failed' warns — and does not prescribe waiting. It collapses a 403 (not our row), a 401,
+  //    a 5xx and an unreachable server, and only the last of those clears by itself.
   const revokeDevice = async (device: PairedDevice): Promise<void> => {
     setPendingRevoke(null)
+    setRevokeNote(null)
     try {
-      await window.nodeTerminal.pairing.revokeDevice(device.id)
+      const result = await window.nodeTerminal.pairing.revokeDevice(device.id)
+      // Additive, not exclusive: both legs can fail at once (an unwritable ~/.ssh while offline),
+      // and being told only half of that leaves the other half to be discovered by accident.
+      const notes: string[] = []
+      if (!result.local) {
+        notes.push(`Couldn’t remove “${device.name}” from this machine — try again.`)
+      }
+      if (result.server === 'failed') {
+        // Deliberately not "pair it and remove it again": that used to be the whole advice, and it
+        // is wrong twice over — a 403 will never clear however long you wait, and pairing RESTORES
+        // the phone's Pro (the mint upserts its row) before the second removal tries again. It is
+        // offered as what it is — a retry that costs something — with support as the reliable path.
+        notes.push(
+          (result.local ? `Removed “${device.name}” from this machine, but its` : 'Its') +
+            ' Pro access couldn’t be revoked — we were refused or couldn’t reach the server — so' +
+            ' that phone may keep Pro. Pairing it again and removing it retries the revoke, though' +
+            ' pairing restores its Pro in the meantime. Get in touch if it keeps failing.'
+        )
+      }
+      if (notes.length) {
+        setRevokeNote({ text: notes.join(' '), warn: true })
+      } else if (result.server === 'ok') {
+        // Not instant, and we say so. The phone holds a signed entitlement minted for up to seven
+        // days; revoking the row stops the NEXT one, it cannot reach into the phone.
+        setRevokeNote({
+          text: `Removed “${device.name}”. Its Pro ends when the pass it already holds expires — within 7 days.`,
+          warn: false
+        })
+      }
+    } catch {
+      // The call itself never got an answer (main is gone, or the surface doesn't support it).
+      setRevokeNote({ text: `Couldn’t remove “${device.name}” — try again.`, warn: true })
     } finally {
       void refreshDevices()
     }
@@ -168,6 +227,19 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                     className="rounded-lg bg-white p-2"
                   />
                   <p className="text-sm text-muted">Waiting for your phone… (10 min)</p>
+                  {relayPlan === 'dev' ? (
+                    <p className="text-sm" style={{ color: '#ff9f0a' }}>
+                      Dev build: the relay is off regardless of the toggle, so this code pairs
+                      LAN-only. Run a packaged build — or set NODETERM_RELAY_URL — for remote
+                      access.
+                    </p>
+                  ) : !phoneAccessEnabled ? (
+                    <p className="text-sm" style={{ color: '#ff9f0a' }}>
+                      LAN-only code: the phone will reach this machine only on this network. Turn
+                      on <strong>Remote access from your phone</strong> above first to also
+                      connect from cellular — the QR refreshes by itself.
+                    </p>
+                  ) : null}
                   {sshHealed ? (
                     <p className="text-sm" style={{ color: '#30d158' }}>
                       ✓ Remote Login is on — scan away.
@@ -184,6 +256,27 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
               <p className="text-sm font-medium" style={{ color: '#30d158' }}>
                 ✓ Paired. Your phone can now connect with its own key.
               </p>
+              {relayResult === 'ok' ? (
+                <p className="text-sm" style={{ color: '#30d158' }}>
+                  Remote access is set up — the phone can reach this machine from anywhere.
+                </p>
+              ) : relayResult === 'failed' ? (
+                <p className="text-sm" style={{ color: '#ff9f0a' }}>
+                  ⚠ Remote-access setup failed, so this pairing is LAN-only for now. Check this
+                  machine&apos;s internet connection and pair again to retry — or the phone will
+                  pick it up by itself next time it connects on this network.
+                </p>
+              ) : relayResult === 'off' ? (
+                <p className="text-sm text-muted">
+                  LAN-only pairing — remote access is switched off above.
+                </p>
+              ) : relayResult === 'dev' ? (
+                <p className="text-sm text-muted">
+                  LAN-only pairing — this is an unpackaged (dev) build, where the relay is
+                  disabled regardless of the toggle. Set NODETERM_RELAY_URL to test remote
+                  access, or use a packaged build.
+                </p>
+              ) : null}
               <Button onClick={reset}>Pair another phone</Button>
             </div>
           ) : null}
@@ -221,12 +314,23 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
               ))}
             </ul>
           )}
+          {revokeNote ? (
+            <p
+              className={revokeNote.warn ? 'text-sm' : 'text-sm text-muted'}
+              style={revokeNote.warn ? { color: '#ff9f0a' } : undefined}
+            >
+              {revokeNote.text}
+            </p>
+          ) : null}
         </div>
       </SearchableRow>
 
       {pendingRevoke ? (
         <ConfirmDialog
-          message={`Revoke “${pendingRevoke.name}”? Its key is removed from this machine and it will no longer be able to connect.`}
+          // Both legs, and the timing of the one that is not instant. "If" rather than a flat
+          // claim: a free-tier desktop has no Pro of ours on that phone to take back, and this
+          // dialog cannot tell — the server leg reports that only after the fact ('skipped').
+          message={`Revoke “${pendingRevoke.name}”? Its key is removed from this machine and it will no longer be able to connect. If its Pro comes from this Mac’s license, that is revoked too — the phone loses Pro within 7 days.`}
           confirmLabel="Revoke"
           onConfirm={() => void revokeDevice(pendingRevoke)}
           onCancel={() => setPendingRevoke(null)}

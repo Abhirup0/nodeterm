@@ -82,7 +82,7 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
 
     // ── CORE-BOUND: route to the REMOTE core over the relay RpcClient. ──
     workspace: real.workspace, // the host's canvas/project files
-    userDataDir: real.userDataDir, // the host's writable base — worktree default paths live there
+    userDataDir: real.userDataDir, // the host's writable base
     fs: files.fs,
     git: files.git,
     files: files.files,
@@ -148,7 +148,10 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     // Agent canvas-control (`agent:control`) is not wired over the relay (matches the Server
     // Edition); inert no-ops rather than a local subscription that never carries the host's events.
     onAgentControl: stub.onAgentControl,
-    sendAgentControlResult: stub.sendAgentControlResult
+    sendAgentControlResult: stub.sendAgentControlResult,
+    // Messaging rides the same decision: the browser client is never a sender (constraint 5 of
+    // the messaging plan — the phone drives canvas control over relay→IPC, not /control/*).
+    agentMessage: stub.agentMessage
   } satisfies NodeTerminalApi
 
   return {

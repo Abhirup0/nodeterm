@@ -9,6 +9,10 @@ dist/
 
 build/icon.png
 
+# bundled tmux — a ~2MB universal binary, built by scripts/build-tmux.mjs (the source of truth)
+# and copied into the app by electron-builder's mac extraResources. Never committed.
+/resources/bin/
+
 .playwright-mcp/
 
 # concurrent-session worktrees / local agent state
@@ -27,7 +31,6 @@ build/icon.png
 # local publish helper — never exported to the public repo
 /publish.sh
 /kanban-launch.mp4
-/CLAUDE.md
 /agents-tour.mp4
 /unplug-tour.mp4
 /remote-tour.mp4
@@ -35,3 +38,4 @@ build/icon.png
 /dictation-tour.mp4
 /canvas-tour.mp4
 /hero-tour.mp4
+nodeterm.worktrees/

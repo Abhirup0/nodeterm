@@ -54,6 +54,63 @@ export interface MirrorEntry {
    *  must be held as `waiting` (see reduceEntry). Cleared by anything that supersedes the
    *  ask — a new turn, other tool activity, an interrupt, or a session boundary. */
   awaitingInput?: boolean
+  /**
+   * Did the hook POST that set the CURRENT `state` present a per-node token this instance minted
+   * for this node id? Set from `ev.verified` (hook-server.ts), which is a LABEL on the wire and
+   * must stay one for every other consumer — invariant 2 says /hook/* accepts a tokenless POST
+   * forever, and `normalize.ts` says outright that no consumer may treat it as reject.
+   *
+   * Messaging is the ONE consumer that reads it, and it reads it as a GATE rather than a filter:
+   * gate 2 admits a target as idle only on a verified `done`, because a gate whose input an
+   * attacker writes is a comment. Nothing else in the product may start branching on this field
+   * without re-reading Decision A1 of the messaging design.
+   *
+   * `false` after a `true` is meaningful and is written: a legacy event SUPERSEDES an earlier proof
+   * about a state that has since changed.
+   */
+  stateVerified?: boolean
+  /**
+   * The revision of the managed hook script that posted the event behind the current `state`
+   * (`ev.clientRevision`). `undefined` = no stamp, which is what a script predating per-node
+   * identity sends — and the ONLY thing that separates "this session cannot read a token" from
+   * "there is no token for it to read". Those need opposite advice, and before the stamp existed
+   * they were byte-identical on the wire (Finding F2).
+   *
+   * Written on the same edge as `stateVerified` and, like it, moves DOWN as readily as up: an SSH
+   * project reconnected against an older desktop really is running an older script now.
+   */
+  clientRevision?: number
+  /** When proof was last seen at all. Never cleared by a later legacy event — "we once saw this
+   *  node prove itself" stays true, and it is what separates a node that CAN verify (retryable)
+   *  from one that never has (not retryable). See the plan's Correction C1 mitigation. */
+  verifiedAt?: number
+  /**
+   * This entry's `state` came off disk at boot, not off a hook event this run. The mirror restores
+   * with a 6 h expiry and never pushes the restored copy to a listener — it is 6-hour-old evidence
+   * about a pane that has since done anything at all, including being replaced.
+   *
+   * Gate 2 refuses it outright (`targetNotIdleUnknown`), which is why the flag exists: without it a
+   * restored `done` is indistinguishable from a fresh one and the most dangerous moment in the
+   * product (just after a relaunch, sessions re-adopted, nothing re-confirmed) would read as the
+   * safest. Cleared by the first live event.
+   */
+  restored?: true
+  /**
+   * The CURRENT `done` was inferred from the CLI going idle at its prompt (Claude's `idle_prompt`
+   * notification, `normalize.ts` `idle`), not from a turn-end hook.
+   *
+   * `normalize.ts` already calls that a RESCUE signal, and `reduceEntry` already honours it as one
+   * — it may only move a node that is still `working`. What was missing is that the resulting entry
+   * did not remember WHICH kind of `done` it holds, so a consumer downstream could not tell a turn
+   * that ended from a CLI that merely went quiet. Gate 2 of agent messaging is the consumer that
+   * must: a node blocked on an approval is also "idle at its prompt", and delivering into it is
+   * delivering into a modal. `Canvas.tsx` already discards the idle rescue for an `undefined` node
+   * for the same reason; messaging must not be the one consumer that trusts it.
+   *
+   * Written on the SAME edge as `state`/`stateVerified` (inside `commitState`), so it can never
+   * describe a state it did not arrive with.
+   */
+  idleInferred?: true
 }
 
 /** This host's Server-Edition install metadata (spec: server-update). Written by the installer
@@ -306,6 +363,36 @@ export function reduceEntry(
   now: number
 ): MirrorEntry {
   const next: MirrorEntry = prev ? { ...prev } : { updatedAt: now }
+  /**
+   * Commit a state onto `next` — and everything that must move WITH it. One function rather than
+   * the same four lines at each branch, because the alternative was measured: of the three branches
+   * that commit a state, the `request_user_input` hold set `next.state` and nothing else. A
+   * verified `waiting` therefore kept `stateVerified: true` after a TOKENLESS `done` re-asserted
+   * it — replayable indefinitely by any caller, since `/hook/*` is fail-open by contract, with
+   * `updatedAt` advancing each time so the entry never even expired. A rule three call sites have
+   * to remember is a rule two of them keep.
+   *
+   * `proof` is the evidence for THIS transition, passed in rather than read off `ev` so the one
+   * caller that means something different has to say so out loud.
+   */
+  const commitState = (state: AgentState | undefined, proof: boolean): void => {
+    next.state = state
+    next.updatedAt = now
+    next.stateVerified = proof
+    if (proof) next.verifiedAt = now
+    next.clientRevision = ev.clientRevision
+    // Which KIND of `done` this is, recorded on the same edge as the state itself. `idle` is only
+    // ever meaningful on a `done`; assigning (not merging) is the point — a later, genuine turn-end
+    // `done` must clear the marker, or a node would stay tainted for the rest of its session.
+    if (state === 'done' && ev.idle) next.idleInferred = true
+    else delete next.idleInferred
+    // The entry's STATE now comes from this run, so it is no longer the one restored off disk.
+    // Cleared HERE and only here: an event that commits no state — a context/usage event, a
+    // held-off late `working`, the idle rescue — leaves a restored `done` exactly as restored as
+    // it was. `restored` means "this state came off disk", not "we have heard something since
+    // boot", and gate 2 will read it as the former.
+    delete next.restored
+  }
   // Identity is captured off ANY event (mirrors the renderer's per-event setSessionId +
   // agentId threading). agentId is always present on a NormalizedAgentEvent.
   if (ev.agentId) next.agentId = ev.agentId
@@ -325,8 +412,9 @@ export function reduceEntry(
     if (ev.awaitingInput) {
       next.awaitingInput = true
     } else if (prev?.awaitingInput && ev.state === 'done' && !ev.interrupted) {
-      next.state = 'waiting'
-      next.updatedAt = now
+      // The HELD state is still a state this event committed — the entry says `waiting` because
+      // THIS POST arrived — so its evidence is this POST's evidence, not the ask's from before.
+      commitState('waiting', ev.verified === true)
       return next
     } else {
       next.awaitingInput = undefined
@@ -340,15 +428,20 @@ export function reduceEntry(
       !ev.newTurn &&
       prev?.state === 'done' &&
       now - (prev.updatedAt ?? 0) < DONE_HOLDOFF_MS
-    if (!heldOff) {
-      next.state = ev.state
-      next.updatedAt = now
-    }
+    // Evidence is written on the SAME edge the state is, and only there: a context/usage event
+    // carrying a verified flag says nothing about how the current state arrived, and a held-off
+    // working did not change the state whose proof this describes. `clientRevision` is ASSIGNED
+    // rather than merged — an event with no stamp is a report that this node is running a script
+    // that cannot send one, which is exactly what a stale entry would hide.
+    if (!heldOff) commitState(ev.state, ev.verified === true)
   } else if (ev.kind === 'session') {
     // SessionStart / SessionEnd both reset the node to idle (renderer: setState(id, undefined)).
-    next.state = undefined
+    // The proof goes with the state it was about, and `false` is passed EXPLICITLY rather than
+    // `ev.verified`: this commits idle, and "the idle was verified" is not a claim worth making.
+    // `verifiedAt` stays — "this node has proven itself at least once" survives a session boundary
+    // and is what makes a refusal retryable.
+    commitState(undefined, false)
     next.awaitingInput = undefined
-    next.updatedAt = now
   }
   // subagent-start / subagent-end / recurring: identity captured above, main state untouched.
   return next
@@ -500,6 +593,38 @@ function newestUnresolved(events: ReadonlyArray<InboxEvent>, nodeId: string): In
     if (e.nodeId === nodeId && !e.resolved && (e.kind === 'approval' || e.kind === 'question')) return e
   }
   return undefined
+}
+
+/**
+ * Trim the feed to the rolling history `cap`, but PRESERVE the load-bearing per-node events that
+ * `ackDone` / `isEventUnresolved` / the phone's newest-done depend on — the newest `done` per node
+ * and the newest UNRESOLVED approval/question per node — even when they fall OUTSIDE the newest-`cap`
+ * window (audit P2-7). Without this, on a busy multi-agent host a node's `done` (or live ask) ages
+ * off the front within minutes: `ackDone` then no-ops (a retained DONE card on the phone never
+ * dismisses) and the phone loses that node's end-reason / newest-done. A RESOLVED ask is not
+ * protected — it drops with plain history as before — so the retained-past-cap set is bounded by
+ * ~2 per node. Order (oldest→newest) is preserved, and the wire shape is unchanged: the extra
+ * survivors ride the same `events` array every reader already walks. Pure — `events` untouched.
+ */
+export function trimInboxFeed(events: InboxEvent[], cap: number): InboxEvent[] {
+  if (events.length <= cap) return events
+  // The newest write per node wins each map (feed is oldest→newest, so a later match overwrites).
+  const newestDoneId = new Map<string, string>()
+  const newestUnresolvedAskId = new Map<string, string>()
+  for (const e of events) {
+    if (e.kind === 'done') newestDoneId.set(e.nodeId, e.id)
+    else if (!e.resolved && (e.kind === 'approval' || e.kind === 'question')) {
+      newestUnresolvedAskId.set(e.nodeId, e.id)
+    }
+  }
+  const protectedIds = new Set<string>([...newestDoneId.values(), ...newestUnresolvedAskId.values()])
+  // Keep the newest-`cap` window wholesale (history); older events survive only if protected.
+  const windowStart = events.length - cap
+  const kept: InboxEvent[] = []
+  for (let i = 0; i < events.length; i++) {
+    if (i >= windowStart || protectedIds.has(events[i].id)) kept.push(events[i])
+  }
+  return kept
 }
 
 // ---- Stateful singleton (production side) --------------------------------------------------
@@ -846,10 +971,10 @@ function pushInboxEvent(e: Omit<InboxEvent, 'id'>): void {
   const id = `${e.ts}-${++inboxSeq}`
   const full: InboxEvent = { id, ...e }
   inboxEvents.push(full)
-  // Cap the feed from the front (oldest fall off).
-  if (inboxEvents.length > INBOX_EVENTS_CAP) {
-    inboxEvents = inboxEvents.slice(inboxEvents.length - INBOX_EVENTS_CAP)
-  }
+  // Cap the feed from the front (oldest fall off), but keep each node's newest done + newest
+  // unresolved ask past the cut so `ackDone` / `isEventUnresolved` / the phone's newest-done
+  // don't lose the load-bearing event on a busy multi-agent host (audit P2-7).
+  inboxEvents = trimInboxFeed(inboxEvents, INBOX_EVENTS_CAP)
   // Notify actionable-event subscribers (only reached AFTER the dedup early-returns above it).
   for (const cb of inboxActionableListeners) {
     try {
@@ -996,7 +1121,13 @@ function loadPersisted(file: string): void {
           agentId: e.agentId,
           sessionId: e.sessionId,
           ...(e.name ? { name: e.name } : {}),
-          updatedAt
+          updatedAt,
+          // Marked, and FORCED unverified whatever the file said. `buildFile` writes neither field
+          // — it is an allowlist, which is what keeps `stateVerified` off disk — but a file this
+          // process did not write (hand-edited, downgraded, or from a future build) must not be
+          // able to hand gate 2 a proof nothing presented this run. See `restored`.
+          restored: true,
+          stateVerified: false
         })
       }
     }
@@ -1008,8 +1139,9 @@ function loadPersisted(file: string): void {
       let events = doc.inbox.events.filter(
         (e): e is InboxEvent => !!e && typeof e === 'object' && typeof e.id === 'string'
       )
-      if (events.length > INBOX_EVENTS_CAP) events = events.slice(events.length - INBOX_EVENTS_CAP)
-      inboxEvents = events
+      // Same per-node retention as the live cap (audit P2-7): a restored feed keeps each node's
+      // newest done + newest unresolved ask past the cut, so a restart doesn't strand a DONE card.
+      inboxEvents = trimInboxFeed(events, INBOX_EVENTS_CAP)
       let maxSeq = 0
       for (const e of inboxEvents) {
         const m = /-(\d+)$/.exec(e.id)
@@ -1275,6 +1407,39 @@ function produceInboxFromState(
     })
     // A finished turn is no longer "doing" anything — clear its live activity line.
     clearActivity(nodeId, now)
+  } else if (
+    nextState === undefined &&
+    prevState !== undefined &&
+    prevState !== 'done' &&
+    ev.kind === 'session' &&
+    ev.sessionPhase === 'end'
+  ) {
+    // The CLI EXITED mid-turn (`/exit`, Ctrl-C, a crash) — the one transition that means "this
+    // session is over", and the only one that used to emit nothing at all.
+    //
+    // `reduceEntry` resets a session event to `state: undefined`, while every `end` above is keyed
+    // on the edge INTO `done` — so a node that was working or blocked when its agent quit produced
+    // none. It escaped the rescue too: `sweepStaleWorking` matches `state === 'working'`
+    // (isStaleWorking), which the reset had just stopped being true, so the 20-minute net written
+    // for exactly this failure was structurally bypassed. The phone was left holding a Live
+    // Activity nothing would ever end — a Lock Screen card stuck on "Working…", or worse on
+    // "Needs you" with Approve/Deny buttons whose hook ticket no longer exists — until iOS's own
+    // 8 h staleness.
+    //
+    // Deliberately narrow: only a session END (a SessionStart also resets to idle, and ending a
+    // card there would kill the activity of the turn just beginning), only when the node was
+    // actually mid-turn, and only when the done edge has not already spoken for it.
+    //
+    // No inbox card: a finished turn's card comes from the `done` edge, and this transition means
+    // the session went away, which is not itself news for the feed — the node's pending
+    // approval/question cards were already resolved by the leave-blocked/waiting branch above.
+    fireNodeStateChange({
+      ...stateBase,
+      event: 'end',
+      state: 'done',
+      message: 'Ended'
+    })
+    clearActivity(nodeId, now)
   }
 }
 
@@ -1378,11 +1543,15 @@ export function recordContextUsage(nodeId: string, percent: number): void {
 }
 
 /**
- * Remove a node (call on permanent destroy). Its `nodes` entries (main + inbox activity) drop,
- * but its inbox EVENTS stay as feed history — marked resolved so the phone archives them.
- * Schedules a write so the file reflects the removal.
+ * Remove a node (call on permanent destroy — the `×`/delete path, NOT an unmount, park, offscreen
+ * release or detach: those all leave the tmux session running and the node's status live). Its
+ * `nodes` entries (main + inbox activity) drop, but its inbox EVENTS stay as feed history — marked
+ * resolved so the phone archives them. Schedules a write so the file reflects the removal, and
+ * fires ONE end edge when the node was mid-turn (see below).
  */
 export function clearNode(nodeId: string): void {
+  // Read BEFORE the delete — the end edge below is decided on the state the node died holding.
+  const prev = state.get(nodeId)
   let changed = state.delete(nodeId)
   if (inboxNodes.delete(nodeId)) changed = true
   pendingQuestions.delete(nodeId)
@@ -1392,6 +1561,30 @@ export function clearNode(nodeId: string): void {
       e.resolved = true
       changed = true
     }
+  }
+  // A node deleted MID-TURN owes exactly one end edge, for the same reason the session-ended-
+  // mid-turn branch in `produceInboxFromState` does: dropping the map entry only makes the mirror
+  // FILE forget the node, while every LIVE surface is driven by this seam, not by the file. With
+  // no edge, deleting a working/blocked node left the notch HUD holding its needs-you/done row
+  // until the 6 h prune — its title collapsing to the literal 'Session' once the entry behind it
+  // was gone — and left the phone a Live Activity nothing would ever end.
+  //
+  // Only when it was actually mid-turn. An already-`done` node fired its own 'end' on the done
+  // edge, and an idle one (state undefined — never started, or reset by a session boundary) never
+  // opened a card at all; firing here would be a second 'end' for one card.
+  //
+  // No inbox event, by the same rule the mid-turn branch states: the node is GONE, so a feed card
+  // pointing at it is one the user can neither read nor act on. This is a dismissal, not news.
+  if (prev?.state && prev.state !== 'done') {
+    fireNodeStateChange({
+      nodeId,
+      ...(prev.agentId ? { agentId: prev.agentId } : {}),
+      ...(prev.sessionId ? { sessionId: prev.sessionId } : {}),
+      event: 'end',
+      state: 'done',
+      message: 'Ended',
+      ts: Date.now()
+    })
   }
   if (changed) scheduleWrite()
 }
@@ -1435,14 +1628,25 @@ export function nodeState(nodeId: string): AgentState | undefined {
   return state.get(nodeId)?.state
 }
 
-/** Node ids currently `working` — including entries restored by loadPersisted, which fires no
- *  edges by design. Read-only peek for the shells: keep-awake seeds its tracker from this at
- *  boot, because a tmux-backed run survives an app relaunch and would otherwise go unprotected
- *  until its next turn boundary. A restored entry that is in fact gone is released by the stale
- *  sweep's synthetic end within its next tick. */
-export function workingNodeIds(): string[] {
-  const out: string[] = []
-  for (const [nodeId, e] of state) if (e.state === 'working') out.push(nodeId)
+/**
+ * The full mirror entry for one node — agent messaging's gate 2 reads this (state, `stateVerified`,
+ * `restored`, `idleInferred`, `clientRevision`) through `DeliveryDeps.mirrorEntry`. Read-only by
+ * contract: the reference is live, and a caller that mutates it is corrupting the mirror.
+ */
+export function mirrorEntry(nodeId: string): MirrorEntry | undefined {
+  return state.get(nodeId)
+}
+
+/**
+ * The nodes the mirror currently believes are `working`, with the identity a synthetic event needs.
+ * Read-only peek for the shells — the reconnect resync asks the host about exactly these, because
+ * `working` is the only state a lost hook event can strand (see remote-ssh/agent-resync-decide.ts).
+ */
+export function workingNodes(): { nodeId: string; agentId?: string; sessionId?: string }[] {
+  const out: { nodeId: string; agentId?: string; sessionId?: string }[] = []
+  for (const [nodeId, e] of state) {
+    if (e.state === 'working') out.push({ nodeId, agentId: e.agentId, sessionId: e.sessionId })
+  }
   return out
 }
 
@@ -1545,6 +1749,31 @@ export async function flush(): Promise<void> {
   const file = resolveFile()
   if (!file) return
   const now = Date.now()
+  // Age out inbox events on the SAME 6 h horizon as the two prunes below, applied to RESOLVED and
+  // UNRESOLVED alike. Until this existed the feed's only bound was INBOX_EVENTS_CAP, so an
+  // unresolved approval on a node nobody ever came back to stayed a red "Needs you" card with the
+  // tray badge lit forever — a node abandoned mid-approval emits nothing further, so neither the
+  // state-leave `resolveUnresolvedFor` nor the 50-event cap would ever reach it.
+  //
+  // One window for both kinds, deliberately:
+  //  - UNRESOLVED must not get a SHORTER one. An agent can legitimately sit blocked on a human for
+  //    hours, and this card (with its `pendingId` ticket) is how the phone answers the hook that is
+  //    still holding open. Cutting it early would trade a stale badge for lost functionality, which
+  //    is the worse bug.
+  //  - RESOLVED must not get a LONGER one. It is the phone's archive, but the phone keeps its own
+  //    copy of what it has read; this file is a live side-channel, not the archive of record, and
+  //    the cap already bounds history.
+  // 6 h is the horizon at which the module stops believing anything about a node at all, so an
+  // event outliving `state`/`inboxNodes` would be a card about a node the mirror has forgotten.
+  // Well clear of QUESTION_DEDUP_WINDOW_MS (10 min), so the title-dedup is untouched.
+  //
+  // Pruned BEFORE the doc is built, unlike the two below: `buildFile` applies the expiry to `nodes`
+  // itself but passes `inbox` through verbatim, so pruning after it would leave the aged card in
+  // the FILE for one more flush — and an abandoned node schedules no further writes, so "one more
+  // flush" can be never.
+  if (inboxEvents.some((e) => now - e.ts > EXPIRE_MS)) {
+    inboxEvents = inboxEvents.filter((e) => now - e.ts <= EXPIRE_MS)
+  }
   const inbox: MirrorInbox = { events: inboxEvents, nodes: Object.fromEntries(inboxNodes) }
   const doc = buildFile(Object.fromEntries(state), now, undefined, safeSettings(), safeUsage(), inbox, safeServer())
   // Also drop expired entries from memory so the map itself can't grow without bound.

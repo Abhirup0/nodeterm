@@ -52,6 +52,21 @@ const ALICE = 1
 const BOB = 2
 const CAROL = 3
 
+/**
+ * A machine with pty devices to spare, always.
+ *
+ * Without this the real probe runs a `readdir('/dev')` against the DEVELOPER's host, and
+ * `spawnSession`'s pre-flight refuses every create once that host is within `PTY_DEVICE_HEADROOM`
+ * of its own `kern.tty.ptmx_max` — which a machine running this app all day genuinely reaches (511
+ * on macOS; this one sits in the 480s). Nothing below is about device pressure, so it is pinned
+ * healthy rather than left to depend on who is running the suite and how many terminals they have
+ * open. The pressure behaviour itself is tested in pty-spawn-preflight.test.ts.
+ */
+vi.mock('./pty-devices', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./pty-devices')>()),
+  readPtyDevices: () => ({ ceiling: 511, inUse: 8 })
+}))
+
 describe('terminal co-attach: one PTY, N subscribers', () => {
   let fake: FakePlatform
 
@@ -180,6 +195,37 @@ describe('terminal co-attach: one PTY, N subscribers', () => {
     expect(second.sessionId).toBe('') // neither the dead session…
     expect(second.closed).toEqual({ by: ALICE }) // …nor a fresh one: the node is gone
     expect(spawned).toHaveLength(1)
+  })
+
+  // The agent-status mirror feeds the notch HUD, the phone's Live Activity and its Inbox. Deleting
+  // a node used to tell it NOTHING — `clearNode` had no production caller — so those surfaces kept
+  // rendering a node that no longer exists. It is wired at the one core chokepoint both shells
+  // share (`endSession`), and gated on the DELETE intent: a RECYCLE keeps the node, so clearing
+  // there would blank a live badge for a node still sitting on the canvas.
+  it('a DELETE clears the node from the agent-status mirror; a RECYCLE keeps it', async () => {
+    const mirror = await import('./agent-status-mirror')
+    mirror._resetForTest()
+    try {
+      const m = await manager()
+      await create(ALICE)
+      mirror.recordAgentEvent({
+        nodeId: 'node-1',
+        agentId: 'claude',
+        kind: 'state',
+        state: 'working'
+      } as never)
+      expect(mirror._snapshot()['node-1']).toBeDefined()
+
+      // A worktree move recycles the session; the node lives on, so its status must survive.
+      await m.recycleSession(ALICE, 'node-1')
+      expect(mirror._snapshot()['node-1']).toBeDefined()
+
+      // The × is permanent — the entry goes with the node.
+      await m.destroySession(ALICE, 'node-1')
+      expect(mirror._snapshot()['node-1']).toBeUndefined()
+    } finally {
+      mirror._resetForTest()
+    }
   })
 
   it('a relay-served (detached) pty is NOT indexed: it keeps its own session', async () => {
@@ -908,13 +954,17 @@ describe('destroy/recycle: bounded, validated, rate-limited', () => {
 
   it('refuses a persistKey longer than REF_MAX_LEN (no tombstone, no subprocess)', async () => {
     const { REF_MAX_LEN } = await import('../shared/presence')
-    await manager()
+    const m = await manager()
     const huge = 'x'.repeat(REF_MAX_LEN + 1)
 
     await destroy(ALICE, huge)
-    // Nothing was recorded, so this is not a node anyone can be locked out of.
-    const other = await create(BOB, huge)
-    expect(other.closed).toBeUndefined()
+    // Nothing was recorded, so this is not a node anyone can be locked out of. Read the map
+    // DIRECTLY rather than probing with `create`: an over-long id is now refused at the create
+    // choke point too (the node-id guard, added with the remote-injection fix), so a create's
+    // outcome no longer distinguishes "no tombstone" from "refused for another reason".
+    expect((m as unknown as { tombstones: Map<string, unknown> }).tombstones.size).toBe(0)
+    // And the second layer, on the same value: it can never be spent on a spawn either.
+    await expect(create(BOB, huge)).rejects.toThrow(/node id/i)
   })
 
   it('bounds the tombstone map: the oldest entries are evicted, the newest still refuse', async () => {

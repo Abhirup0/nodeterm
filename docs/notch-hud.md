@@ -18,9 +18,10 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
 - **Geometry** from `screen.getPrimaryDisplay()`: the window spans the full top edge (`bounds`,
   `y = bounds.y`), sized to the EXPANDED box (`HUD_WINDOW_HEIGHT`); we never resize the frame. Main
   sends the renderer everything it needs to draw the capsule: `bar` (= `workArea.y - bounds.y`,
-  floor `NOTCH_BAR_FLOOR` 24 — the fused top zone height), `width`, `notchWidth` (= `NOTCH_WIDTH`,
-  ~200, a tunable — Electron exposes no `auxiliaryTopLeftArea`, so assume a centered notch of this
-  width), `notchCenterX` (= `bounds.width/2`), and `hasNotch` (`inset > 0 && inset >= NOTCH_MIN_BAR`
+  floor `NOTCH_BAR_FLOOR` 24 — the fused top zone height), `width`, `notchWidth` (`settings.notchWidth`
+  clamped to `NOTCH_WIDTH_MIN/MAX` 100–320, falling back to `NOTCH_WIDTH` **168** — Electron exposes
+  no `auxiliaryTopLeftArea`, so assume a centered notch of this width; 200 left a visible gap),
+  `notchCenterX` (= `bounds.width/2`), and `hasNotch` (`inset > 0 && inset >= NOTCH_MIN_BAR`
   32 — a notched Mac's menu bar is ~37 px vs ~24 on a notchless display; when false the renderer
   draws a standalone floating pill instead of fusing). Re-asserted on `screen`
   `display-metrics-changed` + `display-added/removed`.
@@ -45,9 +46,26 @@ the HUD window via a `getHudWindow()`/`sendToHud()` singleton (mirror `main-wind
 Row shape sent to the HUD:
 ```ts
 { nodeId, agentId, title, model?, state: 'working'|'needsYou'|'done'|'idle',
-  prompt?, activity?, contextPercent?,
-  subagents: [{ id, label?, state: 'working'|'done' }] }
+  prompt?, activity?, contextPercent?, unread,
+  subagents: [{ id, label?, state: 'working'|'done' }], updatedAt }
 ```
+- **row order = STATE PRIORITY, not recency** (`hudRowRank`): `needsYou` → unread `done` →
+  `working` → `idle`, the sessions sidebar's own section order (`STATUS_GROUP_ORDER`,
+  renderer/lib/sessionList.ts) — the owner asked the notch to follow the sidebar's model. Ties
+  inside a tier break on **first appearance** (the accum Map's insertion order), a fact no feed
+  event can change. The rows used to sort on `updatedAt` DESC, and `updatedAt` is bumped by every
+  event including the `onNodeNowChange` activity/context ticks, so a busy session climbed to the
+  top every few seconds and — because the panel draws only the first `HUD_ROW_CAP` rows — each
+  climb also evicted the last row and handed it back: the reported "keeps reshuffling, things
+  disappear and come back". `updatedAt` still drives the row's reltime tag and the staleness
+  watchdog; it is simply no longer doing double duty as the row's position.
+- **`unread`** is the done latch said out loud (`state === 'done' && !doneSeen`) — the same mark
+  the sidebar carries. It was previously readable only as "the row exists at all", which is
+  invisible beside five other rows and looks like a glitch when a phone-side read-ack retires the
+  row. The renderer draws it as an **Unread** badge on the title line.
+- **`prompt` is clipped at the mirror's `PROMPT_MAX` (120)** — `firstPromptLine` imports that
+  constant rather than keeping its own number, because the phone's Live Activity line is fed by the
+  SAME `onNodeStateChange` seam and the two surfaces must not show one prompt at two lengths.
 - **done latch + clear**: `done` state is latched by the mirror already. Clearing is **strictly per
   row**: clicking/Go-ing a row (`hudFocusNode` → `model.noteFocus`) clears THAT node, and reading the
   session inside nodeterm clears it through the mirror's read-ack (`state:'done', ack:true`). Opening
@@ -77,7 +95,9 @@ Row shape sent to the HUD:
 
 Reuse `src/renderer/lib/mascot.ts` (`CLAUDE_MASCOT` data-URI + `CODEX_MASCOT` geometry +
 `pet-codex.webp`) and the walk-cycle CSS from AgentMascot/styles.css — plain DOM, no React
-coupling needed (React optional; keep the HUD lean). Master clock 120 ms.
+coupling needed (React optional; keep the HUD lean). Animation is CSS-driven, not a JS clock: the
+claude walk cycle is `0.8s steps(1)` (2 frames) and the brand-mark breathe `1.6s ease-in-out`, both
+disabled under `prefers-reduced-motion`.
 
 The HUD is **one black rounded-bottom capsule (`.hud-capsule`) that EXTENDS the physical notch** —
 fused, seamless: its TOP edge is at `y=0` sharing the notch's black (top corners SQUARE), only the
@@ -86,24 +106,38 @@ BOTTOM corners are rounded (`--capsule-radius`), and it is anchored at the notch
 the click-through hotspot (`pointerenter` → main `setIgnoreMouse(false)`, leave → `true` + collapse);
 the transparent rest of the window stays click-through. Hidden entirely when idle (no empty pill).
 
-- **Collapsed capsule**: width = `--notch-width` (so it reads as the notch itself), height =
-  `--bar + --capsule-drop` — it hangs `--capsule-drop` (~28 px) BELOW the menu-bar line, the classic
-  Dynamic-Island bulge. The indicator content is pushed past the fused top zone
-  (`padding-top: var(--bar)`) so the **mascots sit in that drop zone, below the bar line** — the
-  intended content zone (this is what fixes the old "mascots floating below the bar, beside the
-  notch" reading: the black capsule now frames them there, reading as the notch swelling). A slot per
-  agent kind that is working: claude → 2-frame coral pixel mascot walking; codex → the pet
-  spritesheet first-row crop (`image-rendering: pixelated`); plus a shimmering green blob for a
+- **Collapsed capsule**: never taller than the real notch (owner: "notch'a ekstra height vermek
+  istemiyorum"). It is `--bar` tall (`max-height`), shrink-to-fit wide, its RIGHT edge pinned
+  to the notch's right edge, and the mascots are vertically centred in that strip — the notch reads
+  as WIDER, not taller, so the Dynamic-Island bulge below the bar line was dropped (`--capsule-drop`
+  is now `0px` and only survives for the expand math). The content occupies the strip LEFT of the
+  notch and `syncCapsuleOverhang` pads the right by exactly the notch width, so the capsule grows
+  LEFT-ONLY. (It used to grow symmetrically; on a crowded menu bar the right-hand overhang covered
+  the status items and — being the click-through hotspot — swallowed their clicks. Issue #78.) The collapsed content is decided by ONE pure
+  rule, `buildIndicator` (`src/renderer/hud/indicator.ts`, unit-tested with `orderIndicatorAgents`):
+  a slot per agent kind that is working: claude → 2-frame coral pixel mascot walking; codex → the pet
+  spritesheet first-row crop (`image-rendering: pixelated`); grok/gemini/opencode → their own brand
+  mark breathing instead of a critter (`lib/brandPulse.ts`, the same call the canvas badge makes);
+  plus a shimmering green blob for a
   done-unseen slot and a red "needs you" dot for a waiting session (so the capsule is never an empty
   black pill). Nothing shown when all idle.
-- **Expanded panel**: clicking grows the SAME black surface — width → `--panel-width`, height
+- **Expanded panel**: clicking — or, with `settings.notchHoverExpand` on (the default), hovering for
+  `HOVER_OPEN_MS` (180 ms) — grows the SAME black surface — width → `--panel-width`, height
   (driven by `max-height`, so content of unknown height animates) → the rows box, bottom corners
   still rounded, top still fused — a spring-ish `--capsule-dur` (~220 ms) `--capsule-ease` expand
   from the notch, NOT a separate floating panel. Rows fade in and start below the bar line
-  (`padding-top: calc(var(--bar) + 4px)`). Up to ~6 session rows, newest-active first. Each row:
-  animated mascot/green check + title + `model · reltime` tag (blue working / gray idle / green
+  (`padding-top: calc(var(--bar) + 4px)`). `HUD_ROW_CAP` (6) session rows in the pushed
+  (state-priority) order. Each row:
+  animated mascot/green check + title + an **Unread** badge when `row.unread` + `model · reltime`
+  tag (blue working / gray idle / green
   done) + a `You: <prompt>` (or `activity`) second line + a `▸ N subagents` disclosure (child rows:
-  label + state). A **Go** button (or row-tap) → IPC → main mirrors the notification-click handler:
+  label + state). Because the order is now meaningful, a cut row is a real omission, so the cap is
+  disclosed instead of silent: a `+N more · 1 needs you · 2 unread` footer counts what is hidden by
+  tier (the sidebar answers the same question with `projectSignalCounts`; the notch has no room for
+  a badge per section) and clicking it draws the full list — the cap and the counting are the pure
+  `splitPanelRows` / `overflowLabel` (`src/renderer/hud/panel-rows.ts`, unit-tested). Note main
+  pushes ALL rows: the collapsed indicator aggregates over the whole array, so capping in main
+  would silently drop a working agent's mascot. A **Go** button (or row-tap) → IPC → main mirrors the notification-click handler:
   `getMainWindow().show()/focus()` + `sendToMain(app:focus-node, nodeId)` → `Canvas.focusNodeById`,
   and clears that node's done latch.
 - **Dismissing a row**: hovering a row reveals a `×` (right-click on the row does the same) →
@@ -116,9 +150,11 @@ the transparent rest of the window stays click-through. Hidden entirely when idl
   Collapsed height = `--pill-height`; the mascots center in the pill (no `--bar` padding to clear).
 
 **Tunables** (main constants in `notch-hud.ts`; CSS vars in `hud.css :root`, defaults in parens —
-tune on a Mac): `NOTCH_WIDTH` (200) / `--notch-width`, `NOTCH_MIN_BAR` (32, notch-detection
-threshold), `NOTCH_BAR_FLOOR` (24), `--capsule-drop` (28 px bulge — must exceed the tallest mascot),
-`--capsule-radius` (16), `--panel-width` (400), `--panel-max-h` (420), `--capsule-dur`/`--capsule-ease`,
+tune on a Mac): `NOTCH_WIDTH` (168) / `--notch-width` (the CSS fallback is 200; main pushes the real
+value on the first geometry push), `NOTCH_WIDTH_MIN/MAX` (100/320, the settings clamp),
+`NOTCH_MIN_BAR` (32, notch-detection threshold), `NOTCH_BAR_FLOOR` (24), `HUD_WINDOW_HEIGHT` (460),
+`--capsule-drop` (0 — the bulge was dropped; kept only for the expand math),
+`--capsule-radius` (16), `--panel-width` (400), `--panel-max-h` (420), `--capsule-dur` (0.22s)/`--capsule-ease`,
 and the notchless `--pill-top-gap` (6) / `--pill-radius` (18) / `--pill-height` (30).
 
 ## Settings + lifecycle

@@ -17,6 +17,7 @@ import {
   mergeCanvasControlBlock
 } from './canvas-control-core'
 import { opencodeConfigDir } from '../core/agents/hooks/opencode'
+import { copilotHomeDir } from '../core/agents/hooks/copilot'
 
 function dir(): string {
   return path.join(app.getPath('userData'), 'canvas-control')
@@ -65,7 +66,7 @@ export function installCanvasSkillInto(configDir: string): void {
   }
 }
 
-// Codex/Gemini/opencode have no skill system — merge the canvas-control block into their global
+// Codex/Gemini/Copilot/opencode use global instruction files here — merge the canvas-control block
 // instruction files (marker-delimited, idempotent, other content preserved). Same pattern
 // as context-link's get-linked-context block. The CLI env-gate keeps the block inert in
 // the user's normal (non-nodeterm) codex/gemini/opencode sessions.
@@ -74,6 +75,7 @@ function installAgentInstructions(): void {
   const targets = [
     path.join(os.homedir(), '.codex', 'AGENTS.md'),
     path.join(os.homedir(), '.gemini', 'GEMINI.md'),
+    path.join(copilotHomeDir(), 'copilot-instructions.md'),
     path.join(opencodeConfigDir(), 'AGENTS.md')
   ]
   for (const p of targets) {

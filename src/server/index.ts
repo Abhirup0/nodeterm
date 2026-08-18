@@ -1,7 +1,6 @@
 import fs from 'fs'
 import { readAgentSessionName } from '../core/agent-session-name'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { canRename, type AgentId } from '@shared/agents/config'
 import path from 'path'
 import http from 'http'
 
@@ -15,15 +14,31 @@ import type { ServerConfig } from './config'
 import { initPlatform } from '../core/platform'
 import { SettingsStore } from '../core/settings-store'
 import { WorkspaceStore } from '../core/workspace-store'
+import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { PtyManager } from '../core/pty-manager'
 import { registerCoreHandlers } from './handlers'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
-import { registerServerGitHubControl, ServerGitHubSecretStore } from './github-control'
+import {
+  registerServerGitHubControl,
+  ServerGitHubSecretStore,
+  ServerSecretStore
+} from './github-control'
+import {
+  migrateLegacyModelGatewayKey,
+  MODEL_GATEWAY_SECRET_FILE,
+  ModelGatewayCredentialService
+} from '../core/model-gateway-credentials'
 import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { LogBuffer } from '../core/log-buffer'
+import { installLogSink } from '../core/log-sink'
+import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
+import { serverEditionControlHandler } from './control-unsupported'
+import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
+import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -51,6 +66,9 @@ import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
+import { startSessionMemoryService, sshScopePredicate } from '../core/session-memory-service'
+import { createMemoryPressureMonitor } from '../core/memory-pressure'
+import { createPtyPressureMonitor } from '../core/pty-pressure'
 import { claudeCliCaps, type ClaudeCliCaps } from '../core/claude-cli'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
 import { presenceHub } from '../core/presence/hub'
@@ -154,8 +172,32 @@ export async function startServer(
   const workspaceStore = new WorkspaceStore()
 
   settingsStore.init()
+  const gatewayCredentials = new ModelGatewayCredentialService(
+    new ServerSecretStore(config.dataDir, MODEL_GATEWAY_SECRET_FILE)
+  )
+  await gatewayCredentials.init()
+  try {
+    const migratedGateway = await migrateLegacyModelGatewayKey(
+      settingsStore.get().modelGateway,
+      gatewayCredentials
+    )
+    if (migratedGateway) {
+      await settingsStore.save({ ...settingsStore.get(), modelGateway: migratedGateway })
+    }
+  } catch (error) {
+    console.warn('[model-gateway] could not migrate the legacy API key to secret storage', error)
+  }
   settingsStore.registerIpc()
-  ptyManager.init(() => settingsStore.get())
+  // Gateway discovery/credential IPC. NO env snapshot on the server: every registered handler
+  // here is dispatchable by any authenticated WS client, and the server process environment is
+  // exactly the secret store that must never cross that boundary. Browser clients hardcode an
+  // empty snapshot and `${env:VAR}` expansion degrades to the missing-env refusal; discovery
+  // resolves key REFERENCES only for the saved gateway URL (the exfil-oracle gate in core).
+  registerAgentEnvIpc(() => settingsStore.get().modelGateway, gatewayCredentials)
+  ptyManager.init(
+    () => settingsStore.get(),
+    () => gatewayCredentials.readForHost()
+  )
   ptyManager.registerIpc()
   workspaceStore.registerIpc()
   // Dictation: same construction as src/main/index.ts, with the server's data dir. onProgress
@@ -221,7 +263,8 @@ export async function startServer(
   const downloadTickets = new DownloadTickets()
   const { gitService } = registerCoreHandlers(platform, {
     getSettings: () => settingsStore.get(),
-    downloadTickets
+    downloadTickets,
+    localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
   const github = registerGitHubIntegration({
     platform,
@@ -243,6 +286,12 @@ export async function startServer(
     }
   })
 
+  // Debug log ring (issue #78) — same core registrar as desktop. Headless is where a swallowed
+  // console hurts most; the browser-side panel reads this process's ring over the bridge.
+  const logBuffer = new LogBuffer()
+  installLogSink(logBuffer)
+  registerLogHandlers(platform, logBuffer, () => settingsStore.get().debugLogPanel)
+
   // Agent status pipeline — mirrors the desktop boot order in src/main/index.ts:
   // mirror-init → wire the hook-server listeners onto the platform → install the managed hook
   // scripts → start the loopback hook server. The hook server binds its own port independent of
@@ -260,9 +309,16 @@ export async function startServer(
     // The per-agent router (core/agent-session-name.ts), same as the desktop's sweep and its
     // ptyReadSessionName handler: a grok node's name is in its session metadata, and resolving it
     // through claude's reader would scan ~/.claude/projects once a minute for a guaranteed miss.
-    resolve: readAgentSessionName,
-    publish: setNodeSessionName,
-    supports: (agentId) => !!agentId && canRename(agentId as AgentId)
+    // Gemini's leg needs the transcript path its context tail tracks; that tail is created by
+    // `wireAgentStatus` below, so it is dereferenced lazily — the sweep's first pass is 5s after
+    // boot, long after wiring.
+    resolve: (sessionId, accountId, agentId) =>
+      readAgentSessionName(sessionId, accountId, agentId, {
+        geminiPathFor: (id) => geminiContextTail.pathFor(id)
+      }),
+    publish: setNodeSessionName
+    // No `supports`: core's `supportsTitleRead` (TITLE_READ_CAPABLE) is the rule, and duplicating
+    // it here is how the two shells drift — see the note in core/session-name-sweep.ts.
   })
   // Advertise launch settings to the mobile companion through the mirror (same provider the
   // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local
@@ -293,7 +349,7 @@ export async function startServer(
   // missing/corrupt file simply yields no block.
   const installMeta = readInstallMeta(config.dataDir)
   setMirrorServerProvider(() => installMeta)
-  const { contextTail } = wireAgentStatus(platform)
+  const { contextTail, geminiContextTail } = wireAgentStatus(platform)
   // The ⌘M chat view + the find-bar's transcript index. Registered HERE rather than with the rest
   // of the handlers because the hook-fed path authority is the tail created just above. No remote
   // leg: the Server Edition runs ON the host whose transcripts it reads, so local resolution is
@@ -406,6 +462,27 @@ export async function startServer(
     }
   }
   await hookServer.start()
+  // Canvas control does not exist on this edition, and saying so BY NAME is the whole point: the
+  // null handler answered `control unavailable`, which reads to an agent like a transient outage,
+  // and an agent retries an outage. See `control-unsupported.ts`.
+  hookServer.setControlHandler(serverEditionControlHandler)
+
+  // ---- Node identity (src/core/agents/node-auth-secret.ts) ------------------------------------
+  // First time the Server Edition arms node identity. Headless Linux has no OS keychain, so the
+  // secret is stored as raw 0600 bytes (node-auth-key.bin); the loader handles the at-rest format.
+  // FAIL OPEN and LOUD: if the secret can't be created/read, identity stays unavailable (legacy
+  // mode) and the hook server keeps serving — a throw here must never block boot or the hooks.
+  // Same escape hatch as the desktop, wired OUTSIDE the try for the same reason: it is not part of
+  // arming the secret, and a headless host in legacy mode is where it is most likely to be needed.
+  hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
+  try {
+    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
+    // Materialise a token file for every persisted node so an already-running session becomes
+    // verified at its next hook event with no restart. No-ops into legacy mode without a secret.
+    initNodeTokens({ canvases: () => workspaceStore.persistedCanvases() })
+  } catch (error) {
+    console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
+  }
 
   // Context Link: core owns the whole feature (read handler, shim, skill, instruction blocks) and
   // writes everything under `dataDir`; what it needs from a shell is the link map. The desktop's
@@ -419,7 +496,10 @@ export async function startServer(
   })
   // Every load()/save() is a canvas change as far as links are concerned: a browser drawing a
   // bridge edge reaches us as the workspace save it triggers.
-  workspaceStore.onPersist = () => void contextLink.refresh()
+  workspaceStore.onPersist = () => {
+    contextLink.refresh()
+    refreshNodeTokens()
+  }
   // Nothing has read the workspace index yet — the desktop gets its first load from the renderer,
   // and this shell may never have one. Read it once so links are live before any browser connects.
   // Read-only: boot must not sideline a conflict-marked project.json (that stays a renderer/probe
@@ -434,8 +514,85 @@ export async function startServer(
   // and this standing process is the natural owner of reaping them (field report: 95 sessions /
   // 34 GB idle claude). Attached sessions are never touched; a reaped node cold-restores on next
   // open. Kill switch + tuning via NODETERM_SESSION_* env (core/session-budget.ts).
-  const sessionReaper = createSessionReaper({ tmuxBin: () => ptyManager.getTmuxBin() })
+  // `shadowed` subtracts our own control-mode shadows from tmux's attached flag: a shadow is a real
+  // tmux client but NOT a watcher, so a shadowed session must stay exactly as cullable as an idle
+  // detached one (see PtyManager.shadowedTmuxSessions).
+  // `readMem: hostMemReader()` — same platform-aware reader as the memory-pressure monitor below.
+  // A Server Edition host is normally Linux, where this IS `readMemInfo`; the darwin branch matters
+  // for a Mac serving the browser UI, where available bytes are not the OS's pressure signal (see
+  // hostMemReader). Kept identical to the desktop shell so the two cannot drift.
+  const sessionReaper = createSessionReaper({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    shadowed: (socket) => ptyManager.shadowedTmuxSessions(socket)
+  })
   sessionReaper.start()
+  // Memory pressure (core/memory-pressure.ts): only the reaper leg on this shell. A CRITICAL
+  // reading sweeps NOW instead of waiting out the reaper's 10-minute timer — that is the whole
+  // responder chain here. The renderer levers the desktop also runs (hidden WebGL contexts,
+  // parked terminals) are deliberately NOT pushed to attached browsers: a tab's own memory is the
+  // browser's to manage, and it already discards on its own terms (see the documented no-op in
+  // renderer/bridge/stubs.ts). Stopped on close beside the reaper — the timer is unref'd, but a
+  // test that starts and closes several servers must not leave sweepers behind.
+  const pressure = createMemoryPressureMonitor({
+    onPressure: (severity) => {
+      if (severity === 'critical') void sessionReaper.sweep()
+    }
+  })
+  pressure.start()
+  // Pty-device pressure (core/pty-pressure.ts): the reaper leg ONLY, and deliberately so.
+  //
+  // A standing host is exactly where the ceiling is reached first — it accumulates the sessions
+  // (field report: 95) whose panes and ssh children hold the devices — so the sweep matters more
+  // here than on the desktop. What is missing is the OTHER half: the desktop also raises a banner
+  // whose one useful affordance is "Fix automatically…", and that button ends in macOS's own
+  // admin-password dialog on the HOST's physical display. A browser tab (possibly on another
+  // machine, possibly on a Linux host with no such limit at all) cannot answer that prompt, so a
+  // banner there would name a problem it gives the reader no way to act on. The channel exists —
+  // platform.broadcast reaches attached tabs — this is a choice, not a gap, and the same one
+  // already documented for the memory-pressure levers in renderer/bridge/stubs.ts. Server hosts
+  // hitting the wall are told by the spawn error (core/pty-devices.ts), which is the surface a
+  // headless host actually has. Stopped on close beside the memory monitor.
+  //
+  // `pressure: 'pty'` for the same reason as the desktop: without an explicit reason the budget's
+  // own triggers (memory watermark, detached cap) are both clear on a pty-starved host and the
+  // sweep plans nothing. It buys an allowance, not an exemption — see planReap.
+  const ptyPressure = createPtyPressureMonitor({
+    onLevel: (reading) => {
+      if (reading.level === 'critical') void sessionReaper.sweep({ pressure: 'pty' })
+    }
+  })
+  ptyPressure.start()
+
+  // Session memory: the pill's RAM read plus the on-demand per-session breakdown. The Server
+  // Edition runs ON the host whose sessions it reports and has no SSH-project manager, so it passes
+  // no `run` — an SSH scope is REFUSED (ok:false), never swept locally.
+  //
+  // It does supply `isRemoteProject`, because knowing which projects are somebody else's machine
+  // and being able to READ them are different capabilities: the workspace index answers the first
+  // right here (the same source as the SSH check in the agentAnswerPermission handler above).
+  // Without it, an SSH query arriving WITHOUT the renderer's `remote` flag would fall through to
+  // the local sweep and publish this server's own sessions under the remote host's name — the exact
+  // misattribution the refusal exists to prevent. Registered here (not in handlers/index.ts)
+  // because this is where `ptyManager` lives — the same call site as the reaper above, mirroring
+  // src/main/index.ts.
+  //
+  // DEPENDENCY, and one that breaks silently: `sshProjectIds()` reads the IN-MEMORY index, which is
+  // populated only by the `await workspaceStore.load(...)` above — a line documented there as being
+  // for context-link. Drop it, or stop awaiting it before `server.listen()` below, and every SSH
+  // project reads as local here: the refusal quietly degrades to renderer-flag-only routing, which
+  // is the misattribution bug itself. `test/server/session-memory-e2e.test.ts` exists to fail if
+  // that happens.
+  //
+  // What is NOT load-bearing is this boot's position relative to that load. `isRemoteProject` is a
+  // closure evaluated per QUERY, and no query can arrive before `startServer` reaches `listen()`,
+  // so reordering the two would change nothing. The requirement is that the load happens and is
+  // complete before the server serves — not that it precedes this line.
+  startSessionMemoryService({
+    tmuxBin: () => ptyManager.getTmuxBin(),
+    remote: {
+      isRemoteProject: sshScopePredicate({ sshProjectIds: () => workspaceStore.sshProjectIds() })
+    }
+  })
 
   // Headless notification host: every core service above (incl. the loopback hook server, which
   // is its own listener and MUST run) is booted, but we bind NO public HTTP/WS listener — no
@@ -448,9 +605,18 @@ export async function startServer(
       async close() {
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
+        pressure.stop()
+        ptyPressure.stop()
         await contextLink.stop()
         await ptyManager.killAll()
+        // Same native hazard as the desktop app: a whisper transcribe still running when the
+        // node env is torn down aborts the process. See SpeechService.shutdown.
+        await speechService.shutdown()
         hookServer.stop()
+        // No WS teardown counterpart to the serving branch's below, and none is owed: this branch
+        // returns BEFORE `http.createServer`/`attachWsServer`, so there is no listener and no
+        // upgraded socket that could hold a close open. `startServer` has two returns and a
+        // shutdown step usually belongs in both — this one belongs in exactly one.
       }
     }
   }
@@ -465,7 +631,7 @@ export async function startServer(
   )
   // A closed browser tab is the NORMAL way to leave the Server Edition and sends no `pty:kill`,
   // so the WS close hook is what unsubscribes that client from the sessions it was watching.
-  attachWsServer(server, {
+  const wsServer = attachWsServer(server, {
     platform,
     auth,
     onClientGone: (uiId) => {
@@ -491,10 +657,20 @@ export async function startServer(
     async close() {
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
+      pressure.stop()
+      ptyPressure.stop()
       await contextLink.stop()
       await ptyManager.killAll()
+      // Same native hazard as the desktop app: a whisper transcribe still running when the node
+      // env is torn down aborts the process. See SpeechService.shutdown.
+      await speechService.shutdown()
       // Close the loopback hook-server listener (it would otherwise die with the process anyway).
       hookServer.stop()
+      // Upgraded WebSockets are not ordinary HTTP connections: server.close() waits for them but
+      // does not end them. Own the WS lifecycle explicitly so a client close racing shutdown
+      // cannot hang the Server Edition (or its tests) forever.
+      for (const client of wsServer.clients) client.terminate()
+      await new Promise<void>((resolve) => wsServer.close(() => resolve()))
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })
