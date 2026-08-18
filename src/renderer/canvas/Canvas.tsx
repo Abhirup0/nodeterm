@@ -183,7 +183,9 @@ import {
   routeControlSource,
   needsLiveCanvas,
   sourceIsControlCapable,
-  storedNodeListing
+  storedNodeListing,
+  answerBrowserResolve,
+  type BrowserResolveProject
 } from '../lib/controlRouting'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
 import {
@@ -6378,6 +6380,27 @@ export function Canvas() {
       setNodes((ns) => [...ns, placed])
       setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${placed.id}`, sourceNodeId, placed.id, '#0a84ff')])
       markDirty()
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // The `browser` verb's resolve round-trip (S8 PR 7). Main intercepts `browser` and asks us the
+  // two-and-a-half things ONLY the renderer knows: which project owns the source node, whether that
+  // source is a control-capable agent, and whether the per-project browser-control capability is on
+  // RIGHT NOW (read live via projectCapabilityGrantedFor). We answer over the SAME source routing
+  // every verb uses — travelling to the owning project so its <webview> guest is live for main to
+  // drive — and we NEVER run a CDP command. Main makes the security decision (owner + capability +
+  // the CDP allowlist) and does the driving itself (browser-drive.ts / browser-actions.ts).
+  useEffect(() => {
+    return api.onBrowserControlResolve(({ requestId, sourceNodeId }) => {
+      const { projects, activeProjectId } = useProjects.getState()
+      const route = routeControlSource(projects, activeProjectId, sourceNodeId)
+      // Bring the owning project's canvas up so main can find the live guest (needsLiveCanvas is true
+      // for `browser`). A closed/blocked/unknown owner just yields the refusal below.
+      if (route.kind === 'switch' || route.kind === 'reopen') travelToProjectRef.current(route.projectId)
+      const owner = projects.find((p) => p.nodes.some((n) => n.id === sourceNodeId))
+      const answer = answerBrowserResolve(owner as unknown as BrowserResolveProject | undefined, sourceNodeId)
+      api.sendBrowserControlResolveResult({ requestId, ...answer })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])

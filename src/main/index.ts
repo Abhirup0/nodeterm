@@ -16,7 +16,17 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { allowGuestNavigation } from './webview-nav'
 import { BrowserControlLedger } from './browser-control-ledger'
-import { BrowserLeaseManager } from './browser-lease'
+import { BrowserLeaseManager, BrowserSession } from './browser-lease'
+import { CdpEventBus, type Sendable } from './browser-actions'
+import { RefTable } from './browser-refs'
+import {
+  driveBrowser,
+  resolveBrowserTarget,
+  type BrowserResolve,
+  type LiveGuest
+} from './browser-drive'
+import { parseBrowserArgs } from '../core/browser-verb'
+import { STRICT_CONTROL_REFUSAL } from '../core/agents/node-identity-policy'
 import {
   revokeBrowserNode,
   revokeBrowserByOwner,
@@ -2346,7 +2356,104 @@ app.whenReady().then(async () => {
   // automatic triggers) is fully live, because `release` is a no-op-safe detach for a node with no
   // session. Owned here so all the wiring has one home. See browser-lease.ts / browser-revocation.ts.
   const browserLeases = new BrowserLeaseManager()
-  const browserRevocation: RevocationTargets = { leases: browserLeases, ledger: browserLedger }
+  // @ref bookkeeping (Task 5.5), one table for every driven node; nav bumps a node's generation.
+  const browserRefs = new RefTable()
+  // Per-node event bus (fixed CDP event set → our own state) and the `debugger.on('message')`
+  // listener we registered for it, kept so a teardown removes exactly that listener (a released and
+  // re-created session must not leave a duplicate listener firing on the same debugger).
+  const browserBuses = new Map<string, CdpEventBus>()
+  const browserMsgListeners = new Map<
+    string,
+    { dbg: { removeListener(event: string, fn: (...a: unknown[]) => void): void }; fn: (...a: unknown[]) => void }
+  >()
+  // Tear down the driver-side state for one node (its lease/session is being released). Removes the
+  // exact message listener and forgets the bus + refs, so nothing keeps driving a released node.
+  const browserDriverTeardown = (nodeId: string): void => {
+    const l = browserMsgListeners.get(nodeId)
+    if (l) {
+      try {
+        l.dbg.removeListener('message', l.fn)
+      } catch {
+        /* a destroyed debugger throws; the map cleanup below is what matters */
+      }
+      browserMsgListeners.delete(nodeId)
+    }
+    browserBuses.delete(nodeId)
+    browserRefs.forget(nodeId)
+  }
+  // Revocation releases the lease (detach + reject in-flight) AND tears down the driver state, in one
+  // place, whatever triggered it — so a Stop can never leave a page still drivable.
+  const browserRevocation: RevocationTargets = {
+    leases: {
+      release: (nodeId: string) => {
+        browserLeases.release(nodeId)
+        browserDriverTeardown(nodeId)
+      }
+    },
+    ledger: browserLedger
+  }
+  // The live control session + event bus for a node's CANVAS <webview> guest (Task 2.2: the canvas
+  // surface is the only drivable one — a modal guest is never driven). Attaching is LAZY inside the
+  // session, so getting one costs no debugger attach; that is what keeps "ledger.get() before any
+  // attach" literally true. Returns null when the guest's page is gone (the memory saver released
+  // it), which the drive gate turns into the named discard refusal.
+  const canvasGuestWcId = (browserNodeId: string): number | undefined => {
+    let unknownSurface: number | undefined
+    for (const [wcId, g] of browserGuests) {
+      if (g.nodeId !== browserNodeId) continue
+      if (g.surface === 'canvas') return wcId
+      // `surface` is `undefined` until both mount sites are threaded (guest-registry): treat it as
+      // the canvas fallback (the common case is one canvas guest), but NEVER drive a `'modal'` one.
+      if (g.surface === undefined) unknownSurface = wcId
+    }
+    return unknownSurface
+  }
+  const browserSessionFor = (browserNodeId: string): LiveGuest | null => {
+    const wcId = canvasGuestWcId(browserNodeId)
+    if (wcId === undefined) return null
+    const wc = webContents.fromId(wcId)
+    if (!wc || wc.isDestroyed()) return null
+    const existing = browserLeases.get(browserNodeId)
+    const existingBus = browserBuses.get(browserNodeId)
+    if (existing && existingBus) return { session: existing as unknown as Sendable, bus: existingBus }
+    // Fresh driver: the bus bumps this node's ref generation on a main-frame navigation / context
+    // clear (Task 5.5), the session pushes its lease to the ledger + renderer on every verb (which is
+    // what lights the driving chip), and the message listener feeds the fixed CDP event set into the
+    // bus — nothing is streamed to the agent.
+    const bus = new CdpEventBus(() => browserRefs.bumpGeneration(browserNodeId))
+    const session = new BrowserSession({
+      nodeId: browserNodeId,
+      debugger: wc.debugger,
+      // Coordinates are unused by --nav/--read; PR 8's pointer verbs refresh this from
+      // Page.getLayoutMetrics before dispatching a bounded mouse event.
+      viewport: () => ({ viewport: { width: 0, height: 0 } }),
+      isDevToolsOpen: () => {
+        try {
+          return wc.isDevToolsOpened()
+        } catch {
+          return false
+        }
+      },
+      onLeaseChange: (until) => {
+        browserLedger.touchLease(browserNodeId, until)
+        pushBrowserLeases()
+      }
+    })
+    const fn = (_e: unknown, method: string, params: unknown): void => bus.emit(method, params)
+    wc.debugger.on('message', fn)
+    browserLeases.set(browserNodeId, session)
+    browserBuses.set(browserNodeId, bus)
+    browserMsgListeners.set(browserNodeId, {
+      dbg: wc.debugger as unknown as { removeListener(e: string, f: (...a: unknown[]) => void): void },
+      fn: fn as unknown as (...a: unknown[]) => void
+    })
+    return { session: session as unknown as Sendable, bus }
+  }
+  // The 60s idle detach (browser-lease.ts): drop the debugger attachment on nodes gone quiet, so an
+  // attachment never outlives its usefulness. The session stays in the map and re-attaches on the
+  // next verb; only the debugger handle is released. Unref'd so it never holds the process open.
+  const browserIdleSweep = setInterval(() => browserLeases.sweepIdle(Date.now()), 30_000)
+  browserIdleSweep.unref?.()
   // Push the current driven-lease set to the renderer (chip / rope / kill row). `stopped` ids drop
   // from the chip immediately, skipping the anti-flicker linger — that is how an explicit Stop hides
   // at once while a merely-idle lease fades.
@@ -2405,7 +2512,88 @@ app.whenReady().then(async () => {
       pending.resolve(payload)
     }
   )
+  // The `browser` verb resolve round-trip (Task 7.2). Main asks the renderer to resolve a source
+  // node's owning project, control-capability and the LIVE per-project capability value; the renderer
+  // answers here. Modelled on `pendingControl`, but its own map with its own short (2s) timeout so a
+  // slow canvas can NEVER consume the 120s pending-control budget.
+  const pendingBrowserResolve = new Map<string, (r: BrowserResolve) => void>()
+  ipcMain.on(
+    IPC.browserControlResolveResult,
+    (
+      _e,
+      payload: {
+        requestId: string
+        ok: boolean
+        refusal?: string
+        projectId?: string
+        projectCwd?: string
+        sourceControlCapable?: boolean
+        capabilityOn?: boolean
+      }
+    ) => {
+      const resolve = pendingBrowserResolve.get(payload.requestId)
+      if (!resolve) return
+      pendingBrowserResolve.delete(payload.requestId)
+      resolve(
+        payload.ok
+          ? {
+              ok: true,
+              projectId: payload.projectId ?? '',
+              projectCwd: payload.projectCwd,
+              sourceControlCapable: payload.sourceControlCapable === true,
+              capabilityOn: payload.capabilityOn === true
+            }
+          : { ok: false, refusal: payload.refusal ?? 'source node is not on an open canvas' }
+      )
+    }
+  )
+  // Ask the renderer to resolve a source node — the `ask` closure `resolveBrowserTarget` races
+  // against its own 2s timeout. The renderer NEVER runs a CDP command; it answers existence + project
+  // + capability only.
+  const askRendererResolve = (sourceNodeId: string): Promise<BrowserResolve> => {
+    const w = getMainWindow()
+    if (!w || w.isDestroyed()) {
+      return Promise.resolve({ ok: false, refusal: 'source node is not on an open canvas' })
+    }
+    const requestId = randomUUID()
+    const answered = new Promise<BrowserResolve>((resolve) => {
+      pendingBrowserResolve.set(requestId, resolve)
+    })
+    w.webContents.send(IPC.browserControlResolve, { requestId, sourceNodeId })
+    return answered.finally(() => pendingBrowserResolve.delete(requestId))
+  }
+  // The `browser` verb's whole main-side drive: parse (pure), identity belt, resolve round-trip, then
+  // the gate + drive (owner + LIVE capability + CDP allowlist all decided here in MAIN). A capability
+  // read that comes back OFF revokes as it refuses (detach + drop + tombstone). See browser-drive.ts.
+  const handleBrowserVerb = async (
+    nodeId: string,
+    args: Record<string, string>,
+    verified: boolean
+  ): Promise<{ ok: boolean; message?: string; error?: string }> => {
+    const parsed = parseBrowserArgs(args)
+    if ('error' in parsed) return { ok: false, error: parsed.error, message: parsed.error }
+    // Identity is checked first (the belt to hook-server's verified-only gate for STRICT verbs): a
+    // non-verified caller learns nothing, and no resolve round-trip is even made.
+    if (!verified) return { ok: false, error: STRICT_CONTROL_REFUSAL, message: STRICT_CONTROL_REFUSAL }
+    const resolve = await resolveBrowserTarget(parsed.node, () => askRendererResolve(nodeId))
+    const result = await driveBrowser(
+      { call: parsed, ownerNodeId: nodeId, verified, resolve },
+      {
+        ledger: browserLedger,
+        refs: browserRefs,
+        sessionFor: browserSessionFor,
+        revoke: (id) => pushBrowserLeases(revokeBrowserNode(id, browserRevocation, { userStopped: true }))
+      }
+    )
+    return result.ok
+      ? { ok: true, message: result.message }
+      : { ok: false, error: result.message, message: result.message }
+  }
   hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
+    // `browser` is answered in MAIN and never forwarded to the renderer's agent-control dispatch:
+    // the debugger handle and the CDP allowlist are main-side, and the renderer is the more
+    // attackable half. Every other verb still round-trips to the renderer below.
+    if (verb === 'browser') return handleBrowserVerb(nodeId, args, verified)
     const target = getMainWindow()
     if (!target) return { ok: false, error: 'window unavailable' }
     const requestId = randomUUID()
