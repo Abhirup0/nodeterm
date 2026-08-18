@@ -1,0 +1,75 @@
+/**
+ * The page-side script table.
+ *
+ * Arbitrary page-side script running is excluded from the CDP allowlist (browser-cdp-allowlist.ts),
+ * so all page-side logic runs through CDP's call-a-function-on-object method against THIS table, and
+ * agent input reaches a script only as an argument value, never as source. That moves the risk from
+ * "arbitrary JS in the page's origin" to "a bug in OUR scripts" — a much smaller surface, but not
+ * zero: a stray template literal or a dynamic-code sink in one of these is a complete escape.
+ *
+ * Three things hold the line and each is a requirement:
+ *   1. every entry is a plain single-quoted string literal with NO interpolation and NO
+ *      concatenation — the selector is passed in, never spliced into source;
+ *   2. a source-level test (browser-nt-scripts.source.test.ts) fails the build if this file gains a
+ *      backtick, a dollar-brace interpolation, a dynamic-code token, an HTML-writing sink or a
+ *      token-store reference, if the table stops being frozen, or if isNtScript stops being identity
+ *      membership;
+ *   3. every script is a PURE READER — it clicks nothing, navigates nothing, submits nothing and
+ *      assigns nothing. Every EFFECT goes through Input.* / Page.* instead, which is also what makes
+ *      an effect traceable.
+ *
+ * The table holds only what PRs 7-8 need. Each reader takes its inputs as ordinary parameters,
+ * supplied as argument VALUES by the CDP call — the string in arguments[].value, checked scalar in
+ * the allowlist, is the only agent-controlled data that ever reaches these functions.
+ */
+export const NT_SCRIPTS = Object.freeze({
+  /** The document title. */
+  readTitle: 'function(){ return document.title }',
+
+  /** A map of interactable elements: a ref index, a tag, a short label and the element centre in
+   *  viewport coordinates (what a later Input.dispatchMouseEvent aims at). Read-only. */
+  readMap:
+    'function(){ var els = document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=link],[onclick]"); var out = []; for (var i = 0; i < els.length; i++) { var el = els[i]; var r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) continue; out.push({ ref: i, tag: el.tagName, type: el.getAttribute("type"), text: (el.innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").replace(/\\s+/g, " ").trim().slice(0, 80), x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height }); } return out }',
+
+  /** Every visible link as { href, text }. Read-only. */
+  readLinks:
+    'function(){ var as = document.querySelectorAll("a[href]"); var out = []; for (var i = 0; i < as.length; i++) { out.push({ href: as[i].href, text: (as[i].innerText || "").replace(/\\s+/g, " ").trim().slice(0, 120) }); } return out }',
+
+  /** The visible text of a selector (or the whole body when none is given). Read-only, capped. */
+  readText:
+    'function(sel){ var el = sel ? document.querySelector(sel) : document.body; return el ? (el.innerText || "").slice(0, 20000) : null }',
+
+  /** Re-locate a ref from readMap and return its current centre and tag, or null if it is gone. The
+   *  ref is re-resolved against the SAME enumeration; generation staleness is enforced in main. */
+  resolveRef:
+    'function(i){ var els = document.querySelectorAll("a,button,input,textarea,select,[role=button],[role=link],[onclick]"); var el = els[i]; if (!el) return null; var r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, tag: el.tagName, w: r.width, h: r.height } }',
+
+  /** Resolve a CSS selector to its current centre and tag, or null. Read-only. */
+  resolveSelector:
+    'function(s){ var el = document.querySelector(s); if (!el) return null; var r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, tag: el.tagName, w: r.width, h: r.height } }',
+
+  /** Describe a selector's element without exposing its markup: tag, id, role, label, short text. */
+  describeElement:
+    'function(s){ var el = document.querySelector(s); if (!el) return null; return { tag: el.tagName, id: el.id, role: el.getAttribute("role"), label: el.getAttribute("aria-label"), disabled: !!el.disabled, text: (el.innerText || "").replace(/\\s+/g, " ").trim().slice(0, 120) } }',
+
+  /** Is a selector's element on-screen and displayed? Read-only. */
+  isVisible:
+    'function(s){ var el = document.querySelector(s); if (!el) return false; var r = el.getBoundingClientRect(); var st = getComputedStyle(el); return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none" }',
+
+  /** A readiness probe: is the document loaded, and (optionally) is a selector present yet? */
+  waitProbe:
+    'function(s){ if (document.readyState !== "complete") return false; if (!s) return true; return document.querySelector(s) != null }'
+})
+
+export type NtScriptName = keyof typeof NT_SCRIPTS
+
+const NT_SCRIPT_VALUES: ReadonlySet<string> = new Set(Object.values(NT_SCRIPTS))
+
+/**
+ * IDENTITY membership: is fn byte-for-byte one of the table's entries? Never a shape check, never
+ * a prefix match — a value that merely LOOKS like a reader is refused. This is what the allowlist's
+ * call-a-function check leans on, so a trailing space or an added statement makes it a stranger.
+ */
+export function isNtScript(fn: string): boolean {
+  return NT_SCRIPT_VALUES.has(fn)
+}
