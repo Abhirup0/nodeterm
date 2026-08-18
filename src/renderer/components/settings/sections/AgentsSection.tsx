@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useSettings } from '../../../state/settings'
 import { useProjects } from '../../../state/projects'
+import { useBrowserLease, drivingNodeIds } from '../../../state/browserLease'
 import {
   PROJECT_CAPABILITIES,
   PROJECT_CAPABILITY_COPY,
@@ -106,6 +107,21 @@ const ROWS = {
       'refused'
     ]
   },
+  browserControl: {
+    title: 'Browser control',
+    keywords: [
+      'browser',
+      'control',
+      'drive',
+      'driving',
+      'stop',
+      'revoke',
+      'agent',
+      'web',
+      'page',
+      'security'
+    ]
+  },
   hibernation: {
     title: 'Hibernate idle agents',
     keywords: [
@@ -203,6 +219,25 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const activeProject = useProjects((s) => s.projects.find((p) => p.id === activeProjectId))
   const setProjectCapability = useProjects((s) => s.setProjectCapability)
+  // The kill row (Task 6.4): browser nodes an agent is driving RIGHT NOW, across every open project,
+  // each with a Stop and one Stop-all. The precedent is the identity escape hatch — a user who
+  // notices their browser doing something needs one obvious place to end it, not a per-node hunt.
+  // Stop revokes for real in main (detach + drop), and there is deliberately NO global "disable
+  // browser control" toggle here: one concept, one switch (the per-project capability below).
+  const browserLeaseEntries = useBrowserLease((s) => s.entries)
+  const allProjects = useProjects((s) => s.projects)
+  const nodeTitleById = (id: string): string => {
+    for (const p of allProjects) {
+      const n = p.nodes.find((node) => node.id === id)
+      if (n) return n.title || id
+    }
+    return id
+  }
+  const drivenRows = [...drivingNodeIds(browserLeaseEntries, Date.now())].map((nodeId) => ({
+    nodeId,
+    nodeTitle: nodeTitleById(nodeId),
+    ownerTitle: nodeTitleById(browserLeaseEntries[nodeId].ownerNodeId)
+  }))
   const rows: { id: AgentId; label: string; isBuiltin: boolean }[] = [
     ...BUILTIN_AGENT_IDS.map((id) => ({ id, label: AGENT_CONFIG[id].label, isBuiltin: true })),
     ...settings.customAgents.map((c) => ({ id: c.id, label: c.label || c.id, isBuiltin: false }))
@@ -376,6 +411,37 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
           }
         />
       </SearchableRow>
+      <SearchableRow {...ROWS.browserControl}>
+        <FieldRow
+          label="Browser control"
+          description="Browser nodes an agent is driving right now, across every open project. Stop ends it immediately — the debugger is detached and the agent is told you stopped it, so it reports that instead of retrying. One place to stop it, so you never have to hunt from node to node."
+          control={
+            <Button
+              variant="default"
+              disabled={drivenRows.length === 0}
+              onClick={() => window.nodeTerminal.browser.stopAll()}
+            >
+              Stop all
+            </Button>
+          }
+        />
+        <div className="space-y-2">
+          {drivenRows.length === 0 ? (
+            <span className="text-[13px] text-muted">No agent is driving a browser node right now.</span>
+          ) : (
+            drivenRows.map((r) => (
+              <div key={r.nodeId} className="flex items-center gap-3 py-1">
+                <span className="flex-1 text-[13px] text-text">
+                  {r.ownerTitle} is driving {r.nodeTitle}
+                </span>
+                <Button variant="default" onClick={() => window.nodeTerminal.browser.stop(r.nodeId)}>
+                  Stop
+                </Button>
+              </div>
+            ))
+          )}
+        </div>
+      </SearchableRow>
       {CAPABILITY_ROWS.map(({ cap, title, keywords }) => (
         <SearchableRow key={cap} title={title} keywords={keywords}>
           <FieldRow
@@ -402,6 +468,12 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
                   // value any other way (a string, a stored false) is the bug the validators
                   // exist to refuse.
                   if (activeProject) setProjectCapability(activeProject.id, cap, on)
+                  // Turning browser control OFF revokes any live lease in this project immediately
+                  // (Task 6.4) — detach now, don't wait for the next drive to read the switch. Read
+                  // live off this toggle, never cached at lease start.
+                  if (activeProject && cap === 'agentBrowserControl' && !on) {
+                    window.nodeTerminal?.browser?.stopProject?.(activeProject.id)
+                  }
                 }}
               />
             }

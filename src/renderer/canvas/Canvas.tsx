@@ -5339,8 +5339,22 @@ export function Canvas() {
     // Destructive/recovery rows (Delete, Restart agent, Branch/Transfer) are not hideable at all:
     // `isHidden` only answers for ids in its own inventory.
     const hidden = useSettings.getState().settings.hiddenNodeMenuItems
+    // Stop agent control — the node context-menu surface for Stop (Task 6.4). Shown only for a
+    // single browser node that is actually being driven; it revokes for real (main detaches the
+    // debugger + drops the ledger entry), not just hides the chip. Read fresh, like every other row.
+    const drivenHere =
+      ids.length === 1 && drivingNodeIds(useBrowserLease.getState().entries, Date.now()).has(ids[0])
     return tidySeparators([
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
+      ...(drivenHere
+        ? ([
+            {
+              label: 'Stop agent control',
+              onClick: () => window.nodeTerminal.browser.stop(ids[0])
+            },
+            { type: 'separator' }
+          ] as MenuItem[])
+        : []),
       ...((): MenuItem[] => {
         // "Group …" wraps objects that share ONE container — existing frames are valid members
         // now that frames nest. A box-selection that caught a frame AND its children is
