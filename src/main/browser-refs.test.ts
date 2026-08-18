@@ -88,3 +88,53 @@ describe('RefTable — @refs are scoped to a node AND a navigation generation', 
     if (!r.ok) expect(r.stale).toBe(false) // present generation, but no such ref — not a nav-stale
   })
 })
+
+describe('RefTable.spend — how PR 8 verbs (--click/--type/--wait) redeem a ref', () => {
+  it('spends a live ref against the generation its map was minted on', () => {
+    const t = new RefTable()
+    t.mint('browser-1', 0, items())
+    const r = t.spend('browser-1', '@2')
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.item).toMatchObject({ tag: 'BUTTON', text: 'Delete account' })
+  })
+
+  it('a ref spent AFTER a navigation is STALE — never re-resolved against a newer map (PR 5)', () => {
+    // This is the property a --click must uphold: clicking @2 ("Delete account") after the page
+    // navigated must be refused, not silently re-resolved to whatever is @2 on the new page.
+    const t = new RefTable()
+    t.mint('browser-1', 0, items())
+    t.bumpGeneration('browser-1') // Page.frameNavigated
+    const r = t.spend('browser-1', '@2')
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.stale).toBe(true)
+      expect(r.message).toBe(
+        '@2 is not on the current page (the page navigated since the last --read map; re-read it)'
+      )
+      expect(r).not.toHaveProperty('item')
+    }
+  })
+
+  it('a fresh map after the navigation makes its refs spendable again', () => {
+    const t = new RefTable()
+    t.mint('browser-1', 0, items())
+    t.bumpGeneration('browser-1')
+    t.mint('browser-1', 1, items()) // --read map at the new generation
+    expect(t.spend('browser-1', '@2').ok).toBe(true)
+  })
+
+  it('a ref from ANOTHER node is refused, and a node that never read a map has nothing to spend', () => {
+    const t = new RefTable()
+    t.mint('browser-1', 0, items())
+    expect(t.spend('browser-2', '@1').ok).toBe(false)
+    expect(t.spend('never-read', '@1').ok).toBe(false)
+  })
+
+  it('an out-of-range label on the current page is a refusal, not a guess', () => {
+    const t = new RefTable()
+    t.mint('browser-1', 0, items())
+    const r = t.spend('browser-1', '@99')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.stale).toBe(false) // present, unknown — not nav-stale
+  })
+})

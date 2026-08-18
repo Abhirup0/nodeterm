@@ -2424,8 +2424,9 @@ app.whenReady().then(async () => {
     const session = new BrowserSession({
       nodeId: browserNodeId,
       debugger: wc.debugger,
-      // Coordinates are unused by --nav/--read; PR 8's pointer verbs refresh this from
-      // Page.getLayoutMetrics before dispatching a bounded mouse event.
+      // A 0×0 placeholder: coordinates are unused by --nav/--read, and the pointer verbs (PR 8) call
+      // BrowserSession.refreshViewport() from Page.getLayoutMetrics before every dispatch, which
+      // OVERRIDES this at send time — so a bounded mouse event validates against the real page.
       viewport: () => ({ viewport: { width: 0, height: 0 } }),
       isDevToolsOpen: () => {
         try {

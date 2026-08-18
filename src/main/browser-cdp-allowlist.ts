@@ -24,6 +24,7 @@
  */
 import { isNtScript } from './browser-nt-scripts'
 import { normalizeAddress } from '@shared/browserUrl'
+import { BROWSER_KEYS } from '../core/browser-verb'
 
 /** What the gate needs to know about the page beyond the command itself: the viewport from the last
  *  `Page.getLayoutMetrics`, so a mouse coordinate can be bounded to what is actually on screen. */
@@ -58,6 +59,16 @@ function valueOnlyArgs(args: unknown): boolean {
 const MAX_SELECTOR = 1024
 const MAX_INSERT_TEXT = 8192
 
+/** The dispatch types a key event may carry — a key-down, a key-up, or a raw key-down. There is
+ *  deliberately NO `char` type: a character that types into the page belongs to `Input.insertText`
+ *  (its own capped, data-only path), never to a key event. */
+const KEY_EVENT_TYPES = new Set(['keyDown', 'keyUp', 'rawKeyDown'])
+
+/** The ONLY editing commands a key event may drive — the two `--type --clear true` needs (select the
+ *  field's contents, delete a selection). Anything else (`delete`, `insertText`, `moveToEndOfLine`…)
+ *  is a strange, unaudited effect and is default-denied. */
+const EDIT_COMMANDS = new Set(['selectAll', 'deleteBackward'])
+
 /**
  * The table. Every entry is a (method, validator) pair. A Map — not a plain object — so a method
  * named `__proto__` / `constructor` can never resolve a validator off Object.prototype.
@@ -82,7 +93,10 @@ const ALLOW = new Map<string, Validator>([
   ],
 
   // A synthesized mouse event must land inside the reported viewport — a coordinate off-screen is
-  // either a bug or an attempt to reach chrome the user cannot see.
+  // either a bug or an attempt to reach chrome the user cannot see. This one entry covers the click
+  // (mousePressed/mouseReleased, Task 8.1) AND the scroll (a `mouseWheel` at the viewport centre,
+  // Task 8.4): `Input.synthesizeScrollGesture` stays EXCLUDED (it is in the refused list), so the
+  // wheel translation is the only scroll door and it is bounded by the same viewport check.
   [
     'Input.dispatchMouseEvent',
     (p, ctx) =>
@@ -98,6 +112,33 @@ const ALLOW = new Map<string, Validator>([
 
   // Typed text is capped; the text goes to insertText, never to a shell and never spliced anywhere.
   ['Input.insertText', (p) => isRecord(p) && typeof p.text === 'string' && p.text.length <= MAX_INSERT_TEXT],
+
+  // A key event is NOT free key injection (PR 8, Tasks 8.2-8.3). It is default-deny in three ways at
+  // once, and any one of them failing is a refusal:
+  //   - `key`, if present, must be one of the fixed BROWSER_KEYS `--press` accepts (the SAME table the
+  //     verb parser gates on — one source of truth) — never an arbitrary key;
+  //   - `commands`, if present, must be a NON-EMPTY subset of the two editing commands `--clear` needs
+  //     — never `insertText`/`delete`/a caret walk;
+  //   - `text` is FORBIDDEN outright: a character that reaches the page is `Input.insertText`'s
+  //     capped, data-only job, so a key event may never smuggle one.
+  // At least one of key/commands must be present — an empty key event is meaningless — and the type
+  // must be a real key-event type (no `char`).
+  [
+    'Input.dispatchKeyEvent',
+    (p) => {
+      if (!isRecord(p)) return false
+      if (typeof p.type !== 'string' || !KEY_EVENT_TYPES.has(p.type)) return false
+      if (p.text !== undefined) return false
+      const keyOk = p.key === undefined || (typeof p.key === 'string' && (BROWSER_KEYS as readonly string[]).includes(p.key))
+      if (!keyOk) return false
+      const cmds = p.commands
+      const hasCmds = cmds !== undefined
+      const cmdsOk =
+        !hasCmds || (Array.isArray(cmds) && cmds.length > 0 && cmds.every((c) => typeof c === 'string' && EDIT_COMMANDS.has(c)))
+      if (!cmdsOk) return false
+      return p.key !== undefined || (Array.isArray(cmds) && cmds.length > 0)
+    }
+  ],
 
   // A bounded selector against a known node.
   [

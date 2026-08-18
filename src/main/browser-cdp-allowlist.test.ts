@@ -55,6 +55,27 @@ describe('checkCdpCommand', () => {
     expect(checkCdpCommand('Input.insertText', { text: 'x'.repeat(8193) }, ctx)).toBe(false)
   })
 
+  it('Input.dispatchKeyEvent is a FIXED-TABLE key, or a fixed editing command — never free key injection (Tasks 8.2-8.3)', () => {
+    // A --press key from the table (the same set the verb parser gates on).
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter' }, ctx)).toBe(true)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowDown' }, ctx)).toBe(true)
+    // A key OUTSIDE the table is refused — no arbitrary key injection.
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a' }, ctx)).toBe(false)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: 'F5' }, ctx)).toBe(false)
+    // The two --clear editing commands are allowed; anything else is refused.
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', commands: ['selectAll'] }, ctx)).toBe(true)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', commands: ['deleteBackward'] }, ctx)).toBe(true)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', commands: ['insertText'] }, ctx)).toBe(false)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', commands: ['delete', 'selectAll'] }, ctx)).toBe(false)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', commands: [] }, ctx)).toBe(false)
+    // `text` is FORBIDDEN outright — a character that reaches the page is Input.insertText's job.
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', text: '\r' }, ctx)).toBe(false)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'char', text: 'q' }, ctx)).toBe(false)
+    // A meaningless empty event (no key, no commands) is refused; a bad type is refused.
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDown' }, ctx)).toBe(false)
+    expect(checkCdpCommand('Input.dispatchKeyEvent', { type: 'keyDrag', key: 'Enter' }, ctx)).toBe(false)
+  })
+
   it('cookie READS take one explicit domain; the jar-emptying call does not exist here', () => {
     expect(checkCdpCommand('Network.getCookies', { urls: ['https://github.com/'] }, ctx)).toBe(true)
     expect(checkCdpCommand('Network.getCookies', {}, ctx)).toBe(false)      // no domain ⇒ the whole jar
