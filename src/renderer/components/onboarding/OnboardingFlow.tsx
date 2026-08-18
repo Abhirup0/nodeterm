@@ -16,6 +16,7 @@ import {
   SceneAgents,
   SceneDictation,
   SceneKanban,
+  SceneKeepAwake,
   SceneNotch,
   SceneNotify,
   ScenePhone
@@ -44,6 +45,7 @@ const STEPS = [
   'dictation',
   'kanban',
   'notify',
+  'keepawake',
   ...(isMac ? (['notch'] as const) : []),
   'phone'
 ] as const
@@ -212,6 +214,9 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
             {stepId === 'dictation' && <SceneDictation keys={dictKeys.map((k) => keyLabel(k, isMac))} hold={dictHold} />}
             {stepId === 'kanban' && <SceneKanban pulseKey={kanbanPulse} />}
             {stepId === 'notify' && <SceneNotify />}
+            {stepId === 'keepawake' && (
+              <SceneKeepAwake agentId={agentId} label={agent.label} color={agent.color} />
+            )}
             {stepId === 'notch' && <SceneNotch />}
             {stepId === 'phone' && <ScenePhone />}
           </div>
@@ -349,6 +354,29 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
                   </button>
                   <div className="onb-fineprint">…or just hit Next to leave them off.</div>
                 </div>
+              </>
+            )}
+
+            {stepId === 'keepawake' && (
+              <>
+                <h2>Long runs survive your lunch break</h2>
+                <p>
+                  While an agent is working, nodeterm keeps this machine from idle-sleeping —
+                  and lets go the moment it finishes.
+                </p>
+                <p>
+                  Closing the lid still sleeps the machine — keep it open and plugged in for
+                  overnight runs.
+                </p>
+                <div className="onb-toggle-row">
+                  <Switch
+                    checked={settings.keepAwakeWhileAgentsWork}
+                    ariaLabel="Keep awake while agents work"
+                    onChange={(on) => update({ keepAwakeWhileAgentsWork: on })}
+                  />
+                  <span>Keep awake while agents work</span>
+                </div>
+                <div className="onb-fineprint">Change any time in Settings → Behavior.</div>
               </>
             )}
 
