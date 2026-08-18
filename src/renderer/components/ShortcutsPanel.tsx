@@ -52,7 +52,8 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
         // where a browser insists on handling it too it means the same thing we do ("actual size")
         // instead of fighting us. Shift+1 is nobody else's key on any surface.
         { keys: ['⌘', '0'], label: 'Zoom to 100%' },
-        { keys: ['⇧', '1'], label: 'Fit view' }
+        { keys: ['⇧', '1'], label: 'Fit view' },
+        { keys: ['⌘', '⇧', 'A'], label: 'Tidy canvas' }
       ]
     },
     {

@@ -5233,6 +5233,10 @@ export function Canvas() {
       } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
         e.preventDefault()
         toggleSessionsPin()
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'a') {
+        // arrangeAllNodes self-guards (kanban open, <2 top-level nodes) — no refusal needed here.
+        e.preventDefault()
+        arrangeAllNodes()
       } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
         e.preventDefault()
         setShortcutsOpen((v) => !v)
@@ -5304,7 +5308,7 @@ export function Canvas() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleSessionsPin, switchProject, fitAll, zoomTo100])
+  }, [toggleSessionsPin, switchProject, fitAll, zoomTo100, arrangeAllNodes])
 
   // ⌘/Ctrl+0 on the DESKTOP never reaches the keydown handler above: Electron's default View menu
   // binds the accelerator to `resetZoom`, and a menu accelerator is handled before the page sees

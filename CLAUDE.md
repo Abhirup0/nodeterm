@@ -1595,7 +1595,8 @@ again; the grace window was never the thing that was wrong.
   pane right-click = add nodes at cursor (terminal / Claude / sticky / open file) + select
   all + fit + **Tidy canvas** (`arrangeAllNodes` — packs every top-level node, including group
   frames as rigid units, into a non-overlapping grid via `arrangeNodes`, sorted by current
-  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas"; both
+  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas" and bound
+  to ⌘/Ctrl+Shift+A; both
   hidden below 2 top-level nodes, where it could only be a visual no-op that still writes
   `project.json`) + restart-idle-agents (the bulk in-place agent restart, mirrored in ⌘K; both
   hidden when the canvas holds no restartable agent node, where they could only report "0
