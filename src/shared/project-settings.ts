@@ -320,3 +320,40 @@ export function resolveProjectSettings(
   }
   return out
 }
+
+export type ProjectTrustFamily = 'setup' | 'agents' | 'shell'
+
+/**
+ * Canonical string covering EVERYTHING executable a family ships — the same shape of problem
+ * `execTrusted` (node-exec.ts) solves for shell/ssh fields: a caller compares this against what it
+ * last saw to decide whether re-approval is needed. `null` means the family has nothing executable
+ * right now, so there is nothing to (re-)approve.
+ *
+ * Deliberately excludes fields that cannot introduce code: `waitForSetup` (a boolean gate, not a
+ * command) and `defaultAgentId` (selects among locally-configured agents; it cannot name new code
+ * to run). `env` IS included in `agents` — an env var is attack surface (PATH/LD_PRELOAD hijack),
+ * so it is part of the launch family's blast radius even though it never appears as a command line.
+ */
+export function projectTrustContent(family: ProjectTrustFamily, doc: ProjectSettingsDoc): string | null {
+  switch (family) {
+    case 'setup': {
+      const s = doc.setup
+      if (s?.setupScript === undefined && s?.archiveScript === undefined) return null
+      return JSON.stringify({ setupScript: s?.setupScript ?? '', archiveScript: s?.archiveScript ?? '' })
+    }
+    case 'agents': {
+      const a = doc.agents
+      const envKeys = a?.env ? Object.keys(a.env).sort() : []
+      if (a?.launchCmd === undefined && envKeys.length === 0) return null
+      const env: Record<string, string> = {}
+      for (const k of envKeys) env[k] = a!.env![k]
+      return JSON.stringify({ launchCmd: a?.launchCmd ?? '', env })
+    }
+    case 'shell': {
+      const shell = doc.terminal?.shell
+      return shell ? shell : null
+    }
+    default:
+      return null
+  }
+}

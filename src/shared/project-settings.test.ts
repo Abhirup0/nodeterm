@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   parseProjectSettingsFile, sanitizeProjectSettingsDoc, sanitizeProjectLocalSettings,
-  serializeProjectSettingsFile, sameProjectSettingsContent, resolveProjectSettings
+  serializeProjectSettingsFile, sameProjectSettingsContent, resolveProjectSettings,
+  projectTrustContent
 } from './project-settings'
 
 describe('sanitizeProjectSettingsDoc', () => {
@@ -117,5 +118,24 @@ describe('resolveProjectSettings', () => {
   it('handles both sides undefined', () => {
     expect(resolveProjectSettings(undefined, undefined)).toEqual(
       { setup: {}, worktree: {}, agents: {}, terminal: {} })
+  })
+})
+
+describe('projectTrustContent', () => {
+  it('covers both scripts and is insensitive to key order', () => {
+    expect(projectTrustContent('setup', { setup: { setupScript: 'a' } }))
+      .toBe(JSON.stringify({ setupScript: 'a', archiveScript: '' }))
+    expect(projectTrustContent('setup', {})).toBeNull()
+  })
+  it('agents hash covers launchCmd AND env with sorted keys', () => {
+    const a = projectTrustContent('agents', { agents: { launchCmd: 'x', env: { B: '2', A: '1' } } })
+    const b = projectTrustContent('agents', { agents: { env: { A: '1', B: '2' }, launchCmd: 'x' } })
+    expect(a).toBe(b)
+    expect(a).toContain('"A":"1"')
+    expect(projectTrustContent('agents', { agents: { defaultAgentId: 'claude' } })).toBeNull()
+  })
+  it('shell content is the bare shell or null', () => {
+    expect(projectTrustContent('shell', { terminal: { shell: '/bin/sh' } })).toBe('/bin/sh')
+    expect(projectTrustContent('shell', { terminal: { theme: 'dark' } })).toBeNull()
   })
 })
