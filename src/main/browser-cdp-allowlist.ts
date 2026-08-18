@@ -59,6 +59,28 @@ function valueOnlyArgs(args: unknown): boolean {
 const MAX_SELECTOR = 1024
 const MAX_INSERT_TEXT = 8192
 
+/**
+ * The cookie-JAR-MUTATING CDP methods, listed in ONE place so the decision is recorded, and pinned
+ * UNREACHABLE by the verb-reachability guard in browser-cdp-allowlist.test.ts (PR 9 Task 9.4).
+ *
+ * `Network.setCookie` stays ADMITTED by the ALLOW table below (owner decision 5) so a future write
+ * verb inherits a validated entry rather than a fresh, unreviewed one — but v1 ships NO verb that
+ * emits any of these. The reason it is not merely "not built yet": a write verb needs a design nobody
+ * has done — where does the agent get the cookie value, and what stops it planting an attacker's
+ * session cookie for `accounts.google.com` so a later human visit to that node is a login the attacker
+ * controls? A cookie write, when designed, needs a LOUDER trace than a read: a write is persistent and
+ * silent, where a read is at least a one-time disclosure. So the list records the decision; the guard
+ * proves no action reaches it.
+ */
+export const COOKIE_WRITE_METHODS = [
+  'Network.setCookie',
+  'Network.setCookies',
+  'Network.deleteCookies',
+  'Network.clearBrowserCookies',
+  'Storage.setCookies',
+  'Storage.clearCookies'
+] as const
+
 /** The dispatch types a key event may carry — a key-down, a key-up, or a raw key-down. There is
  *  deliberately NO `char` type: a character that types into the page belongs to `Input.insertText`
  *  (its own capped, data-only path), never to a key event. */
@@ -178,6 +200,29 @@ const ALLOW = new Map<string, Validator>([
       typeof p.value === 'string' &&
       typeof p.domain === 'string' &&
       p.domain.length > 0
+  ],
+
+  // A screenshot is PNG-only and its clip comes from OUR OWN box model (the layout metrics), never
+  // from agent input — the path the agent supplies is jailed to the project dir in browser-screenshot.ts
+  // and never reaches CDP. So the only agent influence here is "take a picture"; format is pinned to
+  // png (no pdf/jpeg surface), and a clip, if present, must be numeric — a well-formed rectangle we
+  // authored, not a structured re-entry point.
+  [
+    'Page.captureScreenshot',
+    (p) => {
+      if (!isRecord(p)) return false
+      if (p.format !== undefined && p.format !== 'png') return false
+      if (p.captureBeyondViewport !== undefined && typeof p.captureBeyondViewport !== 'boolean') return false
+      if (p.clip !== undefined) {
+        const c = p.clip
+        if (!isRecord(c)) return false
+        for (const k of ['x', 'y', 'width', 'height']) {
+          if (typeof c[k] !== 'number') return false
+        }
+        if (c.scale !== undefined && typeof c.scale !== 'number') return false
+      }
+      return true
+    }
   ],
 
   // ---- Session lifecycle (issued by the lease, browser-lease.ts, not by an agent verb). Still gated

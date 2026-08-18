@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
-import { checkCdpCommand, type CdpContext } from './browser-cdp-allowlist'
+import { checkCdpCommand, COOKIE_WRITE_METHODS, type CdpContext } from './browser-cdp-allowlist'
 import { NT_SCRIPTS } from './browser-nt-scripts'
 
 const ctx: CdpContext = { viewport: { width: 1280, height: 800 } }
@@ -84,10 +84,29 @@ describe('checkCdpCommand', () => {
 
   it('cookie WRITES are listed (owner decision 5) and unreachable in v1', () => {
     // The methods stay listed so the allowlist RECORDS the decision; PR 9 Task 9.4 pins that no
-    // verb reaches them, because a write verb needs a design nobody has done: where does the agent
-    // get the value, and what stops it planting accounts.google.com so a later human visit is a
-    // login the attacker controls?
+    // verb reaches them (browser-cookie-write-guard.test.ts), because a write verb needs a design
+    // nobody has done: where does the agent get the value, and what stops it planting
+    // accounts.google.com so a later human visit is a login the attacker controls?
     expect(checkCdpCommand('Network.setCookie', { name: 'a', value: 'b', domain: 'x.test' }, ctx)).toBe(true)
+    // The jar-mutating set is enumerated in one place; setCookie is the only one the ALLOW table
+    // admits, and it is unreachable from every verb (the reachability guard proves that).
+    expect(COOKIE_WRITE_METHODS).toContain('Network.setCookie')
+    expect(COOKIE_WRITE_METHODS).toContain('Network.deleteCookies')
+    expect(COOKIE_WRITE_METHODS).toContain('Storage.setCookies')
+  })
+
+  it('a screenshot is PNG-only, and its clip must be a numeric rectangle we authored (Task 9.1)', () => {
+    expect(checkCdpCommand('Page.captureScreenshot', {}, ctx)).toBe(true)
+    expect(checkCdpCommand('Page.captureScreenshot', { format: 'png' }, ctx)).toBe(true)
+    // No jpeg/pdf surface — a caller cannot pick the format (and never supplies params anyway).
+    expect(checkCdpCommand('Page.captureScreenshot', { format: 'jpeg' }, ctx)).toBe(false)
+    expect(checkCdpCommand('Page.captureScreenshot', { format: 'pdf' }, ctx)).toBe(false)
+    // A well-formed numeric clip (our own box model) passes; a structured/garbage clip is refused.
+    expect(
+      checkCdpCommand('Page.captureScreenshot', { clip: { x: 0, y: 0, width: 100, height: 50, scale: 1 } }, ctx)
+    ).toBe(true)
+    expect(checkCdpCommand('Page.captureScreenshot', { clip: { x: 0, y: 0, width: 100 } }, ctx)).toBe(false)
+    expect(checkCdpCommand('Page.captureScreenshot', { clip: 'whole-page' }, ctx)).toBe(false)
   })
 
   it('an unknown method is refused with NO per-method detail', () => {
