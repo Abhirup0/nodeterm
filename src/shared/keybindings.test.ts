@@ -285,11 +285,18 @@ describe('resolveCommandForKeyEvent', () => {
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'Enter' }), ctx(), {}, true))
       .toBeNull()
   })
-  it('registry order breaks cross-bucket identity ties deterministically', () => {
-    // Cmd+F sits on terminal.find (terminal bucket); an app-bucket override may share it.
+  it('terminal focus admits terminal scope over a canvas command sharing the chord', () => {
+    // Cmd+F sits on terminal.find; a canvas-scope override claims the same chord. The
+    // terminal-focus gate drops canvas.fitAll before its bindings are ever read — this
+    // witnesses the gate, NOT registry order (that is the tie test below).
     const o = { 'canvas.fitAll': ['Cmd+F'] }
     expect(resolveCommandForKeyEvent(
       ev({ metaKey: true, key: 'f' }), ctx({ terminal: true }), o, true
     )).toBe('terminal.find')
+  })
+  it('first matching definition in registry source order wins a tie', () => {
+    // Deliberately unsanitized colliding override — the resolver must order the tie deterministically.
+    const o = { 'canvas.redo': ['Cmd+Z'] }
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'z' }), ctx(), o, true)).toBe('canvas.undo')
   })
 })
