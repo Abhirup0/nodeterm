@@ -147,8 +147,28 @@ describe('answerBrowserResolve — the renderer answers ONLY what it alone knows
       projectId: 'proj-1',
       projectCwd: '/home/u/p',
       sourceControlCapable: true,
-      capabilityOn: true
+      capabilityOn: true,
+      sourceTitle: '',
+      browserTitle: ''
     })
+  })
+
+  it('reports the source and browser node titles for the cookie trace (PR 9)', () => {
+    const granted = proj({
+      agentBrowserControl: true,
+      capabilityAck: { agentBrowserControl: 'kept' },
+      nodes: [
+        { id: 'claude-1', agentId: 'claude', title: 'Research agent' },
+        { id: 'browser-3', title: 'GitHub' }
+      ]
+    })
+    expect(answerBrowserResolve(granted, 'claude-1', 'browser-3')).toMatchObject({
+      ok: true,
+      sourceTitle: 'Research agent',
+      browserTitle: 'GitHub'
+    })
+    // An unknown browser node is an empty string (main falls back to the id), never a throw.
+    expect(answerBrowserResolve(granted, 'claude-1', 'browser-nope')).toMatchObject({ browserTitle: '' })
   })
 
   it('a switch that is ON in the file but only PENDING (never kept) is not on — a pending notice is a refusal', () => {

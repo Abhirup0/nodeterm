@@ -6392,14 +6392,16 @@ export function Canvas() {
   // drive — and we NEVER run a CDP command. Main makes the security decision (owner + capability +
   // the CDP allowlist) and does the driving itself (browser-drive.ts / browser-actions.ts).
   useEffect(() => {
-    return api.onBrowserControlResolve(({ requestId, sourceNodeId }) => {
+    return api.onBrowserControlResolve(({ requestId, sourceNodeId, browserNodeId }) => {
       const { projects, activeProjectId } = useProjects.getState()
       const route = routeControlSource(projects, activeProjectId, sourceNodeId)
       // Bring the owning project's canvas up so main can find the live guest (needsLiveCanvas is true
       // for `browser`). A closed/blocked/unknown owner just yields the refusal below.
       if (route.kind === 'switch' || route.kind === 'reopen') travelToProjectRef.current(route.projectId)
       const owner = projects.find((p) => p.nodes.some((n) => n.id === sourceNodeId))
-      const answer = answerBrowserResolve(owner as unknown as BrowserResolveProject | undefined, sourceNodeId)
+      // `browserNodeId` is passed so the answer can carry the browser node's title for the cookie
+      // trace; the security decision main makes never reads it.
+      const answer = answerBrowserResolve(owner as unknown as BrowserResolveProject | undefined, sourceNodeId, browserNodeId)
       api.sendBrowserControlResolveResult({ requestId, ...answer })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
