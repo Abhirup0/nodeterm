@@ -2219,7 +2219,11 @@ describe('SshProjectManager', () => {
       await assertion
     })
 
-    it('attributes a cancel to the exact master pid through the real AskpassServer wiring', async () => {
+    // POSIX-only: the askpass transport is an AF_UNIX socket (SSH_ASKPASS over a `.sock`), which
+    // cannot bind on Windows (`listen EACCES` on a Temp `.sock`). The mechanism itself is never
+    // used on Windows, so this pins POSIX wiring; the file's drive/UNC uploadFile cases still run
+    // on the windows-latest job.
+    it.skipIf(process.platform === 'win32')('attributes a cancel to the exact master pid through the real AskpassServer wiring', async () => {
       // Pins the production wiring `askpassWasCancelled: (pid) => askpassServer.wasCancelledBy(pid)`
       // together with a spawner handle that reports its child's pid, i.e. that connect() actually
       // threads master.pid() through. The different-pid case is the load-bearing half: had connect()
