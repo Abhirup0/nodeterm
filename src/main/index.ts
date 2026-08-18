@@ -17,6 +17,13 @@ import { writeFilesToClipboard } from './clipboard-files'
 import { allowGuestNavigation } from './webview-nav'
 import { BrowserControlLedger } from './browser-control-ledger'
 import { BrowserLeaseManager } from './browser-lease'
+import {
+  revokeBrowserNode,
+  revokeBrowserByOwner,
+  revokeBrowserByProject,
+  revokeAllBrowser,
+  type RevocationTargets
+} from './browser-revocation'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
@@ -817,7 +824,12 @@ app.whenReady().then(async () => {
     }
   )
   ipcMain.on(IPC.browserUnregister, (_e, webContentsId: number) => {
+    // The browser node's guest is going away (node closed, project closed/switched, or a discard).
+    // Revoke any control lease on it — LIFECYCLE, so no user-stop tombstone. Read the node id BEFORE
+    // dropping the guest. A no-op for a node that was never driven.
+    const nodeId = browserNodeIdForGuest(webContentsId)
     browserGuests.delete(webContentsId)
+    if (nodeId) pushBrowserLeases(revokeBrowserNode(nodeId, browserRevocation, { userStopped: false }))
   })
 
   // The naming agent runs LOCALLY on captured output, so it needs a cwd that exists on THIS
@@ -2327,12 +2339,59 @@ app.whenReady().then(async () => {
   // Who owns which agent-opened browser node, THIS app run only. In-memory, never persisted, never
   // read from project.json (Task 4.3/4.4). Consumed by PR 5 (attach/lease), PR 6 (indicator/Stop).
   const browserLedger = new BrowserControlLedger()
-  // Holds the debugger lease per driven browser node. Built and unit-tested in PR 5 but INERT here:
-  // no `browser` verb exists until PR 7, so nothing attaches a guest to it yet. PR 7 wires each
-  // guest's `webContents.debugger` into a BrowserSession, starts the idle sweep, and releases on
-  // owner/project/app teardown. Owned here so that wiring has one home. See browser-lease.ts.
+  // Holds the debugger lease per driven browser node. Built and unit-tested in PR 5. PR 7 wires each
+  // guest's `webContents.debugger` into a BrowserSession and starts the idle sweep; a driving verb
+  // there will call `browserLedger.touchLease(...)` + `pushBrowserLeases()` so the chip lights up.
+  // No verb attaches a guest yet, so nothing sets a live lease today — but revocation (Stop + the
+  // automatic triggers) is fully live, because `release` is a no-op-safe detach for a node with no
+  // session. Owned here so all the wiring has one home. See browser-lease.ts / browser-revocation.ts.
   const browserLeases = new BrowserLeaseManager()
-  void browserLeases
+  const browserRevocation: RevocationTargets = { leases: browserLeases, ledger: browserLedger }
+  // Push the current driven-lease set to the renderer (chip / rope / kill row). `stopped` ids drop
+  // from the chip immediately, skipping the anti-flicker linger — that is how an explicit Stop hides
+  // at once while a merely-idle lease fades.
+  const pushBrowserLeases = (stopped: string[] = []): void => {
+    const w = getMainWindow()
+    if (!w || w.isDestroyed()) return
+    w.webContents.send(IPC.browserLeaseChanged, {
+      active: browserLedger.activeLeasesForPush(Date.now()),
+      stopped
+    })
+  }
+  // Reverse the guest map: which node id owns this <webview> guest? Used to revoke on a browser
+  // node's teardown (its guest unregisters). Absent guest → no id → nothing to revoke.
+  const browserNodeIdForGuest = (webContentsId: number): string | undefined =>
+    browserGuests.get(webContentsId)?.nodeId
+  // Stop agent control of ONE node — the chip button and the node context menu. USER-initiated, so
+  // it leaves the tombstone: a later drive from that owner is refused by the named human act.
+  ipcMain.on(IPC.browserStop, (_e, nodeId: string) => {
+    pushBrowserLeases(revokeBrowserNode(nodeId, browserRevocation, { userStopped: true }))
+  })
+  // Stop-all — the Settings kill row. Also user-initiated.
+  ipcMain.on(IPC.browserStopAll, () => {
+    pushBrowserLeases(revokeAllBrowser(browserRevocation, { userStopped: true }))
+  })
+  // A project's browser-control switch went OFF (read live in the renderer, never cached at lease
+  // start). User-initiated: a human turned it off.
+  ipcMain.on(IPC.browserStopProject, (_e, projectId: string) => {
+    pushBrowserLeases(revokeBrowserByProject(projectId, browserRevocation))
+  })
+  // The OWNER agent node closed or restarted (pty teardown/recycle) → its browser leases die with
+  // its verified identity. A SECOND listener on these channels alongside releaseNodeTails above;
+  // both fire. LIFECYCLE, so no user-stop tombstone. A restart mints a fresh identity that cannot
+  // drive the old node anyway, so revoking is the honest state.
+  corePlatform.on(IPC.ptyDestroy, (nodeId: string) =>
+    pushBrowserLeases(revokeBrowserByOwner(nodeId, browserRevocation))
+  )
+  corePlatform.on(IPC.ptyRecycle, (nodeId: string) =>
+    pushBrowserLeases(revokeBrowserByOwner(nodeId, browserRevocation))
+  )
+  // App quit: detach every debugger lease. A second `before-quit` listener alongside the module-
+  // level flush one (both fire); scoped here so it can reach `browserRevocation`. No push — the
+  // window is going away. LIFECYCLE, so no tombstone (the in-memory ledger is gone on quit anyway).
+  app.on('before-quit', () => {
+    revokeAllBrowser(browserRevocation, { userStopped: false })
+  })
   ipcMain.on(
     IPC.agentControlResult,
     (
@@ -2380,6 +2439,9 @@ app.whenReady().then(async () => {
           leaseActiveUntil: 0,
           openedAt: Date.now()
         })
+        // A claim carries no live lease (a verb sets that in PR 7), so this does not light the chip;
+        // it keeps the renderer's view consistent from the moment ownership exists.
+        pushBrowserLeases()
       }
     }
     return result

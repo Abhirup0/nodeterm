@@ -24,12 +24,14 @@
  */
 import type { CdpContext } from './browser-cdp-allowlist'
 import { type DebuggerLike, sendCdp } from './browser-cdp-send'
+// The indicator's linger now lives in `src/shared` (PR 6 consumes it from the renderer too, and a
+// renderer→main import is forbidden — global constraint 4). Re-exported here so the debugger-lease
+// timings still read together at this one call site and every existing importer is unaffected.
+import { INDICATOR_LINGER_MS } from '@shared/browser-indicator'
 
 /** The lease outlives the last verb by this long; a verb within the window does not re-attach. */
 export const LEASE_IDLE_MS = 60_000
-/** How long the indicator (PR 6) lingers after a lease ends, so a burst of verbs does not flicker
- *  the chip off between them. Consumed by PR 6, exported here so the two constants live together. */
-export const INDICATOR_LINGER_MS = 5_000
+export { INDICATOR_LINGER_MS }
 
 /** Pure, so the ledger, the indicator and the discard-suppression sweep all agree on "still live". */
 export function leaseIsActive(now: number, leaseActiveUntil: number): boolean {

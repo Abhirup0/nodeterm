@@ -194,7 +194,13 @@ export function buildStubApi(): Omit<
     browser: {
       register: noop,
       unregister: noop,
-      onBrowserNewWindow: noopUnsub
+      onBrowserNewWindow: noopUnsub,
+      // Browser control does not exist off the desktop shell (no <webview>, no CDP), so there is no
+      // lease to push and nothing to stop — the chip simply never appears.
+      onLeaseChanged: noopUnsub,
+      stop: noop,
+      stopAll: noop,
+      stopProject: noop
     },
     updates: {
       onAvailable: noopUnsub,

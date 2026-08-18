@@ -26,6 +26,14 @@
  * never needed on the Server Edition, where browser control cannot exist.
  */
 
+/**
+ * The refusal a drive gets after the USER stopped control of a node (PR 6 Task 6.4). Named after the
+ * human act, not a permissions verdict, so the agent REPORTS it ("the user stopped me") instead of
+ * retrying an outage. Consulted by the drive path in PR 7 via {@link BrowserControlLedger.wasStoppedByUser};
+ * the `browser-3:` prefix matches the numbered refusal family (`browser-1`/`browser-2` in the shim).
+ */
+export const BROWSER_USER_STOPPED = 'browser-3: the user stopped agent control of this node'
+
 export interface AgentBrowserEntry {
   /** The agent node that ran open-browser. Drives are admitted only for THIS owner. */
   ownerNodeId: string
@@ -43,6 +51,15 @@ export interface AgentBrowserEntry {
 export class BrowserControlLedger {
   /** browserNodeId → its ownership entry, for browser nodes an agent opened THIS run. */
   private readonly entries = new Map<string, AgentBrowserEntry>()
+  /**
+   * browserNodeId → the owner the USER stopped control for. A tombstone, not an entry: it outlives
+   * the deleted ownership so a subsequent drive from that same owner answers {@link BROWSER_USER_STOPPED}
+   * instead of the generic not-owned null (which reads as "retryable"). Set ONLY by {@link stopByUser}
+   * (chip/menu/Settings/switch-off — the human acts), never by lifecycle revocation (node/project
+   * close, owner gone, quit), and cleared by a fresh {@link claim} so re-opening a node is a clean
+   * slate. In-memory like the ledger itself — a restart forgets it, which is correct.
+   */
+  private readonly userStopped = new Map<string, string>()
 
   /**
    * Record ownership of a freshly opened browser node. Returns false — and changes NOTHING — if the
@@ -56,6 +73,10 @@ export class BrowserControlLedger {
     if (!browserNodeId || !e.ownerNodeId || !e.projectId) return false
     if (this.entries.has(browserNodeId)) return false
     this.entries.set(browserNodeId, { ...e })
+    // A fresh, verified open is a clean slate: a node the user stopped earlier and then genuinely
+    // re-opened is drivable again. (Ids are not reused within a run, so in practice this clears a
+    // stale tombstone rather than masking a live refusal.)
+    this.userStopped.delete(browserNodeId)
     return true
   }
 
@@ -103,6 +124,65 @@ export class BrowserControlLedger {
       if (e.leaseActiveUntil > now) live.push({ browserNodeId, ownerNodeId: e.ownerNodeId })
     }
     return live
+  }
+
+  /** The same live set, shaped for the renderer push (adds `leaseActiveUntil` so the chip can apply
+   *  its linger). Separate from {@link activeLeases} so that method's asserted shape is untouched. */
+  activeLeasesForPush(now: number): {
+    browserNodeId: string
+    ownerNodeId: string
+    leaseActiveUntil: number
+  }[] {
+    const live: { browserNodeId: string; ownerNodeId: string; leaseActiveUntil: number }[] = []
+    for (const [browserNodeId, e] of this.entries) {
+      if (e.leaseActiveUntil > now) {
+        live.push({ browserNodeId, ownerNodeId: e.ownerNodeId, leaseActiveUntil: e.leaseActiveUntil })
+      }
+    }
+    return live
+  }
+
+  /**
+   * The USER stopped control of this node (chip/menu/Settings/switch-off). Records the tombstone
+   * against its current owner FIRST, then drops the entry — so a later drive from that owner is
+   * refused with the named human act, not the generic null. A no-op tombstone-wise if the node was
+   * already unclaimed (nothing to name an owner). Lifecycle revocation uses {@link release}, which
+   * leaves no tombstone.
+   */
+  stopByUser(browserNodeId: string): void {
+    const entry = this.entries.get(browserNodeId)
+    if (entry) this.userStopped.set(browserNodeId, entry.ownerNodeId)
+    this.entries.delete(browserNodeId)
+  }
+
+  /** Did the user stop control of this node for THIS exact owner? The drive path (PR 7) asks this to
+   *  choose {@link BROWSER_USER_STOPPED} over a retry. Owner-scoped so it can never leak node
+   *  existence to a different agent than the one that was driving. */
+  wasStoppedByUser(browserNodeId: string, ownerNodeId: string): boolean {
+    return this.userStopped.get(browserNodeId) === ownerNodeId
+  }
+
+  /** Every browser node this owner opened (claimed, live-lease or not) — the set to revoke when the
+   *  owner node closes or restarts. */
+  idsByOwner(ownerNodeId: string): string[] {
+    return this.idsWhere((e) => e.ownerNodeId === ownerNodeId)
+  }
+
+  /** Every browser node opened under this project — the set to revoke when the project's switch goes
+   *  off (a project close revokes per-node via the guest teardown instead). */
+  idsByProject(projectId: string): string[] {
+    return this.idsWhere((e) => e.projectId === projectId)
+  }
+
+  /** Every claimed browser node — the set to revoke on app quit. */
+  allIds(): string[] {
+    return [...this.entries.keys()]
+  }
+
+  private idsWhere(pred: (e: AgentBrowserEntry) => boolean): string[] {
+    const ids: string[] = []
+    for (const [browserNodeId, e] of this.entries) if (pred(e)) ids.push(browserNodeId)
+    return ids
   }
 
   private releaseWhere(pred: (e: AgentBrowserEntry) => boolean): string[] {

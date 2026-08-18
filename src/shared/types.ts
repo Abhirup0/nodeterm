@@ -5,6 +5,7 @@ import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
+import type { BrowserLeasePush } from './browser-indicator'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
@@ -840,6 +841,16 @@ export interface BrowserApi {
   unregister(webContentsId: number): void
   /** Fires when a browser guest requested a new window; the renderer opens another browser node. */
   onBrowserNewWindow(listener: (e: { url: string; sourceNodeId: string }) => void): () => void
+  /** Push: the current set of browser nodes an agent is driving (chip / rope / kill row). `stopped`
+   *  ids drop from the chip immediately, skipping the anti-flicker linger. */
+  onLeaseChanged(listener: (push: BrowserLeasePush) => void): () => void
+  /** Stop agent control of ONE browser node — the chip button and the node context menu. Detaches
+   *  the debugger + drops the lease in main; a later drive from that owner is refused by name. */
+  stop(nodeId: string): void
+  /** Stop agent control of EVERY driven node — the Settings kill row's Stop-all. */
+  stopAll(): void
+  /** Stop agent control of every node in a project — the project's browser-control switch going off. */
+  stopProject(projectId: string): void
 }
 
 /** A user-defined agent (BYO CLI). With no `baseAgent` it is in no capability list, so it gets
