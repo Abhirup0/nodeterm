@@ -64,6 +64,41 @@ describe('projectToFile / fileToProject round-trip', () => {
   })
 })
 
+describe('browser partition is re-validated on the hostile load path', () => {
+  // project.json is git-shared, hand-editable and auto-adopted (constraint 10); `data.partition` is
+  // copied verbatim to <webview partition>. A stored partition survives fileToProject ONLY when it
+  // is exactly the jar THIS project (base.id) would mint — anything else drops to un-owned.
+  const browser = (partition?: string): CanvasNodeState =>
+    node({ id: 'browser-1', kind: 'browser', url: 'https://x.test/', ...(partition ? { partition } : {}) })
+
+  it("drops a FOREIGN project's jar — a cloned project.json cannot name persist:...-<victim>", () => {
+    const f = projectToFile(project({ nodes: [browser('persist:nt-agent-browser-victim')] }), 1, 'ts', 'file-id')
+    const back = fileToProject(f, { id: 'p-mine' })
+    // The webview would have received the victim's jar; it now gets none (default session).
+    expect(back.nodes[0].partition).toBeUndefined()
+  })
+
+  it('drops an UNSAFE storage-key string (not persist:...-<isSafeNodeId>)', () => {
+    for (const bad of ['persist:nt-agent-browser-../../x', 'evil', 'persist:nt-agent-browser-a b', '']) {
+      const f = projectToFile(project({ nodes: [browser(bad)] }), 1, 'ts', 'file-id')
+      expect(fileToProject(f, { id: 'p-mine' }).nodes[0].partition).toBeUndefined()
+    }
+  })
+
+  it('KEEPS the jar that THIS project would mint for itself (same-machine reload)', () => {
+    const own = 'persist:nt-agent-browser-p-mine'
+    const f = projectToFile(project({ nodes: [browser(own)] }), 1, 'ts', 'file-id')
+    expect(fileToProject(f, { id: 'p-mine' }).nodes[0].partition).toBe(own)
+  })
+
+  it('leaves a user-opened (partition-less) browser node and non-browser nodes untouched', () => {
+    const f = projectToFile(project({ nodes: [browser(), node({ id: 't1', partition: 'x' } as never)] }), 1, 'ts', 'file-id')
+    const back = fileToProject(f, { id: 'p-mine' })
+    expect(back.nodes[0].partition).toBeUndefined() // user-opened browser: stays absent
+    expect((back.nodes[1] as { partition?: string }).partition).toBe('x') // non-browser: not our concern
+  })
+})
+
 describe('per-project capability fields in the shared file', () => {
   it('a capability round-trips through projectToFile/fileToProject, and a non-literal-true does not', () => {
     const p = project({ agentBrowserControl: true })
