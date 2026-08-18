@@ -1307,6 +1307,27 @@ describe('onNodeStateChange seam', () => {
       expect('pendingId' in c).toBe(false)
     }
   })
+
+  it('a session boundary mid-working fires a not-a-completion end (the exit the sweep cannot see)', () => {
+    // SessionStart/SessionEnd reset the entry to idle, which takes it out of the stale sweep's
+    // jurisdiction (isStaleWorking wants state === 'working') — so without this edge every
+    // edge-driven consumer (Live Activity, keep-awake) would hold a phantom worker forever.
+    const seen: NodeStateChange[] = []
+    onNodeStateChange((c) => seen.push(c))
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    const before = _inboxSnapshot().events.length
+    recordAgentEvent(ev({ kind: 'session', sessionPhase: 'end' }))
+    const ends = seen.filter((c) => c.event === 'end')
+    expect(ends).toHaveLength(1)
+    expect(ends[0]).toMatchObject({ state: 'done', message: 'Stopped', interrupted: true })
+    // Like the sweep: no inbox card — nothing finished, nothing to read.
+    expect(_inboxSnapshot().events.length).toBe(before)
+    // And it is guarded on prevState === 'working': a session boundary on an idle/done node
+    // (the common clean-start case) must stay silent.
+    seen.length = 0
+    recordAgentEvent(ev({ kind: 'session', sessionPhase: 'start' }))
+    expect(seen).toHaveLength(0)
+  })
 })
 
 describe('onNodeNowChange seam', () => {

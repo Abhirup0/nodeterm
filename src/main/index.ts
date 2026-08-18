@@ -62,7 +62,8 @@ import {
   setNodeSessionName,
   sessionNameSweepEntries,
   nodeState,
-  nodeSessionName
+  nodeSessionName,
+  workingNodeIds
 } from '../core/agent-status-mirror'
 import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
@@ -907,6 +908,14 @@ app.whenReady().then(async () => {
   })
   onNodeStateChange((c) => keepAwake?.onChange(c))
   settingsStore.onChange(() => keepAwake?.refresh())
+  // Seed from the restored mirror: an app relaunch (auto-update, crash) does not stop a
+  // tmux-backed run, and loadPersisted deliberately restores its `working` entry WITHOUT firing
+  // edges — so without this the machine would go unprotected until the run's next turn boundary.
+  // The tracker applies the same isRemoteNode/enabled gates as a live edge, and an entry that is
+  // in fact gone is released by the stale sweep's synthetic end within its next tick.
+  for (const nodeId of workingNodeIds()) {
+    keepAwake.onChange({ nodeId, event: 'start', state: 'working' })
+  }
   // Advertise launch settings to the mobile companion through the mirror. The provider is
   // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra
   // plumbing. Caps arrive async: re-flush once the memoized probe answers.
@@ -1969,8 +1978,11 @@ let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
   destroyNotchHud()
-  // Electron releases power assertions at exit anyway; disposing keeps the hold/release log honest.
+  // Electron releases power assertions at exit anyway; disposing keeps the hold/release log
+  // honest. Clearing the ref too keeps a hook edge that lands during the quit flush (the pty
+  // teardown window below) from re-holding an assertion nothing will ever release.
   keepAwake?.dispose()
+  keepAwake = undefined
   workspaceWatcher.dispose()
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.

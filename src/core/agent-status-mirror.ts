@@ -585,7 +585,9 @@ export interface NodeStateChange {
    *  nobody heard from a `working` node for `WORKING_STALE_MS`, so it is presumed gone (see
    *  shared/agents/stale.ts). Like `interrupted`, it must never be celebrated as a completion. */
   stale?: boolean
-  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than finishing.
+  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than
+   *  finishing — or a session boundary (SessionStart/SessionEnd) reset the node while it was
+   *  still `working`, which is the same story: the run stopped without producing anything.
    *  Consumers that celebrate a completion (notification, the notch HUD's "finished, unseen"
    *  highlight) skip it — nothing was accomplished, so there is nothing to go and read. */
   interrupted?: boolean
@@ -1126,6 +1128,21 @@ function produceInboxFromState(
   }
   const baseEvent = { ts: now, nodeId, agentId: ev.agentId, sessionId: ev.sessionId }
   const stateBase = { nodeId, agentId: ev.agentId, sessionId: ev.sessionId, ts: now }
+  // A session boundary (SessionStart/SessionEnd) resets a `working` node to idle with no done
+  // edge of its own (reduceEntry clears the state) — yet every edge-driven consumer (the phone's
+  // Live Activity, keep-awake's power assertion) still believes the node is working, and the
+  // stale sweep can never correct them: it only watches entries still marked `working`, and this
+  // one just left that set. Fire the same not-a-completion end the sweep fires, so the seam sees
+  // every exit. Like the sweep, deliberately NO inbox event — nothing finished.
+  if (ev.kind === 'session' && prevState === 'working') {
+    fireNodeStateChange({
+      ...stateBase,
+      event: 'end',
+      state: 'done',
+      message: 'Stopped',
+      interrupted: true
+    })
+  }
   // Working START edge (fresh turn / session open): a Live Activity begins here. reduceEntry's
   // done-holdoff means a held-off late working keeps `nextState === 'done'`, so it never reaches
   // here — no spurious 'start'.
@@ -1416,6 +1433,17 @@ export function nodeSessionName(nodeId: string): string | undefined {
 /** A node's current main state, or undefined when unknown. Read-only peek for the shells. */
 export function nodeState(nodeId: string): AgentState | undefined {
   return state.get(nodeId)?.state
+}
+
+/** Node ids currently `working` — including entries restored by loadPersisted, which fires no
+ *  edges by design. Read-only peek for the shells: keep-awake seeds its tracker from this at
+ *  boot, because a tmux-backed run survives an app relaunch and would otherwise go unprotected
+ *  until its next turn boundary. A restored entry that is in fact gone is released by the stale
+ *  sweep's synthetic end within its next tick. */
+export function workingNodeIds(): string[] {
+  const out: string[] = []
+  for (const [nodeId, e] of state) if (e.state === 'working') out.push(nodeId)
+  return out
 }
 
 /** The entries the session-name sweep walks: id + what it needs to resolve and dedupe. */

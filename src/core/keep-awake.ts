@@ -13,6 +13,9 @@
 //     stale sweep (`sweepStaleWorking`, shared/agents/stale.ts WORKING_STALE_MS), which fires a
 //     synthetic `end` edge per silent node through the SAME onNodeStateChange seam this tracker
 //     folds — worst case the assertion outlives the last real work by that window, never forever.
+//     A session boundary (SessionStart/SessionEnd) mid-`working` is the one exit the sweep cannot
+//     see — it resets the mirror entry to idle, out of the sweep's jurisdiction — so the mirror
+//     fires the same synthetic end on that path itself (produceInboxFromState's session guard).
 //
 // Electron-free (src/core): the actual powerSaveBlocker lives behind the injected `blocker` seam
 // (template: session-budget.ts); the thin shell in src/main/keep-awake.ts binds it.
