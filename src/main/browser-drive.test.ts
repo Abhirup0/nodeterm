@@ -195,6 +195,105 @@ describe('a user-Stopped node refuses to re-drive until a fresh verified claim (
   })
 })
 
+// ── PR 9: --cookies drives through the SAME gate and is loudly traced ───────────────────────────
+describe('--cookies drives through the gate and traces BEFORE it reads (Task 9.3)', () => {
+  function cookiesCall(): BrowserCall {
+    const c = parseBrowserArgs({ node: NODE, cookies: 'github.com' })
+    if ('error' in c) throw new Error(c.error)
+    return c
+  }
+
+  it('the owner reads cookies, and the board-log trace is appended before the read', async () => {
+    const ledger = freshLedgerOwning()
+    const { guest, dbg } = makeGuest()
+    const order: string[] = []
+    const origSend = dbg.sendCommand.bind(dbg)
+    dbg.sendCommand = async (m: string, p?: object) => {
+      if (m === 'Network.getCookies') order.push('read')
+      return m === 'Network.getCookies' ? { cookies: [{}, {}, {}, {}] } : origSend(m, p)
+    }
+    const appendBoardLog = vi.fn(async (_projectId: string, _entry: unknown) => {
+      order.push('trace')
+      return true
+    })
+    const deps: DriveDeps = { ledger, refs: new RefTable(), sessionFor: () => guest, revoke: vi.fn(), appendBoardLog }
+    const r = await driveBrowser(
+      { call: cookiesCall(), ownerNodeId: OWNER, verified: true, resolve: { ...okResolve, sourceTitle: 'claude-1', browserTitle: 'browser-3' } },
+      deps
+    )
+    expect(r).toEqual({ ok: true, message: "read 4 cookies for github.com — this was recorded in the project's activity log." })
+    expect(order).toEqual(['trace', 'read']) // the trace strictly precedes the read
+    // The entry files under the OWNER's card, names the owner in `from`, the domain in `to`.
+    const entry = appendBoardLog.mock.calls[0][1]
+    expect(entry).toMatchObject({
+      nodeId: OWNER,
+      kind: 'event',
+      event: { type: 'agent-read-cookies', from: 'claude-1', to: 'github.com', title: 'browser-3' }
+    })
+  })
+
+  it('if the trace cannot be recorded, the read does not happen (fail-closed)', async () => {
+    const ledger = freshLedgerOwning()
+    const { guest, dbg } = makeGuest()
+    const reads: string[] = []
+    const origSend = dbg.sendCommand.bind(dbg)
+    dbg.sendCommand = async (m: string, p?: object) => {
+      if (m === 'Network.getCookies') reads.push(m)
+      return origSend(m, p)
+    }
+    // No appendBoardLog wired at all ⇒ the read cannot be recorded ⇒ refuse without reading.
+    const deps: DriveDeps = { ledger, refs: new RefTable(), sessionFor: () => guest, revoke: vi.fn() }
+    const r = await driveBrowser({ call: cookiesCall(), ownerNodeId: OWNER, verified: true, resolve: okResolve }, deps)
+    expect(r.ok).toBe(false)
+    expect(reads).toEqual([]) // the jar was never read
+  })
+})
+
+// ── PR 9: --screenshot is jailed to the project dir end-to-end ───────────────────────────────────
+describe('--screenshot is jailed to the project dir through the gate (Task 9.1)', () => {
+  function shotCall(p: string): BrowserCall {
+    const c = parseBrowserArgs({ node: NODE, screenshot: p })
+    if ('error' in c) throw new Error(c.error)
+    return c
+  }
+  const screenshotIO = () => ({
+    realpath: async (p: string) => p, // identity: no symlinks in this unit
+    lstat: async () => ({ isSymbolicLink: () => false }),
+    writeFile: vi.fn(async () => {})
+  })
+
+  it('a path inside the project writes and replies with the show-image line', async () => {
+    const ledger = freshLedgerOwning()
+    const { guest, dbg } = makeGuest()
+    const origSend = dbg.sendCommand.bind(dbg)
+    dbg.sendCommand = async (m: string, p?: object) =>
+      m === 'Page.captureScreenshot' ? { data: Buffer.from('PNG').toString('base64') } : origSend(m, p)
+    const io = screenshotIO()
+    const deps: DriveDeps = { ledger, refs: new RefTable(), sessionFor: () => guest, revoke: vi.fn(), screenshotIO: io }
+    const r = await driveBrowser(
+      { call: shotCall('shot.png'), ownerNodeId: OWNER, verified: true, resolve: { ...okResolve, projectCwd: '/proj' } },
+      deps
+    )
+    expect(r.ok).toBe(true)
+    expect(r.message).toContain('/proj/shot.png')
+    expect(r.message).toContain('show-image /proj/shot.png')
+    expect(io.writeFile).toHaveBeenCalled()
+  })
+
+  it('a traversal path is refused and never writes', async () => {
+    const ledger = freshLedgerOwning()
+    const { guest } = makeGuest()
+    const io = screenshotIO()
+    const deps: DriveDeps = { ledger, refs: new RefTable(), sessionFor: () => guest, revoke: vi.fn(), screenshotIO: io }
+    const r = await driveBrowser(
+      { call: shotCall('../../etc/x.png'), ownerNodeId: OWNER, verified: true, resolve: { ...okResolve, projectCwd: '/proj' } },
+      deps
+    )
+    expect(r).toEqual({ ok: false, message: 'browser: --screenshot path must be inside the project directory' })
+    expect(io.writeFile).not.toHaveBeenCalled()
+  })
+})
+
 describe('driveBrowser end-to-end refusals', () => {
   it('a discarded guest (sessionFor → null) is the named discard refusal', async () => {
     const ledger = freshLedgerOwning()

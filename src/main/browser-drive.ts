@@ -43,8 +43,12 @@ import {
   type Driver,
   type CdpEventBus
 } from './browser-actions'
+import { browserScreenshot, type ScreenshotDeps } from './browser-screenshot'
+import { browserCookies } from './browser-cookies'
 import type { RefTable } from './browser-refs'
 import type { BrowserCall } from '../core/browser-verb'
+import type { BoardLogEntry } from '../shared/types'
+import { randomUUID } from 'node:crypto'
 
 /** The design's verbatim capability-off sentence. The last clause STOPS an agent burning a turn
  *  trying to enable it. Exported so the wiring and the tests share the one string. */
@@ -63,7 +67,18 @@ export const noDrivableNodeMessage = (id: string): string => `no drivable browse
  *  source, whether the source is control-capable, and the LIVE per-project capability value. Main
  *  makes the security DECISION from this; the renderer never runs a CDP command. */
 export type BrowserResolve =
-  | { ok: true; projectId: string; projectCwd?: string; sourceControlCapable: boolean; capabilityOn: boolean }
+  | {
+      ok: true
+      projectId: string
+      projectCwd?: string
+      sourceControlCapable: boolean
+      capabilityOn: boolean
+      /** The owner agent node's title and the browser node's title — what the renderer alone knows,
+       *  used ONLY to make the cookie-read trace human-readable (`from` / `title`). Never a security
+       *  input; the gate decides from projectId/capability/ownership. */
+      sourceTitle?: string
+      browserTitle?: string
+    }
   | { ok: false; refusal: string }
 
 /** The resolve round-trip's own short ceiling. Kept far under main's 120s pending-control budget and
@@ -157,15 +172,53 @@ export interface DriveDeps {
   sessionFor(browserNodeId: string): LiveGuest | null
   /** Detach + drop ownership + tombstone — invoked when a live capability read comes back OFF. */
   revoke(browserNodeId: string): void
+  /** Append one line to a project's board log, in-process (no IPC round-trip) — the cookie-read
+   *  trace (PR 9). Returns false when there is no reachable log or the write failed; the cookie read
+   *  is refused in that case (fail-closed). Absent ⇒ tracing is unavailable and `--cookies` refuses. */
+  appendBoardLog?(projectId: string, entry: BoardLogEntry): Promise<boolean>
+  /** The filesystem the screenshot path-jail + write use (PR 9). Absent ⇒ `--screenshot` refuses. */
+  screenshotIO?: ScreenshotDeps
+}
+
+/** What only the resolve knows, threaded to the two PR-9 actions: the project the trace/screenshot
+ *  belong to, its cwd (the screenshot jail root), and the titles the cookie trace reads. */
+interface RunContext {
+  browserNodeId: string
+  ownerNodeId: string
+  projectId: string
+  projectCwd?: string
+  sourceTitle?: string
+  browserTitle?: string
+}
+
+/** Build the cookie-read trace entry: it files under the OWNER agent node's card (`nodeId`), names
+ *  the owner in `from`, the domain in `to`, and the browser node in `title`. */
+function cookieTraceEntry(ctx: RunContext, domain: string): BoardLogEntry {
+  const from = ctx.sourceTitle || ctx.ownerNodeId
+  return {
+    id: randomUUID(),
+    ts: Date.now(),
+    author: { name: from, color: '#c2703d' },
+    nodeId: ctx.ownerNodeId,
+    kind: 'event',
+    event: {
+      type: 'agent-read-cookies',
+      from,
+      to: domain,
+      title: ctx.browserTitle || ctx.browserNodeId
+    }
+  }
 }
 
 async function runAction(
   call: BrowserCall,
   guest: LiveGuest,
   refs: RefTable,
-  nodeId: string
+  ctx: RunContext,
+  deps: DriveDeps
 ): Promise<ActionResult> {
   const a = call.action
+  const nodeId = ctx.browserNodeId
   // The pointer verbs need the viewport-refreshing capability; the session is a Driver at runtime.
   const driver = guest.session as Driver
   switch (a.kind) {
@@ -186,10 +239,18 @@ async function runAction(
       return browserScroll(driver, nodeId, a.where)
     case 'wait':
       return browserWait(guest.session, refs, nodeId, a.target, call.timeoutMs)
-    default:
-      // cookies/screenshot (PR 9) parse today but do not drive yet: a NAMED, non-retryable refusal,
-      // never a silent success.
-      return { ok: false, message: `browser: --${a.kind} is not available yet (it lands in a later update)` }
+    case 'screenshot':
+      if (!deps.screenshotIO) return { ok: false, message: 'browser: screenshots are unavailable in this build' }
+      return browserScreenshot(driver, nodeId, ctx.projectCwd, a.path, { full: call.full }, deps.screenshotIO)
+    case 'cookies':
+      // The trace goes through the board log; if there is no appender wired, the read cannot be
+      // recorded, so it must not happen (fail-closed, same as an append that returns false).
+      return browserCookies(guest.session, nodeId, a.domain, {
+        recordTrace: (domain) =>
+          deps.appendBoardLog
+            ? deps.appendBoardLog(ctx.projectId, cookieTraceEntry(ctx, domain))
+            : Promise.resolve(false)
+      })
   }
 }
 
@@ -217,8 +278,16 @@ export async function driveBrowser(
   }
   // guestPresent was true, so `guest` is non-null; the check keeps the type honest.
   if (!guest) return { ok: false, message: browserDiscardedMessage(input.call.node) }
+  const ctx: RunContext = {
+    browserNodeId: input.call.node,
+    ownerNodeId: input.ownerNodeId,
+    projectId: gate.entry.projectId,
+    projectCwd: input.resolve.ok ? input.resolve.projectCwd : undefined,
+    sourceTitle: input.resolve.ok ? input.resolve.sourceTitle : undefined,
+    browserTitle: input.resolve.ok ? input.resolve.browserTitle : undefined
+  }
   try {
-    return await runAction(input.call, guest, deps.refs, input.call.node)
+    return await runAction(input.call, guest, deps.refs, ctx, deps)
   } catch (e) {
     return { ok: false, message: e instanceof Error ? e.message : 'browser: the command failed' }
   }
