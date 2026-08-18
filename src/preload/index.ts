@@ -322,7 +322,15 @@ const api: NodeTerminalApi = {
       const handler = (_e: unknown, ev: { url: string; sourceNodeId: string }) => listener(ev)
       ipcRenderer.on(IPC.browserNewWindow, handler)
       return () => ipcRenderer.removeListener(IPC.browserNewWindow, handler)
-    }
+    },
+    onLeaseChanged: (listener) => {
+      const handler = (_e: unknown, push: Parameters<typeof listener>[0]) => listener(push)
+      ipcRenderer.on(IPC.browserLeaseChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.browserLeaseChanged, handler)
+    },
+    stop: (nodeId: string) => ipcRenderer.send(IPC.browserStop, nodeId),
+    stopAll: () => ipcRenderer.send(IPC.browserStopAll),
+    stopProject: (projectId: string) => ipcRenderer.send(IPC.browserStopProject, projectId)
   },
   files: {
     quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd),
