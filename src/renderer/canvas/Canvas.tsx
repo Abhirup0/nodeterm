@@ -6960,7 +6960,11 @@ export function Canvas() {
               return
             }
             const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow(), partition))
-            reply({ ok: true, message: `opened browser ${id}`, result: { id } })
+            // Return the project id + partition so main can record ownership in its in-memory
+            // ledger (browser-control-ledger.ts). Main gates the claim on its OWN `verified` verdict
+            // and keys it to the verified caller — these fields are descriptive (release-by-project,
+            // the indicator), never the authorization boundary.
+            reply({ ok: true, message: `opened browser ${id}`, result: { id, projectId: ctlProject?.id, partition } })
             return
           }
           case 'group': {
