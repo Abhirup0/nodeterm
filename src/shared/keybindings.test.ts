@@ -7,9 +7,11 @@ import {
   getEffectiveBindings,
   bindingIdentity,
   findKeybindingConflicts,
-  sanitizeKeybindingOverrides
+  sanitizeKeybindingOverrides,
+  resolveCommandForKeyEvent
 } from './keybindings'
 import { parseShortcut } from './shortcut'
+import type { ShortcutKeyEvent } from './shortcut'
 
 describe('registry invariants', () => {
   it('has unique ids and a map that covers them all', () => {
@@ -224,5 +226,70 @@ describe('sanitizeKeybindingOverrides', () => {
     )
     const twice = sanitizeKeybindingOverrides(once.overrides, true)
     expect(twice).toEqual({ overrides: once.overrides, warnings: [] })
+  })
+})
+
+const ev = (over: Partial<ShortcutKeyEvent>): ShortcutKeyEvent => ({
+  metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, key: '', ...over
+})
+const ctx = (over: Partial<{ typing: boolean; terminal: boolean; kanbanOpen: boolean }> = {}) => ({
+  typing: false, terminal: false, kanbanOpen: false, ...over
+})
+
+describe('resolveCommandForKeyEvent', () => {
+  it('matches a default app chord', () => {
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), ctx(), {}, true))
+      .toBe('app.commandPalette')
+  })
+  it('typing blocks commands without allowWhileTyping, allows the flagged ones', () => {
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, key: 't' }), ctx({ typing: true }), {}, true
+    )).toBeNull()
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, key: 'w' }), ctx({ typing: true }), {}, true
+    )).toBe('node.close')
+  })
+  it('terminal focus blocks canvas commands but passes allowInTerminal + terminal scope', () => {
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, key: 't' }), ctx({ terminal: true }), {}, true
+    )).toBeNull()
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, key: 'k' }), ctx({ terminal: true }), {}, true
+    )).toBe('app.commandPalette')
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, key: 'f' }), ctx({ terminal: true }), {}, true
+    )).toBe('terminal.find')
+  })
+  it('kanban open makes canvas-scope commands inert, app scope still fires', () => {
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, key: 'z' }), ctx({ kanbanOpen: true }), {}, true
+    )).toBeNull()
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, shiftKey: true, key: 'b' }), ctx({ kanbanOpen: true }), {}, true
+    )).toBe('view.kanbanToggle')
+  })
+  it('terminal.find does NOT fire outside terminal focus (scope-gated)', () => {
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'f' }), ctx(), {}, true)).toBeNull()
+  })
+  it('respects overrides and disabled commands', () => {
+    const o = { 'app.commandPalette': [] as string[], 'canvas.fitAll': ['Cmd+K'] }
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), ctx(), o, true))
+      .toBe('canvas.fitAll')
+  })
+  it('never resolves a hold chord', () => {
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, altKey: true, key: 'Alt' }), ctx(), {}, true
+    )).toBeNull()
+  })
+  it('never resolves scm-scope commands — they dispatch from their own composer', () => {
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'Enter' }), ctx(), {}, true))
+      .toBeNull()
+  })
+  it('registry order breaks cross-bucket identity ties deterministically', () => {
+    // Cmd+F sits on terminal.find (terminal bucket); an app-bucket override may share it.
+    const o = { 'canvas.fitAll': ['Cmd+F'] }
+    expect(resolveCommandForKeyEvent(
+      ev({ metaKey: true, key: 'f' }), ctx({ terminal: true }), o, true
+    )).toBe('terminal.find')
   })
 })

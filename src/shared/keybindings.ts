@@ -6,7 +6,13 @@
  * canonical binding strings are shortcut.ts strings (`Cmd` = abstract primary modifier,
  * `Ctrl` = literal Control, modifier-only chords = hold-to-talk).
  */
-import { parseShortcut, serializeShortcut, resolvedModifiers } from './shortcut'
+import {
+  parseShortcut,
+  serializeShortcut,
+  resolvedModifiers,
+  matchesShortcut,
+  isHoldChord
+} from './shortcut'
 import type { ParsedShortcut, ShortcutKeyEvent } from './shortcut'
 
 export type CommandScope = 'app' | 'canvas' | 'terminal' | 'scm'
@@ -312,4 +318,39 @@ export function sanitizeKeybindingOverrides(
     }
   }
   return { overrides, warnings }
+}
+
+export interface KeyDispatchContext {
+  /** A real input/textarea/contentEditable has focus (xterm's hidden textarea excluded). */
+  typing: boolean
+  /** An xterm has focus. */
+  terminal: boolean
+  /** The kanban board is open for the active project. */
+  kanbanOpen: boolean
+}
+
+/** Pure dispatch core: the first registry command (source order) whose effective bindings
+ *  match `e` and whose flags permit the context. Keyed chords only — hold chords are the
+ *  dedicated hold listener's job (`chordHeld`). Callers preventDefault only when the
+ *  returned command's handler actually claims the chord. */
+export function resolveCommandForKeyEvent(
+  e: ShortcutKeyEvent,
+  ctx: KeyDispatchContext,
+  overrides: KeybindingOverrides,
+  isMac: boolean
+): CommandId | null {
+  for (const def of COMMAND_DEFINITIONS) {
+    // scm commands dispatch from their own focused composer (local onKeyDown), never from
+    // the window listener — resolving them here would fire Commit with no composer focused.
+    if (def.scope === 'scm') continue
+    if (ctx.typing && !def.allowWhileTyping) continue
+    if (ctx.terminal && !(def.scope === 'terminal' || def.allowInTerminal)) continue
+    if (!ctx.terminal && def.scope === 'terminal') continue
+    if (ctx.kanbanOpen && def.scope === 'canvas') continue
+    for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
+      if (isHoldChord(binding)) continue
+      if (matchesShortcut(e, binding, isMac)) return def.id
+    }
+  }
+  return null
 }
