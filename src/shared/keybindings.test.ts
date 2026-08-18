@@ -3,7 +3,10 @@ import {
   COMMAND_DEFINITIONS,
   COMMANDS_BY_ID,
   isCommandId,
-  normalizeBindingForCommand
+  normalizeBindingForCommand,
+  getEffectiveBindings,
+  bindingIdentity,
+  findKeybindingConflicts
 } from './keybindings'
 import { parseShortcut } from './shortcut'
 
@@ -91,5 +94,58 @@ describe('normalizeBindingForCommand', () => {
         }
       }
     }
+  })
+})
+
+describe('getEffectiveBindings', () => {
+  it('returns platform defaults with no override', () => {
+    expect(getEffectiveBindings('terminal.copySelection', {}, true)).toEqual(['Cmd+C'])
+    expect(getEffectiveBindings('terminal.copySelection', {}, false)).toEqual([
+      'Cmd+Shift+C', 'Ctrl+Insert'
+    ])
+  })
+  it('an override replaces defaults; [] disables', () => {
+    const o = { 'node.newTerminal': ['Cmd+Shift+T'], 'canvas.undo': [] as string[] }
+    expect(getEffectiveBindings('node.newTerminal', o, true)).toEqual(['Cmd+Shift+T'])
+    expect(getEffectiveBindings('canvas.undo', o, true)).toEqual([])
+  })
+})
+
+describe('bindingIdentity', () => {
+  it('resolves Cmd and literal Ctrl to the same identity on non-mac', () => {
+    expect(bindingIdentity('Cmd+K', false)).toBe(bindingIdentity('Ctrl+K', false))
+  })
+  it('keeps them distinct on mac', () => {
+    expect(bindingIdentity('Cmd+K', true)).not.toBe(bindingIdentity('Ctrl+K', true))
+  })
+})
+
+describe('findKeybindingConflicts', () => {
+  it('reports nothing for pure defaults', () => {
+    expect(findKeybindingConflicts({}, true)).toEqual([])
+    expect(findKeybindingConflicts({}, false)).toEqual([])
+  })
+  it('the shipped default table is conflict-free even under full scrutiny', () => {
+    expect(findKeybindingConflicts({}, true, { includeDefaults: true })).toEqual([])
+    expect(findKeybindingConflicts({}, false, { includeDefaults: true })).toEqual([])
+  })
+  it('flags an override colliding with a default in the same bucket', () => {
+    const conflicts = findKeybindingConflicts({ 'canvas.fitAll': ['Cmd+K'] }, true)
+    expect(conflicts).toEqual([
+      { binding: 'Cmd+K', commandIds: ['app.commandPalette', 'canvas.fitAll'] }
+    ])
+  })
+  it('flags a cross-spelling collision on non-mac (Ctrl+K vs Cmd+K)', () => {
+    const conflicts = findKeybindingConflicts({ 'canvas.fitAll': ['Ctrl+K'] }, false)
+    expect(conflicts.map((c) => c.commandIds)).toEqual([['app.commandPalette', 'canvas.fitAll']])
+  })
+  it('does not flag collisions across buckets', () => {
+    // terminal.find is Cmd+F in the terminal bucket; an app-bucket Cmd+F is legal.
+    expect(findKeybindingConflicts({ 'canvas.fitAll': ['Cmd+F'] }, true)).toEqual([])
+  })
+  it('two disabled commands never conflict', () => {
+    expect(
+      findKeybindingConflicts({ 'canvas.fitAll': [], 'canvas.groupSelection': [] }, true)
+    ).toEqual([])
   })
 })

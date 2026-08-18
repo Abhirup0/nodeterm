@@ -171,3 +171,76 @@ export function normalizeBindingForCommand(
   }
   return { ok: true, value: serializeShortcut(p) }
 }
+
+/** User overrides, as stored in settings.json under `keybindings`. Absent id = defaults;
+ *  `[]` = disabled. */
+export type KeybindingOverrides = Partial<Record<CommandId, readonly string[]>>
+
+export function getEffectiveBindings(
+  id: CommandId,
+  overrides: KeybindingOverrides,
+  isMac: boolean
+): readonly string[] {
+  const override = overrides[id]
+  if (override !== undefined) return override
+  const def = COMMANDS_BY_ID.get(id)
+  if (!def) return []
+  return isMac ? def.defaultBindings.darwin : def.defaultBindings.other
+}
+
+/** Platform-resolved identity: two spellings that press the same physical modifiers + key get
+ *  the same identity (`Cmd+K` === `Ctrl+K` on non-mac, but not on mac). */
+export function bindingIdentity(binding: string, isMac: boolean): string {
+  const p = parseShortcut(binding)
+  const m = resolvedModifiers(p, isMac)
+  return [
+    m.meta ? 'M' : '',
+    m.ctrl ? 'C' : '',
+    m.alt ? 'A' : '',
+    m.shift ? 'S' : '',
+    ':',
+    p.key ?? '(hold)'
+  ].join('')
+}
+
+/** Commands sharing a bucket compete for the same keys. 'app' and 'canvas' share one global
+ *  keyspace (both dispatch from the window listener; canvas commands are merely inert while
+ *  the board is open); terminal and scm are their own focused surfaces. */
+export function conflictBucket(scope: CommandScope): 'global' | 'terminal' | 'scm' {
+  return scope === 'app' || scope === 'canvas' ? 'global' : scope
+}
+
+export interface KeybindingConflict {
+  /** Canonical string of one colliding spelling (the first seen). */
+  binding: string
+  /** Sorted ids of every command holding the identity. */
+  commandIds: CommandId[]
+}
+
+/** Collisions between effective bindings within a bucket. By default only collisions touching
+ *  at least one overridden command are reported (shipped defaults are asserted conflict-free
+ *  by a registry test using `includeDefaults: true` — user-facing surfaces never nag about
+ *  stock bindings). */
+export function findKeybindingConflicts(
+  overrides: KeybindingOverrides,
+  isMac: boolean,
+  opts: { includeDefaults?: boolean } = {}
+): KeybindingConflict[] {
+  const byBucketAndIdentity = new Map<string, { binding: string; ids: Set<CommandId> }>()
+  for (const def of COMMAND_DEFINITIONS) {
+    for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
+      const key = `${conflictBucket(def.scope)} ${bindingIdentity(binding, isMac)}`
+      const entry = byBucketAndIdentity.get(key) ?? { binding, ids: new Set<CommandId>() }
+      entry.ids.add(def.id)
+      byBucketAndIdentity.set(key, entry)
+    }
+  }
+  const conflicts: KeybindingConflict[] = []
+  for (const { binding, ids } of byBucketAndIdentity.values()) {
+    if (ids.size < 2) continue
+    const commandIds = [...ids].sort()
+    const touchesOverride = commandIds.some((id) => overrides[id] !== undefined)
+    if (opts.includeDefaults || touchesOverride) conflicts.push({ binding, commandIds })
+  }
+  return conflicts
+}
