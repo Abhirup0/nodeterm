@@ -28,6 +28,10 @@ const ROWS = {
   dragMode: {
     title: 'Canvas left-drag',
     keywords: ['pan', 'drag', 'select', 'canvas', 'mouse', 'grab', 'figma', 'miro']
+  },
+  keepAwake: {
+    title: 'Keep awake while agents work',
+    keywords: ['sleep', 'awake', 'power', 'battery', 'suspend', 'run']
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -168,6 +172,19 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               <option value="select">Select (default)</option>
               <option value="pan">Pan the canvas</option>
             </Select>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.keepAwake}>
+        <FieldRow
+          label="Keep awake while agents work"
+          description="Holds off idle sleep while a local agent is running. A closed lid still sleeps the machine."
+          control={
+            <Switch
+              checked={settings.keepAwakeWhileAgentsWork}
+              onChange={(v) => update({ keepAwakeWhileAgentsWork: v })}
+              ariaLabel="Keep awake while agents work"
+            />
           }
         />
       </SearchableRow>
