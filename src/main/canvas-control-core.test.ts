@@ -301,10 +301,18 @@ describe('parseControlRequest', () => {
  * day the real `browser` verb lands, which is exactly when the PR body, the changelog and the
  * Settings copy all have to stop saying "nothing changes for anyone".
  */
-describe('the strict identity bucket is pre-positioned, not live', () => {
-  it('`browser` is not a verb this app has, so the bucket gates nothing today', () => {
+describe('the strict identity bucket now gates a real verb', () => {
+  it('`browser` IS a real verb (PR 7) AND is in the verified-only bucket', () => {
+    // The day the real `browser` verb lands, this assertion FLIPS from "not a verb" to "a real,
+    // strict verb" — which is exactly when the PR body, the changelog and the Settings copy stop
+    // saying "nothing changes for anyone". It requires `--node` and is otherwise validated by the
+    // pure `parseBrowserArgs` in the drive path.
     expect(STRICT_CONTROL_VERBS.has('browser')).toBe(true)
-    expect(parseControlRequest('browser', {})).toEqual({ error: 'Unknown verb: browser' })
+    expect(parseControlRequest('browser', {})).toEqual({ error: 'browser: --node <id> is required' })
+    expect(parseControlRequest('browser', { node: 'browser-1', read: 'title' })).toEqual({
+      verb: 'browser',
+      args: { node: 'browser-1', read: 'title' }
+    })
   })
 
   it('`open-browser` IS a real verb and is deliberately NOT in the bucket', () => {
