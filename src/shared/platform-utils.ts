@@ -14,6 +14,13 @@ export function isMacPlatform(): boolean {
   return /Mac/i.test(navigator.platform || navigator.userAgent)
 }
 
+/** True on Windows (Electron renderer or browser — same `navigator`-based detection as
+ *  `isMacPlatform`, so it is correct in both the desktop app and a Server Edition browser tab). */
+export function isWindowsPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false
+  return /Win/i.test(navigator.platform || navigator.userAgent)
+}
+
 /** Rewrite mac chord notation in a hint string for the current platform. */
 export function hintLabel(text: string, isMac: boolean = isMacPlatform()): string {
   if (isMac) return text

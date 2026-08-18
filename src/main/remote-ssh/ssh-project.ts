@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs'
 import path from 'path'
+import { createHash, randomUUID } from 'crypto'
 import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
@@ -7,7 +8,7 @@ import { getMainWindow, sendToMain } from '../main-window'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
 import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
-import { renameAtomic } from '../../core/fs-atomic'
+import { removeAtomic, renameAtomic } from '../../core/fs-atomic'
 import { findExecutableSync, shellPathNow } from '../../core/exec-path'
 import { isSafeRemoteHome } from '../../core/remote-safety'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
@@ -42,6 +43,7 @@ import { setRemoteSessionEnvWriter } from '../../core/remote-ssh/session-env'
 import { askpassServer } from './ssh-askpass'
 import { appSshAgent } from './ssh-agent'
 import { sessionName } from '../../core/tmux-naming'
+import { remoteAtomicWrite } from '../remote-atomic-write'
 
 interface Runners {
   userDataDir: string
@@ -131,6 +133,29 @@ const PROBE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
 
 /** How many `name (n)` variants a download tries before falling back to a stamped name. */
 const DOWNLOAD_NAME_ATTEMPTS = 50
+
+/** A hidden, bounded scp stage beside the final path, unique beyond process/PID namespaces. */
+function scpPartPath(finalPath: string): string {
+  return path.join(path.dirname(finalPath), `.nodeterm-scp-${randomUUID()}.part`)
+}
+
+/** Remove file-or-directory scp litter with Node's bounded Windows EPERM/EBUSY retry. */
+async function removeScpPart(partPath: string): Promise<void> {
+  await fs
+    .rm(partPath, {
+      recursive: true,
+      force: true,
+      maxRetries: 4,
+      retryDelay: 50
+    })
+    .catch(() => {})
+}
+
+/** Windows aliases terminal dots/spaces, so do not let two remote names bypass one reservation. */
+function localDownloadName(name: string): string {
+  if (process.platform !== 'win32') return name
+  return name.replace(/[. ]+$/, '') || 'download'
+}
 
 /** Cap on how much master stderr we retain (a misconfigured host can spew), enough for the error. */
 const MASTER_STDERR_CAP = 8 * 1024
@@ -265,8 +290,6 @@ function scpBin(): string {
 export class SshProjectManager {
   private conns = new Map<string, Conn>()
   private remoteHooks: RemoteHooks
-  /** Per-manager counter mixed into each upload token so concurrent drops never collide. */
-  private uploadSeq = 0
   /** Projects whose agent-status mirror was actually pushed, gates the disconnect cleanup so a
    *  transient folder-picker browse (never pushed) doesn't pay an extra rm round-trip. */
   private statusPushed = new Set<string>()
@@ -566,13 +589,14 @@ export class SshProjectManager {
         if (remoteHome) {
           const confPath = `${remoteHome}/.nodeterm/tmux.conf`
           try {
-            const dir = `${remoteHome}/.nodeterm`
             // The runner RESOLVES (doesn't throw) on a non-zero remote exit, so the catch below
             // only guards a thrown error. Gate `tmuxConfPath` on the WRITE's exit code: a failed
             // write (mkdir perms, disk full, …) must leave it undefined so `remoteTmuxCommand`
             // never passes `-f <missing-conf>` (which makes tmux refuse to start → terminal dies).
+            // The invocation-owned temp also keeps an older valid config intact if ssh drops.
+            const confWrite = remoteAtomicWrite(confPath)
             const w = await this.r.run(
-              childArgs(conn, controlPath, `mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(confPath)}`),
+              childArgs(conn, controlPath, confWrite.command),
               remoteTmuxConf(50000)
             )
             if (w.code === 0) {
@@ -738,9 +762,11 @@ export class SshProjectManager {
     if (!c) return null
     // `localPath` is a renderer string passed straight to scp as a positional arg. A value starting
     // with `-` (e.g. `-oProxyCommand=…`) would be parsed by scp as an OPTION (argv flag smuggling →
-    // RCE), not a file. A real OS file drop is always an absolute path, so require one here, this
-    // rejects `-`-prefixed, relative, and empty paths and fully closes the flag-smuggling vector.
-    if (!localPath.startsWith('/')) return null
+    // RCE), not a file. A real OS file drop is always absolute, but `/` is not a cross-platform
+    // absolute-path test: drive-letter and UNC drops are valid on Windows. Ask the local host's path
+    // implementation, while retaining the explicit option guard as defence in depth.
+    if (localPath.startsWith('-') || !path.isAbsolute(localPath)) return null
+    let stagedDir: string | undefined
     try {
       let home = c.remoteHome
       if (!home) {
@@ -748,8 +774,14 @@ export class SshProjectManager {
         if (r.code === 0 && isSafeRemoteHome(r.stdout.trim())) home = r.stdout.trim()
       }
       if (!home) return null
-      const token = `${Date.now().toString(36)}${(this.uploadSeq++).toString(36)}`
+      // The upload directory is the staging boundary, so it must be unique across PROCESSES, not
+      // merely calls on this manager. Two app instances can upload the same basename to one host;
+      // the former timestamp + per-instance counter could let both scp processes write one inode.
+      const token = randomUUID()
       const dir = `${home}/.nodeterm/uploads/${token}`
+      // mkdir can partially create parents before returning non-zero; once this invocation has a
+      // unique directory name, its finally block owns the cleanup attempt on every failure path.
+      stagedDir = dir
       const mk = await this.r.run(childArgs(c.conn, c.controlPath, `mkdir -p ${posixQuote(dir)}`))
       if (mk.code !== 0) return null
       // `fileName` is a renderer string: posixQuote blocks shell injection but NOT filesystem
@@ -759,9 +791,23 @@ export class SshProjectManager {
       if (!safe || safe === '.' || safe === '..') return null
       const remotePath = `${dir}/${safe}`
       const up = await this.r.runScp(scpArgs(c.conn, c.controlPath, localPath, remotePath))
-      return up.code === 0 ? remotePath : null
+      if (up.code !== 0) return null
+      // Successful uploads intentionally stay in the managed uploads directory. Only a failed
+      // call owes cleanup of the unique directory it minted.
+      stagedDir = undefined
+      return remotePath
     } catch {
       return null
+    } finally {
+      if (stagedDir) {
+        try {
+          await this.r.run(
+            childArgs(c.conn, c.controlPath, `rm -rf -- ${posixQuote(stagedDir)}`)
+          )
+        } catch {
+          // Best-effort: the failed transfer is already reported as null; cleanup cannot replace it.
+        }
+      }
     }
   }
 
@@ -774,16 +820,23 @@ export class SshProjectManager {
    *    folder the user picked in a native dialog); the renderer only names the REMOTE side, and
    *    that name is basenamed + sanitized (`safeDownloadBasename`) before it is joined. So no
    *    renderer string can steer the write, and `..` can never appear as a component.
-   *  - **Nothing existing is overwritten.** A collision takes the next `name (n)` candidate.
-   *  - **A failed transfer leaves no half-file under the real name.** scp writes to `<name>.part`
-   *    (a `.part` DIRECTORY for `-r`) and it is renamed into place only on exit 0, the same
-   *    write-then-rename discipline `sshWriteArgs` uses remotely. A failure unlinks the remains.
+   *  - **Nothing existing is overwritten.** A collision takes the next `name (n)` candidate. A
+   *    short exclusive lock coordinates that choice across app processes; it is removed in the
+   *    same finally block that releases the unique staging path.
+   *  - **A failed transfer leaves no half-file under the real name.** scp writes to a hidden,
+   *    UUID-owned `.part` (a `.part` DIRECTORY for `-r`) and it is renamed into place only on exit
+   *    0, the same write-then-rename discipline `sshWriteArgs` uses remotely. A failure unlinks
+   *    exactly its own remains. This local rename retries a transient Windows sharing-violation
+   *    error — see src/core/fs-atomic.ts.
    */
   async downloadFile(projectId: string, remotePath: string, destDir: string): Promise<DownloadResult> {
     const c = this.conns.get(projectId)
     if (!c) return { ok: false, error: 'Not connected.' }
-    const name = safeDownloadBasename(remotePath)
-    if (!name) return { ok: false, error: 'That path cannot be downloaded.' }
+    const remoteName = safeDownloadBasename(remotePath)
+    if (!remoteName) return { ok: false, error: 'That path cannot be downloaded.' }
+    const name = localDownloadName(remoteName)
+    let reservation: { finalPath: string; lockPath: string } | undefined
+    let partPath: string | undefined
     try {
       // Ask the REMOTE whether this is a directory rather than trusting the renderer's tree state:
       // it decides `-r`, and the tree can be stale. A failed probe is not evidence of "file" ,
@@ -792,33 +845,100 @@ export class SshProjectManager {
       const probe = await this.r.run(childArgs(c.conn, c.controlPath, `test -d ${quoteRemotePath(remotePath)}`))
       const isDir = probe.code === 0
       await fs.mkdir(destDir, { recursive: true })
-      const finalPath = await this.freeDestPath(destDir, name)
-      const partPath = `${finalPath}.part`
-      await fs.rm(partPath, { recursive: true, force: true }).catch(() => {})
-      const res = await this.r.runScp(scpDownArgs(c.conn, c.controlPath, remotePath, partPath, isDir))
+      reservation = await this.reserveDestPath(destDir, name)
+      partPath = scpPartPath(reservation.finalPath)
+      const res = await this.r.runScp(
+        scpDownArgs(c.conn, c.controlPath, remotePath, partPath, isDir)
+      )
       if (res.code !== 0) {
-        await fs.rm(partPath, { recursive: true, force: true }).catch(() => {})
         return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
       }
-      await renameAtomic(partPath, finalPath)
-      return { ok: true, localPath: finalPath, dir: isDir }
+      await renameAtomic(partPath, reservation.finalPath)
+      return { ok: true, localPath: reservation.finalPath, dir: isDir }
     } catch {
       return { ok: false, error: 'The download could not be completed.' }
+    } finally {
+      if (partPath) await removeScpPart(partPath)
+      if (reservation) await removeAtomic(reservation.lockPath)
     }
   }
 
-  /** First `<dir>/<name>` variant that exists neither as the target nor as a leftover `.part`. */
-  private async freeDestPath(destDir: string, name: string): Promise<string> {
-    for (let attempt = 1; attempt <= DOWNLOAD_NAME_ATTEMPTS; attempt++) {
-      const candidate = path.join(destDir, candidateName(name, attempt))
-      const taken = await fs
-        .access(candidate)
-        .then(() => true)
-        .catch(() => false)
-      if (!taken) return candidate
+  /**
+   * Reserve the first free `<dir>/<name>` variant across app processes.
+   *
+   * A read-only `lstat(candidate)` is not a reservation: two downloads can both observe absence,
+   * choose one final path, and then atomically overwrite each other. The deterministic lock name
+   * is opened with `wx`, so exactly one cooperating process owns each candidate. A crash can leave
+   * a tiny lock behind; that safely advances the next download to `name (n)` instead of risking an
+   * overwrite. The hash keeps the lock filename bounded even for a maximum-length remote basename.
+   */
+  private async reserveDestPath(
+    destDir: string,
+    name: string
+  ): Promise<{ finalPath: string; lockPath: string }> {
+    const tryCandidate = async (
+      finalPath: string
+    ): Promise<{ finalPath: string; lockPath: string } | null> => {
+      // The lock itself lives inside destDir, so its key only needs the candidate basename. Using
+      // the full spelling lets two aliases of the same physical directory (junction/symlink/drive
+      // alias) create different locks beside the same target and race. Basename makes them
+      // converge without a realpath check that can itself go stale.
+      const candidate = path.basename(finalPath).normalize('NFC')
+      const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin'
+      const normalized = caseInsensitive ? candidate.toLowerCase() : candidate
+      const key = createHash('sha256').update(normalized).digest('hex').slice(0, 20)
+      const lockPath = path.join(destDir, `.nodeterm-download-${key}.lock`)
+      let ownsLock = false
+      try {
+        const handle = await fs.open(lockPath, 'wx', 0o600)
+        ownsLock = true
+        await handle.close()
+        let taken = true
+        try {
+          // lstat asks whether the DIRECTORY ENTRY exists. access follows a symlink, so a dangling
+          // link reports ENOENT and was incorrectly treated as a free name, then replaced.
+          await fs.lstat(finalPath)
+        } catch (error) {
+          const code =
+            typeof error === 'object' && error && 'code' in error
+              ? String((error as { code: unknown }).code)
+              : ''
+          // A failed read is not evidence of absence. Only lstat's ENOENT proves the directory
+          // entry is free; EACCES/EIO and unknown failures must refuse instead of authorizing an
+          // overwrite. In particular, lstat succeeds for a dangling symlink while access did not.
+          if (code === 'ENOENT') taken = false
+          else throw error
+        }
+        if (taken) {
+          await removeAtomic(lockPath)
+          return null
+        }
+        return { finalPath, lockPath }
+      } catch (error) {
+        if (ownsLock) await removeAtomic(lockPath)
+        const code =
+          typeof error === 'object' && error && 'code' in error
+            ? String((error as { code: unknown }).code)
+            : ''
+        if (!ownsLock && code === 'EEXIST') return null
+        throw error
+      }
     }
-    // Every readable variant is taken: fall back to a stamped name rather than overwriting one.
-    return path.join(destDir, candidateName(name, Date.now()))
+
+    for (let attempt = 1; attempt <= DOWNLOAD_NAME_ATTEMPTS; attempt++) {
+      const reservation = await tryCandidate(path.join(destDir, candidateName(name, attempt)))
+      if (reservation) return reservation
+    }
+    // Every readable variant is taken: try stamped names rather than overwriting one. Still
+    // bounded, so a broken/unwritable directory fails honestly rather than looping forever.
+    const stamp = Date.now()
+    for (let offset = 0; offset < DOWNLOAD_NAME_ATTEMPTS; offset++) {
+      const reservation = await tryCandidate(
+        path.join(destDir, candidateName(name, stamp + offset))
+      )
+      if (reservation) return reservation
+    }
+    throw new Error('Could not reserve a download destination.')
   }
 
   /**
@@ -848,24 +968,37 @@ export class SshProjectManager {
         childArgs(c.conn, c.controlPath, `wc -c < ${quoteRemotePath(remotePath)}`)
       )
       const remoteSize = sizeProbe.code === 0 ? parseInt(sizeProbe.stdout.trim(), 10) : NaN
-      const cachedSize = await fs
-        .stat(dest)
-        .then((s) => s.size)
-        .catch(() => -1)
+      let cachedSize = -1
+      try {
+        cachedSize = (await fs.stat(dest)).size
+      } catch (error) {
+        const code =
+          typeof error === 'object' && error && 'code' in error
+            ? String((error as { code: unknown }).code)
+            : ''
+        // Only ENOENT means there is no cached file. An unreadable cache entry must not be
+        // treated as permission to replace it with a fresh transfer.
+        if (code !== 'ENOENT') throw error
+      }
       if (Number.isFinite(remoteSize) && remoteSize >= 0 && cachedSize === remoteSize) {
         return { ok: true, localPath: dest }
       }
       await fs.mkdir(cacheDir, { recursive: true })
       // Same write-then-rename discipline as downloadFile: never leave a half-copied file
-      // under the final name, nt-media would happily serve a truncated video.
-      const partPath = `${dest}.part`
-      await fs.rm(partPath, { force: true }).catch(() => {})
-      const res = await this.r.runScp(scpDownArgs(c.conn, c.controlPath, remotePath, partPath, false))
-      if (res.code !== 0) {
-        await fs.rm(partPath, { force: true }).catch(() => {})
-        return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
+      // under the final name, nt-media would happily serve a truncated video. This local
+      // rename retries a transient Windows sharing-violation error — see src/core/fs-atomic.ts.
+      const partPath = scpPartPath(dest)
+      try {
+        const res = await this.r.runScp(
+          scpDownArgs(c.conn, c.controlPath, remotePath, partPath, false)
+        )
+        if (res.code !== 0) {
+          return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
+        }
+        await renameAtomic(partPath, dest)
+      } finally {
+        await removeScpPart(partPath)
       }
-      await renameAtomic(partPath, dest)
       void this.pruneMediaCache(cacheDir, path.basename(dest))
       return { ok: true, localPath: dest }
     } catch {
@@ -1141,15 +1274,13 @@ export class SshProjectManager {
     const c = this.conns.get(projectId)
     if (!c) return
     const file = this.statusFilePath(projectId, c)
-    const q = quoteRemotePath(file)
-    const qTmp = quoteRemotePath(`${file}.tmp`)
     this.statusPushed.add(projectId)
     await this.r
       .run(
         childArgs(
           c.conn,
           c.controlPath,
-          `umask 077; mkdir -p ${quoteRemotePath(file.slice(0, file.lastIndexOf('/')))} && cat > ${qTmp} && mv -f ${qTmp} ${q}`
+          remoteAtomicWrite(file, { restrictPermissions: true }).command
         ),
         json
       )
@@ -1246,15 +1377,12 @@ export class SshProjectManager {
     if (decision !== 'allow' && decision !== 'deny') return false
     const dir = c.remoteHome ? `${c.remoteHome}/.nodeterm/pending` : '~/.nodeterm/pending'
     const file = `${dir}/${pendingId}.answer`
-    const q = quoteRemotePath(file)
-    const qTmp = quoteRemotePath(`${file}.tmp`)
-    const qDir = quoteRemotePath(dir)
     const { code } = await this.r
       .run(
         childArgs(
           c.conn,
           c.controlPath,
-          `umask 077; mkdir -p ${qDir} && cat > ${qTmp} && mv -f ${qTmp} ${q}`
+          remoteAtomicWrite(file, { restrictPermissions: true }).command
         ),
         decision
       )
