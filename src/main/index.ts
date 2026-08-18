@@ -16,6 +16,7 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { allowGuestNavigation } from './webview-nav'
 import { BrowserControlLedger } from './browser-control-ledger'
+import { BrowserLeaseManager } from './browser-lease'
 import { registerFsHandlers } from '../core/fs-handlers'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
@@ -2326,6 +2327,12 @@ app.whenReady().then(async () => {
   // Who owns which agent-opened browser node, THIS app run only. In-memory, never persisted, never
   // read from project.json (Task 4.3/4.4). Consumed by PR 5 (attach/lease), PR 6 (indicator/Stop).
   const browserLedger = new BrowserControlLedger()
+  // Holds the debugger lease per driven browser node. Built and unit-tested in PR 5 but INERT here:
+  // no `browser` verb exists until PR 7, so nothing attaches a guest to it yet. PR 7 wires each
+  // guest's `webContents.debugger` into a BrowserSession, starts the idle sweep, and releases on
+  // owner/project/app teardown. Owned here so that wiring has one home. See browser-lease.ts.
+  const browserLeases = new BrowserLeaseManager()
+  void browserLeases
   ipcMain.on(
     IPC.agentControlResult,
     (
