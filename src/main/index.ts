@@ -68,6 +68,8 @@ import { createPushNotify, createLiveUpdatePush } from '../core/push-notify'
 import { createGrantsAccessor } from '../core/push-grants'
 import { createAckSweeper } from '../core/ack-sweep'
 import { createSessionReaper } from '../core/session-budget'
+import { initKeepAwake } from './keep-awake'
+import type { KeepAwakeTracker } from '../core/keep-awake'
 import { getDeviceId } from '../core/device-id'
 import { initRemoteStatusPush } from './remote-ssh/remote-status-push'
 import { initCanvasSync } from '../core/canvas-sync'
@@ -292,6 +294,9 @@ let activeRemote: { cwd: string; ref: GitRemoteRef } | null = null
 // macOS close→dock-reopen cycle and silently swallows every send.
 // True from the first before-quit on: lets window close-events through (see hide-on-close).
 let quitting = false
+
+// Keep-awake tracker (created in whenReady next to the notch HUD, disposed in before-quit).
+let keepAwake: KeepAwakeTracker | undefined
 
 // Browser <webview> guest webContents id → its browser node id (for new-window capture).
 const browserGuests = new Map<number, string>()
@@ -891,6 +896,17 @@ app.whenReady().then(async () => {
   if (win.isVisible()) startNotchHud()
   else win.once('show', startNotchHud)
   settingsStore.onChange(() => applyNotchHudSettings(notchTunables()))
+  // Keep awake while agents work (docs/superpowers/specs/2026-08-18-keep-awake-design.md): hold an
+  // idle-sleep power assertion while a LOCAL agent node is working, released the moment the last
+  // one stops. Folds the same mirror edges the notch does; the stale sweep's synthetic end
+  // (WORKING_STALE_MS) is the leak backstop for exits that never send their own edge.
+  keepAwake = initKeepAwake({
+    enabled: () => settingsStore.get().keepAwakeWhileAgentsWork,
+    // SSH-homed nodes work on the remote host — they must not pin THIS machine awake.
+    isRemoteNode: (nodeId) => workspaceStore.sshProjectIdForNode(nodeId) !== undefined
+  })
+  onNodeStateChange((c) => keepAwake?.onChange(c))
+  settingsStore.onChange(() => keepAwake?.refresh())
   // Advertise launch settings to the mobile companion through the mirror. The provider is
   // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra
   // plumbing. Caps arrive async: re-flush once the memoized probe answers.
@@ -1953,6 +1969,8 @@ let quitFlushed = false
 app.on('before-quit', (e) => {
   quitting = true // from here on, window close-events must NOT be turned into hide
   destroyNotchHud()
+  // Electron releases power assertions at exit anyway; disposing keeps the hold/release log honest.
+  keepAwake?.dispose()
   workspaceWatcher.dispose()
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.
