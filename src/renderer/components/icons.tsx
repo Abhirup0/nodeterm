@@ -85,6 +85,17 @@ export const IconColor = () => (
   </svg>
 )
 
+/** "Set icon" — a face, for the emoji-or-picture the row actually sets. Deliberately unlike
+ *  IconColor (a palette of dots), which sits directly above it in the same menu. */
+export const IconSmiley = () => (
+  <svg {...S}>
+    <circle cx="12" cy="12" r="8.5" />
+    <circle cx="9.2" cy="10" r="1.1" fill="currentColor" stroke="none" />
+    <circle cx="14.8" cy="10" r="1.1" fill="currentColor" stroke="none" />
+    <path d="M8.4 14.2a4.4 4.4 0 0 0 7.2 0" />
+  </svg>
+)
+
 export const IconGrid = () => (
   <svg {...S}>
     <path d="M4 9h16M4 15h16M9 4v16M15 4v16" />

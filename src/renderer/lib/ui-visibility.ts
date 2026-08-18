@@ -22,6 +22,7 @@ export const HIDEABLE_MENU_ITEMS: readonly HideableRow[] = [
   { id: 'group', label: 'Group node / Group selection' },
   { id: 'remove-from-group', label: 'Remove from group' },
   { id: 'colors', label: 'Colors' },
+  { id: 'icon', label: 'Set icon' },
   { id: 'duplicate', label: 'Duplicate' },
   { id: 'snap-zone', label: 'Snap to zone' },
   { id: 'collapse', label: 'Collapse / Expand' },

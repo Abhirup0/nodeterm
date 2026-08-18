@@ -11750,3 +11750,126 @@ body.focus-mode .dock:hover {
   color: var(--muted);
   font-size: 13px;
 }
+
+/* ── Node icons (emoji or picture) ─────────────────────────────────────────────────────────
+   One shared box for every surface that draws a node's icon — canvas header, kanban card, card
+   modal, sessions sidebar — so the same session reads the same in all four. Sized by the caller
+   (inline width/height) because a 13px sidebar row and a 16px modal header want different boxes;
+   everything else about how it draws is here.
+
+   `line-height: 1` matters more than it looks: an emoji inherits the surrounding line box, and a
+   header row that is exactly its own text height grows by a couple of px when one is inserted —
+   which nudges every chip beside it. */
+.node-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  line-height: 1;
+  overflow: hidden;
+  /* Emoji fonts differ in how much of the em they fill; centering the glyph in a fixed box keeps
+     a 🚀 and a 🟢 optically the same size rather than the same font-size. */
+  text-align: center;
+}
+
+.node-icon img {
+  width: 100%;
+  height: 100%;
+  /* `contain`, not `cover`: an icon the user picked is usually a logo, and cropping a logo to a
+     square is the one thing that makes it unrecognizable at 14px. */
+  object-fit: contain;
+  border-radius: 3px;
+  display: block;
+}
+
+/* The canvas node header's icon is a button (click re-opens the picker) but must not look like
+   one — it sits between the color swatch and the title, which are both flat. */
+.term-node__icon {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.95;
+}
+.term-node__icon:hover {
+  opacity: 1;
+}
+
+.kanban-card__row > .node-icon.kanban-card__icon {
+  margin-top: 4px; /* optically centers on the first title line, like the color dot beside it */
+}
+
+/* The card modal always offers the action, so its slot is present even with no icon set — muted
+   until it has one, so an unset icon reads as an affordance rather than as a missing image. */
+.kanban-modal__icon {
+  background: none;
+  border: none;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--muted);
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+.kanban-modal__icon:hover {
+  background: rgba(var(--tint-rgb), 0.1);
+  color: var(--text);
+}
+.kanban-modal__icon--empty {
+  opacity: 0.5;
+}
+.kanban-modal__icon--empty:hover {
+  opacity: 1;
+}
+
+/* ── The icon picker dialog ───────────────────────────────────────────────────────────────── */
+.node-icon-dialog {
+  min-width: 340px;
+}
+
+.node-icon-dialog__grid {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 2px;
+  margin: 10px 0 4px;
+}
+
+.node-icon-dialog__swatch {
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 0;
+  font-size: 18px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.node-icon-dialog__swatch:hover {
+  background: rgba(var(--tint-rgb), 0.12);
+}
+.node-icon-dialog__swatch.is-current {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.node-icon-dialog__row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.node-icon-dialog__input {
+  flex: 1;
+  min-width: 0;
+}
+
+.node-icon-dialog__error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--danger);
+}

@@ -106,6 +106,7 @@ import {
   IconLock,
   IconMarkdown,
   IconReload,
+  IconSmiley,
   IconPower,
   IconNote,
   IconPhone,
@@ -385,6 +386,9 @@ import { promptFilePathError } from '@shared/agents/launch'
 import { parseTeamSpec } from '../lib/teamSpec'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
+import { nodeIconDialog } from '../components/NodeIconPicker'
+import { applyIconChoice } from '../lib/nodeIconChoice'
+import type { NodeIcon } from '@shared/node-icon'
 import { branchClaudeSession } from '../lib/claudeBranch'
 import {
   useSession,
@@ -2091,6 +2095,7 @@ export function Canvas() {
               title: n.data.title ?? n.id,
               color: n.data.color ?? '#888',
               agentId: n.data.agentId,
+              icon: n.data.icon as NodeIcon | undefined,
               cwd: n.data.cwd,
               ssh: n.data.ssh,
               parentId: n.parentId
@@ -6193,6 +6198,35 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  /** Write a node's icon (`undefined` clears it). The single funnel for every surface that sets
+   *  one — the node menu, the node header and the kanban card modal — so the canvas is marked
+   *  dirty exactly once per change and in one place. */
+  const setNodeIcon = useCallback(
+    (nodeId: string, icon: NodeIcon | undefined) => {
+      setNodes((ns) => ns.map((n) => (n.id === nodeId ? { ...n, data: { ...n.data, icon } } : n)))
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+
+  /**
+   * Open the icon picker for ONE node and apply the answer. Single-target on purpose: an icon is
+   * how you tell two sessions apart, so setting the same one across a multi-selection is the
+   * opposite of what the feature is for — the menu row is offered only for a single node.
+   */
+  const pickNodeIcon = useCallback(
+    (nodeId: string) => {
+      const node = nodesRef.current.find((n) => n.id === nodeId)
+      if (!node) return
+      void nodeIconDialog({
+        nodeId,
+        title: (node.data.title as string) ?? '',
+        icon: node.data.icon as NodeIcon | undefined
+      }).then((choice) => applyIconChoice(choice, (icon) => setNodeIcon(nodeId, icon)))
+    },
+    [setNodeIcon]
+  )
+
   const alignToGrid = useCallback(
     (ids: string[]) => {
       const g = useSettings.getState().settings.gridSize || GRID
@@ -7216,6 +7250,23 @@ export function Canvas() {
       ...(isHidden('colors', hidden)
         ? []
         : ([{ type: 'colors', onPick: (c) => setNodesColor(ids, c) }] as MenuItem[])),
+      // Single target, and only a SESSION node: an icon is how you tell two sessions apart, so
+      // setting one across a multi-selection is the opposite of the point — and offering it on a
+      // kind that draws no icon (an editor, a diff, a group frame) would be a row that persists a
+      // value nothing ever shows, which is worse than no row at all.
+      ...(ids.length === 1 &&
+      !isHidden('icon', hidden) &&
+      nodesRef.current.find((n) => n.id === ids[0])?.type === 'terminal'
+        ? ([
+            {
+              label: nodesRef.current.find((n) => n.id === ids[0])?.data.icon
+                ? 'Change icon…'
+                : 'Set icon…',
+              icon: <IconSmiley />,
+              onClick: () => pickNodeIcon(ids[0])
+            }
+          ] as MenuItem[])
+        : []),
       { type: 'separator' },
       ...(isHidden('duplicate', hidden)
         ? []
@@ -12162,6 +12213,7 @@ export function Canvas() {
           onDeleteNode={deleteNodeFromKanban}
           onModalNodeChange={setKanbanModalNode}
           onBrowserNav={browserNavFromKanban}
+          onSetIcon={setNodeIcon}
         />
       )}
       <UpdateCard />

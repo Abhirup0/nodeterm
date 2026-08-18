@@ -79,6 +79,7 @@ function partitionFromModal(sessionPartition: string | undefined): string | null
         onOpenCanvas={vi.fn()}
         onRename={vi.fn()}
         onEditSticky={vi.fn()}
+        onSetIcon={vi.fn()}
         onBrowserNav={vi.fn()}
       />
     )

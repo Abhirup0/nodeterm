@@ -1,4 +1,5 @@
 import type { SshConnection } from '@shared/ssh'
+import type { NodeIcon } from '@shared/node-icon'
 import { NODE_COLORS, type CanvasNode } from '../state/workspace'
 import type { KanbanSession } from '../components/kanban/KanbanView'
 
@@ -44,6 +45,7 @@ export function toKanbanSession(n: CanvasNode): KanbanSession | null {
     color: (n.data.color as string) ?? NODE_COLORS[0],
     kind: 'terminal',
     agentId: n.data.agentId as string | undefined,
+    icon: n.data.icon as NodeIcon | undefined,
     // What the card modal's co-attach terminal needs to join THIS node's session the same way the
     // canvas TerminalNode does.
     spawn: {

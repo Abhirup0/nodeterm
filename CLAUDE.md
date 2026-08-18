@@ -171,7 +171,8 @@ Fire-time `TriggerArmStore.isArmed` re-ask everywhere; every rule test-pinned. T
 machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
 reads as disarmed until armed on this machine). A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
-initialCommand, filePath, diffStaged`, `agentId` (which agent CLI a terminal node runs —
+initialCommand, filePath, diffStaged`, `icon` (a user-chosen emoji or picture — see **Node icons**
+below), `agentId` (which agent CLI a terminal node runs —
 persisted), and `accountId` (which managed Claude account a terminal node runs under — immutable,
 resolved at creation, persisted; see **Managed Claude accounts**). `nodeStatesToFlow` defaults a
 missing `kind` to `terminal` for backward compat and migrates the legacy `tags:['claude']` marker
@@ -1988,6 +1989,56 @@ disappearing" rather than as an occasional cull. The `vm_stat` reader is what ma
 again; the grace window was never the thing that was wrong.
 
 
+## Node icons (emoji or picture)
+
+A node may carry `data.icon` (`NodeIcon` in `@shared/node-icon`): `{type:'emoji', value}` or
+`{type:'image', path}`. Absent = the node draws exactly as it did before the feature, which is the
+degrade every failure path falls back to. Set from the node right-click menu ("Set icon…", hideable
+like Colors — id `icon`), from the icon itself in the terminal node header, and from the kanban card
+modal's header slot; drawn by the one `NodeIconView` on all four surfaces that list a node (canvas
+header, kanban card, card modal, sessions sidebar row), because a session seen in four places must
+not look like four sessions. **Terminal (session) nodes only in v1** — the menu row is gated on the
+kind, deliberately: offering it on an editor or a group frame would persist a value nothing draws,
+which is the "looks like it worked" failure this file warns about elsewhere. Extending it to sticky
+or browser nodes means adding the draw and the set together, in one change.
+
+- **`.nodeterm/project.json` is hostile input, so the icon is validated at BOTH serializer seams.**
+  `normalizeNodeIcon` runs in `nodeStatesToFlow` (a cloned file becoming live state) *and* in
+  `flowToNodeStates` (live state becoming the next reader's file — live node data is reachable by a
+  peer canvas mutation, and whatever we write is what the next machine trusts). One-sided validation
+  passes every round-trip test while leaving the other direction open; both seams are mutation-pinned
+  in `workspace.test.ts`.
+- **An emoji is ONE grapheme** (`Intl.Segmenter`, with a UTF-16 cap as the fallback, never as the
+  primary rule — slicing units cuts a ZWJ sequence into a fragment). Uncapped, a shared file could
+  put a 40 kB "emoji" into every header, card and sidebar row.
+- **An image path must LOOK like an image** (extension → MIME). That gate is what stops a hand-edited
+  project file from aiming `fs.readBinary` at `~/.ssh/id_rsa`. It is not a full jail — the path can
+  still name any `*.png` on the machine, exactly as an editor node's `filePath` always could — but
+  the bytes only ever become an `<img>` under a `'self'` CSP with no network, so the reachable
+  outcome is "an icon fails to draw". A `./` path may not traverse (same rule as
+  `isSafeQuickOpenRelPath`).
+- **The bytes are COPIED, not referenced.** The picker reads the chosen file and writes it through
+  `files.saveCanvasImage` — the same seam canvas image nodes use — so it lands in the project's
+  git-shared `.nodeterm/images/`. A path inside the project cwd is then stored `./`-relative
+  (`portableIconPath`) and resolved on read (`resolveIconPath`), which is the convention
+  `toPortableNodes` already set for node cwds. **This is the one place that convention is applied to
+  a `filePath`-like field**: canvas image nodes still store theirs absolutely, so their file travels
+  with the repo while the node naming it does not — an existing gap, not one this introduced.
+  A cwd-less canvas, an SSH project (its cwd is on the host; the image is written app-locally) and
+  the app-local fallback all keep an absolute path and simply do not travel. Not an error.
+- **A relay tab is refused** (`canvasImportRefusal`, the same message and the same reason as canvas
+  image import): the write is this machine's preload while the read is the peer's core, so the node
+  would name a file only this machine has. Reads otherwise go through the PROJECT's session api, not
+  `window.nodeTerminal` — which is what makes a peer-authored `./` icon resolve on the peer.
+- Image reads are cached per `(projectId, absPath)` in `lib/nodeIconImage.ts`, because four surfaces
+  mount independently and a thirty-card board would otherwise re-read the same bytes thirty times per
+  open. Caching by path is safe: `saveCanvasImage` creates exclusively, so re-picking yields
+  `logo (2).png` rather than overwriting.
+- **Surfaces.** Desktop: full. **Server Edition**: full — every leg is already core (`fs.readBinary`,
+  `files.saveCanvasImage`) or has a real browser implementation (`dialog.selectFile` → the web
+  picker), so no new IPC was added and nothing is stubbed. **Mobile**: N/A for v1 — *nodeterm mobile*
+  attaches to tmux sessions over the transport protocol and carries no per-node icon concept;
+  surfacing one means extending that protocol (follow-up in the iOS repo).
 ## Keybindings (registry, overrides, dispatch)
 
 Every user-facing chord is a registry command, and the whole engine is **one module**:

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { isTopDialog, nextDialogId, popDialog, pushDialog } from '../dialog-stack'
-import { IconChat, IconMic, IconSearch } from '../icons'
+import { IconChat, IconMic, IconSearch, IconSmiley } from '../icons'
+import { NodeIconView } from '../NodeIcon'
+import { nodeIconDialog } from '../NodeIconPicker'
+import { applyIconChoice } from '../../lib/nodeIconChoice'
+import type { NodeIcon } from '@shared/node-icon'
 import { ContextMeter } from '../ContextMeter'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useCardPanel } from '../../state/cardPanel'
@@ -45,12 +49,14 @@ interface CardModalProps {
   onEditSticky: (text: string) => void
   /** Browser navigation write-through (only called for kind 'browser'). */
   onBrowserNav: (patch: { url?: string; title?: string }) => void
+  /** Icon write-through. `undefined` clears it — the dialog's cancel never reaches here. */
+  onSetIcon: (icon: NodeIcon | undefined) => void
 }
 
 /** Trello-style card popup over the board. Scrim click / Esc close it; the board (and the
  *  canvas under it) stay mounted. Terminal cards carry the node header's actions too:
  *  search / dictate / AI-name / markdown view (the node itself is hidden under the board). */
-export function CardModal({ session, columnTitle, board, onChangeBoard, onClose, onOpenCanvas, onRename, onEditSticky, onBrowserNav }: CardModalProps) {
+export function CardModal({ session, columnTitle, board, onChangeBoard, onClose, onOpenCanvas, onRename, onEditSticky, onBrowserNav, onSetIcon }: CardModalProps) {
   const { api } = useSession()
   const idRef = useRef<string>()
   if (!idRef.current) idRef.current = nextDialogId()
@@ -230,6 +236,19 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
           }}
         >
           <span className="kanban-card__nodedot" style={{ background: session.color }} />
+          <button
+            className={`kanban-modal__icon${session.icon ? '' : ' kanban-modal__icon--empty'}`}
+            title={session.icon ? 'Change icon' : 'Set icon'}
+            onClick={() =>
+              void nodeIconDialog({
+                nodeId: session.id,
+                title: session.title,
+                icon: session.icon
+              }).then((choice) => applyIconChoice(choice, onSetIcon))
+            }
+          >
+            {session.icon ? <NodeIconView icon={session.icon} size={16} /> : <IconSmiley />}
+          </button>
           {editingTitle ? (
             <input
               className="kanban-modal__rename"

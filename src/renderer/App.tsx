@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import { Canvas } from './canvas/Canvas'
 import { PromptDialogHost } from './components/promptDialog'
+import { NodeIconDialogHost } from './components/NodeIconPicker'
 import { SessionProvider } from './session/session'
 import { localSession } from './session/localSession'
 import { useSettings } from './state/settings'
@@ -75,6 +76,9 @@ export default function App() {
         <Canvas />
         {/* In-app window.prompt replacement (Electron has no prompt); driven by promptDialog(). */}
         <PromptDialogHost />
+        {/* The node-icon picker, opened from the node menu, a node header and the kanban card
+            modal — one dialog for all three, driven by nodeIconDialog(). */}
+        <NodeIconDialogHost />
       </ReactFlowProvider>
     </SessionProvider>
   )

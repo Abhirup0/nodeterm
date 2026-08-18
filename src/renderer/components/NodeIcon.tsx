@@ -1,0 +1,52 @@
+/**
+ * Drawing a node's icon. One component, used by every surface that lists a node — the canvas
+ * header, the kanban card, the card modal and the sessions sidebar — so an icon cannot look like
+ * four different things depending on where you happen to be looking at the session.
+ *
+ * Renders NOTHING (not a placeholder, not an empty box) when the node has no icon, when the icon
+ * is an image that is still loading, and when that image could not be read. All three are the same
+ * thing from the user's side: the node looks exactly as it did before the feature. An icon is
+ * decoration — it must never occupy space it cannot fill, and it must never announce its own
+ * failure in a header that is already carrying six chips.
+ */
+import type { NodeIcon } from '@shared/node-icon'
+import { useNodeIconSrc } from '../lib/nodeIconImage'
+
+export interface NodeIconViewProps {
+  icon?: NodeIcon
+  /** Rendered box in px. The emoji's font-size is derived from it so both forms agree optically. */
+  size?: number
+  /** Extra class for surface-specific spacing (the card and the header sit differently). */
+  className?: string
+  /** The node's project, for surfaces that list nodes across projects. See `useNodeIconSrc`. */
+  projectId?: string
+}
+
+export function NodeIconView({
+  icon,
+  size = 14,
+  className,
+  projectId
+}: NodeIconViewProps): React.JSX.Element | null {
+  // Called unconditionally (hook rules) — it answers null for an emoji icon and for no icon.
+  const src = useNodeIconSrc(icon, projectId)
+  if (!icon) return null
+  const cls = `node-icon${className ? ` ${className}` : ''}`
+  if (icon.type === 'emoji') {
+    return (
+      <span
+        className={cls}
+        style={{ width: size, height: size, fontSize: Math.round(size * 0.92) }}
+        aria-hidden
+      >
+        {icon.value}
+      </span>
+    )
+  }
+  if (!src) return null
+  return (
+    <span className={cls} style={{ width: size, height: size }} aria-hidden>
+      <img src={src} alt="" draggable={false} />
+    </span>
+  )
+}
