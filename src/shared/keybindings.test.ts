@@ -43,6 +43,66 @@ describe('registry invariants', () => {
     expect(COMMANDS_BY_ID.get('canvas.fitAll')?.defaultBindings.darwin).toEqual([])
   })
 
+  it('pins the WHOLE table — every row PR 2 will dispatch on, in source order', () => {
+    // Source order is contractual (first match wins in the resolver), so the array order is
+    // asserted too. A dropped flag — allowInTerminal above all — reds this test.
+    const table = COMMAND_DEFINITIONS.map((d) => ({
+      id: d.id,
+      title: d.title,
+      group: d.group,
+      scope: d.scope,
+      darwin: d.defaultBindings.darwin,
+      other: d.defaultBindings.other,
+      allowWhileTyping: d.allowWhileTyping,
+      allowInTerminal: d.allowInTerminal,
+      allowBareKey: d.allowBareKey,
+      allowHoldChord: d.allowHoldChord
+    }))
+    expect(table).toEqual([
+      { id: 'app.commandPalette', title: 'Command palette', group: 'General', scope: 'app',
+        darwin: ['Cmd+K'], other: ['Cmd+K'], allowInTerminal: true },
+      { id: 'app.settings', title: 'Open settings', group: 'General', scope: 'app',
+        darwin: ['Cmd+Comma'], other: ['Cmd+Comma'], allowInTerminal: true },
+      { id: 'app.shortcutsPanel', title: 'Keyboard shortcuts panel', group: 'General', scope: 'app',
+        darwin: ['Cmd+Slash'], other: ['Cmd+Slash'], allowInTerminal: true },
+      { id: 'view.kanbanToggle', title: 'Toggle kanban board', group: 'General', scope: 'app',
+        darwin: ['Cmd+Shift+B'], other: ['Cmd+Shift+B'], allowInTerminal: true },
+      { id: 'panel.explorer', title: 'Toggle explorer panel', group: 'General', scope: 'app',
+        darwin: ['Cmd+Shift+E'], other: ['Cmd+Shift+E'], allowInTerminal: true },
+      { id: 'panel.sourceControl', title: 'Toggle source control panel', group: 'General',
+        scope: 'app', darwin: ['Cmd+Shift+G'], other: ['Cmd+Shift+G'], allowInTerminal: true },
+      { id: 'panel.sessions', title: 'Pin sessions sidebar', group: 'General', scope: 'app',
+        darwin: ['Cmd+Shift+L'], other: ['Cmd+Shift+L'], allowInTerminal: true },
+      { id: 'canvas.undo', title: 'Undo', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+Z'], other: ['Cmd+Z'] },
+      { id: 'canvas.redo', title: 'Redo', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+Shift+Z'], other: ['Cmd+Shift+Z', 'Cmd+Y'] },
+      { id: 'canvas.deleteSelection', title: 'Delete selection', group: 'Canvas', scope: 'canvas',
+        darwin: ['Delete', 'Backspace'], other: ['Delete', 'Backspace'], allowBareKey: true },
+      { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'canvas.groupSelection', title: 'Group selection', group: 'Canvas', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newTerminal', title: 'New terminal node', group: 'Nodes', scope: 'canvas',
+        darwin: ['Cmd+T'], other: ['Cmd+T'] },
+      { id: 'node.newAgent', title: 'New agent node', group: 'Nodes', scope: 'canvas',
+        darwin: ['Cmd+Shift+C'], other: ['Cmd+Shift+C'] },
+      { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
+        darwin: ['Cmd+W'], other: ['Cmd+W'], allowInTerminal: true, allowWhileTyping: true },
+      { id: 'node.toggleMarkdown', title: 'Toggle markdown view', group: 'Nodes', scope: 'app',
+        darwin: ['Cmd+M'], other: ['Cmd+M'], allowInTerminal: true, allowWhileTyping: true },
+      { id: 'terminal.find', title: 'Find in terminal', group: 'Terminal', scope: 'terminal',
+        darwin: ['Cmd+F'], other: ['Cmd+F'] },
+      { id: 'terminal.copySelection', title: 'Copy terminal selection', group: 'Terminal',
+        scope: 'terminal', darwin: ['Cmd+C'], other: ['Cmd+Shift+C', 'Ctrl+Insert'] },
+      { id: 'scm.commit', title: 'Commit', group: 'Source Control', scope: 'scm',
+        darwin: ['Cmd+Enter'], other: ['Cmd+Enter'], allowWhileTyping: true },
+      { id: 'speech.dictation', title: 'Dictate', group: 'Speech', scope: 'app',
+        darwin: ['Cmd+Alt'], other: ['Cmd+Alt'],
+        allowHoldChord: true, allowInTerminal: true, allowWhileTyping: true }
+    ])
+  })
+
   it('isCommandId accepts known ids and rejects unknowns', () => {
     expect(isCommandId('node.newTerminal')).toBe(true)
     expect(isCommandId('node.selfDestruct')).toBe(false)
@@ -164,6 +224,12 @@ describe('findKeybindingConflicts', () => {
     // terminal.find is Cmd+F in the terminal bucket; an app-bucket Cmd+F is legal.
     expect(findKeybindingConflicts({ 'canvas.fitAll': ['Cmd+F'] }, true)).toEqual([])
   })
+  it('the scm bucket is its own keyspace, not part of global', () => {
+    // scm.commit holds Cmd+Enter; a canvas (global-bucket) override on the same chord is legal,
+    // because Commit dispatches from the focused composer. Reds if conflictBucket folds 'scm'
+    // into 'global'.
+    expect(findKeybindingConflicts({ 'canvas.fitAll': ['Cmd+Enter'] }, true)).toEqual([])
+  })
   it('two disabled commands never conflict', () => {
     expect(
       findKeybindingConflicts({ 'canvas.fitAll': [], 'canvas.groupSelection': [] }, true)
@@ -215,6 +281,22 @@ describe('sanitizeKeybindingOverrides', () => {
     const r = sanitizeKeybindingOverrides({ 'canvas.fitAll': ['Cmd+K'] }, true)
     expect(r.overrides).toEqual({})
     expect(r.warnings.some((w) => w.includes('Command palette'))).toBe(true)
+  })
+  it('keeps stripping when a REVERTED default uncovers a second conflict', () => {
+    // Pass 1: Cmd+P collides between the two overrides, so both are dropped — which reverts
+    // app.commandPalette to its Cmd+K default, and THAT now collides with canvas.fitAll's
+    // override. Pass 2 strips it. A single-shot strip would leave canvas.fitAll on Cmd+K,
+    // ambiguous against the palette.
+    const r = sanitizeKeybindingOverrides(
+      {
+        'app.commandPalette': ['Cmd+P'],
+        'canvas.groupSelection': ['Cmd+P'],
+        'canvas.fitAll': ['Cmd+K']
+      },
+      true
+    )
+    expect(r.overrides).toEqual({})
+    expect(r.warnings.length).toBeGreaterThanOrEqual(2)
   })
   it('non-object / non-array shapes degrade to empty with a warning', () => {
     expect(sanitizeKeybindingOverrides('nope', true).overrides).toEqual({})
@@ -293,6 +375,25 @@ describe('resolveCommandForKeyEvent', () => {
     expect(resolveCommandForKeyEvent(
       ev({ metaKey: true, key: 'f' }), ctx({ terminal: true }), o, true
     )).toBe('terminal.find')
+  })
+  it('resolves the non-mac-only alternate default (Ctrl+Y → redo)', () => {
+    expect(resolveCommandForKeyEvent(ev({ ctrlKey: true, key: 'y' }), ctx(), {}, false))
+      .toBe('canvas.redo')
+  })
+  it('non-mac Ctrl+Shift+C is copy in a terminal and New agent outside one', () => {
+    // By design, the two buckets double-book this chord: node.newAgent (global) and
+    // terminal.copySelection (terminal) both default to it off-mac, and the focus gates — not
+    // the conflict detector — are what keep them apart at dispatch time.
+    const e = ev({ ctrlKey: true, shiftKey: true, key: 'C' })
+    expect(resolveCommandForKeyEvent(e, ctx({ terminal: true }), {}, false))
+      .toBe('terminal.copySelection')
+    expect(resolveCommandForKeyEvent(e, ctx(), {}, false)).toBe('node.newAgent')
+  })
+  it('a bare key resolves, and typing still blocks it', () => {
+    expect(resolveCommandForKeyEvent(ev({ key: 'Delete' }), ctx(), {}, true))
+      .toBe('canvas.deleteSelection')
+    expect(resolveCommandForKeyEvent(ev({ key: 'Delete' }), ctx({ typing: true }), {}, true))
+      .toBeNull()
   })
   it('first matching definition in registry source order wins a tie', () => {
     // Deliberately unsanitized colliding override — the resolver must order the tie deterministically.

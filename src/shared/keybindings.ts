@@ -13,7 +13,7 @@ import {
   matchesShortcut,
   isHoldChord
 } from './shortcut'
-import type { ParsedShortcut, ShortcutKeyEvent } from './shortcut'
+import type { ShortcutKeyEvent } from './shortcut'
 
 export type CommandScope = 'app' | 'canvas' | 'terminal' | 'scm'
 export type CommandGroup = 'General' | 'Canvas' | 'Nodes' | 'Terminal' | 'Source Control' | 'Speech'
@@ -261,9 +261,12 @@ export function findKeybindingConflicts(
 }
 
 /** Validate a raw `settings.keybindings` value (hand-editable JSON) into a safe override map.
- *  Loops until conflict-free so one bad edit cannot leave ambiguous dispatch. The load path
- *  applies the result and warns; the Settings UI runs the same function pre-save and BLOCKS
- *  instead — one detector, two surfacings (design.md D3). */
+ *  Loops until conflict-free so one bad edit cannot leave ambiguous dispatch. This is the
+ *  SETTINGS-LOAD path: it applies what survives and warns about what it dropped. It is not the
+ *  pre-save gate — its warnings are unstructured strings, which cannot tell a UI which field to
+ *  block on. The future Settings UI blocks pre-save by calling `normalizeBindingForCommand` and
+ *  `findKeybindingConflicts` directly, per candidate binding: same detector, different surfacing
+ *  (design.md D3). */
 export function sanitizeKeybindingOverrides(
   raw: unknown,
   isMac: boolean
@@ -304,6 +307,10 @@ export function sanitizeKeybindingOverrides(
   }
   // Strip overridden participants of any remaining conflict until none are left. Bounded:
   // each pass removes at least one override or exits.
+  // NEVER pass `includeDefaults: true` here. Termination rests on the touchesOverride reporting
+  // gate: every reported conflict has at least one OVERRIDE to delete, so a pass always shrinks
+  // the map. A default-vs-default conflict has no deletable participant, so it would be reported
+  // forever and the loop would spin.
   for (;;) {
     const conflicts = findKeybindingConflicts(overrides, isMac)
     if (conflicts.length === 0) break
@@ -320,6 +327,9 @@ export function sanitizeKeybindingOverrides(
   return { overrides, warnings }
 }
 
+/** `typing` and `terminal` are expected to be DISJOINT — xterm's hidden textarea is a terminal,
+ *  not a typing surface, so a caller classifying focus must not report both. If one does anyway,
+ *  `typing` wins (it is checked first) and every terminal-scope command becomes unreachable. */
 export interface KeyDispatchContext {
   /** A real input/textarea/contentEditable has focus (xterm's hidden textarea excluded). */
   typing: boolean
@@ -348,6 +358,10 @@ export function resolveCommandForKeyEvent(
     if (!ctx.terminal && def.scope === 'terminal') continue
     if (ctx.kanbanOpen && def.scope === 'canvas') continue
     for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
+      // Hold chords belong to the dedicated hold listener, and this skip STATES that contract
+      // rather than relying on it being unreachable: `matchesShortcut` also refuses a key-null
+      // chord today (`parsed.key !== null`), so removing this line changes nothing — until the
+      // day it does.
       if (isHoldChord(binding)) continue
       if (matchesShortcut(e, binding, isMac)) return def.id
     }
