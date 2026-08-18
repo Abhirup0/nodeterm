@@ -312,8 +312,9 @@ access on this machine:
 A remote tab is a **connection bookmark**, never a workspace on the peer's disk — the
 files live on the host; the peer cannot own them. Offline, the tab renders greyed
 "unavailable" (reusing the workspace index's existing unavailable-ref rendering) and
-reconnects on click. Host asleep ≠ data loss: processes keep running in the host's
-tmux; reconnect re-enters via co-attach (Stage 2 already guarantees this).
+reconnects on click. Host asleep ≠ data loss: sleep freezes the host's world
+(processes are suspended, not running — tmux still holds them), work resumes on wake,
+and reconnect re-enters via co-attach (Stage 2 already guarantees this).
 
 **Documented limitation:** canvas edits made by the peer while disconnected are lost
 (no offline queue in v1). Accepted, recorded here so nobody discovers it in the field.

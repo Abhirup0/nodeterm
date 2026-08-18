@@ -147,6 +147,11 @@ opencode / custom) · 📝 **Sticky note** (link to an agent as context) · 🗂
 - **Your sessions, in your pocket** — **nodeterm mobile** (iOS) attaches to the same live
   tmux sessions: watch an agent work, answer a "needs you", or type into any terminal
   from your phone — plus push notifications and a mobile board view.
+- **Power & sleep** — while an agent is working, nodeterm keeps the machine from
+  idle-sleeping, and lets go the moment it finishes (on by default; toggle in the setup
+  tour or Settings → Behavior). No app can hold a machine awake through a closed lid —
+  for overnight runs keep the laptop open and plugged in, or run the agents on a box
+  that doesn't sleep via the [Server Edition](./docs/SERVER.md).
 - **Command palette** (⌘K), **file explorer** (⌘⇧E), **markdown view** (⌘M),
   **undo/redo**, and a native macOS dark UI.
 - **Auto-update & in-app announcements** — the app checks a self-hosted feed and
