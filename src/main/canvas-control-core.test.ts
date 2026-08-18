@@ -9,6 +9,9 @@ import {
 } from './canvas-control-core'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
+import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
+import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
+import { BROWSER_CAPABILITY_OFF_MESSAGE } from './browser-drive'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {
@@ -280,6 +283,66 @@ describe('parseControlRequest', () => {
       const word = new RegExp(`\\b${kind}\\b`)
       expect(word.test(retryable ? yesSection : noSection), `${kind} in its group`).toBe(true)
       expect(word.test(retryable ? noSection : yesSection), `${kind} not in the other`).toBe(false)
+    }
+  })
+
+  // --- the `browser` verb's agent-facing docs (S8 PR 10 Task 10.1) -----------------------------
+  // The flag surface is code (`BROWSER_ACTION_KEYS` + the modifier list); the doc must carry every
+  // flag, so a flag added to the parser without a doc line reddens here rather than shipping unseen.
+  it('both agent-facing texts document the browser verb and its FULL flag surface', () => {
+    // The modifiers `parseBrowserArgs` reads off the arg map, listed here so the doc cannot drop one.
+    const modifierFlags = ['into', 'clear', 'press', 'times', 'scroll', 'wait', 'timeout', 'screenshot', 'cookies']
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`browser --node')
+      // Every action key from the pure parser table appears as a documented `--<key>` flag.
+      for (const key of BROWSER_ACTION_KEYS) {
+        expect(body, `action --${key} documented`).toContain(`--${key}`)
+      }
+      for (const flag of modifierFlags) {
+        expect(body, `modifier --${flag} documented`).toContain(`--${flag}`)
+      }
+    }
+  })
+
+  it('both browser docs teach refs over selectors and state the real contract', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      const lower = body.toLowerCase()
+      // Teach @refs over CSS selectors (Task 10.1).
+      expect(body).toContain('@ref')
+      expect(lower).toContain('prefer')
+      expect(lower).toContain('selector')
+      // Verified-only + the per-project switch, OFF by default.
+      expect(lower).toContain('verified')
+      expect(lower).toMatch(/off by default/)
+      // Cookies are LOUDLY TRACED, and cookie WRITES are refused.
+      expect(lower).toContain('trace')
+      expect(lower).toMatch(/no set-cookie|writes are not|cannot set|no cookie-write/)
+      // Server Edition has no browser control.
+      expect(lower).toContain('server edition')
+    }
+  })
+
+  // The consent sentence is a contract string owned by browser-drive.ts (main). The doc must carry
+  // it BYTE-FOR-BYTE so an agent that reads it stops instead of burning a turn — importing the real
+  // constant here reddens the doc on any drift of the source string.
+  it('both browser docs carry the capability-off sentence verbatim from the source', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain(BROWSER_CAPABILITY_OFF_MESSAGE)
+    }
+  })
+
+  it('renders the browser retry table from BROWSER_RETRYABLE, not re-typed prose', () => {
+    const body = buildCanvasSkillBody('/x/shim.sh')
+    const yesAt = body.indexOf('Browser outcomes worth retrying')
+    const noAt = body.indexOf('Browser outcomes that are terminal')
+    expect(yesAt).toBeGreaterThan(-1)
+    expect(noAt).toBeGreaterThan(yesAt)
+    const yesSection = body.slice(yesAt, noAt)
+    const noSection = body.slice(noAt, body.indexOf('\n\n', noAt) === -1 ? undefined : body.indexOf('\n\n', noAt))
+    for (const [kind, retryable] of Object.entries(BROWSER_RETRYABLE)) {
+      const label = BROWSER_OUTCOME_LABEL[kind as keyof typeof BROWSER_OUTCOME_LABEL]
+      expect((retryable ? yesSection : noSection).includes(label), `${kind} label in its group`).toBe(true)
+      expect((retryable ? noSection : yesSection).includes(label), `${kind} label not in the other`).toBe(false)
     }
   })
 
