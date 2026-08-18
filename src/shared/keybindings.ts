@@ -129,3 +129,45 @@ export const COMMANDS_BY_ID: ReadonlyMap<CommandId, CommandDefinition> = new Map
 export function isCommandId(v: string): v is CommandId {
   return COMMANDS_BY_ID.has(v as CommandId)
 }
+
+/** Modifier-less keys that are safe to bind bare — they don't type a character. */
+export const SAFE_BARE_KEYS: ReadonlySet<string> = new Set([
+  'DELETE', 'BACKSPACE', 'ESCAPE', 'ENTER', 'TAB',
+  'ARROWUP', 'ARROWDOWN', 'ARROWLEFT', 'ARROWRIGHT', 'PAGEUP', 'PAGEDOWN',
+  'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'
+])
+
+export type NormalizedBinding = { ok: true; value: string } | { ok: false; error: string }
+
+/** Parse + validate one binding string against a command's flags; returns the canonical
+ *  serialized form on success. The single validation path for defaults (pinned by a registry
+ *  test), Settings-recorder captures, and hand-edited settings.json overrides. */
+export function normalizeBindingForCommand(
+  def: CommandDefinition,
+  raw: string,
+  isMac: boolean
+): NormalizedBinding {
+  const p = parseShortcut(raw)
+  const hasAnyToken = p.cmd || p.ctrl || p.alt || p.shift || p.key !== null
+  if (!hasAnyToken) return { ok: false, error: 'Use a shortcut like Cmd+K or Cmd+Shift+P.' }
+  if (!isMac && p.cmd && p.ctrl) {
+    return { ok: false, error: 'Cmd already means Ctrl on this platform; use one of them.' }
+  }
+  if (p.key === null) {
+    if (!def.allowHoldChord) {
+      return { ok: false, error: 'This command needs a key, not a modifier-only chord.' }
+    }
+    if (!p.cmd && !p.ctrl && !p.alt) {
+      return { ok: false, error: 'A hold chord needs at least one non-shift modifier.' }
+    }
+    return { ok: true, value: serializeShortcut(p) }
+  }
+  const hasStrongModifier = p.cmd || p.ctrl || p.alt
+  if (!hasStrongModifier) {
+    if (p.shift) return { ok: false, error: 'Shift-only shortcuts would steal typed text.' }
+    if (!def.allowBareKey || !SAFE_BARE_KEYS.has(p.key)) {
+      return { ok: false, error: 'Include a modifier key.' }
+    }
+  }
+  return { ok: true, value: serializeShortcut(p) }
+}
