@@ -74,8 +74,16 @@ const LOG_CAP_BYTES = 512 * 1024
 function log(line: string): void {
   if (!logPath) return
   try {
-    const stat = fs.existsSync(logPath) ? fs.statSync(logPath) : null
-    if (stat && stat.size > LOG_CAP_BYTES) fs.writeFileSync(logPath, '')
+    // Stat directly and treat "not there" as size 0 — an existsSync-then-statSync pair is both a
+    // TOCTOU race and redundant here. Diagnostics only, single daemon process, so a truncation that
+    // races an append at worst drops a log line.
+    let size = 0
+    try {
+      size = fs.statSync(logPath).size
+    } catch {
+      /* no log file yet — size stays 0 */
+    }
+    if (size > LOG_CAP_BYTES) fs.writeFileSync(logPath, '')
     fs.appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`)
   } catch {
     /* diagnostics only */
