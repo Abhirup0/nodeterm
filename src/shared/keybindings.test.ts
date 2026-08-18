@@ -118,6 +118,14 @@ describe('bindingIdentity', () => {
   it('keeps them distinct on mac', () => {
     expect(bindingIdentity('Cmd+K', true)).not.toBe(bindingIdentity('Ctrl+K', true))
   })
+  it('collapses alias key spellings onto one identity', () => {
+    expect(bindingIdentity('Cmd+Esc', true)).toBe(bindingIdentity('Cmd+Escape', true))
+    expect(bindingIdentity('Cmd+Return', true)).toBe(bindingIdentity('Cmd+Enter', true))
+  })
+  it('still separates a modifier from a bare key, and a hold chord from a keyed one', () => {
+    expect(bindingIdentity('Cmd+Delete', true)).not.toBe(bindingIdentity('Delete', true))
+    expect(bindingIdentity('Cmd+Alt', true)).not.toBe(bindingIdentity('Cmd+Alt+D', true))
+  })
 })
 
 describe('findKeybindingConflicts', () => {
@@ -133,6 +141,16 @@ describe('findKeybindingConflicts', () => {
     const conflicts = findKeybindingConflicts({ 'canvas.fitAll': ['Cmd+K'] }, true)
     expect(conflicts).toEqual([
       { binding: 'Cmd+K', commandIds: ['app.commandPalette', 'canvas.fitAll'] }
+    ])
+  })
+  it('reports the canonical spelling, not the override as written', () => {
+    expect(findKeybindingConflicts({ 'canvas.fitAll': ['cmd+k'] }, true)).toEqual([
+      { binding: 'Cmd+K', commandIds: ['app.commandPalette', 'canvas.fitAll'] }
+    ])
+    // canvas.fitAll precedes node.newTerminal in the registry, so the override is the
+    // entry-creating spelling here — the assertion above cannot see the canonicalization.
+    expect(findKeybindingConflicts({ 'canvas.fitAll': ['cmd+t'] }, true)).toEqual([
+      { binding: 'Cmd+T', commandIds: ['canvas.fitAll', 'node.newTerminal'] }
     ])
   })
   it('flags a cross-spelling collision on non-mac (Ctrl+K vs Cmd+K)', () => {

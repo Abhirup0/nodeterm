@@ -189,7 +189,10 @@ export function getEffectiveBindings(
 }
 
 /** Platform-resolved identity: two spellings that press the same physical modifiers + key get
- *  the same identity (`Cmd+K` === `Ctrl+K` on non-mac, but not on mac). */
+ *  the same identity (`Cmd+K` === `Ctrl+K` on non-mac, but not on mac). The key segment runs
+ *  through `serializeShortcut` so ALIAS spellings collapse too (`Cmd+Esc` === `Cmd+Escape`,
+ *  `Cmd+Return` === `Cmd+Enter`) — without that a hand-edited `Cmd+Return` override would sit
+ *  invisibly on top of the `Cmd+Enter` default. */
 export function bindingIdentity(binding: string, isMac: boolean): string {
   const p = parseShortcut(binding)
   const m = resolvedModifiers(p, isMac)
@@ -199,7 +202,9 @@ export function bindingIdentity(binding: string, isMac: boolean): string {
     m.alt ? 'A' : '',
     m.shift ? 'S' : '',
     ':',
-    p.key ?? '(hold)'
+    p.key === null
+      ? '(hold)'
+      : serializeShortcut({ cmd: false, ctrl: false, alt: false, shift: false, key: p.key })
   ].join('')
 }
 
@@ -230,7 +235,11 @@ export function findKeybindingConflicts(
   for (const def of COMMAND_DEFINITIONS) {
     for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
       const key = `${conflictBucket(def.scope)} ${bindingIdentity(binding, isMac)}`
-      const entry = byBucketAndIdentity.get(key) ?? { binding, ids: new Set<CommandId>() }
+      const entry = byBucketAndIdentity.get(key) ?? {
+        // Canonicalized, so a hand-edited `cmd+k` override is reported as `Cmd+K`.
+        binding: serializeShortcut(parseShortcut(binding)),
+        ids: new Set<CommandId>()
+      }
       entry.ids.add(def.id)
       byBucketAndIdentity.set(key, entry)
     }
