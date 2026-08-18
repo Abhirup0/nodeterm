@@ -29,8 +29,12 @@ type TrustFileEntry = Partial<Record<ProjectTrustFamily, ProjectTrustRecord>>
 type TrustFile = Record<string, TrustFileEntry>
 
 /**
- * File: {userData}/project-trust.json. Lazy-loaded, cached; malformed file → empty store (fail
- * closed — an unreadable trust record must never be read back as "trusted").
+ * File: {userData}/project-trust.json. Lazy-loaded, cached; malformed (unparsable/wrong-shape)
+ * file → empty store (fail closed — an unreadable trust record must never be read back as
+ * "trusted"). A read ERROR (EACCES/EMFILE/EIO…) is different from ABSENT/malformed: it is not
+ * evidence the file is empty, so it is never cached and never healed by a write — `isTrusted` fails
+ * closed without caching the emptiness, and `record`/`revoke` reject rather than writeAtomic an
+ * empty store over the intact on-disk file.
  *
  * `record`/`revoke` serialize through an internal promise chain: both are read-modify-write over
  * the same in-memory + on-disk store, and two overlapping calls racing the read half would let the
@@ -49,9 +53,16 @@ export class ProjectTrustStore {
     let raw: string
     try {
       raw = await fs.readFile(this.filePath, 'utf-8')
-    } catch {
-      this.cache = {}
-      return this.cache
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.cache = {}
+        return this.cache
+      }
+      // A non-ENOENT failure (EACCES/EMFILE/EIO…) is not evidence the file is absent — caching {}
+      // here would let the next mutate() writeAtomic an empty store over the intact on-disk file,
+      // silently destroying every recorded approval. Leave the cache unset so the next call
+      // retries the read, and let this failure propagate to the caller.
+      throw e
     }
     try {
       const parsed: unknown = JSON.parse(raw)
@@ -63,7 +74,13 @@ export class ProjectTrustStore {
   }
 
   async isTrusted(key: string, family: ProjectTrustFamily, contentHash: string): Promise<boolean> {
-    const store = await this.load()
+    let store: TrustFile
+    try {
+      store = await this.load()
+    } catch {
+      // Fail closed on a read error — never cached, so the next call retries the read.
+      return false
+    }
     return store[key]?.[family]?.contentHash === contentHash
   }
 

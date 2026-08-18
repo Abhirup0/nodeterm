@@ -52,7 +52,10 @@ export async function writeProjectSettingsFile(
   prev: ProjectSettingsFileV1 | null,
   savedAt: string
 ): Promise<ProjectSettingsFileV1> {
-  const candidate: ProjectSettingsFileV1 = { version: 1, rev: (prev?.rev ?? 0) + 1, savedAt, ...doc }
+  // `doc` spreads FIRST: a caller may pass back a previously-read ProjectSettingsFileV1 (it
+  // structurally satisfies ProjectSettingsDoc), and its stale version/rev/savedAt must never win
+  // over the bookkeeping this function computes — that would silently defeat rev monotonicity.
+  const candidate: ProjectSettingsFileV1 = { ...doc, version: 1, rev: (prev?.rev ?? 0) + 1, savedAt }
   if (prev && sameProjectSettingsContent(prev, candidate)) return prev
   const file = projectSettingsPath(cwd)
   await fs.mkdir(path.dirname(file), { recursive: true })

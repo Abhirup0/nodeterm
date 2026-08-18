@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { promises as fs } from 'fs'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { promises as fs, readFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { initPlatform, resetPlatformForTests } from './platform'
@@ -58,5 +58,28 @@ describe('ProjectTrustStore', () => {
     expect(await store.isTrusted(key, 'setup', hashTrustContent('x'))).toBe(false)
     await store.record(key, 'setup', hashTrustContent('x'), 't')
     expect(await new ProjectTrustStore().isTrusted(key, 'setup', hashTrustContent('x'))).toBe(true)
+  })
+  it('a non-ENOENT read failure fails closed WITHOUT clobbering the file, and heals once readable', async () => {
+    const key = localTrustKey('/proj')
+    const h = hashTrustContent('x')
+    const filePath = path.join(userData, 'project-trust.json')
+    // Seed an intact, persisted approval with a fresh store instance (its own uncorrupted cache).
+    await new ProjectTrustStore().record(key, 'setup', h, 't1')
+    const original = readFileSync(filePath, 'utf-8')
+
+    const store = new ProjectTrustStore() // fresh instance: cache is empty, forces a real read
+    const err = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    const spy = vi.spyOn(fs, 'readFile').mockRejectedValue(err)
+    try {
+      expect(await store.isTrusted(key, 'setup', h)).toBe(false)
+      await expect(store.record(key, 'setup', h, 't2')).rejects.toThrow()
+      // The failed record() must not have written anything — readFileSync bypasses the mocked
+      // promises API, so this reads the real on-disk bytes.
+      expect(readFileSync(filePath, 'utf-8')).toBe(original)
+    } finally {
+      spy.mockRestore()
+    }
+    // Once the fs is readable again, the original (never-clobbered) approval is still there.
+    expect(await store.isTrusted(key, 'setup', h)).toBe(true)
   })
 })

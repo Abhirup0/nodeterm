@@ -38,4 +38,17 @@ describe('project settings file IO', () => {
     expect((await readProjectSettingsFile(root)).status).toBe('conflict')
     expect(await fs.readFile(projectSettingsPath(root), 'utf-8')).toBe(raw)
   })
+  it('bumps rev over prev even when the caller passes back the previously-read file as doc', async () => {
+    const v1 = await writeProjectSettingsFile(root, { terminal: { shell: '/bin/zsh' } }, null, 't1')
+    const read = await readProjectSettingsFile(root)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    // A caller may pass the READ FILE straight back as `doc` (it structurally satisfies
+    // ProjectSettingsDoc) — its stale version/rev/savedAt must not survive into the write.
+    const edited = { ...read.file, terminal: { shell: '/bin/fish' } }
+    const v2 = await writeProjectSettingsFile(root, edited, v1, 't2')
+    expect(v2.rev).toBe(v1.rev + 1)
+    expect(v2.savedAt).toBe('t2')
+    expect(v2.terminal?.shell).toBe('/bin/fish')
+  })
 })
