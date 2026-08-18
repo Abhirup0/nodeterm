@@ -7,6 +7,7 @@ import { getMainWindow, sendToMain } from '../main-window'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
 import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
+import { renameAtomic } from '../../core/fs-atomic'
 import { findExecutableSync, shellPathNow } from '../../core/exec-path'
 import { isSafeRemoteHome } from '../../core/remote-safety'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
@@ -799,7 +800,7 @@ export class SshProjectManager {
         await fs.rm(partPath, { recursive: true, force: true }).catch(() => {})
         return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
       }
-      await fs.rename(partPath, finalPath)
+      await renameAtomic(partPath, finalPath)
       return { ok: true, localPath: finalPath, dir: isDir }
     } catch {
       return { ok: false, error: 'The download could not be completed.' }
@@ -864,7 +865,7 @@ export class SshProjectManager {
         await fs.rm(partPath, { force: true }).catch(() => {})
         return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
       }
-      await fs.rename(partPath, dest)
+      await renameAtomic(partPath, dest)
       void this.pruneMediaCache(cacheDir, path.basename(dest))
       return { ok: true, localPath: dest }
     } catch {

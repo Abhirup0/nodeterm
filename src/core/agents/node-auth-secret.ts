@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto'
 import { promises as fs } from 'fs'
 import path from 'path'
+import { renameAtomic, tempNameFor } from '../fs-atomic'
 import { platform } from '../platform'
 
 /**
@@ -62,11 +63,11 @@ function decodeSealed(raw: string): Buffer {
 /** Write bytes atomically: unique tmp with flag 'wx', chmod 0600, rename into place,
  *  unlink the tmp in finally. A reader never observes a partial file. */
 async function persistFile(file: string, data: string | Buffer): Promise<void> {
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  const tmp = tempNameFor(file)
   await fs.mkdir(path.dirname(file), { recursive: true })
   try {
     await fs.writeFile(tmp, data, { mode: 0o600, flag: 'wx' })
-    await fs.rename(tmp, file)
+    await renameAtomic(tmp, file)
     await fs.chmod(file, 0o600)
   } finally {
     await fs.unlink(tmp).catch(() => {})

@@ -27,12 +27,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
 import path from 'path'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { renameAtomicSync } from './fs-atomic'
 import { platform } from './platform'
 
 /**
@@ -202,7 +202,7 @@ export function writeCodexThreadIdentity(
       encoding: 'utf8',
       mode: 0o600
     })
-    renameSync(tmp, file)
+    renameAtomicSync(tmp, file)
     renamed = true
   } finally {
     if (!renamed) {
