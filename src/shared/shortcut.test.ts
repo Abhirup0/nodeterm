@@ -8,29 +8,56 @@ import {
   isModifierEventKey,
   matchesShortcut,
   parseShortcut,
+  resolvedModifiers,
+  serializeShortcut,
   shortcutKeyParts
 } from './shortcut'
 
 describe('parseShortcut', () => {
   it('parses the default combo', () => {
-    expect(parseShortcut('Cmd+Shift+D')).toEqual({ cmd: true, shift: true, alt: false, key: 'D' })
+    expect(parseShortcut('Cmd+Shift+D')).toEqual({
+      cmd: true,
+      ctrl: false,
+      shift: true,
+      alt: false,
+      key: 'D'
+    })
   })
 
   it('parses a combo without Shift/Alt', () => {
-    expect(parseShortcut('Cmd+D')).toEqual({ cmd: true, shift: false, alt: false, key: 'D' })
+    expect(parseShortcut('Cmd+D')).toEqual({
+      cmd: true,
+      ctrl: false,
+      shift: false,
+      alt: false,
+      key: 'D'
+    })
   })
 
   it('parses Alt', () => {
-    expect(parseShortcut('Cmd+Alt+D')).toEqual({ cmd: true, shift: false, alt: true, key: 'D' })
+    expect(parseShortcut('Cmd+Alt+D')).toEqual({
+      cmd: true,
+      ctrl: false,
+      shift: false,
+      alt: true,
+      key: 'D'
+    })
   })
 
   it('parses a named key (F-key)', () => {
-    expect(parseShortcut('Cmd+F5')).toEqual({ cmd: true, shift: false, alt: false, key: 'F5' })
+    expect(parseShortcut('Cmd+F5')).toEqual({
+      cmd: true,
+      ctrl: false,
+      shift: false,
+      alt: false,
+      key: 'F5'
+    })
   })
 
   it('parses a named key (Space)', () => {
     expect(parseShortcut('Cmd+Shift+Space')).toEqual({
       cmd: true,
+      ctrl: false,
       shift: true,
       alt: false,
       key: 'SPACE'
@@ -40,6 +67,7 @@ describe('parseShortcut', () => {
   it('is tolerant of stray whitespace', () => {
     expect(parseShortcut(' Cmd + Shift + D ')).toEqual({
       cmd: true,
+      ctrl: false,
       shift: true,
       alt: false,
       key: 'D'
@@ -47,12 +75,19 @@ describe('parseShortcut', () => {
   })
 
   it('parses a modifier-only chord (no trailing key) — the v3 hold-to-talk shape', () => {
-    expect(parseShortcut('Cmd+Alt')).toEqual({ cmd: true, alt: true, shift: false, key: null })
+    expect(parseShortcut('Cmd+Alt')).toEqual({
+      cmd: true,
+      ctrl: false,
+      alt: true,
+      shift: false,
+      key: null
+    })
   })
 
   it('parses a modifier-only chord with all three modifiers', () => {
     expect(parseShortcut('Cmd+Alt+Shift')).toEqual({
       cmd: true,
+      ctrl: false,
       alt: true,
       shift: true,
       key: null
@@ -298,7 +333,13 @@ describe('buildModifierChord', () => {
   it('round-trips through parseShortcut', () => {
     const combo = buildModifierChord({ cmd: true, alt: true, shift: false })
     expect(combo).not.toBeNull()
-    expect(parseShortcut(combo as string)).toEqual({ cmd: true, alt: true, shift: false, key: null })
+    expect(parseShortcut(combo as string)).toEqual({
+      cmd: true,
+      ctrl: false,
+      alt: true,
+      shift: false,
+      key: null
+    })
     expect(isHoldChord(combo as string)).toBe(true)
   })
 })
@@ -345,5 +386,71 @@ describe('captureToShortcut', () => {
     const combo = captureToShortcut(e, true)
     expect(combo).not.toBeNull()
     expect(matchesShortcut(e, combo as string, true)).toBe(true)
+  })
+})
+
+describe('literal Ctrl token', () => {
+  it('parses Ctrl as literal control, not the abstract primary', () => {
+    expect(parseShortcut('Ctrl+Insert')).toEqual({
+      cmd: false, ctrl: true, shift: false, alt: false, key: 'INSERT'
+    })
+  })
+  it('matches literal Ctrl via ctrlKey on mac, with metaKey forbidden', () => {
+    const e = { metaKey: false, ctrlKey: true, shiftKey: false, altKey: false, key: 'Insert' }
+    expect(matchesShortcut(e, 'Ctrl+Insert', true)).toBe(true)
+    expect(matchesShortcut({ ...e, metaKey: true }, 'Ctrl+Insert', true)).toBe(false)
+  })
+  it('keeps non-mac behavior for Ctrl strings identical to Cmd strings', () => {
+    const e = { metaKey: false, ctrlKey: true, shiftKey: false, altKey: false, key: 'x' }
+    expect(matchesShortcut(e, 'Ctrl+X', false)).toBe(true)
+    expect(matchesShortcut(e, 'Cmd+X', false)).toBe(true)
+  })
+})
+
+describe('strict modifier matching', () => {
+  it('rejects a held Control on top of a Cmd chord on mac', () => {
+    const e = { metaKey: true, ctrlKey: true, shiftKey: false, altKey: false, key: 'k' }
+    expect(matchesShortcut(e, 'Cmd+K', true)).toBe(false)
+  })
+  it('rejects a held Meta on top of a Cmd chord on non-mac', () => {
+    const e = { metaKey: true, ctrlKey: true, shiftKey: false, altKey: false, key: 'k' }
+    expect(matchesShortcut(e, 'Cmd+K', false)).toBe(false)
+  })
+  it('chordHeld applies the same strictness', () => {
+    const e = { metaKey: true, ctrlKey: true, shiftKey: false, altKey: true, key: 'Control' }
+    expect(chordHeld(e, 'Cmd+Alt', true)).toBe(false)
+  })
+})
+
+describe('named punctuation keys', () => {
+  it('normalizes Comma and Slash tokens to their e.key characters', () => {
+    expect(parseShortcut('Cmd+Comma').key).toBe(',')
+    expect(parseShortcut('Cmd+Slash').key).toBe('/')
+  })
+  it('matches a comma keydown against Cmd+Comma', () => {
+    const e = { metaKey: true, ctrlKey: false, shiftKey: false, altKey: false, key: ',' }
+    expect(matchesShortcut(e, 'Cmd+Comma', true)).toBe(true)
+  })
+  it('renders punctuation parts as the character itself', () => {
+    expect(shortcutKeyParts('Cmd+Slash', true)).toEqual(['⌘', '/'])
+  })
+})
+
+describe('serializeShortcut', () => {
+  it('round-trips in canonical Cmd,Ctrl,Alt,Shift,key order', () => {
+    expect(serializeShortcut(parseShortcut('shift+d+cmd'))).toBe('Cmd+Shift+D')
+    expect(serializeShortcut(parseShortcut('Ctrl+Insert'))).toBe('Ctrl+Insert')
+    expect(serializeShortcut(parseShortcut('Alt+Cmd'))).toBe('Cmd+Alt')
+  })
+  it('round-trips a named key through its canonical spelling', () => {
+    expect(serializeShortcut(parseShortcut('Cmd+Enter'))).toBe('Cmd+Enter')
+  })
+})
+
+describe('resolvedModifiers', () => {
+  it('maps Cmd to meta on mac and ctrl elsewhere', () => {
+    const p = parseShortcut('Cmd+Shift+K')
+    expect(resolvedModifiers(p, true)).toEqual({ meta: true, ctrl: false, alt: false, shift: true })
+    expect(resolvedModifiers(p, false)).toEqual({ meta: false, ctrl: true, alt: false, shift: true })
   })
 })
