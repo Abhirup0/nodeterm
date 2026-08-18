@@ -229,6 +229,7 @@ import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useTeamAccessEvents } from '../state/teamAccess'
@@ -1514,8 +1515,14 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depEdgeSig IS the ref's signature
     [depEdgeSig]
   )
+  // Which browser nodes are being DRIVEN (Task 6.2) — for the rope highlight only. Membership comes
+  // from the ownership-backed lease store; a rope whose target is NOT here is never highlighted, so a
+  // hostile pre-declared rope (a cloned project.json can ship one) lights up nothing. Rendering-only:
+  // ownership is still decided in main, never from `controlEdges`.
+  const drivenLeaseEntries = useBrowserLease((s) => s.entries)
   const displayEdges = useMemo(() => {
     const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
+    const drivenTargets = drivingNodeIds(drivenLeaseEntries, Date.now())
     // ONE edge per pair. A node an agent opens gets both a rope (lineage) and a context bridge
     // (readable context), which drew two near-identical arrows between the same two nodes. The
     // rope keeps the pixels; the bridge still exists in data (it is what authorizes reading) and
@@ -1550,22 +1557,31 @@ export function Canvas() {
     const ropeCoversLink = new Set(
       linkEdges.filter((e) => hidden.has(e.id)).map((e) => pairKey(e.source, e.target))
     )
-    const ropes = controlEdges.map((e) =>
-      e.selected
-        ? {
-            ...e,
-            label: ropeCoversLink.has(pairKey(e.source, e.target))
-              ? '⇄ context · ⌫ to remove'
-              : '⌫ to remove',
-            labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
-            labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
-            labelBgPadding: [6, 3] as [number, number],
-            labelBgBorderRadius: 5,
-            style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
-          }
-        : e
-    )
+    const ropes = controlEdges.map((e) => {
+      if (e.selected)
+        return {
+          ...e,
+          label: ropeCoversLink.has(pairKey(e.source, e.target))
+            ? '⇄ context · ⌫ to remove'
+            : '⌫ to remove',
+          labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
+          labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+          labelBgPadding: [6, 3] as [number, number],
+          labelBgBorderRadius: 5,
+          style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
+        }
+      // Driven: the same clay the RUNNING badge uses, thicker and flowing — legible on a zoomed-out
+      // canvas where the header chip is unreadable. This is the whole point of highlighting the rope.
+      if (drivenTargets.has(e.target))
+        return {
+          ...e,
+          animated: true,
+          style: { ...e.style, stroke: '#d97757', strokeWidth: 2.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#d97757', width: 14, height: 14 }
+        }
+      return e
+    })
     // Waiting edges for armed nodes (`--after`): dep → dependent, dashed and animated while the
     // wait is on. Derived from node data rather than persisted — a pending dependency is a STATE
     // that ends when the launch fires, unlike the context bridge `--after` also draws, which is a
@@ -1576,7 +1592,7 @@ export function Canvas() {
         ? [...ephemeralEdges, ...ropes, ...depEdges]
         : []
     return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges])
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges, drivenLeaseEntries])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
