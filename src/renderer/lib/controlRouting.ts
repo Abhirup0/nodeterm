@@ -15,6 +15,10 @@
 
 import { canControlCanvas, type AgentId } from '@shared/agents/config'
 import { projectTravel } from './presenceTravel'
+import {
+  projectCapabilityGrantedFor,
+  type CapabilityAckMap
+} from '@shared/project-capability-consent'
 
 /** The little the routing needs to know about a project (a structural subset of `Project`). */
 export interface ControlProject {
@@ -117,6 +121,60 @@ export function needsLiveCanvas(verb: string): boolean {
 export function sourceIsControlCapable(agentId: unknown): boolean {
   const id = typeof agentId === 'string' && agentId ? agentId : 'claude'
   return canControlCanvas(id as AgentId)
+}
+
+/**
+ * The `browser` verb's resolve answer — the two things ONLY the renderer knows, computed purely so
+ * Canvas.tsx's IPC handler is a thin wrapper testable here. Main asks over `browserControlResolve`,
+ * makes the security decision itself (owner + capability + CDP gate), and does the CDP work; this
+ * function NEVER touches a debugger.
+ *
+ * WHY MAIN STILL DECIDES from these facts: an XSS-in-a-node-title-style bug lands in the renderer,
+ * the more attackable half, so the allowlist and the ledger stay main-side. The renderer reports
+ * facts (does this node's project exist, is the source control-capable, is the capability on right
+ * now — read LIVE via `projectCapabilityGrantedFor`, never cached); main re-orders them into the
+ * refusal decision in `browser-drive.ts`.
+ */
+export interface BrowserResolveNode {
+  id: string
+  agentId?: unknown
+}
+export interface BrowserResolveProject {
+  id: string
+  cwd?: string
+  agentBrowserControl?: boolean
+  capabilityAck?: CapabilityAckMap
+  nodes: readonly BrowserResolveNode[]
+}
+export type BrowserResolveAnswer =
+  | { ok: false; refusal: string }
+  | {
+      ok: true
+      projectId: string
+      projectCwd?: string
+      sourceControlCapable: boolean
+      capabilityOn: boolean
+    }
+
+export function answerBrowserResolve(
+  project: BrowserResolveProject | undefined,
+  sourceNodeId: string
+): BrowserResolveAnswer {
+  // No open project owns the source, or the node is not on its canvas: a named, non-revoking
+  // refusal. (Same class as every other verb's "source node is not on an open canvas".)
+  if (!project) return { ok: false, refusal: 'source node is not on an open canvas' }
+  const node = project.nodes.find((n) => n.id === sourceNodeId)
+  if (!node) return { ok: false, refusal: 'source node is not on an open canvas' }
+  return {
+    ok: true,
+    projectId: project.id,
+    projectCwd: project.cwd,
+    sourceControlCapable: sourceIsControlCapable(node.agentId),
+    // LIVE read — the drive-time capability check the whole feature's safety rests on. A project.json
+    // hand-edit that flipped the switch off is reflected here the next time an agent drives, which is
+    // exactly drive time.
+    capabilityOn: projectCapabilityGrantedFor(project, 'agentBrowserControl')
+  }
 }
 
 /** `list`'s rows, built from serialized nodes — the same shape the live canvas answers with

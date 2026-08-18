@@ -183,7 +183,9 @@ import {
   routeControlSource,
   needsLiveCanvas,
   sourceIsControlCapable,
-  storedNodeListing
+  storedNodeListing,
+  answerBrowserResolve,
+  type BrowserResolveProject
 } from '../lib/controlRouting'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
 import {
@@ -217,6 +219,7 @@ import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { isSafeQuickOpenRelPath } from '@shared/quick-open-filter'
+import { agentBrowserPartition } from '@shared/browser-partition'
 
 /** The real `sshProject.connect`, bound once. Passed into `connectHostAttachment` rather than
  *  reached for inside it, so that helper stays testable without an Electron preload. */
@@ -228,6 +231,7 @@ import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useTeamAccessEvents } from '../state/teamAccess'
@@ -585,6 +589,7 @@ function toKanbanSession(n: CanvasNode): KanbanSession | null {
       color: (n.data.color as string) ?? NODE_COLORS[0],
       kind: 'browser',
       url: n.data.url as string | undefined,
+      partition: n.data.partition as string | undefined,
       spawn: {}
     }
   }
@@ -1512,8 +1517,14 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depEdgeSig IS the ref's signature
     [depEdgeSig]
   )
+  // Which browser nodes are being DRIVEN (Task 6.2) — for the rope highlight only. Membership comes
+  // from the ownership-backed lease store; a rope whose target is NOT here is never highlighted, so a
+  // hostile pre-declared rope (a cloned project.json can ship one) lights up nothing. Rendering-only:
+  // ownership is still decided in main, never from `controlEdges`.
+  const drivenLeaseEntries = useBrowserLease((s) => s.entries)
   const displayEdges = useMemo(() => {
     const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
+    const drivenTargets = drivingNodeIds(drivenLeaseEntries, Date.now())
     // ONE edge per pair. A node an agent opens gets both a rope (lineage) and a context bridge
     // (readable context), which drew two near-identical arrows between the same two nodes. The
     // rope keeps the pixels; the bridge still exists in data (it is what authorizes reading) and
@@ -1548,22 +1559,31 @@ export function Canvas() {
     const ropeCoversLink = new Set(
       linkEdges.filter((e) => hidden.has(e.id)).map((e) => pairKey(e.source, e.target))
     )
-    const ropes = controlEdges.map((e) =>
-      e.selected
-        ? {
-            ...e,
-            label: ropeCoversLink.has(pairKey(e.source, e.target))
-              ? '⇄ context · ⌫ to remove'
-              : '⌫ to remove',
-            labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
-            labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
-            labelBgPadding: [6, 3] as [number, number],
-            labelBgBorderRadius: 5,
-            style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
-          }
-        : e
-    )
+    const ropes = controlEdges.map((e) => {
+      if (e.selected)
+        return {
+          ...e,
+          label: ropeCoversLink.has(pairKey(e.source, e.target))
+            ? '⇄ context · ⌫ to remove'
+            : '⌫ to remove',
+          labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
+          labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+          labelBgPadding: [6, 3] as [number, number],
+          labelBgBorderRadius: 5,
+          style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
+        }
+      // Driven: the same clay the RUNNING badge uses, thicker and flowing — legible on a zoomed-out
+      // canvas where the header chip is unreadable. This is the whole point of highlighting the rope.
+      if (drivenTargets.has(e.target))
+        return {
+          ...e,
+          animated: true,
+          style: { ...e.style, stroke: '#d97757', strokeWidth: 2.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#d97757', width: 14, height: 14 }
+        }
+      return e
+    })
     // Waiting edges for armed nodes (`--after`): dep → dependent, dashed and animated while the
     // wait is on. Derived from node data rather than persisted — a pending dependency is a STATE
     // that ends when the launch fires, unlike the context bridge `--after` also draws, which is a
@@ -1574,7 +1594,7 @@ export function Canvas() {
         ? [...ephemeralEdges, ...ropes, ...depEdges]
         : []
     return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges])
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges, drivenLeaseEntries])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -5321,8 +5341,22 @@ export function Canvas() {
     // Destructive/recovery rows (Delete, Restart agent, Branch/Transfer) are not hideable at all:
     // `isHidden` only answers for ids in its own inventory.
     const hidden = useSettings.getState().settings.hiddenNodeMenuItems
+    // Stop agent control — the node context-menu surface for Stop (Task 6.4). Shown only for a
+    // single browser node that is actually being driven; it revokes for real (main detaches the
+    // debugger + drops the ledger entry), not just hides the chip. Read fresh, like every other row.
+    const drivenHere =
+      ids.length === 1 && drivingNodeIds(useBrowserLease.getState().entries, Date.now()).has(ids[0])
     return tidySeparators([
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
+      ...(drivenHere
+        ? ([
+            {
+              label: 'Stop agent control',
+              onClick: () => window.nodeTerminal.browser.stop(ids[0])
+            },
+            { type: 'separator' }
+          ] as MenuItem[])
+        : []),
       ...((): MenuItem[] => {
         // "Group …" wraps objects that share ONE container — existing frames are valid members
         // now that frames nest. A box-selection that caught a frame AND its children is
@@ -6350,6 +6384,27 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // The `browser` verb's resolve round-trip (S8 PR 7). Main intercepts `browser` and asks us the
+  // two-and-a-half things ONLY the renderer knows: which project owns the source node, whether that
+  // source is a control-capable agent, and whether the per-project browser-control capability is on
+  // RIGHT NOW (read live via projectCapabilityGrantedFor). We answer over the SAME source routing
+  // every verb uses — travelling to the owning project so its <webview> guest is live for main to
+  // drive — and we NEVER run a CDP command. Main makes the security decision (owner + capability +
+  // the CDP allowlist) and does the driving itself (browser-drive.ts / browser-actions.ts).
+  useEffect(() => {
+    return api.onBrowserControlResolve(({ requestId, sourceNodeId }) => {
+      const { projects, activeProjectId } = useProjects.getState()
+      const route = routeControlSource(projects, activeProjectId, sourceNodeId)
+      // Bring the owning project's canvas up so main can find the live guest (needsLiveCanvas is true
+      // for `browser`). A closed/blocked/unknown owner just yields the refusal below.
+      if (route.kind === 'switch' || route.kind === 'reopen') travelToProjectRef.current(route.projectId)
+      const owner = projects.find((p) => p.nodes.some((n) => n.id === sourceNodeId))
+      const answer = answerBrowserResolve(owner as unknown as BrowserResolveProject | undefined, sourceNodeId)
+      api.sendBrowserControlResolveResult({ requestId, ...answer })
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Apply canvas-control commands issued by a control-capable agent's `nodeterm` CLI. Reads the
   // LATEST nodes via nodesRef (so the effect deps stay []), validates the source as the real
   // authorization boundary, then applies the verb. Non-destructive verbs (list/open-*/show-*)
@@ -6947,8 +7002,22 @@ export function Canvas() {
               reply({ ok: false, error: 'open-browser requires a valid http(s) --url' })
               return
             }
-            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow()))
-            reply({ ok: true, message: `opened browser ${id}`, result: { id } })
+            // An agent-opened browser gets its OWN per-project session jar — never the default
+            // session the user's own browsing lives in (Probe A: a partition-less <webview> shares
+            // session.defaultSession). The project id becomes a persisted storage key, so it must
+            // pass isSafeNodeId; agentBrowserPartition returns null when it does not, and we refuse
+            // the open rather than fall back to the shared jar (fail-closed).
+            const partition = agentBrowserPartition(ctlProject?.id ?? '')
+            if (!partition) {
+              reply({ ok: false, error: "open-browser: this project's id cannot be used as a browser session key" })
+              return
+            }
+            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow(), partition))
+            // Return the project id + partition so main can record ownership in its in-memory
+            // ledger (browser-control-ledger.ts). Main gates the claim on its OWN `verified` verdict
+            // and keys it to the verified caller — these fields are descriptive (release-by-project,
+            // the indicator), never the authorization boundary.
+            reply({ ok: true, message: `opened browser ${id}`, result: { id, projectId: ctlProject?.id, partition } })
             return
           }
           case 'group': {

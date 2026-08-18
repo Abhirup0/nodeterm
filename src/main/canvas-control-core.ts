@@ -55,6 +55,7 @@ export type ControlVerb =
   | 'reply'
   | 'notify'
   | 'sticky'
+  | 'browser'
 
 export interface ControlCommand {
   verb: ControlVerb
@@ -89,7 +90,8 @@ const VERBS: ControlVerb[] = [
   'send',
   'reply',
   'notify',
-  'sticky'
+  'sticky',
+  'browser'
 ]
 
 /**
@@ -154,6 +156,12 @@ export function parseControlRequest(
   if (v === 'sticky' && args.text !== undefined && args.append !== undefined) {
     return { error: 'sticky: pass either --text or --append, not both' }
   }
+  // `browser` requires `--node`; the full flag table (exactly one action, timeout clamp, per-flag
+  // value rules) is decided by the pure `parseBrowserArgs` (`src/core/browser-verb.ts`), which main's
+  // drive path runs after this presence gate. The verb is verified-only (STRICT_CONTROL_VERBS,
+  // enforced in hook-server before it ever reaches a handler) and refused by name on the Server
+  // Edition (control-unsupported-on-this-edition), where there is no webview to drive.
+  if (v === 'browser' && !args.node) return { error: 'browser: --node <id> is required' }
   return { verb: v, args }
 }
 

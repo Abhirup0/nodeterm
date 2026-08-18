@@ -9,6 +9,24 @@ import {
 } from '../shared/node-exec'
 import type { BridgeLink, CanvasNodeState, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
+import { loadedAgentBrowserPartition } from '../shared/browser-partition'
+
+/**
+ * Drop a browser node's persisted `partition` unless it is exactly the jar THIS project (its
+ * machine-local id) would mint. `project.json` is hostile input and `partition` is copied straight
+ * to `<webview partition>`, so a foreign/cloned/unsafe stored value is jar forgery; it falls back to
+ * the un-owned default session. Non-browser nodes and un-partitioned browser nodes are untouched.
+ * See `loadedAgentBrowserPartition`. Pure and side-effect free (only clones the nodes it changes).
+ */
+function sanitizeBrowserPartitions(nodes: CanvasNodeState[], projectId: string): CanvasNodeState[] {
+  return nodes.map((n) => {
+    if (n.kind !== 'browser' || n.partition === undefined) return n
+    const safe = loadedAgentBrowserPartition(n.partition, projectId)
+    if (safe === n.partition) return n
+    const { partition: _dropped, ...rest } = n
+    return safe === undefined ? rest : { ...rest, partition: safe }
+  })
+}
 
 export const PROJECT_DIR = '.nodeterm'
 export const PROJECT_FILE = 'project.json'
@@ -256,8 +274,15 @@ export function fileToProject(
     color: f.color,
     viewport: base.viewport ?? f.viewport ?? framingViewport(f.nodes),
     // applyLocalNodeExec DROPS whatever the file carried in the exec fields (it is not ours) and
-    // re-attaches only what this machine typed. See @shared/node-exec.
-    nodes: applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
+    // re-attaches only what this machine typed. See @shared/node-exec. `sanitizeBrowserPartitions`
+    // is the same "the file is hostile input" treatment for a browser node's session jar: a stored
+    // `partition` survives only when it is exactly the one THIS project (base.id, machine-local)
+    // would mint — a foreign/cloned/unsafe one drops to un-owned default session. See
+    // loadedAgentBrowserPartition; without it a cloned project.json forges another project's jar.
+    nodes: sanitizeBrowserPartitions(
+      applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
+      base.id
+    ),
     ...(f.bridges ? { bridges: f.bridges } : {}),
     ...(f.ropes ? { ropes: f.ropes } : {}),
     ...(defaultAccountId ? { defaultAccountId } : {}),

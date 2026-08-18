@@ -217,7 +217,17 @@ class HookServer {
   /** Node ids the materialiser refuses to mint for (see `markNodeIdentityUnmintable`). */
   private unmintableNodes = new Set<string>()
   private controlHandler:
-    | ((cmd: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<{
+    | ((cmd: {
+        verb: string
+        nodeId: string
+        args: Record<string, string>
+        // The caller's IDENTITY verdict for THIS request, decided at the gate above and passed on
+        // rather than re-derived in main. `true` only when the caller presented a per-node token
+        // this instance minted for this node id. The browser ownership ledger (PR 4 Task 4.3)
+        // claims a node ONLY when this is true — a `legacy`/warned caller opens a browser but owns
+        // nothing, so it can drive nothing. `browser-ownership-source.test.ts` guards the source.
+        verified: boolean
+      }) => Promise<{
         ok: boolean
         message?: string
         result?: unknown
@@ -536,7 +546,7 @@ class HookServer {
             return
           }
           const result = this.controlHandler
-            ? await this.controlHandler({ verb, nodeId, args })
+            ? await this.controlHandler({ verb, nodeId, args, verified: verdict === 'verified' })
             : { ok: false, error: 'control unavailable' }
           // Which note, not whether: an unmintable node warned with the restart line is sent round
           // the same loop the refusal path already knows better than to send it round.
