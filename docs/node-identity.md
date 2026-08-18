@@ -195,6 +195,7 @@ The bearer is required everywhere; this table is about the *node* token on top o
 | `/context-link/*` | Accepted unless the node is latched; a refusal is **prose with a 200** | 403 | Every verb is a read, so the whole route sits in the tolerant bucket. |
 | `/control/list` | Accepted unless the node is latched | 403 | Tolerant: leaks canvas shape, changes nothing. |
 | `/control/<mutation>` | Warned during the window, refused after the cutoff, refused immediately if latched | 403 | Refusal happens **before** the handler. `write`/`close` still ask the human. |
+| `/control/browser` | **Refused** immediately — no window, no cutoff to wait for | 403 | Strict from the day it existed via `STRICT_CONTROL_VERBS`, checked **before** both the `override` escape and the dated window, so `hookIdentityStrict: false` does not soften it. Identity is only the first gate: the per-project switch (off by default) and in-memory ledger ownership still apply after it. |
 | `/codex-thread/{start,bind}` | **Refused** (403) | 403 | Strict from the day they existed — no upgrade population to protect. |
 | `/codex-thread/fallback` | **Always accepted** | 403 | It reports a DEGRADE and grants nothing; refusing it would silence it in exactly the tokenless case it exists for. |
 
@@ -207,6 +208,16 @@ unjudgeable, not hostile), every session that predates the feature, and any futu
 there does not degrade a feature — it silently stops an agent's status, context meter and approvals,
 and the managed script's `curl -sS` has no `--fail`, so a 403 exits 0 and the node goes dark with no
 error anywhere. `forged` is the single exception because nothing legitimate can produce it.
+
+**Why the invented-`kid` escape does not reach `/control/browser`.** The "deliberate means inventing
+a `kid`" hole above is real for `/control/list` and every `/context-link/*` verb: a made-up kid is a
+*foreign* kid, therefore `legacy`, therefore it walks past the latch and the cutoff into those
+tolerant routes. It does **not** walk into `browser`. `browser` is in `STRICT_CONTROL_VERBS`, where
+`controlPolicy` demands `verified` and returns `refuse` for anything else — and `legacy` is anything
+else. A foreign or invented kid is `legacy`, `legacy` is a refusal on this route, so the escape that
+buys `/control/list` buys nothing here. This is the whole reason the strict bucket is checked before
+the `override === false` branch: that branch returns `allow-with-warning` for a non-tolerant verb,
+which would have handed browser control to any holder of the app-wide bearer forever.
 
 **A pre-upgrade codex session degrades to plain codex until it is relaunched.** Its launcher reads
 the per-node capability from an env var this build no longer sets, and the value the previous build
@@ -355,15 +366,16 @@ because it is a tri-state:
 `false` is for a user whose upgrade strands a live session: it gets the canvas back without
 downgrading the app. Neither value ever admits a `forged` token.
 
-Neither releases a verb in **`STRICT_CONTROL_VERBS`** either — but **that set is pre-positioned and
-gates nothing today, and nobody's hatch has narrowed.** It contains one name, `browser`, which is
-**not a verb this app has**: `ControlVerb` lists 24 and the browser one is `open-browser`, which is
-deliberately *not* in the set. Measured over the real verb list, the set of verbs the hatch stops
-releasing is empty. What exists now is the ORDERING: the bucket is decided one line below the
-`forged` check, above every branch the hatch or the dated window can reach, and it admits `verified`
-only — so the verb it is for cannot arrive through the `override === false` branch, which returns
-`allow-with-warning` for every non-tolerant verb. The user-visible change begins in the PR that
-creates the verb, not here.
+Neither releases a verb in **`STRICT_CONTROL_VERBS`**, and as of S8 that is now a live restriction,
+not a pre-positioned one. The set contains one name, `browser`, and `browser` **is a real verb**
+(shipped over S8 PRs 7–9): it drives a real logged-in page — navigating, typing, clicking, reading
+text and cookies. So the hatch releasing it would mean handing that to any holder of the app-wide
+bearer, forever, which is exactly what must never happen. The ORDERING makes it impossible: the
+strict bucket is decided one line below the `forged` check, above every branch the hatch or the dated
+window can reach, and it admits `verified` only — so `browser` can never arrive through the
+`override === false` branch, which returns `allow-with-warning` for every non-tolerant verb. Setting
+*Require verified node identity for canvas control* to **Not required** keeps the warning window open
+and releases the latch for the ordinary verbs; it does **not** release browser control.
 
 `open-browser` stays out on purpose, and the distinction is worth stating because the sentence above
 says "browser": **opening a node is not driving one.** The threat is an agent acting inside a page
@@ -374,10 +386,11 @@ open a browser node with no way back, since the hatch by design cannot reach int
 residual is named rather than hidden: an unverified caller can open a node onto a logged-in page and
 the page's title then shows up in `list`. That is `list`'s tolerance, unchanged by this bucket.
 
-The cost, when the verb does land: cross-instance failover loses it, because another instance's
-token is a foreign kid and therefore `legacy`. Both shells wire it as a **live
-getter** (`setIdentityStrictOverride`), so a change takes effect on the next request, not the next
-launch — a stranded user must not have to restart the thing that is already broken.
+The cost, now that the verb has landed: cross-instance failover cannot drive a browser node, because
+another instance's token is a foreign kid and therefore `legacy`, and `legacy` is a refusal on this
+route. Both shells wire the override as a **live getter** (`setIdentityStrictOverride`), so a change
+takes effect on the next request, not the next launch — a stranded user must not have to restart the
+thing that is already broken — but no setting reaches into the strict bucket to release `browser`.
 
 ## Ids are path segments
 
