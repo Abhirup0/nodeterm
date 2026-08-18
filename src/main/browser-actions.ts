@@ -155,7 +155,7 @@ async function callReader(s: Sendable, fn: string, args: readonly (string | numb
 }
 
 /** The final URL after navigation/redirects, from OUR navigation-history read. */
-async function currentUrl(s: Sendable): Promise<string> {
+export async function currentUrl(s: Sendable): Promise<string> {
   const h = (await s.send('Page.getNavigationHistory', {})) as {
     currentIndex?: number
     entries?: { url?: string }[]
