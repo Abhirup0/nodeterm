@@ -83,8 +83,8 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   { id: 'canvas.redo', title: 'Redo', group: 'Canvas', scope: 'canvas',
     defaultBindings: { darwin: ['Cmd+Shift+Z'], other: ['Cmd+Shift+Z', 'Cmd+Y'] } },
   { id: 'canvas.deleteSelection', title: 'Delete selection', group: 'Canvas', scope: 'canvas',
-    // Backspace off-mac deletes text too often to risk as a bare default.
-    defaultBindings: { darwin: ['Delete', 'Backspace'], other: ['Delete'] },
+    // Mirrors the current platform-blind handler; the typing guard keeps Backspace safe.
+    defaultBindings: both('Delete', 'Backspace'),
     allowBareKey: true },
   { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
     defaultBindings: both() },

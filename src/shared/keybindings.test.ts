@@ -27,6 +27,7 @@ describe('registry invariants', () => {
     expect(COMMANDS_BY_ID.get('terminal.copySelection')?.defaultBindings.other).toEqual([
       'Cmd+Shift+C', 'Ctrl+Insert'
     ])
+    expect(COMMANDS_BY_ID.get('canvas.deleteSelection')?.defaultBindings.other).toEqual(['Delete', 'Backspace'])
     expect(COMMANDS_BY_ID.get('speech.dictation')?.defaultBindings.darwin).toEqual(['Cmd+Alt'])
     expect(COMMANDS_BY_ID.get('canvas.fitAll')?.defaultBindings.darwin).toEqual([])
   })
