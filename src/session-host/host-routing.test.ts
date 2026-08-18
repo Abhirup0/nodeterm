@@ -152,6 +152,18 @@ describe('bundled session-host request boundaries', () => {
       socket.write(encodeFrame({ id: 0, cmd: 'hello', token }))
       await expect(connected.response(0)).resolves.toMatchObject({ id: 0, ok: true })
 
+      // A second connection presenting the WRONG token is refused and dropped — the bearer token
+      // is the only command gate, so this is the load-bearing negative. A same-length wrong token
+      // exercises the constant-time compare's real path rather than the length short-circuit.
+      const impostor = await connectFrames(state.endpoint)
+      try {
+        const wrong = 'f'.repeat(token.length)
+        impostor.socket.write(encodeFrame({ id: 0, cmd: 'hello', token: wrong }))
+        await expect(impostor.response(0)).resolves.toMatchObject({ id: 0, ok: false, error: 'unauthorized' })
+      } finally {
+        impostor.socket.destroy()
+      }
+
       const spawnOptions: SessionHostSpawnOptions = {
         cwd: '.',
         shell: 'fake-shell',

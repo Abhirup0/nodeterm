@@ -492,7 +492,15 @@ export class SessionHostClient {
         }
       }
       const onHandshakeData = (chunk: Buffer): void => {
-        const frames = framer.push<SessionHostFrame>(chunk.toString('utf8'))
+        let frames: SessionHostFrame[]
+        try {
+          frames = framer.push<SessionHostFrame>(chunk.toString('utf8'))
+        } catch (error) {
+          // Whatever is bound to the endpoint streamed an oversized un-terminated line — a broken
+          // or impostor host. Fail the handshake rather than buffer it unbounded.
+          failHandshake(asError(error))
+          return
+        }
         for (let index = 0; index < frames.length; index++) {
           const frame = frames[index]
           if ('type' in frame || frame.id !== helloId) continue
@@ -549,7 +557,16 @@ export class SessionHostClient {
     this.everConnected = true
     const framer = new LineFramer()
     socket.on('data', (chunk: Buffer) => {
-      for (const frame of framer.push<SessionHostFrame>(chunk.toString('utf8'))) {
+      let frames: SessionHostFrame[]
+      try {
+        frames = framer.push<SessionHostFrame>(chunk.toString('utf8'))
+      } catch (error) {
+        // Oversized un-terminated line from the host — drop and destroy so a broken/impostor peer
+        // cannot grow this process's buffer without limit.
+        this.dropSocket(socket, asError(error), true)
+        return
+      }
+      for (const frame of frames) {
         this.handleFrame(socket, frame)
       }
     })

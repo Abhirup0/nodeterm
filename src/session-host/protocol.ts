@@ -199,13 +199,36 @@ export interface ListSessionsResult {
  * across TCP/pipe chunks — the whole reason a delimiter-based framing needs a stateful parser
  * instead of `JSON.parse(chunk)`. Shared by both ends so the framing rule is written exactly once.
  */
+/** Hard cap on a single un-terminated line. This framer runs BEFORE the `hello` auth check on
+ *  the host, and on the client against whatever is bound to the endpoint, so an unbounded buffer
+ *  is a pre-auth memory-exhaustion DoS: a peer that streams bytes with no `\n` would grow `buf`
+ *  without limit. No legitimate frame is anywhere near this — the largest is a full-scrollback
+ *  capture, comfortably under a few MB — so a line past the cap is a hostile or broken peer and
+ *  the connection is abandoned rather than buffered. */
+export const MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+/** Thrown when a single line exceeds `MAX_FRAME_BYTES`; both ends destroy the socket on it. */
+export class FrameTooLargeError extends Error {
+  constructor() {
+    super('session-host frame exceeded the maximum size')
+    this.name = 'FrameTooLargeError'
+  }
+}
+
 export class LineFramer {
   private buf = ''
   /** Feed a raw chunk; returns every complete frame it now contains, in arrival order. A
    *  malformed line is DROPPED rather than thrown — one corrupt frame must never wedge every
-   *  frame that follows it on the same connection. */
+   *  frame that follows it on the same connection. A line that grows past `MAX_FRAME_BYTES`
+   *  without terminating throws `FrameTooLargeError`; the caller destroys the connection. */
   push<T>(chunk: string): T[] {
     this.buf += chunk
+    // Only an un-terminated tail can grow unbounded — a chunk full of `\n` splits fine however
+    // large. Check before split so a peer cannot force a huge allocation one byte at a time.
+    if (this.buf.length > MAX_FRAME_BYTES && !this.buf.includes('\n')) {
+      this.buf = ''
+      throw new FrameTooLargeError()
+    }
     const lines = this.buf.split('\n')
     this.buf = lines.pop() ?? ''
     const out: T[] = []

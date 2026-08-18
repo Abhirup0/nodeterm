@@ -49,6 +49,18 @@ import { killHostSession } from './kill-session'
  *  briefly drops to zero sessions (closing every node, or a launcher racing a real create) does
  *  not tear down a host that is about to be handed a fresh session moments later. */
 const GRACE_EXIT_MS = 30_000
+
+/** Constant-time bearer-token comparison. The token is 256 bits of hex, so a timing side-channel
+ *  over noisy local IPC is not practically exploitable — but the check is trivial to get right,
+ *  and a non-string `req.token` (a hostile client can send any JSON) must compare false without
+ *  throwing. Unequal lengths short-circuit false; equal lengths go through `timingSafeEqual`. */
+function tokenMatches(received: unknown, expected: string): boolean {
+  if (typeof received !== 'string') return false
+  const a = Buffer.from(received)
+  const b = Buffer.from(expected)
+  return a.length === b.length && crypto.timingSafeEqual(a, b)
+}
+
 const COMPLETED_KILL_TTL_MS = 10 * 60_000
 const MAX_COMPLETED_KILLS = 1_024
 const REPLACEMENT_RESERVATION_TTL_MS = 30_000
@@ -891,7 +903,15 @@ async function main(): Promise<void> {
       }
     }
     socket.on('data', (chunk: Buffer) => {
-      const frames = framer.push<SessionHostRequest>(chunk.toString('utf8'))
+      let frames: SessionHostRequest[]
+      try {
+        frames = framer.push<SessionHostRequest>(chunk.toString('utf8'))
+      } catch {
+        // A single line past MAX_FRAME_BYTES with no terminator: a hostile or broken peer, pre- or
+        // post-auth. Drop the connection rather than keep buffering it.
+        socket.destroy()
+        return
+      }
       for (const req of frames) {
         if (!authed) {
           const requestedVersion =
@@ -900,7 +920,7 @@ async function main(): Promise<void> {
               : undefined
           if (
             req.cmd === 'hello' &&
-            req.token === token &&
+            tokenMatches(req.token, token) &&
             (requestedVersion === undefined ||
               requestedVersion === 1 ||
               requestedVersion === currentProtocolVersion())
@@ -923,7 +943,7 @@ async function main(): Promise<void> {
             )
           } else {
             const error =
-              req.cmd === 'hello' && req.token === token
+              req.cmd === 'hello' && tokenMatches(req.token, token)
                 ? `incompatible session-host protocol: expected ${currentProtocolVersion()}`
                 : 'unauthorized'
             writeSessionHostFrame(
@@ -951,6 +971,10 @@ async function main(): Promise<void> {
           )
           continue
         }
+        // A JSON primitive/null that parsed cleanly (e.g. `5`) is not a request: `'name' in req`
+        // would throw `TypeError` here — post-auth, inside the data handler, caught only by the
+        // process-level logger, silently dropping the rest of this chunk's frames. Skip it.
+        if (typeof req !== 'object' || req === null) continue
         if ('name' in req) void requestQueue.enqueue(req.name, () => dispatchAndRespond(req))
         else void dispatchAndRespond(req)
       }
@@ -1020,6 +1044,18 @@ async function main(): Promise<void> {
 
   const token = crypto.randomBytes(32).toString('hex')
   server.listen(paths.endpoint, () => {
+    // Defence in depth: the 0600 token already gates every command, but a process running under a
+    // permissive umask would otherwise publish the AF_UNIX socket world-writable, letting a co-user
+    // at least connect() (and reach the pre-auth framer). Pin it to owner-only. Windows named pipes
+    // have their own default ACL and no fs mode, so this is POSIX-only; a failure here is not fatal
+    // — the token still protects the endpoint — so it is best-effort and logged, not aborted.
+    if (process.platform !== 'win32') {
+      try {
+        fs.chmodSync(paths.endpoint, 0o700)
+      } catch (e) {
+        log(`warning: could not restrict socket permissions: ${String(e)}`)
+      }
+    }
     try {
       fs.writeFileSync(paths.tokenPath, token, { mode: 0o600 })
     } catch (e) {

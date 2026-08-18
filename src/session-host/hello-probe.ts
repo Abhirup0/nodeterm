@@ -32,7 +32,16 @@ export function trySessionHostHello(
     })
     const framer = new LineFramer()
     socket.on('data', (chunk: Buffer) => {
-      for (const frame of framer.push<{ id: number; ok?: boolean }>(chunk.toString('utf8'))) {
+      let frames: { id: number; ok?: boolean }[]
+      try {
+        frames = framer.push<{ id: number; ok?: boolean }>(chunk.toString('utf8'))
+      } catch {
+        // Whatever answered streamed an oversized un-terminated line — treat the probe as a
+        // negative (this endpoint is not a healthy host) rather than buffer it.
+        finish(false)
+        return
+      }
+      for (const frame of frames) {
         if (frame.id !== HELLO_PROBE_ID) continue
         finish(frame.ok === true)
       }

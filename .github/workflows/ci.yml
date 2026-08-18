@@ -54,5 +54,8 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
+      - name: Build session host
+        run: npm run host:build
+
       - name: Windows-relevant tests
-        run: npx vitest run src/core/fs-atomic.test.ts src/core/fs-atomic.guard.test.ts
+        run: npx vitest run src/core/fs-atomic.test.ts src/core/fs-atomic.guard.test.ts src/session-host/ src/core/session-host-client.test.ts src/core/session-host-launch-ledger.test.ts src/core/agent-launch.test.ts src/core/pty-session-host.test.ts
