@@ -345,7 +345,11 @@ export async function writeFileAtomic(
 ): Promise<void> {
   const tmp = tempNameFor(target)
   try {
-    await fs.writeFile(tmp, data, { encoding: 'utf-8', ...opts })
+    // `wx`: fail if the temp already exists rather than following it. The name is unique per call,
+    // so this never fires in normal operation — its job is to refuse a symlink an attacker
+    // pre-planted at the (now guessable-in-principle) temp path, so a publish can never be
+    // redirected to write through it. On the expected fresh path it is a plain exclusive create.
+    await fs.writeFile(tmp, data, { encoding: 'utf-8', flag: 'wx', ...opts })
     await renameAtomic(tmp, target)
   } catch (e) {
     await fs.rm(tmp, { force: true }).catch(() => {})
