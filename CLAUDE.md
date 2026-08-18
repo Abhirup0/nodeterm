@@ -18,6 +18,29 @@ workflows who benefit from a spatial layout over stacked tabs. Long-term vision 
 remote access and paid features — the architecture is built so those slot in without a
 UI rewrite (see Transport abstraction below).
 
+## Platform support
+
+macOS, Linux, and a browser Server Edition are the shipping targets; Windows is being brought up
+as a first-class desktop target (extraction from external PR #276). The policy for what "supported"
+means — and what you may assume when writing a feature — is three tiers, not "100% parity":
+
+- **Core is first-class everywhere.** The terminal + agent + canvas + session-continuity
+  experience must work on every desktop platform. Continuity is tmux on POSIX and, where there is
+  no tmux (Windows), a standalone session-host process — the mechanism differs, the guarantee does
+  not.
+- **POSIX-bound edges degrade explicitly, never silently.** Some subsystems are structurally tied
+  to POSIX (SSH ControlMaster, the unix-socket askpass transport, some tmux-only paths). On a
+  platform where they cannot work they must either use a platform-appropriate mechanism or be
+  clearly gated off — a feature that throws `EACCES`/`EPERM` on Windows because nobody checked is a
+  bug, not an accepted limitation.
+- **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
+  through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the
+  guard test (`fs-atomic.guard.test.ts`) enforces this. Resolve path separators / absolute-path
+  checks / file-link dialects against the filesystem-owning core's platform, not the viewer's, and
+  never assume `/` or a unix socket. When a test can only run on one platform, gate it with
+  `it.skipIf(process.platform === 'win32')` (or the inverse) and say why — never let it fail the
+  cross-platform CI. The `windows-latest` CI job runs the platform-dependent suites on real Windows.
+
 ## Commands
 
 ```bash
