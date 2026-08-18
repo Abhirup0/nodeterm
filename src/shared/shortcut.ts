@@ -106,13 +106,19 @@ export function parseShortcut(s: string): ParsedShortcut {
 /** Canonical spellings for the key tokens that are not a single character. Serializing through
  *  this (rather than emitting the uppercased token) is what makes `serializeShortcut` the exact
  *  inverse of `parseShortcut`: `"Ctrl+Insert"` round-trips instead of becoming `"Ctrl+INSERT"`.
- *  Single letters, digits and F-keys are already canonical and pass through. */
+ *  Single letters, digits and F-keys are already canonical and pass through.
+ *  The ALIAS spellings `KEY_LABELS` also accepts (`ESC`, `RETURN`) map onto the canonical token,
+ *  so `"Cmd+Esc"` and `"Cmd+Escape"` serialize identically — without that, two spellings of one
+ *  chord would carry two conflict identities. Serializer-only: neither alias is ever produced by
+ *  `normalizeKey` from a real `e.key` (the DOM reports `"Escape"` / `"Enter"`). */
 const CANONICAL_KEY_NAMES: Record<string, string> = {
   ENTER: 'Enter',
   DELETE: 'Delete',
   BACKSPACE: 'Backspace',
   INSERT: 'Insert',
   ESCAPE: 'Escape',
+  ESC: 'Escape',
+  RETURN: 'Enter',
   TAB: 'Tab',
   SPACE: 'Space',
   ARROWUP: 'ArrowUp',
@@ -249,13 +255,20 @@ export function chordHeld(e: ShortcutKeyEvent, s: string, isMac: boolean): boole
  * modifier is missing. (A modifier-only chord is captured separately — see `buildModifierChord`
  * below — because it commits on keyUP once every key is released, by which point the keyup
  * event's own modifier flags are already false and can't be read off it directly.)
+ *
+ * **A capture must describe the whole gesture**, because matching is exact: on mac a Control held
+ * beside Cmd is recorded as the literal `Ctrl` token, and on non-mac a held Meta (Super/Win)
+ * REFUSES the capture — that chord has no spelling in this grammar, and storing the bare `Cmd+…`
+ * would save a binding the same gesture can never fire again.
  */
 export function captureToShortcut(e: ShortcutKeyEvent, isMac: boolean): string | null {
   const primaryPressed = isMac ? e.metaKey : e.ctrlKey
   if (!primaryPressed) return null
+  if (!isMac && e.metaKey) return null
   const key = normalizeKey(e.key)
   if (MODIFIER_KEYS.has(key)) return null
   const parts = ['Cmd']
+  if (isMac && e.ctrlKey) parts.push('Ctrl')
   if (e.altKey) parts.push('Alt')
   if (e.shiftKey) parts.push('Shift')
   parts.push(key)
@@ -266,18 +279,24 @@ export function captureToShortcut(e: ShortcutKeyEvent, isMac: boolean): string |
  *  `buildModifierChord`). */
 export interface ChordModifiers {
   cmd: boolean
+  /** A literal Control held beside the primary (mac ⌃). OPTIONAL so a caller that does not
+   *  collect it keeps its existing behavior — collecting it is the capture field's job. */
+  ctrl?: boolean
   alt: boolean
   shift: boolean
 }
 
 /** `{cmd:true, alt:true, shift:false}` -> `"Cmd+Alt"`; `{cmd:false, ...}` -> `null` (the primary
- *  modifier is mandatory, same as `captureToShortcut`). The Settings capture field calls this at
- *  keyUp, once every key has been released, using the modifier state it remembered from the last
- *  keyDown while only modifier keys had been pressed (`isModifierEventKey`) — the keyup event
- *  itself no longer carries that state. */
+ *  modifier is mandatory, same as `captureToShortcut`). A `ctrl` observed beside the primary
+ *  becomes the literal `Ctrl` token, for the same reason `captureToShortcut` records it: under
+ *  exact matching, a chord that omits a modifier the user was holding can never fire. The Settings
+ *  capture field calls this at keyUp, once every key has been released, using the modifier state it
+ *  remembered from the last keyDown while only modifier keys had been pressed
+ *  (`isModifierEventKey`) — the keyup event itself no longer carries that state. */
 export function buildModifierChord(mods: ChordModifiers): string | null {
   if (!mods.cmd) return null
   const parts = ['Cmd']
+  if (mods.ctrl) parts.push('Ctrl')
   if (mods.alt) parts.push('Alt')
   if (mods.shift) parts.push('Shift')
   return parts.join('+')

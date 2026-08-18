@@ -330,6 +330,10 @@ describe('buildModifierChord', () => {
     expect(buildModifierChord({ cmd: false, alt: true, shift: true })).toBeNull()
   })
 
+  it('emits the literal Ctrl token after Cmd when a Control was held too', () => {
+    expect(buildModifierChord({ cmd: true, ctrl: true, alt: false, shift: false })).toBe('Cmd+Ctrl')
+  })
+
   it('round-trips through parseShortcut', () => {
     const combo = buildModifierChord({ cmd: true, alt: true, shift: false })
     expect(combo).not.toBeNull()
@@ -386,6 +390,22 @@ describe('captureToShortcut', () => {
     const combo = captureToShortcut(e, true)
     expect(combo).not.toBeNull()
     expect(matchesShortcut(e, combo as string, true)).toBe(true)
+  })
+
+  it('records a Control held alongside Cmd on mac, and the capture still matches its own gesture', () => {
+    const e = { metaKey: true, ctrlKey: true, shiftKey: false, altKey: false, key: 'd' }
+    const combo = captureToShortcut(e, true)
+    expect(combo).toBe('Cmd+Ctrl+D')
+    expect(matchesShortcut(e, combo as string, true)).toBe(true)
+  })
+
+  it('returns null on non-mac when Meta (Super/Win) is held — the grammar cannot express it', () => {
+    expect(
+      captureToShortcut(
+        { metaKey: true, ctrlKey: true, shiftKey: false, altKey: false, key: 'd' },
+        false
+      )
+    ).toBeNull()
   })
 })
 
@@ -444,6 +464,10 @@ describe('serializeShortcut', () => {
   })
   it('round-trips a named key through its canonical spelling', () => {
     expect(serializeShortcut(parseShortcut('Cmd+Enter'))).toBe('Cmd+Enter')
+  })
+  it('collapses alias spellings onto one canonical identity', () => {
+    expect(serializeShortcut(parseShortcut('Cmd+Esc'))).toBe('Cmd+Escape')
+    expect(serializeShortcut(parseShortcut('Cmd+Return'))).toBe('Cmd+Enter')
   })
 })
 
