@@ -51,6 +51,46 @@ describe('sanitizeProjectSettingsDoc', () => {
   })
 })
 
+describe('sanitizeProjectSettingsDoc field caps (at-cap survives, over-cap drops)', () => {
+  it('setupScript/archiveScript: 64000 survives, 64001 drops', () => {
+    const atCap = 'a'.repeat(64000)
+    const overCap = 'a'.repeat(64001)
+    expect(sanitizeProjectSettingsDoc({ setup: { setupScript: atCap } }).setup?.setupScript).toBe(atCap)
+    expect(sanitizeProjectSettingsDoc({ setup: { setupScript: overCap } }).setup).toBeUndefined()
+  })
+  it('launchCmd: 4096 survives, 4097 drops', () => {
+    const atCap = 'x'.repeat(4096)
+    const overCap = 'x'.repeat(4097)
+    expect(sanitizeProjectSettingsDoc({ agents: { launchCmd: atCap } }).agents?.launchCmd).toBe(atCap)
+    expect(sanitizeProjectSettingsDoc({ agents: { launchCmd: overCap } }).agents).toBeUndefined()
+  })
+  it('env value: 4096 survives, 4097 drops the whole entry', () => {
+    const atCap = 'v'.repeat(4096)
+    const overCap = 'v'.repeat(4097)
+    expect(sanitizeProjectSettingsDoc({ agents: { env: { K: atCap } } }).agents?.env).toEqual({ K: atCap })
+    expect(sanitizeProjectSettingsDoc({ agents: { env: { K: overCap } } }).agents).toBeUndefined()
+  })
+  it('env entries: 64 survive, the 65th (key-sorted) is dropped', () => {
+    const env: Record<string, string> = {}
+    for (let i = 0; i < 65; i++) env[`K${String(i).padStart(2, '0')}`] = String(i)
+    const out = sanitizeProjectSettingsDoc({ agents: { env } }).agents?.env ?? {}
+    expect(Object.keys(out).length).toBe(64)
+    expect(out.K00).toBe('0')
+    expect(out.K64).toBeUndefined() // K64 sorts last of the 65 keys, so it is the one dropped
+  })
+  it('sharedPaths: 128 entries survive, the 129th is dropped', () => {
+    const paths = Array.from({ length: 129 }, (_, i) => `p${i}`)
+    const out = sanitizeProjectSettingsDoc({ worktree: { sharedPaths: paths } }).worktree?.sharedPaths
+    expect(out).toEqual(paths.slice(0, 128))
+  })
+  it('sharedPaths entry length: 1024 survives, 1025 drops that entry', () => {
+    const atCap = 'a'.repeat(1024)
+    const overCap = 'b'.repeat(1025)
+    const out = sanitizeProjectSettingsDoc({ worktree: { sharedPaths: [atCap, overCap] } }).worktree?.sharedPaths
+    expect(out).toEqual([atCap])
+  })
+})
+
 describe('sanitizeProjectLocalSettings', () => {
   it('keeps only literal-true known-family ignoreShared flags', () => {
     const local = sanitizeProjectLocalSettings({

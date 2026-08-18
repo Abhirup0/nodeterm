@@ -18,8 +18,6 @@
  * for node-exec.ts).
  */
 
-import * as path from 'path'
-
 export const PROJECT_SETTINGS_FILE = 'settings.json'
 
 export type ProjectSettingsFamily = 'setup' | 'worktree' | 'agents' | 'terminal'
@@ -160,7 +158,10 @@ function sanitizeSharedPaths(v: unknown): string[] | undefined {
   for (const entry of v) {
     if (typeof entry !== 'string') continue
     if (entry.length === 0 || entry.length > SHARED_PATH_STRING_CAP) continue
-    if (path.posix.isAbsolute(entry) || WINDOWS_DRIVE_RE.test(entry)) continue
+    // `entry.startsWith('/')` stands in for `path.posix.isAbsolute` — src/shared is bundled for the
+    // renderer as plain browser code (no Node builtins), and emptiness is already rejected above,
+    // so the two are equivalent for every string that reaches this line.
+    if (entry.startsWith('/') || WINDOWS_DRIVE_RE.test(entry)) continue
     if (hasTraversalSegment(entry)) continue
     if (seen.has(entry)) continue
     seen.add(entry)
