@@ -109,13 +109,15 @@ const ALLOW = new Map<string, Validator>([
       p.selector.length <= MAX_SELECTOR
   ],
 
-  // A shallow document read only (depth <= 1, no pierce) — the deep read is the full-DOM door that
-  // getOuterHTML/getAttributes are excluded to keep shut.
+  // A shallow document read only (0 <= depth <= 1, no pierce) — the deep read is the full-DOM door
+  // that getOuterHTML/getAttributes are excluded to keep shut. NEGATIVE depth is refused too: in CDP
+  // `depth: -1` means the ENTIRE subtree, the same full-DOM read arriving by a signed-number door
+  // (Task 7.6). Our own read code passes depth:0; this is the belt.
   [
     'DOM.getDocument',
     (p) =>
       isRecord(p) &&
-      (p.depth === undefined || (typeof p.depth === 'number' && p.depth <= 1)) &&
+      (p.depth === undefined || (typeof p.depth === 'number' && p.depth >= 0 && p.depth <= 1)) &&
       p.pierce !== true
   ],
 
@@ -144,6 +146,18 @@ const ALLOW = new Map<string, Validator>([
   ['DOM.enable', () => true],
   ['Runtime.enable', () => true],
   ['Page.getLayoutMetrics', () => true],
+  // Enable the Network domain so `--nav` can read the MAIN-FRAME response status from
+  // Network.responseReceived (an event feeding our own state — nothing is streamed to the agent,
+  // asserted in browser-actions.test.ts). It carries no read power itself; getAllCookies stays out.
+  ['Network.enable', () => true],
+  // The final URL after a `--nav` (redirects resolved). Read-only, no parameters that matter.
+  ['Page.getNavigationHistory', () => true],
+  // The read family's chain: getDocument(depth<=1) → resolveNode(nodeId) → callFunctionOn → releaseObject.
+  // resolveNode turns OUR shallow document node into an execution-context object handle for the frozen
+  // NT_SCRIPTS reader; the nodeId comes from our own getDocument, never from the agent.
+  ['DOM.resolveNode', (p) => isRecord(p) && typeof p.nodeId === 'number'],
+  // Free the object handle callFunctionOn ran against. objectId is our own, from resolveNode.
+  ['Runtime.releaseObject', (p) => isRecord(p) && typeof p.objectId === 'string' && p.objectId.length > 0],
   // Flat-mode child attach only (S8): a nested/auto-attach mode is a different, unaudited surface.
   [
     'Target.attachToTarget',

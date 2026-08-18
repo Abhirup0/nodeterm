@@ -364,6 +364,13 @@ export const IPC = {
   browserStop: 'browser:stop-control',
   browserStopAll: 'browser:stop-control-all',
   browserStopProject: 'browser:stop-control-project',
+  // The `browser` VERB resolve round-trip (S8 PR 7). Main intercepts `browser` and asks the renderer
+  // the two things ONLY it knows — which project owns the source node, whether that source is a
+  // control-capable agent, and whether the per-project capability is on RIGHT NOW — over the same
+  // routing every verb uses. Main makes the security decision (owner + capability + CDP gate) and
+  // does the CDP work itself; the renderer never runs a CDP command.
+  browserControlResolve: 'browser:control-resolve',
+  browserControlResolveResult: 'browser:control-resolve-result',
   remoteHostStart: 'remote:host:start',
   remoteHostStop: 'remote:host:stop',
   // Connection approval gate: main → renderer when a client finishes the handshake (carries the

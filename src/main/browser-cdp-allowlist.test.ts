@@ -73,21 +73,52 @@ describe('checkCdpCommand', () => {
     // An allowlist that explains itself is a probing aid.
     expect(checkCdpCommand('Made.Up', {}, ctx)).toBe(false)
   })
+
+  it('the read/nav infra methods PR 7 adds are gated, not blanket-allowed', () => {
+    // Enabling the Network domain (needed for the main-frame status) is fine; it carries no read.
+    expect(checkCdpCommand('Network.enable', {}, ctx)).toBe(true)
+    expect(checkCdpCommand('Page.getNavigationHistory', {}, ctx)).toBe(true)
+    // resolveNode takes OUR document nodeId (a number), never an agent objectId.
+    expect(checkCdpCommand('DOM.resolveNode', { nodeId: 1 }, ctx)).toBe(true)
+    expect(checkCdpCommand('DOM.resolveNode', { objectId: 'agent-picked' }, ctx)).toBe(false)
+    expect(checkCdpCommand('DOM.resolveNode', {}, ctx)).toBe(false)
+    expect(checkCdpCommand('Runtime.releaseObject', { objectId: 'o1' }, ctx)).toBe(true)
+    expect(checkCdpCommand('Runtime.releaseObject', {}, ctx)).toBe(false)
+  })
+
+  it('the full-DOM read cannot arrive by another door (Task 7.6)', () => {
+    // `--read html` is refused in the verb parser; here we pin that the CDP methods an HTML/full-DOM
+    // read would need are refused by the allowlist too, so the same read cannot arrive by another
+    // door — deep getDocument, getOuterHTML and getAttributes are all default-denied.
+    expect(checkCdpCommand('DOM.getOuterHTML', { nodeId: 1 }, ctx)).toBe(false)
+    expect(checkCdpCommand('DOM.getAttributes', { nodeId: 1 }, ctx)).toBe(false)
+    expect(checkCdpCommand('DOM.getDocument', { depth: -1 }, ctx)).toBe(false) // -1 = whole tree
+    expect(checkCdpCommand('DOM.getDocument', { depth: 0 }, ctx)).toBe(true)
+    expect(checkCdpCommand('DOM.getDocument', { depth: 1, pierce: true }, ctx)).toBe(false)
+  })
 })
 
 /**
  * Structural pin (the analogue of Task 4.4's second half). `checkCdpCommand` is only THE gate if it
- * is unbypassable: every `sendCommand(` in the main-side browser surface must live inside the one
- * wrapper, `browser-cdp-send.ts`, which calls this function. A direct `debugger.sendCommand` anywhere
- * else is arbitrary CDP that never met the allowlist.
+ * is unbypassable: every `sendCommand(` in `src/main` must live inside the one wrapper,
+ * `browser-cdp-send.ts`, which calls this function. A direct `debugger.sendCommand` anywhere else is
+ * arbitrary CDP that never met the allowlist.
+ *
+ * WIDENED IN PR 7 (carried obligation, PR 5/#306 MINOR-1). Until the `browser` VERB existed, the only
+ * CDP callers were `browser-*.ts` files and the grep scanned only those. PR 7 adds the drive path
+ * (`browser-drive.ts`, `browser-actions.ts`) and wires the real `webContents.debugger` into a
+ * `BrowserSession` from `index.ts` — so a stray `sendCommand` could now be introduced in a
+ * non-`browser-`prefixed main file too. The grep therefore scans ALL of `src/main`, so the single-gate
+ * property is enforced across the whole surface the verb path now touches, not just the files that
+ * happen to be named `browser-*`.
  */
-describe('debugger.sendCommand has exactly one call site', () => {
+describe('debugger.sendCommand has exactly one call site in ALL of src/main', () => {
   const mainDir = path.resolve(__dirname)
 
-  it('every sendCommand( in src/main/browser-*.ts is inside browser-cdp-send.ts', () => {
+  it('every sendCommand( in src/main is inside browser-cdp-send.ts', () => {
     const offenders: string[] = []
     for (const f of fs.readdirSync(mainDir)) {
-      if (!/^browser-.*\.ts$/.test(f) || f.endsWith('.test.ts')) continue
+      if (!f.endsWith('.ts') || f.endsWith('.test.ts')) continue
       if (f === 'browser-cdp-send.ts') continue
       const src = fs.readFileSync(path.join(mainDir, f), 'utf8')
       // Strip comments so a mention in prose is not a false positive; a real call is not a comment.
