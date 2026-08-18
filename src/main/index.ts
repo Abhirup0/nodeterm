@@ -1334,14 +1334,14 @@ app.whenReady().then(async () => {
     isRemoteNode: (nodeId) => workspaceStore.sshProjectIdForNode(nodeId) !== undefined
   })
   onNodeStateChange((c) => keepAwake?.onChange(c))
-  // Seed from the restored mirror: an app relaunch (auto-update, crash) does not stop a
-  // tmux-backed run, and loadPersisted deliberately restores its `working` entry WITHOUT firing
-  // edges — so without this the machine would go unprotected until the run's next turn boundary.
-  // The tracker applies the same isRemoteNode/enabled gates as a live edge, and an entry that is
-  // in fact gone is released by the stale sweep's synthetic end within its next tick.
-  for (const { nodeId } of workingNodes()) {
-    keepAwake.onChange({ nodeId, event: 'start', state: 'working' })
-  }
+  // Converge to the mirror on two occasions the edge stream cannot cover:
+  //  - boot: an app relaunch (auto-update, crash) does not stop a tmux-backed run, and
+  //    loadPersisted deliberately restores its `working` entry WITHOUT firing edges;
+  //  - every mirror flush: a SessionStart mid-working resets the entry silently (upstream keeps
+  //    that edge-free to protect the new turn's Live Activity), which also disarms the stale
+  //    sweep — but the reset schedules a flush itself, so this sync releases moments later.
+  keepAwake.sync(workingNodes().map((w) => w.nodeId))
+  onMirrorFlush(() => keepAwake?.sync(workingNodes().map((w) => w.nodeId)))
   // Advertise launch settings to the mobile companion through the mirror. The provider is
   // consulted at every flush (heartbeat ≤60s), so a settings change propagates without extra
   // plumbing. Caps arrive async: re-flush once the memoized probe answers.

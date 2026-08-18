@@ -125,4 +125,24 @@ describe('keep-awake tracker', () => {
     expect(calls.stop).toBe(1)
     expect(tracker.holding()).toBe(false)
   })
+
+  it('sync() converges to the mirror set — the SessionStart silent-reset story', () => {
+    // A SessionStart mid-working resets the mirror entry to idle WITHOUT an edge (upstream keeps
+    // it silent to protect the new turn's Live Activity), which also disarms the stale sweep.
+    // The flush-time sync is what releases the assertion then (the reset schedules the flush).
+    const { tracker, calls } = harness({ remote: (id) => id.startsWith('remote-') })
+    tracker.onChange(edge('a', 'start', 'working'))
+    expect(tracker.holding()).toBe(true)
+    tracker.sync([]) // the mirror no longer believes anything is working
+    expect(calls.stop).toBe(1)
+    expect(tracker.holding()).toBe(false)
+    // And the inverse: a restored-at-boot working entry seeds a hold with the same gates.
+    tracker.sync(['b', 'remote-1'])
+    expect(calls.start).toBe(2)
+    expect(tracker.holding()).toBe(true)
+    // The remote id was filtered: releasing 'b' alone must release the assertion.
+    tracker.onChange(edge('b', 'end', 'done'))
+    expect(calls.stop).toBe(2)
+    expect(tracker.holding()).toBe(false)
+  })
 })

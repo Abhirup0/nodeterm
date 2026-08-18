@@ -13,9 +13,13 @@
 //     stale sweep (`sweepStaleWorking`, shared/agents/stale.ts WORKING_STALE_MS), which fires a
 //     synthetic `end` edge per silent node through the SAME onNodeStateChange seam this tracker
 //     folds — worst case the assertion outlives the last real work by that window, never forever.
-//     A session boundary (SessionStart/SessionEnd) mid-`working` is the one exit the sweep cannot
-//     see — it resets the mirror entry to idle, out of the sweep's jurisdiction — so the mirror
-//     fires the same synthetic end on that path itself (produceInboxFromState's session guard).
+//     A session boundary mid-`working` resets the mirror entry to idle, out of the sweep's
+//     jurisdiction: a session END fires its own 'Ended' edge (produceInboxFromState's mid-turn
+//     branch), while a SessionStart is deliberately silent upstream (ending there would kill the
+//     activity of the turn just beginning) — that one gap, and any future silent reset, is closed
+//     by `sync()`, which the shell calls on every mirror flush to make the tracker converge to
+//     the mirror's own `working` set — and the silent reset is itself an event, so it schedules
+//     the very flush (WRITE_DEBOUNCE_MS) that releases the assertion moments later.
 //
 // Electron-free (src/core): the actual powerSaveBlocker lives behind the injected `blocker` seam
 // (template: session-budget.ts); the thin shell in src/main/keep-awake.ts binds it.
@@ -50,6 +54,10 @@ export interface KeepAwakeTracker {
   onChange(c: KeepAwakeEdge): void
   /** Re-evaluate after a settings change (live toggle). */
   refresh(): void
+  /** Converge to the mirror's authoritative `working` node ids (boot seed + every flush).
+   *  Covers every reset the edge stream never reports — loadPersisted restores, the SessionStart
+   *  silent reset — with the same isRemoteNode/enabled gates as a live edge. */
+  sync(workingNodeIds: string[]): void
   /** Currently holding the assertion? (tests + future UI) */
   holding(): boolean
   /** Release + clear (quit path). */
@@ -97,6 +105,11 @@ export function createKeepAwake(opts: KeepAwakeOpts): KeepAwakeTracker {
       reconcile()
     },
     refresh(): void {
+      reconcile()
+    },
+    sync(workingNodeIds: string[]): void {
+      working.clear()
+      for (const id of workingNodeIds) if (!opts.isRemoteNode(id)) working.add(id)
       reconcile()
     },
     holding(): boolean {

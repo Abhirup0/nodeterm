@@ -1260,21 +1260,6 @@ function produceInboxFromState(
   }
   const baseEvent = { ts: now, nodeId, agentId: ev.agentId, sessionId: ev.sessionId }
   const stateBase = { nodeId, agentId: ev.agentId, sessionId: ev.sessionId, ts: now }
-  // A session boundary (SessionStart/SessionEnd) resets a `working` node to idle with no done
-  // edge of its own (reduceEntry clears the state) — yet every edge-driven consumer (the phone's
-  // Live Activity, keep-awake's power assertion) still believes the node is working, and the
-  // stale sweep can never correct them: it only watches entries still marked `working`, and this
-  // one just left that set. Fire the same not-a-completion end the sweep fires, so the seam sees
-  // every exit. Like the sweep, deliberately NO inbox event — nothing finished.
-  if (ev.kind === 'session' && prevState === 'working') {
-    fireNodeStateChange({
-      ...stateBase,
-      event: 'end',
-      state: 'done',
-      message: 'Stopped',
-      interrupted: true
-    })
-  }
   // Working START edge (fresh turn / session open): a Live Activity begins here. reduceEntry's
   // done-holdoff means a held-off late working keeps `nextState === 'done'`, so it never reaches
   // here — no spurious 'start'.
