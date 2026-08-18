@@ -277,3 +277,46 @@ export function sameProjectSettingsContent(a: ProjectSettingsFileV1, b: ProjectS
   const { rev: _revB, savedAt: _savedAtB, ...contentB } = b
   return JSON.stringify(contentA) === JSON.stringify(contentB)
 }
+
+export type ProjectSettingSource = 'local' | 'shared'
+export interface ResolvedProjectSetting<T> {
+  value: T
+  source: ProjectSettingSource
+}
+type R<T> = ResolvedProjectSetting<T>
+export interface ResolvedProjectSettings {
+  setup: { setupScript?: R<string>; archiveScript?: R<string>; waitForSetup?: R<boolean> }
+  worktree: { basePath?: R<string>; baseRef?: R<string>; sharedPaths?: R<string[]> }
+  agents: { defaultAgentId?: R<string>; launchCmd?: R<string>; env?: R<Record<string, string>> }
+  terminal: { shell?: R<string>; theme?: R<string>; fontFamily?: R<string> }
+}
+
+/**
+ * Local-over-shared, per key, with provenance — NOT global/default layering. Consumption sites
+ * apply `?? globalSetting` themselves on top of this (they know their own global); this function
+ * only decides between what THIS project's local and shared docs say. Walks the same
+ * `FAMILY_FIELDS` table the Task 1 sanitizer uses, so a field is still declared exactly once.
+ */
+export function resolveProjectSettings(
+  local: ProjectLocalSettings | undefined,
+  shared: ProjectSettingsDoc | undefined
+): ResolvedProjectSettings {
+  const out = { setup: {}, worktree: {}, agents: {}, terminal: {} } as ResolvedProjectSettings
+  for (const family of KNOWN_FAMILIES) {
+    const localFamily = local?.[family] as Record<string, unknown> | undefined
+    const sharedFamily = shared?.[family] as Record<string, unknown> | undefined
+    const ignoreThisFamily = local?.ignoreShared?.[family] === true
+    const target = out[family] as Record<string, unknown>
+    for (const key of Object.keys(FAMILY_FIELDS[family])) {
+      const localValue = localFamily?.[key]
+      if (localValue !== undefined) {
+        target[key] = { value: localValue, source: 'local' }
+        continue
+      }
+      if (ignoreThisFamily) continue
+      const sharedValue = sharedFamily?.[key]
+      if (sharedValue !== undefined) target[key] = { value: sharedValue, source: 'shared' }
+    }
+  }
+  return out
+}

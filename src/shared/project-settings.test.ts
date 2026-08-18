@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   parseProjectSettingsFile, sanitizeProjectSettingsDoc, sanitizeProjectLocalSettings,
-  serializeProjectSettingsFile, sameProjectSettingsContent
+  serializeProjectSettingsFile, sameProjectSettingsContent, resolveProjectSettings
 } from './project-settings'
 
 describe('sanitizeProjectSettingsDoc', () => {
@@ -89,5 +89,33 @@ describe('serialize + content equality', () => {
     expect(parseProjectSettingsFile(serializeProjectSettingsFile(a)).status).toBe('ok')
     expect(sameProjectSettingsContent(a, b)).toBe(true)
     expect(sameProjectSettingsContent(a, c)).toBe(false)
+  })
+})
+
+describe('resolveProjectSettings', () => {
+  const shared = {
+    setup: { setupScript: 'npm ci', waitForSetup: true },
+    terminal: { shell: '/bin/bash', theme: 'dark' }
+  }
+  it('local wins per key; shared fills the rest with provenance', () => {
+    const r = resolveProjectSettings({ terminal: { shell: '/bin/fish' } }, shared)
+    expect(r.terminal.shell).toEqual({ value: '/bin/fish', source: 'local' })
+    expect(r.terminal.theme).toEqual({ value: 'dark', source: 'shared' })
+    expect(r.setup.setupScript).toEqual({ value: 'npm ci', source: 'shared' })
+  })
+  it('ignoreShared blanks a family without needing local values', () => {
+    const r = resolveProjectSettings({ ignoreShared: { setup: true } }, shared)
+    expect(r.setup).toEqual({})
+    expect(r.terminal.shell).toEqual({ value: '/bin/bash', source: 'shared' })
+  })
+  it('ignoreShared still lets a local value through', () => {
+    const r = resolveProjectSettings(
+      { setup: { setupScript: 'make' }, ignoreShared: { setup: true } }, shared)
+    expect(r.setup.setupScript).toEqual({ value: 'make', source: 'local' })
+    expect(r.setup.waitForSetup).toBeUndefined()
+  })
+  it('handles both sides undefined', () => {
+    expect(resolveProjectSettings(undefined, undefined)).toEqual(
+      { setup: {}, worktree: {}, agents: {}, terminal: {} })
   })
 })
