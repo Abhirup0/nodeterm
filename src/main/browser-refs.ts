@@ -44,6 +44,10 @@ interface NodeRefs {
 
 export class RefTable {
   private readonly byNode = new Map<string, NodeRefs>()
+  /** The generation each node's CURRENT labels were minted at. Kept alongside — and NOT cleared by a
+   *  bump — so a ref spent after a navigation resolves against the generation the agent read it on and
+   *  is therefore reported STALE (the page navigated), not merely "unknown". See {@link spend}. */
+  private readonly mintedAt = new Map<string, number>()
 
   /** The generation the node is currently on (0 before anything is minted or bumped). */
   currentGeneration(nodeId: string): number {
@@ -63,7 +67,21 @@ export class RefTable {
       map.set(label, items[i])
     }
     this.byNode.set(nodeId, { gen, items: map })
+    this.mintedAt.set(nodeId, gen)
     return { gen, labels }
+  }
+
+  /**
+   * SPEND a ref an agent is holding (`--click @7`, `--type --into @3`, `--wait @9`). It resolves the
+   * label at the generation its CURRENT map was minted on — so a navigation since that read (which
+   * bumped the generation) surfaces as the STALE refusal (`the page navigated … re-read it`), while a
+   * label that was simply never minted on this page is the UNKNOWN refusal. Both are refusals; a stale
+   * ref is NEVER silently re-resolved against a newer map (the correctness property PR 5 pins). A node
+   * that never read a map at all resolves as stale-shaped (there is nothing to spend), which is still a
+   * refusal.
+   */
+  spend(nodeId: string, label: string): RefResolution {
+    return this.resolve(nodeId, this.mintedAt.get(nodeId) ?? 0, label)
   }
 
   /**
@@ -99,5 +117,6 @@ export class RefTable {
   /** Forget a node entirely (its guest is gone / owner released). */
   forget(nodeId: string): void {
     this.byNode.delete(nodeId)
+    this.mintedAt.delete(nodeId)
   }
 }

@@ -41,8 +41,10 @@ export const NT_SCRIPTS = Object.freeze({
   /** The visible text of a selector (or the whole body when none is given), plus the untruncated
    *  length so main can announce an in-band truncation. Capped at the hard ceiling (60000) so a huge
    *  page never ships megabytes over CDP; main applies the caller's --max (<= ceiling) to the text.
-   *  innerText semantics exclude <script>, <style>, display:none and aria-hidden BY CONSTRUCTION.
-   *  Read-only. */
+   *  innerText semantics exclude <script>, <style> and display:none BY CONSTRUCTION (they are the
+   *  RENDERED text). They do NOT drop aria-hidden content — that lives in the accessibility tree, not
+   *  in innerText — so this reader makes no aria-hidden promise; its real property is that no hidden
+   *  input value and no <script> body ride along. Read-only. */
   readText:
     'function(sel){ var el = sel ? document.querySelector(sel) : document.body; if (!el) return null; var t = el.innerText || ""; return { text: t.slice(0, 60000), total: t.length } }',
 
@@ -65,7 +67,14 @@ export const NT_SCRIPTS = Object.freeze({
 
   /** A readiness probe: is the document loaded, and (optionally) is a selector present yet? */
   waitProbe:
-    'function(s){ if (document.readyState !== "complete") return false; if (!s) return true; return document.querySelector(s) != null }'
+    'function(s){ if (document.readyState !== "complete") return false; if (!s) return true; return document.querySelector(s) != null }',
+
+  /** The currently-focused EDITABLE field, or null — used by --type with no --into to tell "type into
+   *  the focused field" from "nothing is focused" (Task 8.2). Returns only the tag + id, never a
+   *  value: reading document.activeElement is a read, and a text/select/contenteditable focus is the
+   *  only thing that makes a bare --type well-defined. Read-only. */
+  activeField:
+    'function(){ var el = document.activeElement; if (!el || el === document.body) return null; var tag = el.tagName ? el.tagName.toLowerCase() : ""; var editable = tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable === true; if (!editable) return null; return { tag: tag, id: el.id || "" } }'
 })
 
 export type NtScriptName = keyof typeof NT_SCRIPTS

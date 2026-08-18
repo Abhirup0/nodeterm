@@ -23,6 +23,7 @@
  * Electron-adjacent (holds a debugger on a page with real logins) → `src/main`, never Server Edition.
  */
 import type { CdpContext } from './browser-cdp-allowlist'
+import type { LayoutMetrics } from './browser-actions'
 import { type DebuggerLike, sendCdp } from './browser-cdp-send'
 // The indicator's linger now lives in `src/shared` (PR 6 consumes it from the renderer too, and a
 // renderer→main import is forbidden — global constraint 4). Re-exported here so the debugger-lease
@@ -89,6 +90,14 @@ export class BrowserSession {
   private attached = false
   private _leaseActiveUntil = 0
   /**
+   * The last viewport measured from `Page.getLayoutMetrics` ({@link refreshViewport}). PR 8's pointer
+   * verbs bound a mouse coordinate to what is actually on screen, and the constructor-injected
+   * viewport is a 0×0 placeholder until then — so once a real measurement lands, it OVERRIDES the
+   * injected closure at send time (see {@link currentCtx}). Reset on any detach: a released/re-navigated
+   * page's old size must never bound a coordinate on the next one.
+   */
+  private _viewport: { width: number; height: number } | null = null
+  /**
    * CDP child-session ids are scoped to the debugger attachment. They are invalid after either an
    * explicit detach or webContents teardown and must never survive a reattach.
    */
@@ -132,6 +141,36 @@ export class BrowserSession {
    *  detach so it can never hang past a release. */
   send(method: string, params: object): Promise<unknown> {
     return this.dispatch(method, params, undefined)
+  }
+
+  /**
+   * Measure the page from `Page.getLayoutMetrics`, cache the viewport size so subsequent bounded
+   * pointer events ({@link import('./browser-actions').browserClick}/`browserScroll`) validate against
+   * the REAL page, and return the full scroll geometry (viewport + current scroll offset + content
+   * size) the scroll reply reads back. A pointer verb calls this immediately before it dispatches, so
+   * a resize/scroll between verbs is always reflected.
+   */
+  async refreshViewport(): Promise<LayoutMetrics> {
+    const raw = (await this.send('Page.getLayoutMetrics', {})) as {
+      cssLayoutViewport?: { clientWidth?: number; clientHeight?: number }
+      cssVisualViewport?: { clientWidth?: number; clientHeight?: number; pageX?: number; pageY?: number }
+      cssContentSize?: { width?: number; height?: number }
+    }
+    const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+    const lv = raw?.cssLayoutViewport
+    const vv = raw?.cssVisualViewport
+    const cs = raw?.cssContentSize
+    const width = num(lv?.clientWidth) ?? num(vv?.clientWidth) ?? 0
+    const height = num(lv?.clientHeight) ?? num(vv?.clientHeight) ?? 0
+    this._viewport = { width, height }
+    return {
+      width,
+      height,
+      scrollX: num(vv?.pageX) ?? 0,
+      scrollY: num(vv?.pageY) ?? 0,
+      contentWidth: num(cs?.width) ?? width,
+      contentHeight: num(cs?.height) ?? height
+    }
   }
 
   /** Send a command to a flat-mode child target, using its LIVE session id (never a caller-supplied
@@ -201,7 +240,13 @@ export class BrowserSession {
       return Promise.reject(e)
     }
     this.extendLease()
-    return this.race(sendCdp(this.dbg, method, params, this.viewport(), sessionId))
+    return this.race(sendCdp(this.dbg, method, params, this.currentCtx(), sessionId))
+  }
+
+  /** The viewport the allowlist bounds a coordinate against: the last real measurement when we have
+   *  one, else the injected placeholder. */
+  private currentCtx(): CdpContext {
+    return this._viewport ? { viewport: this._viewport } : this.viewport()
   }
 
   private ensureAttached(): void {
@@ -236,6 +281,9 @@ export class BrowserSession {
   private onDetached(): void {
     this.attached = false
     this.targets.clear()
+    // A measured viewport belongs to the page we were attached to; drop it so it can never bound a
+    // coordinate on a different page after a reattach.
+    this._viewport = null
     this.rejectInFlight()
   }
 

@@ -30,7 +30,19 @@ import {
 } from './browser-control-ledger'
 import { STRICT_CONTROL_REFUSAL } from '../core/agents/node-identity-policy'
 import { browserDiscardedMessage } from './browser-guest-registry'
-import { browserNav, browserRead, type ActionResult, type Sendable, type CdpEventBus } from './browser-actions'
+import {
+  browserNav,
+  browserRead,
+  browserClick,
+  browserType,
+  browserPress,
+  browserScroll,
+  browserWait,
+  type ActionResult,
+  type Sendable,
+  type Driver,
+  type CdpEventBus
+} from './browser-actions'
 import type { RefTable } from './browser-refs'
 import type { BrowserCall } from '../core/browser-verb'
 
@@ -154,6 +166,8 @@ async function runAction(
   nodeId: string
 ): Promise<ActionResult> {
   const a = call.action
+  // The pointer verbs need the viewport-refreshing capability; the session is a Driver at runtime.
+  const driver = guest.session as Driver
   switch (a.kind) {
     case 'nav':
       return browserNav(guest.session, guest.bus, nodeId, a.url, call.timeoutMs)
@@ -162,9 +176,19 @@ async function runAction(
         selector: call.selector,
         max: call.max
       })
+    case 'click':
+      return browserClick(driver, refs, nodeId, a.target)
+    case 'type':
+      return browserType(driver, refs, nodeId, { text: a.text, into: call.into, clear: call.clear })
+    case 'press':
+      return browserPress(guest.session, nodeId, a.key, call.times ?? 1)
+    case 'scroll':
+      return browserScroll(driver, nodeId, a.where)
+    case 'wait':
+      return browserWait(guest.session, refs, nodeId, a.target, call.timeoutMs)
     default:
-      // Interaction (PR 8) and cookies/screenshot (PR 9) parse today but do not drive yet: a NAMED,
-      // non-retryable refusal, never a silent success.
+      // cookies/screenshot (PR 9) parse today but do not drive yet: a NAMED, non-retryable refusal,
+      // never a silent success.
       return { ok: false, message: `browser: --${a.kind} is not available yet (it lands in a later update)` }
   }
 }
