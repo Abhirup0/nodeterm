@@ -490,7 +490,10 @@ Consequences worth knowing:
   `control unavailable` read to an agent like a transient outage, and an agent retries an
   outage. `browser` additionally names why it is **structural** rather than unimplemented —
   a browser node on this edition renders in the **viewer's own** browser tab, which this
-  server has no debugger for, and never can. See `src/server/control-unsupported.ts`.
+  server has no debugger for, and never can. The whole `browser` drive set shipped over
+  S8 (nav/read/click/type/press/scroll/wait/screenshot/cookies) is therefore **desktop-only**:
+  it needs Electron's `<webview>` + CDP, which this edition has none of, so there is no
+  browser driving here at all. See `src/server/control-unsupported.ts`.
   The agent-messaging verbs (`send`/`reply`/`notify`) are additionally **verified-only at
   the route** on every edition, so on this one an unverified caller gets the flat 403
   messaging refusal and a verified caller gets the same

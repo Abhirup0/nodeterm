@@ -357,6 +357,20 @@ export const IPC = {
   browserRegister: 'browser:register',
   browserUnregister: 'browser:unregister',
   browserNewWindow: 'browser:new-window',
+  // Browser control indicator + Stop (S8 PR 6). Main pushes the current driven-lease set to the
+  // renderer (the chip / rope / kill row); the renderer asks main to revoke — per node, all, or a
+  // whole project's — and main detaches the debugger + drops the ledger entry for real.
+  browserLeaseChanged: 'browser:lease-changed',
+  browserStop: 'browser:stop-control',
+  browserStopAll: 'browser:stop-control-all',
+  browserStopProject: 'browser:stop-control-project',
+  // The `browser` VERB resolve round-trip (S8 PR 7). Main intercepts `browser` and asks the renderer
+  // the two things ONLY it knows — which project owns the source node, whether that source is a
+  // control-capable agent, and whether the per-project capability is on RIGHT NOW — over the same
+  // routing every verb uses. Main makes the security decision (owner + capability + CDP gate) and
+  // does the CDP work itself; the renderer never runs a CDP command.
+  browserControlResolve: 'browser:control-resolve',
+  browserControlResolveResult: 'browser:control-resolve-result',
   remoteHostStart: 'remote:host:start',
   remoteHostStop: 'remote:host:stop',
   // Connection approval gate: main → renderer when a client finishes the handshake (carries the

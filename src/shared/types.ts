@@ -5,6 +5,7 @@ import type { CloneProgress } from './clone-url'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
+import type { BrowserLeasePush } from './browser-indicator'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
@@ -285,6 +286,13 @@ export interface CanvasNodeState {
   fileMissing?: boolean
   /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
   url?: string
+  /**
+   * browser-only: the Electron session partition for an AGENT-opened browser node
+   * (`persist:nt-agent-browser-<projectId>`), set once at creation and never mutated. Absent for a
+   * USER-opened node (default session, no migration). Persisted so the jar survives reopen; carried
+   * through untouched on Server Edition / mobile, where a browser node renders with no <webview>.
+   */
+  partition?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
@@ -427,6 +435,12 @@ export interface BoardLogEvent {
      *  is the delivery's outcome kind — a trace that cannot answer "did it land?" answers the only
      *  question anyone asks it with silence. Written by `agent-message-trace.recordDelivery`. */
     | 'agent-message'
+    /** An agent read a site's cookies through `browser --cookies` — a data-exfiltration surface the
+     *  owner allowed but that MUST be loudly traced (PR 9 Task 9.2/9.3). `from` = the owner agent
+     *  node's title, `to` = the domain read, `title` = the browser node's title; `nodeId` = the owner
+     *  agent node so it files under that agent's card. Written BEFORE the read (fail-closed): a cookie
+     *  read that happened but was not recorded is the one outcome this trace exists to prevent. */
+    | 'agent-read-cookies'
   from?: string
   to?: string
   /** Column title for column-added/deleted; card title for card-created; outcome for agent-message. */
@@ -833,6 +847,16 @@ export interface BrowserApi {
   unregister(webContentsId: number): void
   /** Fires when a browser guest requested a new window; the renderer opens another browser node. */
   onBrowserNewWindow(listener: (e: { url: string; sourceNodeId: string }) => void): () => void
+  /** Push: the current set of browser nodes an agent is driving (chip / rope / kill row). `stopped`
+   *  ids drop from the chip immediately, skipping the anti-flicker linger. */
+  onLeaseChanged(listener: (push: BrowserLeasePush) => void): () => void
+  /** Stop agent control of ONE browser node — the chip button and the node context menu. Detaches
+   *  the debugger + drops the lease in main; a later drive from that owner is refused by name. */
+  stop(nodeId: string): void
+  /** Stop agent control of EVERY driven node — the Settings kill row's Stop-all. */
+  stopAll(): void
+  /** Stop agent control of every node in a project — the project's browser-control switch going off. */
+  stopProject(projectId: string): void
 }
 
 /** A user-defined agent (BYO CLI). With no `baseAgent` it is in no capability list, so it gets
@@ -2572,6 +2596,26 @@ export interface NodeTerminalApi {
     message?: string
     result?: unknown
     error?: string
+  }): void
+  /** The `browser` verb resolve round-trip (S8 PR 7): main asks the renderer to resolve a source
+   *  node's owning project, control-capability and the LIVE per-project capability value. The
+   *  renderer answers over `sendBrowserControlResolveResult` and NEVER runs a CDP command. */
+  onBrowserControlResolve(
+    listener: (req: { requestId: string; sourceNodeId: string; browserNodeId?: string }) => void
+  ): () => void
+  /** Answer a browser-control resolve. `ok:false` carries a named refusal; `ok:true` carries the
+   *  facts main turns into its own (owner + capability + CDP-gate) decision. `sourceTitle`/
+   *  `browserTitle` are for the cookie-read trace only (PR 9) — never a security input. */
+  sendBrowserControlResolveResult(payload: {
+    requestId: string
+    ok: boolean
+    refusal?: string
+    projectId?: string
+    projectCwd?: string
+    sourceControlCapable?: boolean
+    capabilityOn?: boolean
+    sourceTitle?: string
+    browserTitle?: string
   }): void
   /** Agent messaging (the `send`/`reply` control verbs): run one delivery in main, where the
    *  scope check, the per-project switch, flow control and the pane probes all live. The reply is
