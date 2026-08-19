@@ -3394,7 +3394,10 @@ app.whenReady().then(async () => {
         // Host-derived, exactly as on the canvas: the account's default color beats the agent's,
         // so a phone-started session under a colored account is recognizable in the same way. The
         // agent decides WHICH account list answers (agentAccountColor) — the phone supplies both
-        // ids, and the two lists are keyed independently.
+        // ids, and the two lists are keyed independently. Resolved off the RAW account id: whether
+        // this node is account-bound at all is `boundAccountId`'s call, made once inside the
+        // registrar, which ignores this color when it refuses the binding. Re-deriving that rule
+        // here would be the second copy that drifts.
         agentAccountColor(node.agentId, node.accountId, {
           claude: settingsStore.get().claudeAccounts ?? [],
           codex: settingsStore.get().codexAccounts ?? []

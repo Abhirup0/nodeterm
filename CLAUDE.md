@@ -1524,6 +1524,21 @@ else, and its context links must keep classifying across restarts).
     the project-default account), and validation runs against `accountsForProject`, not the raw
     list, so a **pending** account or one **pinned to another machine's host** is never stamped
     onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
+  - **`boundAccountId(accountId, agentId)` (`shared/agents/account-binding.ts`) is the ONE rule for
+    whether a node is account-bound at all**, and it feeds `data.accountId` *and* the account color
+    from a single decision — split them and a node carries an account it is not painted for, or is
+    painted for one it does not carry. Two surfaces mint nodes and both ask it: `createAgentNode`
+    (canvas) and `appendProjectNode` (the phone's `projects.registerNode`, which used to write
+    whatever the wire sent, so a gemini node could come back bound to a Claude account). Managed
+    accounts belong to the builtin **claude and codex** (S6); a **known** other agent — builtin or
+    custom, since a custom agent inheriting one of those harnesses is still its own agent — never
+    binds. **An UNSTATED agent keeps its binding** — the asymmetry is deliberate: the phone chooses
+    `agentId` and `accountId` independently and is not known to always send the first
+    (docs/ios-protocol-migration.md §6), dropping a real binding is the wrong-identity bug the
+    field exists to prevent, while a stray one on an agent-less node only sets a config-home
+    variable nothing reads. On the canvas `agentId` is always stated, so that path is bit-for-bit
+    what it was. `main` resolves the color off the RAW id and lets the registrar refuse it, rather
+    than re-deriving the gate at the call site.
   - **Account default node color (`ClaudeAccount.color` / `CodexAccount.color`, optional)** — a
     per-account default node color (Settings → Accounts) that beats the agent's own brand color in
     `createAgentNode`, so a second login is recognizable on the canvas. Read off the SAME
