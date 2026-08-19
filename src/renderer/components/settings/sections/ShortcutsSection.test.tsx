@@ -23,10 +23,9 @@ const kb = (): Record<string, readonly string[]> =>
 let host: HTMLDivElement
 let root: Root | null = null
 
-function render(query = ''): void {
-  host = document.createElement('div')
-  document.body.appendChild(host)
-  root = createRoot(host)
+/** Re-render into the SAME root, so component identity survives a query change — which is the
+ *  whole point of the armed-recorder test below. */
+function rerender(query: string): void {
   act(() =>
     root!.render(
       <SettingsSearchContext.Provider value={query}>
@@ -35,6 +34,17 @@ function render(query = ''): void {
     )
   )
 }
+
+function render(query = ''): void {
+  host = document.createElement('div')
+  document.body.appendChild(host)
+  root = createRoot(host)
+  rerender(query)
+}
+
+const setRecording = (): ReturnType<typeof vi.fn> =>
+  (window as unknown as { nodeTerminal: { shortcuts: { setRecording: ReturnType<typeof vi.fn> } } })
+    .nodeTerminal.shortcuts.setRecording
 
 /** The section shell's card body — `divide-y [&>*]:py-5`, so every direct child DRAWS. */
 const body = (): Element => host.querySelector<HTMLElement>('#shortcuts')!.lastElementChild!
@@ -162,6 +172,37 @@ describe('ShortcutsSection rows', () => {
     expect(dictate.querySelectorAll('kbd')).toHaveLength(0)
     expect(dictate.textContent).toContain('Disabled')
     expect(dictate.textContent).toContain('hold to talk')
+  })
+
+  // `ShortcutRecorderButton.release` is guarded by `armedRef`, and this section is where that
+  // guard is actually reachable: every row is a `SearchableRow`, which returns `null` for a row
+  // the query does not match, so typing in the settings search box unmounts a BATCH of recorders
+  // at once. The main-process recording bit is ONE global boolean — an unconditional
+  // `setRecording(false)` in that cleanup would clear the ARMED recorder's bit from under it and
+  // re-arm the ⌘W/⌘M intercepts mid-capture.
+  it('keeps the global recording bit while non-armed sibling recorders unmount', () => {
+    render()
+    click(recorder('terminal.copySelection', 'Record')!)
+    expect(setRecording()).toHaveBeenCalledWith(true)
+
+    // 'tmux' matches only Copy terminal selection (via its note) — every other row unmounts, and
+    // the armed one keeps its identity (stable group/row keys), so it is still armed.
+    rerender('tmux')
+    expect([...host.querySelectorAll('[data-command]')].map((el) =>
+      el.getAttribute('data-command')
+    )).toEqual(['terminal.copySelection'])
+    expect(
+      recorder('terminal.copySelection', 'Press keys…')?.getAttribute('data-shortcut-recording')
+    ).toBe('true')
+    expect(setRecording()).not.toHaveBeenCalledWith(false)
+
+    // …and the armed instance still owes the release on its own unmount (Settings closed
+    // mid-recording fires no blur), exactly once.
+    const r = root!
+    root = null
+    act(() => r.unmount())
+    host.remove()
+    expect(setRecording().mock.calls.filter((c) => c[0] === false)).toHaveLength(1)
   })
 })
 

@@ -26,6 +26,12 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   // write path keeps it in sync so an older build still finds the user's chord).
   // A shortcut EQUAL to the default seeds nothing: the override would only restate what the
   // registry already says, and would then pin that chord against any future default change.
+  // **Seeding here is not the same as surviving.** The value written below is a plain override,
+  // so the READ path's sanitizer (`sanitizeKeybindingOverrides`) can still STRIP it: if the
+  // legacy chord collides with another command's effective binding in the same conflict bucket,
+  // every OVERRIDDEN participant of that conflict is deleted — the seed goes, dictation silently
+  // falls back to the registry default chord, and the user's own colliding override is dropped
+  // with it. The only signal is a console warning; nothing surfaces in the UI.
   if (
     merged.speech.shortcut !== DEFAULT_SETTINGS.speech.shortcut &&
     !(merged.keybindings && "speech.dictation" in merged.keybindings)

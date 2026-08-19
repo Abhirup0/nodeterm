@@ -216,7 +216,11 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
     <SettingsSection
       id="shortcuts"
       title="Keyboard Shortcuts"
-      description="Remap any command. Overrides are stored in settings.json under `keybindings`; Disable turns a command's shortcut off, Reset restores its default. macOS owns ⌘M for Window ▸ Minimize, so that one chord cannot be recorded here."
+      // The limitation is the application MENU's, not macOS's: its accelerators are handled above
+      // the page on every platform, so the main-process stand-down cannot deliver them to the
+      // recorder. Minimize is in the menu everywhere; Close only on Windows/Linux (the mac
+      // template has no {role:'close'}) — see `src/main/keydown-intercept.ts`.
+      description="Remap any command. Overrides are stored in settings.json under `keybindings`; Disable turns a command's shortcut off, Reset restores its default. The application menu owns Minimize (⌘M / Ctrl+M) and, on Windows/Linux, Close (Ctrl+W); those chords cannot be recorded here."
       isActive={isActive}
       searchEntries={entries}
     >

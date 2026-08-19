@@ -3,6 +3,9 @@
  * SpeechSection `ShortcutCaptureField` (one hard-wired dictation chord) into a decision function
  * any command row can drive, and closes the two gaps that field shipped with.
  *
+ * `ShortcutCaptureField` and its `anyModDown` helper were both REMOVED in this series — they are
+ * named below only to record which bug each gap was; there is nothing left in the tree to grep.
+ *
  * Two commit shapes, exactly as the v3 chord grammar defines them:
  *  - A KEYED chord (primary modifier + a non-modifier key) commits IMMEDIATELY on keydown.
  *  - A HOLD chord (modifier keys only — permitted only when `allowHold`, i.e. the command's

@@ -62,7 +62,14 @@ export function chipFor(id: CommandId, isMac: boolean = isMacPlatform()): string
  *  `speech.shortcut` field for one release, so a downgraded build keeps the user's chord.
  *  On DISABLE (`[]`) `bindings?.[0]` is `undefined`, so the mirror falls back to the DEFAULT
  *  chord rather than an empty string: a downgraded build then gets default dictation instead
- *  of a broken value it cannot parse. */
+ *  of a broken value it cannot parse.
+ *
+ *  **Raw in, sanitized out — the two maps are not the same map.** This writes into the RAW
+ *  `settings.keybindings` object, while every UI gate (the chips, Disable/Reset visibility,
+ *  `commitCandidate`'s conflict check) reads the SANITIZED one. So a hand-edited entry the
+ *  sanitizer drops — an unknown id, an invalid chord, a conflict participant — is invisible to
+ *  the gate yet still sitting on disk, and it stays there until a UI write for that command, or
+ *  a Reset, replaces the map. */
 export function setKeybindingOverride(id: CommandId, bindings: readonly string[] | null): void {
   const state = useSettings.getState()
   const next: KeybindingOverrides = { ...(state.settings.keybindings ?? {}) }
