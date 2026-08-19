@@ -166,7 +166,7 @@ import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
-import { chipFor, effectiveBindings } from '../lib/keybindingOverrides'
+import { chipFor, effectiveBindings, terminalShortcutPolicy } from '../lib/keybindingOverrides'
 import { matchesShortcut } from '@shared/shortcut'
 import { isMacPlatform } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
@@ -2370,9 +2370,14 @@ export function TerminalNode({
     // ESC+CR (`SHIFT_ENTER_SEQ`) — agent CLIs read that as "insert newline" (see terminal-config.ts).
     // Cmd/Ctrl+1-9 (jump to the Nth project) must be swallowed before xterm turns Ctrl+2..Ctrl+8
     // into control bytes — but ONLY when the app owns the key: desktop shell, digit addressing an
-    // open project. `liveProjectJumpTarget` is the same decision Canvas's handler makes.
+    // open project, AND app-first. Under terminal-first the user reserved every chord for the
+    // shell, so the digit must reach the PTY: this handler runs inside xterm, ahead of the window
+    // dispatcher that honors the policy for every other chord, so it owes the check itself.
+    // `liveProjectJumpTarget` is the same decision Canvas's handler makes.
     term.attachCustomKeyEventHandler((e) => {
-      const action = terminalKeyAction(e, term.hasSelection(), liveProjectJumpTarget(e) !== null)
+      const ownsProjectJump =
+        terminalShortcutPolicy() !== 'terminal-first' && liveProjectJumpTarget(e) !== null
+      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump)
       if (action === 'pass') return true
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())

@@ -2,7 +2,7 @@
 
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
-import type { KeybindingOverrides } from './keybindings'
+import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
@@ -1206,9 +1206,17 @@ export interface Settings {
    *  entries are dropped with a console warning at read time (sanitizeKeybindingOverrides).
    *  Optional and deliberately not in DEFAULT_SETTINGS: absent simply means "no overrides". */
   keybindings?: KeybindingOverrides
+  /** Who wins while a terminal has keyboard focus: 'app-first' (default) lets allowInTerminal
+   *  app commands fire over an xterm; 'terminal-first' reserves every chord but the terminal's
+   *  own (find, copy) for the shell/TUI — including ⌘W/⌘M and the zoom/project-jump gestures. */
+  terminalShortcutPolicy: TerminalShortcutPolicy
+  /** Command ids whose "this chord was captured from your terminal" notice has been shown
+   *  (app-first only, once per command). Optional and absent from DEFAULT_SETTINGS: absent
+   *  means none seen. Lives in settings, not localStorage, so Server Edition shares it. */
+  seenShortcutCaptureNotices?: string[]
   /** Per-node hook identity enforcement (src/core/agents/node-identity-policy.ts).
    *
-   *  One of the two optional keys in this interface, and deliberately so: it is a TRI-state, and the two
+   *  One of the three optional keys in this interface, and deliberately so: it is a TRI-state, and the two
    *  non-default states are opposite escape hatches. Absent (the default — it is not in
    *  DEFAULT_SETTINGS) follows `NODE_IDENTITY_STRICT_AFTER`, so the rollout has one schedule for
    *  everybody. `true` opts in to strict enforcement before that date. `false` keeps the warning
@@ -1264,6 +1272,9 @@ export const DEFAULT_SETTINGS: Settings = {
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
+  // 'app-first' reproduces today's dispatch bit-for-bit: allowInTerminal app commands keep
+  // firing over a focused xterm. Opting into 'terminal-first' is the user's call, never ours.
+  terminalShortcutPolicy: 'app-first',
   seenShortcuts: false,
   seenOnboarding: false,
   notifyOnClaudeDone: true,
@@ -2485,6 +2496,15 @@ export interface ShortcutsApi {
    *  no-op (a browser tab has no application menu to steal a chord back from, so nothing
    *  intercepts). */
   setRecording(active: boolean): void
+  /** Mirror whether an xterm currently holds keyboard focus, so the desktop's intercepts can stand
+   *  down under the `terminal-first` shortcut policy — `before-input-event` fires before any
+   *  renderer handler could answer, so main needs the answer in advance. Sent on CHANGE only.
+   *  Fire-and-forget, and **not optional**: the mirror is the only thing that makes the policy
+   *  reach the three main-intercepted chords. Read fail-safe on the far side (a missing or stale
+   *  mirror = not focused = intercepts on), so the failure mode of never sending is the app
+   *  behaving as it did before the policy existed. Server Edition: a documented no-op, like
+   *  `setRecording` — a browser tab has no application menu to steal a chord back from. */
+  setTerminalFocused(focused: boolean): void
 }
 
 export interface NodeTerminalApi {
