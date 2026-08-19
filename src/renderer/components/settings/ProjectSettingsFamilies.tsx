@@ -378,6 +378,16 @@ const SKIP_NOTE: Record<Extract<ProjectSetupRunResult, { status: 'skipped' }>['r
 
 const RUN_LABEL: Record<ProjectSetupKind, string> = { setup: 'Run setup', archive: 'Run archive' }
 
+/**
+ * A `launchCmd` with no `defaultAgentId` beside it is INERT, and silently so — the launch layer
+ * (`workspace.ts agentLaunchOverride`) consumes a project's launch command only for the agent that
+ * project itself names, and never falls back to this machine's global default agent (that would
+ * make a shared doc type one agent's wrapper into whatever agent the local user happens to prefer).
+ * A setting that does nothing must say it does nothing, on the row where it was typed.
+ */
+export const LAUNCH_CMD_UNPAIRED_NOTE =
+  'Launch command applies only when a Default agent id is set above.'
+
 /** How a finished run reads in the badge. */
 function exitNote(state: 'done' | 'failed' | 'cancelled', exitCode: number | undefined): string {
   if (state === 'cancelled') return 'Cancelled'
@@ -616,10 +626,24 @@ function FamilySection({
     )
   }
 
+  // EFFECTIVE values (local-over-shared, `ignoreShared` respected), like the setup family's run
+  // buttons above: a launch command nothing can consume is reported wherever it was typed — on the
+  // shared row and on its "this machine" twin, since either one alone can be the value that is
+  // sitting there doing nothing. Absence of a resolved `defaultAgentId` is the whole condition;
+  // an id that resolves to no launchable agent is a different (and much louder) problem.
+  const launchCmdUnpaired =
+    family === 'agents' &&
+    resolvedFamily.launchCmd !== undefined &&
+    resolvedFamily.defaultAgentId === undefined
+  /** The caveat WINS over the provenance note ("Active" / "Overridden on this machine"): where the
+   *  value comes from hardly matters while nothing consumes it. */
+  const unpairedNote = (f: FieldConfig): string | undefined =>
+    launchCmdUnpaired && f.key === 'launchCmd' ? LAUNCH_CMD_UNPAIRED_NOTE : undefined
+
   const renderShared = (f: FieldConfig): React.JSX.Element => {
     const overridden = resolvedFamily[f.key]?.source === 'local'
     const id = `project-${family}-${f.key}-${projectId}`
-    const overrideNote = overridden ? 'Overridden on this machine' : undefined
+    const overrideNote = unpairedNote(f) ?? (overridden ? 'Overridden on this machine' : undefined)
     if (f.kind === 'switch') {
       return (
         <SwitchField
@@ -666,7 +690,7 @@ function FamilySection({
   const renderLocal = (f: FieldConfig): React.JSX.Element => {
     const active = resolvedFamily[f.key]?.source === 'local'
     const id = `project-${family}-${f.key}-local-${projectId}`
-    const activeNote = active ? 'Active' : undefined
+    const activeNote = unpairedNote(f) ?? (active ? 'Active' : undefined)
     if (f.kind === 'switch') {
       return (
         <SwitchField

@@ -358,10 +358,19 @@ function askAgentsTrustOnce(projectId: string): void {
  *  3. the user's global Settings → Agents → Launch commands entry (builtin-keyed: custom agents
  *     index past it to undefined — they already own their launchCmd).
  *
- * SCOPE: the project's launchCmd applies to the agent that project TARGETS — the panel's own copy
- * is "Overrides how the default agent is launched", and the family holds one launchCmd, not one
- * per agent id. So it is used only when `agentId` is the project's effective default
- * (`resolveNewNodeAgent`); every other agent resolves on the global layer, exactly as before.
+ * SCOPE: the project's launchCmd applies ONLY to the agent that project ITSELF names —
+ * `projectDefaultAgent`, its own valid `agents.defaultAgentId`, never the global default. The
+ * family holds one launchCmd, not one per agent id, and the panel's copy is "Overrides how the
+ * default agent is launched", so it needs an agent to be about; the pair is what makes it
+ * meaningful. Falling back to the GLOBAL default here would have been a cross-agent misfire that
+ * the builtin-KEYED global map made structurally impossible: a doc shipping only `launchCmd` would
+ * follow whatever this user's mutable global default happens to be, so `nix develop -c claude`
+ * could end up typed into a codex node, differently on each teammate's machine, and could change
+ * under a node on cold restore after an unrelated Settings change.
+ *
+ * So an UNPAIRED launchCmd (a project that sets no valid `defaultAgentId` of its own) is a dead
+ * setting: never consumed for any agent, and never prompts for trust. The Agents panel says so
+ * on the row itself (`ProjectSettingsFamilies.tsx`) rather than leaving it silently inert.
  *
  * Fails OPEN in the ordinary sense: no project id, or no warm snapshot for it
  * (`projectLaunchInfoNow` is synchronous by design — see its module doc), resolves layer 3 alone,
@@ -374,11 +383,10 @@ export function agentLaunchOverride(agentId: AgentId, projectId?: string): strin
   if (!info) return global
   const entry = info.resolved.agents.launchCmd
   if (!entry) return global
-  // Scope check BEFORE anything else: an agent this project does not target consumes nothing here,
+  // Scope check BEFORE anything else: an agent this project does not name consumes nothing here,
   // so it must not even raise a trust prompt about a value it would never use.
-  if (agentId !== resolveNewNodeAgent(undefined, projectId, useSettings.getState().settings)) {
-    return global
-  }
+  const target = projectDefaultAgent(projectId, useSettings.getState().settings)
+  if (!target || target !== agentId) return global
   // `.nodeterm/settings.json` is hand-editable, git-shared, hostile input (see @shared/project-settings):
   // a non-string that slipped through is simply not a launch command.
   const cmd = typeof entry.value === 'string' ? entry.value.trim() : ''
@@ -406,31 +414,43 @@ export function claudeLaunchCommand(projectId?: string): string {
 }
 
 /**
- * The agent a NEW node launches: an explicit pick always wins, then the project's own
- * `agents.defaultAgentId`, then the global default.
+ * The agent THIS PROJECT names as its own default (`agents.defaultAgentId`), or undefined when it
+ * names none — deliberately WITHOUT any global fallback, so a caller can tell "the project chose
+ * this agent" from "nobody chose, so the app's default applies". `agentLaunchOverride`'s scoping
+ * turns on exactly that difference; `resolveNewNodeAgent` adds the fallback on top.
  *
- * The project value is VALIDATED against what this machine can actually launch — a known builtin,
- * or a custom agent the user still has — and against `disabledAgents`: `.nodeterm/settings.json`
- * is git-shared and hand-editable, so it may name an agent that was removed, never existed, or
- * that this user deliberately switched off, and none of those may become the id typed into a
- * shell (`resolveAgent`'s unknown-id fallback launches the id itself — the same failure
+ * VALIDATED against what this machine can actually launch — a known builtin, or a custom agent the
+ * user still has — and against `disabledAgents`: `.nodeterm/settings.json` is git-shared and
+ * hand-editable, so it may name an agent that was removed, never existed, or that this user
+ * deliberately switched off, and none of those may become the id typed into a shell
+ * (`resolveAgent`'s unknown-id fallback launches the id itself — the same failure
  * `launchableDefaultAgent` exists to prevent for the global setting).
  *
  * Deliberately NOT trust-gated: naming which of the user's own installed agents to open is not
  * executable content (`projectTrustContent('agents', …)` hashes launchCmd + env, not this), and
  * every id it can select resolves to a command the user already configured themselves.
  */
+function projectDefaultAgent(
+  projectId: string | undefined,
+  settings: Settings
+): AgentId | undefined {
+  const raw = projectId ? projectLaunchInfoNow(projectId)?.resolved.agents.defaultAgentId : undefined
+  const id = typeof raw?.value === 'string' ? raw.value.trim() : ''
+  if (!id) return undefined
+  const known = !!agentConfig(id) || settings.customAgents.some((c) => c.id === id)
+  return known && isAgentEnabled(settings, id) ? id : undefined
+}
+
+/**
+ * The agent a NEW node launches: an explicit pick always wins, then the project's own validated
+ * `agents.defaultAgentId` (`projectDefaultAgent`), then the global default.
+ */
 export function resolveNewNodeAgent(
   explicit: AgentId | undefined,
   projectId: string | undefined,
   settings: Settings
 ): AgentId {
-  if (explicit) return explicit
-  const raw = projectId ? projectLaunchInfoNow(projectId)?.resolved.agents.defaultAgentId : undefined
-  const id = typeof raw?.value === 'string' ? raw.value.trim() : ''
-  const known = !!id && (!!agentConfig(id) || settings.customAgents.some((c) => c.id === id))
-  if (known && isAgentEnabled(settings, id)) return id
-  return launchableDefaultAgent(settings)
+  return explicit ?? projectDefaultAgent(projectId, settings) ?? launchableDefaultAgent(settings)
 }
 
 /** Fallback color for custom / unknown agents that have no config-provided color. */
