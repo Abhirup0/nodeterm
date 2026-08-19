@@ -21,10 +21,20 @@
  * because the send would be harmless. One global bit, many instances: an unconditional release
  * would let a sibling unmounting for unrelated reasons clear the armed recorder's bit.
  *
- * **A menu accelerator is still out of reach.** The main-process stand-down only stops nodeterm's
- * own `before-input-event` intercepts; the application menu's accelerators are handled above the
- * page regardless. So ⌘M (Window ▸ Minimize, every platform) and Ctrl+W (Windows/Linux) cannot be
- * recorded here — see the limitation note in `src/main/keydown-intercept.ts`.
+ * **A menu accelerator needs a THIRD mechanism, and it now has one.** The main-process bit above
+ * only stops nodeterm's own `before-input-event` intercepts; the application menu's accelerators
+ * are handled above the page regardless. So main also DISABLES the command-style menu items in
+ * `menuItemIdsToSuspend` while this bit is set (`menuStandsDown` → `syncMenuForStandDown` in
+ * `src/main/index.ts`) — a disabled item suppresses its accelerator, which is what lets ⌘M
+ * (Window ▸ Minimize), ⌘⇧B (Toggle Kanban Board), ⌘, (Settings) and, off-mac, Ctrl+W (Window ▸
+ * Close) reach this component instead of acting. Pressing ⌘⇧B or ⌘, into an armed recorder used to
+ * FIRE — opening the board behind the Settings dialog, or re-opening Settings.
+ *
+ * **What stays out of reach**, deliberately: **Reload** (⌘R / ⌘⇧R) is excluded from that list as
+ * the crash-recovery lever, so it can never be recorded. And the list only covers the items the
+ * policy stand-down needed — the always-on app roles (`quit` ⌘Q, `hide`/`hideOthers`,
+ * `toggleDevTools`, `togglefullscreen`) are NOT suspended, so those chords still act while a
+ * recorder is armed. See `menuItemIdsToSuspend` in `src/main/keydown-intercept.ts`.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { COMMANDS_BY_ID, normalizeBindingForCommand, type CommandId } from '@shared/keybindings'

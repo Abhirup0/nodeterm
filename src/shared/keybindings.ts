@@ -220,9 +220,37 @@ export function bindingIdentity(binding: string, isMac: boolean): string {
 
 /** Commands sharing a bucket compete for the same keys. 'app' and 'canvas' share one global
  *  keyspace (both dispatch from the window listener; canvas commands are merely inert while
- *  the board is open); terminal and scm are their own focused surfaces. */
-export function conflictBucket(scope: CommandScope): 'global' | 'terminal' | 'scm' {
-  return scope === 'app' || scope === 'canvas' ? 'global' : scope
+ *  the board is open); terminal and scm are their own focused surfaces.
+ *
+ *  **`speech.dictation` is its own fourth bucket, and the reason is dispatch, not scope.** It
+ *  never competes for a chord: the resolver SKIPS it outright (see the `def.id ===
+ *  'speech.dictation'` guard in `resolveCommandForKeyEvent`), and its keyed gesture runs from a
+ *  dedicated listener that claims the chord FIRST in plain app focus. So a chord shared with
+ *  another command is a matter of PRECEDENCE — dictation wins where it listens, the other command
+ *  wins everywhere else (terminal focus, say) — never ambiguity, which is the only thing the
+ *  conflict detector exists to find. Folding it into 'global' therefore reported a collision that
+ *  dispatch cannot produce.
+ *
+ *  What the bucket BUYS is survival on the read path: `sanitizeKeybindingOverrides` deletes every
+ *  overridden participant of a reported conflict, so a migrated legacy chord that happened to match
+ *  another command's binding (the `speech.shortcut` → `speech.dictation` seed in
+ *  `core/settings-store.ts`) was seeded on load and stripped moments later, taking the user's own
+ *  colliding override with it. With its own bucket the seed survives.
+ *
+ *  **Overlap policy is deliberately asymmetric.** The LOAD path PERMITS a shared chord — legacy
+ *  settings.json files already contain them and silently dropping a user's chord is the failure
+ *  this closes. The Settings UI REFUSES to create one (`commitCandidate`'s two dictation gates),
+ *  because a user picking a chord interactively should be told about the precedence rather than
+ *  discover it later. One case the permissive load path cannot rescue: a keyed dictation override
+ *  on a MAIN-INTERCEPTED chord (⌘W / ⌘M) wins NOWHERE — main steals those in `before-input-event`
+ *  before the page exists, so such a hand-edit survives sanitization as a permanently dead chord.
+ *  The UI can never create it (`commitCandidate`'s reverse-shadow gate refuses it one step earlier
+ *  than the dictation gates). */
+export function conflictBucket(
+  def: Pick<CommandDefinition, 'id' | 'scope'>
+): 'global' | 'terminal' | 'scm' | 'dictation' {
+  if (def.id === 'speech.dictation') return 'dictation'
+  return def.scope === 'app' || def.scope === 'canvas' ? 'global' : def.scope
 }
 
 export interface KeybindingConflict {
@@ -244,7 +272,7 @@ export function findKeybindingConflicts(
   const byBucketAndIdentity = new Map<string, { binding: string; ids: Set<CommandId> }>()
   for (const def of COMMAND_DEFINITIONS) {
     for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
-      const key = `${conflictBucket(def.scope)} ${bindingIdentity(binding, isMac)}`
+      const key = `${conflictBucket(def)} ${bindingIdentity(binding, isMac)}`
       const entry = byBucketAndIdentity.get(key) ?? {
         // Canonicalized, so a hand-edited `cmd+k` override is reported as `Cmd+K`.
         binding: serializeShortcut(parseShortcut(binding)),
@@ -300,9 +328,9 @@ export function findMainInterceptShadowing(
  *  Loops until conflict-free so one bad edit cannot leave ambiguous dispatch. This is the
  *  SETTINGS-LOAD path: it applies what survives and warns about what it dropped. It is not the
  *  pre-save gate — its warnings are unstructured strings, which cannot tell a UI which field to
- *  block on. The future Settings UI blocks pre-save by calling `normalizeBindingForCommand` and
- *  `findKeybindingConflicts` directly, per candidate binding: same detector, different surfacing
- *  (design.md D3). */
+ *  block on. The Settings UI blocks pre-save in `ShortcutsSection.commitCandidate`, which runs
+ *  `normalizeBindingForCommand` (inside its recorder) and `findKeybindingConflicts` directly, per
+ *  candidate binding: same detector, different surfacing (design.md D3). */
 export function sanitizeKeybindingOverrides(
   raw: unknown,
   isMac: boolean

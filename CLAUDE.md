@@ -1623,6 +1623,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     warning reads that list and cannot derive it — main is not importable from the renderer. Note
     what the pin cannot cover: a HARDCODED intercept (the `Digit0` branch) has no command id, so it
     swallows its chord app-wide with the recorder reporting no conflict.
+  - **Dictation has its own conflict bucket** (`conflictBucket` — `speech.dictation` is never in
+    `global`), because it never competes at dispatch: the resolver skips it and its own keyed
+    listener claims the chord FIRST **in plain app focus only**, which is precedence, not ambiguity.
+    Overlap policy is deliberately asymmetric — the LOAD path PERMITS a shared chord (legacy
+    settings.json files contain them and `sanitizeKeybindingOverrides` would otherwise strip the
+    user's own binding with the migrated one), while the Settings UI REFUSES to create one
+    (`commitCandidate`'s two dictation gates, both keyed-only — a modifier-only hold chord renders
+    as `…:(hold)` and can never match a keyed identity).
   - **The terminal-first stand-down is `policyStandsDown(policy, terminalFocused)`, and both halves
     are refusals.** `settings.terminalShortcutPolicy` (`app-first` default, Settings → Keyboard
     Shortcuts, read everywhere through `normalizeTerminalShortcutPolicy` because it is
@@ -1632,7 +1640,11 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     `menuItemIdsToSuspend` — Minimize, Toggle Kanban Board (⌘⇧B) and Settings (⌘,) everywhere, plus
     Close off-mac, with **Reload deliberately excluded** (see **Window chrome**): not calling
     `preventDefault` alone would hand ⌘M straight to `{role:'minimize'}`, which is strictly worse
-    than having no policy.
+    than having no policy. **The MENU's state is the composed
+    `menuStandsDown(shortcutRecording, policy, terminalFocused)`** — an armed shortcut recorder
+    suspends the same items, so ⌘M / ⌘⇧B / ⌘, / off-mac Ctrl+W reach the recorder instead of the
+    menu item that owns them; `menuStandsDown(false, …)` is `policyStandsDown(…)` by construction.
+    The two INTERCEPT thunks stay independent parameters — only the menu ORs them.
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -1927,19 +1939,33 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   submenu's standard `{role:'cut'|'copy'|'paste'|'selectAll'|…}` items behave differently — Chromium
   routes them into the focused element, so ⌘C in a terminal or a text field does the ordinary thing
   and does not need stealing. Ask which kind an item is before reasoning from this bullet.
-  That difference is also why the **terminal-first stand-down has a menu leg**: while a terminal
-  owns the keys under `terminal-first`, `syncMenuForStandDown` disables the command-style items
+  That difference is also why the **stand-down has a menu leg**: while a terminal
+  owns the keys under `terminal-first` **or while a shortcut recorder is armed**
+  (`menuStandsDown(shortcutRecording, policy, terminalFocused)`), `syncMenuForStandDown` disables
+  the command-style items
   named in `menuItemIdsToSuspend` — Minimize (`MENU_ITEM_ID_MINIMIZE`), **Toggle Kanban Board
   (`MENU_ITEM_ID_KANBAN`, ⌘⇧B)** and **Settings (`MENU_ITEM_ID_SETTINGS`, ⌘,)** on every platform,
   plus Close (`MENU_ITEM_ID_CLOSE`) on Windows/Linux — because a disabled item suppresses its
-  accelerator and only then do those chords fall through to the terminal. Kanban and Settings are
+  accelerator and only then do those chords fall through to the terminal, or to the recorder. The
+  recorder leg is why ⌘M is bindable at all, and it fixed a live misfire: ⌘⇧B pressed into an armed
+  recorder used to open the kanban board behind the Settings dialog, and ⌘, to re-open Settings.
+  Kanban and Settings are
   the ones a reader gets wrong: they are **not** intercepted chords at all but ordinary registry
   commands (`view.kanbanToggle` / `app.settings`), so the renderer's dispatcher could never stand
   them down itself — under app-first the menu takes them before the keydown exists, which is also
   why their capture NOTICE is raised at the IPC receivers in `Canvas.tsx` rather than by the
   dispatcher. **Reload (⌘R / ⌘⇧R) is the named exception and stays live while stood down**: it is
   the crash-recovery lever (a wedged renderer is exactly when it is needed) and a main-frame
-  navigation is one of the three sites that reset `terminalFocused` / `shortcutRecording`.
+  navigation is one of the three sites that reset `terminalFocused` / `shortcutRecording`. **Of the
+  items main suspends, Reload is therefore the deliberate exception** — the one it holds back from a
+  shortcut recorder — which is what the Keyboard Shortcuts section's description now says.
+  **KNOWN GAP, pre-existing and accepted:** the suspend list only ever covered the command-style
+  items the terminal-first policy needed, so the always-on app roles — `quit` (⌘Q), `hide` /
+  `hideOthers` (⌘H / ⌘⌥H), `toggleDevTools`, `togglefullscreen` — still act while a recorder is
+  armed (⌘Q pressed into one QUITS the app). They are deliberately NOT added: ONE list drives both
+  stand-downs, and making ⌘Q/⌘H unreachable for a terminal-first user is the worse trade — quit and
+  hide must never be policy-gated. Splitting the list per stand-down is the change that would close
+  it, and it has not been made.
   `keydown-intercept.test.ts` pins both the stolen chords and the suspended item ids (including
   that the list does not silently grow) — `getMenuItemById` answers `null` for a typo and the
   fail-safe is to do nothing, which is indistinguishable from the feature working.
