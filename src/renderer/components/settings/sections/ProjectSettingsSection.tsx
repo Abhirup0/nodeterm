@@ -342,6 +342,9 @@ function EditableProjectSection({
         // Only the shell knows WHERE this project lives; a folderless inline canvas tab has no
         // shared settings file and never can have one — see `sharedEditable`.
         sharedEditable={Boolean(project.cwd || project.ssh)}
+        // Same predicate today, deliberately a separate prop: this one gates SPAWNING a setup
+        // script, not writing the shared file — see `FamilySection`'s `canRun`.
+        canRun={Boolean(project.cwd || project.ssh)}
         saveShared={settings.saveShared}
         saveLocal={settings.saveLocal}
         reload={settings.reload}

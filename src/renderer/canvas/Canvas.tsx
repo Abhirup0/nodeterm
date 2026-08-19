@@ -156,6 +156,7 @@ import { PtyPressureBanner } from '../components/PtyPressureBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CapabilityNotice } from '../components/CapabilityNotice'
+import { SetupConsentDialog } from '../components/SetupConsentDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
 import { peerApprovalView } from '@shared/remote/approval'
 import { promptDialog } from '../components/promptDialog'
@@ -9804,6 +9805,12 @@ export function Canvas() {
           every active-project change (the project-load path), is click-only, and records its
           answer machine-locally — see components/CapabilityNotice.tsx and its test. */}
       <CapabilityNotice />
+
+      {/* The trust gate for a git-shared setup/archive script, mounted ONCE for the whole app on
+          the same layer as the clone notice: main raises it (a manual run, or a worktree's setup)
+          and it must be answerable wherever the user is, not only while a settings pane happens to
+          be open — see components/SetupConsentDialog.tsx. */}
+      <SetupConsentDialog />
 
       {confirm && (
         <ConfirmDialog

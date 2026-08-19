@@ -10,6 +10,8 @@ import { registerWorkspaceDirty } from '../../../state/workspaceDirty'
 import { SettingsSearchContext } from '../context'
 import { ProjectSettingsSection } from './ProjectSettingsSection'
 import { mergeSharedDoc, useProjectSettings, type ProjectSettingsHook } from '../useProjectSettings'
+import type { ProjectSetupEvent } from '@shared/project-settings'
+import { useProjectSetup } from '../../../state/projectSetup'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -738,5 +740,175 @@ describe('mergeSharedDoc', () => {
     expect(mergeSharedDoc(current, { terminal: { shell: undefined } })).toEqual({
       setup: { waitForSetup: true }
     })
+  })
+})
+
+/**
+ * The setup family's RUN controls (Task 4). These buttons are the manual half of the trust gate:
+ * the service still decides whether the script may run (and raises the consent dialog), so what is
+ * pinned here is the renderer's side — the right call, the right ORDER (subscribe before run, or
+ * the first chunks are lost), an honest disabled state, and the live output.
+ */
+describe('ProjectSettingsSection — setup run controls', () => {
+  let root: Root
+  let host: HTMLElement
+  let runSetup: ReturnType<typeof vi.fn>
+  let cancel: ReturnType<typeof vi.fn>
+  let onEvent: ReturnType<typeof vi.fn>
+  let emit: (ev: ProjectSetupEvent) => void
+  let off: ReturnType<typeof vi.fn>
+
+  const snapshotWith = (setup: Record<string, unknown>): ProjectSettingsSnapshot => ({
+    shared: { version: 1, rev: 1, savedAt: '2026-08-19T00:00:00.000Z', setup },
+    local: undefined
+  })
+
+  const mountPanel = async (
+    snapshot: ProjectSettingsSnapshot,
+    p: Project = project()
+  ): Promise<void> => {
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = vi.fn(
+      async () => snapshot
+    )
+    useProjects.setState({ projects: [p], activeProjectId: p.id })
+    root = createRoot(host)
+    await act(async () => {
+      root.render(
+        <SettingsSearchContext.Provider value="">
+          <ProjectSettingsSection projectId={p.id} isActive />
+        </SettingsSearchContext.Provider>
+      )
+    })
+  }
+
+  const button = (label: string): HTMLButtonElement => {
+    const el = [...host.querySelectorAll('button')].find((b) => b.textContent === label)
+    expect(el, `button "${label}"`).toBeTruthy()
+    return el as HTMLButtonElement
+  }
+
+  const hasButton = (label: string): boolean =>
+    [...host.querySelectorAll('button')].some((b) => b.textContent === label)
+
+  const log = (): HTMLElement | null => host.querySelector('[role="log"]')
+
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    useProjectSetup.setState({ byProject: {}, byGroup: {} })
+    runSetup = vi.fn(async () => ({ status: 'started', runKey: 'run-1', waitForSetup: false }))
+    cancel = vi.fn(async () => true)
+    off = vi.fn()
+    onEvent = vi.fn((_projectId: string, cb: (ev: ProjectSetupEvent) => void) => {
+      emit = cb
+      return off
+    })
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal = {
+      projectSettings: { read: vi.fn(async () => EMPTY_SNAPSHOT), writeShared: vi.fn(async () => true), updateLocal: vi.fn(async () => true) },
+      projectSetup: { run: runSetup, cancel, onEvent, consent: vi.fn(), onConsentRequest: vi.fn(), onConsentDismiss: vi.fn() },
+      workspace: { save: vi.fn() }
+    }
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+    useProjects.setState({ projects: [], activeProjectId: '' })
+    useProjectSetup.setState({ byProject: {}, byGroup: {} })
+  })
+
+  it('runs the setup script for this project, SUBSCRIBING to the event channel first', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make bootstrap' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    expect(runSetup).toHaveBeenCalledWith('p1', 'setup', undefined)
+    expect(onEvent).toHaveBeenCalledWith('p1', expect.any(Function))
+    // T1: main can emit the first chunks before the `run` invoke resolves, so a subscription
+    // opened after the ack would miss the head of the output.
+    expect(onEvent.mock.invocationCallOrder[0]).toBeLessThan(runSetup.mock.invocationCallOrder[0])
+  })
+
+  it('runs the archive script from its own button', async () => {
+    await mountPanel(snapshotWith({ archiveScript: 'rm -rf node_modules' }))
+    await act(async () => {
+      button('Run archive').click()
+    })
+    expect(runSetup).toHaveBeenCalledWith('p1', 'archive', undefined)
+  })
+
+  it('disables the button whose script is not set', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    expect(button('Run setup').disabled).toBe(false)
+    expect(button('Run archive').disabled).toBe(true)
+  })
+
+  it('uses the EFFECTIVE value: a machine-local script enables the button with none shared', async () => {
+    await mountPanel({ shared: null, local: { setup: { setupScript: 'local-only.sh' } } })
+    expect(button('Run setup').disabled).toBe(false)
+  })
+
+  it('disables both for a project with nowhere to run — no folder and no server', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make', archiveScript: 'clean' }), project({ cwd: undefined }))
+    expect(button('Run setup').disabled).toBe(true)
+    expect(button('Run archive').disabled).toBe(true)
+  })
+
+  it('shows the live output in a log box and disables the buttons while the run is going', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make', archiveScript: 'clean' }))
+    expect(log()).toBeNull()
+    await act(async () => {
+      button('Run setup').click()
+    })
+    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 1, state: 'running', chunk: 'compiling…\n' }))
+    expect(log()!.textContent).toContain('compiling…')
+    expect(button('Run setup').disabled).toBe(true)
+    expect(button('Run archive').disabled).toBe(true)
+    expect(hasButton('Cancel')).toBe(true)
+  })
+
+  it('cancels the live run by its runKey', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 1, state: 'running', chunk: 'x' }))
+    await act(async () => {
+      button('Cancel').click()
+    })
+    expect(cancel).toHaveBeenCalledWith('run-1')
+  })
+
+  it('reports the exit code when the run ends, and re-enables the buttons', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 1, state: 'running', chunk: 'boom\n' }))
+    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 2, state: 'failed', exitCode: 2 }))
+    expect(host.textContent).toContain('2')
+    expect(host.textContent?.toLowerCase()).toContain('failed')
+    expect(button('Run setup').disabled).toBe(false)
+    expect(hasButton('Cancel')).toBe(false)
+  })
+
+  it('explains a REFUSED run instead of looking like nothing happened', async () => {
+    runSetup.mockResolvedValue({ status: 'skipped', reason: 'declined' })
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    expect(host.textContent?.toLowerCase()).toContain('skipped')
+    expect(button('Run setup').disabled).toBe(false)
+  })
+
+  it('drops the subscription when the pane goes away', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    act(() => root.unmount())
+    expect(off).toHaveBeenCalledTimes(1)
+    root = createRoot(host)
   })
 })
