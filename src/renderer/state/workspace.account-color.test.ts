@@ -43,6 +43,15 @@ describe('accountNodeColor', () => {
   it('is undefined for a blank color — an empty string must not paint a node transparent', () => {
     expect(accountNodeColor('a3', [account('a3', '   ')])).toBeUndefined()
   })
+
+  // settings.json is hand-editable and nothing validates `claudeAccounts` field-by-field on load,
+  // so a non-string `color` reaches this helper as-is. `.trim()` on it throws — and this runs
+  // inside createAgentNode, so the throw would stop EVERY new node under that account from
+  // opening, with nothing pointing back at the edited file.
+  it('is undefined for a non-string color — a hand-edited settings.json must not break node creation', () => {
+    const bad = { id: 'a4', label: 'a4', createdAt: 0, color: 123 } as unknown as ClaudeAccount
+    expect(accountNodeColor('a4', [bad])).toBeUndefined()
+  })
 })
 
 describe('createAgentNode — account default color', () => {

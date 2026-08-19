@@ -1241,7 +1241,10 @@ else, and its context links must keep classifying across restarts).
     `data.accountId`, so the color and the binding cannot drift. Applied **at creation** and baked
     into `data.color` like any other node color: a hand-picked node color is never overwritten and
     editing the account later repaints nothing. Unset / stale id / non-claude agent ⇒ the agent's
-    color, unchanged.
+    color, unchanged. The value is **re-validated as a string** at the read: `claudeAccounts` comes
+    out of a hand-editable settings.json that nothing checks field-by-field on load, and a
+    `"color": 123` would throw on `.trim()` INSIDE `createAgentNode` — stopping every new node
+    under that account from opening, with nothing pointing back at the edited file.
   - **Env injection** — `pty-manager` sets `CLAUDE_CONFIG_DIR` in the spawn env AND as a tmux `-e`
     (local); for a remote node it emits an **absolute-path** remote tmux `-e` built from the
     connection-cached `remoteHome` (skipped **fail-open** if home is unresolved). `AUTH_ENV_STRIP`
