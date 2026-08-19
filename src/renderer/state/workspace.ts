@@ -391,6 +391,23 @@ export function agentLaunchOverride(agentId: AgentId, projectId?: string): strin
   // a non-string that slipped through is simply not a launch command.
   const cmd = typeof entry.value === 'string' ? entry.value.trim() : ''
   if (!cmd) return global
+  // LITERAL ONLY — the same rule the project's ENV already obeys (`ProjectSpawnOverrides.env`:
+  // "`${env:VAR}` is NOT expanded here"), and for the same reason. The assembler expands
+  // `${env:…}` in whatever `launchCmdOverride` it is handed (`shared/agents/launch.ts`
+  // `expandedProgram`) — a CUSTOM-AGENT feature, where the value is the local user's own typing and
+  // Settings previews the expansion. Inheriting it for a project document would turn a hand-edited,
+  // git-shared settings.json into a read of THIS machine's environment, laundered past a consent
+  // dialog that rendered the token verbatim. Nor is honoring it literally an option: `${env:X}` is a
+  // bad substitution at bash/zsh, so the typed line would fail anyway. So a project launchCmd
+  // carrying a token is not a launch command — the same verdict, and the same fall-through, as the
+  // non-string case above. Checked BEFORE the trust branch so a value that can never be consumed
+  // never raises a question about itself, exactly like the out-of-scope agent check.
+  //
+  // BOTH halves, local as well as shared — the deliberate overreach `isReservedSpawnEnvKey` explains
+  // for the env list: one auditable rule beats a provenance check at every launch. The cost is that
+  // a local overlay cannot use expansion either; the global Settings → Agents override (which does
+  // expand, and is previewed) is where a wrapper that needs `${env:…}` belongs.
+  if (cmd.includes('${env:')) return global
   if (entry.source === 'local') return cmd
   // NOTE (carried from Task 2's review): the trust-changed invalidation this ask relies on is
   // keyed by projectId while the grant itself is keyed by LOCATION — two projects pointing at the

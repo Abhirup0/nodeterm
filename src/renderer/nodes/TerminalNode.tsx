@@ -59,6 +59,7 @@ import {
   type SessionLife
 } from '../terminal/terminal-config'
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
+import { ensureProjectLaunchInfo } from '../state/projectLaunchInfo'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { quantizeCharSize } from '../terminal/char-size-quantize'
 import {
@@ -203,6 +204,33 @@ export function sshConnectionScope(conn: SshConnection): string {
  */
 export function owningProjectId(): string {
   return useProjects.getState().activeProjectId
+}
+
+/**
+ * The owning project id, with its launch-info snapshot WARM — for the three already-async relaunch
+ * paths below (cold restore, in-place restart, hibernation wake).
+ *
+ * `agentLaunchOverride` reads `projectLaunchInfoNow` SYNCHRONOUSLY and fails open to the global
+ * layer when the project is still cold. That is right for a fresh launch (it must never block), but
+ * on COLD RESTORE it silently dropped the project's wrapper at the one moment it matters most: the
+ * relaunch fires from a node's mount, racing the very first `ensureProjectLaunchInfo` of the
+ * session, so a whole canvas could come back through the bare CLI — no env, no account setup —
+ * with nothing to show for it. These paths are already asynchronous (they await the permission-mode
+ * probe), so one bounded warm-up costs them nothing they were not already paying.
+ *
+ * Bounded and never-rejecting BY CONSTRUCTION (see `ensureProjectLaunchInfo`: it resolves on its own
+ * ENSURE_WAIT_MS timeout and swallows every error), so this cannot hang or break a relaunch — a
+ * project that stays cold resolves exactly as it did before.
+ *
+ * The id is read ONCE, before the await, and returned — so the snapshot that was warmed and the
+ * project the override is resolved for are the same one even if the active project changes while
+ * the round trip is in flight. Deliberately NOT applied to the synchronous fresh-launch factory
+ * (`createAgentNode`), which has no await to hide this behind.
+ */
+async function warmOwningProjectId(): Promise<string> {
+  const projectId = owningProjectId()
+  await ensureProjectLaunchInfo(projectId)
+  return projectId
 }
 
 /** The live ControlMaster path a remote node would run over, if any. Lets the caller tell "we will
@@ -2883,6 +2911,11 @@ export function TerminalNode({
           // re-claims its own thread instead of joining as an anonymous client. `data.ssh` /
           // `data.sshRemoteTmux` keep a remote node on the bare command (no launcher on the host).
           const mode = await ensureActivePermissionMode(agentId)
+          // …and the project's launch-info snapshot, for the same reason and with the same shape:
+          // this runs at MOUNT, so on a cold boot it is racing the session's very first fetch, and
+          // the synchronous `agentLaunchOverride` read below would answer "no project settings" for
+          // a whole canvas of restoring nodes. Bounded and never-rejecting (see the helper).
+          const ownerProjectId = await warmOwningProjectId()
           const shared = codexSharedIdentity(data.ssh || data.sshRemoteTmux)
           const customAgent = agentConfig(agentId)
             ? undefined
@@ -2897,9 +2930,9 @@ export function TerminalNode({
               sharedIdentity: shared,
               // The launch-command override rides the relaunch too, so a wrapper user's node comes
               // back through its wrapper after a reboot — the moment env/account setup matters.
-              // Scoped to the OWNING project (`owningProjectId`) so a project-level wrapper does
+              // Scoped to the OWNING project (`warmOwningProjectId`) so a project-level wrapper does
               // not vanish on cold restore, which is exactly where it is most needed.
-              launchCmdOverride: agentLaunchOverride(agentId, owningProjectId())
+              launchCmdOverride: agentLaunchOverride(agentId, ownerProjectId)
             },
             // The boot-time desktop env snapshot — the same object fresh launch and the Settings
             // preview expand against, so a ${env:…}-referencing custom agent cold-restores with
@@ -3051,6 +3084,10 @@ export function TerminalNode({
         const launchEnv = customTarget
           ? await api.agent.envSnapshot().catch(() => ({}))
           : {}
+        // Warm the owning project before the SYNCHRONOUS override read below — a restart can be the
+        // first thing a user does after a boot, and a cold snapshot would silently relaunch through
+        // the bare CLI. Bounded and never-rejecting (see `warmOwningProjectId`).
+        const ownerProjectId = await warmOwningProjectId()
         const { command, missingEnv } = assembleResumeCommand(
           {
             agentId: target,
@@ -3061,7 +3098,7 @@ export function TerminalNode({
             // The launch-command override rides the restart too (the global layer is undefined for
             // a custom target, which already owns its launchCmd) — it is a property of how the
             // agent launches, so the owning project's own value applies here as well.
-            launchCmdOverride: agentLaunchOverride(target, owningProjectId())
+            launchCmdOverride: agentLaunchOverride(target, ownerProjectId)
           },
           launchEnv
         )
@@ -3170,6 +3207,9 @@ export function TerminalNode({
         const customAgent = agentConfig(agentId)
           ? undefined
           : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+        // Same warm-up as the cold-restore and restart paths: the override read inside the builder
+        // is synchronous, and a wake can be the first launch after a boot. Bounded, never rejects.
+        const ownerProjectId = await warmOwningProjectId()
         const { command } = assembleResumeCommand(
           {
             agentId,
@@ -3179,7 +3219,7 @@ export function TerminalNode({
             sharedIdentity: false,
             // The launch-command override lives on the user's own PATH (or is an absolute path),
             // not in a generated launcher dir, so it rides the wake too — project layer included.
-            launchCmdOverride: agentLaunchOverride(agentId, owningProjectId())
+            launchCmdOverride: agentLaunchOverride(agentId, ownerProjectId)
           },
           // Same boot-time env snapshot as fresh launch / cold restore, so a wake types the same
           // line the node launched with (empty on browser/relay by design).

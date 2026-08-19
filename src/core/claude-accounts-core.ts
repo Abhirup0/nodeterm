@@ -182,6 +182,42 @@ export const AUTH_ENV_STRIP = [
 const AGENT_CONFIG_DIR_ENV: readonly string[] = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CONFIG_HOME']
 
 /**
+ * Names that make a program EXECUTE something it was never asked to, without changing which program
+ * was launched. `NODE_OPTIONS`'s exact reserve-reason, one interpreter down and one shell over —
+ * three mechanisms, one list because they are one hazard (see `isReservedSpawnEnvKey`'s clause):
+ *  - `LD_PRELOAD` / `LD_AUDIT` / `LD_LIBRARY_PATH` — the Linux dynamic loader loads a repo-supplied
+ *    `.so` into the CLI's own address space before `main` runs.
+ *  - `DYLD_INSERT_LIBRARIES` / `DYLD_LIBRARY_PATH` — the macOS equivalent. macOS strips DYLD_* only
+ *    across a SIP-protected or hardened-runtime boundary, and a node/agent CLI is neither: it is a
+ *    script run by the user's own `node`, so the pair applies exactly as on Linux.
+ *  - `BASH_ENV` / `ENV` — sourced by a NON-interactive shell at startup, which is precisely the
+ *    shell every launch line runs in; the file runs before the agent's first byte.
+ *  - `GIT_SSH_COMMAND` / `GIT_EXTERNAL_DIFF` — git runs the named command verbatim the moment the
+ *    agent (or the user) shells out to git, which an agent pane does constantly.
+ * Every one of them renders as an innocuous path or command string in the consent table while
+ * granting arbitrary execution inside a binary the user believes untouched — the NODE_OPTIONS
+ * bucket, not the PATH bucket. Spec §2 names LD_PRELOAD as attack surface by name.
+ *
+ * Honest cost, same shape as the `XDG_CONFIG_HOME` overreach documented below: `ENV` and
+ * `LD_LIBRARY_PATH` are ALSO ordinary application variables (a project that genuinely wanted
+ * `LD_LIBRARY_PATH=./vendor/lib` for its own toolchain cannot set it through project env, and must
+ * use custom-agent env or the shell's rc instead). Kept, because a per-key "is this one being used
+ * innocently?" judgement is not something the merge point can make, and the failure direction of
+ * guessing wrong is arbitrary code execution.
+ */
+const INJECTION_ENV: readonly string[] = [
+  'LD_PRELOAD',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'GIT_SSH_COMMAND',
+  'GIT_EXTERNAL_DIFF',
+  'BASH_ENV',
+  'ENV'
+]
+
+/**
  * Env keys a PROJECT's settings document may never contribute to a spawn, however it is sourced
  * and however it was consented to (`makeProjectSpawnOverrides` → `PtyManager.spawnSession`, both
  * the local merge and the ssh `remoteEnvPairs` join).
@@ -217,6 +253,12 @@ const AGENT_CONFIG_DIR_ENV: readonly string[] = ['CLAUDE_CONFIG_DIR', 'CODEX_HOM
  *    and stealthier than PATH: the process still IS the real claude, from the real location, so
  *    nothing downstream — not the pane, not the identity probe — can tell. The dialog shows a flag
  *    string; the grant is code execution.
+ *  - `INJECTION_ENV` — the same grant through the DYNAMIC LOADER (`LD_PRELOAD` and friends; the
+ *    macOS `DYLD_*` pair, which a non-SIP-protected node/agent CLI honors just as Linux does), the
+ *    NON-interactive shell's own startup file (`BASH_ENV` / `ENV`, sourced by the very shell the
+ *    launch line runs in), and git's command hooks (`GIT_SSH_COMMAND` / `GIT_EXTERNAL_DIFF`, run
+ *    verbatim as soon as the agent shells out to git). One reserve-reason with NODE_OPTIONS: the
+ *    process still IS the real CLI, from the real location, and the table showed "a path".
  *
  * WHAT IS DELIBERATELY *NOT* HERE — `PATH`, and every ordinary application variable. Approving
  * `PATH=./bin` is a COHERENT consent: "this project's terminals resolve tools from the repo" is the
@@ -251,6 +293,7 @@ export function isReservedSpawnEnvKey(key: string): boolean {
   return (
     key.startsWith('NODETERM_') ||
     key === 'NODE_OPTIONS' ||
+    INJECTION_ENV.includes(key) ||
     AGENT_CONFIG_DIR_ENV.includes(key) ||
     (AUTH_ENV_STRIP as readonly string[]).includes(key) ||
     (MODEL_GATEWAY_ENV_KEYS as readonly string[]).includes(key)
