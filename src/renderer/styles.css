@@ -1739,6 +1739,30 @@ body,
   color: var(--accent-text);
 }
 
+.term-node__hide-fanout,
+.term-node__tidy-fanout {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.term-node__hide-fanout:hover,
+.term-node__tidy-fanout:hover {
+  background: rgba(10, 132, 255, 0.18);
+  color: var(--accent-text);
+}
+
+.term-node__hide-fanout[aria-pressed='true'] {
+  color: var(--accent-text);
+}
+
 .term-node__find {
   display: flex;
   flex-direction: column;
