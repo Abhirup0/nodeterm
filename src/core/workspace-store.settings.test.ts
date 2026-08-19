@@ -42,6 +42,33 @@ describe('project settings — local leg', () => {
     expect(onDisk.rev).toBe(1)
   })
 
+  it('a cold store reads before writing, so the rev sequence continues instead of restarting', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } }) // rev 1
+    const file = path.join(projRoot, '.nodeterm', 'settings.json')
+    expect(JSON.parse(await fs.readFile(file, 'utf-8')).rev).toBe(1)
+
+    // A fresh process: nothing has been read this run, so the write must look at the file first.
+    const store2 = new WorkspaceStore()
+    await store2.load()
+    expect(await store2.writeProjectSettings('p1', { terminal: { shell: '/bin/bash' } })).toBe(true)
+    const onDisk = JSON.parse(await fs.readFile(file, 'utf-8'))
+    expect(onDisk.rev).toBe(2)
+    expect(onDisk.terminal.shell).toBe('/bin/bash')
+  })
+
+  it('refuses to write over a git-conflicted settings.json, leaving the bytes untouched', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const file = path.join(projRoot, '.nodeterm', 'settings.json')
+    const conflicted = '<<<<<<< a\n{}\n=======\n{}\n>>>>>>> b\n'
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, conflicted, 'utf-8')
+    expect(await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } })).toBe(false)
+    expect(await fs.readFile(file, 'utf-8')).toBe(conflicted)
+  })
+
   it('local overlay persists across store instances without a canvas save', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))

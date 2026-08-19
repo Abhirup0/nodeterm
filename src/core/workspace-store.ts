@@ -480,15 +480,34 @@ export class WorkspaceStore {
    * user's editor) may have changed since the caller read it, and silently merging into a file the
    * caller never saw is how the shared half stops meaning what the repo says.
    *
-   * False = there is nowhere to write it: an unknown id, an inline canvas (no folder), an ssh
-   * project (Task 7 gives it the remote leg), or the write itself failed.
+   * READS FIRST when this run has never read the file. Without that, a fresh process writes with
+   * `prev = null` — rev restarts at 1 over a file that was at rev N, and, worse, the write lands on
+   * whatever is there, including the git-conflict-marked file `readProjectSettings` deliberately
+   * refuses to parse. Same rule the project.json path already lives by: never write a file this
+   * store has not looked at.
+   *
+   * False = there is nowhere to write it, or writing would destroy something: an unknown id, an
+   * inline canvas (no folder), an ssh project (Task 7 gives it the remote leg), a conflicted file
+   * (the user's to resolve — untouched), an unreadable one (a failed read is never evidence of
+   * absence, so it may not be clobbered either), or a write that failed.
    */
   async writeProjectSettings(projectId: string, doc: ProjectSettingsDoc): Promise<boolean> {
     const e = this.index?.entries.find((x) => x.id === projectId)
     if (!e || e.ssh || !e.cwd) return false
+    let prev = this.lastSharedSettings.get(projectId) ?? null
+    if (!prev) {
+      const read = await readProjectSettingsFile(e.cwd)
+      // absent → nothing to lose, start at rev 1. invalid → the read already sidelined the only
+      // copy to `.corrupt-<ts>`, so this write destroys nothing either.
+      if (read.status === 'conflict' || read.status === 'error') return false
+      if (read.status === 'ok') {
+        prev = read.file
+        this.lastSharedSettings.set(projectId, read.file)
+      }
+    }
     try {
       const written = await writeProjectSettingsFile(
-        e.cwd, doc, this.lastSharedSettings.get(projectId) ?? null, new Date().toISOString()
+        e.cwd, doc, prev, new Date().toISOString()
       )
       this.lastSharedSettings.set(projectId, written)
       return true
