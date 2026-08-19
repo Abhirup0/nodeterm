@@ -1195,6 +1195,10 @@ export interface Settings {
    *  survive an unattended laptop. Released when the last one stops (or goes stale). Cannot
    *  hold through a closed lid. Asked in the setup tour; Settings → Behavior. */
   keepAwakeWhileAgentsWork: boolean
+  /** Ask before the app actually quits (⌘/Ctrl+Q, menu Quit, or the Windows/Linux title-bar ×).
+   *  The auto-update "Restart to update" flow never asks — that decision was already made.
+   *  Settings → Behavior. */
+  confirmBeforeQuit: boolean
   /** macOS Notch HUD (docs/notch-hud.md): a transparent always-on-top strip by the notch showing
    *  walking agent mascots while agents work, expanding into a mini session panel. Default on;
    *  macOS + desktop only (ignored on other platforms / Server Edition). */
@@ -1326,6 +1330,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Keep-awake-while-agents-work default ON (existing users pick it up on hydrate — deliberate,
   // same note style as hookReplyApprovals). Held only while a local agent is actually working.
   keepAwakeWhileAgentsWork: true,
+  // Confirm-before-quit default ON: sessions survive a quit anyway, but an accidental ⌘Q
+  // tears down every window at once; the toggle is one switch away for who finds it noisy.
+  confirmBeforeQuit: true,
   // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
   notchHud: true,
   notchWidth: 168,
