@@ -32,8 +32,21 @@ export interface ProjectSettingsHook {
    * may have sanitized what it wrote, so what the panel shows afterwards is the FILE, not our hope.
    */
   saveShared(doc: ProjectSettingsDoc): Promise<boolean>
-  /** This machine's overlay, written whole (`undefined` clears it). Re-reads on success. */
-  saveLocal(local: ProjectLocalSettings | undefined): Promise<boolean>
+  /**
+   * Commits an edit to THIS MACHINE's local overlay — a whole-document write, exactly like
+   * `saveShared`. Takes either the next whole document directly, or an updater over the CURRENT
+   * one (preferring a still-in-flight write's result over the last-read snapshot, via the same
+   * `pendingLocalRef` guard `saveShared` uses for the shared doc) — so two local edits inside one
+   * IPC round-trip do not drop the first. Prefer the updater form for anything that merges into
+   * the existing doc; the plain-value form stays for a caller that already holds the whole next
+   * document (e.g. clearing the overlay with `undefined`). Re-reads on success.
+   */
+  saveLocal(
+    update:
+      | ProjectLocalSettings
+      | undefined
+      | ((current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined)
+  ): Promise<boolean>
   reload(): void
 }
 
@@ -92,6 +105,11 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
   // re-read is asynchronous; the user's next blur is not going to wait for it. Tagged with the
   // project id so a pane switch can never merge one project's edit into another's file.
   const pendingRef = useRef<{ projectId: string; doc: ProjectSettingsDoc } | null>(null)
+  // Same hazard, same fix, for the LOCAL overlay: `saveLocal` is also a whole-document write, so
+  // two local edits in one round-trip need their own pending base independent of the shared one.
+  const pendingLocalRef = useRef<{ projectId: string; local: ProjectLocalSettings | undefined } | null>(
+    null
+  )
 
   useEffect(() => {
     let alive = true
@@ -104,7 +122,10 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
     const seqAtStart = writeSeqRef.current
     const settle = (next: ProjectSettingsSnapshot | null): void => {
       if (!alive) return
-      if (writeSeqRef.current === seqAtStart) pendingRef.current = null
+      if (writeSeqRef.current === seqAtStart) {
+        pendingRef.current = null
+        pendingLocalRef.current = null
+      }
       setSnapshot(next)
     }
     void window.nodeTerminal.projectSettings.read(projectId).then(settle, () => settle(null))
@@ -138,10 +159,24 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
   )
 
   const saveLocal = useCallback(
-    async (local: ProjectLocalSettings | undefined): Promise<boolean> => {
-      const ok = await window.nodeTerminal.projectSettings.updateLocal(projectId, local)
-      if (ok) reload()
-      return ok
+    async (
+      update:
+        | ProjectLocalSettings
+        | undefined
+        | ((current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined)
+    ): Promise<boolean> => {
+      const pending = pendingLocalRef.current
+      const snap = snapshotRef.current
+      const current =
+        pending?.projectId === projectId ? pending.local : snap && snap !== 'loading' ? snap.local : undefined
+      const next = typeof update === 'function' ? update(current) : update
+      const ok = await window.nodeTerminal.projectSettings.updateLocal(projectId, next)
+      if (!ok) return false
+      // Advance the merge base NOW, not when the re-read lands: the next blur may arrive first.
+      writeSeqRef.current += 1
+      pendingLocalRef.current = { projectId, local: next }
+      reload()
+      return true
     },
     [projectId, reload]
   )

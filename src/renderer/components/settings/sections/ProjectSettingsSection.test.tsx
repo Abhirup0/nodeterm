@@ -257,6 +257,69 @@ describe('ProjectSettingsSection', () => {
     expect(localShell.disabled).toBe(false)
     expect(toggle.disabled).toBe(false)
   })
+
+  it('disables every family editor (shared, local, and ignoreShared) while the read is in flight, and a blur landing in that window produces no write', async () => {
+    let release: (v: ProjectSettingsSnapshot) => void = () => {}
+    read = vi.fn(() => new Promise<ProjectSettingsSnapshot>((r) => (release = r)))
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
+    await mountSection()
+    const sharedShell = host.querySelector<HTMLInputElement>('#project-terminal-shell-p1')!
+    const localShell = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    const toggle = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Ignore shared setup settings on this machine"]'
+    )!
+    expect(sharedShell.disabled).toBe(true)
+    expect(localShell.disabled).toBe(true)
+    expect(toggle.disabled).toBe(true)
+    // Bypass the DOM `disabled` attribute the way a stray/synthetic event could — the guard that
+    // matters is the one inside the commit handler, not just the attribute.
+    await typeInto(localShell, '/bin/zsh')
+    await blur(localShell)
+    expect(updateLocal).not.toHaveBeenCalled()
+    await act(async () => {
+      release(EMPTY_SNAPSHOT)
+    })
+    expect(sharedShell.disabled).toBe(false)
+    expect(localShell.disabled).toBe(false)
+    expect(toggle.disabled).toBe(false)
+  })
+
+  it('preserves an existing local family when a different local field is committed', async () => {
+    read = vi.fn(async () => ({ shared: null, local: { agents: { launchCmd: 'x' } } }) as ProjectSettingsSnapshot)
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
+    await mountSection()
+    const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    await typeInto(local, '/bin/zsh')
+    await blur(local)
+    expect(updateLocal).toHaveBeenCalledWith('p1', {
+      agents: { launchCmd: 'x' },
+      terminal: { shell: '/bin/zsh' }
+    })
+  })
+
+  it('merges a shared textarea blur into the whole shared doc, preserving other families', async () => {
+    read = vi.fn(async () => ({
+      shared: { version: 1, rev: 1, savedAt: 't', agents: { launchCmd: 'y' } },
+      local: undefined
+    }) as ProjectSettingsSnapshot)
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
+    await mountSection()
+    const setupScript = host.querySelector<HTMLTextAreaElement>('#project-setup-setupScript-p1')!
+    await typeIntoTextarea(setupScript, 'echo hi')
+    await blur(setupScript)
+    expect(writeShared).toHaveBeenCalledWith('p1', {
+      agents: { launchCmd: 'y' },
+      setup: { setupScript: 'echo hi' }
+    })
+  })
+
+  it('commits parsed KEY=VALUE pairs from the shared env textarea on blur', async () => {
+    await mountSection()
+    const env = host.querySelector<HTMLTextAreaElement>('#project-agents-env-p1')!
+    await typeIntoTextarea(env, 'A=1\nB=2')
+    await blur(env)
+    expect(writeShared).toHaveBeenCalledWith('p1', { agents: { env: { A: '1', B: '2' } } })
+  })
 })
 
 describe('useProjectSettings', () => {
@@ -398,6 +461,36 @@ describe('useProjectSettings', () => {
       ignoreShared: { agents: true }
     })
     expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a local save that is still being re-read as the merge base for the next local save', async () => {
+    // Same hazard as the shared-doc race above, on the local overlay: local edit A (terminal)
+    // saves; local edit B (worktree) arrives before A's re-read lands. Merging B into the pre-A
+    // local doc would make B's whole-document write silently drop A's edit.
+    const first: ProjectSettingsSnapshot = {
+      shared: { version: 1, rev: 1, savedAt: 't', terminal: { shell: '/bin/bash' } },
+      local: { agents: { launchCmd: 'x' } }
+    }
+    let gate: (v: ProjectSettingsSnapshot) => void = () => {}
+    read.mockResolvedValueOnce(first).mockReturnValue(
+      new Promise<ProjectSettingsSnapshot>((r) => (gate = r))
+    )
+    await mount()
+    await act(async () => {
+      await hook.saveLocal((current) => ({ ...current, terminal: { shell: '/bin/zsh' } }))
+    })
+    expect(hook.snapshot).toBe('loading') // the re-read is gated open
+    await act(async () => {
+      await hook.saveLocal((current) => ({ ...current, worktree: { basePath: '/tmp/wt' } }))
+    })
+    expect(updateLocal).toHaveBeenLastCalledWith('p1', {
+      agents: { launchCmd: 'x' },
+      terminal: { shell: '/bin/zsh' },
+      worktree: { basePath: '/tmp/wt' }
+    })
+    await act(async () => {
+      gate(first)
+    })
   })
 
   it('degrades a failed read to "nothing readable" instead of throwing', async () => {

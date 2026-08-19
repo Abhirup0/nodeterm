@@ -316,7 +316,7 @@ function FamilySection({
   ignoreShared,
   resolvedFamily,
   conflict,
-  fullLocal,
+  ready,
   saveShared,
   saveLocal
 }: {
@@ -327,20 +327,36 @@ function FamilySection({
   ignoreShared: boolean
   resolvedFamily: Record<string, { source: 'local' | 'shared' } | undefined>
   conflict: boolean
-  fullLocal: ProjectLocalSettings | undefined
+  /** False until `snapshot` is an actual object (not `'loading'`, not `null`). Gates EVERY editor
+   *  in this family, shared and local alike: before the first read answers (or after a failed
+   *  one), there is no reliable doc to merge an edit into, and for an SSH project that window is a
+   *  network round-trip, not a render tick — a blur landing in it would write a doc built from
+   *  `{}`/`undefined`, silently deleting every other family already on disk. */
+  ready: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
-  saveLocal: (local: ProjectLocalSettings | undefined) => Promise<boolean>
+  saveLocal: (
+    update: ProjectLocalSettings | undefined | ((current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined)
+  ) => Promise<boolean>
 }): React.JSX.Element {
   const config = FAMILY_CONFIG[family]
+  const sharedDisabled = conflict || !ready
+  const localDisabled = !ready
 
+  // Guarded here too, not just via the `disabled` attribute below: a disabled control blocks real
+  // user interaction, but nothing stops a caller (or a test) from dispatching events on it
+  // directly, and the merge-base hazard this guards against is a data-corruption risk, not a UX
+  // nicety — it must hold even if the DOM attribute is bypassed.
   const commitShared = (key: string, value: unknown): void => {
+    if (sharedDisabled) return
     void saveShared({ [family]: { [key]: value } } as ProjectSettingsDoc)
   }
   const commitLocal = (key: string, value: unknown): void => {
-    void saveLocal(nextLocalField(fullLocal, family, key, value))
+    if (localDisabled) return
+    void saveLocal((current) => nextLocalField(current, family, key, value))
   }
   const commitIgnoreShared = (on: boolean): void => {
-    void saveLocal(nextLocalIgnoreShared(fullLocal, family, on))
+    if (localDisabled) return
+    void saveLocal((current) => nextLocalIgnoreShared(current, family, on))
   }
 
   const renderShared = (f: FieldConfig): React.JSX.Element => {
@@ -356,7 +372,7 @@ function FamilySection({
           note={overrideNote}
           ariaLabel={f.label}
           checked={sharedFamily?.[f.key] === true}
-          disabled={conflict}
+          disabled={sharedDisabled}
           onCommit={(on) => commitShared(f.key, on ? true : undefined)}
         />
       )
@@ -368,7 +384,7 @@ function FamilySection({
           id={id}
           label={f.label}
           description={f.description}
-          disabled={conflict}
+          disabled={sharedDisabled}
           text={formatEnvLines(sharedFamily?.[f.key] as Record<string, string> | undefined)}
           overrideNote={overrideNote}
           onCommitValue={(v) => commitShared(f.key, v)}
@@ -383,7 +399,7 @@ function FamilySection({
         description={f.description}
         multiline={f.kind === 'textarea' || f.kind === 'list'}
         note={overrideNote}
-        disabled={conflict}
+        disabled={sharedDisabled}
         text={textOf(f.kind, sharedFamily?.[f.key])}
         onCommit={(text) => commitShared(f.key, valueOf(f.kind, text))}
       />
@@ -403,6 +419,7 @@ function FamilySection({
           note={activeNote}
           ariaLabel={`${f.label} (this machine)`}
           checked={localFamily?.[f.key] === true}
+          disabled={localDisabled}
           onCommit={(on) => commitLocal(f.key, on ? true : undefined)}
         />
       )
@@ -414,6 +431,7 @@ function FamilySection({
           id={id}
           label={f.label}
           description={f.description}
+          disabled={localDisabled}
           text={formatEnvLines(localFamily?.[f.key] as Record<string, string> | undefined)}
           overrideNote={activeNote}
           onCommitValue={(v) => commitLocal(f.key, v)}
@@ -428,6 +446,7 @@ function FamilySection({
         description={f.description}
         multiline={f.kind === 'textarea' || f.kind === 'list'}
         note={activeNote}
+        disabled={localDisabled}
         text={textOf(f.kind, localFamily?.[f.key])}
         onCommit={(text) => commitLocal(f.key, valueOf(f.kind, text))}
       />
@@ -450,6 +469,7 @@ function FamilySection({
             description="Never use the git-shared values for this family on this machine, even where this machine sets none of its own."
             ariaLabel={`Ignore shared ${family} settings on this machine`}
             checked={ignoreShared}
+            disabled={localDisabled}
             onCommit={commitIgnoreShared}
           />
         </div>
@@ -471,8 +491,13 @@ export function ProjectFamilyEditors({
   resolved: ResolvedProjectSettings
   conflict: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
-  saveLocal: (local: ProjectLocalSettings | undefined) => Promise<boolean>
+  saveLocal: (
+    update: ProjectLocalSettings | undefined | ((current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined)
+  ) => Promise<boolean>
 }): React.JSX.Element {
+  // Loading and failed-read (`null`) both mean "no doc it is safe to merge an edit into" — see
+  // `FamilySection`'s `ready` doc comment.
+  const ready = snapshot !== 'loading' && snapshot !== null
   const shared: ProjectSettingsDoc = snapshot && snapshot !== 'loading' && snapshot.shared ? snapshot.shared : {}
   const local: ProjectLocalSettings | undefined = snapshot && snapshot !== 'loading' ? snapshot.local : undefined
   return (
@@ -487,7 +512,7 @@ export function ProjectFamilyEditors({
           ignoreShared={local?.ignoreShared?.[family] === true}
           resolvedFamily={resolved[family] as Record<string, { source: 'local' | 'shared' } | undefined>}
           conflict={conflict}
-          fullLocal={local}
+          ready={ready}
           saveShared={saveShared}
           saveLocal={saveLocal}
         />
