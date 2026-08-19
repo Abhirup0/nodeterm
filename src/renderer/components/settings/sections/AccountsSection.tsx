@@ -19,6 +19,7 @@ import {
   strayCodexAccounts
 } from '../../../lib/codexMachineGroups'
 import { presentAccount } from '../../../lib/accountPresentation'
+import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
 import { AccountIdentityPills } from '../../AccountIdentityPills'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { SettingsSection } from '../SettingsSection'
@@ -293,11 +294,23 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           />
         </div>
         {accounts.map((account) => {
-          const blockedRemote = !!account.host && !connectedProjectIdForHost(account.host)
+          // The SAME fail-closed gate the create/switch UI uses (§5 Property 4): an account that is
+          // unsafe, missing, or a remote account with no live connection is not operable. Driving
+          // the row's warning state through it (rather than an ad-hoc host check) makes
+          // `codexAccountSelectable` a real reader and keeps one definition of "operable".
+          const selectable = codexAccountSelectable(account.id, codexAccounts, (host) =>
+            connectedProjectIdForHost(host)
+          )
+          const blockedReason = selectable.ok
+            ? undefined
+            : selectable.reason === 'no-connection'
+              ? `Connect to ${account.host} to use this account`
+              : 'This account is unavailable'
           return (
             <div
               key={account.id}
               className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-2"
+              title={blockedReason}
             >
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <Input
@@ -306,7 +319,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   value={account.label}
                   onChange={(e) => setCodexLabel(account.id, e.target.value)}
                 />
-                <AccountIdentityPills account={presentCodex(account)} warning={blockedRemote} />
+                <AccountIdentityPills account={presentCodex(account)} warning={!selectable.ok} />
                 {account.pending ? (
                   <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
                     pending

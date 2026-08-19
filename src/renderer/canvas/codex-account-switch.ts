@@ -7,6 +7,21 @@
 //   2. `codexAccountSelectable` — an explicitly selected account that is MISSING, unsafe, or a
 //      remote account with no live connection is REFUSED; the UI never silently falls back to
 //      another login (§5 Property 4 / Decision 2).
+//
+// READERS / follow-up wiring:
+//   - `codexAccountSelectable` is consumed today by the Accounts settings UI
+//     (`AccountsSection.tsx`), which drives each Codex row's operable/warning state through it — one
+//     definition of "operable" for the surface PR 8 builds. It is ALSO the gate the "New Codex
+//     node" account picker must route every pick through once that picker exists. That picker is a
+//     FOLLOW-UP (surface §3.4): the base node factory deliberately refuses a non-Claude accountId
+//     (`createAgentNode` in `state/workspace.ts` stamps `accountId` only when `agentId==='claude'`)
+//     and `addAgentNode` validates against `claudeAccounts`, so wiring a Codex picker first needs
+//     the factory/creation path to carry codex account ids. The pty spawn side already honours one
+//     (`pty-manager.ts` applies `codexSessionEnv` and fails closed on a missing home).
+//   - `codexAccountSwitchStillEligible` is the recycle gate the account-SWITCH menu (surface §3.5)
+//     must consult before reusing the source pane. That menu is a FOLLOW-UP: the renderer switch
+//     bridge (`codexAccounts.switchThread` et al.) is still a stub, so no switch is originated in
+//     the renderer yet. When the switch menu lands it MUST gate recycle on this function.
 
 import type { CodexAccount } from '@shared/codex-account'
 import { isSafeAccountId } from '@shared/codex-account'
