@@ -158,10 +158,12 @@ export class WorkspaceStore {
   /** ssh project id -> last shared settings.json seen on that host (offline copy). Only entries that
    *  round-tripped through `parseProjectSettingsFile` are in here. */
   private settingsCacheByProject = new Map<string, ProjectSettingsFileV1>()
-  /** ssh project ids whose settings.json was git-conflict-marked on the last read, so a write must
-   *  refuse instead of picking a side of the merge (the local leg refuses the same way, straight off
-   *  the file). Cleared as soon as a read finds the file parsing again — or gone. Runtime-only: a
-   *  fresh run's first read re-establishes it before any write can be issued from the panel. */
+  /** ssh project ids whose settings.json was git-conflict-marked on the last read: `writeSshSettings`
+   *  refuses while an id is in here instead of picking a side of the merge (the local leg refuses
+   *  the same way, straight off the file it re-reads). Cleared as soon as a read finds the file
+   *  parsing again — or gone. Runtime-only, and deliberately NOT relied on to be populated: a write
+   *  that finds both settings maps cold does its own read first, because "a read established this
+   *  flag before any write" is an assumption about panel order, not something this store enforces. */
   private settingsConflictByProject = new Set<string>()
   /** project id -> the shared settings file as last read/written, i.e. the rev source for the NEXT
    *  write. Runtime-only: a write that has not read first starts at rev 1, which is the same thing
@@ -573,10 +575,16 @@ export class WorkspaceStore {
    * persisted into workspace.json; running it through the same sanitizer a read applies keeps one
    * definition of "a valid settings file" whichever side the bytes came from.
    *
-   * REFUSES while the last read found the host's file git-conflict-marked, exactly like the local
-   * leg refuses a conflicted settings.json: a conflicted file is the user's to resolve, and pushing
-   * over it would silently pick a side of a merge nobody has looked at. The flag clears itself the
-   * moment a read finds the file parsing (or gone).
+   * REFUSES a git-conflict-marked host file, exactly like the local leg refuses a conflicted
+   * settings.json: a conflicted file is the user's to resolve, and pushing over it would silently
+   * pick a side of a merge nobody has looked at. Two mechanisms enforce that, because the ssh leg
+   * cannot afford the local leg's read-before-every-write (a round trip per save):
+   *  - WARM (this run has a cache or a last-read doc): the runtime flag a read left behind, which
+   *    clears itself the moment a read finds the file parsing again — or gone.
+   *  - COLD (neither map knows this project, so no read has ever compared): one read here, or the
+   *    refusal would be a promise nothing checks — the first save of a session would blind-write
+   *    the mirror over a merge. `absent` writes rev 1 as before; a read `error` proceeds
+   *    cache-first, since being unable to reach the host is exactly what the cache exists for.
    */
   private async writeSshSettings(
     projectId: string,
@@ -584,14 +592,39 @@ export class WorkspaceStore {
     doc: ProjectSettingsDoc
   ): Promise<boolean> {
     if (this.settingsConflictByProject.has(projectId)) return false
-    // `doc` spreads FIRST for the same reason writeProjectSettingsFile does it: a caller may hand
-    // back a document it read, and its stale rev must not defeat monotonicity.
-    const prev = this.settingsCacheByProject.get(projectId) ?? this.lastSharedSettings.get(projectId) ?? null
+    let prev = this.settingsCacheByProject.get(projectId) ?? this.lastSharedSettings.get(projectId) ?? null
+    if (!prev && this.remoteIO?.readSettings) {
+      // A throwing IO is an unreachable host, not a verdict on the file — same fail-open shape as
+      // `pushSshSettings`, and the cache-first write below is what makes that survivable.
+      let cold: RemoteReadResult = { status: 'error' }
+      try {
+        cold = await this.remoteIO.readSettings(projectId, ssh)
+      } catch { /* offline: fall through to the cache-first write */ }
+      if (cold.status === 'ok') {
+        const parsed = parseProjectSettingsFile(cold.content)
+        if (parsed.status === 'conflict') {
+          this.settingsConflictByProject.add(projectId)
+          return false
+        }
+        // `invalid` is left as prev=null: the host's bytes are unusable as a rev source, and the
+        // cache-first write is what gives the user a readable file again.
+        if (parsed.status === 'ok') {
+          prev = parsed.file
+          this.lastSharedSettings.set(projectId, parsed.file)
+          this.settingsConflictByProject.delete(projectId)
+        }
+      }
+    }
+    // Canonical shape (bookkeeping first, then the sanitized doc) — the same order
+    // `parseProjectSettingsFile` produces, so a cache built here compares equal to the identical
+    // document read back from the host instead of looking like a change. Sanitizing on the way in
+    // keeps one definition of "a valid settings file" whichever side the bytes came from, and drops
+    // the stale version/rev/savedAt of a document a caller hands straight back.
     const next: ProjectSettingsFileV1 = {
-      ...sanitizeProjectSettingsDoc(doc),
       version: 1,
       rev: (prev?.rev ?? 0) + 1,
-      savedAt: new Date().toISOString()
+      savedAt: new Date().toISOString(),
+      ...sanitizeProjectSettingsDoc(doc)
     }
     this.settingsCacheByProject.set(projectId, next)
     this.lastSharedSettings.set(projectId, next)
@@ -610,11 +643,13 @@ export class WorkspaceStore {
    * user's editor) may have changed since the caller read it, and silently merging into a file the
    * caller never saw is how the shared half stops meaning what the repo says.
    *
-   * READS FIRST when this run has never read the file. Without that, a fresh process writes with
-   * `prev = null` — rev restarts at 1 over a file that was at rev N, and, worse, the write lands on
-   * whatever is there, including the git-conflict-marked file `readProjectSettings` deliberately
-   * refuses to parse. Same rule the project.json path already lives by: never write a file this
-   * store has not looked at.
+   * ALWAYS READS FIRST — not just when this run has never read the file. A remembered rev is not
+   * evidence of the file's current STATE: `.nodeterm/settings.json` is git-tracked, so between the
+   * panel's read and the user's save a pull/merge can leave conflict markers, and a write off the
+   * warm rev would overwrite them (the same file `readProjectSettings` deliberately refuses to
+   * parse). Without any read a fresh process is worse still — rev restarts at 1 over a file that was
+   * at rev N. Settings are cold (a panel save, not a keystroke), so one read per write is the ruled
+   * cost of never writing a file this store has not just looked at.
    *
    * An ssh project takes the cache-first remote leg instead (`writeSshSettings`).
    *
@@ -631,16 +666,14 @@ export class WorkspaceStore {
     if (!e) return false
     if (e.ssh) return this.writeSshSettings(projectId, e.ssh, doc)
     if (!e.cwd) return false
-    let prev = this.lastSharedSettings.get(projectId) ?? null
-    if (!prev) {
-      const read = await readProjectSettingsFile(e.cwd)
-      // absent → nothing to lose, start at rev 1. invalid → the read already sidelined the only
-      // copy to `.corrupt-<ts>`, so this write destroys nothing either.
-      if (read.status === 'conflict' || read.status === 'error') return false
-      if (read.status === 'ok') {
-        prev = read.file
-        this.lastSharedSettings.set(projectId, read.file)
-      }
+    const read = await readProjectSettingsFile(e.cwd)
+    // absent → nothing to lose, start at rev 1. invalid → the read already sidelined the only
+    // copy to `.corrupt-<ts>`, so this write destroys nothing either.
+    if (read.status === 'conflict' || read.status === 'error') return false
+    let prev: ProjectSettingsFileV1 | null = null
+    if (read.status === 'ok') {
+      prev = read.file
+      this.lastSharedSettings.set(projectId, read.file)
     }
     try {
       const written = await writeProjectSettingsFile(

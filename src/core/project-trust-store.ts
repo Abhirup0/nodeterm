@@ -84,6 +84,25 @@ export class ProjectTrustStore {
     return store[key]?.[family]?.contentHash === contentHash
   }
 
+  /**
+   * The stored approval for one family, or null when there is none. For DIALOG COPY only — "you
+   * approved this on <date>, and it has changed since" — never as the basis of a grant: a caller
+   * deciding whether something may RUN asks `isTrusted`, which compares the hash itself.
+   *
+   * Mirrors `isTrusted`'s posture on a read failure (catch → null, nothing cached) rather than
+   * `record`/`revoke`'s (propagate): the same fail-closed answer as "no approval on file", which
+   * for this caller costs a re-prompt, never an unearned yes.
+   */
+  async getRecord(key: string, family: ProjectTrustFamily): Promise<ProjectTrustRecord | null> {
+    let store: TrustFile
+    try {
+      store = await this.load()
+    } catch {
+      return null
+    }
+    return store[key]?.[family] ?? null
+  }
+
   async record(key: string, family: ProjectTrustFamily, contentHash: string, approvedAt: string): Promise<void> {
     return this.mutate((store) => {
       store[key] = { ...store[key], [family]: { contentHash, approvedAt } }

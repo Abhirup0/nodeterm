@@ -58,6 +58,32 @@ describe('project settings — local leg', () => {
     expect(onDisk.terminal.shell).toBe('/bin/bash')
   })
 
+  it('re-saving identical content neither bumps rev nor rewrites the bytes', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } })
+    const file = path.join(projRoot, '.nodeterm', 'settings.json')
+    await store.readProjectSettings('p1') // the panel always reads before it saves
+    const before = await fs.readFile(file, 'utf-8')
+    expect(await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } })).toBe(true)
+    // A no-op save must not churn a git-tracked file: same bytes, same rev.
+    expect(await fs.readFile(file, 'utf-8')).toBe(before)
+    expect(JSON.parse(before).rev).toBe(1)
+  })
+
+  it('re-reads before every write, so a file conflicted since the last read is left alone', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } })
+    await store.readProjectSettings('p1') // warms the rev source
+    const file = path.join(projRoot, '.nodeterm', 'settings.json')
+    // …and then a git pull leaves conflict markers behind our back.
+    const conflicted = '<<<<<<< a\n{}\n=======\n{}\n>>>>>>> b\n'
+    await fs.writeFile(file, conflicted, 'utf-8')
+    expect(await store.writeProjectSettings('p1', { terminal: { shell: '/bin/bash' } })).toBe(false)
+    expect(await fs.readFile(file, 'utf-8')).toBe(conflicted)
+  })
+
   it('refuses to write over a git-conflicted settings.json, leaving the bytes untouched', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({ cwd: projRoot })]))
@@ -250,9 +276,13 @@ describe('project settings — ssh leg', () => {
   it('a write landing mid-read is not downgraded by the older doc that read was already fetching', async () => {
     let release!: () => void
     const gate = new Promise<void>((r) => { release = r })
+    // The FIRST call is the cold write's own read-before-write (the host has no file yet); only the
+    // read under test — the one racing the second write — waits on the gate.
+    let coldPreflight = true
     const store = new WorkspaceStore({
       ...fakeIO,
       readSettings: async () => {
+        if (coldPreflight) { coldPreflight = false; return { status: 'absent' as const } }
         await gate
         return { status: 'ok' as const, content: JSON.stringify(
           { version: 1, rev: 1, savedAt: 't', setup: { setupScript: 'remote-rev1' } }) }
@@ -300,6 +330,22 @@ describe('project settings — ssh leg', () => {
     const s = await store2.readProjectSettings('ps1')
     expect(s?.shared?.setup?.setupScript).toBe('from-host')
     expect(s?.shared?.rev).toBe(4)
+  })
+
+  it('a cold store reads the host before its first ssh write, and refuses a conflict-marked file', async () => {
+    const writes: string[] = []
+    const conflicted = '<<<<<<< a\n{}\n=======\n{}\n>>>>>>> b\n'
+    const store = new WorkspaceStore({
+      ...fakeIO,
+      readSettings: async () => ({ status: 'ok' as const, content: conflicted }),
+      writeSettings: async (_id: string, _ssh: { remoteCwd: string }, content: string) => {
+        writes.push(content); return true
+      }
+    })
+    await store.save(ws([sshProject()]))
+    // Nothing has been read this run, so the runtime conflict flag is cold — the write must look.
+    expect(await store.writeProjectSettings('ps1', { setup: { setupScript: 'nope' } })).toBe(false)
+    expect(writes).toEqual([])
   })
 
   it('an ssh project with no remote IO at all still reads and writes its cache', async () => {

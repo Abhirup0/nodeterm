@@ -39,6 +39,17 @@ describe('ProjectTrustStore', () => {
     expect(await store.isTrusted(key, 'setup', hashTrustContent('npm ci && evil'))).toBe(false)
     expect(await store.isTrusted(key, 'agents', hashTrustContent('npm ci'))).toBe(false)
   })
+  it('getRecord answers the stored approval, or null when there is none', async () => {
+    const key = localTrustKey('/proj')
+    const hash = hashTrustContent('npm ci')
+    const store = new ProjectTrustStore()
+    expect(await store.getRecord(key, 'setup')).toBeNull()
+    await store.record(key, 'setup', hash, '2026-08-19T00:00:00Z')
+    expect(await store.getRecord(key, 'setup')).toEqual({ contentHash: hash, approvedAt: '2026-08-19T00:00:00Z' })
+    expect(await store.getRecord(key, 'agents')).toBeNull() // another family is not this one
+    expect(await store.getRecord(localTrustKey('/other'), 'setup')).toBeNull()
+  })
+
   it('revoke drops one family or the whole key', async () => {
     const key = localTrustKey('/proj')
     const h = hashTrustContent('x')
