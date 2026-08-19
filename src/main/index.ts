@@ -198,6 +198,7 @@ import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
+import { initCodexAccounts } from './codex-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
 import {
@@ -2963,6 +2964,11 @@ app.whenReady().then(async () => {
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
+  // Machine-scoped managed Codex accounts (S6). Its synchronous boot migration of legacy long
+  // CODEX_HOMEs runs here, before the renderer restores its PTYs — an already-persisted managed
+  // Codex node must see its migrated (SUN_LEN-safe) home on its very first spawn. Same lazy SSH
+  // getter for the local→SSH transfer source leg.
+  initCodexAccounts(() => sshProjectManager)
   // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
   // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
   // through the workspace store (written as an outside edit, so the watcher broadcasts it and

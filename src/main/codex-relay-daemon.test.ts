@@ -20,12 +20,14 @@ import path from 'path'
 import { WebSocketServer } from 'ws'
 import {
   acquireProcessLock,
+  ensureCodexRelayRoot,
   exposeForeignThread,
   listThreadsAt,
   mergeRelayThreadLists,
   readThreadAt,
   relayControlPost,
   relayThreadReservationKey,
+  relayThreadResponseError,
   resolveForeignThreadAt,
   retargetRelayResumeByPath,
   resolveRelayThreadResponse,
@@ -145,6 +147,39 @@ describe('Codex shared relay thread observation', () => {
       id: 4,
       result: { thread: { id: 'forked' } }
     })).toEqual({ ok: false, unexpectedThreadId: 'forked' })
+  })
+
+  it('labels a changed id as -32004 but a malformed id as a distinct error (PR-4 minor)', () => {
+    // The silent-fork case the guard exists for keeps the -32004 "changed the conversation id"
+    // wording...
+    expect(relayThreadResponseError({ ok: false, unexpectedThreadId: 'forked' })).toEqual({
+      code: -32004,
+      message: 'Codex changed the conversation id during account switch'
+    })
+    // ...while a plain malformed/missing id (no unexpectedThreadId) must NOT claim the id changed.
+    // MUTATION: collapse both branches back to the -32004 message ⇒ this reddens.
+    const malformed = relayThreadResponseError({ ok: false })
+    expect(malformed?.code).toBe(-32603)
+    expect(malformed?.message).not.toMatch(/changed the conversation id/)
+    // A successful observation carries no error at all.
+    expect(relayThreadResponseError({ ok: true, threadId: 'x' })).toBeNull()
+  })
+
+  it('ensureCodexRelayRoot creates the relay root 0o700 and is idempotent (PR-4 obligation)', () => {
+    const base = mkdtempSync(path.join(tmpdir(), 'nt-relay-root-'))
+    const root = path.join(base, 'nested', '.nodeterm')
+    try {
+      expect(existsSync(root)).toBe(false)
+      ensureCodexRelayRoot(root)
+      const st = statSync(root)
+      expect(st.isDirectory()).toBe(true)
+      // The private-state root must be owner-only (it holds the 0600 control-token state file).
+      if (process.platform !== 'win32') expect(st.mode & 0o777).toBe(0o700)
+      // Idempotent: a second call over an existing root does not throw.
+      expect(() => ensureCodexRelayRoot(root)).not.toThrow()
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 
   it('keeps two account catalogs visible while preserving the selected account as duplicate owner', () => {
