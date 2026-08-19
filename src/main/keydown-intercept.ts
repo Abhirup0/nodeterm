@@ -277,9 +277,13 @@ export const MENU_ITEM_ID_SETTINGS = 'app-settings'
  * earlier argument here was that a recorder greying out Minimize was a worse trade than an
  * unrecordable ⌘M; that trade REVERSED once the menu leg existed for the policy anyway. The cost is
  * now a momentary grey-out while a modal recorder is armed — self-healing the instant it disarms —
- * and the benefit is four chords that could not be bound at all: ⌘M everywhere, off-mac Ctrl+W, and
- * ⌘⇧B / ⌘, which did not merely fail to record but FIRED — pressing ⌘⇧B into the recorder opened
- * the kanban board behind the Settings dialog, and ⌘, re-opened Settings.
+ * and the benefit is that four chords now REACH the recorder instead of acting on the app: ⌘M
+ * everywhere, off-mac Ctrl+W, and ⌘⇧B / ⌘, which did not merely fail to record but FIRED —
+ * pressing ⌘⇧B into the recorder opened the kanban board behind the Settings dialog, and ⌘,
+ * re-opened Settings. **Reaching the recorder is all this buys, and it is the unconditional part.**
+ * Whether the chord can then be BOUND is a separate question, answered by the pre-save gates in
+ * `ShortcutsSection.commitCandidate`: while its owning command still holds it, it is refused there
+ * like any other taken chord — the user has to Disable or remap that command first.
  *
  * **KNOWN GAP for the recording half, pre-existing and accepted.** This list was written for the
  * POLICY stand-down, so it covers only the command-style items that policy needed. The always-on

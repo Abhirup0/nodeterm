@@ -328,9 +328,9 @@ export function findMainInterceptShadowing(
  *  Loops until conflict-free so one bad edit cannot leave ambiguous dispatch. This is the
  *  SETTINGS-LOAD path: it applies what survives and warns about what it dropped. It is not the
  *  pre-save gate — its warnings are unstructured strings, which cannot tell a UI which field to
- *  block on. The future Settings UI blocks pre-save by calling `normalizeBindingForCommand` and
- *  `findKeybindingConflicts` directly, per candidate binding: same detector, different surfacing
- *  (design.md D3). */
+ *  block on. The Settings UI blocks pre-save in `ShortcutsSection.commitCandidate`, which runs
+ *  `normalizeBindingForCommand` (inside its recorder) and `findKeybindingConflicts` directly, per
+ *  candidate binding: same detector, different surfacing (design.md D3). */
 export function sanitizeKeybindingOverrides(
   raw: unknown,
   isMac: boolean

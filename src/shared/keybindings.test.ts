@@ -6,6 +6,7 @@ import {
   normalizeBindingForCommand,
   getEffectiveBindings,
   bindingIdentity,
+  conflictBucket,
   findKeybindingConflicts,
   sanitizeKeybindingOverrides,
   resolveCommandForKeyEvent,
@@ -193,6 +194,25 @@ describe('bindingIdentity', () => {
   it('still separates a modifier from a bare key, and a hold chord from a keyed one', () => {
     expect(bindingIdentity('Cmd+Delete', true)).not.toBe(bindingIdentity('Delete', true))
     expect(bindingIdentity('Cmd+Alt', true)).not.toBe(bindingIdentity('Cmd+Alt+D', true))
+  })
+})
+
+describe('conflictBucket', () => {
+  // The whole mapping, asserted over the REGISTRY rather than a hand-picked example per bucket:
+  // 'app' and 'canvas' share the global keyspace, 'terminal' and 'scm' are their own, and
+  // `speech.dictation` is the one command whose bucket comes from its id instead of its scope.
+  // Kills two mutants a per-bucket sample can miss: a scope-mapping typo (folding 'scm' — or a
+  // scope added later — into 'global', or dropping 'canvas' out of it), and the removal of the
+  // dictation branch, which would send Dictate back into 'global' and re-report the collision
+  // the bucket exists to stop.
+  it('maps every command to its scope bucket, dictation excepted', () => {
+    for (const def of COMMAND_DEFINITIONS) {
+      if (def.id === 'speech.dictation') continue
+      expect(conflictBucket(def)).toBe(
+        def.scope === 'app' || def.scope === 'canvas' ? 'global' : def.scope
+      )
+    }
+    expect(conflictBucket(COMMANDS_BY_ID.get('speech.dictation')!)).toBe('dictation')
   })
 })
 
