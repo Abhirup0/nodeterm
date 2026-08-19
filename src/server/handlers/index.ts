@@ -10,6 +10,8 @@ import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
+import { codexUsageAccounts } from '../../core/codex-accounts-core'
+import { codexHomeFor } from '../../core/codex-config-dir'
 import {
   setMirrorUsageProvider,
   buildMirrorUsage,
@@ -98,8 +100,22 @@ export function registerCoreHandlers(
   // poll all local managed accounts, and re-flush the mirror on every cache update.
   const localClaudeAccountIds = (): string[] =>
     (deps.getSettings().claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
+  // Local managed Codex accounts + their isolated homes, for the per-account usage fan-out
+  // (S6 §4.3). Managed Codex accounts run on the headless host too, so the Server Edition serves
+  // them the same way desktop does — a src/core change ships on both shells by construction.
+  const localCodexAccounts = (): Array<{
+    id: string
+    home: string
+    label: string
+    email?: string | null
+  }> =>
+    codexUsageAccounts(
+      (deps.getSettings().codexAccounts ?? []).filter((a) => !a.host && !a.pending),
+      codexHomeFor
+    )
   const usageService = startUsageService({
     localAccounts: localClaudeAccountIds,
+    codexAccounts: localCodexAccounts,
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     }

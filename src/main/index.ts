@@ -208,6 +208,8 @@ import {
   writeCodexThreadIdentity
 } from '../core/codex-identity-proxy'
 import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
+import { codexUsageAccounts } from '../core/codex-accounts-core'
+import { codexHomeFor } from '../core/codex-config-dir'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
 import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
@@ -3024,8 +3026,22 @@ app.whenReady().then(async () => {
   // drop it (filterMirrorForNodes) — a host answers only for its own local credentials.
   const localClaudeAccountIds = (): string[] =>
     (settingsStore.get().claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
+  // Local managed Codex accounts, each paired with the isolated home its auth.json lives in, for
+  // the per-account usage fan-out (S6 §4.3). Remote (`host`) accounts have no local home; pending
+  // ones have no auth yet — both are excluded, exactly like the Claude list above.
+  const localCodexAccounts = (): Array<{
+    id: string
+    home: string
+    label: string
+    email?: string | null
+  }> =>
+    codexUsageAccounts(
+      (settingsStore.get().codexAccounts ?? []).filter((a) => !a.host && !a.pending),
+      codexHomeFor
+    )
   const usageService = initClaudeUsage(win, {
     localAccounts: localClaudeAccountIds,
+    codexAccounts: localCodexAccounts,
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     },

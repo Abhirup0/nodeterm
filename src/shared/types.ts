@@ -1788,6 +1788,13 @@ export interface ProviderUsage {
   limits: UsageLimit[]
   /** Signed-in identity, when the provider exposes one cheaply (email / account label). */
   account: string | null
+  /**
+   * The managed account this row's numbers belong to, when the provider is account-scoped (Codex
+   * manages N homes on one machine). `undefined` is the un-owned system row — an account that
+   * cannot be proven un-owned is never labelled un-owned. Rows are keyed by this so one account's
+   * usage can never collapse into or be attributed to another (S6 §4.3, no mixing / fail-closed).
+   */
+  accountId?: string
   updatedAt: number
   /**
    * 'unavailable' = not signed in / no subscription to report → hide this provider entirely.
