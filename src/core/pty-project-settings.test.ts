@@ -172,6 +172,7 @@ describe('project settings at the spawn — LOCAL leg', () => {
         CLAUDE_CONFIG_DIR: './.tooling',
         CODEX_HOME: './.tooling',
         XDG_CONFIG_HOME: './.tooling',
+        NODE_OPTIONS: '--require /repo/x.js',
         NODETERM_HOOK_ENDPOINT: '/tmp/evil.sock',
         NODETERM_NODE_ID: 'other-node',
         RAILS_ENV: 'test'
@@ -185,6 +186,7 @@ describe('project settings at the spawn — LOCAL leg', () => {
     expect(spawns[0].env.CLAUDE_CONFIG_DIR).not.toBe('./.tooling')
     expect(spawns[0].env.CODEX_HOME).not.toBe('./.tooling')
     expect(spawns[0].env.XDG_CONFIG_HOME).not.toBe('./.tooling')
+    expect(spawns[0].env.NODE_OPTIONS).not.toBe('--require /repo/x.js')
     // The hook identity this manager set for the node survives INTACT — the project's forgery
     // neither replaced it nor blanked it.
     expect(spawns[0].env.NODETERM_HOOK_ENDPOINT).toBe('/run/nodeterm/real.sock')
@@ -230,6 +232,13 @@ describe('isReservedSpawnEnvKey — the keys a project may never set', () => {
     expect(isReservedSpawnEnvKey('XDG_CONFIG_HOME')).toBe(true)
   })
 
+  // `NODE_OPTIONS=--require /repo/x.js` loads arbitrary JS into every node-based CLI — claude
+  // first among them — at interpreter start. The dialog shows a flag string; the grant is code
+  // execution inside a binary the user believes untouched.
+  it('reserves NODE_OPTIONS — a flag string that is really code execution', () => {
+    expect(isReservedSpawnEnvKey('NODE_OPTIONS')).toBe(true)
+  })
+
   // A base URL redirects the CLI's traffic — carrying the USER's own credentials — to whatever
   // endpoint the repo names, and "a URL" reads innocuous in a consent table. Every name in
   // MODEL_GATEWAY_ENV_KEYS is one this app itself emits to re-route a launched CLI, i.e. the
@@ -241,12 +250,12 @@ describe('isReservedSpawnEnvKey — the keys a project may never set', () => {
     expect(isReservedSpawnEnvKey('COPILOT_PROVIDER_BASE_URL')).toBe(true)
   })
 
-  // PATH and NODE_OPTIONS are ALLOWED on purpose, not by omission — pointing a project's terminals
-  // at its own tooling is the feature's stated purpose, and the consent dialog shows those pairs
-  // verbatim. The reserved list is for keys whose implications a dialog CANNOT convey. The written
-  // ruling lives in `isReservedSpawnEnvKey`'s doc block; this test pins it.
+  // PATH is ALLOWED on purpose, not by omission: approving `PATH=./bin` is a COHERENT consent —
+  // "this project's terminals resolve tools from the repo" is the feature's purpose, and the
+  // hijack it enables requires committing a visible binary. The written ruling (and why
+  // NODE_OPTIONS is not in this list) lives in `isReservedSpawnEnvKey`'s doc block; this pins it.
   it('reserves nothing else — a project may still set its own tooling env', () => {
-    for (const k of ['PATH', 'NODE_OPTIONS', 'LANG', 'RAILS_ENV', 'DATABASE_URL', 'NODE_ENV', 'NODETERM'])
+    for (const k of ['PATH', 'LANG', 'RAILS_ENV', 'DATABASE_URL', 'NODE_ENV', 'NODETERM'])
       expect(isReservedSpawnEnvKey(k)).toBe(false)
   })
 })

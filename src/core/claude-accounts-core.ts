@@ -212,21 +212,36 @@ const AGENT_CONFIG_DIR_ENV: readonly string[] = ['CLAUDE_CONFIG_DIR', 'CODEX_HOM
  *    in it. Custom-agent env may still set these — that is the documented proxy use case.
  *  - `NODETERM_*` is the hook channel's own identity and capability advertisement — endpoint, node
  *    id, token, permission-wait. Forging any of them lets one node speak as another.
+ *  - `NODE_OPTIONS` — `--require /repo/x.js` loads arbitrary JavaScript into every node-based CLI
+ *    (claude first among them) at interpreter start. Same class as the opencode-plugin path above,
+ *    and stealthier than PATH: the process still IS the real claude, from the real location, so
+ *    nothing downstream — not the pane, not the identity probe — can tell. The dialog shows a flag
+ *    string; the grant is code execution.
  *
- * WHAT IS DELIBERATELY *NOT* HERE — `PATH`, `NODE_OPTIONS`, and every ordinary application variable.
- * Pointing a project's terminals at its own tooling IS this feature's purpose, and a consent dialog
- * conveys those pairs perfectly well: a reader sees the directory or the flag and can judge it. The
- * reserved list exists only for keys whose implications a dialog CANNOT convey — a credential
- * directory, a silent traffic redirect, a hook identity — where what is shown ("a path", "a URL")
- * and what is granted are different things. The line is legibility, not danger; a project that
- * wants its own auth belongs in a custom agent.
+ * WHAT IS DELIBERATELY *NOT* HERE — `PATH`, and every ordinary application variable. Approving
+ * `PATH=./bin` is a COHERENT consent: "this project's terminals resolve tools from the repo" is the
+ * feature's stated purpose, and the hijack it enables still requires committing a visible binary
+ * that a reviewer can see in the tree. `NODE_OPTIONS` fails exactly that test, which is why it sits
+ * above and PATH does not — it smuggles execution into a binary the user believes untouched.
+ *
+ * The reserved list exists only for keys whose implications a dialog CANNOT convey — a credential
+ * directory, a silent traffic redirect, a hook identity, an interpreter preload — where what is
+ * shown ("a path", "a URL", "a flag") and what is granted are different things. The line is
+ * legibility, not danger; a project that wants its own auth belongs in a custom agent.
  *
  * SCOPE, precisely: this filters the project's contribution — BOTH halves of it, the git-shared
  * document AND this machine's local overlay. That is broader than the hostile-input argument
  * strictly requires, and it is the deliberate trade: one rule is auditable where "reserved unless
- * it came from the overlay" would be a provenance check on every key, at the spawn, forever. A user
- * who genuinely wants one of these names on this machine sets it in custom-agent env, which is
- * per-machine configuration they typed themselves and is merged after (and over) this.
+ * it came from the overlay" would be a provenance check on every key, at the spawn, forever.
+ *
+ * The same overreach applies by AGENT: `XDG_CONFIG_HOME` is reserved for every pane, including a
+ * plain terminal that launches no agent at all and where the opencode-plugin hazard cannot arise.
+ * Kept anyway, for the same one-auditable-rule reason — the alternative is a per-agent reserved list
+ * evaluated at the spawn, and a pane's agent can change under it. The honest cost: someone who
+ * wanted to point a project's shells at repo-local dotfiles through project env cannot, and the
+ * local overlay is no workaround because this filter covers that too. What is left is custom-agent
+ * env (per-machine configuration the user typed themselves, merged after and over this) for an agent
+ * pane, or the shell's own rc for a plain one.
  *
  * Filtered SILENTLY at the merge — a spawn is not a place to raise a second question. So a dropped
  * key is currently invisible to its author; surfacing the skipped keys in the project settings
@@ -235,6 +250,7 @@ const AGENT_CONFIG_DIR_ENV: readonly string[] = ['CLAUDE_CONFIG_DIR', 'CODEX_HOM
 export function isReservedSpawnEnvKey(key: string): boolean {
   return (
     key.startsWith('NODETERM_') ||
+    key === 'NODE_OPTIONS' ||
     AGENT_CONFIG_DIR_ENV.includes(key) ||
     (AUTH_ENV_STRIP as readonly string[]).includes(key) ||
     (MODEL_GATEWAY_ENV_KEYS as readonly string[]).includes(key)
