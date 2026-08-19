@@ -88,6 +88,16 @@ describe('preload sshProject passphrase wiring', () => {
     expect(h.invoke).toHaveBeenCalledWith(IPC.sessionMemory, { projectId: 'p2', remote: false })
   })
 
+  // The recorder's release leg is a `false`, and main reads it as `active === true`. A preload
+  // that dropped the argument, or sent on the wrong channel, would leave ⌘W/⌘M/⌘0 suppressed
+  // app-wide after Settings closed — with every other test in the tree still green.
+  it('shortcuts.setRecording sends both edges on its own channel', () => {
+    api.shortcuts.setRecording(true)
+    expect(h.send).toHaveBeenCalledWith(IPC.uiShortcutRecording, true)
+    api.shortcuts.setRecording(false)
+    expect(h.send).toHaveBeenCalledWith(IPC.uiShortcutRecording, false)
+  })
+
   it('onPassphraseDismiss subscribes the dismiss channel and forwards the requestId', () => {
     const got: { requestId: string }[] = []
     const off = api.sshProject.onPassphraseDismiss((e) => got.push(e))

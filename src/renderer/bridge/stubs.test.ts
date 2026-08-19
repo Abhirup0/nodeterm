@@ -98,6 +98,10 @@ describe('bridge stubs', () => {
       s.setBadgeCount(3)
       s.contextLink.setLinks({} as never)
       s.sendAgentControlResult({} as never)
+      // The shortcut recorder calls this on every arm AND on unmount; a throw here would leave
+      // Settings unusable in the browser, where there is no main-process intercept to suspend.
+      s.shortcuts.setRecording(true)
+      s.shortcuts.setRecording(false)
     }).not.toThrow()
   })
 })

@@ -593,6 +593,11 @@ const api: NodeTerminalApi = {
   },
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.
+  shortcuts: {
+    // Fire-and-forget: nothing waits on the answer, and a dropped disarm is covered by main's own
+    // window/renderer-death resets (index.ts `clearShortcutRecording`).
+    setRecording: (active: boolean) => ipcRenderer.send(IPC.uiShortcutRecording, active)
+  },
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),
   onZoomActualSize: subscribe(IPC.appZoomActualSize),

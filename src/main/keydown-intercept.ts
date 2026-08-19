@@ -28,7 +28,10 @@ import { matchesShortcut } from '../shared/shortcut'
  * **This module stays the closed list of main-intercepted chords.** ⌘M and ⌘W are now resolved
  * from the keybinding registry (`node.toggleMarkdown` / `node.close`), so the USER decides which
  * chord they are — but nothing else is intercepted here, because everything else reaches the
- * renderer's dispatcher on its own.
+ * renderer's dispatcher on its own. That closed list is ALSO written down in
+ * `shared/keybindings.ts` as `MAIN_INTERCEPTED_COMMAND_IDS` (the Settings UI's app-wide shadow
+ * warning reads it, and cannot derive it from here — main is not importable from the renderer);
+ * a third intercept added here owes that list an entry, which `keydown-intercept.test.ts` pins.
  *
  * Desktop-only by construction (it exists to fight a native menu), so it stays in `src/main` next
  * to `main-window.ts` rather than moving to `src/core` — the Server Edition's browser shell has no
@@ -181,13 +184,22 @@ export interface KeydownInterceptTarget {
  * `getBindings` is read per event rather than captured: settings change while the window lives, and
  * it returns a cached object (`index.ts` recomputes it on `settingsStore.onChange`, not here — a
  * sanitize per keystroke would be real work on the input path).
+ *
+ * `isRecording` is the same shape and for the same reason — the renderer flips it over IPC while
+ * this window is alive. **It is checked BEFORE `preventDefault`, not before the send**: a claimed
+ * chord never reaches the page at all, so while the Settings shortcut recorder is armed the only
+ * way it can SEE ⌘W is for this listener to leave the key completely alone. Swallowing but not
+ * forwarding would still hand the recorder nothing — and forwarding is the live bug, since ⌘W
+ * pressed into the recorder deletes the canvas's selected nodes.
  */
 export function installKeydownIntercepts(
   win: KeydownInterceptTarget,
   getBindings: () => KeydownInterceptBindings,
-  isMac: boolean
+  isMac: boolean,
+  isRecording: () => boolean
 ): void {
   win.webContents.on('before-input-event', (event, input) => {
+    if (isRecording()) return
     const decision = keydownIntercept(input, getBindings(), isMac)
     if (!decision) return
     event.preventDefault()

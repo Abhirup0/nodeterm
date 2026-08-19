@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { IPC } from '../shared/ipc'
+import { MAIN_INTERCEPTED_COMMAND_IDS } from '../shared/keybindings'
 import {
   installKeydownIntercepts,
   keydownIntercept,
@@ -57,10 +58,28 @@ function press(
 ): { prevented: boolean; sent: string[] } {
   const isMac = opts.isMac ?? true
   const bindings = opts.bindings ?? (isMac ? DEFAULTS : DEFAULTS_PC)
+  // Not recording: the ordinary state of the app, and the baseline every case below asserts
+  // against. The armed state has its own describe block at the bottom of this file.
+  const seam = install(() => bindings, isMac, () => false)
+  seam.fire(over)
+  return { prevented: seam.prevented.length > 0, sent: seam.sent }
+}
+
+/**
+ * ONE installation whose listener can be fired repeatedly — the shape a live window has, and the
+ * only way to press the same key on both sides of a state change (the recording bit flipping under
+ * a running window is exactly what `press`, which installs per call, cannot show).
+ */
+function install(
+  getBindings: () => KeydownInterceptBindings,
+  isMac: boolean,
+  isRecording: () => boolean
+): { fire: (over?: Partial<KeydownInterceptInput>) => void; prevented: string[]; sent: string[] } {
   let handler:
     | ((event: { preventDefault(): void }, input: KeydownInterceptInput) => void)
     | null = null
   const sent: string[] = []
+  const prevented: string[] = []
   const win: KeydownInterceptTarget = {
     webContents: {
       on: (_event, listener) => {
@@ -71,14 +90,16 @@ function press(
       }
     }
   }
-  installKeydownIntercepts(win, () => bindings, isMac)
+  installKeydownIntercepts(win, getBindings, isMac, isRecording)
   if (!handler) throw new Error('installKeydownIntercepts registered no before-input-event listener')
-  let prevented = false
-  ;(handler as (e: { preventDefault(): void }, i: KeydownInterceptInput) => void)(
-    { preventDefault: () => (prevented = true) },
-    input(over)
-  )
-  return { prevented, sent }
+  const fire = (over: Partial<KeydownInterceptInput> = {}): void => {
+    const i = input(over)
+    ;(handler as (e: { preventDefault(): void }, i: KeydownInterceptInput) => void)(
+      { preventDefault: () => prevented.push(i.code) },
+      i
+    )
+  }
+  return { fire, prevented, sent }
 }
 
 /** Nothing happened at all: the page gets the key, and so does the menu if the page ignores it. */
@@ -299,5 +320,53 @@ describe('binding-driven intercept', () => {
       { prevented: true, sent: [IPC.appCloseNode] }
     )
     expect(press({ meta: true, key: 'w', code: 'KeyW' }, { bindings: remapped })).toEqual(UNTOUCHED)
+  })
+
+  // LIST DRIFT. `MAIN_INTERCEPTED_COMMAND_IDS` is what the Settings UI checks a candidate binding
+  // against for the app-wide shadow warning (`findMainInterceptShadowing`), and nothing else ties
+  // it to the commands THIS module actually resolves. A third intercept added here without the id
+  // added there would be swallowed app-wide with the recorder cheerfully reporting no conflict.
+  it('MAIN_INTERCEPTED_COMMAND_IDS is exactly the set this module resolves', () => {
+    expect(Object.keys(DEFAULTS)).toHaveLength(MAIN_INTERCEPTED_COMMAND_IDS.length)
+    // Unbinding a listed command must visibly change what this module resolves — i.e. it is read
+    // here, not merely claimed.
+    for (const id of MAIN_INTERCEPTED_COMMAND_IDS) {
+      expect(resolveInterceptBindings({ [id]: [] }, true), id).not.toEqual(DEFAULTS)
+    }
+  })
+})
+
+/**
+ * THE bug this suppression exists to close: the Settings shortcut recorder asks the user to PRESS
+ * the chord they want to bind, and pressing ⌘W there used to reach `app:close-node` — deleting the
+ * selected nodes instead of recording a keystroke. A claimed chord never reaches the page at all,
+ * so the recorder's own `preventDefault`/`stopPropagation` cannot help: main has to stand down.
+ */
+describe('an armed shortcut recorder suspends every interception', () => {
+  it('suppresses while armed and resumes on disarm', () => {
+    let recording = true
+    const seam = install(() => DEFAULTS, true, () => recording)
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    seam.fire({ meta: true, key: 'm', code: 'KeyM' })
+    seam.fire({ meta: true, code: 'Digit0' })
+    // Not swallowed either: `preventDefault` would take the key from the recorder as well as the
+    // menu, so the suppression must return BEFORE it, not merely skip the send.
+    expect(seam.prevented).toEqual([])
+    expect(seam.sent).toEqual([])
+    recording = false
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([IPC.appCloseNode])
+    expect(seam.prevented).toEqual(['KeyW'])
+  })
+
+  it('is read per event, not captured at install time', () => {
+    // The bit lives in a module-level `let` in index.ts that the renderer flips over IPC long
+    // after the window was created; a captured boolean would make the whole feature inert.
+    let recording = false
+    const seam = install(() => DEFAULTS, true, () => recording)
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    recording = true
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([IPC.appCloseNode])
   })
 })

@@ -292,6 +292,18 @@ const currentInterceptBindings = (): KeydownInterceptBindings =>
 settingsStore.onChange((s) => {
   interceptBindings = resolveInterceptBindings(s.keybindings, interceptIsMac)
 })
+// Settings' shortcut recorder is armed: stand every intercept down so the chord the user presses
+// reaches the recorder. Without it, recording ⌘W CLOSES THE SELECTED NODES — a claimed chord never
+// reaches the page, so the recorder's own preventDefault cannot save it.
+// A module-level `let` read through a closure, exactly like `interceptBindings` above: the window
+// is created later and can be recreated (macOS dock reopen), so nothing may capture a value.
+// FAIL-SAFE DIRECTION: every uncertainty resolves to `false` (intercepts on). A renderer that
+// crashes or a window that closes while armed clears it — see `createWindow` — because the
+// alternative is ⌘W/⌘M/⌘0 dead app-wide with no component left alive to release the bit.
+let shortcutRecording = false
+const clearShortcutRecording = (): void => {
+  shortcutRecording = false
+}
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
 // Dictation: local whisper.cpp models live under userData, one dir per install (same convention
@@ -622,6 +634,11 @@ function createWindow(): BrowserWindow {
     // client to co-attach to that node would inherit a frozen terminal. The tmux sessions
     // themselves keep running, exactly as they do on quit (killAll).
     ptyManager.dropClient(presenceId)
+    // The window that armed the recorder is gone, so nothing can ever disarm it. Leaving the bit
+    // set would suppress ⌘W/⌘M/⌘0 for the NEXT window too (the flag outlives the window; a dock
+    // reopen builds a fresh one). Same shape as the dropClient above: state this window owned,
+    // released where its departure is observed.
+    clearShortcutRecording()
   })
   // A crashed/killed renderer is the same story, minus the window: drop its subscriptions so the
   // reloaded renderer reattaches to live sessions instead of inheriting the dead one's state.
@@ -632,6 +649,9 @@ function createWindow(): BrowserWindow {
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
+    // A dead renderer sends no disarm. The reloaded page mounts no recorder, so without this the
+    // user would come back to an app where ⌘W does nothing at all.
+    clearShortcutRecording()
     if (quitting || win.isDestroyed()) return
     const action = crashReload(details.reason, Date.now())
     if (action === 'reload') {
@@ -686,7 +706,7 @@ function createWindow(): BrowserWindow {
   // resetZoom) and forward each to the renderer instead. The decision — and, importantly, what it
   // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test. The first two
   // are the user's effective `node.toggleMarkdown` / `node.close` bindings (⌘0 is not remappable).
-  installKeydownIntercepts(win, currentInterceptBindings, interceptIsMac)
+  installKeydownIntercepts(win, currentInterceptBindings, interceptIsMac, () => shortcutRecording)
 
   // Open external links in the system browser — only safe schemes (no file://, no custom
   // protocol handlers). Reachable from remotely-fetched announcement URLs and rendered
@@ -911,6 +931,16 @@ app.whenReady().then(async () => {
   )
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
+
+  // Settings' shortcut recorder arming/disarming. Guarded on the sender being the live main window
+  // (the same `getMainWindow()?.webContents.id !== event.sender.id` test `registerElectronGitHubControl`
+  // uses): a <webview> guest — a browser node showing an arbitrary page — is a webContents in this
+  // process too, and this bit disables the app's own keyboard shortcuts. Resolved at call time, not
+  // captured, because the window can be closed and recreated on macOS.
+  ipcMain.on(IPC.uiShortcutRecording, (event, active: boolean) => {
+    if (getMainWindow()?.webContents.id !== event.sender.id) return
+    shortcutRecording = active === true
+  })
 
   // Bring the window forward after a file is dropped into a terminal. On macOS a drag-drop from
   // another app does NOT activate the destination app, so without this the drag-source keeps OS

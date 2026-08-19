@@ -353,6 +353,13 @@ export function buildStubApi(): Omit<
       listDevices: U('pairing.listDevices'),
       revokeDevice: U('pairing.revokeDevice')
     },
+    shortcuts: {
+      // Deliberate no-op (not a gap): the recording bit exists to stand the DESKTOP's
+      // `before-input-event` intercepts down, and a browser tab has no application menu to steal
+      // ⌘W/⌘M/⌘0 back from — nothing intercepts here, so there is nothing to suspend. The
+      // recorder's own preventDefault/stopPropagation is the whole path in this shell.
+      setRecording: noop
+    },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,
     // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the

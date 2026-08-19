@@ -69,6 +69,12 @@ export const IPC = {
    *  Electron's default View menu binds that accelerator to `resetZoom`, which resets the WINDOW's
    *  page zoom rather than the canvas's. */
   appZoomActualSize: 'app:zoom-actual-size',
+  /** Renderer → main: the Settings shortcut recorder is armed (`true`) or disarmed (`false`).
+   *  While armed the main window's `before-input-event` intercepts above stand down entirely, so
+   *  the chord the user is recording — ⌘W and ⌘M among them — reaches the recorder instead of
+   *  closing their selected nodes. Fire-and-forget `send`; desktop-only (a browser tab has no
+   *  application menu to steal a chord back from, so the Server Edition stubs it). */
+  uiShortcutRecording: 'ui:shortcut-recording',
   appCloseWindow: 'app:close-window',
   /** Main → renderer: the native application menu's "Settings…" item (⌘,) was clicked. The
    *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */
