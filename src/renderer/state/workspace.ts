@@ -545,7 +545,13 @@ export function createAgentNode(
   ssh?: Project['ssh'],
   accountId?: string,
   permissionMode?: AgentPermissionMode,
-  projectId?: string
+  projectId?: string,
+  /** Per-node model override for a MODEL_SWITCH_CAPABLE agent (claude/codex/copilot, base-resolved).
+   *  Applied through the effective base harness via `withAgentModel` (a no-op for a non-capable
+   *  agent, so passing a model for one is harmless — it's simply not appended). Persisted as
+   *  `data.agentModel` so cold-restore and later restarts keep the model. Trails `projectId`: every
+   *  existing caller passes that ninth argument, so the model is the one that had to move. */
+  model?: string
 ): CanvasNode {
   const { label, color } = resolveAgent(agentId)
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
@@ -593,7 +599,11 @@ export function createAgentNode(
       // A SHARED_IDENTITY_CAPABLE agent (codex) launches through its managed launcher when this
       // machine actually has one — otherwise the bare CLI, byte-identical to before. `codexSharedIdentity`
       // folds in the SSH answer (a host has no launcher installed yet, so a remote node stays bare).
-      sharedIdentity: codexSharedIdentity(ssh)
+      sharedIdentity: codexSharedIdentity(ssh),
+      // A model picked at creation (e.g. Transfer-to-agent-with-model). `withAgentModel` appends
+      // `--model <value>` for a switch-capable agent and no-ops otherwise, so the line stays
+      // byte-identical when no model is chosen.
+      model
     },
     // The boot-time snapshot of the desktop env (empty on browser/relay by design, where the
     // missing-env warning below is the honest outcome — the same markers the preview shows).
@@ -631,6 +641,9 @@ export function createAgentNode(
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
+      // A model chosen at creation (Transfer-to-agent-with-model). Persisted so cold-restore and
+      // later restarts keep it; `withAgentModel` re-applies it on relaunch. Only stamped when set.
+      ...(model ? { agentModel: model } : {}),
       cwd: ssh ? ssh.remoteCwd : cwd,
       initialCommand,
       ...(ssh ? { ssh: ssh.server, sshRemoteTmux: true } : {})
