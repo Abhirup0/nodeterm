@@ -16,7 +16,7 @@ import { buildCommitMenuItems } from './git-history/git-history-menu'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { PublishDialog } from './PublishDialog'
 import { defaultScmScope, type ScmScope } from '@shared/scm-scope'
-import { hintLabel } from '@shared/platform-utils'
+import { chipFor } from '../lib/keybindingOverrides'
 
 export interface SourceControlPanelProps {
   onClose: () => void
@@ -404,6 +404,10 @@ export function SourceControlPanel({
     )
   }
 
+  // Whatever Commit is bound to; '' when unbound, in which case the box is just "Message" —
+  // the button below it still commits.
+  const commitChip = chipFor('scm.commit')
+
   return createPortal(
     <div className="drawer-overlay" onClick={onClose}>
       <aside className="drawer scm" onClick={(e) => e.stopPropagation()}>
@@ -503,7 +507,7 @@ export function SourceControlPanel({
                 <div className="scm-compose">
                   <textarea
                     className="scm-message"
-                    placeholder={hintLabel('Message (⌘↵ to commit)')}
+                    placeholder={commitChip ? `Message (${commitChip} to commit)` : 'Message'}
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={(e) => {

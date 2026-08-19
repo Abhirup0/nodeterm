@@ -45,3 +45,11 @@ export function commandTooltip(text: string, id: CommandId, isMac: boolean = isM
   if (!parts.length) return text
   return `${text} (${isMac ? parts.join('') : parts.join('+')})`
 }
+
+/** The bare chord, as a chip: `'⌘K'` (mac) / `'Ctrl+K'`. **`''` when unbound** — every caller
+ *  embeds this in a sentence (`⌘M to exit`, `Message (⌘Enter to commit)`), so they must test it
+ *  and fall back to chord-less copy rather than rendering a stray fragment. */
+export function chipFor(id: CommandId, isMac: boolean = isMacPlatform()): string {
+  const parts = commandKeys(id, isMac)
+  return isMac ? parts.join('') : parts.join('+')
+}

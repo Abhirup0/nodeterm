@@ -179,7 +179,7 @@ import {
   type GlobalKeydownDeps
 } from '../lib/globalKeybindings'
 import type { ContextElement } from '../lib/keyContext'
-import { activeKeybindingOverrides } from '../lib/keybindingOverrides'
+import { activeKeybindingOverrides, chipFor, commandTooltip } from '../lib/keybindingOverrides'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
@@ -262,7 +262,6 @@ import {
 } from '@shared/worktree'
 import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
 import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@shared/scm-scope'
-import { hintLabel } from '@shared/platform-utils'
 import {
   canvasImageFiles,
   canvasImageSink,
@@ -9164,6 +9163,11 @@ export function Canvas() {
     [paletteOpen, buildCommands, nodes]
   )
 
+  // The palette's chord appears as a bare chip in two places (the cluster's search button and the
+  // empty-canvas hint). Empty means the user unbound it: the chip is dropped rather than rendered
+  // as an empty <kbd>, and the hint's sentence loses that clause with it.
+  const paletteChip = chipFor('app.commandPalette')
+
   return (
     <div className="canvas-root">
       <TabBar
@@ -9357,7 +9361,7 @@ export function Canvas() {
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
       >
-        <button title={hintLabel('Sessions (⌘⇧L)')} onClick={onSessionsIconClick}>
+        <button title={commandTooltip('Sessions', 'panel.sessions')} onClick={onSessionsIconClick}>
           <IconSessions />
         </button>
       </div>
@@ -9375,12 +9379,12 @@ export function Canvas() {
           onClick={() => setPaletteOpen(true)}
         >
           <span className="cluster-search__icon">⌕</span>
-          <span className="kbd">{hintLabel('⌘K')}</span>
+          {paletteChip && <span className="kbd">{paletteChip}</span>}
         </button>
-        <button title={hintLabel('Explorer (⌘⇧E)')} onClick={() => setExplorerOpen(true)}>
+        <button title={commandTooltip('Explorer', 'panel.explorer')} onClick={() => setExplorerOpen(true)}>
           <IconExplorer />
         </button>
-        <button title={hintLabel('Source Control (⌘⇧G)')} onClick={() => setScOpen(true)}>
+        <button title={commandTooltip('Source Control', 'panel.sourceControl')} onClick={() => setScOpen(true)}>
           <IconBranch />
         </button>
         <button
@@ -9393,7 +9397,7 @@ export function Canvas() {
           <IconPhone />
         </button>
         <button
-          title={hintLabel('Settings (⌘,)')}
+          title={commandTooltip('Settings', 'app.settings')}
           onClick={() => {
             setSettingsSection(undefined)
             setSettingsOpen(true)
@@ -9410,7 +9414,7 @@ export function Canvas() {
               x: Math.max(8, r.right - 220),
               y: r.bottom + 6,
               items: [
-                { label: 'Keyboard shortcuts', hint: hintLabel('⌘/'), onClick: () => setShortcutsOpen(true) },
+                { label: 'Keyboard shortcuts', hint: chipFor('app.shortcutsPanel') || undefined, onClick: () => setShortcutsOpen(true) },
                 { label: 'Report a bug…', onClick: () => setBugReportOpen(true) },
                 {
                   label: 'Documentation',
@@ -9442,7 +9446,7 @@ export function Canvas() {
           <div className="empty-canvas-hint" aria-hidden>
             <div>Right-click to add a terminal or agent</div>
             <div>
-              <span className="kbd">{hintLabel('⌘K')}</span> command palette · <span className="kbd">+</span> in the dock below
+              {paletteChip && <><span className="kbd">{paletteChip}</span> command palette · </>}<span className="kbd">+</span> in the dock below
             </div>
           </div>
         )}

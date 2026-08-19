@@ -166,7 +166,7 @@ import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
-import { hintLabel } from '@shared/platform-utils'
+import { chipFor } from '../lib/keybindingOverrides'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
@@ -4150,6 +4150,10 @@ export function TerminalNode({
     status?.state !== 'waiting' &&
     status?.state !== 'blocked'
 
+  // Whatever the markdown toggle is bound to; '' when the user unbound it, in which case the
+  // markdown view's hint names the action instead of promising a chord that never fires.
+  const mdChip = chipFor('node.toggleMarkdown')
+
   return (
     <>
     {/* Sibling of the root: .term-node is overflow:hidden and would clip the half-pill. */}
@@ -4632,7 +4636,7 @@ export function TerminalNode({
             <div className="term-md nodrag nowheel">
               <div className="term-md__bar">
                 <span>Markdown</span>
-                <span className="term-md__hint">{hintLabel('⌘M to exit')}</span>
+                <span className="term-md__hint">{mdChip ? `${mdChip} to exit` : 'Exit'}</span>
               </div>
               <div className="term-md__content" dangerouslySetInnerHTML={{ __html: mdHtml }} />
             </div>

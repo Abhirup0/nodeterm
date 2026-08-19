@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
+import type { CommandId } from '@shared/keybindings'
 import { isBrowserRuntime } from '../bridge/runtime'
+import { commandKeys } from '../lib/keybindingOverrides'
 import { useSettings } from '../state/settings'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -16,31 +18,44 @@ interface Row {
   label: string
 }
 
-/** Everything but "Dictate" is fixed; that row's keys/label depend on `settings.speech.shortcut`
- *  (a modifier-only chord is hold-to-talk — no trailing key badge, so the label spells that out),
- *  so the sections are built at render time instead of module scope. */
+/** Registry rows derive their keys from the effective binding, so a remap in settings.json
+ *  shows up here without touching this file — and a command the user unbound (or that ships
+ *  unassigned) drops off the panel instead of advertising a chord that no longer fires.
+ *  Gesture/mouse rows stay literal: they are not commands and the registry knows nothing
+ *  about them. "Dictate" also stays literal — its chord still lives in
+ *  `settings.speech.shortcut` (the registry's `speech.dictation` row is display-only for now),
+ *  and a modifier-only chord is hold-to-talk, which the label spells out. */
 function buildSections(dictationKeys: string[], dictationLabel: string): { title: string; rows: Row[] }[] {
+  const cmd = (id: CommandId, label: string): Row[] => {
+    const keys = commandKeys(id)
+    return keys.length ? [{ keys, label }] : []
+  }
   return [
     {
       title: 'General',
       rows: [
-        { keys: ['⌘', 'K'], label: 'Command palette' },
-        { keys: ['⌘', ','], label: 'Settings' },
-        { keys: ['⌘', '/'], label: 'This shortcuts panel' },
+        ...cmd('app.commandPalette', 'Command palette'),
+        ...cmd('app.settings', 'Settings'),
+        ...cmd('app.shortcutsPanel', 'This shortcuts panel'),
+        ...cmd('panel.explorer', 'Explorer'),
+        ...cmd('panel.sourceControl', 'Source Control'),
+        ...cmd('view.kanbanToggle', 'Kanban board'),
+        ...cmd('panel.sessions', 'Pin the sessions sidebar'),
         // Desktop only: browsers own Cmd/Ctrl+1-9 for tab switching and a page cannot take it
         // back, so listing it in the Server Edition would promise a shortcut that never fires.
         ...(isBrowserRuntime() ? [] : [{ keys: ['⌘', '1-9'], label: 'Jump to project' }]),
         { keys: dictationKeys, label: dictationLabel },
-        { keys: ['⌘', 'Z'], label: 'Undo' },
-        { keys: ['⌘', '⇧', 'Z'], label: 'Redo' }
+        ...cmd('canvas.undo', 'Undo'),
+        ...cmd('canvas.redo', 'Redo')
       ]
     },
     {
       title: 'Canvas',
       rows: [
-        { keys: ['⌘', 'T'], label: 'New terminal' },
-        { keys: ['⌘', '⇧', 'C'], label: 'New Claude Code' },
-        { keys: ['⌘', 'W'], label: 'Close selected node' },
+        ...cmd('node.newTerminal', 'New terminal'),
+        ...cmd('node.newAgent', 'New Claude Code'),
+        ...cmd('node.close', 'Close selected node'),
+        ...cmd('canvas.deleteSelection', 'Delete selection'),
         { keys: ['Right-click'], label: 'Actions menu (empty space or node)' },
         { keys: ['Left-drag'], label: 'Box-select (touch to select)' },
         { keys: ['Middle / Right-drag'], label: 'Pan the canvas' },
@@ -60,7 +75,8 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
       rows: [
         { keys: ['Hover ~0.6s'], label: 'Enter the terminal (type/select)' },
         { keys: ['Quick drag'], label: 'Move the terminal (before it focuses)' },
-        { keys: ['⌘', 'M'], label: 'Toggle markdown view' },
+        ...cmd('node.toggleMarkdown', 'Toggle markdown view'),
+        ...cmd('terminal.find', 'Find in terminal'),
         { keys: ['⌘', 'C'], label: 'Copy selection (markdown view)' },
         { keys: ['✦'], label: 'Name the terminal with AI' }
       ]
@@ -68,8 +84,8 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
     {
       title: 'Source Control',
       rows: [
-        { keys: ['⌘', '⇧', 'G'], label: 'Open Source Control' },
-        { keys: ['⌘', '↵'], label: 'Commit the staged changes' }
+        ...cmd('panel.sourceControl', 'Open Source Control'),
+        ...cmd('scm.commit', 'Commit the staged changes')
       ]
     }
   ]

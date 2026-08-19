@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { useSettings } from '../state/settings'
-import { activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip } from './keybindingOverrides'
+import {
+  activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip, chipFor
+} from './keybindingOverrides'
 
 const setKb = (kb: unknown) =>
   useSettings.setState({ settings: { ...DEFAULT_SETTINGS, keybindings: kb as never } })
@@ -49,5 +51,19 @@ describe('effectiveBindings / commandKeys / commandTooltip', () => {
   it('unbound commands render without a chord suffix', () => {
     expect(commandTooltip('Fit all', 'canvas.fitAll', true)).toBe('Fit all')
     expect(commandKeys('canvas.fitAll', true)).toEqual([])
+  })
+})
+
+describe('chipFor', () => {
+  it('renders the bare chord the way each platform spells it', () => {
+    expect(chipFor('app.commandPalette', true)).toBe('⌘K')
+    expect(chipFor('app.commandPalette', false)).toBe('Ctrl+K')
+  })
+  it('follows a remap', () => {
+    setKb({ 'app.commandPalette': ['Cmd+Shift+P'] })
+    expect(chipFor('app.commandPalette', true)).toBe('⌘⇧P')
+  })
+  it('is empty for an unbound command, so callers can fall back', () => {
+    expect(chipFor('canvas.fitAll', true)).toBe('')
   })
 })
