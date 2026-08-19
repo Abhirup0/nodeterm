@@ -19,6 +19,22 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
     ...DEFAULT_SETTINGS.modelGateway,
     ...saved?.modelGateway,
   };
+  // One-shot dictation migration: a customized legacy `speech.shortcut` becomes the
+  // `speech.dictation` override that every consumer now reads (renderer lib `dictationBinding()`).
+  // Once the key exists — user-set, seeded, or explicitly disabled (`[]`) — it is the truth and
+  // this never runs again; the legacy field lives on only as a downgrade mirror (the renderer
+  // write path keeps it in sync so an older build still finds the user's chord).
+  // A shortcut EQUAL to the default seeds nothing: the override would only restate what the
+  // registry already says, and would then pin that chord against any future default change.
+  if (
+    merged.speech.shortcut !== DEFAULT_SETTINGS.speech.shortcut &&
+    !(merged.keybindings && "speech.dictation" in merged.keybindings)
+  ) {
+    merged.keybindings = {
+      ...(merged.keybindings ?? {}),
+      "speech.dictation": [merged.speech.shortcut],
+    };
+  }
   // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
   // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch
