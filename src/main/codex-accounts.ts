@@ -167,6 +167,25 @@ async function existingManagedIdentity(id: string): Promise<{ email: string | nu
 }
 
 /**
+ * THREE SURFACES (global-constraint 5), stated explicitly:
+ *
+ *  - **Desktop (Electron)** — the full feature. This module registers its IPC over `electron`'s
+ *    `ipcMain`, and owner-authorization keys off `event.sender.id` (a WebContents). `src/main/
+ *    index.ts` is the ONLY caller.
+ *  - **Server Edition (headless / an SSH host)** — this IPC surface is deliberately **N/A** here,
+ *    and PR 5 does NOT wire it. The verbs are `ipcMain.handle` + WebContents-owner semantics, which
+ *    the headless CorePlatform bridge does not provide, so `startServer` never calls
+ *    `initCodexAccounts`. This is not a silent gap: managed Codex logins **on an SSH host** are
+ *    driven by the DESKTOP over SSH / `RemoteHooks` (the remote account-add / device-login / import
+ *    legs), which is **PR 6's** work — the host runs the relay + import, not its own copy of this
+ *    IPC. The Server Edition still arms the codex identity *record secret* (src/server/
+ *    node-identity-arm.ts) so records sign; it just does not host the account-management verbs.
+ *    **PR 6 obligation:** if the remote leg needs SE-side handlers, PR 6 wires them through the
+ *    server bridge — PR 5 intentionally left that unbuilt. Nothing in PR 5 assumes an SE IPC
+ *    surface exists.
+ *  - **Mobile (phone)** — never originates an add/switch/copy; it drives via relay→IPC and reads
+ *    state. No mint here.
+ *
  * @param getSshManager Lazily resolves the SSH project manager (created after this init in
  * index.ts). Only the local→SSH transfer SOURCE leg uses it today; local account ops never do.
  */

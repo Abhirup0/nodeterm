@@ -123,6 +123,29 @@ describe('Codex same-machine switch — three-phase, owner-authorized (Propertie
     expect(readThread).toHaveBeenCalled()
   })
 
+  it('refuses to finish a switch that was never committed (committed-gate, Property 5)', async () => {
+    // A reservation is planned but NOT committed (the atomic hardlink never ran). Finishing it would
+    // release the reservation as if the copy had succeeded — the renderer then recycles the node
+    // onto a target that has no rollout. finishSwitch must refuse until commit ran.
+    const owner = makeSender(1)
+    const res = (await call(IPC.codexAccountsSwitchThread, owner, THREAD, '/work', SOURCE, TARGET)) as {
+      rollbackToken?: string
+    }
+    // MUTATION: drop `!pending?.committed` in finishSwitch ⇒ this stops throwing ⇒ red.
+    expect(() => call(IPC.codexAccountsFinishSwitch, owner, res.rollbackToken)).toThrow(
+      /was not committed/
+    )
+    // The target still has NO rollout — nothing was published by a premature finish.
+    const targetPath = path.join(
+      codexAccountHome(userDataDir, TARGET),
+      'sessions',
+      '2026',
+      '08',
+      `rollout-${THREAD}.jsonl`
+    )
+    expect(() => statSync(targetPath)).toThrow()
+  })
+
   it('a non-owner WebContents cannot commit or finish the switch', async () => {
     const owner = makeSender(1)
     const attacker = makeSender(2)

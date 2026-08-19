@@ -26,7 +26,8 @@ vi.mock('../core/codex-session-name', () => ({
   readCodexAccountAt: (..._a: any[]) => readAccount()
 }))
 vi.mock('../core/pty-manager', () => ({ findInLoginPath: vi.fn(async () => null) }))
-vi.mock('./codex-relay-daemon', () => ({ ensureCodexRelayRoot: vi.fn() }))
+const ensureRelayRoot = vi.fn()
+vi.mock('./codex-relay-daemon', () => ({ ensureCodexRelayRoot: ensureRelayRoot }))
 
 import { IPC } from '../shared/ipc'
 import { fakePlatform } from '../core/platform-fake'
@@ -39,6 +40,7 @@ const call = (channel: string, ...args: any[]) => h.handlers[channel]({ sender }
 
 beforeEach(async () => {
   h.handlers = {}
+  ensureRelayRoot.mockClear()
   readAccount.mockReset().mockResolvedValue({ email: 'me@example.com' })
   userDataDir = mkdtempSync(path.join(os.tmpdir(), 'nodeterm-codex-acct-'))
   systemHome = mkdtempSync(path.join(os.tmpdir(), 'nodeterm-codex-sys-'))
@@ -61,6 +63,12 @@ afterEach(async () => {
 })
 
 describe('Codex local account lifecycle (Task 5.1)', () => {
+  it('ensures the ~/.nodeterm relay root at boot (carried PR-4 obligation)', () => {
+    // initCodexAccounts ran in beforeEach; the boot-time call to ensureCodexRelayRoot is asserted
+    // here (not just the function itself) so removing the call site would red this.
+    expect(ensureRelayRoot).toHaveBeenCalled()
+  })
+
   it('add mints a 0700 home and symlinks the shared, non-secret runtime assets', async () => {
     const { id, home } = (await call(IPC.codexAccountsAdd)) as { id: string; home: string }
     expect(id).toMatch(/^[0-9a-f-]{36}$/)
