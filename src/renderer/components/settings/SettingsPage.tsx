@@ -49,14 +49,23 @@ export function SettingsPage({
   retargetNonce?: number
 }): React.JSX.Element {
   const hydrate = useEntitlement((s) => s.hydrate)
-  // Which section is shown and what is typed in the search box, plus the deep-link retarget rule.
-  const { active, setActive, query, setQuery } = useSettingsTarget(initialSection, retargetNonce)
 
   // ONE list feeds both the nav rows and the panes below, so a "Projects" row can never point at a
   // section that is not rendered (or vice versa). Memoized: `projects.filter(...)` inside a zustand
   // selector would return a fresh array on every store snapshot and re-render the whole page.
   const projects = useProjects((s) => s.projects)
   const openProjects = useMemo(() => projects.filter((p) => !p.closed), [projects])
+  // Same list, ids only, with a stable identity — it is an effect dependency in useSettingsTarget.
+  const openProjectIds = useMemo(() => openProjects.map((p) => p.id), [openProjects])
+
+  // Which section is shown and what is typed in the search box, plus the deep-link retarget rule
+  // and the fallback for a project section whose project has since been closed.
+  const { active, setActive, query, setQuery } = useSettingsTarget(
+    initialSection,
+    retargetNonce,
+    openProjectIds
+  )
+
   const extraGroups = useMemo(() => {
     const group = projectsSettingsGroup(
       openProjects.map((p) => ({ id: p.id, name: p.name, color: p.color }))

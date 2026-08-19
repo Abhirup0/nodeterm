@@ -89,3 +89,76 @@ describe('useSettingsTarget', () => {
     expect(target.query).toBe('shell')
   })
 })
+
+/**
+ * `active` outlives the dialog: Canvas keeps `settingsSection` across opens. So a project pane it
+ * points at can disappear (project closed) while the selection stays — and the panel then opens on
+ * a section nobody renders: no nav row, blank main area.
+ */
+describe('useSettingsTarget project fallback', () => {
+  let root: Root
+  let host: HTMLElement
+  let target: SettingsTarget
+
+  function Probe({
+    initialSection,
+    retargetNonce,
+    openProjectIds
+  }: {
+    initialSection?: SettingsSectionId
+    retargetNonce?: number
+    openProjectIds?: string[]
+  }): React.JSX.Element {
+    target = useSettingsTarget(initialSection, retargetNonce, openProjectIds)
+    return <div>{target.active}</div>
+  }
+
+  const render = async (props: {
+    initialSection?: SettingsSectionId
+    retargetNonce?: number
+    openProjectIds?: string[]
+  }): Promise<void> => {
+    await act(async () => {
+      root.render(<Probe {...props} />)
+    })
+  }
+
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  it('falls back to the first section when the active project closes', async () => {
+    await render({ initialSection: 'project-p1' as SettingsSectionId, retargetNonce: 1, openProjectIds: ['p1', 'p2'] })
+    expect(target.active).toBe('project-p1')
+    // p1 closed while the dialog was shut; the selection is still pointing at its pane.
+    await render({ openProjectIds: ['p2'] })
+    expect(target.active).toBe(FIRST_SECTION_ID)
+  })
+
+  it('refuses a deep link to a project that has no pane', async () => {
+    await render({ initialSection: 'project-gone' as SettingsSectionId, retargetNonce: 1, openProjectIds: ['p1'] })
+    expect(target.active).toBe(FIRST_SECTION_ID)
+  })
+
+  it('leaves a live project section, and every non-project section, alone', async () => {
+    await render({ initialSection: 'project-p1' as SettingsSectionId, retargetNonce: 1, openProjectIds: ['p1'] })
+    expect(target.active).toBe('project-p1')
+    await act(async () => target.setActive('ssh'))
+    await render({ openProjectIds: [] })
+    expect(target.active).toBe('ssh')
+  })
+
+  it('never falls back when the caller passes no project list at all', async () => {
+    // `undefined` is "I have no list", not "no projects are open": a caller whose projects have not
+    // loaded yet must not bulldoze a legitimate deep link.
+    await render({ initialSection: 'project-p1' as SettingsSectionId, retargetNonce: 1 })
+    expect(target.active).toBe('project-p1')
+  })
+})

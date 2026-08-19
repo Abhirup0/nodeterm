@@ -34,18 +34,16 @@ export interface ProjectSettingsHook {
   saveShared(doc: ProjectSettingsDoc): Promise<boolean>
   /**
    * Commits an edit to THIS MACHINE's local overlay — a whole-document write, exactly like
-   * `saveShared`. Takes either the next whole document directly, or an updater over the CURRENT
-   * one (preferring a still-in-flight write's result over the last-read snapshot, via the same
-   * `pendingLocalRef` guard `saveShared` uses for the shared doc) — so two local edits inside one
-   * IPC round-trip do not drop the first. Prefer the updater form for anything that merges into
-   * the existing doc; the plain-value form stays for a caller that already holds the whole next
-   * document (e.g. clearing the overlay with `undefined`). Re-reads on success.
+   * `saveShared`. Takes an UPDATER over the current document (preferring a still-in-flight write's
+   * result over the last-read snapshot, via the same `pendingLocalRef` guard `saveShared` uses for
+   * the shared doc), so two local edits inside one IPC round-trip do not drop the first. The
+   * updater form is the ONLY form: a plain next-document argument cannot see the pending base, so
+   * it would silently revert an edit whose re-read has not landed yet — the exact hazard
+   * `pendingLocalRef` exists to close. Clearing the whole overlay is `saveLocal(() => undefined)`.
+   * Re-reads on success.
    */
   saveLocal(
-    update:
-      | ProjectLocalSettings
-      | undefined
-      | ((current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined)
+    update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
   ): Promise<boolean>
   reload(): void
 }
@@ -60,8 +58,9 @@ function docOf(shared: ProjectSettingsFileV1 | null | undefined): ProjectSetting
 
 /**
  * Field-level merge of `patch` into `current`, dropping `undefined` (a cleared field) and any
- * family the clearing leaves empty. Exported for the tests that pin the "an editor never blanks a
- * field it does not own" rule.
+ * family the clearing leaves empty. A whole family set to `undefined` is dropped outright.
+ * Exported for the tests that pin the "an editor never blanks a field it does not own" rule (see
+ * `mergeSharedDoc` in ProjectSettingsSection.test.tsx).
  */
 export function mergeSharedDoc(
   current: ProjectSettingsDoc,
@@ -138,14 +137,14 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
 
   const saveShared = useCallback(
     async (doc: ProjectSettingsDoc): Promise<boolean> => {
-      const pending = pendingRef.current
+      const pending = pendingRef.current?.projectId === projectId ? pendingRef.current : null
       const snap = snapshotRef.current
-      const current =
-        pending?.projectId === projectId
-          ? pending.doc
-          : snap && snap !== 'loading'
-            ? docOf(snap.shared)
-            : {}
+      // Defence in depth under the editors' own `ready` gate: with no snapshot object AND no
+      // pending write to merge into, the merge base would be `{}` — and every write here is a
+      // WHOLE-document write, so committing it would delete whatever the file already holds. There
+      // is nothing to merge into yet, so there is nothing safe to write: refuse.
+      if (!pending && (snap === 'loading' || snap === null)) return false
+      const current = pending ? pending.doc : docOf((snap as ProjectSettingsSnapshot).shared)
       const next = mergeSharedDoc(current, doc)
       const ok = await window.nodeTerminal.projectSettings.writeShared(projectId, next)
       if (!ok) return false
@@ -160,16 +159,17 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
 
   const saveLocal = useCallback(
     async (
-      update:
-        | ProjectLocalSettings
-        | undefined
-        | ((current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined)
+      update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
     ): Promise<boolean> => {
-      const pending = pendingLocalRef.current
+      const pending =
+        pendingLocalRef.current?.projectId === projectId ? pendingLocalRef.current : null
       const snap = snapshotRef.current
-      const current =
-        pending?.projectId === projectId ? pending.local : snap && snap !== 'loading' ? snap.local : undefined
-      const next = typeof update === 'function' ? update(current) : update
+      // Same refusal as `saveShared`, same reason: the local overlay is a whole-document write too,
+      // so an updater handed `undefined` because nothing has been READ yet (rather than because the
+      // overlay is genuinely empty) would erase this machine's overrides for every other family.
+      if (!pending && (snap === 'loading' || snap === null)) return false
+      const current = pending ? pending.local : (snap as ProjectSettingsSnapshot).local
+      const next = update(current)
       const ok = await window.nodeTerminal.projectSettings.updateLocal(projectId, next)
       if (!ok) return false
       // Advance the merge base NOW, not when the re-read lands: the next blur may arrive first.

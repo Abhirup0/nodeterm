@@ -339,8 +339,12 @@ function EditableProjectSection({
         snapshot={snapshot}
         resolved={settings.resolved}
         conflict={conflict}
+        // Only the shell knows WHERE this project lives; a folderless inline canvas tab has no
+        // shared settings file and never can have one — see `sharedEditable`.
+        sharedEditable={Boolean(project.cwd || project.ssh)}
         saveShared={settings.saveShared}
         saveLocal={settings.saveLocal}
+        reload={settings.reload}
       />
     </SettingsSection>
   )

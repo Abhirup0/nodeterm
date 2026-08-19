@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Project } from '@shared/types'
 import type { ProjectSettingsSnapshot } from '@shared/project-settings'
 import { useProjects } from '../../../state/projects'
+import { useSettings } from '../../../state/settings'
 import { registerWorkspaceDirty } from '../../../state/workspaceDirty'
 import { SettingsSearchContext } from '../context'
 import { ProjectSettingsSection } from './ProjectSettingsSection'
-import { useProjectSettings, type ProjectSettingsHook } from '../useProjectSettings'
+import { mergeSharedDoc, useProjectSettings, type ProjectSettingsHook } from '../useProjectSettings'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -321,6 +322,101 @@ describe('ProjectSettingsSection', () => {
     expect(writeShared).toHaveBeenCalledWith('p1', { agents: { env: { A: '1', B: '2' } } })
   })
 
+  it('surfaces a REFUSED shared write as a warn note, re-reads the file, and clears the note on the next save that lands', async () => {
+    // A dropped `false` is silent data loss: the row snaps back to the stored value with no
+    // explanation, which is indistinguishable from the app ignoring the edit.
+    writeShared.mockResolvedValue(false)
+    await mountSection()
+    expect(read).toHaveBeenCalledTimes(1)
+    const shell = host.querySelector<HTMLInputElement>('#project-terminal-shell-p1')!
+    await typeInto(shell, '/bin/fish')
+    await blur(shell)
+    expect(writeShared).toHaveBeenCalledTimes(1)
+    expect(host.textContent).toContain('Could not save')
+    // A refusal is usually the FILE's answer (it went conflicted, or the folder went away, between
+    // our read and our write), so the pane re-reads instead of describing a file it no longer knows.
+    expect(read).toHaveBeenCalledTimes(2)
+    writeShared.mockResolvedValue(true)
+    await blur(shell)
+    expect(writeShared).toHaveBeenCalledTimes(2)
+    expect(host.textContent).not.toContain('Could not save')
+  })
+
+  it('surfaces a refused LOCAL write too, without re-reading (nothing about the shared file changed)', async () => {
+    updateLocal.mockResolvedValue(false)
+    await mountSection()
+    const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    await typeInto(local, '/bin/zsh')
+    await blur(local)
+    expect(host.textContent).toContain('Could not save this override on this machine')
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders the shared family rows read-only for a folderless inline project, with the reason', async () => {
+    // An inline canvas tab has no `cwd` and no `ssh`, so there is nowhere to put a
+    // `.nodeterm/settings.json`: the store refuses every shared write for it. Editors that can only
+    // ever fail must not be offered.
+    await mountSection(project({ cwd: '' }))
+    expect(host.textContent).toContain('no folder')
+    const familyControls = [
+      ...host.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
+    ].filter((el) => /^project-(setup|agents|worktree|terminal)-/.test(el.id))
+    const sharedRows = familyControls.filter((el) => !el.id.includes('-local-'))
+    expect(sharedRows.length).toBeGreaterThan(0)
+    expect(sharedRows.every((el) => el.disabled)).toBe(true)
+    // Bypassing the attribute (a synthetic event) must not write either.
+    const shell = host.querySelector<HTMLInputElement>('#project-terminal-shell-p1')!
+    await typeInto(shell, '/bin/fish')
+    await blur(shell)
+    expect(writeShared).not.toHaveBeenCalled()
+    // The identity rows still work: name/color/defaults live in project.json, not in the folder.
+    expect(nameInput().disabled).toBe(false)
+    await typeInto(nameInput(), 'Beta')
+    await blur(nameInput())
+    expect(useProjects.getState().getProject('p1')?.name).toBe('Beta')
+    // And so does the machine-local overlay, which lives in this machine's workspace index.
+    const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    expect(local.disabled).toBe(false)
+    await typeInto(local, '/bin/zsh')
+    await blur(local)
+    expect(updateLocal).toHaveBeenCalledWith('p1', { terminal: { shell: '/bin/zsh' } })
+  })
+
+  it('gives every local row an accessible name of its own, so it never duplicates its shared twin', async () => {
+    await mountSection()
+    expect(
+      host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!.getAttribute('aria-label')
+    ).toBe('Shell (this machine)')
+    expect(
+      host.querySelector<HTMLTextAreaElement>('#project-agents-env-local-p1')!.getAttribute('aria-label')
+    ).toBe('Environment variables (this machine)')
+    // The shared twin keeps its `<label>` as its name — the two must not read alike.
+    expect(
+      host.querySelector<HTMLInputElement>('#project-terminal-shell-p1')!.getAttribute('aria-label')
+    ).toBeNull()
+  })
+
+  it('shows an unknown default account as itself and switches to one this machine has', async () => {
+    const prior = useSettings.getState().settings
+    onTestFinished(() => useSettings.setState({ settings: prior }))
+    useSettings.setState({
+      settings: { ...prior, claudeAccounts: [{ id: 'acc-1', label: 'Work', createdAt: 0 }] }
+    })
+    await mountSection(project({ defaultAccountId: 'acc-gone' }))
+    const select = host.querySelector<HTMLSelectElement>('#project-account-p1')!
+    // A default naming an account this machine does not have (a teammate's pick, or one since
+    // removed) must READ as itself, not silently as the system account.
+    expect(host.textContent).toContain('acc-gone (not on this machine)')
+    expect(select.value).toBe('acc-gone')
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
+      setter.call(select, 'acc-1')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(useProjects.getState().getProject('p1')?.defaultAccountId).toBe('acc-1')
+    expect(dirty).toHaveBeenCalledTimes(1)
+  })
+
   // --- Task 5: search integration ------------------------------------------------------------
 
   const pane = (): HTMLElement | null => host.querySelector('[data-settings-section="project-p1"]')
@@ -351,6 +447,20 @@ describe('ProjectSettingsSection', () => {
     expect(host.querySelector('#project-worktree-basePath-p1')).not.toBeNull()
     expect(host.querySelector('#project-terminal-shell-p1')).toBeNull()
     expect(host.querySelector('#project-name-p1')).toBeNull()
+  })
+
+  it('does not match every family field on the non-discriminating query "project"', async () => {
+    // Every field in this pane is a project setting, so "project" told the search nothing while
+    // pulling in all four families of every open project. The identity rows still match — the
+    // "Project name" row is titled with the word.
+    // (A field whose own description genuinely says "project" — the setup scripts, the default
+    // agent — still matches, and should: that is prose about the field, not a blanket keyword.)
+    await mountSection(project(), { isActive: false, query: 'project' })
+    expect(host.querySelector('#project-name-p1')).not.toBeNull()
+    expect(host.querySelector('#project-terminal-shell-p1')).toBeNull()
+    expect(host.querySelector('#project-terminal-fontFamily-p1')).toBeNull()
+    expect(host.querySelector('#project-agents-launchCmd-p1')).toBeNull()
+    expect(host.querySelector('#project-worktree-basePath-local-p1')).toBeNull()
   })
 
   it('renders nothing (and reads nothing) for a query matching neither the name nor any row', async () => {
@@ -515,7 +625,7 @@ describe('useProjectSettings', () => {
   it('passes the local overlay through whole and re-reads', async () => {
     await mount()
     await act(async () => {
-      await hook.saveLocal({ terminal: { shell: '/bin/zsh' }, ignoreShared: { agents: true } })
+      await hook.saveLocal(() => ({ terminal: { shell: '/bin/zsh' }, ignoreShared: { agents: true } }))
     })
     expect(updateLocal).toHaveBeenCalledWith('p1', {
       terminal: { shell: '/bin/zsh' },
@@ -567,5 +677,66 @@ describe('useProjectSettings', () => {
       hook.reload()
     })
     expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses BOTH savers while the first read is still in flight, without writing anything', async () => {
+    // Defence in depth below the editors' own `ready` gate. Every write here is a WHOLE-document
+    // write; with nothing read and nothing pending, the merge base would be `{}`/`undefined`, so
+    // committing would delete whatever the files already hold.
+    let release: (v: ProjectSettingsSnapshot) => void = () => {}
+    read.mockReturnValue(new Promise<ProjectSettingsSnapshot>((r) => (release = r)))
+    root = createRoot(host)
+    act(() => {
+      root.render(<Probe projectId="p1" />)
+    })
+    expect(hook.snapshot).toBe('loading')
+    let ok = true
+    let okLocal = true
+    await act(async () => {
+      ok = await hook.saveShared({ terminal: { shell: '/bin/fish' } })
+      okLocal = await hook.saveLocal(() => ({ terminal: { shell: '/bin/zsh' } }))
+    })
+    expect(ok).toBe(false)
+    expect(okLocal).toBe(false)
+    expect(writeShared).not.toHaveBeenCalled()
+    expect(updateLocal).not.toHaveBeenCalled()
+    await act(async () => {
+      release(EMPTY_SNAPSHOT)
+    })
+  })
+
+  it('refuses BOTH savers after a FAILED read, which is equally "no document to merge into"', async () => {
+    read.mockRejectedValue(new Error('boom'))
+    await mount()
+    expect(hook.snapshot).toBeNull()
+    let ok = true
+    let okLocal = true
+    await act(async () => {
+      ok = await hook.saveShared({ terminal: { shell: '/bin/fish' } })
+      okLocal = await hook.saveLocal(() => ({ terminal: { shell: '/bin/zsh' } }))
+    })
+    expect(ok).toBe(false)
+    expect(okLocal).toBe(false)
+    expect(writeShared).not.toHaveBeenCalled()
+    expect(updateLocal).not.toHaveBeenCalled()
+  })
+})
+
+describe('mergeSharedDoc', () => {
+  it('merges field-by-field so an editor never blanks a field it does not own', () => {
+    expect(
+      mergeSharedDoc({ terminal: { shell: '/bin/bash', theme: 'dark' } }, { terminal: { theme: 'light' } })
+    ).toEqual({ terminal: { shell: '/bin/bash', theme: 'light' } })
+  })
+
+  it('clears a WHOLE family set to undefined, and drops a family its last cleared field empties', () => {
+    // The advertised family-level clear: `{ terminal: undefined }` removes the family outright,
+    // while clearing its last field removes it as a side effect — an unset setting adds no bytes
+    // to a file the whole team reads.
+    const current = { terminal: { shell: '/bin/bash' }, setup: { waitForSetup: true } }
+    expect(mergeSharedDoc(current, { terminal: undefined })).toEqual({ setup: { waitForSetup: true } })
+    expect(mergeSharedDoc(current, { terminal: { shell: undefined } })).toEqual({
+      setup: { waitForSetup: true }
+    })
   })
 })
