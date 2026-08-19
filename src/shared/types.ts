@@ -2096,8 +2096,10 @@ export interface CodexAccountsApi {
   cancelWaitLogin(id: string): Promise<void>
   /** Read a managed account's already-logged-in identity (email), or null if not logged in. */
   identity(id: string): Promise<{ email: string | null } | null>
-  /** Read the system (`~/.codex`) account's identity. */
-  systemIdentity(): Promise<{ email: string | null } | null>
+  /** Read a machine's system (`~/.codex`) account identity. No arg ⇒ this Mac. `{ projectId }` ⇒
+   *  the connected SSH host behind that project; a host whose system identity cannot be resolved
+   *  resolves `null` (fail-closed — a remote machine panel never borrows this Mac's login). */
+  systemIdentity(ctx?: { projectId?: string }): Promise<{ email: string | null } | null>
   /** Remove a managed account: stop its daemon and delete its home. Refused while a switch
    *  reservation holds it or a concurrent removal is in flight (Property 10). */
   remove(id: string): Promise<void>

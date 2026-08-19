@@ -238,7 +238,15 @@ export function initCodexAccounts(getSshManager?: () => SshProjectManager | unde
 
   ipcMain.handle(IPC.codexAccountsIdentity, (_event, id: string) => existingManagedIdentity(id))
 
-  ipcMain.handle(IPC.codexAccountsSystemIdentity, () => accountIdentity())
+  // No ctx ⇒ this Mac's system identity. A `{ projectId }` ctx asks for a remote HOST's system
+  // identity, which this build does not yet resolve — fail closed to `null` rather than returning
+  // THIS Mac's login, so a remote machine panel never fabricates/borrows a local identity
+  // (§5 "system-account discovery must not fabricate an account"). Remote resolution is a follow-up.
+  ipcMain.handle(
+    IPC.codexAccountsSystemIdentity,
+    (_event, ctx?: { projectId?: string }) =>
+      ctx?.projectId ? Promise.resolve(null) : accountIdentity()
+  )
 
   ipcMain.handle(IPC.codexAccountsRemove, async (_event, id: string) => {
     assertCodexAccountId(id)
