@@ -1,13 +1,12 @@
 import { IPC } from '../shared/ipc'
 import {
-  projectTrustContent,
   resolveProjectSettings,
   type ProjectLaunchInfo,
-  type ProjectSettingsDoc,
-  type ProjectTrustFamily
+  type ProjectSettingsDoc
 } from '../shared/project-settings'
 import type { CorePlatform } from './platform'
-import { hashTrustContent, localTrustKey, sshTrustKey, type ProjectTrustStore } from './project-trust-store'
+import type { ProjectTrustStore } from './project-trust-store'
+import { projectFamilyTrusted, projectTrustKeyFor } from './project-trust-verdict'
 import type { WorkspaceStore } from './workspace-store'
 
 /**
@@ -39,19 +38,14 @@ export function registerProjectLaunchInfoHandlers(
       const info = workspaceStore.projectTargetInfo(projectId)
       const sharedDoc: ProjectSettingsDoc = snap.shared ?? {}
       const resolved = resolveProjectSettings(snap.local, snap.shared ?? undefined)
-      // A cwd-less inline canvas falls to `localTrustKey('')` — inert by construction: such a
-      // project has no shared document to have, so `sharedDoc` is always `{}` and every family's
-      // `projectTrustContent` already returns null before this key is ever consulted.
-      const key = info?.ssh
-        ? sshTrustKey({ server: info.ssh.server, remoteCwd: info.ssh.remoteCwd })
-        : localTrustKey(info?.cwd ?? '')
-      const trustedFor = async (family: ProjectTrustFamily): Promise<boolean> => {
-        const content = projectTrustContent(family, sharedDoc)
-        // No shared executable content for this family — nothing to gate.
-        if (content === null) return true
-        return trustStore.isTrusted(key, family, hashTrustContent(content))
+      // The verdict itself lives in `project-trust-verdict.ts`, shared with the SPAWN's own reader
+      // (`makeProjectSpawnOverrides`): a renderer told "trusted" here while the spawn silently
+      // drops the same value would be a gate that reports one thing and enforces another.
+      const key = projectTrustKeyFor(info)
+      const trusted = {
+        agents: await projectFamilyTrusted(trustStore, key, 'agents', sharedDoc),
+        shell: await projectFamilyTrusted(trustStore, key, 'shell', sharedDoc)
       }
-      const trusted = { agents: await trustedFor('agents'), shell: await trustedFor('shell') }
       return { resolved, trusted }
     }
   )

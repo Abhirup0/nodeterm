@@ -96,6 +96,7 @@ import {
 } from './remote-ssh/session-env'
 import { foregroundProcessGroup, parsePaneProcess } from './pane-process'
 import { isShellCommand } from '../shared/agents/pane'
+import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -127,6 +128,17 @@ const execFileAsync = promisify(execFile)
  * scrollback over a distant host is legitimately slow. The point is a ceiling, not a deadline.
  */
 const PROC_TIMEOUT_MS = 15_000
+
+/**
+ * How long a spawn may wait on the project's settings before it goes ahead WITHOUT them.
+ *
+ * The reader is cheap on the local leg (an in-process store read), but the SSH leg's
+ * `readProjectSettings` reconciles the host's `settings.json` over the ControlMaster — the same
+ * half-dead-socket hazard that wedged `pty:create` once already (see PROC_TIMEOUT_MS). A terminal
+ * must never hang on a settings read, and the failure direction is the same one everything else
+ * here takes: no overrides, spawn anyway.
+ */
+const PROJECT_OVERRIDES_TIMEOUT_MS = 2_000
 
 /**
  * Shorter for the probes an interactive spawn WAITS ON. `hasRemoteSession` only decides warm vs
@@ -684,6 +696,14 @@ export class PtyManager {
   private getSettings: () => Settings = () => DEFAULT_SETTINGS
   /** Literal model-gateway key loaded by the shell's secret service during startup. */
   private getModelGatewaySecret: () => string | null = () => null
+  /**
+   * What the OWNING project contributes to a session's env + shell, or null when it contributes
+   * nothing. Injected (not constructed) for the same reason `getSettings` is: core cannot see the
+   * workspace store or the trust store, and both shells wire the SAME core factory
+   * (`makeProjectSpawnOverrides`). Unset ⇒ the feature is simply absent — every spawn behaves
+   * exactly as it did before it existed.
+   */
+  private readProjectSpawnOverrides: ProjectSpawnOverridesReader | null = null
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -1247,6 +1267,48 @@ export class PtyManager {
     primePtyCeiling()
   }
 
+  /**
+   * Wire the project settings → spawn overrides reader (SDD: project-settings consumption, Task 4).
+   *
+   * A SEPARATE setter rather than a third `init` argument: the Server Edition constructs its
+   * workspace/trust stores AFTER `ptyManager.init(...)`, so an init parameter could only ever be
+   * wired on one of the two shells.
+   */
+  setProjectSpawnOverrides(read: ProjectSpawnOverridesReader | null): void {
+    this.readProjectSpawnOverrides = read
+  }
+
+  /**
+   * The project's contribution to THIS spawn — bounded and fail-open on every path.
+   *
+   *  - no reader wired, or no `ownerProjectId` (the pane is UNPROVEN — see PtyCreateOptions) ⇒ no
+   *    overrides, and the reader is not even asked,
+   *  - a reader that rejects ⇒ no overrides,
+   *  - a reader that HANGS ⇒ no overrides after PROJECT_OVERRIDES_TIMEOUT_MS. The read still
+   *    settles on its own afterwards (nothing is cancelled); this spawn just stops waiting.
+   */
+  private async projectSpawnOverrides(
+    options: PtyCreateOptions
+  ): Promise<ProjectSpawnOverrides | null> {
+    const read = this.readProjectSpawnOverrides
+    if (!read || !options.ownerProjectId) return null
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        read(options.ownerProjectId),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), PROJECT_OVERRIDES_TIMEOUT_MS)
+          // Never hold the process open for a settings read nobody is waiting on any more.
+          timer.unref?.()
+        })
+      ])
+    } catch {
+      return null
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   /** Probe tmux and write/push the generated config. Idempotent and safe to re-run: a later
    *  successful probe (the banner's install command finishing, or init()'s post-PATH-probe re-run
    *  finding a tmux only the login shell knew about) brings tmux up for NEW sessions without an
@@ -1741,7 +1803,12 @@ export class PtyManager {
     if (hasSharedIdentity((options.agentId ?? 'claude') as AgentId) && !options.sshRemote) {
       installCodexLauncher()
     }
-    const sessionId = this.spawnSession(options, clientId, undefined)
+    // Resolved HERE rather than inside `spawnSession` because that function is synchronous and two
+    // of its three callers (`createDetached`/`attachDetached`, the relay host's attach path) are
+    // synchronous public API. Those two carry no `ownerProjectId` — they attach to a session the
+    // host already spawned — so this is also the only path that could contribute overrides at all.
+    const projectOverrides = await this.projectSpawnOverrides(options)
+    const sessionId = this.spawnSession(options, clientId, undefined, projectOverrides)
     const spawned = this.sessions.get(sessionId)
     // PANE OWNERSHIP (agent messaging, PR #237 fix round 2): record the OWNING project of a pane
     // this process just GENUINELY spawned. Gated on `fresh` — an attach/co-attach to a session
@@ -1925,7 +1992,10 @@ export class PtyManager {
     options: PtyCreateOptions,
     /** The client this session is spawned for, or null for a relay-served (detached) pty. */
     clientId: ClientId | null,
-    sinks: DetachedSinks | undefined
+    sinks: DetachedSinks | undefined,
+    /** What the OWNING project contributes (see `projectSpawnOverrides`) — already resolved,
+     *  because this function is synchronous. Null on every path with no proven project owner. */
+    overrides?: ProjectSpawnOverrides | null
   ): string {
     // PRE-FLIGHT — refuse before node-pty is touched, not after it fails.
     //
@@ -2120,6 +2190,20 @@ export class PtyManager {
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
     }
 
+    // The OWNING project's env (`.nodeterm/settings.json`, local overlay + TRUSTED shared half —
+    // the gate is in `makeProjectSpawnOverrides`, never here). Placed between the gateway and the
+    // custom agent on purpose: a project may point its terminals at its own tooling, and a
+    // per-agent config the user wrote for THIS agent still beats it on a key collision.
+    //
+    // LITERAL values only: no `${env:VAR}` expansion. That is a custom-agent feature and a
+    // settings.json is git-shared hostile input — expanding it would turn an approved-looking
+    // literal into a read of this machine's process environment. The keys/values are already
+    // bounded and identifier-shaped by the settings sanitizer.
+    const projectEnv = overrides?.env
+    if (!options.sshRemote && projectEnv) {
+      for (const [k, v] of Object.entries(projectEnv)) env[k] = v
+    }
+
     // Custom-agent env: merged LAST so it wins over hook + account + PATH/LANG env (required for
     // the proxy use case — the user's ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL must beat whatever
     // the account path set). ${env:VAR} is expanded against the live process env. Only the LOCAL
@@ -2148,7 +2232,16 @@ export class PtyManager {
     // mutation, or the user), so an unsafe value degrades to `undefined` = the default shell —
     // never to execution. @shared/node-exec keeps foreign values out of `options.shell` in the
     // first place; this is the second layer.
-    const reqShell = safeSessionProgram(options.shell)
+    //
+    // PRECEDENCE: the NODE's own `options.shell` wins outright — it is the exec-trusted value
+    // @shared/node-exec already vouched for, and a node that names its program means it. Only when
+    // it names none does the owning project's shell apply (local overlay, or a shared value the
+    // trust gate admitted). `??` deliberately reads the node's value BEFORE validation, so an
+    // unsafe node shell degrades to the default shell rather than silently falling through to the
+    // project's — the caller asked for a specific program and did not get the project's instead.
+    // Validation covers both sources: a project settings.json is git-shared (and on an SSH project
+    // it lives on the remote HOST), i.e. exactly the foreign provenance this check exists for.
+    const reqShell = safeSessionProgram(options.shell ?? overrides?.shell)
     const program = reqShell === 'ssh' ? findSsh() ?? 'ssh' : reqShell
     const programArgs = options.shellArgs ?? []
 
@@ -2228,7 +2321,9 @@ export class PtyManager {
       // and the remote conf's `update-environment` copies the names into the session env. Gated on
       // the validated remote $HOME and on a wired uploader — absent either, the vars are simply
       // not delivered and the agent fails loudly in its pane (fail-open, never a fallback to argv).
-      const remoteEnvPairs: Record<string, string> = { ...gatewayEnv }
+      // The project's env joins that same 0600 file — same reason, same ordering as the local leg
+      // (gateway, then project, then the custom agent's own values on top).
+      const remoteEnvPairs: Record<string, string> = { ...gatewayEnv, ...(projectEnv ?? {}) }
       for (const kv of remoteCustomEnv.args) {
         const eq = kv.indexOf('=')
         if (eq > 0) remoteEnvPairs[kv.slice(0, eq)] = kv.slice(eq + 1)
@@ -2310,7 +2405,10 @@ export class PtyManager {
       // client's argv — world-readable in /proc/<pid>/cmdline on a multi-user host, the exact
       // PR #195 leak class. Custom-agent env keys OUTSIDE the baked gateway list still need the
       // option appended at runtime on a shared server (the conf assignment cannot know them):
-      this.ensureUpdateEnvKeys(Object.keys(customEnvMerged))
+      // The project's keys need the same treatment for the same reason: their VALUES are in this
+      // tmux client's process env (merged above) and must reach the session without ever appearing
+      // on the long-lived client's argv.
+      this.ensureUpdateEnvKeys([...Object.keys(customEnvMerged), ...Object.keys(projectEnv ?? {})])
       const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',

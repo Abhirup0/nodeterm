@@ -33,8 +33,13 @@ import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import { ProjectTrustStore } from '../core/project-trust-store'
 import { ProjectSetupService } from '../core/project-setup-service'
-import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
+import {
+  makeProjectTrustRequester,
+  registerProjectSetupHandlers,
+  type ProjectSetupHandlerDeps
+} from '../core/project-setup-handlers'
 import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
+import { makeProjectSpawnOverrides } from '../core/project-spawn-overrides'
 import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink } from '../core/log-sink'
@@ -284,13 +289,29 @@ export async function startServer(
     readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
     runLocal: makeLocalSetupRunner()
   })
-  registerProjectSetupHandlers(platform, projectSetupService, {
+  const projectSetupDeps: ProjectSetupHandlerDeps = {
     projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
     worktreeList: (repoPath) => gitService.worktreeList(repoPath)
-  })
+  }
+  registerProjectSetupHandlers(platform, projectSetupService, projectSetupDeps)
   // `project-settings:launch-info` — same sibling registrar as main/index.ts, sharing this
   // process's own trust store.
   registerProjectLaunchInfoHandlers(platform, workspaceStore, projectTrustStore)
+  // Project env + shell at the spawn — the same core factory main/index.ts wires, over this
+  // shell's own stores. `requestTrust` is wired here too, and deliberately so: the Server Edition's
+  // consent prompt goes to `platform.broadcast` (the service's default `sendConsent`), which is the
+  // right delivery HERE — every attached client is an authenticated operator of this host — where
+  // on the desktop it would also reach relay peers. A headless server with nobody attached simply
+  // gets no answer, the prompt expires, and the shared value stays unused: fail closed on the
+  // grant, fail open on the spawn.
+  ptyManager.setProjectSpawnOverrides(
+    makeProjectSpawnOverrides({
+      readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+      targetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+      trust: projectTrustStore,
+      requestTrust: makeProjectTrustRequester(projectSetupService, projectSetupDeps)
+    })
+  )
 
   const github = registerGitHubIntegration({
     platform,
