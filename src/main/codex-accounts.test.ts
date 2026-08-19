@@ -115,4 +115,15 @@ describe('Codex local account lifecycle (Task 5.1)', () => {
     await expect(call(IPC.codexAccountsWaitLogin, '../escape')).rejects.toThrow(/Invalid Codex account id/)
     await expect(call(IPC.codexAccountsRemove, '../escape')).rejects.toThrow(/Invalid Codex account id/)
   })
+
+  it('systemIdentity reads THIS Mac by default but fails closed for a remote projectId', async () => {
+    // No ctx ⇒ this Mac's system login (the mocked app-server reader).
+    await expect(call(IPC.codexAccountsSystemIdentity)).resolves.toEqual({ email: 'me@example.com' })
+    // A remote `{ projectId }` request cannot be resolved by this build, so it MUST resolve null —
+    // never THIS Mac's identity (§5 "system-account discovery must not fabricate an account"; a
+    // remote machine panel never borrows the local login).
+    // MUTATION PIN: change the handler to return `accountIdentity()` for a remote projectId
+    // (fail-OPEN) and this assertion reds.
+    await expect(call(IPC.codexAccountsSystemIdentity, { projectId: 'proj-1' })).resolves.toBeNull()
+  })
 })

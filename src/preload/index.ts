@@ -473,7 +473,7 @@ const api: NodeTerminalApi = {
     waitLogin: (id) => ipcRenderer.invoke(IPC.codexAccountsWaitLogin, id),
     cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.codexAccountsCancelWait, id),
     identity: (id) => ipcRenderer.invoke(IPC.codexAccountsIdentity, id),
-    systemIdentity: () => ipcRenderer.invoke(IPC.codexAccountsSystemIdentity),
+    systemIdentity: (ctx) => ipcRenderer.invoke(IPC.codexAccountsSystemIdentity, ctx),
     remove: (id) => ipcRenderer.invoke(IPC.codexAccountsRemove, id),
     switchThread: (threadId, cwd, sourceAccountId, targetAccountId) =>
       ipcRenderer.invoke(
