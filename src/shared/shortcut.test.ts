@@ -262,6 +262,15 @@ describe('isHoldChord', () => {
     expect(isHoldChord('Cmd+Alt+D')).toBe(false)
     expect(isHoldChord('Cmd+D')).toBe(false)
   })
+
+  // DOCUMENTATION OF A HAZARD, not a desirable property: `''` parses to a chord with no key, so
+  // it reads as a HOLD chord. `dictationBinding()` returns `''` for a DISABLED dictation shortcut
+  // (override `[]`), so any caller that asks `isHoldChord(chord)` without first testing for the
+  // empty string classifies "off" as "hold-to-talk" — which is why SpeechSection's note checks
+  // `chord === ''` FIRST, and why the hold listener must not arm on it.
+  it('is TRUE for the empty string — every caller owes it an explicit empty check', () => {
+    expect(isHoldChord('')).toBe(true)
+  })
 })
 
 describe('isModifierEventKey', () => {
@@ -439,6 +448,13 @@ describe('strict modifier matching', () => {
   it('chordHeld applies the same strictness', () => {
     const e = { metaKey: true, ctrlKey: true, shiftKey: false, altKey: true, key: 'Control' }
     expect(chordHeld(e, 'Cmd+Alt', true)).toBe(false)
+  })
+  // The other half of the `''` guard (see isHoldChord above): the KEYED path is safe on its own —
+  // an empty chord parses to `key: null`, which no event key equals — so a disabled dictation
+  // shortcut can never be pressed into existence, however the modifiers happen to be held.
+  it('never matches the empty string, whatever is held', () => {
+    const e = { metaKey: true, ctrlKey: false, shiftKey: false, altKey: true, key: 'd' }
+    expect(matchesShortcut(e, '', true)).toBe(false)
   })
 })
 

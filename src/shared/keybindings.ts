@@ -386,7 +386,8 @@ export function resolveCommandForKeyEvent(
     // the window listener — resolving them here would fire Commit with no composer focused.
     if (def.scope === 'scm') continue
     // speech.dictation dispatches from its own dedicated listeners (the keyed gesture and the
-    // hold-mode effect, both reading settings.speech.shortcut), never from the registry — its
+    // hold-mode effect, both reading `dictationBinding()` — the registry override; the legacy
+    // settings.speech.shortcut field is only its downgrade mirror), never from here — its
     // row here is display-only, for ShortcutsPanel and the Settings section. A hand-edited KEYED
     // override would otherwise RESOLVE, find no handler, and spend the chord: the dispatcher's
     // claim protocol stops a resolved command from reaching the trailing gestures, so
