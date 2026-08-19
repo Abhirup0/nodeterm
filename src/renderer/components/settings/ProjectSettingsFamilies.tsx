@@ -1,13 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type {
   ProjectLocalSettings,
   ProjectSettingsDoc,
   ProjectSettingsFamily,
   ProjectSettingsSnapshot,
+  ProjectSetupKind,
+  ProjectSetupRunResult,
   ResolvedProjectSettings
 } from '@shared/project-settings'
+import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
 import { Switch } from '@renderer/ui/Switch'
+import { useProjectSetup } from '../../state/projectSetup'
 import { useSettingsSearch } from './context'
 import { FieldRow } from './FieldRow'
 import { formatEnvLines, formatListLines, parseEnvLines, parseListLines } from './project-settings-env'
@@ -362,6 +366,160 @@ const SAVE_FAILED_NOTE: Record<'shared' | 'local', string> = {
   local: 'Could not save this override on this machine; reload the project settings.'
 }
 
+/** Why a run the service refused never happened. A refusal must read as a refusal: the button was
+ *  pressed and nothing appeared, which is otherwise indistinguishable from a broken button. */
+const SKIP_NOTE: Record<Extract<ProjectSetupRunResult, { status: 'skipped' }>['reason'], string> = {
+  'no-script': 'Skipped: no script is set for this project.',
+  declined: 'Skipped: the trust prompt was answered "Skip", so nothing ran.',
+  unanswered: 'Skipped: the trust prompt went unanswered, so nothing ran.',
+  busy: 'Skipped: a run for this project is already in progress.',
+  unavailable: 'Skipped: this project has nowhere to run — no folder and no server connection.'
+}
+
+const RUN_LABEL: Record<ProjectSetupKind, string> = { setup: 'Run setup', archive: 'Run archive' }
+
+/** How a finished run reads in the badge. */
+function exitNote(state: 'done' | 'failed' | 'cancelled', exitCode: number | undefined): string {
+  if (state === 'cancelled') return 'Cancelled'
+  if (state === 'done') return `Finished (exit ${exitCode ?? 0})`
+  return `Failed (exit ${exitCode ?? 'unknown'})`
+}
+
+/**
+ * Manual "Run setup" / "Run archive" for this project, with the live output of whatever is running.
+ *
+ * The service — not this component — decides whether a script may run: a shared-sourced script goes
+ * through the consent dialog (`SetupConsentDialog`), and every refusal comes back as a `skipped`
+ * reason that is shown verbatim-ish below. So the properties that matter here are:
+ *
+ *  - SUBSCRIBE BEFORE RUN. Main can emit the first chunks before the `run` invoke resolves, so a
+ *    subscription opened on the ack would silently lose the head of the output (Task 1 review, T1).
+ *    The subscription is opened on the first click and held until the pane unmounts — a late
+ *    `cancelled`/`failed` event after a terminal-looking one must still land.
+ *  - HONEST DISABLED STATE. Disabled while a run is live (main would answer `busy` anyway), while
+ *    the family sets no EFFECTIVE script for that kind (local-over-shared — a machine-local script
+ *    is a real script), and for a project with nowhere to run (no folder, no server): the service
+ *    refuses that with `unavailable`, and offering a button that can only fail is a lie.
+ *  - The run is PROJECT-scoped: `worktreePath` is deliberately `undefined` here. Worktree-bound
+ *    runs come from the worktree flow (Task 5), which owns the path main then validates.
+ */
+function SetupRunControls({
+  projectId,
+  canRun,
+  hasScript
+}: {
+  projectId: string
+  /** False when the project has neither a folder nor an SSH endpoint. */
+  canRun: boolean
+  hasScript: Record<ProjectSetupKind, boolean>
+}): React.JSX.Element {
+  // Resolved through the ATTACHMENT this component made at ack time, not through "whatever event
+  // arrived on the channel we subscribed to": events carry no lane discriminator, so a worktree's
+  // run and this panel's run are told apart only by who claimed which runKey.
+  const attached = useProjectSetup((s) => s.runForProject(projectId))
+  const [busy, setBusy] = useState<'' | ProjectSetupKind | 'cancel'>('')
+  const [notice, setNotice] = useState('')
+  /** The run main acknowledged, held until the store reports THAT run (by `runId`). `runKey` alone
+   *  will not do: it is deterministic, so the entry sitting under it may still be the PREVIOUS run
+   *  of the same script — showing its exit badge over a script that is starting right now. */
+  const [started, setStarted] = useState<{ runKey: string; runId: string } | null>(null)
+  const unsubRef = useRef<(() => void) | null>(null)
+  useEffect(
+    () => () => {
+      unsubRef.current?.()
+      unsubRef.current = null
+    },
+    []
+  )
+
+  // The acked run's first event has not landed yet, so what sits in the lane (if anything) is the
+  // PREVIOUS run of the same script. It is not ours to show.
+  const awaitingStarted = started !== null && attached?.runId !== started.runId
+  const run = awaitingStarted ? undefined : attached
+  const active = busy !== '' || run?.state === 'running' || awaitingStarted
+  const liveKey = run?.state === 'running' ? run.runKey : awaitingStarted ? started.runKey : null
+
+  const start = async (kind: ProjectSetupKind): Promise<void> => {
+    setNotice('')
+    setBusy(kind)
+    // Before the call, never after — see the T1 note above.
+    if (!unsubRef.current) unsubRef.current = useProjectSetup.getState().subscribeProject(projectId)
+    try {
+      const res = await window.nodeTerminal.projectSetup.run(projectId, kind, undefined)
+      if (res.status === 'skipped') {
+        setNotice(SKIP_NOTE[res.reason])
+        return
+      }
+      // Claim the lane with the runKey main gave us — this is what makes the events ours rather
+      // than some other initiator's, and it is why `attachProject` takes the ACKED key.
+      useProjectSetup.getState().attachProject(projectId, res.runKey)
+      setStarted({ runKey: res.runKey, runId: res.runId })
+    } catch {
+      setNotice('Could not start the script — the project may have become unavailable.')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const stop = async (runKey: string): Promise<void> => {
+    setBusy('cancel')
+    try {
+      await window.nodeTerminal.projectSetup.cancel(runKey)
+    } catch {
+      /* A cancel that cannot be delivered leaves the run where it was; the event stream still owns
+         the truth about whether it ended. */
+    } finally {
+      setBusy('')
+      // Stop waiting for an acked run we just asked to die: from here the event stream (a
+      // `cancelled`, or a terminal event that beat the cancel) owns what the box shows.
+      setStarted(null)
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {(['setup', 'archive'] as ProjectSetupKind[]).map((kind) => (
+          <Button
+            key={kind}
+            disabled={!canRun || !hasScript[kind] || active}
+            onClick={() => void start(kind)}
+          >
+            {RUN_LABEL[kind]}
+          </Button>
+        ))}
+        {liveKey ? (
+          <Button variant="ghost" disabled={busy === 'cancel'} onClick={() => void stop(liveKey)}>
+            Cancel
+          </Button>
+        ) : null}
+        {run && run.state !== 'running' ? (
+          <span className="text-[12px] text-muted">{exitNote(run.state, run.exitCode)}</span>
+        ) : null}
+      </div>
+      {!canRun ? (
+        <p className="text-[12px] leading-relaxed text-muted">
+          This project has nowhere to run a script — set a folder or a server connection first.
+        </p>
+      ) : null}
+      {notice ? (
+        <p role="status" className="text-[12px] leading-relaxed text-[color:var(--warn)]">
+          {notice}
+        </p>
+      ) : null}
+      {run ? (
+        <pre
+          role="log"
+          aria-label="Setup script output"
+          className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-bg px-2.5 py-2 font-mono text-[12px] leading-relaxed text-text"
+        >
+          {run.tail}
+        </pre>
+      ) : null}
+    </div>
+  )
+}
+
 function FamilySection({
   projectId,
   family,
@@ -372,6 +530,7 @@ function FamilySection({
   conflict,
   ready,
   sharedEditable,
+  canRun,
   saveShared,
   saveLocal,
   reload
@@ -391,6 +550,12 @@ function FamilySection({
   ready: boolean
   /** False when this project has no file to share (see `ProjectFamilyEditors`). */
   sharedEditable: boolean
+  /** False when the project has nowhere to run a script. Deliberately NOT `sharedEditable`, even
+   *  though today both come out of `project.cwd || project.ssh`: one is about where a FILE can be
+   *  written, the other about where a PROCESS can be spawned, and the run buttons live outside the
+   *  shared-editing gate entirely (a machine-local script on a folderless project still cannot
+   *  run). */
+  canRun: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
   saveLocal: (
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
@@ -550,6 +715,19 @@ function FamilySection({
   return (
     <div className="space-y-3 border-t border-border pt-4">
       <h3 className="text-[13px] font-semibold text-text">{config.title}</h3>
+      {family === 'setup' ? (
+        <SetupRunControls
+          projectId={projectId}
+          canRun={canRun}
+          // EFFECTIVE values (local-over-shared), not the shared row's text: a machine-local
+          // script is a real script, and a family whose shared half is ignored on this machine
+          // has none even when the file sets one.
+          hasScript={{
+            setup: resolvedFamily.setupScript !== undefined,
+            archive: resolvedFamily.archiveScript !== undefined
+          }}
+        />
+      ) : null}
       {saveFailed ? (
         <p role="status" className="text-[12px] leading-relaxed text-[color:var(--warn)]">
           {SAVE_FAILED_NOTE[saveFailed]}
@@ -585,6 +763,7 @@ export function ProjectFamilyEditors({
   resolved,
   conflict,
   sharedEditable,
+  canRun,
   saveShared,
   saveLocal,
   reload
@@ -603,6 +782,9 @@ export function ProjectFamilyEditors({
    * not in the project folder, so `updateLocal` genuinely succeeds for a folderless project.
    */
   sharedEditable: boolean
+  /** See `FamilySection`'s `canRun`: where a PROCESS may be spawned, which is a different question
+   *  from where the shared file may be written. */
+  canRun: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
   saveLocal: (
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
@@ -635,6 +817,7 @@ export function ProjectFamilyEditors({
           conflict={conflict}
           ready={ready}
           sharedEditable={sharedEditable}
+          canRun={canRun}
           saveShared={saveShared}
           saveLocal={saveLocal}
           reload={reload}

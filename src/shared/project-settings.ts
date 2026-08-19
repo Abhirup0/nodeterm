@@ -337,6 +337,54 @@ export function resolveProjectSettings(
 
 export type ProjectTrustFamily = 'setup' | 'agents' | 'shell'
 
+/** Which of the setup family's two scripts a run executes. */
+export type ProjectSetupKind = 'setup' | 'archive'
+
+/** main→renderer: raise the consent dialog before a shared-sourced script runs. One answer approves
+ *  the whole `setup` family (both scripts are hashed together), so the payload carries BOTH — a
+ *  dialog must be able to show everything the approval covers, not just the half about to run. */
+export interface ProjectSetupConsentRequest {
+  requestId: string
+  /** Which script is about to run — the one the dialog highlights. */
+  kind: ProjectSetupKind
+  projectName: string
+  /** Human-readable location ("~/code/app" or "user@host:/srv/app"). */
+  locationLabel: string
+  /** The family's full executable content, straight from the SHARED document: exactly what the
+   *  approved hash covers. A field is absent when that script is not set. */
+  scripts: { setup?: string; archive?: string }
+  /** A prior approval exists for this family at this location (dialog copy: "changed since you
+   *  approved"). Copy only — never a grant; the grant is the hash comparison. */
+  previouslyApproved: boolean
+}
+
+export type ProjectSetupConsentAnswer = 'approve' | 'skip'
+
+export type ProjectSetupRunResult =
+  | { status: 'started'; runKey: string; runId: string; waitForSetup: boolean }
+  | { status: 'skipped'; reason: 'no-script' | 'declined' | 'unanswered' | 'busy' | 'unavailable' }
+
+/** main→renderer per-run progress on `IPC.projectSetupEvent(projectId)`. `seq` is monotonic per
+ *  run, so a client that misses one knows it. */
+export interface ProjectSetupEvent {
+  /** The SINGLE-FLIGHT key: deterministic (kind + location), so a second launch of the same script
+   *  at the same place is refused as `busy`. It is therefore NOT unique over time — two sequential
+   *  runs of the same script share it. */
+  runKey: string
+  /** Unique per RUN (a fresh uuid each launch). This is what a client folds on: two sequential runs
+   *  share a `runKey`, so without it the second run's events look like a continuation of the first
+   *  — its `seq` restarts at 1 and would be dropped as stale, leaving the finished run's exit badge
+   *  standing over a live script. */
+  runId: string
+  kind: ProjectSetupKind
+  /** Monotonic within one `runId`, from 1. */
+  seq: number
+  state: 'running' | 'done' | 'failed' | 'cancelled'
+  /** Appended output since the last event (stdout+stderr interleaved, capped). */
+  chunk?: string
+  exitCode?: number
+}
+
 /**
  * Canonical string covering EVERYTHING executable a family ships — the same shape of problem
  * `execTrusted` (node-exec.ts) solves for shell/ssh fields: a caller compares this against what it

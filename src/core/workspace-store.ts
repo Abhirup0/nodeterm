@@ -1015,6 +1015,16 @@ export class WorkspaceStore {
     return this.index?.entries.find((e) => e.id === projectId && e.cwd)?.cwd
   }
 
+  /** Minimal per-project target info for the setup/archive runner (project-setup-runner-local.ts's
+   *  `resolveProjectSetupTarget`) — cwd/ssh/name straight off the loaded index. Sync, like
+   *  `localCwdForProject`: this is what closes the Task 1 review finding that a run's rootPath/
+   *  ssh/projectName must come from THIS machine's own index, never from whatever the renderer
+   *  happened to send. */
+  projectTargetInfo(projectId: string): { cwd?: string; ssh?: Project['ssh']; name: string } | null {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    return e ? { cwd: e.cwd, ssh: e.ssh, name: e.name } : null
+  }
+
   /** Resolve the shared project together with its machine-local trust identity. The approval id
    *  never enters the shared project object or project.json. */
   async githubProject(projectId: string): Promise<{

@@ -45,16 +45,29 @@ function depSatisfied(depId: string, status: StatusById, live: ReadonlySet<strin
  * Which armed nodes are ready to launch, given the live canvas and the current agent states.
  * `live` is passed in (rather than derived from `nodes`) because the caller already holds the
  * full node list while `nodes` here may be pre-filtered.
+ *
+ * `setupDone` is the SECOND gate, for a node opened into a worktree frame whose project runs a
+ * setup script with `waitForSetup`: the node's command must not race an `npm ci` that is still
+ * writing node_modules underneath it. It answers per group id, and the two gates are ANDed —
+ * a node can be waiting on both its upstream stations and its checkout being ready.
+ *
+ * An ABSENT probe (`setupDone` not passed) means the gate is open. That is the honest default,
+ * not laxness: the run store is rebuilt from live events, so after an app restart a node armed
+ * with `awaitSetupGroup` has no run to hear from ever again, and reading "nothing known" as
+ * "still running" would strand it forever — the same reasoning as a deleted dependency counting
+ * as satisfied. (The caller's probe applies the same rule to a group with no entry.)
  */
 export function launchesToFire(
   nodes: readonly ArmedNode[],
   status: StatusById,
-  live: ReadonlySet<string>
+  live: ReadonlySet<string>,
+  setupDone?: (groupId: string) => boolean
 ): LaunchToFire[] {
   const out: LaunchToFire[] = []
   for (const n of nodes) {
     const p = n.data.pendingLaunch
     if (!p || !p.command) continue
+    if (p.awaitSetupGroup && !(setupDone?.(p.awaitSetupGroup) ?? true)) continue
     if (p.after.every((d) => depSatisfied(d, status, live))) out.push({ id: n.id, command: p.command })
   }
   return out
