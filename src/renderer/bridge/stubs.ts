@@ -294,6 +294,15 @@ export function buildStubApi(): Omit<
       saveGatewayCredential: U('agent.saveGatewayCredential'),
       clearGatewayCredential: U('agent.clearGatewayCredential')
     },
+    projectSettings: {
+      // Overridden by the real WS-backed namespace in ws-bridge (same registerIpc() call as
+      // `workspace`); this fallback only matters if some future assembly spreads the stub alone.
+      // Fail-closed rather than reject: an unknown/unreachable project reads as "no settings" and
+      // a write/update as "did not happen", matching the real handlers' contract for an unknown id.
+      read: () => Promise.resolve(null),
+      writeShared: () => Promise.resolve(false),
+      updateLocal: () => Promise.resolve(false)
+    },
     chat: {
       readTranscript: U('chat.readTranscript')
     },

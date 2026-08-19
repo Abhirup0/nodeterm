@@ -356,3 +356,19 @@ describe('project settings — ssh leg', () => {
     expect(s?.shared?.setup?.setupScript).toBe('no-io')
   })
 })
+
+describe('project settings IPC registration', () => {
+  it('registers the three channels and round-trips through platform handlers', async () => {
+    // fakePlatform's `handle` already records into `fake.handlers` (a plain object keyed by
+    // channel) — no monkey-patching needed, just read handlers back off it.
+    const store = new WorkspaceStore()
+    store.registerIpc()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const handlers = fake.handlers
+    expect(await handlers['project-settings:write-shared']('p1', { terminal: { shell: '/bin/zsh' } })).toBe(true)
+    const snap = (await handlers['project-settings:read']('p1')) as { shared: { terminal?: { shell?: string } } | null }
+    expect(snap.shared?.terminal?.shell).toBe('/bin/zsh')
+    expect(await handlers['project-settings:update-local']('p1', { ignoreShared: { setup: true } })).toBe(true)
+    expect(await handlers['project-settings:read']('nope')).toBeNull()
+  })
+})

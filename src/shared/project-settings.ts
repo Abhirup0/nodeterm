@@ -67,6 +67,19 @@ export type ProjectSettingsParse =
   | { status: 'invalid' }
   | { status: 'conflict' }
 
+/** What one project's settings look like right now: the git-shared document (null when there is
+ *  none, or it cannot be trusted/read) plus this machine's own overlay. `resolveProjectSettings`
+ *  turns the pair into effective values; this type only reports what each side says. Shared here
+ *  (not core) so the renderer's `ProjectSettingsApi` can name it without importing core. */
+export interface ProjectSettingsSnapshot {
+  shared: ProjectSettingsFileV1 | null
+  local: ProjectLocalSettings | undefined
+  /** The shared file exists but is git-conflict-marked, so it is left untouched for the user to
+   *  resolve. `shared` is null for a local ref; for an ssh project the last-known-good offline cache
+   *  is still served alongside the flag (it is the only readable copy of that document). */
+  conflict?: true
+}
+
 const STRING_CAP = 1024
 const BIG_STRING_CAP = 64000
 const LAUNCH_CMD_CAP = 4096
