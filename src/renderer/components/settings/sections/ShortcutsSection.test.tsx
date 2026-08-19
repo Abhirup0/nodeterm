@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { COMMAND_DEFINITIONS } from '@shared/keybindings'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { useSettings } from '../../../state/settings'
+import { SettingsSearchContext } from '../context'
 import { ShortcutsSection, commitCandidate } from './ShortcutsSection'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -22,12 +23,21 @@ const kb = (): Record<string, readonly string[]> =>
 let host: HTMLDivElement
 let root: Root | null = null
 
-function render(): void {
+function render(query = ''): void {
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
-  act(() => root!.render(<ShortcutsSection isActive={true} />))
+  act(() =>
+    root!.render(
+      <SettingsSearchContext.Provider value={query}>
+        <ShortcutsSection isActive={true} />
+      </SettingsSearchContext.Provider>
+    )
+  )
 }
+
+/** The section shell's card body — `divide-y [&>*]:py-5`, so every direct child DRAWS. */
+const body = (): Element => host.querySelector<HTMLElement>('#shortcuts')!.lastElementChild!
 
 const row = (id: string): HTMLElement => host.querySelector<HTMLElement>(`[data-command="${id}"]`)!
 const button = (id: string, label: string): HTMLButtonElement | null =>
@@ -100,6 +110,49 @@ describe('ShortcutsSection rows', () => {
     ])
   })
 
+  // A filtered query must not leave the group's padded, divider-separated strip behind: the shell
+  // body is `divide-y [&>*]:py-5`, so an empty wrapper is a visible empty block, not nothing.
+  it('drops a whole group when neither its header nor any of its rows match', () => {
+    render('close')
+    expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['Nodes'])
+    expect([...host.querySelectorAll('[data-command]')].map((el) =>
+      el.getAttribute('data-command')
+    )).toEqual(['node.close'])
+    // Exactly the heading and the one row — no empty siblings.
+    expect(body().children).toHaveLength(2)
+    expect([...body().children].every((c) => (c.textContent ?? '').trim() !== '')).toBe(true)
+  })
+
+  // A row can match on its own note, which the group's keywords do not carry — the heading must
+  // follow the rows, never filter itself independently and strand one.
+  it('keeps the heading over a row that matched on its note', () => {
+    render('tmux')
+    expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['Terminal'])
+    expect([...host.querySelectorAll('[data-command]')].map((el) =>
+      el.getAttribute('data-command')
+    )).toEqual(['terminal.copySelection'])
+  })
+
+  it('renders every group and row unfiltered, each as its own divided block', () => {
+    render()
+    expect(host.querySelectorAll('h3')).toHaveLength(6)
+    expect(body().children).toHaveLength(6 + COMMAND_DEFINITIONS.length)
+  })
+
+  // The dictation row must not promise a second chord: every consumer reads
+  // `dictationBinding()` = the FIRST effective binding, so an added one could never fire.
+  it('offers Add for an ordinary command but never for Dictate', () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt', 'Cmd+Alt+D'] })
+    render()
+    expect(recorder('app.commandPalette', 'Add')).toBeTruthy()
+    expect(recorder('speech.dictation', 'Add')).toBeUndefined()
+    // …and the chips show only the chord that is actually live.
+    expect([...row('speech.dictation').querySelectorAll('kbd')].map((k) => k.textContent)).toEqual([
+      '⌘',
+      '⌥'
+    ])
+  })
+
   // Ruling 1(a): the disabled-dictation render case. `[]` is the load-bearing "off" value —
   // `dictationBinding()` returns '' for it, and this row must SAY so rather than looking unbound.
   it('renders the dictation row as disabled when its override is []', () => {
@@ -136,6 +189,21 @@ describe('commitCandidate', () => {
     expect(r.ok).toBe(false)
     expect(r.ok === false && r.error).toContain('Command palette')
     expect(r.ok === false && r.error).not.toContain('swallowed app-wide')
+  })
+
+  // REVERSE shadowing: neither existing gate can see it — the shadow check answers only for an
+  // intercepted id, and the two commands are in different buckets so nothing conflicts.
+  it('refuses a chord the main process intercepts for another command', () => {
+    const r = commitCandidate('terminal.find', 'Cmd+W', 'replace')
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.error).toContain('Close node / window')
+    expect(r.ok === false && r.error).toContain('Find in terminal')
+    expect('terminal.find' in kb()).toBe(false)
+  })
+
+  it('still accepts a chord no intercepted command holds', () => {
+    expect(commitCandidate('terminal.find', 'Cmd+Alt+F', 'replace')).toEqual({ ok: true })
+    expect(kb()['terminal.find']).toEqual(['Cmd+Alt+F'])
   })
 
   it('accepts a free chord, replacing or adding to the list', () => {

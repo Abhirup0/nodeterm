@@ -20,12 +20,14 @@
  * Writes go through `setKeybindingOverride` (the single write path — it also mirrors
  * `speech.dictation` into the legacy `settings.speech.shortcut` field for one release).
  */
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import {
+  bindingIdentity,
   COMMANDS_BY_ID,
   COMMAND_DEFINITIONS,
   findKeybindingConflicts,
   findMainInterceptShadowing,
+  MAIN_INTERCEPTED_COMMAND_IDS,
   type CommandDefinition,
   type CommandGroup,
   type CommandId
@@ -44,7 +46,8 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { ShortcutRecorderButton } from '../ShortcutRecorderButton'
 import { Button } from '@renderer/ui/Button'
-import type { SettingsSearchEntry } from '../search'
+import { useSettingsSearch } from '../context'
+import { matchesQuery, type SettingsSearchEntry } from '../search'
 
 /** Per-command help text. Only commands whose BEHAVIOR needs explaining get one — a row that
  *  merely repeats its own title is noise in a 20-row list. */
@@ -65,6 +68,12 @@ function rowEntry(def: CommandDefinition): SettingsSearchEntry {
   }
 }
 
+/** Commands whose consumers read the FIRST effective binding only, so a second chord would be
+ *  dead on arrival. `speech.dictation` is the case: every dictation surface (the hold listener,
+ *  the keyed gesture, the Dock mic, SpeechSection's note) goes through `dictationBinding()`, which
+ *  is `effectiveBindings('speech.dictation')[0]`. Their rows get no Add and show one chip. */
+const SINGLE_BINDING_COMMANDS: ReadonlySet<CommandId> = new Set<CommandId>(['speech.dictation'])
+
 function groupEntry(group: CommandGroup, defs: CommandDefinition[]): SettingsSearchEntry {
   // The header must survive any query that keeps one of its rows, so its keywords are the union
   // of what those rows match on — otherwise a filtered list shows rows under the wrong heading.
@@ -72,6 +81,17 @@ function groupEntry(group: CommandGroup, defs: CommandDefinition[]): SettingsSea
     title: group,
     keywords: ['shortcut', 'keybinding', 'hotkey', ...defs.flatMap((d) => [d.title, d.id])]
   }
+}
+
+/** Does this group have anything to show under the current query? It decides BOTH the heading and
+ *  the group's presence, which is why the heading is not a `SearchableRow` of its own: a row can
+ *  match on its per-command note (`NOTES`) — query "tmux" hits Copy terminal selection — and a
+ *  heading filtered independently would then leave that row standing under no heading at all. */
+function groupVisible(query: string, group: CommandGroup, defs: CommandDefinition[]): boolean {
+  if (query.trim() === '') return true
+  return (
+    matchesQuery(query, groupEntry(group, defs)) || defs.some((d) => matchesQuery(query, rowEntry(d)))
+  )
 }
 
 /**
@@ -115,12 +135,34 @@ export function commitCandidate(
     return { ok: false, error: `${chord} would be swallowed app-wide before ${titles} could see it.` }
   }
 
+  // REVERSE shadowing — the same collision seen from the other side, and neither gate above can
+  // see it. `findMainInterceptShadowing` answers only for an INTERCEPTED id, and a bucket conflict
+  // needs both commands in one bucket; binding `terminal.find` to `Cmd+W` is neither, so it passed
+  // every check and produced a permanently dead shortcut with no warning — main swallows the chord
+  // in `before-input-event` and the terminal surface is never offered it.
+  if (!MAIN_INTERCEPTED_COMMAND_IDS.includes(id)) {
+    const target = bindingIdentity(combo, isMac)
+    for (const cid of MAIN_INTERCEPTED_COMMAND_IDS) {
+      const hit = effectiveBindings(cid).some((b) => bindingIdentity(b, isMac) === target)
+      if (!hit) continue
+      const title = COMMANDS_BY_ID.get(cid)?.title ?? cid
+      const own = COMMANDS_BY_ID.get(id)?.title ?? id
+      return {
+        ok: false,
+        error: `${chord} is intercepted app-wide for ${title}; it would never reach ${own}.`
+      }
+    }
+  }
+
   setKeybindingOverride(id, nextList)
   return { ok: true }
 }
 
-function Chips({ id }: { id: CommandId }): React.JSX.Element {
-  const keys = commandKeysFor(id)
+/** `limit` exists for `speech.dictation`: its consumers read `dictationBinding()` — the FIRST
+ *  effective binding — so showing a second chip would promise a chord that can never fire. */
+function Chips({ id, limit }: { id: CommandId; limit?: number }): React.JSX.Element {
+  const all = commandKeysFor(id)
+  const keys = limit === undefined ? all : all.slice(0, limit)
   if (keys.length === 0) return <></>
   return (
     <span className="flex items-center gap-2">
@@ -142,6 +184,7 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
   // Any remap re-renders every row: chips, and the Add/Disable/Reset visibility, are all derived
   // from the override map.
   const overrides = useSettings((s) => s.settings.keybindings)
+  const query = useSettingsSearch()
   const [errors, setErrors] = useState<Partial<Record<CommandId, string>>>({})
 
   const groups = useMemo(() => {
@@ -177,72 +220,77 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
       isActive={isActive}
       searchEntries={entries}
     >
-      {groups.map(([group, defs]) => (
-        <div key={group} className="space-y-4">
-          <SearchableRow {...groupEntry(group, defs)}>
+      {groups.map(([group, defs]) => {
+        // A group whose header AND every row are filtered out must not render at all. The shell's
+        // body is `divide-y [&>*]:py-5`, so an empty wrapper is not invisible — it draws a padded
+        // strip with a divider, and a narrow query left five of those above the one real hit.
+        if (!groupVisible(query, group, defs)) return null
+        return (
+          <Fragment key={group}>
             <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted">
               {group}
             </h3>
-          </SearchableRow>
-          {defs.map((def) => {
-            const override = overrides?.[def.id]
-            const disabled = Array.isArray(override) && override.length === 0
-            const bound = commandKeysFor(def.id).length > 0
-            return (
-              <SearchableRow key={def.id} {...rowEntry(def)}>
-                <div data-command={def.id}>
-                  <FieldRow
-                    label={def.title}
-                    description={NOTES[def.id]}
-                    note={errors[def.id]}
-                    control={
-                      <div className="flex items-center gap-2">
-                        {bound ? (
-                          <Chips id={def.id} />
-                        ) : (
-                          <span className="text-[13px] text-muted">
-                            {disabled ? 'Disabled' : '—'}
-                          </span>
-                        )}
-                        <ShortcutRecorderButton
-                          commandId={def.id}
-                          idleLabel={bound ? 'Record' : 'Record shortcut'}
-                          onCommit={(combo) => apply(def.id, combo, 'replace')}
-                        />
-                        {bound ? (
+            {defs.map((def) => {
+              const override = overrides?.[def.id]
+              const disabled = Array.isArray(override) && override.length === 0
+              const single = SINGLE_BINDING_COMMANDS.has(def.id)
+              const bound = commandKeysFor(def.id).length > 0
+              return (
+                <SearchableRow key={def.id} {...rowEntry(def)}>
+                  <div data-command={def.id}>
+                    <FieldRow
+                      label={def.title}
+                      description={NOTES[def.id]}
+                      note={errors[def.id]}
+                      control={
+                        <div className="flex items-center gap-2">
+                          {bound ? (
+                            <Chips id={def.id} limit={single ? 1 : undefined} />
+                          ) : (
+                            <span className="text-[13px] text-muted">
+                              {disabled ? 'Disabled' : '—'}
+                            </span>
+                          )}
                           <ShortcutRecorderButton
                             commandId={def.id}
-                            idleLabel="Add"
-                            onCommit={(combo) => apply(def.id, combo, 'add')}
+                            idleLabel={bound ? 'Record' : 'Record shortcut'}
+                            onCommit={(combo) => apply(def.id, combo, 'replace')}
                           />
-                        ) : null}
-                        {bound ? (
-                          <Button
-                            variant="ghost"
-                            aria-label={`Disable ${def.title}`}
-                            onClick={() => write(def.id, [])}
-                          >
-                            Disable
-                          </Button>
-                        ) : null}
-                        {override !== undefined ? (
-                          <Button
-                            variant="ghost"
-                            aria-label={`Reset ${def.title}`}
-                            onClick={() => write(def.id, null)}
-                          >
-                            Reset
-                          </Button>
-                        ) : null}
-                      </div>
-                    }
-                  />
-                </div>
-              </SearchableRow>
-            )
-          })}
-        </div>
-      ))}
+                          {bound && !single ? (
+                            <ShortcutRecorderButton
+                              commandId={def.id}
+                              idleLabel="Add"
+                              onCommit={(combo) => apply(def.id, combo, 'add')}
+                            />
+                          ) : null}
+                          {bound ? (
+                            <Button
+                              variant="ghost"
+                              aria-label={`Disable ${def.title}`}
+                              onClick={() => write(def.id, [])}
+                            >
+                              Disable
+                            </Button>
+                          ) : null}
+                          {override !== undefined ? (
+                            <Button
+                              variant="ghost"
+                              aria-label={`Reset ${def.title}`}
+                              onClick={() => write(def.id, null)}
+                            >
+                              Reset
+                            </Button>
+                          ) : null}
+                        </div>
+                      }
+                    />
+                  </div>
+                </SearchableRow>
+              )
+            })}
+          </Fragment>
+        )
+      })}
     </SettingsSection>
   )
 }
