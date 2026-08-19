@@ -2,7 +2,7 @@ import { IPC } from '../shared/ipc'
 import type { ProjectSetupConsentAnswer, ProjectSetupKind, ProjectSetupRunResult } from '../shared/project-settings'
 import type { WorktreeListResult } from '../shared/worktree'
 import type { CorePlatform } from './platform'
-import type { ProjectSetupTarget } from './project-setup-service'
+import type { ProjectConsumerFamily, ProjectSetupTarget } from './project-setup-service'
 import { resolveProjectSetupTarget, type ProjectSetupTargetInfo } from './project-setup-runner-local'
 
 /**
@@ -27,6 +27,11 @@ export interface ProjectSetupHandlerService {
   run(target: ProjectSetupTarget, kind: ProjectSetupKind): Promise<ProjectSetupRunResult>
   cancel(runKey: string): boolean
   submitConsent(requestId: string, answer: ProjectSetupConsentAnswer): void
+  /** The launch-settings gate (`ProjectSetupService.ensureFamilyTrusted`). OPTIONAL so a service
+   *  built against the run-only surface still registers; the channel is registered either way and
+   *  simply answers `false` — fail closed, never a missing-handler rejection a caller has to
+   *  special-case. */
+  ensureFamilyTrusted?(target: ProjectSetupTarget, family: ProjectConsumerFamily): Promise<boolean>
 }
 
 /** What `registerProjectSetupHandlers` needs from its shell to resolve a trusted target — the
@@ -59,6 +64,23 @@ export function registerProjectSetupHandlers(
       const target = await resolveProjectSetupTarget(projectId, worktreePath, info, deps.worktreeList)
       if (!target) return { status: 'skipped', reason: 'unavailable' }
       return service.run(target, kind)
+    }
+  )
+  platform.handle(
+    IPC.projectSetupRequestTrust,
+    async (projectId: unknown, family: unknown): Promise<boolean> => {
+      // `setup` is NOT accepted: that family is gated inside `run` itself, and admitting it here
+      // would hand a caller a run-less way to raise (and then answer) the host's setup dialog.
+      if (typeof projectId !== 'string' || !projectId) return false
+      if (family !== 'agents' && family !== 'shell') return false
+      const ask = service.ensureFamilyTrusted?.bind(service)
+      if (!ask) return false
+      // Same derivation as `run`, minus the worktree: trust is keyed to the project ROOT (a
+      // worktree inherits the root's approval), so there is no path-shaped argument at all here.
+      const info = deps.projectTargetInfo(projectId)
+      const target = await resolveProjectSetupTarget(projectId, undefined, info, deps.worktreeList)
+      if (!target) return false
+      return ask(target, family)
     }
   )
   platform.handle(IPC.projectSetupCancel, (runKey: unknown) =>

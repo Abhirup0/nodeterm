@@ -246,8 +246,9 @@ export const IPC = {
    *  unknown project id, same as projectSettingsRead. */
   projectSettingsLaunchInfo: 'project-settings:launch-info',
   /** main→renderer broadcast: `{projectId}` after ANY family approval changes for that project (a
-   *  consent dialog answered, a trust record revoked). Nobody emits this yet (Task 2 records
-   *  approvals) — the channel exists so the renderer cache can subscribe ahead of the emitter. */
+   *  consent dialog answered, a trust record revoked). Emitted by
+   *  `ProjectSetupService.ensureFamilyTrusted` on an approval — for EVERY project that asked, not
+   *  just the one that raised the prompt (two canvas nodes can share one location). */
   projectTrustChanged: 'project-trust:changed',
   /** Run a project's setup/archive script. Args: (projectId, kind, worktreePath?) — NO rootPath/
    *  projectName/ssh: the handler derives those itself from its own workspace index by projectId,
@@ -256,10 +257,18 @@ export const IPC = {
    *  projectSetupEvent. */
   projectSetupRun: 'project-setup:run',
   projectSetupCancel: 'project-setup:cancel',
+  /** Ask for one project's `agents`/`shell` family to be trusted, prompting if it is not. Args:
+   *  `(projectId, family)` — nothing path-shaped: the handler derives the location from its own
+   *  workspace index, same as projectSetupRun. Answers `true` only when the family is trusted at
+   *  that location (nothing shared to gate, an existing grant, or a fresh approval); `false` covers
+   *  skip, expiry and every failure. HOST-ONLY (`shared/host-control.ts`): it raises the host's own
+   *  dialog. `setup` is deliberately NOT accepted here — that family is gated by the runner. */
+  projectSetupRequestTrust: 'project-setup:request-trust',
   /** Renderer's answer to a projectSetupConsentRequest ('approve' | 'skip'). A stale/unknown
    *  requestId is a silent no-op — an expired prompt can never be approved late. */
   projectSetupConsentSubmit: 'project-setup:consent-submit',
-  /** main→renderer: raise the trust dialog (payload: ProjectSetupConsentRequest). */
+  /** main→renderer: raise the trust dialog (payload: ProjectConsentRequest — tagged by family, the
+   *  `setup` arm being the script-runner's own request). */
   projectSetupConsentRequest: 'project-setup:consent-request',
   /** main→renderer: close a prompt nobody answered (payload: { requestId }). */
   projectSetupConsentDismiss: 'project-setup:consent-dismiss',

@@ -373,6 +373,51 @@ export interface ProjectSetupConsentRequest {
   previouslyApproved: boolean
 }
 
+/**
+ * main→renderer: the consent prompt for a family nothing in the setup service EXECUTES — the launch
+ * settings a caller is about to consume. Same one-answer machinery, same trichotomy, same host-only
+ * delivery as the setup request; what differs is the content the dialog must put on screen, because
+ * that content is what the one approval covers (`projectTrustContent('agents', …)` hashes launchCmd
+ * AND every env pair, so BOTH are in the payload — showing one half would approve the other unseen).
+ *
+ * Straight from the SHARED document, like `scripts` above: a local override must never be able to
+ * launder a shared value past the dialog by making it look like the user's own typing.
+ */
+export interface ProjectAgentsConsentRequest {
+  family: 'agents'
+  requestId: string
+  projectName: string
+  locationLabel: string
+  previouslyApproved: boolean
+  /** Absent when the shared doc sets no launch command (an env-only family is still gated). */
+  launchCmd?: string
+  /** Absent when the shared doc sets no env. Values are the approved bytes — rendered verbatim. */
+  env?: Record<string, string>
+}
+
+/** main→renderer: the consent prompt for the terminal program a shared document names. The whole
+ *  family's executable content is this one string (`projectTrustContent('shell', …)`). */
+export interface ProjectShellConsentRequest {
+  family: 'shell'
+  requestId: string
+  projectName: string
+  locationLabel: string
+  previouslyApproved: boolean
+  shell: string
+}
+
+/**
+ * Everything that can arrive on `IPC.projectSetupConsentRequest`, TAGGED by trust family: one
+ * channel, one queue, one dialog — the tag says which variant's content to render. The `setup` arm
+ * is the original payload with the tag added; a renderer that switches on `family` must treat a tag
+ * it does not know as unrenderable (never as "some other variant"), because approving a prompt
+ * whose content was not on screen is exactly what this dialog exists to prevent.
+ */
+export type ProjectConsentRequest =
+  | ({ family: 'setup' } & ProjectSetupConsentRequest)
+  | ProjectAgentsConsentRequest
+  | ProjectShellConsentRequest
+
 export type ProjectSetupConsentAnswer = 'approve' | 'skip'
 
 export type ProjectSetupRunResult =

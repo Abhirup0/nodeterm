@@ -313,6 +313,9 @@ export function buildStubApi(): Omit<
       run: () => Promise.resolve({ status: 'skipped', reason: 'unavailable' }),
       cancel: () => Promise.resolve(false),
       consent: pnoop,
+      // Fails closed, like `run`: no bridge means no way to ask a human, and an unasked question
+      // is never an approval.
+      requestTrust: () => Promise.resolve(false),
       onConsentRequest: noopUnsub,
       onConsentDismiss: noopUnsub,
       onEvent: noopUnsub

@@ -5,13 +5,15 @@ import { IPC } from '../shared/ipc'
 import {
   projectTrustContent,
   resolveProjectSettings,
+  type ProjectConsentRequest,
   type ProjectSettingsDoc,
   type ProjectSettingsSnapshot,
   type ProjectSetupConsentAnswer,
   type ProjectSetupConsentRequest,
   type ProjectSetupEvent,
   type ProjectSetupKind,
-  type ProjectSetupRunResult
+  type ProjectSetupRunResult,
+  type ProjectTrustFamily
 } from '../shared/project-settings'
 import type { SshConnection } from '../shared/ssh'
 import { platform } from './platform'
@@ -39,6 +41,12 @@ import { ProjectTrustStore, hashTrustContent, localTrustKey, sshTrustKey } from 
  *
  * Spawning itself is injected (`runLocal`/`runSsh`) — this file knows nothing about child_process
  * or ssh, which is also what makes the gate testable without a shell.
+ *
+ * `ensureFamilyTrusted` is the same gate aimed at the families this service never RUNS — the launch
+ * settings (`agents`) and the terminal program (`shell`) a caller elsewhere is about to consume. It
+ * reuses every invariant above (one queue, one dialog, the trichotomy, location keying, host-only
+ * delivery) through the same `queuePrompt` core, and adds one of its own: an approval broadcasts
+ * `IPC.projectTrustChanged` so a renderer holding a stale "not trusted" verdict re-reads it.
  */
 
 /** How long an unanswered consent prompt is held before it is dismissed and reported as
@@ -116,6 +124,34 @@ function familyScripts(sharedDoc: ProjectSettingsDoc): ProjectSetupConsentReques
   return out
 }
 
+/** The families `ensureFamilyTrusted` answers for: everything a launcher consumes but this service
+ *  never runs itself. `setup` is excluded on purpose — the runner owns that gate, and admitting it
+ *  here would be a second, run-less way to raise a setup prompt. */
+export type ProjectConsumerFamily = Exclude<ProjectTrustFamily, 'setup'>
+
+/** The dialog payload for a consumer family, built from the SHARED document alone — exactly the
+ *  fields `projectTrustContent(family, …)` hashes, so what is rendered is what is approved. */
+function familyConsentPayload(
+  family: ProjectConsumerFamily,
+  sharedDoc: ProjectSettingsDoc,
+  base: { requestId: string; previouslyApproved: boolean; projectName: string; locationLabel: string }
+): ProjectConsentRequest {
+  if (family === 'shell') {
+    // Non-null by construction: a null `projectTrustContent('shell', …)` returned before this point.
+    return { family: 'shell', ...base, shell: sharedDoc.terminal?.shell ?? '' }
+  }
+  const agents = sharedDoc.agents
+  const req: ProjectConsentRequest = { family: 'agents', ...base }
+  if (agents?.launchCmd !== undefined) req.launchCmd = agents.launchCmd
+  if (agents?.env) {
+    // Key-sorted, like the hash's own canonical form, so the dialog's order is the approved order.
+    const env: Record<string, string> = {}
+    for (const k of Object.keys(agents.env).sort()) env[k] = agents.env[k]
+    req.env = env
+  }
+  return req
+}
+
 function locationLabel(target: ProjectSetupTarget): string {
   if (target.ssh) return `${target.ssh.server.user}@${target.ssh.server.host}:${target.ssh.remoteCwd}`
   const abs = path.resolve(target.rootPath)
@@ -138,11 +174,21 @@ interface ActiveRun {
   consentRequestId?: string
 }
 
+interface TrustFlight {
+  promise: Promise<boolean>
+  /** Every project id that asked while this one question was open. All of them are invalidated on
+   *  an approval: two canvas nodes on one folder share a trust key but not a project id. */
+  projectIds: Set<string>
+}
+
 export class ProjectSetupService {
   private readonly active = new Map<string, ActiveRun>()
   private readonly pending = new Map<string, (answer: ProjectSetupConsentAnswer | undefined) => void>()
-  /** App-wide prompt queue: each ask chains onto the previous one, so only one dialog is live. */
+  /** App-wide prompt queue: each ask chains onto the previous one, so only one dialog is live.
+   *  SHARED with `ensureFamilyTrusted` — a launch prompt and a setup prompt are the same modal. */
   private consentQueue: Promise<unknown> = Promise.resolve()
+  /** Live `ensureFamilyTrusted` asks, keyed by (family, LOCATION) — see `ensureFamilyTrusted`. */
+  private readonly trustFlights = new Map<string, TrustFlight>()
 
   constructor(private readonly deps: ProjectSetupDeps) {}
 
@@ -218,6 +264,99 @@ export class ProjectSetupService {
     }
   }
 
+  /**
+   * The SAME gate as `run`'s, for a family this service never executes: `agents` (launchCmd + env)
+   * and `shell` (the terminal program). A launcher calls this before it consumes a shared-sourced
+   * value; `true` means that family is trusted AT THIS LOCATION right now.
+   *
+   *  - Nothing executable in the SHARED document (`projectTrustContent` → null) → `true` with NO
+   *    prompt. There is nothing hostile to gate: a value that exists only in this machine's local
+   *    overlay is the user's own instruction (the same rule `run` applies to a local script).
+   *  - Already trusted (the family's shared-content hash matches the record) → `true`, no prompt.
+   *  - Otherwise ONE prompt, on the app-wide queue, and only `approve` records — skip and expiry
+   *    are both `false`, and neither leaves anything behind. A record that cannot be persisted is
+   *    not an approval either (fail closed rather than grant something only memory knows).
+   *
+   * SINGLE-FLIGHT per (family, LOCATION): concurrent askers share one promise, so five nodes
+   * launching against the same folder raise ONE dialog, not five. The flight is keyed by the trust
+   * key — the same identity the approval itself is keyed by — so joiners are asking the same
+   * question about the same document, and every joiner's projectId is invalidated on approval.
+   */
+  async ensureFamilyTrusted(target: ProjectSetupTarget, family: ProjectConsumerFamily): Promise<boolean> {
+    const trustKey = trustKeyFor(target)
+    const flightKey = `${family}\0${trustKey}`
+    const inflight = this.trustFlights.get(flightKey)
+    if (inflight) {
+      inflight.projectIds.add(target.projectId)
+      return inflight.promise
+    }
+    const flight: TrustFlight = { projectIds: new Set([target.projectId]), promise: Promise.resolve(false) }
+    // Registered BEFORE the first await inside `resolveFamilyTrust` can settle, so a caller that
+    // asks in the same tick joins this flight instead of opening a second dialog.
+    flight.promise = this.resolveFamilyTrust(target, family, trustKey, flight).finally(() => {
+      this.trustFlights.delete(flightKey)
+    })
+    this.trustFlights.set(flightKey, flight)
+    return flight.promise
+  }
+
+  private async resolveFamilyTrust(
+    target: ProjectSetupTarget,
+    family: ProjectConsumerFamily,
+    trustKey: string,
+    flight: TrustFlight
+  ): Promise<boolean> {
+    let snap: ProjectSettingsSnapshot | null
+    try {
+      snap = await this.deps.readSettings(target.projectId)
+    } catch {
+      return false // settings unreadable → no verdict, and a no-verdict is never a yes
+    }
+    const sharedDoc: ProjectSettingsDoc = snap?.shared ?? {}
+    const content = projectTrustContent(family, sharedDoc)
+    if (content === null) return true // nothing shared to gate
+    const hash = hashTrustContent(content)
+    let trusted: boolean
+    try {
+      trusted = await this.deps.trust.isTrusted(trustKey, family, hash)
+    } catch {
+      return false
+    }
+    if (trusted) return true
+
+    const answer = await this.askFamilyConsent(trustKey, family, sharedDoc, target)
+    if (answer !== 'approve') return false
+    try {
+      await this.deps.trust.record(trustKey, family, hash, new Date(this.now()).toISOString())
+    } catch {
+      return false
+    }
+    // The renderer's launch-info cache is keyed by project id, so every asker is told — including
+    // the ones that merely joined this flight.
+    for (const projectId of flight.projectIds) {
+      platform().broadcast(IPC.projectTrustChanged, { projectId })
+    }
+    return true
+  }
+
+  private askFamilyConsent(
+    trustKey: string,
+    family: ProjectConsumerFamily,
+    sharedDoc: ProjectSettingsDoc,
+    target: ProjectSetupTarget
+  ): Promise<ProjectSetupConsentAnswer | undefined> {
+    return this.queuePrompt({
+      trustKey,
+      family,
+      payload: (base) =>
+        familyConsentPayload(family, sharedDoc, {
+          ...base,
+          projectName: target.projectName,
+          locationLabel: locationLabel(target)
+        })
+    })
+  }
+
   /** Aborts a run — live OR still waiting at its consent dialog. `false` = nothing by that runKey
    *  exists (already finished, or never did). */
   cancel(runKey: string): boolean {
@@ -238,10 +377,9 @@ export class ProjectSetupService {
   /**
    * Shell shutdown: abort every run still in flight. A local run is a DETACHED process group
    * (setsid, so a cancel can SIGKILL the whole tree) — which is also why quitting without this
-   * leaves `npm ci` churning with nothing left to report to, and, on the ssh leg, an orphaned remote
-   * command. Goes through `cancel`, so a run parked at its consent dialog is closed and its dialog
-   * dismissed too. Idempotent: Electron's `before-quit` runs twice, and the second pass finds
-   * nothing left.
+   * leaves `npm ci` churning with nothing left to report to. Goes through `cancel`, so a run parked
+   * at its consent dialog is closed and its dialog dismissed too. Idempotent: Electron's
+   * `before-quit` runs twice, and the second pass finds nothing left.
    */
   disposeAll(): void {
     for (const runKey of [...this.active.keys()]) this.cancel(runKey)
@@ -269,18 +407,47 @@ export class ProjectSetupService {
     trustKey: string,
     req: Omit<ProjectSetupConsentRequest, 'requestId' | 'previouslyApproved'>
   ): Promise<ProjectSetupConsentAnswer | undefined> {
-    const step = this.consentQueue.then(async () => {
+    return this.queuePrompt({
+      trustKey,
+      family: 'setup',
       // Cancelled while queued behind another dialog — never raise one for a run that is gone.
-      if (entry.abort.signal.aborted) return undefined
+      skipIf: () => entry.abort.signal.aborted,
+      // So `cancel` can close the dialog this run is parked at instead of leaving a modal up for a
+      // run that no longer exists.
+      bind: (requestId) => {
+        entry.consentRequestId = requestId
+      },
+      payload: (base) => ({ family: 'setup', ...req, ...base })
+    })
+  }
+
+  /**
+   * THE prompt: one dialog at a time, app-wide, whatever family asked. Shared by the setup runner
+   * (`askConsent`) and the launch-settings gate (`askFamilyConsent`) so there is exactly one place
+   * that mints a requestId, holds the expiry, and delivers through the host-only seam — a second
+   * copy of this is how one caller ends up with a prompt that cannot expire, or that a stale
+   * requestId can answer.
+   */
+  private queuePrompt(opts: {
+    trustKey: string
+    family: ProjectTrustFamily
+    /** Checked at PROMPT time (not enqueue time): true → no dialog, answer `undefined`. */
+    skipIf?: () => boolean
+    /** The live requestId while the dialog is up, then `undefined`. */
+    bind?: (requestId: string | undefined) => void
+    payload: (base: { requestId: string; previouslyApproved: boolean }) => ProjectConsentRequest
+  }): Promise<ProjectSetupConsentAnswer | undefined> {
+    const step = this.consentQueue.then(async () => {
+      if (opts.skipIf?.()) return undefined
       // Read at PROMPT time, not at enqueue time: an earlier prompt in the queue may have just
       // recorded an approval for this same location. Dialog copy only — the grant was the
       // `isTrusted` hash comparison, which already said no.
-      const previouslyApproved = !!(await this.deps.trust.getRecord(trustKey, 'setup'))
+      const previouslyApproved = !!(await this.deps.trust.getRecord(opts.trustKey, opts.family))
       return new Promise<ProjectSetupConsentAnswer | undefined>((resolve) => {
         const requestId = randomUUID()
         const settle = (answer: ProjectSetupConsentAnswer | undefined): void => {
           this.pending.delete(requestId)
-          entry.consentRequestId = undefined
+          opts.bind?.(undefined)
           resolve(answer)
         }
         const timer = setTimeout(() => {
@@ -292,9 +459,8 @@ export class ProjectSetupService {
           clearTimeout(timer)
           settle(answer)
         })
-        entry.consentRequestId = requestId
-        const payload: ProjectSetupConsentRequest = { ...req, requestId, previouslyApproved }
-        this.sendConsent(IPC.projectSetupConsentRequest, payload)
+        opts.bind?.(requestId)
+        this.sendConsent(IPC.projectSetupConsentRequest, opts.payload({ requestId, previouslyApproved }))
       })
     })
     // A rejected step must not poison the queue for every later prompt.

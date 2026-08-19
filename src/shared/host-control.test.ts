@@ -21,6 +21,13 @@ describe('isHostOnlyChannel', () => {
     expect(isHostOnlyChannel(IPC.projectSetupCancel)).toBe(true)
   })
 
+  it('covers request-trust too — it RAISES the host’s own consent prompt', () => {
+    // A guest that could cast this one would be able to put a dialog on the host's screen at will
+    // (prompt spam), and — paired with an admitted consent-submit — approve a shared launchCmd/env
+    // for the host's own agent launches. Same self-approval loop as run+consent-submit.
+    expect(isHostOnlyChannel(IPC.projectSetupRequestTrust)).toBe(true)
+  })
+
   it('leaves the read-only/lifecycle channels alone — the gate is on ACTION, not on the namespace', () => {
     // Subscribing and receiving events costs a guest nothing the canvas does not already show;
     // running host code, and answering the host's own trust prompt, are the two acts being gated.

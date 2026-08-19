@@ -18,7 +18,7 @@ import type {
   WorkspaceMigrationKind
 } from '../shared/types'
 import type { ClientId, PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
-import type { ProjectSetupConsentRequest, ProjectSetupEvent } from '../shared/project-settings'
+import type { ProjectConsentRequest, ProjectSetupEvent } from '../shared/project-settings'
 
 // Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
 // this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
@@ -57,7 +57,7 @@ const subscribeRelayHostClosed = subscribe<[{ id: string }]>(IPC.relayHostClosed
 
 // Project setup/archive (SDD: 2026-08-19-project-settings-trust): global (not per-project) main →
 // renderer prompts, fanned out the same way as the relay events above.
-const subscribeProjectSetupConsentRequest = subscribe<[ProjectSetupConsentRequest]>(
+const subscribeProjectSetupConsentRequest = subscribe<[ProjectConsentRequest]>(
   IPC.projectSetupConsentRequest
 )
 const subscribeProjectSetupConsentDismiss = subscribe<[{ requestId: string }]>(
@@ -170,6 +170,8 @@ const api: NodeTerminalApi = {
     consent: async (requestId, answer) => {
       ipcRenderer.send(IPC.projectSetupConsentSubmit, requestId, answer)
     },
+    requestTrust: (projectId, family) =>
+      ipcRenderer.invoke(IPC.projectSetupRequestTrust, projectId, family),
     onConsentRequest: subscribeProjectSetupConsentRequest,
     onConsentDismiss: subscribeProjectSetupConsentDismiss,
     onEvent: (projectId, cb) => {
