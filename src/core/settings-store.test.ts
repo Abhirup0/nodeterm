@@ -6,7 +6,7 @@ import { IPC } from '../shared/ipc'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import { SettingsStore } from './settings-store'
-import { DEFAULT_SETTINGS } from '../shared/types'
+import { DEFAULT_SETTINGS, type Settings } from '../shared/types'
 
 describe('SettingsStore nested-default merge', () => {
   let dir: string
@@ -142,6 +142,63 @@ describe('SettingsStore nested-default merge', () => {
       expect(load(42).get().terminalGpuRendering).toBe('auto')
       expect(load(null).get().terminalGpuRendering).toBe('auto')
       expect(load({ mode: 'shared' }).get().terminalGpuRendering).toBe('auto')
+    })
+  })
+
+  describe('dictation chord seed (one-shot migration)', () => {
+    // Same disk fixture as the sibling describes: write a settings.json, load it through the real
+    // store, read the merged result back.
+    const loadWith = (saved: Record<string, unknown>): Settings => {
+      writeFileSync(path.join(dir, 'settings.json'), JSON.stringify(saved), 'utf-8')
+      const store = new SettingsStore()
+      store.init()
+      return store.get()
+    }
+
+    it('a customized legacy speech.shortcut becomes the speech.dictation override', () => {
+      // The whole point of the migration: a user who had rebound dictation before the keybinding
+      // registry existed keeps their chord, because every consumer now reads the override.
+      const s = loadWith({
+        speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+Shift+D' }
+      })
+      expect(s.keybindings?.['speech.dictation']).toEqual(['Cmd+Shift+D'])
+      // The legacy field lives on as the downgrade mirror — the seed must not consume it.
+      expect(s.speech.shortcut).toBe('Cmd+Shift+D')
+    })
+
+    it('a default shortcut seeds nothing', () => {
+      // Seeding the default would write an override that says exactly what the registry already
+      // says, and would then pin that chord forever against any future default change.
+      const s = loadWith({})
+      expect(s.keybindings?.['speech.dictation']).toBeUndefined()
+    })
+
+    it('an existing speech.dictation key wins over the legacy field — including disabled', () => {
+      // `[]` is a deliberate "dictation has no chord". Re-seeding it from the legacy field would
+      // hand the user back the shortcut they explicitly turned off, on every single load.
+      const s = loadWith({
+        speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+Shift+D' },
+        keybindings: { 'speech.dictation': [] }
+      })
+      expect(s.keybindings?.['speech.dictation']).toEqual([])
+    })
+
+    it('seeding does not disturb other overrides', () => {
+      const s = loadWith({
+        speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+Alt+D' },
+        keybindings: { 'canvas.undo': [] }
+      })
+      expect(s.keybindings).toEqual({ 'canvas.undo': [], 'speech.dictation': ['Cmd+Alt+D'] })
+    })
+
+    it('is idempotent — a seeded file re-loaded seeds nothing new', () => {
+      // Load 1 seeds; load 2 sees the key and leaves it alone. Without the key check the seed
+      // would keep overwriting a chord the user changed AFTER the migration, every launch.
+      const once = loadWith({
+        speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+Shift+D' }
+      })
+      const twice = loadWith({ ...once, keybindings: { 'speech.dictation': ['Cmd+Alt+K'] } })
+      expect(twice.keybindings?.['speech.dictation']).toEqual(['Cmd+Alt+K'])
     })
   })
 })

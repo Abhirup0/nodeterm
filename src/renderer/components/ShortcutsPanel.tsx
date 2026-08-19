@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
 import type { CommandId } from '@shared/keybindings'
 import { isBrowserRuntime } from '../bridge/runtime'
-import { commandKeys } from '../lib/keybindingOverrides'
+import { commandKeys, dictationBinding } from '../lib/keybindingOverrides'
 import { useSettings } from '../state/settings'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -25,14 +25,26 @@ interface Row {
  *  what makes the panel and the key agree — `terminal.find` included, whose match in
  *  TerminalNode now reads `effectiveBindings('terminal.find')` instead of a hardcoded
  *  Cmd/Ctrl+F. Gesture/mouse rows stay literal: they are not commands and the registry knows
- *  nothing about them. "Dictate" also stays literal — its chord still lives in
- *  `settings.speech.shortcut` (the registry's `speech.dictation` row is display-only for now),
- *  and a modifier-only chord is hold-to-talk, which the label spells out. */
-function buildSections(dictationKeys: string[], dictationLabel: string): { title: string; rows: Row[] }[] {
+ *  nothing about them. "Dictate" is a registry row too now — its chord comes from
+ *  `dictationBinding()` (the first effective `speech.dictation` binding), with the legacy
+ *  `settings.speech.shortcut` field kept only as a downgrade mirror — so it follows a remap and
+ *  DROPS off the panel when the user unbinds it, exactly like every `cmd()` row above. It keeps
+ *  its own builder because it is the one row whose LABEL depends on the chord's shape: a
+ *  modifier-only chord is hold-to-talk, which "Dictate (hold)" spells out. */
+function buildSections(dictationChord: string): { title: string; rows: Row[] }[] {
   const cmd = (id: CommandId, label: string): Row[] => {
     const keys = commandKeys(id)
     return keys.length ? [{ keys, label }] : []
   }
+  const dictate = (): Row[] =>
+    dictationChord === ''
+      ? []
+      : [
+          {
+            keys: shortcutKeyParts(dictationChord, isMac),
+            label: isHoldChord(dictationChord) ? 'Dictate (hold)' : 'Dictate'
+          }
+        ]
   return [
     {
       title: 'General',
@@ -41,13 +53,15 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
         ...cmd('app.settings', 'Settings'),
         ...cmd('app.shortcutsPanel', 'This shortcuts panel'),
         ...cmd('panel.explorer', 'Explorer'),
-        ...cmd('panel.sourceControl', 'Source Control'),
+        // `panel.sourceControl` used to be listed here AND in the Source Control section below —
+        // one command, two rows, both showing the same chord. The section row ("Open Source
+        // Control") is the one that belongs, so the General duplicate is gone.
         ...cmd('view.kanbanToggle', 'Kanban board'),
         ...cmd('panel.sessions', 'Pin the sessions sidebar'),
         // Desktop only: browsers own Cmd/Ctrl+1-9 for tab switching and a page cannot take it
         // back, so listing it in the Server Edition would promise a shortcut that never fires.
         ...(isBrowserRuntime() ? [] : [{ keys: ['⌘', '1-9'], label: 'Jump to project' }]),
-        { keys: dictationKeys, label: dictationLabel },
+        ...dictate(),
         ...cmd('canvas.undo', 'Undo'),
         ...cmd('canvas.redo', 'Redo')
       ]
@@ -96,11 +110,15 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
 
 /** Keyboard shortcuts reference; shown on first launch and via ⌘/ or the ? button. */
 export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
-  const speechShortcut = useSettings((s) => s.settings.speech.shortcut)
-  const SECTIONS = buildSections(
-    shortcutKeyParts(speechShortcut, isMac),
-    isHoldChord(speechShortcut) ? 'Dictate (hold)' : 'Dictate'
-  )
+  // A string selector, so an unrelated settings write cannot re-render the panel.
+  const dictationChord = useSettings(() => dictationBinding())
+  // Every OTHER row reads the registry through a plain `commandKeys()` call, which is not a
+  // subscription — so a panel left open while a chord is remapped (Settings in another window,
+  // or an outside edit to settings.json the store watcher picks up) kept showing the old key
+  // unless the remap happened to be dictation's. Subscribing to the overrides object itself is
+  // what makes the whole panel re-render; the value is unused on purpose.
+  useSettings((s) => s.settings.keybindings)
+  const SECTIONS = buildSections(dictationChord)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

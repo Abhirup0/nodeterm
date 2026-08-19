@@ -3,7 +3,8 @@ import { DEFAULT_SETTINGS } from '@shared/types'
 import { matchesShortcut, type ShortcutKeyEvent } from '@shared/shortcut'
 import { useSettings } from '../state/settings'
 import {
-  activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip, chipFor
+  activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip, chipFor,
+  setKeybindingOverride, commandKeysFor, dictationBinding
 } from './keybindingOverrides'
 
 const setKb = (kb: unknown) =>
@@ -103,5 +104,38 @@ describe('chipFor', () => {
   })
   it('is empty for an unbound command, so callers can fall back', () => {
     expect(chipFor('canvas.fitAll', true)).toBe('')
+  })
+})
+
+describe('setKeybindingOverride', () => {
+  it('set, disable, and reset shape the map correctly', () => {
+    setKeybindingOverride('node.newTerminal', ['Cmd+Shift+T'])
+    expect(useSettings.getState().settings.keybindings).toEqual({
+      'node.newTerminal': ['Cmd+Shift+T']
+    })
+    setKeybindingOverride('canvas.undo', [])
+    expect(useSettings.getState().settings.keybindings?.['canvas.undo']).toEqual([])
+    setKeybindingOverride('node.newTerminal', null)
+    expect('node.newTerminal' in (useSettings.getState().settings.keybindings ?? {})).toBe(false)
+  })
+  it('mirrors speech.dictation into speech.shortcut, and reset restores the default mirror', () => {
+    setKeybindingOverride('speech.dictation', ['Cmd+Alt+D'])
+    expect(useSettings.getState().settings.speech.shortcut).toBe('Cmd+Alt+D')
+    setKeybindingOverride('speech.dictation', null)
+    expect(useSettings.getState().settings.speech.shortcut).toBe(DEFAULT_SETTINGS.speech.shortcut)
+  })
+})
+
+describe('commandKeysFor / dictationBinding', () => {
+  it('lists every effective binding', () => {
+    expect(commandKeysFor('canvas.deleteSelection', true)).toEqual([['Delete'], ['Backspace']])
+    expect(commandKeysFor('canvas.fitAll', true)).toEqual([])
+  })
+  it('dictationBinding follows the override and reports disabled as empty', () => {
+    expect(dictationBinding()).toBe('Cmd+Alt')
+    setKeybindingOverride('speech.dictation', ['Cmd+Alt+D'])
+    expect(dictationBinding()).toBe('Cmd+Alt+D')
+    setKeybindingOverride('speech.dictation', [])
+    expect(dictationBinding()).toBe('')
   })
 })

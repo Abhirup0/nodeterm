@@ -2467,6 +2467,19 @@ export interface PresenceApi {
   onPeer(listener: (diff: PeerDiff) => void): () => void
 }
 
+/** Keyboard-shortcut plumbing the RENDERER cannot do for itself. */
+export interface ShortcutsApi {
+  /** Tell the shell that a shortcut recorder is armed (`true`) or released (`false`), so the
+   *  desktop's `before-input-event` intercepts stand down and the chord being recorded — ⌘W and
+   *  ⌘M among them — reaches the recorder instead of closing the user's selected nodes. A claimed
+   *  chord never reaches the page, so the recorder's own preventDefault cannot substitute for
+   *  this. Fire-and-forget. **The `false` leg is not optional**: the bit is global, so a recorder
+   *  that arms and never releases leaves those chords dead app-wide. Server Edition: a documented
+   *  no-op (a browser tab has no application menu to steal a chord back from, so nothing
+   *  intercepts). */
+  setRecording(active: boolean): void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -2508,6 +2521,7 @@ export interface NodeTerminalApi {
   handoff: HandoffApi
   pairing: PairingApi
   presence: PresenceApi
+  shortcuts: ShortcutsApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

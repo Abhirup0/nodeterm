@@ -8,7 +8,9 @@ import {
   bindingIdentity,
   findKeybindingConflicts,
   sanitizeKeybindingOverrides,
-  resolveCommandForKeyEvent
+  resolveCommandForKeyEvent,
+  MAIN_INTERCEPTED_COMMAND_IDS,
+  findMainInterceptShadowing
 } from './keybindings'
 import { parseShortcut } from './shortcut'
 import type { ShortcutKeyEvent } from './shortcut'
@@ -408,5 +410,32 @@ describe('resolveCommandForKeyEvent', () => {
     // Deliberately unsanitized colliding override — the resolver must order the tie deterministically.
     const o = { 'canvas.redo': ['Cmd+Z'] }
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'z' }), ctx(), o, true)).toBe('canvas.undo')
+  })
+})
+
+describe('findMainInterceptShadowing', () => {
+  it('flags a main-intercepted remap that shadows another bucket', () => {
+    expect(findMainInterceptShadowing('node.close', 'Cmd+F', {}, true)).toEqual(['terminal.find'])
+    expect(findMainInterceptShadowing('node.close', 'Cmd+Enter', {}, true)).toEqual(['scm.commit'])
+  })
+  it('same-bucket collisions are the sanitizer/conflict path, still reported here', () => {
+    expect(findMainInterceptShadowing('node.toggleMarkdown', 'Cmd+K', {}, true)).toEqual([
+      'app.commandPalette'
+    ])
+  })
+  it('empty for a clean chord, for non-intercepted commands, and never self-reports', () => {
+    expect(findMainInterceptShadowing('node.close', 'Cmd+Alt+F9', {}, true)).toEqual([])
+    expect(findMainInterceptShadowing('canvas.undo', 'Cmd+F', {}, true)).toEqual([])
+    expect(findMainInterceptShadowing('node.close', 'Cmd+W', {}, true)).toEqual([])
+  })
+  it('respects overrides and cross-spelling identities', () => {
+    const o = { 'terminal.find': ['Cmd+Alt+F9'] }
+    expect(findMainInterceptShadowing('node.close', 'Cmd+F', o, true)).toEqual([])
+    expect(findMainInterceptShadowing('node.close', 'Ctrl+K', {}, false)).toEqual([
+      'app.commandPalette'
+    ])
+  })
+  it('names exactly the two main-intercepted commands', () => {
+    expect(MAIN_INTERCEPTED_COMMAND_IDS).toEqual(['node.close', 'node.toggleMarkdown'])
   })
 })

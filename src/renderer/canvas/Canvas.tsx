@@ -179,7 +179,12 @@ import {
   type GlobalKeydownDeps
 } from '../lib/globalKeybindings'
 import type { ContextElement } from '../lib/keyContext'
-import { activeKeybindingOverrides, chipFor, commandTooltip } from '../lib/keybindingOverrides'
+import {
+  activeKeybindingOverrides,
+  chipFor,
+  commandTooltip,
+  dictationBinding
+} from '../lib/keybindingOverrides'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
@@ -3615,6 +3620,10 @@ export function Canvas() {
     setRemotePicker(screenPos)
   }, [])
 
+  // The selector re-runs on every settings change and returns a STRING, so zustand's default
+  // equality keeps this from re-rendering the canvas unless the chord itself moved.
+  const dictationChord = useSettings(() => dictationBinding())
+
   // v3 hold-to-talk: active only while the configured dictation shortcut is a modifier-only
   // chord (isHoldChord — the new default, "Cmd+Alt"). Walkie-talkie semantics: the chord held
   // down starts recording immediately (armed on the keydown that completes the exact modifier
@@ -3631,8 +3640,15 @@ export function Canvas() {
   // already-armed chord are inert by construction: once armed, a repeat keydown of the same
   // modifier still satisfies chordHeld, so the "misfire" branch's condition is false and it's a
   // no-op. Window blur (app switch) cancels outright.
+  //
+  // The chord comes from the keybinding registry (`dictationBinding()` — the first effective
+  // `speech.dictation` binding), not from settings.speech.shortcut, so a remap in
+  // settings.json's `keybindings` block reaches hold mode too. The `=== ''` test in front of
+  // every isHoldChord call is LOAD-BEARING: `''` means the user DISABLED dictation, and
+  // `isHoldChord('')` is TRUE (an all-false parse has a null key), so without it a disabled
+  // binding would arm a modifier-less hold chord that fires on any keydown.
   useEffect(() => {
-    if (!isHoldChord(settings.speech.shortcut)) return
+    if (dictationChord === '' || !isHoldChord(dictationChord)) return
 
     let armed = false
     let heldSince = 0
@@ -3651,8 +3667,8 @@ export function Canvas() {
 
     const onKeyDown = (e: KeyboardEvent): void => {
       if (isKanbanOpen(useProjects.getState().activeProjectId)) return
-      const combo = useSettings.getState().settings.speech.shortcut
-      if (!isHoldChord(combo)) return
+      const combo = dictationBinding()
+      if (combo === '' || !isHoldChord(combo)) return
 
       if (!armed) {
         // Arm only on the keydown that completes the exact chord — not on every keydown while
@@ -3686,7 +3702,16 @@ export function Canvas() {
 
     const onKeyUp = (e: KeyboardEvent): void => {
       if (!armed) return
-      const combo = useSettings.getState().settings.speech.shortcut
+      const combo = dictationBinding()
+      // The binding moved mid-hold (disabled, or remapped to a keyed chord): this gesture has
+      // no owner any more, so cancel — the same thing the cleanup below does once the change
+      // reaches React a tick later. Without this the `''` case would READ AS STILL HELD
+      // (`chordHeld(e, '', isMac)` is true exactly when no modifier is down) and the recording
+      // would never stop.
+      if (combo === '' || !isHoldChord(combo)) {
+        cancel()
+        return
+      }
       // Still fully down (an unrelated key was released) — keep recording.
       if (chordHeld(e, combo, isMac)) return
       const heldMs = Date.now() - heldSince
@@ -3714,7 +3739,7 @@ export function Canvas() {
         setDictationOpen(false)
       }
     }
-  }, [settings.speech.shortcut])
+  }, [dictationChord])
 
   // "Connect to a host" from the Settings section / tab-menu dialog: they collect the pairing offer
   // and dispatch it here (a window event, so they need no Canvas reference), and this runs the SAME
@@ -5230,13 +5255,16 @@ export function Canvas() {
       // terminal.* / scm.commit / speech.dictation: owned by their local listeners.
     },
     gestures: {
-      // A KEYED dictation shortcut (e.g. "Cmd+Alt+D") toggles dictation. A modifier-only
-      // shortcut (the new default, "Cmd+Alt") is hold-to-talk instead — matchesShortcut always
-      // returns false for that shape (its `key` is null), so this gesture is naturally a no-op
-      // for it; see the dedicated hold-mode effect above, which is what fires in that case.
+      // A KEYED dictation shortcut (e.g. "Cmd+Alt+D") toggles dictation. The chord is the
+      // registry's first effective `speech.dictation` binding (`dictationBinding()`), so a
+      // remap lands here without touching this file. A modifier-only shortcut (the default,
+      // "Cmd+Alt") is hold-to-talk instead — matchesShortcut always returns false for that
+      // shape (its `key` is null), so this gesture is naturally a no-op for it; see the
+      // dedicated hold-mode effect above, which is what fires in that case. The DISABLED case
+      // (`''`) needs no guard for the same reason: an empty parse also has a null key.
       // The dispatcher only offers it in plain app focus (not typing / terminal / kanban).
       keyedDictation: (e) => {
-        if (!matchesShortcut(e, useSettings.getState().settings.speech.shortcut, isMac)) return false
+        if (!matchesShortcut(e, dictationBinding(), isMac)) return false
         e.preventDefault()
         toggleDictation()
         return true
@@ -9061,7 +9089,7 @@ export function Canvas() {
       cmds.push({
         id: 'toggle-kanban',
         label: kb ? 'Canvas view' : 'Kanban view',
-        hint: '⌘⇧B',
+        hint: chipFor('view.kanbanToggle') || undefined,
         section: 'View',
         icon: kb ? <IconCanvasView /> : <IconKanban />,
         run: () => useViewMode.getState().toggle(kanbanId)

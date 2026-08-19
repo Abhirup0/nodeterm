@@ -7,15 +7,22 @@ import { matchesShortcut } from '../shared/shortcut'
  * pair whose renderer half is `src/renderer/lib/zoomShortcut.ts` (same shape: a key-state-only
  * input, an action-or-null out, and the refusals as the point of the module).
  *
- * **Why the main process gets a say at all.** We never call `Menu.setApplicationMenu`, so Electron
- * installs its DEFAULT application menu, and that menu already claims all three of these chords:
+ * **Why the main process gets a say at all.** A menu accelerator is handled *before* the page sees
+ * the key, so a renderer-side listener for one would simply never run on the desktop.
+ * `before-input-event`'s `preventDefault` suppresses the menu item AND the page event, which is why
+ * each claimed chord has to forward its intent to the renderer over IPC itself rather than letting
+ * the key through. The three chords, and who claims them TODAY:
  *
- *   ⌘M → Window ▸ Minimize     ⌘W → Window ▸ Close     ⌘0 → View ▸ Actual Size (`resetZoom`)
+ *   ⌘M → Window ▸ Minimize — a live accelerator on **every** platform (`{role:'minimize'}`).
+ *   ⌘W → Window ▸ Close — a live accelerator on **Windows/Linux only**; the mac template has no
+ *         `{role:'close'}`, so on macOS this module is now ⌘W's only handler.
+ *   ⌘0 → not in any menu at all any more; this module is its only handler, which is exactly why
+ *         the View menu's Fit View item deliberately carries NO accelerator.
  *
- * A menu accelerator is handled *before* the page sees the key, so a renderer-side listener for any
- * of them would simply never run on the desktop. `before-input-event`'s `preventDefault` suppresses
- * the menu item AND the page event, which is why each claimed chord has to forward its intent to
- * the renderer over IPC itself rather than letting the key through.
+ * (This paragraph used to say "we never call `Menu.setApplicationMenu`, so Electron installs its
+ * DEFAULT menu". That has been false since `buildAppMenu` landed in `index.ts`. The menu is OURS
+ * now, so the list above is a fact about `buildAppMenu` — check it there, not against Electron's
+ * defaults, and update this comment when you edit that template.)
  *
  * **Why it is pure and lives here rather than in the callback.** Deleting a branch from an inline
  * callback breaks nothing and throws nothing — the shortcut just quietly starts minimizing the
@@ -28,7 +35,14 @@ import { matchesShortcut } from '../shared/shortcut'
  * **This module stays the closed list of main-intercepted chords.** ⌘M and ⌘W are now resolved
  * from the keybinding registry (`node.toggleMarkdown` / `node.close`), so the USER decides which
  * chord they are — but nothing else is intercepted here, because everything else reaches the
- * renderer's dispatcher on its own.
+ * renderer's dispatcher on its own. The **remappable** half of that list is ALSO written down in
+ * `shared/keybindings.ts` as `MAIN_INTERCEPTED_COMMAND_IDS` (the Settings UI's app-wide shadow
+ * warning reads it, and cannot derive it from here — main is not importable from the renderer);
+ * a third REGISTRY-BACKED intercept added here owes that list an entry, which
+ * `keydown-intercept.test.ts` pins. Note what that pin does NOT cover: a hardcoded ⌘0-shaped
+ * intercept has no command id, so it cannot appear in the list and the invariant test cannot see
+ * it — it would swallow its chord app-wide with the Settings recorder reporting no conflict. If
+ * you add one, the Settings UI needs a separate way to know about it.
  *
  * Desktop-only by construction (it exists to fight a native menu), so it stays in `src/main` next
  * to `main-window.ts` rather than moving to `src/core` — the Server Edition's browser shell has no
@@ -154,6 +168,33 @@ export function keydownIntercept(
   return null
 }
 
+/**
+ * PURE. Does this `did-start-navigation` mean the page that armed a shortcut recorder is going
+ * away, so the recording bit must be cleared?
+ *
+ * **Why the bit needs a navigation leg at all.** The recording bit is GLOBAL and lives in the main
+ * process, so every way the renderer can stop existing owes it a release. Window `closed` and
+ * `render-process-gone` cover two of them. The third is a **reload** — and the app's own View menu
+ * restores `{role:'reload'}` / `{role:'forceReload'}`, whose ⌘R/⌘⇧R are ACCELERATORS: they are
+ * handled above the page, so the recorder's `preventDefault` cannot stop a user from pressing one
+ * while armed. That reload fires no React unmount, no `closed` and no `render-process-gone`; the
+ * new page mounts no recorder, and the bit would stay true forever — ⌘W/⌘M/⌘0 dead app-wide with
+ * nothing left alive to clear them.
+ *
+ * The two filters are both refusals, and both matter:
+ * - `isSameDocument` (Electron's newer name for the old `isInPlace`) is a `pushState`, a
+ *   `replaceState` or a fragment jump — the SAME page, with the recorder still mounted and still
+ *   armed. Clearing there would re-arm the intercepts under a live recorder, i.e. re-open the very
+ *   bug this feature closes.
+ * - A subframe navigating is not this page going away either.
+ */
+export function navigationClearsRecording(details: {
+  isMainFrame: boolean
+  isSameDocument: boolean
+}): boolean {
+  return details.isMainFrame && !details.isSameDocument
+}
+
 /** The renderer channel a claimed action is forwarded on. */
 export function keydownInterceptChannel(action: KeydownInterceptAction): string {
   if (action === 'toggle-markdown') return IPC.appToggleMarkdown
@@ -181,13 +222,33 @@ export interface KeydownInterceptTarget {
  * `getBindings` is read per event rather than captured: settings change while the window lives, and
  * it returns a cached object (`index.ts` recomputes it on `settingsStore.onChange`, not here — a
  * sanitize per keystroke would be real work on the input path).
+ *
+ * `isRecording` is the same shape and for the same reason — the renderer flips it over IPC while
+ * this window is alive. **It is checked BEFORE `preventDefault`, not before the send**: a chord
+ * THIS MODULE claims never reaches the page at all, so while the Settings shortcut recorder is
+ * armed, leaving the key completely alone is the only way the recorder can see it. Swallowing but
+ * not forwarding would still hand the recorder nothing — and forwarding is the live bug, since ⌘W
+ * pressed into the recorder deletes the canvas's selected nodes.
+ *
+ * **What this stand-down does NOT buy, and cannot.** It only stops US from taking the key; it has
+ * no say over the application MENU, whose accelerators are handled above the page either way. So
+ * every menu accelerator is unrecordable while this stands down — including **⌘M**, which
+ * `{role:'minimize'}` owns on every platform, and **Ctrl+W** on Windows/Linux, where the Window
+ * submenu has a `{role:'close'}`. Pressing one of those into an armed recorder minimizes/closes the
+ * window instead of recording. Concretely, the stand-down fully delivers **⌘0** everywhere and
+ * **⌘W on macOS** (neither is in the menu), and cannot deliver ⌘M anywhere. Fixing that means
+ * suspending the MENU while recording (`Menu.setApplicationMenu(null)` around the armed window, or
+ * per-item `enabled:false`) — a change to `buildAppMenu`, not to this module. Known limitation;
+ * see the PR body.
  */
 export function installKeydownIntercepts(
   win: KeydownInterceptTarget,
   getBindings: () => KeydownInterceptBindings,
-  isMac: boolean
+  isMac: boolean,
+  isRecording: () => boolean
 ): void {
   win.webContents.on('before-input-event', (event, input) => {
+    if (isRecording()) return
     const decision = keydownIntercept(input, getBindings(), isMac)
     if (!decision) return
     event.preventDefault()
