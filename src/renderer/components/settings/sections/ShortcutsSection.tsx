@@ -45,6 +45,7 @@ import {
   type CommandDefinition,
   type CommandGroup,
   type CommandId,
+  type KeybindingOverrides,
   type TerminalShortcutPolicy
 } from '@shared/keybindings'
 import { formatShortcut } from '@shared/shortcut'
@@ -60,7 +61,7 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { ShortcutRecorderButton } from '../ShortcutRecorderButton'
-import { IconDisableSlash, IconResetArrow } from '../ShortcutRowIcons'
+import { IconDisableSlash, IconPlusSmall, IconResetArrow } from '../ShortcutRowIcons'
 import { Input } from '@renderer/ui/Input'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { useSettingsSearch } from '../context'
@@ -373,6 +374,33 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
     [groups]
   )
 
+  /**
+   * The RAW `settings.keybindings`, narrowed to the entries whose value is actually a list.
+   *
+   * **`shortcutRowStatus` reads `override.length`, and the raw map is not typed at runtime.**
+   * `settings.keybindings` is hand-editable JSON and `mergeSettings` passes it through with no
+   * per-value validation, so `{"canvas.undo": null}` arrives here verbatim — inside a memo that
+   * runs on every render, with no error boundary above Settings, which means a `TypeError` here
+   * blanks the whole renderer and takes away the page the user would have opened to repair the
+   * value. The pre-redesign row carried this guard inline
+   * (`Array.isArray(override) && override.length === 0`); this is that guard, at the one call
+   * site that still needs it. `shortcutFilter.ts` is pure and stays as shipped: a malformed
+   * value is this section's to keep out, not that module's to tolerate.
+   *
+   * A non-array entry reads as **absent** — the row shows its default, offers no Reset and is
+   * not counted as Modified. That is the truth rather than a degrade: the sanitized read path
+   * (`sanitizeKeybindingOverrides`, which already ignores it) is what the chips and every gate
+   * are showing, so there is no override for a Reset to undo.
+   */
+  const listOverrides = useMemo<KeybindingOverrides>(() => {
+    const out: KeybindingOverrides = {}
+    for (const def of COMMAND_DEFINITIONS) {
+      const value = overrides?.[def.id]
+      if (Array.isArray(value)) out[def.id] = value
+    }
+    return out
+  }, [overrides])
+
   // One read of the override map per render pass, shared by the counts and by the rendered rows.
   // Two reads would be two chances to disagree — the pill saying `Modified 2` over one row.
   const models = useMemo<RowModel[]>(
@@ -385,10 +413,10 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
           entry,
           keywords: rowKeywords(entry),
           chords,
-          status: shortcutRowStatus(def.id, overrides, chords.length)
+          status: shortcutRowStatus(def.id, listOverrides, chords.length)
         }
       }),
-    [overrides]
+    [listOverrides]
   )
   const modelById = useMemo(() => new Map(models.map((m) => [m.def.id, m])), [models])
 
@@ -510,6 +538,9 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
                   appearance="icon"
                   idleLabel="Add"
                   label={`Add a shortcut to ${def.title}`}
+                  // Record sits immediately to its left in the same label-less cluster; the
+                  // glyph is the only thing telling the two apart.
+                  idleIcon={<IconPlusSmall />}
                   onCommit={(combo) => apply(def.id, combo, 'add')}
                 />
               ) : null}

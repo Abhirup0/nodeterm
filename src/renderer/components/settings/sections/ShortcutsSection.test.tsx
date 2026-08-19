@@ -179,6 +179,44 @@ describe('ShortcutsSection rows', () => {
     expect(body().children).toHaveLength(2 + 6)
   })
 
+  // `settings.keybindings` is hand-editable JSON and `mergeSettings` passes it through with NO
+  // per-value validation, so `{"canvas.undo": null}` reaches this component verbatim. Anything
+  // that reads `.length` off the raw value throws — inside a memo that runs on every render, with
+  // no error boundary above Settings, i.e. it blanks the whole renderer and takes away the very
+  // page the user would have opened to repair the value.
+  it('survives malformed override values and shows those commands as unmodified defaults', () => {
+    setKb({ 'canvas.undo': null, 'canvas.redo': 'Cmd+Y' })
+    expect(() => render()).not.toThrow()
+    // The sanitized read path already discarded both, so the rows show their defaults…
+    expect([...row('canvas.undo').querySelectorAll('kbd')].map((k) => k.textContent)).toEqual([
+      '⌘',
+      'Z'
+    ])
+    // …and nothing claims they are overridden: no Modified badge, no Reset, and they are not
+    // counted in the rail's Modified bucket.
+    expect(row('canvas.undo').querySelectorAll('[data-badge]')).toHaveLength(0)
+    expect(button('canvas.undo', 'Reset Undo')).toBeNull()
+    expect(button('canvas.redo', 'Reset Redo')).toBeNull()
+    expect(statusLabels()).toEqual([
+      `All ${COMMAND_DEFINITIONS.length}`,
+      'Modified 0',
+      'Unassigned 2',
+      'Disabled 0'
+    ])
+  })
+
+  // Record and Add sit side by side in the same hover-revealed cluster with no text, so two
+  // identical keycaps would leave the pair unreadable — the icon is the whole label.
+  it('gives Add a different glyph than Record', () => {
+    render()
+    const record = button('app.commandPalette', 'Record Command palette')!
+    const add = button('app.commandPalette', 'Add a shortcut to Command palette')!
+    expect(record.querySelector('rect')).toBeTruthy()
+    expect(add.querySelector('rect')).toBeNull()
+    expect(add.querySelector('path')?.getAttribute('d')).toBe('M8 3.5v9M3.5 8h9')
+    expect(add.innerHTML).not.toEqual(record.innerHTML)
+  })
+
   // The dictation row must not promise a second chord: every consumer reads
   // `dictationBinding()` = the FIRST effective binding, so an added one could never fire.
   it('offers Add for an ordinary command but never for Dictate', () => {

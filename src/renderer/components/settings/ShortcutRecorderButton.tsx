@@ -49,13 +49,20 @@ export function ShortcutRecorderButton({
   idleLabel,
   onCommit,
   appearance = 'button',
-  label
+  label,
+  idleIcon
 }: {
   commandId: CommandId
   idleLabel: string
   onCommit: (combo: string) => void
   appearance?: 'button' | 'icon'
   label?: string
+  /** The glyph the IDLE `appearance="icon"` button shows — presentational only, and it changes
+   *  nothing else about the recorder. It exists because a row can carry two recorders (Record and
+   *  Add) side by side in one label-less cluster, where the icon IS the label and two identical
+   *  keycaps would leave the pair unreadable. Omitted ⇒ the keycap, so every existing call site
+   *  renders exactly what it did before. */
+  idleIcon?: React.ReactNode
 }): React.JSX.Element {
   const [capturing, setCapturing] = useState(false)
   const [hint, setHint] = useState('')
@@ -153,7 +160,7 @@ export function ShortcutRecorderButton({
           {hint || 'Press keys…'}
         </>
       ) : appearance === 'icon' ? (
-        <IconRecordKey />
+        (idleIcon ?? <IconRecordKey />)
       ) : (
         idleLabel
       )}
