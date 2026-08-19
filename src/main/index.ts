@@ -67,6 +67,7 @@ import { ProjectTrustStore } from '../core/project-trust-store'
 import { ProjectSetupService } from '../core/project-setup-service'
 import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
 import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
+import { makeSshSetupRunner } from './remote-ssh/ssh-setup-runner'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
 import {
@@ -356,9 +357,13 @@ const projectTrustStore = new ProjectTrustStore()
 const projectSetupService = new ProjectSetupService({
   trust: projectTrustStore,
   readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
-  runLocal: makeLocalSetupRunner()
-  // runSsh: a later task's manual-run leg. Until wired, an ssh target's run answers
-  // `{status:'skipped', reason:'unavailable'}` — same as any other missing runner.
+  runLocal: makeLocalSetupRunner(),
+  // The ssh leg streams over the project's LIVE ControlMaster, resolved lazily by remote cwd (the
+  // manager is created only once the window is ready) — the same seam remote git uses. A
+  // disconnected project resolves to null and the runner reports that as a failed run rather than
+  // dialing a fresh connection. Server Edition has no ssh-project manager at all, so it wires
+  // `runLocal` only and an ssh target there stays `{status:'skipped', reason:'unavailable'}`.
+  runSsh: makeSshSetupRunner((remoteCwd) => sshProjectManager?.refForRemoteCwd(remoteCwd) ?? null)
 })
 registerProjectSetupHandlers(corePlatform, projectSetupService, {
   projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),

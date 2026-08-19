@@ -2,22 +2,13 @@ import { execFile, spawn } from 'child_process'
 import path from 'path'
 import { findInPathString, shellPathNow } from './exec-path'
 import type { ProjectSetupRunner, ProjectSetupTarget } from './project-setup-service'
+import { SETUP_OUTPUT_CAP, SETUP_TIMEOUT_MS, createSetupOutputStream } from './setup-output-stream'
 import type { WorktreeListResult } from '../shared/worktree'
 
-/** Combined stdout+stderr budget for one run — the SAME cap `ProjectSetupEvent.chunk` documents
- *  ("stdout+stderr interleaved, capped"). Deliberately one shared budget rather than one per
- *  stream: a script that floods only stderr must not get 1MB total just because stdout stayed
- *  quiet. */
-export const SETUP_OUTPUT_CAP = 512 * 1024
-/** SIGKILL a run that outlives this — a hung `setupScript` must never wedge the single-flight
- *  slot forever. Test-injectable via `opts.timeoutMs` so a suite doesn't wait 10 real minutes. */
-export const SETUP_TIMEOUT_MS = 10 * 60 * 1000
-/** Chunks are batched to `onChunk` at most this often (plus one final flush on exit), matching
- *  the debounce the brief calls for — a script that `echo`s in a tight loop must not turn into
- *  an event per line. */
-const FLUSH_DEBOUNCE_MS = 150
-
-const TRUNCATION_NOTE = '\n[output truncated — exceeded 512KB]\n'
+// The cap/timeout/debounce/truncation rules moved to `setup-output-stream.ts` when the SSH runner
+// arrived — both runners MUST report the same way (see that file). Re-exported here because this
+// module was their original home and callers/tests import them from it.
+export { SETUP_OUTPUT_CAP, SETUP_TIMEOUT_MS }
 
 /** Resolve a configured shell to an absolute path via the cached login-shell PATH (exec-path.ts) —
  *  a GUI process's inherited PATH misses Homebrew/nvm/etc, the same problem commit-message.ts's
@@ -49,50 +40,7 @@ export function makeLocalSetupRunner(opts?: { shell?: string; timeoutMs?: number
         return
       }
 
-      let totalBytes = 0
-      let truncated = false
-      let pending = ''
-      let flushTimer: ReturnType<typeof setTimeout> | null = null
-
-      const flush = (): void => {
-        if (flushTimer) {
-          clearTimeout(flushTimer)
-          flushTimer = null
-        }
-        if (!pending) return
-        const text = pending
-        pending = ''
-        onChunk(text)
-      }
-
-      const scheduleFlush = (): void => {
-        if (flushTimer) return
-        flushTimer = setTimeout(flush, FLUSH_DEBOUNCE_MS)
-        flushTimer.unref?.()
-      }
-
-      const append = (text: string): void => {
-        if (!text || truncated) return
-        const remaining = SETUP_OUTPUT_CAP - totalBytes
-        if (remaining <= 0) {
-          truncated = true
-          pending += TRUNCATION_NOTE
-          scheduleFlush()
-          return
-        }
-        const asBytes = Buffer.byteLength(text, 'utf-8')
-        if (asBytes <= remaining) {
-          pending += text
-          totalBytes += asBytes
-        } else {
-          const cut = Buffer.from(text, 'utf-8').subarray(0, remaining).toString('utf-8')
-          pending += cut
-          totalBytes += Buffer.byteLength(cut, 'utf-8')
-          truncated = true
-          pending += TRUNCATION_NOTE
-        }
-        scheduleFlush()
-      }
+      const { append, flush } = createSetupOutputStream(onChunk)
 
       const isWin = process.platform === 'win32'
       const shellBin = resolveShellBin(shell)
