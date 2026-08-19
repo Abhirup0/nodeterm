@@ -301,7 +301,14 @@ export function buildRealApi(
     writeShared: (projectId, doc) =>
       client.request(IPC.projectSettingsWriteShared, projectId, doc) as Promise<boolean>,
     updateLocal: (projectId, local) =>
-      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>
+      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>,
+    launchInfo: (projectId) =>
+      client.request(IPC.projectSettingsLaunchInfo, projectId) as ReturnType<
+        NodeTerminalApi['projectSettings']['launchInfo']
+      >,
+    // REAL: nobody broadcasts IPC.projectTrustChanged yet (Task 2 records approvals) — the
+    // subscription is wired ahead of the emitter, same posture as the preload leg.
+    onTrustChanged: (cb) => client.subscribe(IPC.projectTrustChanged, cb as Listener)
   }
 
   // REAL: registerProjectSetupHandlers (core) is wired on the same construction-order point as

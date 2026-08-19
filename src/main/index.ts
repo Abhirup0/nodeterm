@@ -66,6 +66,7 @@ import { GitService } from '../core/git-service'
 import { ProjectTrustStore } from '../core/project-trust-store'
 import { ProjectSetupService } from '../core/project-setup-service'
 import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
+import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
 import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { makeSshSetupRunner } from './remote-ssh/ssh-setup-runner'
 import { registerGitHubIntegration } from '../core/github/integration'
@@ -378,6 +379,9 @@ registerProjectSetupHandlers(corePlatform, projectSetupService, {
   projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
   worktreeList: (repoPath) => gitService.worktreeList(repoPath)
 })
+// `project-settings:launch-info` — a sibling registrar (not a widening of
+// WorkspaceStore.registerIpc()) sharing the trust store constructed above.
+registerProjectLaunchInfoHandlers(corePlatform, workspaceStore, projectTrustStore)
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
 // strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],

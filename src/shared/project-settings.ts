@@ -337,6 +337,21 @@ export function resolveProjectSettings(
 
 export type ProjectTrustFamily = 'setup' | 'agents' | 'shell'
 
+/**
+ * One project's fully-resolved settings PLUS the trust verdict a launcher needs before consuming
+ * any shared-sourced executable value out of `resolved` — the `project-settings:launch-info` IPC
+ * answer (Task 1, consumption plan). `trusted.<family>` is `true` when the family's SHARED document
+ * has no executable content at all (`projectTrustContent` returns `null` — nothing to gate), and
+ * otherwise the trust-store verdict for that family's shared-content hash. It does NOT depend on
+ * whether `resolved` actually picked the shared value for a given key (a local override still
+ * reports the shared family's own verdict) — a caller that only ever consumes a shared-sourced
+ * value already knows to check `resolved.<family>.<key>.source === 'shared'` first.
+ */
+export interface ProjectLaunchInfo {
+  resolved: ResolvedProjectSettings
+  trusted: { agents: boolean; shell: boolean }
+}
+
 /** Which of the setup family's two scripts a run executes. */
 export type ProjectSetupKind = 'setup' | 'archive'
 

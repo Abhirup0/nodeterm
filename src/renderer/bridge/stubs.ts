@@ -301,7 +301,9 @@ export function buildStubApi(): Omit<
       // a write/update as "did not happen", matching the real handlers' contract for an unknown id.
       read: () => Promise.resolve(null),
       writeShared: () => Promise.resolve(false),
-      updateLocal: () => Promise.resolve(false)
+      updateLocal: () => Promise.resolve(false),
+      launchInfo: () => Promise.resolve(null),
+      onTrustChanged: noopUnsub
     },
     projectSetup: {
       // Same fallback story as `projectSettings` above — real over the bridge

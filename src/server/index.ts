@@ -34,6 +34,7 @@ import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-
 import { ProjectTrustStore } from '../core/project-trust-store'
 import { ProjectSetupService } from '../core/project-setup-service'
 import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
+import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
 import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink } from '../core/log-sink'
@@ -287,6 +288,9 @@ export async function startServer(
     projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
     worktreeList: (repoPath) => gitService.worktreeList(repoPath)
   })
+  // `project-settings:launch-info` — same sibling registrar as main/index.ts, sharing this
+  // process's own trust store.
+  registerProjectLaunchInfoHandlers(platform, workspaceStore, projectTrustStore)
 
   const github = registerGitHubIntegration({
     platform,

@@ -268,6 +268,7 @@ import {
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
 import { setupAckDecision, setupGateDone, useProjectSetup } from '../state/projectSetup'
+import { ensureProjectLaunchInfo, invalidateProjectLaunchInfo } from '../state/projectLaunchInfo'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -2206,6 +2207,26 @@ export function Canvas() {
   useEffect(() => {
     setConflict(null)
   }, [activeProjectId])
+
+  // Warm the launch-info cache (`renderer/state/projectLaunchInfo.ts`) for whichever project just
+  // became active, so a launch on it reads a fresh `projectLaunchInfoNow` instead of null (fail
+  // open) the first time it asks. Fire-and-forget: `ensureProjectLaunchInfo` never rejects and is
+  // bounded on its own.
+  useEffect(() => {
+    if (!activeProjectId) return
+    void ensureProjectLaunchInfo(activeProjectId)
+  }, [activeProjectId])
+
+  // `project-trust:changed` (Task 2 emits it once a family is approved/revoked): drop the stale
+  // verdict and re-warm immediately, so a launch right after answering the consent dialog sees the
+  // new trust state instead of the pre-approval snapshot. Mount-once — the subscription itself is
+  // not per-project (the payload carries the id), unlike `projectSetup.onEvent`.
+  useEffect(() => {
+    return window.nodeTerminal.projectSettings.onTrustChanged(({ projectId }) => {
+      invalidateProjectLaunchInfo(projectId)
+      void ensureProjectLaunchInfo(projectId)
+    })
+  }, [])
 
   // Debounced auto-save for canvas edits. Suppressed while a conflict bar is up: the bar only ever
   // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"

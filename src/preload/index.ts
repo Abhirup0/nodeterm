@@ -63,6 +63,10 @@ const subscribeProjectSetupConsentRequest = subscribe<[ProjectSetupConsentReques
 const subscribeProjectSetupConsentDismiss = subscribe<[{ requestId: string }]>(
   IPC.projectSetupConsentDismiss
 )
+// Not per-project like githubIssuesChanged: `project-trust:changed` is one global channel whose
+// payload carries the projectId, fanned out the same way — nobody broadcasts it yet (Task 2), but
+// the renderer cache subscribes ahead of the emitter.
+const subscribeProjectTrustChanged = subscribe<[{ projectId: string }]>(IPC.projectTrustChanged)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -152,7 +156,9 @@ const api: NodeTerminalApi = {
     writeShared: (projectId: string, doc) =>
       ipcRenderer.invoke(IPC.projectSettingsWriteShared, projectId, doc),
     updateLocal: (projectId: string, local) =>
-      ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local)
+      ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local),
+    launchInfo: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsLaunchInfo, projectId),
+    onTrustChanged: subscribeProjectTrustChanged
   },
   projectSetup: {
     // Wire carries exactly `(projectId, kind, worktreePath?)` — no rootPath/projectName/ssh: main

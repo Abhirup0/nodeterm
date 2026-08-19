@@ -241,6 +241,14 @@ export const IPC = {
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',
+  /** Resolved settings + per-family trust verdict for one project (`ProjectLaunchInfo`), the single
+   *  read a launcher warms before it may consume a shared-sourced value — answers `null` for an
+   *  unknown project id, same as projectSettingsRead. */
+  projectSettingsLaunchInfo: 'project-settings:launch-info',
+  /** main→renderer broadcast: `{projectId}` after ANY family approval changes for that project (a
+   *  consent dialog answered, a trust record revoked). Nobody emits this yet (Task 2 records
+   *  approvals) — the channel exists so the renderer cache can subscribe ahead of the emitter. */
+  projectTrustChanged: 'project-trust:changed',
   /** Run a project's setup/archive script. Args: (projectId, kind, worktreePath?) — NO rootPath/
    *  projectName/ssh: the handler derives those itself from its own workspace index by projectId,
    *  never the caller (project-setup-handlers.ts). Answers a ProjectSetupRunResult — `started` only
