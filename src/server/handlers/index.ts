@@ -77,12 +77,15 @@ export function registerCoreHandlers(
   // The secret question that used to block this is ANSWERED: src/server/index.ts arms
   // `hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())` at boot, which on a headless
   // host is raw 0600 bytes in the data dir — a decision taken explicitly, not quietly (see
-  // src/core/agents/node-auth-secret.ts). What is still missing is only the codex-specific
-  // plumbing: `setCodexThreadIdentityAuthSecret(secret)`, `refreshCodexIdentityCaps()`, and the two
-  // `setCodexThread*Handler` registrations src/main/index.ts makes. Everything they call already
-  // lives in src/core and boots from CorePlatform, so this stays a scope line, not a blocker —
-  // until it is drawn differently, saying "no" here keeps the browser's Codex nodes identical to
-  // what they are today rather than half-armed.
+  // src/core/agents/node-auth-secret.ts). As of S6 PR 5 the same boot path also calls
+  // `setCodexThreadIdentityAuthSecret(secret)`, so a MANAGED Codex account's thread→node→account
+  // ownership records sign and verify on this headless host instead of throwing "identity
+  // authentication is unavailable" (the carried PR-2 obligation). What stays deliberately absent
+  // here is the shared-app-server plumbing (`refreshCodexIdentityCaps()` + the two
+  // `setCodexThread*Handler` registrations src/main/index.ts makes): the Server Edition answers "no
+  // shared identity" so its Codex nodes launch the bare `codex` — a working node with its own
+  // app-server, just without the shared one. Arming the record secret is orthogonal to that
+  // degrade: it never launches an app-server, it only lets the record layer sign.
   registerCodexIdentityIpc(() => UNKNOWN_CODEX_IDENTITY_CAPS)
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
