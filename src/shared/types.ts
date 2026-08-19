@@ -240,6 +240,8 @@ export interface CanvasNodeState {
   tags?: string[]
   /** When true the node body is hidden (header-only). */
   collapsed?: boolean
+  /** Agent nodes only: when true, this node's subagent/loop fan-out cards are hidden. */
+  hideFanout?: boolean
   /** Parent group node id, if this node belongs to a group frame. */
   parentId?: string
   // terminal-only

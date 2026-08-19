@@ -1324,7 +1324,7 @@ export function Canvas() {
       // lives here, in the render layer, and nowhere else.
       if (!st.loop || st.loop.dismissed) continue
       const parent = nodes.find((n) => n.id === pid)
-      if (!parent) continue
+      if (!parent || parent.data.hideFanout) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
       const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const lid = `loop-${pid}`
@@ -1373,7 +1373,7 @@ export function Canvas() {
     }
     for (const [pid, childIds] of Object.entries(byParent)) {
       const parent = nodes.find((n) => n.id === pid)
-      if (!parent) continue
+      if (!parent || parent.data.hideFanout) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
       const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const COLS = 4
