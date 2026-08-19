@@ -12,6 +12,12 @@ import {
   serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
+import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
+import {
+  parseProjectSettingsFile, sameProjectSettingsContent, sanitizeProjectLocalSettings,
+  sanitizeProjectSettingsDoc, serializeProjectSettingsFile,
+  type ProjectLocalSettings, type ProjectSettingsDoc, type ProjectSettingsFileV1
+} from '../shared/project-settings'
 import { readProjectCapabilities, type ProjectCapability } from '../shared/project-capabilities'
 import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
@@ -26,9 +32,26 @@ export type RemoteReadResult = { status: 'ok'; content: string } | { status: 'ab
 export interface RemoteWorkspaceIO {
   read(projectId: string, ssh: NonNullable<Project['ssh']>): Promise<RemoteReadResult>
   write(projectId: string, ssh: NonNullable<Project['ssh']>, content: string): Promise<boolean>
+  /** `.nodeterm/settings.json` on the same host. Optional: an IO that predates the settings leg (or
+   *  a test fake that only cares about project.json) simply leaves the project on its offline cache,
+   *  which is exactly the disconnected behaviour. */
+  readSettings?(projectId: string, ssh: NonNullable<Project['ssh']>): Promise<RemoteReadResult>
+  writeSettings?(projectId: string, ssh: NonNullable<Project['ssh']>, content: string): Promise<boolean>
 }
 
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
+
+/** What one project's settings look like right now: the git-shared document (null when there is
+ *  none, or it cannot be trusted/read) plus this machine's own overlay. `resolveProjectSettings`
+ *  turns the pair into effective values; this type only reports what each side says. */
+export interface ProjectSettingsState {
+  shared: ProjectSettingsFileV1 | null
+  local: ProjectLocalSettings | undefined
+  /** The shared file exists but is git-conflict-marked, so it is left untouched for the user to
+   *  resolve. `shared` is null for a local ref; for an ssh project the last-known-good offline cache
+   *  is still served alongside the flag (it is the only readable copy of that document). */
+  conflict?: true
+}
 
 /** A parsed project file together with the exact bytes it was parsed from. `lastWritten` must
  *  record `raw` — see the field it caches. */
@@ -47,7 +70,7 @@ interface LoadedEntry {
 }
 
 let tmpSeq = 0
-async function writeAtomic(filePath: string, content: string): Promise<void> {
+export async function writeAtomic(filePath: string, content: string): Promise<void> {
   // Unique per write: writers that bypass each other's queue (a second app instance, the SSH
   // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
   // published spliced JSON under the atomic rename.
@@ -127,6 +150,25 @@ export class WorkspaceStore {
    *  node we never had, and the tie is broken toward rescuing (a resurrected node is visible and
    *  deletable again; a deleted session node is gone with no trace of where it went). */
   private clearedNodes = new Map<string, Set<string>>()
+  /** project id -> this machine's settings overlay, already sanitized. The map — not the index
+   *  entry — is the live copy: `splitWorkspace` rebuilds entries from the renderer's Workspace,
+   *  which has never carried machine-local state, so every save would otherwise drop the overlay
+   *  (the same reason `localExec`/`cache` are re-attached below). Absent = no overlay. */
+  private localSettingsByProject = new Map<string, ProjectLocalSettings>()
+  /** ssh project id -> last shared settings.json seen on that host (offline copy). Only entries that
+   *  round-tripped through `parseProjectSettingsFile` are in here. */
+  private settingsCacheByProject = new Map<string, ProjectSettingsFileV1>()
+  /** ssh project ids whose settings.json was git-conflict-marked on the last read: `writeSshSettings`
+   *  refuses while an id is in here instead of picking a side of the merge (the local leg refuses
+   *  the same way, straight off the file it re-reads). Cleared as soon as a read finds the file
+   *  parsing again — or gone. Runtime-only, and deliberately NOT relied on to be populated: a write
+   *  that finds both settings maps cold does its own read first, because "a read established this
+   *  flag before any write" is an assumption about panel order, not something this store enforces. */
+  private settingsConflictByProject = new Set<string>()
+  /** project id -> the shared settings file as last read/written, i.e. the rev source for the NEXT
+   *  write. Runtime-only: a write that has not read first starts at rev 1, which is the same thing
+   *  a fresh file means. */
+  private lastSharedSettings = new Map<string, ProjectSettingsFileV1>()
   /** Last index written/loaded — lets readLocalRef/refresh resolve entries without a full load. */
   private index: WorkspaceIndexV3 | null = null
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
@@ -276,6 +318,8 @@ export class WorkspaceStore {
       }
     }
     await this.repairDuplicateIds(built, sideline)
+    // AFTER the repair: it re-keys entries in place, and the maps are keyed by project id.
+    this.adoptSettingsFromIndex(index)
     const projects = built.map((b) => b.project)
     const active = projects.some((p) => p.id === index.activeProjectId && !p.unavailable)
       ? index.activeProjectId
@@ -380,6 +424,304 @@ export class WorkspaceStore {
   }
 
   /**
+   * Loads the settings halves out of a just-read index into the two runtime maps.
+   *
+   * workspace.json is hand-editable (and, on Server Edition, sits next to other users' reach), so
+   * neither field is trusted on the way in: the overlay goes through the same sanitizer a settings
+   * file gets, and a cached SHARED file is accepted only if it still parses as one — the parser is
+   * reused as the validator so there is exactly one definition of "a valid settings file",
+   * wherever the bytes came from.
+   */
+  private adoptSettingsFromIndex(index: WorkspaceIndexV3): void {
+    this.localSettingsByProject.clear()
+    this.settingsCacheByProject.clear()
+    for (const e of index.entries) {
+      const local = sanitizeProjectLocalSettings(e.localSettings)
+      if (local && Object.keys(local).length) this.localSettingsByProject.set(e.id, local)
+      if (!e.ssh || !e.settingsCache) continue
+      const parsed = parseProjectSettingsFile(JSON.stringify(e.settingsCache))
+      if (parsed.status === 'ok') this.settingsCacheByProject.set(e.id, parsed.file)
+    }
+  }
+
+  /** Writes the maps back onto an index about to be persisted — the machine-local half that
+   *  `splitWorkspace` cannot know about. Runs on every index write, so an entry the maps no longer
+   *  cover loses the field rather than keeping a stale copy of it. */
+  private applySettingsToIndex(index: WorkspaceIndexV3): void {
+    for (const e of index.entries) {
+      const local = this.localSettingsByProject.get(e.id)
+      if (local) e.localSettings = local
+      else delete e.localSettings
+      // Only an ssh entry has anywhere to cache: a local ref's shared file is one disk read away,
+      // and an inline canvas has no shared file at all.
+      const cached = e.ssh ? this.settingsCacheByProject.get(e.id) : undefined
+      if (cached) e.settingsCache = cached
+      else delete e.settingsCache
+    }
+  }
+
+  /**
+   * The shared + local settings of one project. `null` means the id names no entry (never "no
+   * settings" — an entry with neither file nor overlay answers `{shared: null, local: undefined}`).
+   *
+   * The shared doc is read from disk on every call rather than cached: `.nodeterm/settings.json` is
+   * a git-tracked file a checkout/merge/teammate rewrites behind our back, and a settings read is
+   * rare enough (a panel opening, a launch) that a stale answer would cost more than the read does.
+   */
+  async readProjectSettings(projectId: string): Promise<ProjectSettingsState | null> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return null
+    const local = this.localSettingsByProject.get(projectId)
+    if (e.ssh) return this.readSshSettings(projectId, e.ssh, local)
+    // An inline canvas has no folder, so there is no shared document to have.
+    if (!e.cwd) return { shared: null, local }
+    const read = await readProjectSettingsFile(e.cwd)
+    if (read.status === 'ok') {
+      // The rev source for the next write — a write that skipped the read would restart at rev 1
+      // and lose the counter a remote/offline comparison depends on.
+      this.lastSharedSettings.set(projectId, read.file)
+      return { shared: read.file, local }
+    }
+    // conflict: the file exists but is mid-merge; it is left untouched for the user to resolve and
+    // reported as such, so a caller shows "resolve this" instead of "this project has no settings".
+    if (read.status === 'conflict') return { shared: null, local, conflict: true }
+    return { shared: null, local } // absent / invalid (sidelined) / unreadable
+  }
+
+  /**
+   * The ssh half of `readProjectSettings`: reconcile the host's settings.json against the offline
+   * cache, then answer with whichever is authoritative. Same rules the project.json mirror lives by:
+   *
+   *  - no settings IO / read `error` → serve the cache. A failed read is never evidence of absence,
+   *    so nothing is pushed and nothing is dropped; the project stays usable offline.
+   *  - `absent` → the host has no file; heal it from the cache (the mirror direction) and serve the
+   *    cache. Without a cache there is simply no shared document yet.
+   *  - `ok` → the bytes are HOSTILE INPUT (a git-shared file on a machine we do not control) and go
+   *    through `parseProjectSettingsFile` alone. The higher rev wins, ties to the host, so a
+   *    teammate's push is adopted rather than fought over, while a STRICTLY newer cache (this
+   *    machine edited while disconnected) is pushed back instead of being silently overwritten.
+   *  - `conflict`/`invalid` → the remote copy cannot be trusted and must not be clobbered; the cache
+   *    is served as the last known good, with `conflict` flagged so a caller can say "resolve this"
+   *    (and, for a conflict, remembered so a WRITE refuses too — see `settingsConflictByProject`).
+   *
+   * The cache is read AFTER the round trip, never before: a cache-first write can land while this
+   * read is in flight, and comparing the host's answer against a snapshot taken before the await
+   * would adopt an older remote doc over an edit the user has already been told was saved.
+   */
+  private async readSshSettings(
+    projectId: string,
+    ssh: NonNullable<Project['ssh']>,
+    local: ProjectLocalSettings | undefined
+  ): Promise<ProjectSettingsState> {
+    const res = await this.remoteIO?.readSettings?.(projectId, ssh)
+    const cached = this.settingsCacheByProject.get(projectId) ?? null
+    if (!res || res.status === 'error') return { shared: cached, local }
+    if (res.status === 'absent') {
+      // The host has no file to be mid-merge: whatever conflict a previous read saw is gone.
+      this.settingsConflictByProject.delete(projectId)
+      if (cached) await this.pushSshSettings(projectId, ssh, cached)
+      return { shared: cached, local }
+    }
+    const parsed = parseProjectSettingsFile(res.content)
+    if (parsed.status === 'conflict') {
+      this.settingsConflictByProject.add(projectId)
+      return { shared: cached, local, conflict: true }
+    }
+    // `invalid` deliberately leaves the flag alone: unparsable is not "resolved", and refusing to
+    // write is the conservative side of a file we still cannot read.
+    if (parsed.status === 'invalid') return { shared: cached, local }
+    this.settingsConflictByProject.delete(projectId) // the host's file parses again — resolved
+    const file = parsed.file
+    if (cached && file.rev < cached.rev) {
+      // Offline edits outrank the host's older copy — push them rather than letting the next read
+      // adopt a document the user already replaced here.
+      await this.pushSshSettings(projectId, ssh, cached)
+      return { shared: cached, local }
+    }
+    this.lastSharedSettings.set(projectId, file)
+    // Only persist when the cache actually moved: a read is the common case, and rewriting
+    // workspace.json on every panel open would be a disk write per glance.
+    if (!cached || cached.rev !== file.rev || !sameProjectSettingsContent(cached, file)) {
+      this.settingsCacheByProject.set(projectId, file)
+      await this.persistIndexNow().catch(() => {})
+    }
+    return { shared: file, local }
+  }
+
+  /** Best-effort mirror of one settings document to the host. A failure is not an error anywhere:
+   *  the cache is the durable copy and the next read reconciles (heal / push again). */
+  private async pushSshSettings(
+    projectId: string,
+    ssh: NonNullable<Project['ssh']>,
+    file: ProjectSettingsFileV1
+  ): Promise<boolean> {
+    const io = this.remoteIO
+    if (!io?.writeSettings) return false
+    try {
+      return await io.writeSettings(projectId, ssh, serializeProjectSettingsFile(file))
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The ssh half of `writeProjectSettings`, CACHE-FIRST: the rev-bumped document lands in the
+   * offline cache and workspace.json BEFORE it is offered to the host, so a connection that dies
+   * mid-save loses a round trip, never the user's edit. The remote write is then best-effort —
+   * `true` here means "this edit is safely recorded", and an unreachable host is reconciled by the
+   * next read (which heals an absent file and pushes a cache that outranks the remote).
+   *
+   * The doc is sanitized on the way in because this cache is served straight from memory and
+   * persisted into workspace.json; running it through the same sanitizer a read applies keeps one
+   * definition of "a valid settings file" whichever side the bytes came from.
+   *
+   * REFUSES a git-conflict-marked host file, exactly like the local leg refuses a conflicted
+   * settings.json: a conflicted file is the user's to resolve, and pushing over it would silently
+   * pick a side of a merge nobody has looked at. Two mechanisms enforce that, because the ssh leg
+   * cannot afford the local leg's read-before-every-write (a round trip per save):
+   *  - WARM (this run has a cache or a last-read doc): the runtime flag a read left behind, which
+   *    clears itself the moment a read finds the file parsing again — or gone.
+   *  - COLD (neither map knows this project, so no read has ever compared): one read here, or the
+   *    refusal would be a promise nothing checks — the first save of a session would blind-write
+   *    the mirror over a merge. `absent` writes rev 1 as before; a read `error` proceeds
+   *    cache-first, since being unable to reach the host is exactly what the cache exists for.
+   */
+  private async writeSshSettings(
+    projectId: string,
+    ssh: NonNullable<Project['ssh']>,
+    doc: ProjectSettingsDoc
+  ): Promise<boolean> {
+    if (this.settingsConflictByProject.has(projectId)) return false
+    let prev = this.settingsCacheByProject.get(projectId) ?? this.lastSharedSettings.get(projectId) ?? null
+    if (!prev && this.remoteIO?.readSettings) {
+      // A throwing IO is an unreachable host, not a verdict on the file — same fail-open shape as
+      // `pushSshSettings`, and the cache-first write below is what makes that survivable.
+      let cold: RemoteReadResult = { status: 'error' }
+      try {
+        cold = await this.remoteIO.readSettings(projectId, ssh)
+      } catch { /* offline: fall through to the cache-first write */ }
+      if (cold.status === 'ok') {
+        const parsed = parseProjectSettingsFile(cold.content)
+        if (parsed.status === 'conflict') {
+          this.settingsConflictByProject.add(projectId)
+          return false
+        }
+        // `invalid` is left as prev=null: the host's bytes are unusable as a rev source, and the
+        // cache-first write is what gives the user a readable file again.
+        if (parsed.status === 'ok') {
+          prev = parsed.file
+          this.lastSharedSettings.set(projectId, parsed.file)
+          this.settingsConflictByProject.delete(projectId)
+        }
+      }
+    }
+    // Canonical shape (bookkeeping first, then the sanitized doc) — the same order
+    // `parseProjectSettingsFile` produces, so a cache built here compares equal to the identical
+    // document read back from the host instead of looking like a change. Sanitizing on the way in
+    // keeps one definition of "a valid settings file" whichever side the bytes came from, and drops
+    // the stale version/rev/savedAt of a document a caller hands straight back.
+    const next: ProjectSettingsFileV1 = {
+      version: 1,
+      rev: (prev?.rev ?? 0) + 1,
+      savedAt: new Date().toISOString(),
+      ...sanitizeProjectSettingsDoc(doc)
+    }
+    this.settingsCacheByProject.set(projectId, next)
+    this.lastSharedSettings.set(projectId, next)
+    try {
+      await this.persistIndexNow()
+    } catch {
+      return false // the edit is live in this session, but it did not durably land
+    }
+    await this.pushSshSettings(projectId, ssh, next)
+    return true
+  }
+
+  /**
+   * Whole-document write of the GIT-SHARED settings file. Whole-document on purpose: a per-field
+   * patch grammar would have to merge against a file that another writer (a teammate's commit, the
+   * user's editor) may have changed since the caller read it, and silently merging into a file the
+   * caller never saw is how the shared half stops meaning what the repo says.
+   *
+   * ALWAYS READS FIRST — not just when this run has never read the file. A remembered rev is not
+   * evidence of the file's current STATE: `.nodeterm/settings.json` is git-tracked, so between the
+   * panel's read and the user's save a pull/merge can leave conflict markers, and a write off the
+   * warm rev would overwrite them (the same file `readProjectSettings` deliberately refuses to
+   * parse). Without any read a fresh process is worse still — rev restarts at 1 over a file that was
+   * at rev N. Settings are cold (a panel save, not a keystroke), so one read per write is the ruled
+   * cost of never writing a file this store has not just looked at.
+   *
+   * An ssh project takes the cache-first remote leg instead (`writeSshSettings`).
+   *
+   * False = there is nowhere to write it, or writing would destroy something. On BOTH legs: an
+   * unknown id, an inline canvas (no folder), and a git-conflicted shared file — the user's to
+   * resolve, left untouched (the local leg sees it in the read-before-write, the ssh leg remembers
+   * it from the last read, since looking again would cost a round trip per keystroke). Local leg
+   * only: an unreadable file (a failed read is never evidence of absence, so it may not be
+   * clobbered either) or a failed write. SSH leg only: an index write that did not persist —
+   * a failed REMOTE write is not false there, because the cache already holds the edit.
+   */
+  async writeProjectSettings(projectId: string, doc: ProjectSettingsDoc): Promise<boolean> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return false
+    if (e.ssh) return this.writeSshSettings(projectId, e.ssh, doc)
+    if (!e.cwd) return false
+    const read = await readProjectSettingsFile(e.cwd)
+    // absent → nothing to lose, start at rev 1. invalid → the read already sidelined the only
+    // copy to `.corrupt-<ts>`, so this write destroys nothing either.
+    if (read.status === 'conflict' || read.status === 'error') return false
+    let prev: ProjectSettingsFileV1 | null = null
+    if (read.status === 'ok') {
+      prev = read.file
+      this.lastSharedSettings.set(projectId, read.file)
+    }
+    try {
+      const written = await writeProjectSettingsFile(
+        e.cwd, doc, prev, new Date().toISOString()
+      )
+      this.lastSharedSettings.set(projectId, written)
+      return true
+    } catch {
+      // Folder gone / read-only checkout: the caller is told the doc did not land, exactly like a
+      // failed project.json write leaves the entry stale rather than pretending it saved.
+      return false
+    }
+  }
+
+  /**
+   * Replaces this machine's overlay for one project (undefined = clear it) and persists the index
+   * NOW, without waiting for a canvas save: a settings edit is often the only thing the user did in
+   * that session, and an overlay that lives only in memory until the next node is dragged is an
+   * overlay that quietly disappears when the app quits.
+   */
+  async updateLocalProjectSettings(
+    projectId: string,
+    local: ProjectLocalSettings | undefined
+  ): Promise<boolean> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return false
+    const clean = local === undefined ? undefined : sanitizeProjectLocalSettings(local)
+    if (clean && Object.keys(clean).length) this.localSettingsByProject.set(projectId, clean)
+    else this.localSettingsByProject.delete(projectId)
+    await this.persistIndexNow()
+    return true
+  }
+
+  /** Rewrites the CURRENT index with the settings maps applied. On `saveChain` like every other
+   *  index write, so it can neither interleave with a save's own rewrite nor invent entries: it
+   *  persists exactly what `this.index` already holds (and does nothing before the first load). */
+  private persistIndexNow(): Promise<void> {
+    const run = this.saveChain.then(async () => {
+      const index = this.index
+      if (!index) return
+      this.applySettingsToIndex(index)
+      await writeAtomic(this.indexPath, JSON.stringify(index))
+    })
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  /**
    * Reads + parses one project file. Only the authoritative loadV3 path passes `sideline: true`,
    * which renames an unparsable/wrong-shape file to `.corrupt-<ts>` so a later save can't overwrite
    * the only copy. Read-only callers (probeFolder — an RPC reachable with arbitrary paths on Server
@@ -459,6 +801,11 @@ export class WorkspaceStore {
       const previous = this.index?.entries.find((candidate) => candidate.id === entry.id)
       entry.localApprovalId = previous?.localApprovalId || randomUUID()
     }
+
+    // The settings overlay / ssh settings cache ride every index write, like `localExec` and
+    // `cache`: `splitWorkspace` builds entries from the renderer's Workspace, which carries no
+    // machine-local state, so without this each autosave would erase them from disk.
+    this.applySettingsToIndex(index)
 
     // An unavailable placeholder carries no real data. splitWorkspace already dropped its file
     // and cache; here we restore the machine-local payload (ssh offline cache) from the previous

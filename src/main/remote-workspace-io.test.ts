@@ -79,6 +79,57 @@ describe('write', () => {
   })
 })
 
+/** The read fake above is declared param-less, so its recorded arguments need a cast to be read. */
+const readPaths = (fs: ReturnType<typeof fakeFs>['fs']): string[] =>
+  (fs.readTextChecked.mock.calls as unknown as [SshFsRef, string][]).map((c) => c[1])
+
+describe('settings IO', () => {
+  it('targets <remoteCwd>/.nodeterm/settings.json, not project.json', async () => {
+    const { fs, sshFs } = fakeFs()
+    const io = makeRemoteWorkspaceIO(() => ref, sshFs)
+    await io.readSettings!('p1', ssh)
+    await io.writeSettings!('p1', ssh, 'body')
+    // project.json's own path is unchanged by the refactor.
+    await io.read('p1', ssh)
+    expect(readPaths(fs)).toEqual(['~/app/.nodeterm/settings.json', '~/app/.nodeterm/project.json'])
+    expect(fs.writeText.mock.calls[0][1]).toBe('~/app/.nodeterm/settings.json')
+  })
+
+  it('is NOT throttled: settings are cold, so two writes in a row both hit the wire', async () => {
+    const { fs, sshFs } = fakeFs()
+    const io = makeRemoteWorkspaceIO(() => ref, sshFs)
+    expect(await io.writeSettings!('p1', ssh, 'c1')).toBe(true)
+    expect(await io.writeSettings!('p1', ssh, 'c2')).toBe(true)
+    expect(fs.writeText.mock.calls.map((c) => c[2])).toEqual(['c1', 'c2'])
+  })
+
+  it('disconnected → read errors (never absent) and the write is a quiet no-op', async () => {
+    const { fs, sshFs } = fakeFs()
+    const io = makeRemoteWorkspaceIO(() => null, sshFs)
+    expect(await io.readSettings!('p1', ssh)).toEqual({ status: 'error' })
+    expect(await io.writeSettings!('p1', ssh, 'c1')).toBe(false)
+    expect(fs.writeText).not.toHaveBeenCalled()
+  })
+
+  it('a throwing settings write reports false instead of rejecting', async () => {
+    const { fs, sshFs } = fakeFs()
+    const io = makeRemoteWorkspaceIO(() => ref, sshFs)
+    fs.writeText.mockRejectedValueOnce(new Error('conn reset'))
+    expect(await io.writeSettings!('p1', ssh, 'c1')).toBe(false)
+  })
+
+  it('a settings write does not disturb project.json throttling', async () => {
+    const { fs, sshFs } = fakeFs()
+    const io = makeRemoteWorkspaceIO(() => ref, sshFs)
+    await io.write('p1', ssh, 'p1-immediate')
+    await io.writeSettings!('p1', ssh, 'settings')
+    await io.write('p1', ssh, 'p1-trailing') // still inside the 5s window
+    expect(fs.writeText.mock.calls.map((c) => c[2])).toEqual(['p1-immediate', 'settings'])
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(fs.writeText.mock.calls.map((c) => c[2])).toEqual(['p1-immediate', 'settings', 'p1-trailing'])
+  })
+})
+
 describe('flush', () => {
   it('fires every pending trailing write immediately (quit path: masters die right after)', async () => {
     const { fs, sshFs } = fakeFs()
