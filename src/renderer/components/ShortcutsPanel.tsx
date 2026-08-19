@@ -53,7 +53,9 @@ function buildSections(dictationChord: string): { title: string; rows: Row[] }[]
         ...cmd('app.settings', 'Settings'),
         ...cmd('app.shortcutsPanel', 'This shortcuts panel'),
         ...cmd('panel.explorer', 'Explorer'),
-        ...cmd('panel.sourceControl', 'Source Control'),
+        // `panel.sourceControl` used to be listed here AND in the Source Control section below —
+        // one command, two rows, both showing the same chord. The section row ("Open Source
+        // Control") is the one that belongs, so the General duplicate is gone.
         ...cmd('view.kanbanToggle', 'Kanban board'),
         ...cmd('panel.sessions', 'Pin the sessions sidebar'),
         // Desktop only: browsers own Cmd/Ctrl+1-9 for tab switching and a page cannot take it
@@ -110,6 +112,12 @@ function buildSections(dictationChord: string): { title: string; rows: Row[] }[]
 export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
   // A string selector, so an unrelated settings write cannot re-render the panel.
   const dictationChord = useSettings(() => dictationBinding())
+  // Every OTHER row reads the registry through a plain `commandKeys()` call, which is not a
+  // subscription — so a panel left open while a chord is remapped (Settings in another window,
+  // or an outside edit to settings.json the store watcher picks up) kept showing the old key
+  // unless the remap happened to be dictation's. Subscribing to the overrides object itself is
+  // what makes the whole panel re-render; the value is unused on purpose.
+  useSettings((s) => s.settings.keybindings)
   const SECTIONS = buildSections(dictationChord)
 
   useEffect(() => {

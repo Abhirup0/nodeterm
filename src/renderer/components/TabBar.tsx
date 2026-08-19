@@ -11,6 +11,7 @@ import { useSystemAccount } from '../state/systemAccount'
 import { sessionCount, sessionForProject, useProjectSession } from '../session/session'
 import { tabClickAction } from '../session/relay-tab'
 import { useMenuFlip } from '../ui/useMenuFlip'
+import { commandTooltip } from '../lib/keybindingOverrides'
 import { IconCanvasView, IconKanban } from './icons'
 import {
   ALL_PERMISSION_MODES,
@@ -335,9 +336,16 @@ export function TabBar({
                 )}
 
                 {active && editingId !== p.id && (
+                  // The title was a hardcoded `(⌘⇧B)` — mac glyphs shown to Linux/Windows users
+                  // (a pre-existing bug: it was never even hintLabel-wrapped), and stale after a
+                  // remap. `commandTooltip` fixes both and drops the chord entirely when the
+                  // command is unbound.
                   <button
                     className="tab__board-toggle"
-                    title={kanbanActive ? 'Canvas view (⌘⇧B)' : 'Kanban view (⌘⇧B)'}
+                    title={commandTooltip(
+                      kanbanActive ? 'Canvas view' : 'Kanban view',
+                      'view.kanbanToggle'
+                    )}
                     onClick={(e) => {
                       e.stopPropagation() // a tab click switches projects, this only flips the view
                       useViewMode.getState().toggle(p.id)
