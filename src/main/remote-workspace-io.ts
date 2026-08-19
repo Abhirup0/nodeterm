@@ -2,6 +2,7 @@ import path from 'path'
 import type { Project } from '../shared/types'
 import type { RemoteReadResult, RemoteWorkspaceIO } from '../core/workspace-store'
 import { PROJECT_DIR, PROJECT_FILE } from '../core/workspace-files'
+import { PROJECT_SETTINGS_FILE } from '../shared/project-settings'
 import type { SshFs, SshFsRef } from './ssh-fs'
 
 /** Resolves an SSH project's live control master; null while disconnected. */
@@ -21,6 +22,10 @@ export interface RemoteWorkspaceIOWithFlush extends RemoteWorkspaceIO {
  * round-trip per keystroke burst is still too chatty — spec says ~5 s). A throttled write is
  * acked optimistically; if the trailing run later fails, `onDropped` reports it back so the
  * store re-owes the mirror instead of believing it landed.
+ *
+ * The settings pair (`readSettings`/`writeSettings`, `.nodeterm/settings.json`) rides the same
+ * connection but NOT the throttle — see `writeSettings`. `flush()` therefore still covers only
+ * project.json's pending writes: a settings write has already been on the wire when it returns.
  */
 export function makeRemoteWorkspaceIO(
   resolveRef: RefResolver,
@@ -31,14 +36,14 @@ export function makeRemoteWorkspaceIO(
   const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; run: () => Promise<void> }>()
   const WRITE_THROTTLE_MS = 5000
 
-  const remotePath = (ssh: NonNullable<Project['ssh']>): string =>
-    path.posix.join(ssh.remoteCwd, PROJECT_DIR, PROJECT_FILE)
+  const remotePath = (ssh: NonNullable<Project['ssh']>, file: string): string =>
+    path.posix.join(ssh.remoteCwd, PROJECT_DIR, file)
 
   return {
     async read(projectId, ssh): Promise<RemoteReadResult> {
       const ref = resolveRef(projectId)
       if (!ref) return { status: 'error' }
-      return sshFs.readTextChecked(ref, remotePath(ssh))
+      return sshFs.readTextChecked(ref, remotePath(ssh, PROJECT_FILE))
     },
     async write(projectId, ssh, content) {
       const run = async (): Promise<boolean> => {
@@ -48,7 +53,7 @@ export function makeRemoteWorkspaceIO(
         const ref = resolveRef(projectId)
         if (!ref) return false
         try {
-          return await sshFs.writeText(ref, remotePath(ssh), content)
+          return await sshFs.writeText(ref, remotePath(ssh, PROJECT_FILE), content)
         } catch {
           return false
         }
@@ -73,6 +78,25 @@ export function makeRemoteWorkspaceIO(
       if (prev) clearTimeout(prev.timer)
       pending.set(projectId, { timer: setTimeout(() => void fire(), WRITE_THROTTLE_MS - since), run: fire })
       return true
+    },
+    async readSettings(projectId, ssh): Promise<RemoteReadResult> {
+      const ref = resolveRef(projectId)
+      if (!ref) return { status: 'error' }
+      return sshFs.readTextChecked(ref, remotePath(ssh, PROJECT_SETTINGS_FILE))
+    },
+    // Deliberately NOT throttled, and deliberately not sharing project.json's throttle bookkeeping:
+    // the 5 s window exists for canvas churn (a node dragged across the screen), while a settings
+    // save is a cold, user-initiated act. Delaying or reordering one behind a canvas write would
+    // make "Save" mean "maybe, in five seconds" — so this goes straight to the wire and reports the
+    // real outcome. The store's cache-first write already makes a false here non-fatal.
+    async writeSettings(projectId, ssh, content) {
+      const ref = resolveRef(projectId)
+      if (!ref) return false
+      try {
+        return await sshFs.writeText(ref, remotePath(ssh, PROJECT_SETTINGS_FILE), content)
+      } catch {
+        return false
+      }
     },
     async flush() {
       const flushed = [...pending.values()]

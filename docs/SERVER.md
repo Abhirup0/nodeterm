@@ -529,6 +529,27 @@ than a generic failure, see above), full **two-master flow-control coordination*
 a single actuator with the renderer), and the web folder picker's **hardcoded start
 directory**.
 
+### Managed Codex accounts (S6)
+
+The Server Edition **arms the Codex record-signing secret** but does **not** host the
+account-management IPC — that surface is desktop-driven over SSH.
+
+- **Arms the record secret (Decision 1).** At boot `armServerNodeIdentity`
+  (`src/server/node-identity-arm.ts`) loads the raw node-auth secret and calls
+  `setCodexThreadIdentityAuthSecret(...)` with it, so a managed Codex account's thread→node→account
+  ownership records can **sign and verify on a headless host**. Headless Linux has no OS keychain, so
+  the secret is 32 **raw bytes** at `node-auth-key.bin`, mode `0600` — the same both-shells channel the
+  desktop seals via `safeStorage`. This only makes the record layer *able to sign*; it is orthogonal to
+  the shared-app-server degrade (Codex nodes still launch bare here, exactly as before).
+- **Does NOT host the account-management verbs.** `initCodexAccounts` registers its IPC over Electron's
+  `ipcMain` with WebContents-owner authorization, which the headless bridge does not provide, so
+  `startServer` never calls it. This is **not** a silent gap: managed Codex logins **on an SSH host**
+  are driven by the **desktop** over SSH (the remote account-add / device-login / import legs + the
+  relay) — the host runs the relay + import, not its own copy of the account IPC.
+- **Fail-closed, both ways.** With no secret armed (unwritable key file), the record layer throws
+  rather than writing anything unsigned, and Codex nodes keep working bare. A machine with **no** managed
+  accounts is byte-for-byte the pre-S6 layout (a bare-root record per thread).
+
 ## Manual browser smoke checklist
 
 Run against a real browser (this is the human-verified path; the automated harness

@@ -98,6 +98,15 @@ describe('bridge stubs', () => {
       s.setBadgeCount(3)
       s.contextLink.setLinks({} as never)
       s.sendAgentControlResult({} as never)
+      // The shortcut recorder calls this on every arm AND on unmount; a throw here would leave
+      // Settings unusable in the browser, where there is no main-process intercept to suspend.
+      s.shortcuts.setRecording(true)
+      s.shortcuts.setRecording(false)
+      // The focus mirror fires on every click into and out of a terminal, so a throw here would
+      // break the browser canvas on the first keystroke — and the browser has no main-process
+      // intercept for it to suspend in the first place.
+      s.shortcuts.setTerminalFocused(true)
+      s.shortcuts.setTerminalFocused(false)
     }).not.toThrow()
   })
 })

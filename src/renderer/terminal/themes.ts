@@ -355,3 +355,17 @@ const BY_ID = new Map(TERMINAL_THEMES.map((t) => [t.id, t]))
 export function resolveTerminalTheme(id: string | undefined): TerminalTheme {
   return (id ? BY_ID.get(id) : undefined) ?? BY_ID.get(DEFAULT_TERMINAL_THEME_ID)!
 }
+
+/**
+ * Whether an id names a theme this build actually ships.
+ *
+ * `resolveTerminalTheme` is total, which is exactly right for the GLOBAL setting (there is nothing
+ * behind it to fall back to) and exactly wrong for a per-project OVERRIDE: a project naming a theme
+ * this build does not have must fall back to whatever the user's own global setting says, not to the
+ * app default — silently repainting someone's terminals to `nodeterm-dark` because a teammate's
+ * `.nodeterm/settings.json` mentions a theme from a newer version is a worse answer than ignoring
+ * the override. So an override asks this FIRST and only then resolves.
+ */
+export function isKnownTerminalThemeId(id: string | undefined): boolean {
+  return id !== undefined && BY_ID.has(id)
+}

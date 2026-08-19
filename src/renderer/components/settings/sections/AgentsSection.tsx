@@ -31,7 +31,7 @@ import {
   unsupportedModesNote
 } from '@shared/agents/approval-mode'
 import { AgentIcon } from '../../../lib/agentIcons'
-import { hintLabel } from '@shared/platform-utils'
+import { chipFor } from '../../../lib/keybindingOverrides'
 import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
@@ -274,11 +274,16 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
           .join(' ')
       : undefined
 
+  // Whatever "new agent node" is bound to; '' when unbound, and the sentence drops the chord.
+  const agentChip = chipFor('node.newAgent')
+
   return (
     <SettingsSection
       id="agents"
       title="Agents"
-      description={hintLabel('Enable or disable agents in the Add menus, and pick the default (⌘⇧C).')}
+      description={agentChip
+        ? `Enable or disable agents in the Add menus, and pick the default (${agentChip}).`
+        : 'Enable or disable agents in the Add menus, and pick the default.'}
       isActive={isActive}
       searchEntries={ENTRIES}
     >

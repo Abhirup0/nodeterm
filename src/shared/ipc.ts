@@ -41,6 +41,20 @@ export const IPC = {
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
+  // Machine-scoped managed Codex accounts (S6). Add/device-login/removal, plus the three-phase,
+  // owner-authorized account switch (resume the SAME conversation id, never fork) and the
+  // source-side leg of moving an idle conversation to an SSH account. See main/codex-accounts.ts.
+  codexAccountsAdd: 'codex-accounts:add',
+  codexAccountsWaitLogin: 'codex-accounts:wait-login',
+  codexAccountsCancelWait: 'codex-accounts:cancel-wait',
+  codexAccountsIdentity: 'codex-accounts:identity',
+  codexAccountsSystemIdentity: 'codex-accounts:system-identity',
+  codexAccountsRemove: 'codex-accounts:remove',
+  codexAccountsSwitchThread: 'codex-accounts:switch-thread',
+  codexAccountsCommitSwitch: 'codex-accounts:commit-switch',
+  codexAccountsFinishSwitch: 'codex-accounts:finish-switch',
+  codexAccountsRollbackSwitch: 'codex-accounts:rollback-switch',
+  codexAccountsTransferThreadToSsh: 'codex-accounts:transfer-thread-to-ssh',
   claudeCliCaps: 'claude-cli:caps',
   /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
   codexIdentityCaps: 'codex-identity:caps',
@@ -69,6 +83,21 @@ export const IPC = {
    *  Electron's default View menu binds that accelerator to `resetZoom`, which resets the WINDOW's
    *  page zoom rather than the canvas's. */
   appZoomActualSize: 'app:zoom-actual-size',
+  /** Renderer → main: the Settings shortcut recorder is armed (`true`) or disarmed (`false`).
+   *  While armed the main window's `before-input-event` intercepts above stand down entirely, so
+   *  the chord the user is recording — ⌘W and ⌘M among them — reaches the recorder instead of
+   *  closing their selected nodes. Fire-and-forget `send`; desktop-only (a browser tab has no
+   *  application menu to steal a chord back from, so the Server Edition stubs it). */
+  uiShortcutRecording: 'ui:shortcut-recording',
+  /** Renderer → main: an xterm does (`true`) / does not (`false`) currently hold keyboard focus.
+   *  A MIRROR, not a request: under the `terminal-first` shortcut policy the intercepts above must
+   *  stand down while the user is typing in a terminal, and `before-input-event` fires before any
+   *  renderer handler could tell main so — the answer has to already be there. Change-deduped by
+   *  the sender, fire-and-forget `send`, and read fail-safe: main starts at `false` and every way
+   *  the page can stop existing resets it there, so a stale mirror means intercepts ON (the
+   *  pre-policy app), never a window whose ⌘W has silently gone back to the application menu.
+   *  Desktop-only, for the same reason as the recording bit — the Server Edition stubs it. */
+  uiTerminalFocus: 'ui:terminal-focus',
   appCloseWindow: 'app:close-window',
   /** Main → renderer: the native application menu's "Settings…" item (⌘,) was clicked. The
    *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */
@@ -238,6 +267,51 @@ export const IPC = {
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
+  projectSettingsRead: 'project-settings:read',
+  projectSettingsWriteShared: 'project-settings:write-shared',
+  projectSettingsUpdateLocal: 'project-settings:update-local',
+  /** Resolved settings + per-family trust verdict for one project (`ProjectLaunchInfo`), the single
+   *  read a launcher warms before it may consume a shared-sourced value — answers `null` for an
+   *  unknown project id, same as projectSettingsRead. */
+  projectSettingsLaunchInfo: 'project-settings:launch-info',
+  /** main→renderer broadcast: `{projectId}` after ANY family approval changes for that project (a
+   *  consent dialog answered, a trust record revoked). Emitted by
+   *  `ProjectSetupService.ensureFamilyTrusted` on an approval — for EVERY project that asked, not
+   *  just the one that raised the prompt (two canvas nodes can share one location). */
+  projectTrustChanged: 'project-trust:changed',
+  /** Run a project's setup/archive script. Args: (projectId, kind, worktreePath?) — NO rootPath/
+   *  projectName/ssh: the handler derives those itself from its own workspace index by projectId,
+   *  never the caller (project-setup-handlers.ts). Answers a ProjectSetupRunResult — `started` only
+   *  means the run was admitted (gated + single-flight), not that it finished; progress arrives on
+   *  projectSetupEvent. */
+  projectSetupRun: 'project-setup:run',
+  projectSetupCancel: 'project-setup:cancel',
+  /** Ask for one project's `agents`/`shell` family to be trusted, prompting if it is not. Args:
+   *  `(projectId, family)` — nothing path-shaped: the handler derives the location from its own
+   *  workspace index, same as projectSetupRun. Answers `true` only when the family is trusted at
+   *  that location (nothing shared to gate, an existing grant, or a fresh approval); `false` covers
+   *  skip, expiry and every failure. HOST-ONLY (`shared/host-control.ts`): it raises the host's own
+   *  dialog. `setup` is deliberately NOT accepted here — that family is gated by the runner. */
+  projectSetupRequestTrust: 'project-setup:request-trust',
+  /** Renderer's answer to a projectSetupConsentRequest ('approve' | 'skip'). A stale/unknown
+   *  requestId is a silent no-op — an expired prompt can never be approved late. */
+  projectSetupConsentSubmit: 'project-setup:consent-submit',
+  /** main→renderer: raise the trust dialog (payload: ProjectConsentRequest — tagged by family, the
+   *  `setup` arm being the script-runner's own request). */
+  projectSetupConsentRequest: 'project-setup:consent-request',
+  /** main→renderer: close a prompt nobody answered (payload: { requestId }). */
+  projectSetupConsentDismiss: 'project-setup:consent-dismiss',
+  /** Per-project push carrying a ProjectSetupEvent (mirrors the boardLogChanged naming). */
+  projectSetupEvent: (projectId: string) => `project-setup:event:${projectId}`,
+  projectSetupSubscribe: 'project-setup:subscribe',
+  projectSetupUnsubscribe: 'project-setup:unsubscribe',
+  /** Renderer → core: symlink a project's `sharedPaths` from its repo root into a freshly-created
+   *  git worktree. Args carry ONLY `(projectId, worktreePath)` — NEVER the path list, which the
+   *  handler reads itself by projectId (the list is untrusted from a renderer). The handler
+   *  validates `worktreePath` is that project's rootPath or one of its actual git worktrees, and
+   *  refuses an SSH project (local-only this PR); an unknown/invalid input answers `[]`. Resolves
+   *  `SharedPathResult[]`. See core/worktree-shared-paths-handlers.ts. */
+  worktreeMaterializeShared: 'worktree:materialize-shared',
   // main → renderer events
   workspaceMigrated: 'workspace:migrated',
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */
