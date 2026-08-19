@@ -247,6 +247,61 @@ describe('project settings — ssh leg', () => {
     expect(idx.entries[0].settingsCache.setup.setupScript).toBe('kept')
   })
 
+  it('a write landing mid-read is not downgraded by the older doc that read was already fetching', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const store = new WorkspaceStore({
+      ...fakeIO,
+      readSettings: async () => {
+        await gate
+        return { status: 'ok' as const, content: JSON.stringify(
+          { version: 1, rev: 1, savedAt: 't', setup: { setupScript: 'remote-rev1' } }) }
+      }
+    })
+    await store.save(ws([sshProject()]))
+    await store.writeProjectSettings('ps1', { setup: { setupScript: 'v1' } }) // cache rev 1
+    const reading = store.readProjectSettings('ps1') // in flight, host still answering rev 1
+    await store.writeProjectSettings('ps1', { setup: { setupScript: 'v2' } }) // cache rev 2
+    release()
+    const s = await reading
+    expect(s?.shared?.setup?.setupScript).toBe('v2') // NOT the rev-1 doc the read was carrying
+    const idx = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(idx.entries[0].settingsCache.rev).toBe(2) // and no downgrade was persisted
+  })
+
+  it('refuses to write while the host file is conflict-marked, and resumes once it is resolved', async () => {
+    const writes: string[] = []
+    let remote = '<<<<<<< a\n{}\n=======\n{}\n>>>>>>> b\n'
+    const store = new WorkspaceStore({
+      ...fakeIO,
+      readSettings: async () => ({ status: 'ok' as const, content: remote }),
+      writeSettings: async (_id: string, _ssh: { remoteCwd: string }, content: string) => {
+        writes.push(content); return true
+      }
+    })
+    await store.save(ws([sshProject()]))
+    expect((await store.readProjectSettings('ps1'))?.conflict).toBe(true)
+    expect(await store.writeProjectSettings('ps1', { setup: { setupScript: 'nope' } })).toBe(false)
+    expect(writes).toEqual([]) // nothing was pushed over the merge
+    remote = JSON.stringify({ version: 1, rev: 3, savedAt: 't', setup: { setupScript: 'resolved' } })
+    expect((await store.readProjectSettings('ps1'))?.shared?.setup?.setupScript).toBe('resolved')
+    expect(await store.writeProjectSettings('ps1', { setup: { setupScript: 'after' } })).toBe(true)
+    expect(writes.join('|')).toContain('after')
+  })
+
+  it('an adopted remote doc is persisted to the index and served after a reload', async () => {
+    const store = new WorkspaceStore(fakeIO)
+    await store.save(ws([sshProject()]))
+    remoteFs.set('/srv/app/.nodeterm/settings.json', JSON.stringify(
+      { version: 1, rev: 4, savedAt: 't', setup: { setupScript: 'from-host' } }))
+    expect((await store.readProjectSettings('ps1'))?.shared?.setup?.setupScript).toBe('from-host')
+    const store2 = new WorkspaceStore({ ...fakeIO, readSettings: async () => ({ status: 'error' as const }) })
+    await store2.load()
+    const s = await store2.readProjectSettings('ps1')
+    expect(s?.shared?.setup?.setupScript).toBe('from-host')
+    expect(s?.shared?.rev).toBe(4)
+  })
+
   it('an ssh project with no remote IO at all still reads and writes its cache', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([sshProject()]))

@@ -158,6 +158,11 @@ export class WorkspaceStore {
   /** ssh project id -> last shared settings.json seen on that host (offline copy). Only entries that
    *  round-tripped through `parseProjectSettingsFile` are in here. */
   private settingsCacheByProject = new Map<string, ProjectSettingsFileV1>()
+  /** ssh project ids whose settings.json was git-conflict-marked on the last read, so a write must
+   *  refuse instead of picking a side of the merge (the local leg refuses the same way, straight off
+   *  the file). Cleared as soon as a read finds the file parsing again — or gone. Runtime-only: a
+   *  fresh run's first read re-establishes it before any write can be issued from the panel. */
+  private settingsConflictByProject = new Set<string>()
   /** project id -> the shared settings file as last read/written, i.e. the rev source for the NEXT
    *  write. Runtime-only: a write that has not read first starts at rev 1, which is the same thing
    *  a fresh file means. */
@@ -494,23 +499,36 @@ export class WorkspaceStore {
    *    teammate's push is adopted rather than fought over, while a STRICTLY newer cache (this
    *    machine edited while disconnected) is pushed back instead of being silently overwritten.
    *  - `conflict`/`invalid` → the remote copy cannot be trusted and must not be clobbered; the cache
-   *    is served as the last known good, with `conflict` flagged so a caller can say "resolve this".
+   *    is served as the last known good, with `conflict` flagged so a caller can say "resolve this"
+   *    (and, for a conflict, remembered so a WRITE refuses too — see `settingsConflictByProject`).
+   *
+   * The cache is read AFTER the round trip, never before: a cache-first write can land while this
+   * read is in flight, and comparing the host's answer against a snapshot taken before the await
+   * would adopt an older remote doc over an edit the user has already been told was saved.
    */
   private async readSshSettings(
     projectId: string,
     ssh: NonNullable<Project['ssh']>,
     local: ProjectLocalSettings | undefined
   ): Promise<ProjectSettingsState> {
-    const cached = this.settingsCacheByProject.get(projectId) ?? null
     const res = await this.remoteIO?.readSettings?.(projectId, ssh)
+    const cached = this.settingsCacheByProject.get(projectId) ?? null
     if (!res || res.status === 'error') return { shared: cached, local }
     if (res.status === 'absent') {
+      // The host has no file to be mid-merge: whatever conflict a previous read saw is gone.
+      this.settingsConflictByProject.delete(projectId)
       if (cached) await this.pushSshSettings(projectId, ssh, cached)
       return { shared: cached, local }
     }
     const parsed = parseProjectSettingsFile(res.content)
-    if (parsed.status === 'conflict') return { shared: cached, local, conflict: true }
+    if (parsed.status === 'conflict') {
+      this.settingsConflictByProject.add(projectId)
+      return { shared: cached, local, conflict: true }
+    }
+    // `invalid` deliberately leaves the flag alone: unparsable is not "resolved", and refusing to
+    // write is the conservative side of a file we still cannot read.
     if (parsed.status === 'invalid') return { shared: cached, local }
+    this.settingsConflictByProject.delete(projectId) // the host's file parses again — resolved
     const file = parsed.file
     if (cached && file.rev < cached.rev) {
       // Offline edits outrank the host's older copy — push them rather than letting the next read
@@ -554,12 +572,18 @@ export class WorkspaceStore {
    * The doc is sanitized on the way in because this cache is served straight from memory and
    * persisted into workspace.json; running it through the same sanitizer a read applies keeps one
    * definition of "a valid settings file" whichever side the bytes came from.
+   *
+   * REFUSES while the last read found the host's file git-conflict-marked, exactly like the local
+   * leg refuses a conflicted settings.json: a conflicted file is the user's to resolve, and pushing
+   * over it would silently pick a side of a merge nobody has looked at. The flag clears itself the
+   * moment a read finds the file parsing (or gone).
    */
   private async writeSshSettings(
     projectId: string,
     ssh: NonNullable<Project['ssh']>,
     doc: ProjectSettingsDoc
   ): Promise<boolean> {
+    if (this.settingsConflictByProject.has(projectId)) return false
     // `doc` spreads FIRST for the same reason writeProjectSettingsFile does it: a caller may hand
     // back a document it read, and its stale rev must not defeat monotonicity.
     const prev = this.settingsCacheByProject.get(projectId) ?? this.lastSharedSettings.get(projectId) ?? null
@@ -594,10 +618,13 @@ export class WorkspaceStore {
    *
    * An ssh project takes the cache-first remote leg instead (`writeSshSettings`).
    *
-   * False = there is nowhere to write it, or writing would destroy something: an unknown id, an
-   * inline canvas (no folder), a conflicted file (the user's to resolve — untouched), an unreadable
-   * one (a failed read is never evidence of absence, so it may not be clobbered either), or a write
-   * that failed.
+   * False = there is nowhere to write it, or writing would destroy something. On BOTH legs: an
+   * unknown id, an inline canvas (no folder), and a git-conflicted shared file — the user's to
+   * resolve, left untouched (the local leg sees it in the read-before-write, the ssh leg remembers
+   * it from the last read, since looking again would cost a round trip per keystroke). Local leg
+   * only: an unreadable file (a failed read is never evidence of absence, so it may not be
+   * clobbered either) or a failed write. SSH leg only: an index write that did not persist —
+   * a failed REMOTE write is not false there, because the cache already holds the edit.
    */
   async writeProjectSettings(projectId: string, doc: ProjectSettingsDoc): Promise<boolean> {
     const e = this.index?.entries.find((x) => x.id === projectId)
