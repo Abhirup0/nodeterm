@@ -39,6 +39,9 @@ export function registerProjectLaunchInfoHandlers(
       const info = workspaceStore.projectTargetInfo(projectId)
       const sharedDoc: ProjectSettingsDoc = snap.shared ?? {}
       const resolved = resolveProjectSettings(snap.local, snap.shared ?? undefined)
+      // A cwd-less inline canvas falls to `localTrustKey('')` — inert by construction: such a
+      // project has no shared document to have, so `sharedDoc` is always `{}` and every family's
+      // `projectTrustContent` already returns null before this key is ever consulted.
       const key = info?.ssh
         ? sshTrustKey({ server: info.ssh.server, remoteCwd: info.ssh.remoteCwd })
         : localTrustKey(info?.cwd ?? '')

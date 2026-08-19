@@ -10,12 +10,22 @@ import type { ProjectLaunchInfo } from '@shared/project-settings'
  * for its own memo.
  *
  * `cache`/`generation` are BOTH keyed by projectId so one project's invalidate never disturbs
- * another's warm entry. `generation` exists solely to keep an ABANDONED fetch from clobbering a
- * fresher one: `invalidateProjectLaunchInfo` bumps it and drops the in-flight entry so the next
- * `ensure` starts a real new request, but the OLD request (already in flight) is not cancelled —
- * only silenced. Its `.then` still runs and checks the generation before writing, so a slow answer
- * from before the invalidate can never overwrite what a later fetch (or the invalidate itself)
- * already settled on.
+ * another's warm entry. `generation` is claimed FRESH by every fetch this module actually issues
+ * (not merely bumped by `invalidate`): a write is honored only while its own claimed value is still
+ * the current one. This closes two distinct ways an abandoned fetch can otherwise clobber a fresher
+ * answer:
+ *  - `invalidateProjectLaunchInfo` bumps it directly and drops the in-flight entry, so an in-flight
+ *    fetch that predates the invalidate is superseded even if nothing ever re-`ensure`s.
+ *  - the ENSURE_WAIT_MS timeout (below) drops the in-flight entry WITHOUT touching the generation —
+ *    on its own, a fetch that never settles (a dropped Server Edition WS-RPC request neither times
+ *    out nor rejects — see permissionMode.ts's `CAPS_WAIT_MS` doc) would otherwise leave `inFlight`
+ *    pointing at an exhausted promise forever, so every later `ensure` for that project just
+ *    rejoins it and NO fresh wire call is ever made again. Dropping the entry lets the next `ensure`
+ *    issue a real new fetch, which claims its OWN generation — so if the original fetch finally
+ *    answers after that, its stale generation no longer matches and its write is silently dropped,
+ *    exactly like the invalidate case.
+ * Neither path cancels the abandoned fetch (there is nothing to cancel it with) — only its write is
+ * ever silenced, never the promise itself.
  */
 const cache = new Map<string, { info: ProjectLaunchInfo | null; fetchedAt: number }>()
 const inFlight = new Map<string, Promise<void>>()
@@ -29,6 +39,16 @@ function currentGeneration(projectId: string): number {
   return generation.get(projectId) ?? 0
 }
 
+/** Claims and returns a generation strictly newer than whatever the project is currently at —
+ *  called once per fetch actually issued (never on a joined in-flight call), so two fetches for the
+ *  same project always hold distinguishable values regardless of which one (invalidate, timeout, or
+ *  a plain re-ensure) triggered the reissue. */
+function claimGeneration(projectId: string): number {
+  const next = currentGeneration(projectId) + 1
+  generation.set(projectId, next)
+  return next
+}
+
 /** The last-known answer, synchronously — null when nothing has been fetched yet (or the project
  *  was never warmed, or the fetch itself found no shared executable content to gate at all: a
  *  caller reading null must treat it as "no override behavior", i.e. fail open, exactly like an
@@ -40,29 +60,45 @@ export function projectLaunchInfoNow(projectId: string): ProjectLaunchInfo | nul
 /**
  * Kick off (or join) the launch-info fetch for one project. Never rejects, and never takes longer
  * than `ENSURE_WAIT_MS` — on timeout the promise resolves with whatever is cached (possibly
- * nothing), and a late answer still lands in `cache` for the NEXT read. Memoized per project: a
- * second caller while one is already in flight joins the same promise rather than firing a second
- * request.
+ * nothing), and a late answer still lands in `cache` for the NEXT read PROVIDED nothing fresher
+ * has claimed the project's generation since (see the module doc). Memoized per project: a second
+ * caller while one is already in flight joins the same promise rather than firing a second request;
+ * once a fetch's own in-flight entry is cleared (settled, or timed out), the NEXT caller always
+ * issues a brand new wire call — a project is never left permanently cold by one dropped request.
  */
 export function ensureProjectLaunchInfo(projectId: string): Promise<void> {
   const existing = inFlight.get(projectId)
   if (existing) return existing
 
-  const gen = currentGeneration(projectId)
+  const gen = claimGeneration(projectId)
   const fetch = Promise.resolve()
     .then(() => window.nodeTerminal.projectSettings.launchInfo(projectId))
     .then((info) => {
-      // A bump since this fetch started means `invalidateProjectLaunchInfo` (and likely a fresher
-      // `ensure`) ran while we were in flight — never let a stale answer land over it.
+      // A newer claim since this fetch started means it was superseded (an invalidate, or this
+      // very fetch having already been abandoned by a timeout and reissued) — never let a stale
+      // answer land over whatever a fresher fetch already wrote.
       if (currentGeneration(projectId) === gen) cache.set(projectId, { info, fetchedAt: Date.now() })
     })
     .catch(() => {
       // Fail open: leave whatever is cached (possibly nothing) alone.
     })
-  const timeout = new Promise<void>((resolve) => setTimeout(resolve, ENSURE_WAIT_MS))
-  const bounded = Promise.race([fetch, timeout])
-  // Own in-flight entry cleared only by the request that owns it — an abandoned (invalidated)
-  // fetch's `finally` must not delete a NEWER fetch's entry out from under it.
+
+  // `bounded` is referenced inside the timeout callback before its own declaration below — safe
+  // because the callback only runs asynchronously, well after `bounded` is assigned.
+  let bounded!: Promise<void>
+  const timeout = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      // The wire call may simply never answer (see the module doc). Clear OUR OWN in-flight entry
+      // — guarded on identity, since a fetch that already finished (and cleared itself in the
+      // `finally` below) may have already been superseded by a newer `ensure` by the time this
+      // timer fires, and that newer entry must not be touched.
+      if (inFlight.get(projectId) === bounded) inFlight.delete(projectId)
+      resolve()
+    }, ENSURE_WAIT_MS)
+  })
+  bounded = Promise.race([fetch, timeout])
+  // Same identity guard as the timeout branch: a fetch that answers after ITS OWN timeout already
+  // cleared (and possibly a newer fetch is now in flight) must not delete that newer entry.
   fetch.finally(() => {
     if (inFlight.get(projectId) === bounded) inFlight.delete(projectId)
   })

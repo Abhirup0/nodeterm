@@ -94,6 +94,35 @@ describe('ensureProjectLaunchInfo', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(projectLaunchInfoNow('p1')).toEqual(INFO)
   })
+
+  // The wire call this project's first fetch is waiting on may NEVER answer at all — a dropped
+  // Server Edition WS-RPC request neither times out nor rejects (permissionMode.ts's
+  // `CAPS_WAIT_MS` doc). Without clearing the in-flight entry on timeout, every later `ensure`
+  // for this project would just rejoin that exhausted promise and no fresh wire call would ever
+  // be issued again.
+  it('a timed-out fetch is retried on the NEXT ensure, and its late answer cannot clobber the retry', async () => {
+    vi.useFakeTimers()
+    let resolveStale!: (v: ProjectLaunchInfo | null) => void
+    const staleInfo: ProjectLaunchInfo = { ...INFO, trusted: { agents: false, shell: true } }
+    const freshInfo: ProjectLaunchInfo = { ...INFO, trusted: { agents: true, shell: true } }
+    // Gated — never answers on its own until `resolveStale` is called.
+    const fn = mockLaunchInfo(() => new Promise((r) => (resolveStale = r)))
+
+    const first = ensureProjectLaunchInfo('p1')
+    await vi.advanceTimersByTimeAsync(3000)
+    await first // gave up waiting
+
+    fn.mockImplementation(() => Promise.resolve(freshInfo))
+    await ensureProjectLaunchInfo('p1') // must issue a SECOND wire call, not rejoin the first
+    expect(fn).toHaveBeenCalledTimes(2)
+    expect(projectLaunchInfoNow('p1')).toEqual(freshInfo)
+
+    // The abandoned first fetch finally answers — its write must be discarded, never overwrite
+    // the retry's fresher result (the generation guard).
+    resolveStale(staleInfo)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(projectLaunchInfoNow('p1')).toEqual(freshInfo)
+  })
 })
 
 describe('invalidateProjectLaunchInfo', () => {

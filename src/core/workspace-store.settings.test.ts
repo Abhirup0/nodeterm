@@ -406,6 +406,22 @@ describe('project-settings:launch-info', () => {
     expect(await fake.handlers['project-settings:launch-info']('nope')).toBeNull()
   })
 
+  it('reports trusted.agents true when the SHARED doc has no launchCmd/env, even with a local agents overlay', async () => {
+    const store = new WorkspaceStore()
+    const trust = new ProjectTrustStore()
+    registerProjectLaunchInfoHandlers(fake, store, trust)
+    await store.save(ws([project({ cwd: projRoot })]))
+    // A shared doc exists but never sets anything in the `agents` family — nothing executable to
+    // gate — while this machine's own local overlay picks a launchCmd of its own (never gated: a
+    // value the user typed locally is their own instruction, not hostile shared input).
+    await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } })
+    await store.updateLocalProjectSettings('p1', { agents: { launchCmd: 'npm run dev' } })
+
+    const info = (await fake.handlers['project-settings:launch-info']('p1')) as ProjectLaunchInfo
+    expect(info.resolved.agents.launchCmd).toEqual({ value: 'npm run dev', source: 'local' })
+    expect(info.trusted.agents).toBe(true)
+  })
+
   it('a shared change invalidates the OLD approval — trusted flips back to false', async () => {
     const store = new WorkspaceStore()
     const trust = new ProjectTrustStore()
