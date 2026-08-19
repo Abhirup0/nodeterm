@@ -354,7 +354,8 @@ const api: NodeTerminalApi = {
   shell: {
     reveal: (path: string) => ipcRenderer.send(IPC.shellReveal, path),
     openPath: (path: string) => ipcRenderer.send(IPC.shellOpenPath, path),
-    openExternal: (url: string) => ipcRenderer.send(IPC.shellOpenExternal, url)
+    openExternal: (url: string) => ipcRenderer.send(IPC.shellOpenExternal, url),
+    pickProjectIcon: () => ipcRenderer.invoke(IPC.shellPickProjectIcon)
   },
   fs: {
     list: (dirPath: string) => ipcRenderer.invoke(IPC.fsList, dirPath),

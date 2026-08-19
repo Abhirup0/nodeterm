@@ -1,4 +1,97 @@
 import type { ProjectIcon } from '@shared/project-icon'
+import {
+  Folder,
+  FolderGit,
+  Code,
+  Terminal,
+  Rocket,
+  Box,
+  Package,
+  Database,
+  Server,
+  Cloud,
+  Globe,
+  Star,
+  Heart,
+  Flag,
+  Bookmark,
+  Zap,
+  Flame,
+  Cpu,
+  Layers,
+  LayoutGrid,
+  Hash,
+  Braces,
+  Bug,
+  Wrench,
+  Hammer,
+  Beaker,
+  Palette,
+  Paintbrush,
+  Camera,
+  Image as ImageIcon,
+  Music,
+  Video,
+  Book,
+  FileText,
+  Shield,
+  Key,
+  Lock,
+  Users,
+  Bot,
+  Sparkles,
+  type LucideIcon
+} from 'lucide-react'
+
+/**
+ * The curated lucide map (Task 4's swap-in for the former placeholder). One named import per icon
+ * so the bundler tree-shakes the rest of lucide's ~1k glyphs out; keyed by the same kebab ids as
+ * `LUCIDE_ICON_IDS` (@shared/project-icon), which is the closed allowlist `sanitizeProjectIcon`
+ * enforces AND the picker grid. An `icon.name` that isn't a key here degrades to the fallback
+ * (belt-and-braces — a sanitized icon's name is always a key).
+ */
+const LUCIDE_ICONS: Record<string, LucideIcon> = {
+  folder: Folder,
+  'folder-git': FolderGit,
+  code: Code,
+  terminal: Terminal,
+  rocket: Rocket,
+  box: Box,
+  package: Package,
+  database: Database,
+  server: Server,
+  cloud: Cloud,
+  globe: Globe,
+  star: Star,
+  heart: Heart,
+  flag: Flag,
+  bookmark: Bookmark,
+  zap: Zap,
+  flame: Flame,
+  cpu: Cpu,
+  layers: Layers,
+  'layout-grid': LayoutGrid,
+  hash: Hash,
+  braces: Braces,
+  bug: Bug,
+  wrench: Wrench,
+  hammer: Hammer,
+  beaker: Beaker,
+  palette: Palette,
+  paintbrush: Paintbrush,
+  camera: Camera,
+  image: ImageIcon,
+  music: Music,
+  video: Video,
+  book: Book,
+  'file-text': FileText,
+  shield: Shield,
+  key: Key,
+  lock: Lock,
+  users: Users,
+  bot: Bot,
+  sparkles: Sparkles
+}
 
 export interface ProjectGlyphProps {
   /** The project's icon, when it has one. Absent → render the site's pre-icon fallback. */
@@ -23,32 +116,6 @@ export interface ProjectGlyphProps {
 }
 
 const DEFAULT_SIZE = 16
-
-/**
- * TODO(Task 4): lucide-react is not yet a dependency of this package — Task 4 adds it, plus the
- * real curated map (`Record<string, LucideIcon>` built from `LUCIDE_ICON_IDS`, one import per
- * icon so unused ones tree-shake out). Until then a lucide icon renders as this tinted, bordered
- * placeholder so the branch is exercised (by tests and by real data) without blocking Task 2 on
- * the new dependency. Task 4's swap-in point is exactly here: replace `LucidePlaceholder`'s body
- * (or the call site below) with `const Icon = LUCIDE_ICONS[icon.name]; <Icon color={color} .../>`
- * and delete this function — no other call site in this file needs to change.
- */
-function LucidePlaceholder({ color }: { color?: string }): JSX.Element {
-  return (
-    <svg viewBox="0 0 16 16" width="100%" height="100%" aria-hidden="true" data-testid="lucide-placeholder">
-      <rect
-        x="2.5"
-        y="2.5"
-        width="11"
-        height="11"
-        rx="3"
-        fill="none"
-        stroke={color || 'currentColor'}
-        strokeWidth="1.5"
-      />
-    </svg>
-  )
-}
 
 /**
  * A project's small badge, used wherever the UI shows one beside a project's name: its custom
@@ -86,15 +153,19 @@ export function ProjectGlyph({
   }
 
   if (icon?.type === 'lucide') {
-    return (
-      <span
-        className={className}
-        title={title}
-        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-      >
-        <LucidePlaceholder color={color} />
-      </span>
-    )
+    const Icon = LUCIDE_ICONS[icon.name]
+    if (Icon) {
+      return (
+        <span
+          className={className}
+          title={title}
+          style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+        >
+          <Icon color={color || 'currentColor'} width="100%" height="100%" aria-hidden="true" />
+        </span>
+      )
+    }
+    // Unknown name (never happens for a sanitized icon) → fall through to the fallback below.
   }
 
   if (icon?.type === 'image') {

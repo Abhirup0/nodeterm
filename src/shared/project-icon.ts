@@ -28,6 +28,13 @@ export const LUCIDE_ICON_IDS = [
   'lock', 'users', 'bot', 'sparkles'
 ] as const
 
+/**
+ * Result of the main-process "pick a project icon image" flow (`shell.pickProjectIcon`): a re-
+ * encoded PNG `data:` URL on success, an `error` message to surface, or `null` when the user
+ * cancelled the file dialog. Shared so main, preload and the renderer agree on the shape.
+ */
+export type ProjectIconPickResult = { dataUrl: string } | { error: string } | null
+
 /** MIME types an `image` icon's `data:` URL may declare. Closed set — no `image/svg+xml` (script
  *  execution risk on render), no video/other types. */
 const IMAGE_ICON_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const

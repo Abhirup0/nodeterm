@@ -32,20 +32,23 @@ describe('ProjectGlyph', () => {
     expect(host.textContent).toBe('🚀')
   })
 
-  it('renders a lucide icon as the Task-4 placeholder, tinted with color', async () => {
+  // Task 4 swapped the placeholder for the real curated lucide-react map. lucide renders an <svg>
+  // whose `stroke` is the `color` prop, so these two pin the same thing 1:1 (tinted / currentColor)
+  // against the real glyph instead of the former placeholder rect.
+  it('renders a lucide icon as a tinted lucide <svg>', async () => {
     await render(
       <ProjectGlyph icon={{ type: 'lucide', name: 'folder' }} color="#3355ff" name="Folder Project" />
     )
-    const svg = host.querySelector('[data-testid="lucide-placeholder"]')
+    const svg = host.querySelector('svg')
     expect(svg).not.toBeNull()
-    const rect = svg!.querySelector('rect')
-    expect(rect?.getAttribute('stroke')).toBe('#3355ff')
+    expect(svg?.getAttribute('stroke')).toBe('#3355ff')
+    expect(svg?.classList.contains('lucide-folder')).toBe(true)
   })
 
-  it('falls back to currentColor for the lucide placeholder when no color is given', async () => {
+  it('falls back to currentColor for the lucide glyph when no color is given', async () => {
     await render(<ProjectGlyph icon={{ type: 'lucide', name: 'folder' }} name="No Color" />)
-    const rect = host.querySelector('[data-testid="lucide-placeholder"] rect')
-    expect(rect?.getAttribute('stroke')).toBe('currentColor')
+    const svg = host.querySelector('svg')
+    expect(svg?.getAttribute('stroke')).toBe('currentColor')
   })
 
   it('renders an image icon as an <img> with the given src', async () => {

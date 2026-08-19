@@ -12,7 +12,7 @@ import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from '
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
-import type { ProjectIcon } from './project-icon'
+import type { ProjectIcon, ProjectIconPickResult } from './project-icon'
 import type {
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
@@ -871,6 +871,9 @@ export interface ShellApi {
   openPath(path: string): void
   /** Open an http(s) URL in the OS default browser. */
   openExternal(url: string): void
+  /** Open a file dialog for a project-icon image; main re-encodes the pick to a bounded PNG data
+   *  URL (or an error), or returns null when cancelled. See `pickProjectIcon` (main). */
+  pickProjectIcon(): Promise<ProjectIconPickResult>
 }
 
 export interface DirEntry {

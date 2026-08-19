@@ -336,6 +336,7 @@ export const IPC = {
   dialogSelectFile: 'dialog:select-file',
   shellReveal: 'shell:reveal',
   shellOpenPath: 'shell:open-path',
+  shellPickProjectIcon: 'shell:pick-project-icon',
   fsList: 'fs:list',
   fsRead: 'fs:read',
   fsReadBinary: 'fs:read-binary',
