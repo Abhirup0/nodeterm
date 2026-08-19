@@ -1,5 +1,9 @@
 import { create } from 'zustand'
-import type { ProjectSetupEvent, ProjectSetupKind } from '@shared/project-settings'
+import type {
+  ProjectSetupEvent,
+  ProjectSetupKind,
+  ProjectSetupRunResult
+} from '@shared/project-settings'
 
 /**
  * Renderer view of the setup/archive runs main is streaming (`ProjectSetupEvent` on
@@ -54,13 +58,29 @@ interface ProjectSetupState {
   projectRunKey: Record<string, string | undefined>
   /** groupId -> the runKey that worktree's launch claimed (Task 5). */
   groupRunKey: Record<string, string | undefined>
+  /**
+   * groupId -> how many setup launches for it are IN FLIGHT (requested, not yet acked). Runtime-only
+   * and never persisted — like the runs themselves, it is rebuilt from what this app instance did.
+   *
+   * A COUNTER, not a flag, because the launches can overlap: `projectSetup.run` resolves only after
+   * the consent dialog is answered, and the chip that re-runs a failed setup can be clicked twice
+   * inside that window. With a flag, the loser's `busy` ack would clear the marker while the
+   * winner's script is genuinely running, and the gate would open over a live checkout.
+   */
+  pendingByGroup: Record<string, number>
   /** Fold one event into `byRunKey`. Takes no lane: the lanes come from the attachments. */
   applyEvent(ev: ProjectSetupEvent): void
   /** Called by the initiator with the runKey main acknowledged. */
   attachProject(projectId: string, runKey: string): void
   attachGroup(groupId: string, runKey: string): void
+  /** Called immediately BEFORE a `projectSetup.run` for this group is invoked. */
+  markGroupPending(groupId: string): void
+  /** Called on EVERY ack path of that invoke — started, skipped (busy included), and rejection. */
+  clearGroupPending(groupId: string): void
   runForProject(projectId: string): SetupRunState | undefined
   runForGroup(groupId: string): SetupRunState | undefined
+  /** How many launches for this group are still un-acked. */
+  pendingForGroup(groupId: string): number
   /** Wire this project's event channel into `applyEvent`; returns the unsubscribe. The preload api
    *  ref-counts subscribe/unsubscribe per project (boardLog.onChanged's shape), so several callers
    *  may hold one at once. */
@@ -87,6 +107,34 @@ interface ProjectSetupState {
 export function setupGateDone(run: SetupRunState | undefined, pending: boolean): boolean {
   if (pending) return false
   return !run || run.state === 'done'
+}
+
+/**
+ * What a worktree setup launch's ACK obliges its caller to do, as a pure decision so the one case
+ * that is easy to get wrong is pinned by tests rather than by reading the call site.
+ *
+ * `hold` is about nodes this group armed while the launch was in flight:
+ *  - `wait`    — the run started and the project asked collaborators to wait. Keep holding.
+ *  - `release` — nothing is going to prepare this checkout (no script, the user declined, the
+ *                location is unavailable), or the project runs its script unblocked. Nodes armed
+ *                during the in-flight window must be let go, or they would hold for a `done` that
+ *                either is not coming or was never meant to gate them.
+ *  - `keep`    — `busy`: ANOTHER invocation of this same run is in flight or executing right now
+ *                (a double-clicked re-run chip, most likely). This ack knows nothing about that
+ *                run's outcome, and releasing on it would open the gate over a live script. The
+ *                owning invocation's own ack, and the run's events, decide.
+ */
+export interface SetupAckDecision {
+  /** Claim the group's lane with the acked runKey (only a `started` ack has one). */
+  attach: boolean
+  hold: 'wait' | 'release' | 'keep'
+}
+
+export function setupAckDecision(res: ProjectSetupRunResult): SetupAckDecision {
+  if (res.status === 'started') {
+    return { attach: true, hold: res.waitForSetup ? 'wait' : 'release' }
+  }
+  return { attach: false, hold: res.reason === 'busy' ? 'keep' : 'release' }
 }
 
 /** Appends `chunk` and keeps only the last `SETUP_TAIL_MAX` characters. */
@@ -134,6 +182,7 @@ export const useProjectSetup = create<ProjectSetupState>((set, get) => ({
   byRunKey: {},
   projectRunKey: {},
   groupRunKey: {},
+  pendingByGroup: {},
 
   applyEvent: (ev) => {
     const next = foldEvent(get().byRunKey[ev.runKey], ev)
@@ -146,6 +195,24 @@ export const useProjectSetup = create<ProjectSetupState>((set, get) => ({
 
   attachGroup: (groupId, runKey) =>
     set((s) => ({ groupRunKey: { ...s.groupRunKey, [groupId]: runKey } })),
+
+  markGroupPending: (groupId) =>
+    set((s) => ({
+      pendingByGroup: { ...s.pendingByGroup, [groupId]: (s.pendingByGroup[groupId] ?? 0) + 1 }
+    })),
+
+  clearGroupPending: (groupId) =>
+    set((s) => {
+      const next = (s.pendingByGroup[groupId] ?? 0) - 1
+      const pendingByGroup = { ...s.pendingByGroup }
+      // Drop the key at zero rather than keeping a 0 around: absent and zero must not be two
+      // different things to anything reading this map, and a stray extra clear cannot go negative.
+      if (next > 0) pendingByGroup[groupId] = next
+      else delete pendingByGroup[groupId]
+      return { pendingByGroup }
+    }),
+
+  pendingForGroup: (groupId) => get().pendingByGroup[groupId] ?? 0,
 
   runForProject: (projectId) => {
     const runKey = get().projectRunKey[projectId]

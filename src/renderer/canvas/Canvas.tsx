@@ -267,7 +267,7 @@ import {
   pastedFiles
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
-import { setupGateDone, useProjectSetup } from '../state/projectSetup'
+import { setupAckDecision, setupGateDone, useProjectSetup } from '../state/projectSetup'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -1312,27 +1312,20 @@ export function Canvas() {
     return sig
   })
   // ---- the setup gate an armed node waits on ----
-  // The two runtime-only facts the gate needs live up here (beside the launch effect that reads
-  // them); the runs themselves are launched from the worktree-lifecycle block far below.
+  // The runs are launched from the worktree-lifecycle block far below; the gate itself lives up
+  // here, beside the launch effect that reads it.
   //
-  // Runtime-only is deliberate for BOTH: after a restart neither a pending launch nor a
-  // wait-for-setup obligation survives, there is no run left to hear from, and `setupGateDone`'s
-  // "nothing on record and nothing pending" rule then releases a persisted arming rather than
-  // stranding it.
-  /** Groups whose setup launch has been REQUESTED but not yet acked. Marked BEFORE the invoke,
-   *  because `projectSetup.run` resolves only after the consent dialog is answered — the window is
-   *  as long as the user takes to read it, and nodes opened into the group meanwhile must wait. */
-  const setupPendingRef = useRef<Set<string>>(new Set())
+  // In-flight launches are counted in the STORE (`pendingByGroup`) rather than in a ref: the frame's
+  // chip reads the same fact to disable itself, and a per-group COUNTER is what makes two overlapping
+  // launches safe (see the store's note). It is runtime-only either way — after a restart neither a
+  // pending launch nor a wait-for-setup obligation survives, and `setupGateDone`'s "nothing on record
+  // and nothing pending" rule then releases a persisted arming rather than stranding it.
   /** Groups whose acked setup run said `waitForSetup` — the ones that arm what is opened into them. */
   const setupWaitGroupsRef = useRef<Set<string>>(new Set())
-  const setupDoneForGroup = useCallback(
-    (groupId: string): boolean =>
-      setupGateDone(
-        useProjectSetup.getState().runForGroup(groupId),
-        setupPendingRef.current.has(groupId)
-      ),
-    []
-  )
+  const setupDoneForGroup = useCallback((groupId: string): boolean => {
+    const s = useProjectSetup.getState()
+    return setupGateDone(s.runForGroup(groupId), s.pendingForGroup(groupId) > 0)
+  }, [])
   // A signature over the setup-run state of every group an armed node is waiting on, so a run going
   // `done` re-runs the launch effect — the same trick as `armedDepSig`. Subscribing to the whole
   // store would re-render the canvas on every output chunk of every script.
@@ -1342,7 +1335,10 @@ export function Canvas() {
       const g = n.data.pendingLaunch?.awaitSetupGroup
       if (!g) continue
       const runKey = s.groupRunKey[g]
-      sig += `${n.id}:${g}=${runKey === undefined ? '-' : (s.byRunKey[runKey]?.state ?? '')}|`
+      // The pending count is part of the signature: an ack that leaves no other trace (a `busy`
+      // one) still changes whether the gate is closed, and the effect has to be told.
+      sig += `${n.id}:${g}=${runKey === undefined ? '-' : (s.byRunKey[runKey]?.state ?? '')}`
+      sig += `+${s.pendingByGroup[g] ?? 0}|`
     }
     return sig
   })
@@ -3997,32 +3993,35 @@ export function Canvas() {
       const projectId = useProjects.getState().activeProjectId
       if (!projectId) return
       ensureSetupSubscription(projectId)
-      // Pending BEFORE the invoke, and cleared on every exit below. `run` resolves only once the
+      // Pending BEFORE the invoke, and cleared on every ack path below. `run` resolves only once the
       // consent dialog has been answered, so this window is human-length, not a round-trip: an
       // agent that gets its `open-worktree` reply and immediately opens nodes into the group lands
       // inside it, and those nodes must wait rather than launch into an unprepared checkout.
-      setupPendingRef.current.add(groupId)
+      const store = useProjectSetup.getState()
+      store.markGroupPending(groupId)
       void setupApi()
         .run(projectId, 'setup', worktreePath)
         .then((res) => {
-          setupPendingRef.current.delete(groupId)
-          if (res.status === 'started') useProjectSetup.getState().attachGroup(groupId, res.runKey)
-          // Only `waitForSetup` holds launches. Without it the script runs alongside whatever the
-          // user opens — the default, and the honest reading of a project that never asked its
-          // collaborators to wait.
-          if (res.status === 'started' && res.waitForSetup) {
+          store.clearGroupPending(groupId)
+          const decision = setupAckDecision(res)
+          if (decision.attach && res.status === 'started') store.attachGroup(groupId, res.runKey)
+          if (decision.hold === 'keep') return // `busy` — another launch owns this run; touch nothing.
+          if (decision.hold === 'wait') {
             setupWaitGroupsRef.current.add(groupId)
             return
           }
           setupWaitGroupsRef.current.delete(groupId)
-          // Nothing to wait for after all (no script, declined, or a script this project runs
-          // unblocked) — so release whatever the pending window armed. Without this a node from
-          // that window would hold on a run whose completion the gate only accepts as `done`, and
-          // a run that FAILS never gets there.
+          // Nothing is going to prepare this checkout, or the project runs its script unblocked —
+          // so release whatever the in-flight window armed. Without this such a node would hold for
+          // a `done` that either is not coming or was never meant to gate it.
           releaseSetupArming(groupId)
         })
         .catch(() => {
-          setupPendingRef.current.delete(groupId)
+          store.clearGroupPending(groupId)
+          // A rejected invoke says nothing about a launch that may be running for this group from
+          // another click — give up the hold only when nobody else is still working on it.
+          const s = useProjectSetup.getState()
+          if (s.pendingForGroup(groupId) > 0 || s.runForGroup(groupId)?.state === 'running') return
           setupWaitGroupsRef.current.delete(groupId)
           releaseSetupArming(groupId)
         })
@@ -6981,7 +6980,8 @@ export function Canvas() {
         // releases these again) or while its acked run said `waitForSetup` and has not finished.
         const holdsForSetup =
           !!intoGroup &&
-          (setupPendingRef.current.has(intoGroup) || setupWaitGroupsRef.current.has(intoGroup)) &&
+          (useProjectSetup.getState().pendingForGroup(intoGroup) > 0 ||
+            setupWaitGroupsRef.current.has(intoGroup)) &&
           !setupDoneForGroup(intoGroup)
         const awaitSetupGroup = holdsForSetup ? intoGroup ?? undefined : undefined
         if (!after.length && !awaitSetupGroup) return node

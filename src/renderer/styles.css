@@ -5469,8 +5469,14 @@ button.group-node__setup {
   cursor: pointer;
 }
 
-button.group-node__setup:hover {
+button.group-node__setup:hover:not(:disabled) {
   background: var(--panel-header);
+}
+
+/* A launch is already in flight (or running) — the click would only earn a `busy` refusal. */
+button.group-node__setup:disabled {
+  cursor: default;
+  opacity: 0.75;
 }
 
 .group-node__wt-btn {

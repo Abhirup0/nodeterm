@@ -15,7 +15,13 @@
 // resolve through those attachments.
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { ProjectSetupEvent } from '@shared/project-settings'
-import { SETUP_TAIL_MAX, setupGateDone, useProjectSetup, type SetupRunState } from './projectSetup'
+import {
+  SETUP_TAIL_MAX,
+  setupAckDecision,
+  setupGateDone,
+  useProjectSetup,
+  type SetupRunState
+} from './projectSetup'
 
 const ev = (over: Partial<ProjectSetupEvent> = {}): ProjectSetupEvent => ({
   runKey: 'rk',
@@ -33,7 +39,7 @@ const runForProject = (projectId: string): ReturnType<typeof useProjectSetup.get
   useProjectSetup.getState().runForProject(projectId)
 
 beforeEach(() => {
-  useProjectSetup.setState({ byRunKey: {}, projectRunKey: {}, groupRunKey: {} })
+  useProjectSetup.setState({ byRunKey: {}, projectRunKey: {}, groupRunKey: {}, pendingByGroup: {} })
 })
 
 describe('useProjectSetup — folding the event stream', () => {
@@ -222,6 +228,77 @@ describe('setupGateDone — may a node armed on this worktree run yet?', () => {
 
   it('pending wins over a stale record of the PREVIOUS run', () => {
     expect(setupGateDone(run('done'), true)).toBe(false)
+  })
+})
+
+describe('setupAckDecision — what a launch ack obliges the caller to do', () => {
+  it('a started run that asks collaborators to wait KEEPS the hold, and claims the lane', () => {
+    expect(
+      setupAckDecision({ status: 'started', runKey: 'rk', runId: 'r1', waitForSetup: true })
+    ).toEqual({ attach: true, hold: 'wait' })
+  })
+
+  it('a started run that does NOT ask them to wait releases it (still claiming the lane)', () => {
+    expect(
+      setupAckDecision({ status: 'started', runKey: 'rk', runId: 'r1', waitForSetup: false })
+    ).toEqual({ attach: true, hold: 'release' })
+  })
+
+  it('nothing will prepare this checkout → release', () => {
+    for (const reason of ['no-script', 'declined', 'unanswered', 'unavailable'] as const) {
+      expect(setupAckDecision({ status: 'skipped', reason })).toEqual({
+        attach: false,
+        hold: 'release'
+      })
+    }
+  })
+
+  it('BUSY keeps the hold — this ack knows nothing about the run that is actually going', () => {
+    // The double-clicked re-run chip: the loser gets `busy` while the winner's script runs. Reading
+    // that as "nothing is happening" would open the gate over a live checkout.
+    expect(setupAckDecision({ status: 'skipped', reason: 'busy' })).toEqual({
+      attach: false,
+      hold: 'keep'
+    })
+  })
+})
+
+describe('useProjectSetup — in-flight launches per group', () => {
+  const pending = (groupId: string): number => useProjectSetup.getState().pendingForGroup(groupId)
+
+  it('DOUBLE DISPATCH: a busy ack decrements one launch and leaves the gate closed', () => {
+    const s = (): ReturnType<typeof useProjectSetup.getState> => useProjectSetup.getState()
+    // Two clicks on the re-run chip inside the consent window: two launches in flight.
+    s().markGroupPending('g1')
+    s().markGroupPending('g1')
+    expect(pending('g1')).toBe(2)
+    // The loser comes back `busy` (its caller clears exactly one).
+    s().clearGroupPending('g1')
+    expect(pending('g1')).toBe(1)
+    expect(setupGateDone(s().runForGroup('g1'), pending('g1') > 0)).toBe(false)
+    // The winner's ack lands: its run is attached and live — still closed, now on the run itself.
+    s().clearGroupPending('g1')
+    s().attachGroup('g1', 'rk')
+    apply(ev({ seq: 1, state: 'running' }))
+    expect(pending('g1')).toBe(0)
+    expect(setupGateDone(s().runForGroup('g1'), pending('g1') > 0)).toBe(false)
+    // …and only its `done` opens it.
+    apply(ev({ seq: 2, state: 'done', exitCode: 0 }))
+    expect(setupGateDone(s().runForGroup('g1'), pending('g1') > 0)).toBe(true)
+  })
+
+  it('never goes negative, and an exhausted group leaves no entry behind', () => {
+    useProjectSetup.getState().markGroupPending('g1')
+    useProjectSetup.getState().clearGroupPending('g1')
+    useProjectSetup.getState().clearGroupPending('g1')
+    expect(pending('g1')).toBe(0)
+    expect(useProjectSetup.getState().pendingByGroup.g1).toBeUndefined()
+  })
+
+  it('counts per group — one worktree’s launch never gates another’s', () => {
+    useProjectSetup.getState().markGroupPending('g1')
+    expect(pending('g1')).toBe(1)
+    expect(pending('g2')).toBe(0)
   })
 })
 

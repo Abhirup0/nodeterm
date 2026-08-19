@@ -46,6 +46,12 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
     const runKey = s.groupRunKey[id]
     return runKey === undefined ? undefined : s.byRunKey[runKey]
   })
+  // A launch for this group is already on its way (requested, not yet acked — which includes the
+  // whole time a consent dialog is up). The re-run chip must not fire a second one: the service
+  // would answer `busy`, and the store's counter exists precisely because that ack must not be
+  // mistaken for "nothing is happening".
+  const setupPending = useProjectSetup((s) => (s.pendingByGroup[id] ?? 0) > 0)
+  const setupBusy = setupPending || setupRun?.state === 'running'
 
   // On an SSH project the poll is OFF, not merely useless: `git status <path>` would be answered by
   // the LOCAL filesystem for a project whose checkout lives on the host (remote git routing is
@@ -233,16 +239,19 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
               // group's lane, and a `done` from the new run releases them.
               (setupRun.kind === 'setup' && setupRun.state === 'failed' ? (
                 <button
-                  className="group-node__setup group-node__setup--failed nodrag"
+                  className={`group-node__setup group-node__setup--${setupBusy ? 'running' : 'failed'} nodrag`}
+                  disabled={setupBusy}
                   title={
-                    `Setup script failed${setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`}.` +
-                    '\nNodes opened into this worktree may still be holding their launch.' +
-                    '\nClick to run it again — a successful run releases them.' +
-                    '\n(Its output is in Project settings → Setup.)'
+                    setupBusy
+                      ? 'Setup script is starting…'
+                      : `Setup script failed${setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`}.` +
+                        '\nNodes opened into this worktree may still be holding their launch.' +
+                        '\nClick to run it again — a successful run releases them.' +
+                        '\n(Its output is in Project settings → Setup.)'
                   }
                   onClick={() => worktreeActionHandler?.(id, 'rerun-setup')}
                 >
-                  setup ✕ ↻
+                  {setupBusy ? 'setup …' : 'setup ✕ ↻'}
                 </button>
               ) : (
                 <span
