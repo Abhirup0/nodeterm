@@ -90,6 +90,7 @@ import {
 import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
 import {
   installKeydownIntercepts,
+  navigationClearsRecording,
   resolveInterceptBindings,
   type KeydownInterceptBindings
 } from './keydown-intercept'
@@ -297,9 +298,12 @@ settingsStore.onChange((s) => {
 // reaches the page, so the recorder's own preventDefault cannot save it.
 // A module-level `let` read through a closure, exactly like `interceptBindings` above: the window
 // is created later and can be recreated (macOS dock reopen), so nothing may capture a value.
-// FAIL-SAFE DIRECTION: every uncertainty resolves to `false` (intercepts on). A renderer that
-// crashes or a window that closes while armed clears it — see `createWindow` — because the
-// alternative is ⌘W/⌘M/⌘0 dead app-wide with no component left alive to release the bit.
+// FAIL-SAFE DIRECTION: every uncertainty resolves to `false` (intercepts on). The alternative is
+// ⌘W/⌘M/⌘0 dead app-wide with no component left alive to release the bit, so EVERY way the page
+// that armed it can stop existing owes a clear — `createWindow` wires three (window `closed`,
+// `render-process-gone`, and a main-frame navigation, i.e. ⌘R). That is three known paths, not a
+// proof of exhaustiveness: a fourth would show up as "⌘W stopped working after I did X", so add
+// its reset beside the others rather than assuming this list is closed.
 let shortcutRecording = false
 const clearShortcutRecording = (): void => {
   shortcutRecording = false
@@ -707,6 +711,16 @@ function createWindow(): BrowserWindow {
   // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test. The first two
   // are the user's effective `node.toggleMarkdown` / `node.close` bindings (⌘0 is not remappable).
   installKeydownIntercepts(win, currentInterceptBindings, interceptIsMac, () => shortcutRecording)
+
+  // The THIRD way the page that armed a recorder can go away: a reload. The View menu above
+  // restores `{role:'reload'}` / `{role:'forceReload'}`, and ⌘R/⌘⇧R are accelerators — handled
+  // above the page, so the recorder cannot preventDefault its way out of one, and a same-process
+  // reload fires neither `closed` nor `render-process-gone`. `navigationClearsRecording` is the
+  // (tested) filter: a same-document navigation is the SAME page with the recorder still armed,
+  // and a subframe is not this page at all.
+  win.webContents.on('did-start-navigation', (details) => {
+    if (navigationClearsRecording(details)) clearShortcutRecording()
+  })
 
   // Open external links in the system browser — only safe schemes (no file://, no custom
   // protocol handlers). Reachable from remotely-fetched announcement URLs and rendered

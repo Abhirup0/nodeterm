@@ -594,8 +594,10 @@ const api: NodeTerminalApi = {
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.
   shortcuts: {
-    // Fire-and-forget: nothing waits on the answer, and a dropped disarm is covered by main's own
-    // window/renderer-death resets (index.ts `clearShortcutRecording`).
+    // Fire-and-forget: nothing waits on the answer. Main clears the bit itself on the three ways
+    // this page can stop existing — window closed, renderer died, main-frame navigation (⌘R) —
+    // but those are a backstop for a page that VANISHED, not a general safety net: an ordinary
+    // disarm that never sends leaves the shortcuts suppressed until one of them happens.
     setRecording: (active: boolean) => ipcRenderer.send(IPC.uiShortcutRecording, active)
   },
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),

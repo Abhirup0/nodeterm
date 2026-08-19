@@ -4,6 +4,7 @@ import { MAIN_INTERCEPTED_COMMAND_IDS } from '../shared/keybindings'
 import {
   installKeydownIntercepts,
   keydownIntercept,
+  navigationClearsRecording,
   resolveInterceptBindings,
   type KeydownInterceptBindings,
   type KeydownInterceptInput,
@@ -357,6 +358,39 @@ describe('an armed shortcut recorder suspends every interception', () => {
     seam.fire({ meta: true, key: 'w', code: 'KeyW' })
     expect(seam.sent).toEqual([IPC.appCloseNode])
     expect(seam.prevented).toEqual(['KeyW'])
+  })
+
+  // THE HOLE REVIEW FOUND. The app's own View menu restores `{role:'reload'}` /
+  // `{role:'forceReload'}`, and ⌘R/⌘⇧R are ACCELERATORS — they fire above the page, so the
+  // recorder's preventDefault cannot stop them. A same-process reload fires no React unmount, no
+  // window `closed` and no `render-process-gone`, so every release path this feature had missed
+  // it and the bit stayed true forever: ⌘W/⌘M/⌘0 dead app-wide with nothing left to clear them.
+  // This mirrors index.ts's wiring exactly — the listener runs the same predicate.
+  it('a reload while armed restores interception; an in-page navigation does not', () => {
+    let recording = true
+    const seam = install(() => DEFAULTS, true, () => recording)
+    const onNavigation = (d: { isMainFrame: boolean; isSameDocument: boolean }): void => {
+      if (navigationClearsRecording(d)) recording = false
+    }
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([])
+    // pushState / a fragment jump is not a page change: the recorder is still mounted and armed,
+    // so disarming here would suppress the recorder instead of the intercept.
+    onNavigation({ isMainFrame: true, isSameDocument: true })
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([])
+    onNavigation({ isMainFrame: true, isSameDocument: false }) // ⌘R
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([IPC.appCloseNode])
+  })
+
+  it('only a real main-frame document navigation clears the bit', () => {
+    expect(navigationClearsRecording({ isMainFrame: true, isSameDocument: false })).toBe(true)
+    expect(navigationClearsRecording({ isMainFrame: true, isSameDocument: true })).toBe(false)
+    // A subframe navigating is not this page going away — an iframe/ad reloading itself must not
+    // silently re-arm the app's shortcuts under a recorder that is still listening.
+    expect(navigationClearsRecording({ isMainFrame: false, isSameDocument: false })).toBe(false)
+    expect(navigationClearsRecording({ isMainFrame: false, isSameDocument: true })).toBe(false)
   })
 
   it('is read per event, not captured at install time', () => {
