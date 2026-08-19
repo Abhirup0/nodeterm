@@ -59,6 +59,7 @@ import {
   type SessionLife
 } from '../terminal/terminal-config'
 import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
+import { ensureProjectLaunchInfo } from '../state/projectLaunchInfo'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { quantizeCharSize } from '../terminal/char-size-quantize'
 import {
@@ -194,6 +195,48 @@ export const SSH_REMOTE_WAIT_MS = 20000
 export function sshConnectionScope(conn: SshConnection): string {
   const { activeProjectId, getProject } = useProjects.getState()
   return sshConnectionIdForProject(activeProjectId, conn, getProject(activeProjectId)?.ssh?.server)
+}
+
+/**
+ * The project whose per-project settings apply to a node in THIS canvas — for the launch-command
+ * layer (`agentLaunchOverride`) on relaunch, restart and wake.
+ *
+ * The active project, deliberately, and NOT `sshConnectionScope`'s answer: that scope is a
+ * CONNECTION identity, which for a remote node attached to a foreign host is a synthetic
+ * project×host attachment id (`sshAttachmentId`) rather than a project id at all — passing it here
+ * would silently resolve to "no project settings" for exactly those nodes. A node only ever exists
+ * in the active project's React Flow (same reasoning `sshConnectionScope` states), so the active
+ * project is its owner; an SSH project's own nodes answer the same id either way.
+ */
+export function owningProjectId(): string {
+  return useProjects.getState().activeProjectId
+}
+
+/**
+ * The owning project id, with its launch-info snapshot WARM — for the three already-async relaunch
+ * paths below (cold restore, in-place restart, hibernation wake).
+ *
+ * `agentLaunchOverride` reads `projectLaunchInfoNow` SYNCHRONOUSLY and fails open to the global
+ * layer when the project is still cold. That is right for a fresh launch (it must never block), but
+ * on COLD RESTORE it silently dropped the project's wrapper at the one moment it matters most: the
+ * relaunch fires from a node's mount, racing the very first `ensureProjectLaunchInfo` of the
+ * session, so a whole canvas could come back through the bare CLI — no env, no account setup —
+ * with nothing to show for it. These paths are already asynchronous (they await the permission-mode
+ * probe), so one bounded warm-up costs them nothing they were not already paying.
+ *
+ * Bounded and never-rejecting BY CONSTRUCTION (see `ensureProjectLaunchInfo`: it resolves on its own
+ * ENSURE_WAIT_MS timeout and swallows every error), so this cannot hang or break a relaunch — a
+ * project that stays cold resolves exactly as it did before.
+ *
+ * The id is read ONCE, before the await, and returned — so the snapshot that was warmed and the
+ * project the override is resolved for are the same one even if the active project changes while
+ * the round trip is in flight. Deliberately NOT applied to the synchronous fresh-launch factory
+ * (`createAgentNode`), which has no await to hide this behind.
+ */
+async function warmOwningProjectId(): Promise<string> {
+  const projectId = owningProjectId()
+  await ensureProjectLaunchInfo(projectId)
+  return projectId
 }
 
 /** The live ControlMaster path a remote node would run over, if any. Lets the caller tell "we will
@@ -970,7 +1013,9 @@ export function TerminalNode({
   // field it actually uses changes — not on every unrelated settings edit.
   const panHoverDelay = useSettings((s) => s.settings.panHoverDelay)
   // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
-  const visual = useXtermVisualSettings()
+  // Scoped to the OWNING project so its `terminal.theme` / `terminal.fontFamily` layer over the
+  // global settings for this node, and for no other project's nodes.
+  const visual = useXtermVisualSettings(owningProjectId())
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move
@@ -1395,9 +1440,14 @@ export function TerminalNode({
   // it is armed, and by WHAT it is blocked — dep titles read straight off the live canvas, since
   // "waits for term-17" tells the user nothing.
   const pendingLaunch = data.pendingLaunch as PendingLaunch | undefined
-  const pendingWaitingOn = (pendingLaunch?.after ?? [])
-    .map((depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId)
-    .join(', ')
+  const pendingWaitingOn = [
+    ...(pendingLaunch?.after ?? []).map(
+      (depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId
+    ),
+    // The other thing a launch can be held on: this worktree's project setup script. Named, or the
+    // tooltip on a setup-only hold would read "Waiting for  to finish".
+    ...(pendingLaunch?.awaitSetupGroup ? ['the project setup script'] : [])
+  ].join(', ')
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
   const useChat = mdMode && showChat && !!status?.sessionId
@@ -2878,6 +2928,11 @@ export function TerminalNode({
           // re-claims its own thread instead of joining as an anonymous client. `data.ssh` /
           // `data.sshRemoteTmux` keep a remote node on the bare command (no launcher on the host).
           const mode = await ensureActivePermissionMode(agentId)
+          // …and the project's launch-info snapshot, for the same reason and with the same shape:
+          // this runs at MOUNT, so on a cold boot it is racing the session's very first fetch, and
+          // the synchronous `agentLaunchOverride` read below would answer "no project settings" for
+          // a whole canvas of restoring nodes. Bounded and never-rejecting (see the helper).
+          const ownerProjectId = await warmOwningProjectId()
           const shared = codexSharedIdentity(data.ssh || data.sshRemoteTmux)
           const customAgent = agentConfig(agentId)
             ? undefined
@@ -2890,9 +2945,11 @@ export function TerminalNode({
               permissionMode: mode,
               model: data.agentModel,
               sharedIdentity: shared,
-              // The user's launch-command override rides the relaunch too, so a wrapper user's node
-              // comes back through its wrapper after a reboot — the moment env/account setup matters.
-              launchCmdOverride: agentLaunchOverride(agentId)
+              // The launch-command override rides the relaunch too, so a wrapper user's node comes
+              // back through its wrapper after a reboot — the moment env/account setup matters.
+              // Scoped to the OWNING project (`warmOwningProjectId`) so a project-level wrapper does
+              // not vanish on cold restore, which is exactly where it is most needed.
+              launchCmdOverride: agentLaunchOverride(agentId, ownerProjectId)
             },
             // The boot-time desktop env snapshot — the same object fresh launch and the Settings
             // preview expand against, so a ${env:…}-referencing custom agent cold-restores with
@@ -3044,6 +3101,10 @@ export function TerminalNode({
         const launchEnv = customTarget
           ? await api.agent.envSnapshot().catch(() => ({}))
           : {}
+        // Warm the owning project before the SYNCHRONOUS override read below — a restart can be the
+        // first thing a user does after a boot, and a cold snapshot would silently relaunch through
+        // the bare CLI. Bounded and never-rejecting (see `warmOwningProjectId`).
+        const ownerProjectId = await warmOwningProjectId()
         const { command, missingEnv } = assembleResumeCommand(
           {
             agentId: target,
@@ -3051,9 +3112,10 @@ export function TerminalNode({
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(target),
             model: selectedModel ?? undefined,
-            // The per-builtin launch-command override rides the restart too (undefined for a custom
-            // target, which already owns its launchCmd) — it is a property of how the agent launches.
-            launchCmdOverride: agentLaunchOverride(target)
+            // The launch-command override rides the restart too (the global layer is undefined for
+            // a custom target, which already owns its launchCmd) — it is a property of how the
+            // agent launches, so the owning project's own value applies here as well.
+            launchCmdOverride: agentLaunchOverride(target, ownerProjectId)
           },
           launchEnv
         )
@@ -3162,6 +3224,9 @@ export function TerminalNode({
         const customAgent = agentConfig(agentId)
           ? undefined
           : useSettings.getState().settings.customAgents.find((c) => c.id === agentId)
+        // Same warm-up as the cold-restore and restart paths: the override read inside the builder
+        // is synchronous, and a wake can be the first launch after a boot. Bounded, never rejects.
+        const ownerProjectId = await warmOwningProjectId()
         const { command } = assembleResumeCommand(
           {
             agentId,
@@ -3169,9 +3234,9 @@ export function TerminalNode({
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(agentId),
             sharedIdentity: false,
-            // The USER's launch-command override lives on their own PATH (or is an absolute path),
-            // not in a generated launcher dir, so it rides the wake too.
-            launchCmdOverride: agentLaunchOverride(agentId)
+            // The launch-command override lives on the user's own PATH (or is an absolute path),
+            // not in a generated launcher dir, so it rides the wake too — project layer included.
+            launchCmdOverride: agentLaunchOverride(agentId, ownerProjectId)
           },
           // Same boot-time env snapshot as fresh launch / cold restore, so a wake types the same
           // line the node launched with (empty on browser/relay by design).

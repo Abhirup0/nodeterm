@@ -408,6 +408,40 @@ and the other node reads it. The materialiser refuses tokens for the **whole col
 sweeps anything an earlier pass wrote for them; those nodes fall back to `legacy`, the designed
 fail-open state.
 
+## Account scoping (S6): the same secret signs Codex account-scoped records
+
+The restart-stable node-auth secret above does a second job: it signs the Codex thread→node→**account**
+ownership records (`src/core/codex-identity-proxy.ts`). S6 gives a machine the system Codex login
+(`~/.codex`) alongside managed logins, and a record now binds the full 4-tuple
+`(threadId, accountScope, nodeId, hookEndpoint)` so one account can never be made to speak for
+another's threads. The full model is [Shared Codex node identity](shared-codex-node-identity.md); the
+parts that touch this secret and the invariants here:
+
+- **The codex identity secret is armed on both shells.** Desktop and Server Edition both call
+  `setCodexThreadIdentityAuthSecret(loadOrCreateNodeAuthSecret())` at boot — the desktop in
+  `src/main/index.ts`, the Server Edition in `src/server/node-identity-arm.ts` — so **managed records
+  sign on a headless host too** (raw `0600` `node-auth-key.bin`, no keychain). This is the both-shells
+  half of Decision 1; a keychain-only secret would regress Server Edition. With **no** secret armed, a
+  record write **throws** rather than writing an unsigned record (fail-closed) — nothing is minted.
+- **The switch is owner-authorized, main-side.** Moving a running node's conversation to another
+  account is a three-phase, TTL-bounded protocol keyed off `event.sender.id` — only the WebContents
+  that reserved the switch may commit or finish it. It resumes the **same conversation id** (an atomic
+  hardlink of the rollout inode), never a fork. The phone **never originates** an add/switch/copy.
+- **Ambiguity fails closed, like the latch.** The same thread id owned by two account scopes resolves
+  to **no owner** unless `owners.size === 1` — the same house rule as the pane-ownership and
+  invented-`kid` refusals: an owner that cannot be *proven* is denied, never picked by order.
+- **Ids are path segments, still.** A managed account id is a directory scope
+  (`<codexThreadIdentityRoot>/<accountId>/<threadId>`), so it passes `isSafeAccountId` (must start
+  alphanumeric — blocks `.`/`..`/leading-separator) before it becomes a path, exactly as `isSafeNodeId`
+  / `isSafeThreadId` do. The account id travels in the launcher's POST **body**, never on an argv
+  (invariant 1 — no credential *or* scope-shaping input on a command line).
+
+Two S6 surfaces remain **owed device verifications** rather than shipped-and-verified: the imperative
+pane-recycle glue behind a live switch, and the remote-host account **lifecycle** UI (add/login/remove
+*on* an SSH host — the local picker + switch are wired, the remote lifecycle surface is display-only,
+fail-closed). Both, plus the live-daemon and real-WAN legs, are in
+[the acceptance gate](codex-accounts-acceptance.md).
+
 ## Invariants a future change must not break
 
 1. **No credential on any argv or command line — local or SSH.** Not tmux `-e`, not `curl -H`, not a

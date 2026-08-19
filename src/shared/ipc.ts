@@ -267,6 +267,51 @@ export const IPC = {
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
+  projectSettingsRead: 'project-settings:read',
+  projectSettingsWriteShared: 'project-settings:write-shared',
+  projectSettingsUpdateLocal: 'project-settings:update-local',
+  /** Resolved settings + per-family trust verdict for one project (`ProjectLaunchInfo`), the single
+   *  read a launcher warms before it may consume a shared-sourced value — answers `null` for an
+   *  unknown project id, same as projectSettingsRead. */
+  projectSettingsLaunchInfo: 'project-settings:launch-info',
+  /** main→renderer broadcast: `{projectId}` after ANY family approval changes for that project (a
+   *  consent dialog answered, a trust record revoked). Emitted by
+   *  `ProjectSetupService.ensureFamilyTrusted` on an approval — for EVERY project that asked, not
+   *  just the one that raised the prompt (two canvas nodes can share one location). */
+  projectTrustChanged: 'project-trust:changed',
+  /** Run a project's setup/archive script. Args: (projectId, kind, worktreePath?) — NO rootPath/
+   *  projectName/ssh: the handler derives those itself from its own workspace index by projectId,
+   *  never the caller (project-setup-handlers.ts). Answers a ProjectSetupRunResult — `started` only
+   *  means the run was admitted (gated + single-flight), not that it finished; progress arrives on
+   *  projectSetupEvent. */
+  projectSetupRun: 'project-setup:run',
+  projectSetupCancel: 'project-setup:cancel',
+  /** Ask for one project's `agents`/`shell` family to be trusted, prompting if it is not. Args:
+   *  `(projectId, family)` — nothing path-shaped: the handler derives the location from its own
+   *  workspace index, same as projectSetupRun. Answers `true` only when the family is trusted at
+   *  that location (nothing shared to gate, an existing grant, or a fresh approval); `false` covers
+   *  skip, expiry and every failure. HOST-ONLY (`shared/host-control.ts`): it raises the host's own
+   *  dialog. `setup` is deliberately NOT accepted here — that family is gated by the runner. */
+  projectSetupRequestTrust: 'project-setup:request-trust',
+  /** Renderer's answer to a projectSetupConsentRequest ('approve' | 'skip'). A stale/unknown
+   *  requestId is a silent no-op — an expired prompt can never be approved late. */
+  projectSetupConsentSubmit: 'project-setup:consent-submit',
+  /** main→renderer: raise the trust dialog (payload: ProjectConsentRequest — tagged by family, the
+   *  `setup` arm being the script-runner's own request). */
+  projectSetupConsentRequest: 'project-setup:consent-request',
+  /** main→renderer: close a prompt nobody answered (payload: { requestId }). */
+  projectSetupConsentDismiss: 'project-setup:consent-dismiss',
+  /** Per-project push carrying a ProjectSetupEvent (mirrors the boardLogChanged naming). */
+  projectSetupEvent: (projectId: string) => `project-setup:event:${projectId}`,
+  projectSetupSubscribe: 'project-setup:subscribe',
+  projectSetupUnsubscribe: 'project-setup:unsubscribe',
+  /** Renderer → core: symlink a project's `sharedPaths` from its repo root into a freshly-created
+   *  git worktree. Args carry ONLY `(projectId, worktreePath)` — NEVER the path list, which the
+   *  handler reads itself by projectId (the list is untrusted from a renderer). The handler
+   *  validates `worktreePath` is that project's rootPath or one of its actual git worktrees, and
+   *  refuses an SSH project (local-only this PR); an unknown/invalid input answers `[]`. Resolves
+   *  `SharedPathResult[]`. See core/worktree-shared-paths-handlers.ts. */
+  worktreeMaterializeShared: 'worktree:materialize-shared',
   // main → renderer events
   workspaceMigrated: 'workspace:migrated',
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */

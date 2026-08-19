@@ -1078,6 +1078,38 @@ export class SshProjectManager {
   }
 
   /**
+   * Resolve the ref for the connection matching a FULL endpoint — host, user, effective port AND
+   * remote cwd. Sibling of `refForRemoteCwd`, not a replacement: matching on cwd alone is fine for
+   * the git-remote registry (a remote repo path is resolved from a node that already belongs to one
+   * project), but wrong for anything keyed by a project's own SERVER, which is what running that
+   * project's setup script is.
+   *
+   * Two ways cwd-only matching picks the wrong box, both reachable with ordinary config:
+   *  - The DEFAULT remoteCwd is `~`, so every project that never chose a directory collides with
+   *    every other one — the first connection in map order would win them all, forever.
+   *  - Same host and user on different PORTS are routinely different machines (containers, or hosts
+   *    behind one NAT), and a host/user-only check waves that straight through.
+   *
+   * `undefined` when nothing matches — a disconnected project and a wrong-endpoint one are the same
+   * answer here, and the caller reports it rather than dialing a new connection.
+   */
+  refForEndpoint(endpoint: {
+    host: string
+    user: string
+    port?: number
+    remoteCwd: string
+  }): { conn: SshConnection; controlPath: string } | undefined {
+    const wantPort = endpoint.port ?? 22
+    for (const c of this.conns.values()) {
+      if (c.remoteCwd !== endpoint.remoteCwd) continue
+      if (c.conn.host !== endpoint.host || c.conn.user !== endpoint.user) continue
+      if ((c.conn.port ?? 22) !== wantPort) continue
+      return { conn: c.conn, controlPath: c.controlPath }
+    }
+    return undefined
+  }
+
+  /**
    * `user@host` of the connection whose ControlMaster has this pid, for the passphrase dialog.
    * The askpass helper reports the asking ssh process as its `$PPID` (see ssh-askpass.ts), which
    * is exactly the master this manager spawned, so a prompt can be attributed to a server without

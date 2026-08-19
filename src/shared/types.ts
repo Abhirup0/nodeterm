@@ -220,6 +220,16 @@ export interface PendingLaunch {
   after: string[]
   /** Delivered to the node's shell once the wait is over (agent CLI + prompt, or a plain command). */
   command: string
+  /**
+   * Also wait for this worktree GROUP's project setup script to finish (`waitForSetup`). Set when
+   * the node is opened into a frame whose checkout is still being prepared — running a command in a
+   * half-installed worktree is the failure this gate exists to prevent. It names a group id, never
+   * a command: nothing here is ever executed, it only selects a run to ask about.
+   *
+   * A group with no run on record counts as done (`launchesToFire`), so a persisted arming that
+   * outlives the run's event stream — an app restart — releases rather than strands the node.
+   */
+  awaitSetupGroup?: string
 }
 
 export interface CanvasNodeState {
@@ -761,6 +771,79 @@ export interface WorkspaceApi {
   onCorruptRecovered(cb: (backupFile: string) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
+}
+
+export interface ProjectSettingsApi {
+  /** `{shared, local, conflict?}` for a known project id, or null for an unknown one. */
+  read(projectId: string): Promise<import('./project-settings').ProjectSettingsSnapshot | null>
+  /** Whole-document write of the git-shared `.nodeterm/settings.json`. See
+   *  `WorkspaceStore.writeProjectSettings` for the false-vs-true contract. */
+  writeShared(projectId: string, doc: import('./project-settings').ProjectSettingsDoc): Promise<boolean>
+  /** This machine's own overlay; `local: undefined` clears it. */
+  updateLocal(
+    projectId: string,
+    local: import('./project-settings').ProjectLocalSettings | undefined
+  ): Promise<boolean>
+  /** Resolved settings + per-family trust verdict for one project — `null` for an unknown id. The
+   *  renderer cache (`renderer/state/projectLaunchInfo.ts`) warms this on activate and never awaits
+   *  it inline; a caller wanting the raw handshake calls this directly instead. */
+  launchInfo(projectId: string): Promise<import('./project-settings').ProjectLaunchInfo | null>
+  /** main → renderer: a family's trust verdict changed for `projectId` (a consent dialog answered,
+   *  an approval revoked). Nobody broadcasts this yet — Task 2 records approvals and emits it. */
+  onTrustChanged(cb: (p: { projectId: string }) => void): () => void
+}
+
+export interface ProjectSetupApi {
+  /** Launch a project's setup/archive script behind the trust gate (`project-setup-service.ts`).
+   *  `worktreePath`, when given, is the ONLY path-shaped hint this call carries — main derives
+   *  `rootPath`/`ssh` from its own workspace index by `projectId` and independently validates
+   *  `worktreePath` against that project's actual git worktrees; nothing path-shaped sent here is
+   *  trusted as-is (Task 1 review finding). */
+  run(
+    projectId: string,
+    kind: import('./project-settings').ProjectSetupKind,
+    worktreePath?: string
+  ): Promise<import('./project-settings').ProjectSetupRunResult>
+  /** Aborts a live run, or one still waiting at its consent dialog. `false` = nothing by that
+   *  runKey exists (already finished, or never did). */
+  cancel(runKey: string): Promise<boolean>
+  /** Renderer's answer to a `onConsentRequest` prompt. A stale/unknown requestId is a silent no-op. */
+  consent(requestId: string, answer: import('./project-settings').ProjectSetupConsentAnswer): Promise<void>
+  /**
+   * Ask for this project's `agents`/`shell` family to be trusted, prompting the human if it is not
+   * yet — the call a launcher makes before consuming a shared-sourced `launchCmd`/`env`/`shell`.
+   * `true` only when the family is trusted at that project's location (nothing shared to gate, an
+   * existing grant, or a fresh approval); skip, expiry, an unknown project and a refused (relay
+   * guest) call are all `false`. Concurrent asks for one location share ONE dialog. On approval,
+   * `projectSettings.onTrustChanged` fires for the project, so a cached launch-info verdict is
+   * re-read rather than trusted from before the answer.
+   */
+  requestTrust(projectId: string, family: 'agents' | 'shell'): Promise<boolean>
+  /** main → renderer: raise the trust dialog before a shared-sourced script runs, or before a
+   *  shared-sourced launch setting is consumed — tagged by family (`ProjectConsentRequest`). */
+  onConsentRequest(cb: (req: import('./project-settings').ProjectConsentRequest) => void): () => void
+  /** main → renderer: close a prompt nobody answered before the renderer did. */
+  onConsentDismiss(cb: (p: { requestId: string }) => void): () => void
+  /** Per-project run progress (`ProjectSetupEvent`), mirroring `boardLog.onChanged`'s ref-counted
+   *  subscribe/unsubscribe shape. */
+  onEvent(projectId: string, cb: (ev: import('./project-settings').ProjectSetupEvent) => void): () => void
+}
+
+export interface WorktreeApi {
+  /**
+   * Symlink a project's configured `sharedPaths` (git-ignored dirs like `node_modules`) from its
+   * repo root into a freshly-created git worktree, so a setup `npm install` there sees the links.
+   *
+   * The renderer passes ONLY `(projectId, worktreePath)` — never the path list: main reads the list
+   * itself out of the project's settings by `projectId`, derives the repo root from its own
+   * workspace index, and validates `worktreePath` is that project's rootPath or one of its actual
+   * git worktrees. An unknown project, an unvalidated path, or an SSH project (local-only this PR)
+   * all resolve `[]`. Never rejects — a per-entry `SharedPathResult[]` reports what happened.
+   */
+  materializeShared(
+    projectId: string,
+    worktreePath: string
+  ): Promise<import('./worktree').SharedPathResult[]>
 }
 
 export interface DialogApi {
@@ -1788,6 +1871,13 @@ export interface ProviderUsage {
   limits: UsageLimit[]
   /** Signed-in identity, when the provider exposes one cheaply (email / account label). */
   account: string | null
+  /**
+   * The managed account this row's numbers belong to, when the provider is account-scoped (Codex
+   * manages N homes on one machine). `undefined` is the un-owned system row — an account that
+   * cannot be proven un-owned is never labelled un-owned. Rows are keyed by this so one account's
+   * usage can never collapse into or be attributed to another (S6 §4.3, no mixing / fail-closed).
+   */
+  accountId?: string
   updatedAt: number
   /**
    * 'unavailable' = not signed in / no subscription to report → hide this provider entirely.
@@ -2089,8 +2179,10 @@ export interface CodexAccountsApi {
   cancelWaitLogin(id: string): Promise<void>
   /** Read a managed account's already-logged-in identity (email), or null if not logged in. */
   identity(id: string): Promise<{ email: string | null } | null>
-  /** Read the system (`~/.codex`) account's identity. */
-  systemIdentity(): Promise<{ email: string | null } | null>
+  /** Read a machine's system (`~/.codex`) account identity. No arg ⇒ this Mac. `{ projectId }` ⇒
+   *  the connected SSH host behind that project; a host whose system identity cannot be resolved
+   *  resolves `null` (fail-closed — a remote machine panel never borrows this Mac's login). */
+  systemIdentity(ctx?: { projectId?: string }): Promise<{ email: string | null } | null>
   /** Remove a managed account: stop its daemon and delete its home. Refused while a switch
    *  reservation holds it or a concurrent removal is in flight (Property 10). */
   remove(id: string): Promise<void>
@@ -2570,6 +2662,9 @@ export interface ShortcutsApi {
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
+  projectSettings: ProjectSettingsApi
+  projectSetup: ProjectSetupApi
+  worktree: WorktreeApi
   dialog: DialogApi
   settings: SettingsApi
   speech: SpeechApi

@@ -6,10 +6,52 @@ The node↔thread mapping is what survives resumes, in-pane restarts, and app re
 managed logins, and a thread's ownership record must name **which account** it belongs to, not just
 which node — so one account can never be made to speak for another's threads.
 
-This document covers the ownership spine shipped in S6 PR 2. The account **model** and on-disk home
-layout are PR 1 (`codex-accounts-core.ts`); the spawn wiring, relay, and switch/transfer protocol
-are later PRs. This slice **ships inert** — nothing sets `NODETERM_CODEX_ACCOUNT_ID` on a pane yet —
-but it is fully tested against real primitives (real `/bin/sh`, real fs, real HMAC).
+This document covers the whole S6 feature — the account × machine model, the on-disk layout, the
+switch and cross-machine protocols, the fail-closed properties, and the same-filesystem (U3) /
+discovery (U1) constraints the probes settled. S6 shipped across nine PRs (the account model, the
+identity proxy documented here, the rollout primitive, the relay daemon, local accounts + the switch,
+SSH remote accounts, per-account usage, the Settings UI, and the per-node account picker); this
+feature is **fully operable** — a Codex node carries an account scope, the picker stamps it, and the
+switch/transfer verbs run. Every layer is tested against real primitives (real `/bin/sh`, real fs,
+real HMAC, the real main-side switch handler); the composition is walked once end-to-end in
+`src/main/codex-accounts-e2e.test.ts` (Task 9.2), and the human/device verifications that headless CI
+cannot run are enumerated in [the acceptance gate](codex-accounts-acceptance.md).
+
+Based on @Corvin's S6 design in external PR #112.
+
+## The account × machine model
+
+An account is **system** or **managed**, and it lives on **one machine**:
+
+- **System account** — the login at `$CODEX_HOME` (or `~/.codex`). No id. Always resolves. A machine
+  with no managed accounts behaves exactly as it did before S6 (Constraint 12).
+- **Managed account** — a second (or third…) logged-in Codex identity, addressed by a validated id.
+  Its home is private (`0700`) and isolated; only NON-secret installation assets (`config.toml`,
+  `AGENTS.md`, `skills`, …) are symlinked in from the system home — never `auth.json`, never the
+  thread DB, so a managed account acts only as **its own** login.
+- **Remote account** — the same, but its home lives on an SSH host (`host` set). The desktop drives
+  its lifecycle over SSH; the host runs the relay + import, not its own account-management IPC.
+
+`id` empty/undefined at any call site means the system account. Ids arrive from hand-editable,
+git-shared `settings.json` / `project.json`, so every id passes `isSafeAccountId`
+(`^[A-Za-z0-9][A-Za-z0-9._-]*$`, must start alphanumeric) **before** it becomes a path component.
+
+## On-disk home layout
+
+| What | Where |
+| --- | --- |
+| System home | `$CODEX_HOME` or `~/.codex` |
+| Managed home (local) | `~/.nodeterm/cx/<sha256(userDataDir ␀ accountId)[0..16]>`, mode `0700` |
+| Managed home (remote) | `<remoteHome>/.nodeterm/cx/<sha256(accountId)[0..16]>` |
+| App-server control socket | `<home>/app-server-control/app-server-control.sock` |
+| Ownership records | `<userDataDir>/codex-thread-nodes/` (system: bare root; managed: `<accountId>/`) |
+
+The digest is deliberately **short**: the app-server control Unix socket lives two levels below the
+home and must stay under macOS `SUN_LEN`, which an Electron userData path plus a UUID already
+overshoots. `userDataDir` is folded into the LOCAL digest so separate NodeTerm profiles never
+collide; a remote host has one home root, so the remote digest is over `accountId` only. A
+pre-migration long home (`<userData>/codex-accounts/<id>`) is moved to its short home at boot,
+fail-closed (no-op if absent, if the target exists, or on an invalid id).
 
 ## The signing secret (both shells — Decision 1)
 
@@ -100,3 +142,90 @@ directory scope, so `.`/`..`/leading-separator/`a/b`/absolute ids are refused at
 launcher threads the account id through the `/codex-thread/{start,bind}` POST **body**, never on
 argv (Constraint 6); a bad id falls back to plain `codex` rather than binding under a hostile scope,
 and the server refuses it at `400` before the start handler can create an orphan thread.
+
+## Spawn scope resolution (fail-closed)
+
+`resolveCodexSessionScope(userDataDir, accountId, homeExists)` decides the `CODEX_HOME` +
+`NODETERM_CODEX_ACCOUNT_ID` a Codex spawn runs under:
+
+- **No id** → the system home. Always resolves, and it is written **explicitly** so it overwrites any
+  managed scope inherited from a parent (tmux shares one server env) rather than silently acting as
+  the wrong login.
+- **An explicitly selected managed account whose home is missing** → **refuses**
+  (`{ unavailable: 'codex-account' }`). It never falls back to the system home. This is deliberately
+  **stricter** than the Claude sibling's first-spawn fallback: silently acting as the wrong login is a
+  worse failure for an explicit switch than a refused spawn. The `pty-manager` maps `unavailable`
+  straight through to the renderer.
+
+The OAuth-shadowing env vars (`OPENAI_API_KEY`, `CODEX_API_KEY` — `AUTH_ENV_STRIP`) are removed from
+the session env at spawn so a managed account always acts as its own `auth.json` login. That strip
+touches only the **env**; no credential is ever placed on an argv (Constraint 6).
+
+## The same-machine switch (three-phase, owner-authorized)
+
+Moving a running node's conversation to another account **resumes the same conversation id, never
+forks it**. The switch is a three-phase, TTL-bounded, owner-authorized protocol driven by the
+renderer (`src/main/codex-accounts.ts`):
+
+1. **plan** (`switch-thread`) — reserve both account ids (so a concurrent removal is blocked —
+   Property 10), read the source rollout path off its app-server, and `planCodexRolloutExposure`
+   (validate only, mutate nothing). Returns a `rollbackToken`.
+2. **commit** (`commit-switch`) — `commitCodexRolloutExposure`: **atomically hardlink** the source
+   rollout inode into the target account's `sessions/<same relative path>`. Same inode ⇒
+   byte-identical conversation id. Only the **owning WebContents** may commit.
+3. **finish** (`finish-switch`) — release the reservation. Refuses until commit actually ran, so a
+   premature finish can never make the renderer recycle a node onto a target that has no rollout.
+
+`rollback-switch`, the reservation TTL, and the owner being `destroyed` all release a reservation
+without committing. The exposure is an **atomic, never-overwrite hardlink**: `link(2)` is
+no-overwrite, an `EEXIST` collision is tolerated **only** when the existing target is already the same
+inode (an idempotent re-expose), and the copy refuses to write **through** a symlinked directory
+segment. The source `dev`/`ino` is re-verified before and after the link, so a mid-flight source swap
+fails closed.
+
+## The cross-machine transfer (local → SSH)
+
+`transfer-thread-to-ssh` moves an **idle** local conversation to a remote account. The SOURCE leg
+reuses `planCodexRolloutExposure`'s guards (regular file under `<home>/sessions/`, basename
+`<threadId>.jsonl`, no symlinked segment) and then hands the upload + atomic remote install to the
+SSH importer. Properties: the conversation id survives; the far side must **discover** the hardlinked
+rollout before the node is recycled (verify-then-recycle — a false discovery is a **refused copy +
+rollback**, never a silent one); the **local copy remains** (it is a hardlink, never moved); and an
+existing remote rollout is **never overwritten** (`link` / `mv` fail closed on `EEXIST` / `exit 17`).
+An absent importer (no live SSH manager) **fails closed** with a named error, never a silent success.
+
+## Per-account usage (no mixing)
+
+Usage is one **system row** plus one row **per managed account**, each keyed by its own `accountId`
+and built independently — there is no reduce/merge step, so one account's numbers can never be
+attributed to another. Every `fetchCodexUsage` return path (including `unavailable`) is stamped with
+the account's identity, so an empty or failed read fails closed to **that** account, never to a
+fabricated one; the system row stays explicitly un-owned (`accountId: undefined`). A throwing account
+source yields **system-only**, never a made-up account. A cache fingerprint over the account set
+busts stale numbers when an account is added, removed, or relabelled.
+
+## Fail-closed properties (the house rules)
+
+| Situation | Verdict |
+| --- | --- |
+| Explicitly selected account, home missing | Refuse the spawn — no system fallback |
+| Same thread id owned by two account scopes, no hint | No owner (proxy, sh resolver, relay catalog all fail closed) |
+| Rollout collision at target, different inode | Never overwrite (throws / `exit 17`) |
+| Cross-mount rollout link | Named `EXDEV` error — no silent byte-copy fallback (U3) |
+| Far side cannot discover the imported rollout | Roll back the import |
+| Record signed for account A, filed under B | MAC fails — rejected |
+| No signing secret armed | Record write throws; nothing unsigned is written |
+| Usage source throws | System-only; never a fabricated account |
+| Account id from `settings.json` that could escape the root | Refused at the door by `isSafeAccountId` |
+
+## U1 / U3 — the two constraints the probes settled
+
+- **U3 — same filesystem.** A same-machine switch links a rollout inode between two LOCAL homes, both
+  under `$HOME` (`~/.codex` and `~/.nodeterm/cx`), measured same-device on the build host (ext4).
+  `link(2)` throws `EXDEV` across mounts, and a `$HOME` subtree **can** be bind-mounted onto another
+  volume, so v1 does **not** silently fall back to a byte copy — `commit` surfaces a named `EXDEV`
+  error. A cross-mount copy fallback is explicitly out of scope for S6 v1.
+- **U1 — live discovery.** The cross-machine copy rests on a running `app-server` discovering a
+  hardlinked rollout **without a reindex**. Mitigated in code by verify-then-recycle (a false U1 is a
+  refused copy + rollback, never silent), but the live-daemon confirmation is a **device
+  verification**, owed on a real host — see the acceptance gate.
