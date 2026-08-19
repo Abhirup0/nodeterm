@@ -220,9 +220,32 @@ export function bindingIdentity(binding: string, isMac: boolean): string {
 
 /** Commands sharing a bucket compete for the same keys. 'app' and 'canvas' share one global
  *  keyspace (both dispatch from the window listener; canvas commands are merely inert while
- *  the board is open); terminal and scm are their own focused surfaces. */
-export function conflictBucket(scope: CommandScope): 'global' | 'terminal' | 'scm' {
-  return scope === 'app' || scope === 'canvas' ? 'global' : scope
+ *  the board is open); terminal and scm are their own focused surfaces.
+ *
+ *  **`speech.dictation` is its own fourth bucket, and the reason is dispatch, not scope.** It
+ *  never competes for a chord: the resolver SKIPS it outright (see the `def.id ===
+ *  'speech.dictation'` guard in `resolveCommandForKeyEvent`), and its keyed gesture runs from a
+ *  dedicated listener that claims the chord FIRST in plain app focus. So a chord shared with
+ *  another command is a matter of PRECEDENCE — dictation wins where it listens, the other command
+ *  wins everywhere else (terminal focus, say) — never ambiguity, which is the only thing the
+ *  conflict detector exists to find. Folding it into 'global' therefore reported a collision that
+ *  dispatch cannot produce.
+ *
+ *  What the bucket BUYS is survival on the read path: `sanitizeKeybindingOverrides` deletes every
+ *  overridden participant of a reported conflict, so a migrated legacy chord that happened to match
+ *  another command's binding (the `speech.shortcut` → `speech.dictation` seed in
+ *  `core/settings-store.ts`) was seeded on load and stripped moments later, taking the user's own
+ *  colliding override with it. With its own bucket the seed survives.
+ *
+ *  **Overlap policy is deliberately asymmetric.** The LOAD path PERMITS a shared chord — legacy
+ *  settings.json files already contain them and silently dropping a user's chord is the failure
+ *  this closes. The Settings UI REFUSES to create one, because a user picking a chord interactively
+ *  should be told about the precedence rather than discover it later. */
+export function conflictBucket(
+  def: Pick<CommandDefinition, 'id' | 'scope'>
+): 'global' | 'terminal' | 'scm' | 'dictation' {
+  if (def.id === 'speech.dictation') return 'dictation'
+  return def.scope === 'app' || def.scope === 'canvas' ? 'global' : def.scope
 }
 
 export interface KeybindingConflict {
@@ -244,7 +267,7 @@ export function findKeybindingConflicts(
   const byBucketAndIdentity = new Map<string, { binding: string; ids: Set<CommandId> }>()
   for (const def of COMMAND_DEFINITIONS) {
     for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
-      const key = `${conflictBucket(def.scope)} ${bindingIdentity(binding, isMac)}`
+      const key = `${conflictBucket(def)} ${bindingIdentity(binding, isMac)}`
       const entry = byBucketAndIdentity.get(key) ?? {
         // Canonicalized, so a hand-edited `cmd+k` override is reported as `Cmd+K`.
         binding: serializeShortcut(parseShortcut(binding)),

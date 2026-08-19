@@ -480,3 +480,28 @@ describe('resolver under terminal-first', () => {
       .toBe('app.commandPalette')
   })
 })
+
+describe('dictation conflict bucket', () => {
+  it("a dictation override sharing another command's chord is NOT a conflict", () => {
+    expect(findKeybindingConflicts({ 'speech.dictation': ['Cmd+K'] }, true)).toEqual([])
+  })
+  it('sanitize keeps a colliding dictation override — the migration survival case', () => {
+    const r = sanitizeKeybindingOverrides({ 'speech.dictation': ['Cmd+K'] }, true)
+    expect(r).toEqual({ overrides: { 'speech.dictation': ['Cmd+K'] }, warnings: [] })
+  })
+  it("sanitize keeps BOTH sides when a user override shares dictation's chord", () => {
+    const r = sanitizeKeybindingOverrides(
+      { 'speech.dictation': ['Cmd+J'], 'app.commandPalette': ['Cmd+J'] },
+      true
+    )
+    expect(r.overrides).toEqual({
+      'speech.dictation': ['Cmd+J'],
+      'app.commandPalette': ['Cmd+J']
+    })
+    expect(r.warnings).toEqual([])
+  })
+  it('the shipped defaults stay conflict-free under full scrutiny (unchanged invariant)', () => {
+    expect(findKeybindingConflicts({}, true, { includeDefaults: true })).toEqual([])
+    expect(findKeybindingConflicts({}, false, { includeDefaults: true })).toEqual([])
+  })
+})
