@@ -267,6 +267,27 @@ export const IPC = {
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
+  projectSettingsRead: 'project-settings:read',
+  projectSettingsWriteShared: 'project-settings:write-shared',
+  projectSettingsUpdateLocal: 'project-settings:update-local',
+  /** Run a project's setup/archive script. Args: (projectId, kind, worktreePath?) — NO rootPath/
+   *  projectName/ssh: the handler derives those itself from its own workspace index by projectId,
+   *  never the caller (project-setup-handlers.ts). Answers a ProjectSetupRunResult — `started` only
+   *  means the run was admitted (gated + single-flight), not that it finished; progress arrives on
+   *  projectSetupEvent. */
+  projectSetupRun: 'project-setup:run',
+  projectSetupCancel: 'project-setup:cancel',
+  /** Renderer's answer to a projectSetupConsentRequest ('approve' | 'skip'). A stale/unknown
+   *  requestId is a silent no-op — an expired prompt can never be approved late. */
+  projectSetupConsentSubmit: 'project-setup:consent-submit',
+  /** main→renderer: raise the trust dialog (payload: ProjectSetupConsentRequest). */
+  projectSetupConsentRequest: 'project-setup:consent-request',
+  /** main→renderer: close a prompt nobody answered (payload: { requestId }). */
+  projectSetupConsentDismiss: 'project-setup:consent-dismiss',
+  /** Per-project push carrying a ProjectSetupEvent (mirrors the boardLogChanged naming). */
+  projectSetupEvent: (projectId: string) => `project-setup:event:${projectId}`,
+  projectSetupSubscribe: 'project-setup:subscribe',
+  projectSetupUnsubscribe: 'project-setup:unsubscribe',
   // main → renderer events
   workspaceMigrated: 'workspace:migrated',
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */

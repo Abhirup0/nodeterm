@@ -112,6 +112,7 @@ import {
   IconUnlock
 } from '../components/icons'
 import type { SettingsSectionId } from '../components/settings/nav'
+import { projectSectionId } from '../components/settings/project-settings-targets'
 // Overlay surfaces (settings, source control, explorer, kanban, onboarding, dictation, …) are
 // code-split: they render behind a flag and must not sit in the startup chunk. See lazyPanels.
 import {
@@ -156,6 +157,7 @@ import { ShortcutCaptureBanner } from '../components/ShortcutCaptureBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CapabilityNotice } from '../components/CapabilityNotice'
+import { SetupConsentDialog } from '../components/SetupConsentDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
 import { peerApprovalView } from '@shared/remote/approval'
 import { promptDialog } from '../components/promptDialog'
@@ -280,6 +282,7 @@ import {
   pastedFiles
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
+import { setupAckDecision, setupGateDone, useProjectSetup } from '../state/projectSetup'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -685,6 +688,15 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
   )
 }
 
+/**
+ * `window.nodeTerminal` rather than the session `api`: the run store's `subscribeProject` listens on
+ * the LOCAL core's channel, so raising a run anywhere else would leave its events unheard — the chip
+ * would sit blank over a script that is really running.
+ */
+function setupApi(): typeof window.nodeTerminal.projectSetup {
+  return window.nodeTerminal.projectSetup
+}
+
 export function Canvas() {
   // This canvas's core api (a context read — stable for the session, no store subscription).
   // For the local session it IS window.nodeTerminal, so every call resolves identically.
@@ -803,6 +815,15 @@ export function Canvas() {
   const [welcomeOpen, setWelcomeOpen] = useState(false)
   // Optional deep-link target when opening settings (e.g. RemotePicker → the SSH section).
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
+  // Bumped ONLY by a deep link, so SettingsPage re-targets (and clears its search box) even when
+  // the requested section is the one it is already showing. Plain opens leave it alone.
+  const [settingsNonce, setSettingsNonce] = useState(0)
+  // Tab caret menu / sidebar right-click → this project's own pane in Settings.
+  const openProjectSettings = useCallback((id: string) => {
+    setSettingsSection(projectSectionId(id))
+    setSettingsNonce((n) => n + 1)
+    setSettingsOpen(true)
+  }, [])
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   // Debug log panel (issue #78). Settings' "Open" button fires the event (the dialog can't
@@ -1257,6 +1278,37 @@ export function Canvas() {
     }
     return sig
   })
+  // ---- the setup gate an armed node waits on ----
+  // The runs are launched from the worktree-lifecycle block far below; the gate itself lives up
+  // here, beside the launch effect that reads it.
+  //
+  // In-flight launches are counted in the STORE (`pendingByGroup`) rather than in a ref: the frame's
+  // chip reads the same fact to disable itself, and a per-group COUNTER is what makes two overlapping
+  // launches safe (see the store's note). It is runtime-only either way — after a restart neither a
+  // pending launch nor a wait-for-setup obligation survives, and `setupGateDone`'s "nothing on record
+  // and nothing pending" rule then releases a persisted arming rather than stranding it.
+  /** Groups whose acked setup run said `waitForSetup` — the ones that arm what is opened into them. */
+  const setupWaitGroupsRef = useRef<Set<string>>(new Set())
+  const setupDoneForGroup = useCallback((groupId: string): boolean => {
+    const s = useProjectSetup.getState()
+    return setupGateDone(s.runForGroup(groupId), s.pendingForGroup(groupId) > 0)
+  }, [])
+  // A signature over the setup-run state of every group an armed node is waiting on, so a run going
+  // `done` re-runs the launch effect — the same trick as `armedDepSig`. Subscribing to the whole
+  // store would re-render the canvas on every output chunk of every script.
+  const armedSetupSig = useProjectSetup((s) => {
+    let sig = ''
+    for (const n of nodesRef.current) {
+      const g = n.data.pendingLaunch?.awaitSetupGroup
+      if (!g) continue
+      const runKey = s.groupRunKey[g]
+      // The pending count is part of the signature: an ack that leaves no other trace (a `busy`
+      // one) still changes whether the gate is closed, and the effect has to be told.
+      sig += `${n.id}:${g}=${runKey === undefined ? '-' : (s.byRunKey[runKey]?.state ?? '')}`
+      sig += `+${s.pendingByGroup[g] ?? 0}|`
+    }
+    return sig
+  })
   // Bumped to re-run the launch effect after a refused delivery (see LAUNCH_RETRY_MS).
   const [launchRetry, setLaunchRetry] = useState(0)
   // Ids whose held launch has been handed to the pty. An id stays here FOREVER once delivery
@@ -1272,7 +1324,8 @@ export function Canvas() {
     const ready = launchesToFire(
       nodes as unknown as ArmedNode[],
       useAgentStatus.getState().byId,
-      live
+      live,
+      setupDoneForGroup
     ).filter((f) => !launchInFlight.current.has(f.id))
     for (const f of ready) {
       launchInFlight.current.add(f.id)
@@ -1296,8 +1349,8 @@ export function Canvas() {
         }
       })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/launchRetry are the triggers
-  }, [nodes, armedDepSig, launchRetry])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedSetupSig/launchRetry are the triggers
+  }, [nodes, armedDepSig, armedSetupSig, launchRetry])
 
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes), owned by
   // the agent-nodes store so the cards themselves can set it — see `selectable: false` below.
@@ -3871,6 +3924,123 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId]
   )
 
+  // ---- project setup/archive scripts on the worktree lifecycle ----
+  //
+  // The event channel is per PROJECT and ref-counted in preload, so one subscription per project
+  // covers every worktree of it; the unsubscribes are held here and released on unmount.
+  const setupSubsRef = useRef<Map<string, () => void>>(new Map())
+  useEffect(
+    () => () => {
+      setupSubsRef.current.forEach((off) => off())
+      setupSubsRef.current.clear()
+    },
+    []
+  )
+  /** Subscribe BEFORE the run is raised — the head of a script's output must not be lost to the
+   *  gap between the ack and the first listener. Idempotent per project. */
+  const ensureSetupSubscription = useCallback((projectId: string): void => {
+    if (setupSubsRef.current.has(projectId)) return
+    setupSubsRef.current.set(projectId, useProjectSetup.getState().subscribeProject(projectId))
+  }, [])
+  /** Drop the SETUP half of the hold on every node armed for this group, leaving its `after` deps
+   *  (if any) to decide. The launch effect re-runs on the `nodes` change and fires what is now free. */
+  const releaseSetupArming = useCallback(
+    (groupId: string): void => {
+      if (!nodesRef.current.some((n) => n.data.pendingLaunch?.awaitSetupGroup === groupId)) return
+      setNodes((ns) =>
+        ns.map((n) => {
+          const p = n.data.pendingLaunch
+          if (p?.awaitSetupGroup !== groupId) return n
+          const { awaitSetupGroup: _released, ...rest } = p
+          return { ...n, data: { ...n.data, pendingLaunch: rest } }
+        })
+      )
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+  /**
+   * Kick a worktree's `setup` script and hand the run to the group's chip. Asked UNCONDITIONALLY:
+   * the service answers `no-script` cheaply, and reading the project's settings here would put a
+   * file read (SSH: a network round-trip) on the hot path of creating a worktree.
+   *
+   * Fire-and-observe — nothing awaits the script. What the ack decides is only (a) which run the
+   * frame's chip reports, and (b) whether nodes opened into this group meanwhile hold their launch.
+   *
+   * Also the RE-RUN path: the frame's chip calls this again on a failed run, and the new ack
+   * re-attaches the group's lane, which is what releases nodes the failure left armed. (The settings
+   * panel's Run cannot do this — it runs at the project ROOT and attaches the PROJECT lane.)
+   */
+  const startWorktreeSetup = useCallback(
+    (groupId: string, worktreePath: string): void => {
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      ensureSetupSubscription(projectId)
+      // Pending BEFORE the invoke, and cleared on every ack path below. `run` resolves only once the
+      // consent dialog has been answered, so this window is human-length, not a round-trip: an
+      // agent that gets its `open-worktree` reply and immediately opens nodes into the group lands
+      // inside it, and those nodes must wait rather than launch into an unprepared checkout.
+      const store = useProjectSetup.getState()
+      store.markGroupPending(groupId)
+      void setupApi()
+        .run(projectId, 'setup', worktreePath)
+        .then((res) => {
+          store.clearGroupPending(groupId)
+          const decision = setupAckDecision(res)
+          if (decision.attach && res.status === 'started') store.attachGroup(groupId, res.runKey)
+          if (decision.hold === 'keep') return // `busy` — another launch owns this run; touch nothing.
+          if (decision.hold === 'wait') {
+            setupWaitGroupsRef.current.add(groupId)
+            return
+          }
+          setupWaitGroupsRef.current.delete(groupId)
+          // Nothing is going to prepare this checkout, or the project runs its script unblocked —
+          // so release whatever the in-flight window armed. Without this such a node would hold for
+          // a `done` that either is not coming or was never meant to gate it.
+          releaseSetupArming(groupId)
+        })
+        .catch(() => {
+          store.clearGroupPending(groupId)
+          // A rejected invoke says nothing about a launch that may be running for this group from
+          // another click — give up the hold only when nobody else is still working on it.
+          const s = useProjectSetup.getState()
+          if (s.pendingForGroup(groupId) > 0 || s.runForGroup(groupId)?.state === 'running') return
+          setupWaitGroupsRef.current.delete(groupId)
+          releaseSetupArming(groupId)
+        })
+    },
+    [ensureSetupSubscription, releaseSetupArming]
+  )
+  /**
+   * Kick the `archive` script for a worktree that is about to be unbound or removed.
+   *
+   * TRADEOFF, deliberate: this awaits the LAUNCH RESULT (`started`/`skipped`) and nothing more.
+   * Awaiting completion would let a hung archive script trap the user in a group they asked to close
+   * — the removal is their decision, not the script's.
+   *
+   * The cost is real and currently UNSURFACED: the script keeps running after the binding drops, so
+   * the frame that would have shown its chip is already gone, and a slow script can still be writing
+   * when a delete-from-disk removal pulls the directory out from under it. Its outcome — including
+   * that failure — is recorded in the run store but has nowhere on screen to appear. Giving archive
+   * runs an observable home belongs to the observability wave, not here; until then this is a
+   * fire-and-forget in practice, and the comment says so rather than promising a chip nobody sees.
+   */
+  const runWorktreeArchive = useCallback(
+    async (groupId: string, worktreePath: string): Promise<void> => {
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      ensureSetupSubscription(projectId)
+      const res = await setupApi()
+        .run(projectId, 'archive', worktreePath)
+        .catch(() => null)
+      // The group is on its way out, so this attachment only serves the moment the chip is still
+      // on screen — and it must not be left pointing at the finished SETUP run while an archive
+      // script is live.
+      if (res?.status === 'started') useProjectSetup.getState().attachGroup(groupId, res.runKey)
+    },
+    [ensureSetupSubscription]
+  )
+
   /**
    * Everything a group owes the world when its worktree BINDING is dropped — minus the dropping
    * itself, which each caller does its own way (clear `data.worktree`, dissolve the frame, delete
@@ -3900,6 +4070,9 @@ export function Canvas() {
     async (groupId: string): Promise<void> => {
       const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
       if (!wt || isSshProject) return
+      // The project's `archive` script gets its chance BEFORE anything else — this is the one place
+      // every unbinding path passes through. Only the launch is awaited (see `runWorktreeArchive`).
+      await runWorktreeArchive(groupId, wt.path)
       if (!useWorktrees.getState().staleGroupIds.includes(groupId)) return
       resetDisplacedCwd(groupId, wt.path, false)
       // A failed prune must still let the binding go — dropping it is the user's ask, and a
@@ -3908,7 +4081,7 @@ export function Canvas() {
         .worktreeRemove(wt.repoPath, wt.path, false, true)
         .catch(() => {})
     },
-    [isSshProject, resetDisplacedCwd]
+    [isSshProject, resetDisplacedCwd, runWorktreeArchive]
   )
 
   // ---- multi-node actions (context menu) ----
@@ -4227,11 +4400,15 @@ export function Canvas() {
       }
       markDirty()
       refreshWorktreeStore({ bind: { groupId, worktree: wt } })
+      // A fresh checkout is the moment the project's `setup` script exists for: this is the single
+      // shared post-create point (the dialog AND agent-control's open-worktree land here), so the
+      // trigger lives here rather than being repeated — and never diverging — at each caller.
+      startWorktreeSetup(groupId, wt.path)
       // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
       // callers that need the id (agent-control's open-worktree reply) take it from here.
       return groupId
     },
-    [setNodes, markDirty, viewCenter, refreshWorktreeStore]
+    [setNodes, markDirty, viewCenter, refreshWorktreeStore, startWorktreeSetup]
   )
 
   const createWorktreeAndGroup = useCallback(
@@ -4401,6 +4578,10 @@ export function Canvas() {
       setNotice({ kind: 'info', text: `Unbound ${wt.branch}. The worktree is still on disk.` })
       return
     }
+    // 0) The `archive` script's last chance — after step 1 the directory is gone. Only its LAUNCH is
+    //    awaited (see `runWorktreeArchive`), so a hung script cannot hold the removal hostage; the
+    //    unbind-only branch above gets the same call through `releaseWorktreeBinding`.
+    await runWorktreeArchive(t.groupId, wt.path)
     // 1) Remove the worktree FIRST; only delete the branch if the branch is ours (we created it).
     //    The sessions are killed after, not before: `worktreeRemove` can still REFUSE (a dangerous
     //    path, a locked worktree, EPERM), and killing every child terminal's tmux session up front
@@ -4446,7 +4627,14 @@ export function Canvas() {
     resetDisplacedCwd(t.groupId, wt.path, true)
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
-  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, resetDisplacedCwd, releaseWorktreeBinding])
+  }, [
+    removeTarget,
+    deleteFromDisk,
+    clearWorktreeBinding,
+    resetDisplacedCwd,
+    releaseWorktreeBinding,
+    runWorktreeArchive
+  ])
 
   // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
   // what the dialog said is exactly what runs — and the result banner names the push either way.
@@ -4473,7 +4661,7 @@ export function Canvas() {
   // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
   // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
   const onWorktreeAction = useCallback(
-    (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+    (groupId: string, action: 'merge' | 'remove' | 'unbind' | 'rerun-setup') => {
       // A binding can only predate the SSH gate (hand-edited project file, or a project that became
       // an SSH project), but it can still exist — and merge/remove would run against the LOCAL
       // filesystem for a project whose git and terminals live on the remote host. Refuse them, out
@@ -4529,11 +4717,27 @@ export function Canvas() {
             if (!res.ok && res.error) setNotice({ kind: 'error', text: res.error })
           })
           break
+        case 'rerun-setup': {
+          // The failed-setup chip. This is the ONLY re-run that can clear a worktree group's failed
+          // run and release the nodes it left armed: it runs at the WORKTREE path and its ack
+          // re-attaches THIS group's lane. The settings panel's Run does neither (project root,
+          // project lane), which is why the chip does not merely point at it.
+          const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+          if (!wt) return
+          startWorktreeSetup(groupId, wt.path)
+          break
+        }
         default:
           break
       }
     },
-    [requestRemoveWorktree, clearWorktreeBinding, releaseWorktreeBinding, activeProjectId]
+    [
+      requestRemoveWorktree,
+      clearWorktreeBinding,
+      releaseWorktreeBinding,
+      activeProjectId,
+      startWorktreeSetup
+    ]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
@@ -7067,9 +7271,27 @@ export function Canvas() {
       // `extraLive` names nodes being created in this same tick — `verify` arms its judge on
       // reviewers that are not on the canvas yet, and without this they would look DELETED,
       // which counts as satisfied, and the judge would fire before a single review existed.
-      const armAfter = (node: CanvasNode, after: string[], extraLive?: Iterable<string>): CanvasNode => {
+      // `intoGroup` adds the SECOND reason to hold a launch: the node is being opened into a
+      // worktree frame whose project setup script is still preparing the checkout (and said
+      // `waitForSetup`). Same mechanism, same escape hatch on the node — see `awaitSetupGroup`.
+      const armAfter = (
+        node: CanvasNode,
+        after: string[],
+        extraLive?: Iterable<string>,
+        intoGroup?: string | null
+      ): CanvasNode => {
         const command = node.data.initialCommand as string | undefined
-        if (!after.length || !command) return node
+        if (!command) return node
+        // A group counts while its launch is still PENDING (the ack — and with it `waitForSetup` —
+        // has not come back yet; holding is the safe side of that unknown, and a non-waiting ack
+        // releases these again) or while its acked run said `waitForSetup` and has not finished.
+        const holdsForSetup =
+          !!intoGroup &&
+          (useProjectSetup.getState().pendingForGroup(intoGroup) > 0 ||
+            setupWaitGroupsRef.current.has(intoGroup)) &&
+          !setupDoneForGroup(intoGroup)
+        const awaitSetupGroup = holdsForSetup ? intoGroup ?? undefined : undefined
+        if (!after.length && !awaitSetupGroup) return node
         // If the wait is ALREADY over, don't arm at all — leave the command as the node's
         // `initialCommand` so its own mount path delivers it through `writeWhenShellReady`
         // (which waits for the shell prompt and echo-verifies). Arming would instead hand
@@ -7081,10 +7303,14 @@ export function Canvas() {
           useAgentStatus.getState().byId,
           live
         )
-        if (!unmet.length) return node
+        if (!unmet.length && !awaitSetupGroup) return node
         return {
           ...node,
-          data: { ...node.data, initialCommand: undefined, pendingLaunch: { after, command } }
+          data: {
+            ...node.data,
+            initialCommand: undefined,
+            pendingLaunch: { after, command, ...(awaitSetupGroup ? { awaitSetupGroup } : {}) }
+          }
         }
       }
       // Open `count` nodes INTO a group frame: grow the frame FIRST (extent:'parent' would
@@ -7158,7 +7384,9 @@ export function Canvas() {
                   args.cmd,
                   sshFor(termCwd)
                 ),
-                after ?? []
+                after ?? [],
+                undefined,
+                intoGroupId
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -7209,7 +7437,9 @@ export function Canvas() {
                   account,
                   activePermissionMode(agentId)
                 ),
-                after ?? []
+                after ?? [],
+                undefined,
+                intoGroupId
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -9086,6 +9316,11 @@ export function Canvas() {
             }
           },
           { label: 'Set folder…', icon: <IconProject />, onClick: () => setProjectFolder(projectId) },
+          {
+            label: 'Project settings…',
+            icon: <IconGear />,
+            onClick: () => openProjectSettings(projectId)
+          },
           { type: 'separator' },
           { type: 'colors', onPick: (color) => setProjectColor(projectId, color) },
           { type: 'separator' },
@@ -9098,7 +9333,15 @@ export function Canvas() {
         ]
       })
     },
-    [activeProjectId, switchProject, renameProject, setProjectFolder, setProjectColor, closeProject]
+    [
+      activeProjectId,
+      switchProject,
+      renameProject,
+      setProjectFolder,
+      setProjectColor,
+      closeProject,
+      openProjectSettings
+    ]
   )
 
   // Reopen a previously closed project and make it active — the active-project effect reloads its
@@ -9486,6 +9729,7 @@ export function Canvas() {
         onRemoteAccess={() => setRemoteDialogOpen(true)}
         onSetDefaultAccount={setProjectDefaultAccount}
         onSetDefaultPermissionMode={setProjectDefaultPermissionMode}
+        onOpenProjectSettings={openProjectSettings}
       />
 
       <div className="top-banners">
@@ -9993,7 +10237,11 @@ export function Canvas() {
       )}
 
       {settingsOpen && (
-        <SettingsPage onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+        <SettingsPage
+          onClose={() => setSettingsOpen(false)}
+          initialSection={settingsSection}
+          retargetNonce={settingsNonce}
+        />
       )}
 
       {scOpen && (
@@ -10096,6 +10344,12 @@ export function Canvas() {
           every active-project change (the project-load path), is click-only, and records its
           answer machine-locally — see components/CapabilityNotice.tsx and its test. */}
       <CapabilityNotice />
+
+      {/* The trust gate for a git-shared setup/archive script, mounted ONCE for the whole app on
+          the same layer as the clone notice: main raises it (a manual run, or a worktree's setup)
+          and it must be answerable wherever the user is, not only while a settings pane happens to
+          be open — see components/SetupConsentDialog.tsx. */}
+      <SetupConsentDialog />
 
       {confirm && (
         <ConfirmDialog

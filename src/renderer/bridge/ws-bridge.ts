@@ -204,11 +204,15 @@ const AI_NAMING_UNAVAILABLE = {
   message: 'AI naming is not available in the server edition yet'
 }
 
-/** Build the real `pty` / `workspace` / `settings` namespaces (plus the top-level `userDataDir`)
- *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
+/** Build the real `pty` / `workspace` / `projectSettings` / `settings` namespaces (plus the
+ *  top-level `userDataDir`) over an RpcClient, mirroring the preload's
+ *  invoke(→request)/send(→cast) split exactly. */
 export function buildRealApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'agent' | 'userDataDir'> {
+): Pick<
+  NodeTerminalApi,
+  'pty' | 'workspace' | 'projectSettings' | 'projectSetup' | 'settings' | 'agent' | 'userDataDir'
+> {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
@@ -287,6 +291,43 @@ export function buildRealApi(
     onExternalChange: () => () => {}
   }
 
+  // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same
+  // registerIpc() call as workspace above — so the server serves this on both shells.
+  const projectSettings: NodeTerminalApi['projectSettings'] = {
+    read: (projectId) =>
+      client.request(IPC.projectSettingsRead, projectId) as ReturnType<
+        NodeTerminalApi['projectSettings']['read']
+      >,
+    writeShared: (projectId, doc) =>
+      client.request(IPC.projectSettingsWriteShared, projectId, doc) as Promise<boolean>,
+    updateLocal: (projectId, local) =>
+      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>
+  }
+
+  // REAL: registerProjectSetupHandlers (core) is wired on the same construction-order point as
+  // src/main/index.ts. Wire carries exactly `(projectId, kind, worktreePath?)` — no rootPath/
+  // projectName/ssh; the server derives those itself from its own workspace index, same as main.
+  const projectSetup: NodeTerminalApi['projectSetup'] = {
+    run: (projectId, kind, worktreePath) =>
+      client.request(IPC.projectSetupRun, projectId, kind, worktreePath) as ReturnType<
+        NodeTerminalApi['projectSetup']['run']
+      >,
+    cancel: (runKey) => client.request(IPC.projectSetupCancel, runKey) as Promise<boolean>,
+    consent: async (requestId, answer) => {
+      client.cast(IPC.projectSetupConsentSubmit, requestId, answer)
+    },
+    onConsentRequest: (cb) => client.subscribe(IPC.projectSetupConsentRequest, cb as Listener),
+    onConsentDismiss: (cb) => client.subscribe(IPC.projectSetupConsentDismiss, cb as Listener),
+    onEvent: (projectId, cb) => {
+      const unsub = client.subscribe(IPC.projectSetupEvent(projectId), cb as Listener)
+      client.cast(IPC.projectSetupSubscribe, projectId)
+      return () => {
+        unsub()
+        client.cast(IPC.projectSetupUnsubscribe, projectId)
+      }
+    }
+  }
+
   const settings: SettingsApi = {
     load: () => client.request(IPC.settingsLoad) as Promise<Settings>,
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
@@ -321,7 +362,7 @@ export function buildRealApi(
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, settings, agent, userDataDir }
+  return { pty, workspace, projectSettings, projectSetup, settings, agent, userDataDir }
 }
 
 export function buildGitHubApi(

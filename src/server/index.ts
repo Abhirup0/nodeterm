@@ -31,6 +31,10 @@ import {
 } from '../core/model-gateway-credentials'
 import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { ProjectTrustStore } from '../core/project-trust-store'
+import { ProjectSetupService } from '../core/project-setup-service'
+import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
+import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -266,6 +270,24 @@ export async function startServer(
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
+  // Project setup/archive runner — same construction as src/main/index.ts, and the SAME
+  // `registerProjectSetupHandlers` trust boundary (project-setup-handlers.ts): it derives rootPath/
+  // ssh/projectName from THIS process's own workspace index by projectId, never the renderer, and
+  // re-validates `worktreePath` against the project's actual git worktrees. No ssh leg here at all
+  // (the Server Edition has no SSH projects, same reason board-log's router below never resolves
+  // one) — `projectTargetInfo` never populates `ssh` on this shell, so an ssh-shaped target simply
+  // never arises.
+  const projectTrustStore = new ProjectTrustStore()
+  const projectSetupService = new ProjectSetupService({
+    trust: projectTrustStore,
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    runLocal: makeLocalSetupRunner()
+  })
+  registerProjectSetupHandlers(platform, projectSetupService, {
+    projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+    worktreeList: (repoPath) => gitService.worktreeList(repoPath)
+  })
+
   const github = registerGitHubIntegration({
     platform,
     userDataDir: config.dataDir,
@@ -605,6 +627,9 @@ export async function startServer(
     return {
       port: 0, // nothing bound
       async close() {
+        // Kill any in-flight setup/archive run: it is a detached process group, so nothing else in
+        // this teardown reaches it. Same call, same reason, in the serving branch's close() below.
+        projectSetupService.disposeAll()
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
         pressure.stop()
@@ -657,6 +682,9 @@ export async function startServer(
   return {
     port,
     async close() {
+      // Kill any in-flight setup/archive run first: it is a detached process group (setsid), so
+      // neither the WS teardown nor ptyManager.killAll() below would ever reach it.
+      projectSetupService.disposeAll()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
       pressure.stop()

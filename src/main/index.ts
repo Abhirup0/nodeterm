@@ -63,6 +63,11 @@ import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
+import { ProjectTrustStore } from '../core/project-trust-store'
+import { ProjectSetupService } from '../core/project-setup-service'
+import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
+import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
+import { makeSshSetupRunner } from './remote-ssh/ssh-setup-runner'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
 import {
@@ -457,6 +462,40 @@ workspaceStore.onPersist = () => {
   refreshNodeTokens()
 }
 const gitService = new GitService()
+
+// Project setup/archive runner (SDD: 2026-08-19-project-settings-trust). The trust store is keyed
+// by LOCATION, never project id (hostile-project-json), so one instance covers every project.
+// `readSettings` reuses WorkspaceStore's own resolution instead of re-reading disk. `ProjectSetupService`
+// already matches `ProjectSetupHandlerService`'s shape, so it is passed straight through — the
+// TRUST boundary (deriving rootPath/ssh/projectName from THIS machine's own index by projectId,
+// never the renderer, and re-validating `worktreePath` against the project's actual git worktrees)
+// lives centrally in `registerProjectSetupHandlers` itself (project-setup-handlers.ts), shared with
+// the Server Edition below instead of re-implemented per shell.
+const projectTrustStore = new ProjectTrustStore()
+const projectSetupService = new ProjectSetupService({
+  trust: projectTrustStore,
+  readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+  runLocal: makeLocalSetupRunner(),
+  // The ssh leg streams over the project's LIVE ControlMaster, resolved lazily (the manager is
+  // created only once the window is ready) on the FULL endpoint — host+user+port+remoteCwd, not the
+  // cwd alone: the default remoteCwd is `~`, and one `user@host` can be several machines on
+  // different ports. A project with no matching live connection resolves to null and the runner
+  // reports that as a failed run rather than dialing a fresh connection. Server Edition has no
+  // ssh-project manager at all, so it wires `runLocal` only and an ssh target there stays
+  // `{status:'skipped', reason:'unavailable'}`.
+  runSsh: makeSshSetupRunner((endpoint) => sshProjectManager?.refForEndpoint(endpoint) ?? null),
+  // The trust prompt goes to THIS window only — never `platform().broadcast`, which also fans out
+  // to every relay peer (a paired phone, another desktop). Broadcasting it would hand a guest the
+  // shared script bodies (the exact bytes being approved) and put the host's own trust dialog on
+  // their screen. Same main-window-only push the ssh passphrase prompt uses; with the window closed
+  // (macOS) the prompt is simply not delivered and the run rides out its expiry as `unanswered`,
+  // which is the fail-closed direction.
+  sendConsent: (channel, payload) => sendToMain(channel, payload)
+})
+registerProjectSetupHandlers(corePlatform, projectSetupService, {
+  projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+  worktreeList: (repoPath) => gitService.worktreeList(repoPath)
+})
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
 // strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],
@@ -3408,6 +3447,11 @@ app.on('before-quit', (e) => {
   keepAwake?.dispose()
   keepAwake = undefined
   workspaceWatcher.dispose()
+  // A setup/archive run is a DETACHED process group (setsid, so cancel can SIGKILL the tree), which
+  // means quitting without this leaves `npm ci` churning with no app left to report to — and the
+  // hook/pty teardown below would never touch it. Idempotent, so the second before-quit pass (the
+  // deferred app.quit()) costs nothing.
+  projectSetupService.disposeAll()
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.
     sshProjectManager?.disconnectAll()

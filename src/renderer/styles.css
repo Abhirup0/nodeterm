@@ -5465,6 +5465,44 @@ body,
   color: var(--warn);
 }
 
+/* Project setup/archive script state for this checkout — same quiet weight as the status
+   suffixes above; only a failure earns a color. */
+.group-node__setup {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: help;
+}
+
+.group-node__setup--done {
+  color: var(--success);
+}
+
+.group-node__setup--failed,
+.group-node__setup--cancelled {
+  color: var(--warn);
+}
+
+/* A failed SETUP is a button (re-run), not a label — it is the only path that can release the
+   nodes the failure left armed. Styled as the chip it replaces, plus a click affordance. */
+button.group-node__setup {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+button.group-node__setup:hover:not(:disabled) {
+  background: var(--panel-header);
+}
+
+/* A launch is already in flight (or running) — the click would only earn a `busy` refusal. */
+button.group-node__setup:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+
 .group-node__wt-btn {
   background: var(--surface-sunken);
   border: 1px solid var(--border);

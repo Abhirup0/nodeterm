@@ -294,6 +294,27 @@ export function buildStubApi(): Omit<
       saveGatewayCredential: U('agent.saveGatewayCredential'),
       clearGatewayCredential: U('agent.clearGatewayCredential')
     },
+    projectSettings: {
+      // Overridden by the real WS-backed namespace in ws-bridge (same registerIpc() call as
+      // `workspace`); this fallback only matters if some future assembly spreads the stub alone.
+      // Fail-closed rather than reject: an unknown/unreachable project reads as "no settings" and
+      // a write/update as "did not happen", matching the real handlers' contract for an unknown id.
+      read: () => Promise.resolve(null),
+      writeShared: () => Promise.resolve(false),
+      updateLocal: () => Promise.resolve(false)
+    },
+    projectSetup: {
+      // Same fallback story as `projectSettings` above — real over the bridge
+      // (`buildRealApi`'s `projectSetup`); this only matters if some future assembly spreads the
+      // stub alone. `run` fails closed with the SAME shape a real "nothing to run" answer uses, so
+      // a caller needs no extra branch to handle the stub differently from the real thing.
+      run: () => Promise.resolve({ status: 'skipped', reason: 'unavailable' }),
+      cancel: () => Promise.resolve(false),
+      consent: pnoop,
+      onConsentRequest: noopUnsub,
+      onConsentDismiss: noopUnsub,
+      onEvent: noopUnsub
+    },
     chat: {
       readTranscript: U('chat.readTranscript')
     },

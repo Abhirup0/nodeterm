@@ -220,6 +220,16 @@ export interface PendingLaunch {
   after: string[]
   /** Delivered to the node's shell once the wait is over (agent CLI + prompt, or a plain command). */
   command: string
+  /**
+   * Also wait for this worktree GROUP's project setup script to finish (`waitForSetup`). Set when
+   * the node is opened into a frame whose checkout is still being prepared — running a command in a
+   * half-installed worktree is the failure this gate exists to prevent. It names a group id, never
+   * a command: nothing here is ever executed, it only selects a run to ask about.
+   *
+   * A group with no run on record counts as done (`launchesToFire`), so a persisted arming that
+   * outlives the run's event stream — an app restart — releases rather than strands the node.
+   */
+  awaitSetupGroup?: string
 }
 
 export interface CanvasNodeState {
@@ -761,6 +771,44 @@ export interface WorkspaceApi {
   onCorruptRecovered(cb: (backupFile: string) => void): () => void
   /** Fired when a project file changed on disk outside the app (git pull, sync, teammate). */
   onExternalChange(cb: (project: Project) => void): () => void
+}
+
+export interface ProjectSettingsApi {
+  /** `{shared, local, conflict?}` for a known project id, or null for an unknown one. */
+  read(projectId: string): Promise<import('./project-settings').ProjectSettingsSnapshot | null>
+  /** Whole-document write of the git-shared `.nodeterm/settings.json`. See
+   *  `WorkspaceStore.writeProjectSettings` for the false-vs-true contract. */
+  writeShared(projectId: string, doc: import('./project-settings').ProjectSettingsDoc): Promise<boolean>
+  /** This machine's own overlay; `local: undefined` clears it. */
+  updateLocal(
+    projectId: string,
+    local: import('./project-settings').ProjectLocalSettings | undefined
+  ): Promise<boolean>
+}
+
+export interface ProjectSetupApi {
+  /** Launch a project's setup/archive script behind the trust gate (`project-setup-service.ts`).
+   *  `worktreePath`, when given, is the ONLY path-shaped hint this call carries — main derives
+   *  `rootPath`/`ssh` from its own workspace index by `projectId` and independently validates
+   *  `worktreePath` against that project's actual git worktrees; nothing path-shaped sent here is
+   *  trusted as-is (Task 1 review finding). */
+  run(
+    projectId: string,
+    kind: import('./project-settings').ProjectSetupKind,
+    worktreePath?: string
+  ): Promise<import('./project-settings').ProjectSetupRunResult>
+  /** Aborts a live run, or one still waiting at its consent dialog. `false` = nothing by that
+   *  runKey exists (already finished, or never did). */
+  cancel(runKey: string): Promise<boolean>
+  /** Renderer's answer to a `onConsentRequest` prompt. A stale/unknown requestId is a silent no-op. */
+  consent(requestId: string, answer: import('./project-settings').ProjectSetupConsentAnswer): Promise<void>
+  /** main → renderer: raise the trust dialog before a shared-sourced script runs. */
+  onConsentRequest(cb: (req: import('./project-settings').ProjectSetupConsentRequest) => void): () => void
+  /** main → renderer: close a prompt nobody answered before the renderer did. */
+  onConsentDismiss(cb: (p: { requestId: string }) => void): () => void
+  /** Per-project run progress (`ProjectSetupEvent`), mirroring `boardLog.onChanged`'s ref-counted
+   *  subscribe/unsubscribe shape. */
+  onEvent(projectId: string, cb: (ev: import('./project-settings').ProjectSetupEvent) => void): () => void
 }
 
 export interface DialogApi {
@@ -2579,6 +2627,8 @@ export interface ShortcutsApi {
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
+  projectSettings: ProjectSettingsApi
+  projectSetup: ProjectSetupApi
   dialog: DialogApi
   settings: SettingsApi
   speech: SpeechApi
