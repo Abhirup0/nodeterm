@@ -26,8 +26,17 @@
  *    registry and is offered to zoom → projectJump → copy. Those gestures receive the RAW event
  *    with no context, so **each trailing gesture closure owes its own focus/typing guard**; keyed
  *    dictation is the only gesture this module guards.
+ *
+ * 3. **The terminal-shortcut policy is applied in TWO places, because the gestures bypass the
+ *    resolver.** `resolveCommandForKeyEvent` honors `ctx.terminalFirst` for registry commands;
+ *    the trailing gestures never go through it, so this module gates them separately. A future
+ *    gesture appended to that chain inherits the gate for free — one added ABOVE the registry
+ *    (as keyed dictation is) does not, and owes its own.
  */
-import { resolveCommandForKeyEvent, type CommandId, type KeybindingOverrides } from '@shared/keybindings'
+import {
+  resolveCommandForKeyEvent, COMMANDS_BY_ID,
+  type CommandId, type KeybindingOverrides
+} from '@shared/keybindings'
 import { keyDispatchContextFor, type ContextElement } from './keyContext'
 
 /** Structural key event so node-env tests need no DOM (a real KeyboardEvent satisfies it). */
@@ -49,7 +58,15 @@ export interface GlobalKeydownDeps {
   kanbanOpen: () => boolean
   overrides: () => KeybindingOverrides
   isMac: boolean
+  /** The user's `terminalShortcutPolicy`, read live: true = 'terminal-first'. A thunk, not a
+   *  value, so a policy change takes effect on the next keystroke without re-registering the
+   *  window listener. */
+  terminalFirst: () => boolean
   handlers: CommandHandlers
+  /** Called when a registry handler CLAIMS a chord that a focused terminal would otherwise
+   *  have received — i.e. app-first took it. Terminal-scope claims and terminal-first are not
+   *  captures (see the call site). Optional: a caller that shows no notice omits it. */
+  onTerminalCapture?: (id: CommandId) => void
   /** Registry-less chords, tried in this exact order (matches today's if-chain order):
    *  keyed dictation BEFORE the registry (a custom keyed chord may collide with a default
    *  and must keep winning), zoom/projectJump/copy AFTER a registry miss. Each returns true
@@ -65,8 +82,7 @@ export interface GlobalKeydownDeps {
 export function dispatchGlobalKeydown(e: GlobalKeyEvent, deps: GlobalKeydownDeps): boolean {
   // A child handler (find bar, dialogs, terminal) that already claimed the key wins outright.
   if (e.defaultPrevented) return false
-  // Task 2 threads the real policy (a deps thunk); app-first until then, which is today's behavior.
-  const ctx = keyDispatchContextFor(deps.activeElement(), deps.kanbanOpen(), false)
+  const ctx = keyDispatchContextFor(deps.activeElement(), deps.kanbanOpen(), deps.terminalFirst())
   // Keyed dictation predates the registry and may deliberately collide with a default; it
   // keeps first claim, but only in plain app focus (its old guard blocked inputs AND xterm).
   if (!ctx.typing && !ctx.terminal && !ctx.kanbanOpen && deps.gestures.keyedDictation(e)) return true
@@ -75,12 +91,28 @@ export function dispatchGlobalKeydown(e: GlobalKeyEvent, deps: GlobalKeydownDeps
     const handler = deps.handlers[id]
     if (handler && handler()) {
       e.preventDefault()
+      // App-first just took this chord from a focused terminal: the once-per-command notice.
+      // The scope check is the load-bearing one — a terminal-scope claim (find, copy) is the
+      // terminal's OWN key, not a capture, and gating on the policy alone would report ⌘F as
+      // stolen. `!ctx.terminalFirst` is deliberate redundancy: the RESOLVER already refuses
+      // every non-terminal-scope command under terminal-first, so no test can distinguish it
+      // today (measured — removing it leaves the suite green). It STATES the condition here so
+      // the notice stays honest if that resolver rule is ever loosened, the same way the
+      // resolver's own isHoldChord skip states a contract it does not currently need.
+      if (ctx.terminal && !ctx.terminalFirst && COMMANDS_BY_ID.get(id)?.scope !== 'terminal') {
+        deps.onTerminalCapture?.(id)
+      }
       return true
     }
     // Resolved but unhandled/declined: fall through to the platform, never to a gesture that
     // could reinterpret the same chord.
     return false
   }
+  // terminal-first: the trailing gestures are APP gestures (zoom, project jump, copy) and the
+  // resolver never saw them, so the policy has to be applied here too — otherwise Cmd+0 still
+  // zooms out from under a user who reserved every chord for the shell. Each gesture keeps its
+  // own guards for the app-first case; this is an additional gate, not a replacement.
+  if (ctx.terminal && ctx.terminalFirst) return false
   if (deps.gestures.zoom(e)) return true
   if (deps.gestures.projectJump(e)) return true
   if (deps.gestures.copy(e)) return true

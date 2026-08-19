@@ -183,7 +183,8 @@ import {
   activeKeybindingOverrides,
   chipFor,
   commandTooltip,
-  dictationBinding
+  dictationBinding,
+  terminalShortcutPolicy
 } from '../lib/keybindingOverrides'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { SystemResourcePill } from '../components/SystemResourcePill'
@@ -5226,6 +5227,9 @@ export function Canvas() {
     kanbanOpen: () => isKanbanOpen(useProjects.getState().activeProjectId),
     overrides: activeKeybindingOverrides,
     isMac,
+    // Read per keystroke (the deps object is rebuilt each render anyway, but the thunk is what
+    // the contract asks for): a policy change takes effect immediately, with no re-registration.
+    terminalFirst: () => terminalShortcutPolicy() === 'terminal-first',
     handlers: {
       'app.commandPalette': () => { setPaletteOpen((v) => !v); return true },
       'app.settings': () => { setSettingsSection(undefined); setSettingsOpen(true); return true },

@@ -4,7 +4,8 @@ import { matchesShortcut, type ShortcutKeyEvent } from '@shared/shortcut'
 import { useSettings } from '../state/settings'
 import {
   activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip, chipFor,
-  setKeybindingOverride, commandKeysFor, dictationBinding
+  setKeybindingOverride, commandKeysFor, dictationBinding,
+  terminalShortcutPolicy, noteTerminalCapture
 } from './keybindingOverrides'
 
 const setKb = (kb: unknown) =>
@@ -123,6 +124,59 @@ describe('setKeybindingOverride', () => {
     expect(useSettings.getState().settings.speech.shortcut).toBe('Cmd+Alt+D')
     setKeybindingOverride('speech.dictation', null)
     expect(useSettings.getState().settings.speech.shortcut).toBe(DEFAULT_SETTINGS.speech.shortcut)
+  })
+})
+
+// NODE ENV, deliberately: this file runs without jsdom (see the note on noteTerminalCapture),
+// so only the SETTINGS side is asserted here. The 'nodeterm:shortcut-captured' event is
+// window-guarded and its dispatch is covered by the banner's jsdom test.
+describe('terminalShortcutPolicy / noteTerminalCapture', () => {
+  const seen = () => useSettings.getState().settings.seenShortcutCaptureNotices
+  const setSettings = (patch: Record<string, unknown>) =>
+    useSettings.setState({ settings: { ...DEFAULT_SETTINGS, ...patch } as never })
+
+  it('normalizes the setting', () => {
+    expect(terminalShortcutPolicy()).toBe('app-first')
+    setSettings({ terminalShortcutPolicy: 'terminal-first' })
+    expect(terminalShortcutPolicy()).toBe('terminal-first')
+  })
+  it('a hand-edited garbage policy reads as app-first, not as the raw value', () => {
+    // settings.json is hand-editable, so the compile-time type is not a runtime guarantee —
+    // and the unknown value must degrade to today's behavior, never to terminal-first.
+    setSettings({ terminalShortcutPolicy: 'shell-first' })
+    expect(terminalShortcutPolicy()).toBe('app-first')
+  })
+  it('notes a capture once, persists the id, and is silent under terminal-first', () => {
+    noteTerminalCapture('app.commandPalette')
+    noteTerminalCapture('app.commandPalette')
+    expect(seen()).toEqual(['app.commandPalette'])
+    setSettings({
+      terminalShortcutPolicy: 'terminal-first',
+      seenShortcutCaptureNotices: ['app.commandPalette']
+    })
+    noteTerminalCapture('canvas.undo')
+    expect(seen()).toEqual(['app.commandPalette'])
+  })
+  it('appends to the ids already seen rather than replacing them', () => {
+    setSettings({ seenShortcutCaptureNotices: ['app.settings'] })
+    noteTerminalCapture('app.commandPalette')
+    expect(seen()).toEqual(['app.settings', 'app.commandPalette'])
+  })
+  it('a hand-edited seenShortcutCaptureNotices of the wrong shape reads as empty', () => {
+    // `.includes` on a string would answer TRUE for any substring of it, silently swallowing
+    // the first notice; on a non-array it would throw inside a keydown handler.
+    setSettings({ seenShortcutCaptureNotices: 'garbage' })
+    noteTerminalCapture('app.commandPalette')
+    expect(seen()).toEqual(['app.commandPalette'])
+  })
+  it('drops non-string entries from a hand-edited list instead of carrying them forward', () => {
+    setSettings({ seenShortcutCaptureNotices: ['app.settings', 7, null] })
+    noteTerminalCapture('app.commandPalette')
+    expect(seen()).toEqual(['app.settings', 'app.commandPalette'])
+  })
+  it('does not throw with no window (the guard node-env dispatch depends on)', () => {
+    expect(typeof window).toBe('undefined')
+    expect(() => noteTerminalCapture('app.commandPalette')).not.toThrow()
   })
 })
 
