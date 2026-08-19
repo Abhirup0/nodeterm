@@ -190,6 +190,21 @@ export function sshConnectionScope(conn: SshConnection): string {
   return sshConnectionIdForProject(activeProjectId, conn, getProject(activeProjectId)?.ssh?.server)
 }
 
+/**
+ * The project whose per-project settings apply to a node in THIS canvas — for the launch-command
+ * layer (`agentLaunchOverride`) on relaunch, restart and wake.
+ *
+ * The active project, deliberately, and NOT `sshConnectionScope`'s answer: that scope is a
+ * CONNECTION identity, which for a remote node attached to a foreign host is a synthetic
+ * project×host attachment id (`sshAttachmentId`) rather than a project id at all — passing it here
+ * would silently resolve to "no project settings" for exactly those nodes. A node only ever exists
+ * in the active project's React Flow (same reasoning `sshConnectionScope` states), so the active
+ * project is its owner; an SSH project's own nodes answer the same id either way.
+ */
+function owningProjectId(): string {
+  return useProjects.getState().activeProjectId
+}
+
 /** The live ControlMaster path a remote node would run over, if any. Lets the caller tell "we will
  *  resolve in a microtask" from "we are about to sit in the wait below" without duplicating the
  *  lookup. Without a `conn` it answers for the active project's own connection. */
@@ -2878,9 +2893,11 @@ export function TerminalNode({
               permissionMode: mode,
               model: data.agentModel,
               sharedIdentity: shared,
-              // The user's launch-command override rides the relaunch too, so a wrapper user's node
-              // comes back through its wrapper after a reboot — the moment env/account setup matters.
-              launchCmdOverride: agentLaunchOverride(agentId)
+              // The launch-command override rides the relaunch too, so a wrapper user's node comes
+              // back through its wrapper after a reboot — the moment env/account setup matters.
+              // Scoped to the OWNING project (`owningProjectId`) so a project-level wrapper does
+              // not vanish on cold restore, which is exactly where it is most needed.
+              launchCmdOverride: agentLaunchOverride(agentId, owningProjectId())
             },
             // The boot-time desktop env snapshot — the same object fresh launch and the Settings
             // preview expand against, so a ${env:…}-referencing custom agent cold-restores with
@@ -3039,9 +3056,10 @@ export function TerminalNode({
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(target),
             model: selectedModel ?? undefined,
-            // The per-builtin launch-command override rides the restart too (undefined for a custom
-            // target, which already owns its launchCmd) — it is a property of how the agent launches.
-            launchCmdOverride: agentLaunchOverride(target)
+            // The launch-command override rides the restart too (the global layer is undefined for
+            // a custom target, which already owns its launchCmd) — it is a property of how the
+            // agent launches, so the owning project's own value applies here as well.
+            launchCmdOverride: agentLaunchOverride(target, owningProjectId())
           },
           launchEnv
         )
@@ -3157,9 +3175,9 @@ export function TerminalNode({
             sessionId: agentSessionId,
             permissionMode: await ensureActivePermissionMode(agentId),
             sharedIdentity: false,
-            // The USER's launch-command override lives on their own PATH (or is an absolute path),
-            // not in a generated launcher dir, so it rides the wake too.
-            launchCmdOverride: agentLaunchOverride(agentId)
+            // The launch-command override lives on the user's own PATH (or is an absolute path),
+            // not in a generated launcher dir, so it rides the wake too — project layer included.
+            launchCmdOverride: agentLaunchOverride(agentId, owningProjectId())
           },
           // Same boot-time env snapshot as fresh launch / cold restore, so a wake types the same
           // line the node launched with (empty on browser/relay by design).
