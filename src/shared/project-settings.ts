@@ -337,6 +337,43 @@ export function resolveProjectSettings(
 
 export type ProjectTrustFamily = 'setup' | 'agents' | 'shell'
 
+/** Which of the setup family's two scripts a run executes. */
+export type ProjectSetupKind = 'setup' | 'archive'
+
+/** main→renderer: raise the consent dialog for ONE shared-sourced script about to run. Approving
+ *  covers the whole `setup` family (both scripts are hashed together), so `script` is what is about
+ *  to run, not the full extent of what is being approved — the dialog says so. */
+export interface ProjectSetupConsentRequest {
+  requestId: string
+  kind: ProjectSetupKind
+  projectName: string
+  /** Human-readable location ("~/code/app" or "user@host:/srv/app"). */
+  locationLabel: string
+  /** The script about to run (the family's OTHER script is covered by the same approval). */
+  script: string
+  /** A prior approval exists for this family at this location (dialog copy: "changed since you
+   *  approved"). Copy only — never a grant; the grant is the hash comparison. */
+  previouslyApproved: boolean
+}
+
+export type ProjectSetupConsentAnswer = 'approve' | 'skip'
+
+export type ProjectSetupRunResult =
+  | { status: 'started'; runKey: string; waitForSetup: boolean }
+  | { status: 'skipped'; reason: 'no-script' | 'declined' | 'unanswered' | 'busy' | 'unavailable' }
+
+/** main→renderer per-run progress on `IPC.projectSetupEvent(projectId)`. `seq` is monotonic per
+ *  run, so a client that misses one knows it. */
+export interface ProjectSetupEvent {
+  runKey: string
+  kind: ProjectSetupKind
+  seq: number
+  state: 'running' | 'done' | 'failed' | 'cancelled'
+  /** Appended output since the last event (stdout+stderr interleaved, capped). */
+  chunk?: string
+  exitCode?: number
+}
+
 /**
  * Canonical string covering EVERYTHING executable a family ships — the same shape of problem
  * `execTrusted` (node-exec.ts) solves for shell/ssh fields: a caller compares this against what it
