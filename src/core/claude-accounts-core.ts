@@ -2,6 +2,7 @@
 // everything here is unit-tested; the impure lifecycle lives in claude-accounts.ts.
 import { createHash } from 'crypto'
 import path from 'path'
+import { MODEL_GATEWAY_ENV_KEYS } from '../shared/agents/model-gateway'
 
 /** Shape of a valid account id (uuid / opaque token). Shared by every path builder so a bad id
  *  can never traverse out of the accounts root — locally OR on a remote host over ssh. */
@@ -190,6 +191,13 @@ export const AUTH_ENV_STRIP = [
  *    routes the session's traffic to a third party.
  *  - `CLAUDE_CONFIG_DIR` is where the agent reads and WRITES credentials. Redirected into the repo
  *    (`./.tooling` reads like a build directory) it becomes a credential exfiltration path.
+ *  - `MODEL_GATEWAY_ENV_KEYS` — the provider ROUTING vars (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+ *    `COPILOT_PROVIDER_BASE_URL`, and the keys that travel with them). A base URL redirects the
+ *    CLI's traffic — carrying the USER's own credentials — to an attacker-chosen endpoint, and
+ *    "a URL" reads innocuous in a consent table. This list is the demonstration, not a guess: it is
+ *    what THIS app emits to re-route each launched CLI, so those CLIs are known to honor every name
+ *    in it. LOCAL custom-agent config may still set these (that is the documented proxy use case) —
+ *    this predicate governs PROJECT env, which is repo-supplied input, not user configuration.
  *  - `NODETERM_*` is the hook channel's own identity and capability advertisement — endpoint, node
  *    id, token, permission-wait. Forging any of them lets one node speak as another.
  * Nothing here is a value a project legitimately needs to set; a project that wants its own auth
@@ -202,7 +210,8 @@ export function isReservedSpawnEnvKey(key: string): boolean {
   return (
     key.startsWith('NODETERM_') ||
     key === 'CLAUDE_CONFIG_DIR' ||
-    (AUTH_ENV_STRIP as readonly string[]).includes(key)
+    (AUTH_ENV_STRIP as readonly string[]).includes(key) ||
+    (MODEL_GATEWAY_ENV_KEYS as readonly string[]).includes(key)
   )
 }
 
