@@ -39,6 +39,7 @@ import {
   type ProjectSetupHandlerDeps
 } from '../core/project-setup-handlers'
 import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
+import { registerWorktreeSharedPathsHandlers } from '../core/worktree-shared-paths-handlers'
 import { makeProjectSpawnOverrides } from '../core/project-spawn-overrides'
 import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { LogBuffer } from '../core/log-buffer'
@@ -294,6 +295,14 @@ export async function startServer(
     worktreeList: (repoPath) => gitService.worktreeList(repoPath)
   }
   registerProjectSetupHandlers(platform, projectSetupService, projectSetupDeps)
+  // `worktree:materialize-shared` — same sibling registrar and trust boundary as main/index.ts,
+  // over this process's own stores. The Server Edition has no SSH projects, so an ssh-shaped target
+  // never arises; the path validation and by-projectId list read are identical.
+  registerWorktreeSharedPathsHandlers(platform, {
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    targetInfo: projectSetupDeps.projectTargetInfo,
+    worktreeList: projectSetupDeps.worktreeList
+  })
   // `project-settings:launch-info` — same sibling registrar as main/index.ts, sharing this
   // process's own trust store.
   registerProjectLaunchInfoHandlers(platform, workspaceStore, projectTrustStore)

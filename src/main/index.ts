@@ -71,6 +71,7 @@ import {
   type ProjectSetupHandlerDeps
 } from '../core/project-setup-handlers'
 import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
+import { registerWorktreeSharedPathsHandlers } from '../core/worktree-shared-paths-handlers'
 import { makeProjectSpawnOverrides } from '../core/project-spawn-overrides'
 import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { makeSshSetupRunner } from './remote-ssh/ssh-setup-runner'
@@ -503,6 +504,16 @@ const projectSetupDeps: ProjectSetupHandlerDeps = {
   worktreeList: (repoPath) => gitService.worktreeList(repoPath)
 }
 registerProjectSetupHandlers(corePlatform, projectSetupService, projectSetupDeps)
+// `worktree:materialize-shared` — same sibling-registrar shape and the SAME trust boundary as the
+// setup runner (rootPath/ssh derived from THIS process's index by projectId, `worktreePath`
+// re-validated against the project's actual git worktrees); the sharedPaths LIST is read here by
+// projectId, never taken off the wire. Reuses the very `projectTargetInfo`/`worktreeList` the setup
+// deps already carry, plus the store's own settings resolution.
+registerWorktreeSharedPathsHandlers(corePlatform, {
+  readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+  targetInfo: projectSetupDeps.projectTargetInfo,
+  worktreeList: projectSetupDeps.worktreeList
+})
 // `project-settings:launch-info` — a sibling registrar (not a widening of
 // WorkspaceStore.registerIpc()) sharing the trust store constructed above.
 registerProjectLaunchInfoHandlers(corePlatform, workspaceStore, projectTrustStore)

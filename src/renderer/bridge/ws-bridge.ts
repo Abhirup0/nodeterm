@@ -211,7 +211,14 @@ export function buildRealApi(
   client: RpcClient
 ): Pick<
   NodeTerminalApi,
-  'pty' | 'workspace' | 'projectSettings' | 'projectSetup' | 'settings' | 'agent' | 'userDataDir'
+  | 'pty'
+  | 'workspace'
+  | 'projectSettings'
+  | 'projectSetup'
+  | 'worktree'
+  | 'settings'
+  | 'agent'
+  | 'userDataDir'
 > {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
@@ -343,6 +350,15 @@ export function buildRealApi(
     }
   }
 
+  // REAL: registerWorktreeSharedPathsHandlers (core), same construction point as main/server. Wire
+  // carries exactly `(projectId, worktreePath)`; the server reads the sharedPaths list itself.
+  const worktree: NodeTerminalApi['worktree'] = {
+    materializeShared: (projectId, worktreePath) =>
+      client.request(IPC.worktreeMaterializeShared, projectId, worktreePath) as ReturnType<
+        NodeTerminalApi['worktree']['materializeShared']
+      >
+  }
+
   const settings: SettingsApi = {
     load: () => client.request(IPC.settingsLoad) as Promise<Settings>,
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
@@ -377,7 +393,7 @@ export function buildRealApi(
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, projectSettings, projectSetup, settings, agent, userDataDir }
+  return { pty, workspace, projectSettings, projectSetup, worktree, settings, agent, userDataDir }
 }
 
 export function buildGitHubApi(

@@ -261,6 +261,8 @@ import {
   computeWorktreePath,
   resolveWorktreePath,
   displacedByWorktree,
+  effectiveWorktreeBaseRef,
+  effectiveWorktreeTemplate,
   isRemoteSessionNode,
   resolveBaseRef,
   sanitizeWorktreeBranch,
@@ -283,7 +285,11 @@ import {
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
 import { setupAckDecision, setupGateDone, useProjectSetup } from '../state/projectSetup'
-import { ensureProjectLaunchInfo, invalidateProjectLaunchInfo } from '../state/projectLaunchInfo'
+import {
+  ensureProjectLaunchInfo,
+  invalidateProjectLaunchInfo,
+  projectLaunchInfoNow
+} from '../state/projectLaunchInfo'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -1144,6 +1150,15 @@ export function Canvas() {
   }, [getViewport, setViewport])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
+  // Project-level worktree defaults (basePath/baseRef) for the active project, read from the warmed
+  // launch-info cache. Fed to the "New worktree" dialog defaults below; the open-worktree verb reads
+  // its own project's entry separately. Absent (project never warmed, or it sets neither) → the
+  // `effectiveWorktree*` resolvers fall back to entries/global, i.e. today's exact behavior.
+  const activeWorktreePw = projectLaunchInfoNow(activeProjectId ?? '')?.resolved.worktree
+  const activeWorktreeDefaults = {
+    basePath: activeWorktreePw?.basePath?.value,
+    baseRef: activeWorktreePw?.baseRef?.value
+  }
   // Bumped by `requestReload()`; a dependency of the project-load effect so an in-place reload of
   // the ALREADY-active project actually re-runs it (see reloadActiveProject).
   const reloadNonce = useProjects((s) => s.reloadNonce)
@@ -4436,7 +4451,18 @@ export function Canvas() {
       // A fresh checkout is the moment the project's `setup` script exists for: this is the single
       // shared post-create point (the dialog AND agent-control's open-worktree land here), so the
       // trigger lives here rather than being repeated — and never diverging — at each caller.
-      startWorktreeSetup(groupId, wt.path)
+      //
+      // Materialize the project's `sharedPaths` (symlink node_modules/etc back to the repo root)
+      // BEFORE the setup script runs, so a setup `npm install` sees those links. Fire-and-forget re
+      // the bind (it never blocks the frame), but ORDERED before `startWorktreeSetup` — main reads
+      // the sharedPaths list itself by projectId and validates `wt.path`, so a `[]`/reject is safe.
+      void (async () => {
+        const projectId = useProjects.getState().activeProjectId
+        if (projectId) {
+          await window.nodeTerminal.worktree.materializeShared(projectId, wt.path).catch(() => {})
+        }
+        startWorktreeSetup(groupId, wt.path)
+      })()
       // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
       // callers that need the id (agent-control's open-worktree reply) take it from here.
       return groupId
@@ -8030,14 +8056,22 @@ export function Canvas() {
               }
               bindGroupId = g.id
             }
-            const baseRef = args.base?.trim() || resolveBaseRef(entries)
+            // Project-level worktree defaults (basePath/baseRef) from the warmed launch-info cache,
+            // same as the "New worktree" dialog. Fail-open: no cached entry → `effectiveWorktree*`
+            // reduce to entries/global exactly as before. An explicit `--base` still wins.
+            const pw = projectLaunchInfoNow(project?.id ?? '')?.resolved.worktree
+            const projectDefaults = { basePath: pw?.basePath?.value, baseRef: pw?.baseRef?.value }
+            const baseRef = args.base?.trim() || effectiveWorktreeBaseRef(projectDefaults, entries)
             // Resolve from this session's repo root, so a relay tab still produces a path on the
             // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
               explicitPath: args.path,
               repoRoot,
               branch,
-              template: useSettings.getState().settings.worktreePathTemplate
+              template: effectiveWorktreeTemplate(
+                projectDefaults,
+                useSettings.getState().settings.worktreePathTemplate
+              )
             })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
@@ -10488,13 +10522,13 @@ export function Canvas() {
           intent={worktreeDialog.groupId ? 'bind' : 'create'}
           repoPath={worktreeRepoRoot ?? ''}
           existing={worktreeOrphans.filter((e) => !boundWorktreePaths.has(normWorktreePath(e.path)))}
-          defaultBaseRef={resolveBaseRef(worktreeEntries)}
+          defaultBaseRef={effectiveWorktreeBaseRef(activeWorktreeDefaults, worktreeEntries)}
           branches={worktreeBranches}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
               repoPath,
               branch,
-              settings.worktreePathTemplate
+              effectiveWorktreeTemplate(activeWorktreeDefaults, settings.worktreePathTemplate)
             )
           }
           busy={worktreeBusy}
