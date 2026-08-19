@@ -2,6 +2,7 @@
 // everything here is unit-tested; the impure lifecycle lives in claude-accounts.ts.
 import { createHash } from 'crypto'
 import path from 'path'
+import { MODEL_GATEWAY_ENV_KEYS } from '../shared/agents/model-gateway'
 
 /** Shape of a valid account id (uuid / opaque token). Shared by every path builder so a bad id
  *  can never traverse out of the accounts root — locally OR on a remote host over ssh. */
@@ -175,6 +176,129 @@ export const AUTH_ENV_STRIP = [
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_OAUTH_TOKEN'
 ] as const
+
+/** Where each supported agent keeps its config, credentials and (for opencode) its plugin code.
+ *  One list because they are one hazard — see `isReservedSpawnEnvKey`'s clause on them. */
+const AGENT_CONFIG_DIR_ENV: readonly string[] = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CONFIG_HOME']
+
+/**
+ * Names that make a program EXECUTE something it was never asked to, without changing which program
+ * was launched. `NODE_OPTIONS`'s exact reserve-reason, one interpreter down and one shell over —
+ * three mechanisms, one list because they are one hazard (see `isReservedSpawnEnvKey`'s clause):
+ *  - `LD_PRELOAD` / `LD_AUDIT` / `LD_LIBRARY_PATH` — the Linux dynamic loader loads a repo-supplied
+ *    `.so` into the CLI's own address space before `main` runs.
+ *  - `DYLD_INSERT_LIBRARIES` / `DYLD_LIBRARY_PATH` — the macOS equivalent. macOS strips DYLD_* only
+ *    across a SIP-protected or hardened-runtime boundary, and a node/agent CLI is neither: it is a
+ *    script run by the user's own `node`, so the pair applies exactly as on Linux.
+ *  - `BASH_ENV` / `ENV` — sourced by a NON-interactive shell at startup, which is precisely the
+ *    shell every launch line runs in; the file runs before the agent's first byte.
+ *  - `GIT_SSH_COMMAND` / `GIT_EXTERNAL_DIFF` — git runs the named command verbatim the moment the
+ *    agent (or the user) shells out to git, which an agent pane does constantly.
+ * Every one of them renders as an innocuous path or command string in the consent table while
+ * granting arbitrary execution inside a binary the user believes untouched — the NODE_OPTIONS
+ * bucket, not the PATH bucket. Spec §2 names LD_PRELOAD as attack surface by name.
+ *
+ * Honest cost, same shape as the `XDG_CONFIG_HOME` overreach documented below: `ENV` and
+ * `LD_LIBRARY_PATH` are ALSO ordinary application variables (a project that genuinely wanted
+ * `LD_LIBRARY_PATH=./vendor/lib` for its own toolchain cannot set it through project env, and must
+ * use custom-agent env or the shell's rc instead). Kept, because a per-key "is this one being used
+ * innocently?" judgement is not something the merge point can make, and the failure direction of
+ * guessing wrong is arbitrary code execution.
+ */
+const INJECTION_ENV: readonly string[] = [
+  'LD_PRELOAD',
+  'LD_AUDIT',
+  'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'GIT_SSH_COMMAND',
+  'GIT_EXTERNAL_DIFF',
+  'BASH_ENV',
+  'ENV'
+]
+
+/**
+ * Env keys a PROJECT's settings document may never contribute to a spawn, however it is sourced
+ * and however it was consented to (`makeProjectSpawnOverrides` → `PtyManager.spawnSession`, both
+ * the local merge and the ssh `remoteEnvPairs` join).
+ *
+ * WHY, given the value already passed a trust dialog: consent proves a human saw the PAIRS, not
+ * that they understood what each one out-ranks. A project's settings.json is a git-shared file —
+ * one commit reaches every clone — and it is merged AFTER the three layers whose entire job is to
+ * control these exact names:
+ *  - `AUTH_ENV_STRIP` is DELETED from the env when a managed account is selected, precisely so an
+ *    inherited API key cannot shadow that account's OAuth login. A project re-adding one silently
+ *    routes the session's traffic to a third party.
+ *  - AGENT CONFIG DIRS — one clause, three names, because every supported agent has one and a repo
+ *    naming any of them redirects that agent's credentials or code loading into itself. All three
+ *    read like build directories (`./.tooling`) in a consent table:
+ *      · `CLAUDE_CONFIG_DIR` — where claude reads and WRITES credentials (the account path sets it).
+ *      · `CODEX_HOME` — the same for codex (`auth.json` lives there; this app emits it in
+ *        `usage/codex-usage.ts`, and the launched pane resolves it from its OWN environment, see
+ *        `codex-identity-proxy.ts`), so a repo-supplied value captures codex's auth writes.
+ *      · `XDG_CONFIG_HOME` — opencode is XDG-respecting and loads its plugins from
+ *        `$XDG_CONFIG_HOME/opencode` (`agents/hooks/opencode.ts`), which is where THIS app installs
+ *        its managed plugin. A repo pointing that at itself is arbitrary JavaScript executed inside
+ *        the agent process — the worst of the three, and the least legible as an env pair.
+ *  - `MODEL_GATEWAY_ENV_KEYS` — the provider ROUTING vars (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+ *    `COPILOT_PROVIDER_BASE_URL`, and the keys that travel with them). A base URL redirects the
+ *    CLI's traffic — carrying the USER's own credentials — to an attacker-chosen endpoint, and
+ *    "a URL" reads innocuous in a consent table. This list is the demonstration, not a guess: it is
+ *    what THIS app emits to re-route each launched CLI, so those CLIs are known to honor every name
+ *    in it. Custom-agent env may still set these — that is the documented proxy use case.
+ *  - `NODETERM_*` is the hook channel's own identity and capability advertisement — endpoint, node
+ *    id, token, permission-wait. Forging any of them lets one node speak as another.
+ *  - `NODE_OPTIONS` — `--require /repo/x.js` loads arbitrary JavaScript into every node-based CLI
+ *    (claude first among them) at interpreter start. Same class as the opencode-plugin path above,
+ *    and stealthier than PATH: the process still IS the real claude, from the real location, so
+ *    nothing downstream — not the pane, not the identity probe — can tell. The dialog shows a flag
+ *    string; the grant is code execution.
+ *  - `INJECTION_ENV` — the same grant through the DYNAMIC LOADER (`LD_PRELOAD` and friends; the
+ *    macOS `DYLD_*` pair, which a non-SIP-protected node/agent CLI honors just as Linux does), the
+ *    NON-interactive shell's own startup file (`BASH_ENV` / `ENV`, sourced by the very shell the
+ *    launch line runs in), and git's command hooks (`GIT_SSH_COMMAND` / `GIT_EXTERNAL_DIFF`, run
+ *    verbatim as soon as the agent shells out to git). One reserve-reason with NODE_OPTIONS: the
+ *    process still IS the real CLI, from the real location, and the table showed "a path".
+ *
+ * WHAT IS DELIBERATELY *NOT* HERE — `PATH`, and every ordinary application variable. Approving
+ * `PATH=./bin` is a COHERENT consent: "this project's terminals resolve tools from the repo" is the
+ * feature's stated purpose, and the hijack it enables still requires committing a visible binary
+ * that a reviewer can see in the tree. `NODE_OPTIONS` fails exactly that test, which is why it sits
+ * above and PATH does not — it smuggles execution into a binary the user believes untouched.
+ *
+ * The reserved list exists only for keys whose implications a dialog CANNOT convey — a credential
+ * directory, a silent traffic redirect, a hook identity, an interpreter preload — where what is
+ * shown ("a path", "a URL", "a flag") and what is granted are different things. The line is
+ * legibility, not danger; a project that wants its own auth belongs in a custom agent.
+ *
+ * SCOPE, precisely: this filters the project's contribution — BOTH halves of it, the git-shared
+ * document AND this machine's local overlay. That is broader than the hostile-input argument
+ * strictly requires, and it is the deliberate trade: one rule is auditable where "reserved unless
+ * it came from the overlay" would be a provenance check on every key, at the spawn, forever.
+ *
+ * The same overreach applies by AGENT: `XDG_CONFIG_HOME` is reserved for every pane, including a
+ * plain terminal that launches no agent at all and where the opencode-plugin hazard cannot arise.
+ * Kept anyway, for the same one-auditable-rule reason — the alternative is a per-agent reserved list
+ * evaluated at the spawn, and a pane's agent can change under it. The honest cost: someone who
+ * wanted to point a project's shells at repo-local dotfiles through project env cannot, and the
+ * local overlay is no workaround because this filter covers that too. What is left is custom-agent
+ * env (per-machine configuration the user typed themselves, merged after and over this) for an agent
+ * pane, or the shell's own rc for a plain one.
+ *
+ * Filtered SILENTLY at the merge — a spawn is not a place to raise a second question. So a dropped
+ * key is currently invisible to its author; surfacing the skipped keys in the project settings
+ * panel is left to the observability wave.
+ */
+export function isReservedSpawnEnvKey(key: string): boolean {
+  return (
+    key.startsWith('NODETERM_') ||
+    key === 'NODE_OPTIONS' ||
+    INJECTION_ENV.includes(key) ||
+    AGENT_CONFIG_DIR_ENV.includes(key) ||
+    (AUTH_ENV_STRIP as readonly string[]).includes(key) ||
+    (MODEL_GATEWAY_ENV_KEYS as readonly string[]).includes(key)
+  )
+}
 
 /** tmux `-e` pair injecting the account config dir (shared server → per-session env). */
 export function accountTmuxEnvArgs(configDir: string): string[] {

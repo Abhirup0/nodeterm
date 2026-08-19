@@ -7,6 +7,7 @@ import {
   type ProjectSettingsSnapshot,
   type ResolvedProjectSettings
 } from '@shared/project-settings'
+import { ensureProjectLaunchInfo, invalidateProjectLaunchInfo } from '../../state/projectLaunchInfo'
 
 /**
  * One project's `.nodeterm/settings.json` (the git-shared doc) plus this machine's local overlay,
@@ -152,6 +153,11 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
       writeSeqRef.current += 1
       pendingRef.current = { projectId, doc: next }
       reload()
+      // A shared write can change what a launch needs to know (a new/edited launchCmd, a new
+      // trust-relevant shell) — drop the stale launch-info snapshot and re-warm it, same pair
+      // `onTrustChanged` runs on Canvas.
+      invalidateProjectLaunchInfo(projectId)
+      void ensureProjectLaunchInfo(projectId)
       return true
     },
     [projectId, reload]
@@ -176,6 +182,10 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
       writeSeqRef.current += 1
       pendingLocalRef.current = { projectId, local: next }
       reload()
+      // A local overlay change can flip which value (local vs shared) a launch would consume —
+      // same re-warm as `saveShared`.
+      invalidateProjectLaunchInfo(projectId)
+      void ensureProjectLaunchInfo(projectId)
       return true
     },
     [projectId, reload]

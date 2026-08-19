@@ -10,7 +10,9 @@ import type {
 } from '@shared/project-settings'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
+import { Select } from '@renderer/ui/Select'
 import { Switch } from '@renderer/ui/Switch'
+import { isKnownTerminalThemeId, TERMINAL_THEMES } from '@renderer/terminal/themes'
 import { useProjectSetup } from '../../state/projectSetup'
 import { useSettingsSearch } from './context'
 import { FieldRow } from './FieldRow'
@@ -28,7 +30,7 @@ import { matchesQuery, type SettingsSearchEntry } from './search'
  * would have pushed that file well past ~400 lines.
  */
 
-type FieldKind = 'input' | 'textarea' | 'switch' | 'env' | 'list'
+type FieldKind = 'input' | 'textarea' | 'switch' | 'env' | 'list' | 'theme'
 
 interface FieldConfig {
   key: string
@@ -49,7 +51,12 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
       {
         key: 'setupScript',
         label: 'Setup script',
-        description: 'Runs once when a worktree for this project is created.',
+        // Not only "when a worktree is created": `attachWorktree` is the single post-bind point, so
+        // adopting an existing worktree and re-binding one to a group run it too (as does the failed
+        // chip's Re-run). A script written for a fresh checkout only, and re-run over a working one,
+        // is the kind of surprise the row itself has to warn about.
+        description:
+          'Runs when a worktree for this project is created, adopted, or re-bound to a group.',
         kind: 'textarea'
       },
       {
@@ -60,7 +67,13 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
       },
       {
         key: 'waitForSetup',
-        label: 'Wait for setup to finish before opening a terminal',
+        // The old label ("…before opening a terminal") promised something this switch never did:
+        // the terminal opens immediately either way. What waits is the node's QUEUED LAUNCH COMMAND
+        // (`launchesToFire`'s setup gate) — the agent command must not race an `npm ci` still
+        // writing node_modules under it.
+        label: 'Hold queued launch commands until the setup script finishes',
+        description:
+          'Nodes opened into a new worktree still open right away; only their queued command waits.',
         kind: 'switch'
       }
     ]
@@ -91,7 +104,16 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
   worktree: {
     title: 'Worktree',
     fields: [
-      { key: 'basePath', label: 'Base path', kind: 'input' },
+      {
+        key: 'basePath',
+        label: 'Base path',
+        // NB: no literal "project" in this searchable copy — see `fieldEntry` / the "project" query
+        // guard in ProjectSettingsSection.test.tsx. "Local checkouts only" carries the same meaning
+        // as the SSH-inert note without the trap word.
+        description:
+          'Directory new worktrees are created under; overrides the global template. Local checkouts only.',
+        kind: 'input'
+      },
       {
         key: 'baseRef',
         label: 'Base ref',
@@ -100,8 +122,11 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
       },
       {
         key: 'sharedPaths',
+        // Honest now that the linker exists (core/worktree-shared-paths.ts): it does not error on a
+        // missing source or a target that already exists — it SKIPS them (SharedPathResult).
         label: 'Shared paths',
-        description: 'One relative path per line, symlinked into every worktree.',
+        description:
+          'Relative paths symlinked into each new worktree — e.g. .env, node_modules. Skipped when the source is missing or the target already exists.',
         kind: 'list'
       }
     ]
@@ -110,8 +135,21 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
     title: 'Terminal',
     fields: [
       { key: 'shell', label: 'Shell', kind: 'input' },
-      { key: 'theme', label: 'Theme', kind: 'input' },
-      { key: 'fontFamily', label: 'Font family', kind: 'input' }
+      // Neither description says the word "project": every row in this pane is a project setting,
+      // so it discriminates nothing while making the query "project" match the whole pane — the
+      // very thing `fieldEntry`'s keyword list is careful to avoid.
+      {
+        key: 'theme',
+        label: 'Theme',
+        description: 'Overrides the global terminal theme. Terminals already open repaint.',
+        kind: 'theme'
+      },
+      {
+        key: 'fontFamily',
+        label: 'Font family',
+        description: 'Overrides the global terminal font.',
+        kind: 'input'
+      }
     ]
   }
 }
@@ -294,6 +332,68 @@ function EnvField({
   )
 }
 
+/**
+ * The terminal `theme` row: a Select over the ids this build actually ships, not a free-text box.
+ *
+ * Three properties the plain Input could not have:
+ *  - the ids are not guessable ('catppuccin-mocha', 'tokyo-night'), and a typo used to be
+ *    indistinguishable from a working value — the merge ignores an unknown id, so the terminal just
+ *    kept the global theme with nothing on screen saying why.
+ *  - the empty option is INHERIT, not "no theme": it clears the field so this machine's global
+ *    setting (or, on a local row, the shared document) decides.
+ *  - a stored id this build does not know must still READ AS ITSELF rather than silently showing as
+ *    "inherit" — same precedent as the identity pane's unknown-account option. A teammate's newer
+ *    theme name, or one since removed, is a real value sitting in a real document; presenting the
+ *    box as empty would invite a save that erases it.
+ */
+function ThemeField({
+  id,
+  label,
+  ariaLabel,
+  description,
+  note,
+  value,
+  disabled,
+  onCommit
+}: {
+  id: string
+  label: string
+  ariaLabel?: string
+  description?: string
+  note?: string
+  value: string
+  disabled?: boolean
+  onCommit: (value: string | undefined) => void
+}): React.JSX.Element {
+  const unknown = value !== '' && !isKnownTerminalThemeId(value)
+  return (
+    <FieldRow
+      label={label}
+      description={description}
+      note={note}
+      htmlFor={id}
+      control={
+        <Select
+          id={id}
+          className="w-72"
+          aria-label={ariaLabel}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onCommit(e.target.value === '' ? undefined : e.target.value)}
+        >
+          <option value="">Inherit (use this machine&rsquo;s setting)</option>
+          {TERMINAL_THEMES.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
+            </option>
+          ))}
+          {unknown ? <option value={value}>{value} (not in this version)</option> : null}
+        </Select>
+      }
+    />
+  )
+}
+
 function SwitchField({
   label,
   description,
@@ -377,6 +477,26 @@ const SKIP_NOTE: Record<Extract<ProjectSetupRunResult, { status: 'skipped' }>['r
 }
 
 const RUN_LABEL: Record<ProjectSetupKind, string> = { setup: 'Run setup', archive: 'Run archive' }
+
+/**
+ * A `launchCmd` with no `defaultAgentId` beside it is INERT, and silently so — the launch layer
+ * (`workspace.ts agentLaunchOverride`) consumes a project's launch command only for the agent that
+ * project itself names, and never falls back to this machine's global default agent (that would
+ * make a shared doc type one agent's wrapper into whatever agent the local user happens to prefer).
+ * A setting that does nothing must say it does nothing, on the row where it was typed.
+ */
+export const LAUNCH_CMD_UNPAIRED_NOTE =
+  'Launch command applies only when a Default agent id is set above.'
+
+/**
+ * The whole worktree family is INERT on an SSH project: `git worktree` runs against the local
+ * filesystem, and an SSH project has no local checkout to create worktrees in (both creation sites —
+ * the "New worktree" dialog and the `open-worktree` verb — refuse SSH outright). Shown on every
+ * worktree row so a value typed there does not look as if it will ever take effect. Unlike the
+ * searchable field copy this note may say "project" — it is a `note`, not part of any search entry.
+ */
+export const WORKTREE_SSH_INERT_NOTE =
+  'Worktree settings apply to local projects; this is an SSH project.'
 
 /** How a finished run reads in the badge. */
 function exitNote(state: 'done' | 'failed' | 'cancelled', exitCode: number | undefined): string {
@@ -531,6 +651,7 @@ function FamilySection({
   ready,
   sharedEditable,
   canRun,
+  ssh,
   saveShared,
   saveLocal,
   reload
@@ -556,6 +677,9 @@ function FamilySection({
    *  shared-editing gate entirely (a machine-local script on a folderless project still cannot
    *  run). */
   canRun: boolean
+  /** SSH project → the whole `worktree` family is inert (no local checkout). Drives the per-row
+   *  caveat below; ignored by every other family. */
+  ssh: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
   saveLocal: (
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
@@ -616,10 +740,30 @@ function FamilySection({
     )
   }
 
+  // EFFECTIVE values (local-over-shared, `ignoreShared` respected), like the setup family's run
+  // buttons above: a launch command nothing can consume is reported wherever it was typed — on the
+  // shared row and on its "this machine" twin, since either one alone can be the value that is
+  // sitting there doing nothing. Absence of a resolved `defaultAgentId` is the whole condition;
+  // an id that resolves to no launchable agent is a different (and much louder) problem.
+  const launchCmdUnpaired =
+    family === 'agents' &&
+    resolvedFamily.launchCmd !== undefined &&
+    resolvedFamily.defaultAgentId === undefined
+  // The whole worktree family cannot take effect on an SSH project (no local checkout) — every row
+  // of it carries the caveat, not just one.
+  const worktreeInert = family === 'worktree' && ssh
+  /** The caveat WINS over the provenance note ("Active" / "Overridden on this machine"): where the
+   *  value comes from hardly matters while nothing consumes it. */
+  const caveatNote = (f: FieldConfig): string | undefined => {
+    if (worktreeInert) return WORKTREE_SSH_INERT_NOTE
+    if (launchCmdUnpaired && f.key === 'launchCmd') return LAUNCH_CMD_UNPAIRED_NOTE
+    return undefined
+  }
+
   const renderShared = (f: FieldConfig): React.JSX.Element => {
     const overridden = resolvedFamily[f.key]?.source === 'local'
     const id = `project-${family}-${f.key}-${projectId}`
-    const overrideNote = overridden ? 'Overridden on this machine' : undefined
+    const overrideNote = caveatNote(f) ?? (overridden ? 'Overridden on this machine' : undefined)
     if (f.kind === 'switch') {
       return (
         <SwitchField
@@ -648,6 +792,20 @@ function FamilySection({
         />
       )
     }
+    if (f.kind === 'theme') {
+      return (
+        <ThemeField
+          key={f.key}
+          id={id}
+          label={f.label}
+          description={f.description}
+          note={overrideNote}
+          disabled={sharedDisabled}
+          value={textOf(f.kind, sharedFamily?.[f.key])}
+          onCommit={(v) => commitShared(f.key, v)}
+        />
+      )
+    }
     return (
       <StringField
         key={f.key}
@@ -666,7 +824,7 @@ function FamilySection({
   const renderLocal = (f: FieldConfig): React.JSX.Element => {
     const active = resolvedFamily[f.key]?.source === 'local'
     const id = `project-${family}-${f.key}-local-${projectId}`
-    const activeNote = active ? 'Active' : undefined
+    const activeNote = caveatNote(f) ?? (active ? 'Active' : undefined)
     if (f.kind === 'switch') {
       return (
         <SwitchField
@@ -693,6 +851,21 @@ function FamilySection({
           text={formatEnvLines(localFamily?.[f.key] as Record<string, string> | undefined)}
           overrideNote={activeNote}
           onCommitValue={(v) => commitLocal(f.key, v)}
+        />
+      )
+    }
+    if (f.kind === 'theme') {
+      return (
+        <ThemeField
+          key={f.key}
+          id={id}
+          label={f.label}
+          ariaLabel={`${f.label} (this machine)`}
+          description={f.description}
+          note={activeNote}
+          disabled={localDisabled}
+          value={textOf(f.kind, localFamily?.[f.key])}
+          onCommit={(v) => commitLocal(f.key, v)}
         />
       )
     }
@@ -764,6 +937,7 @@ export function ProjectFamilyEditors({
   conflict,
   sharedEditable,
   canRun,
+  ssh = false,
   saveShared,
   saveLocal,
   reload
@@ -785,6 +959,9 @@ export function ProjectFamilyEditors({
   /** See `FamilySection`'s `canRun`: where a PROCESS may be spawned, which is a different question
    *  from where the shared file may be written. */
   canRun: boolean
+  /** SSH project → the worktree family is inert (local-only feature). Defaults false; forwarded to
+   *  each `FamilySection` for its per-row caveat. */
+  ssh?: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
   saveLocal: (
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
@@ -818,6 +995,7 @@ export function ProjectFamilyEditors({
           ready={ready}
           sharedEditable={sharedEditable}
           canRun={canRun}
+          ssh={ssh}
           saveShared={saveShared}
           saveLocal={saveLocal}
           reload={reload}

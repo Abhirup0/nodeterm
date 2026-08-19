@@ -211,7 +211,14 @@ export function buildRealApi(
   client: RpcClient
 ): Pick<
   NodeTerminalApi,
-  'pty' | 'workspace' | 'projectSettings' | 'projectSetup' | 'settings' | 'agent' | 'userDataDir'
+  | 'pty'
+  | 'workspace'
+  | 'projectSettings'
+  | 'projectSetup'
+  | 'worktree'
+  | 'settings'
+  | 'agent'
+  | 'userDataDir'
 > {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
@@ -301,7 +308,14 @@ export function buildRealApi(
     writeShared: (projectId, doc) =>
       client.request(IPC.projectSettingsWriteShared, projectId, doc) as Promise<boolean>,
     updateLocal: (projectId, local) =>
-      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>
+      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>,
+    launchInfo: (projectId) =>
+      client.request(IPC.projectSettingsLaunchInfo, projectId) as ReturnType<
+        NodeTerminalApi['projectSettings']['launchInfo']
+      >,
+    // REAL: `ProjectSetupService.ensureFamilyTrusted` broadcasts IPC.projectTrustChanged on every
+    // approval, for each project id that asked.
+    onTrustChanged: (cb) => client.subscribe(IPC.projectTrustChanged, cb as Listener)
   }
 
   // REAL: registerProjectSetupHandlers (core) is wired on the same construction-order point as
@@ -316,6 +330,14 @@ export function buildRealApi(
     consent: async (requestId, answer) => {
       client.cast(IPC.projectSetupConsentSubmit, requestId, answer)
     },
+    // Fails CLOSED on a rejection rather than throwing at the caller: over the relay this method is
+    // host-only, so a guest's call comes back E_FORBIDDEN — and "not trusted" is exactly the right
+    // answer for a client that may not raise the host's dialog.
+    requestTrust: (projectId, family) =>
+      client.request(IPC.projectSetupRequestTrust, projectId, family).then(
+        (v) => v === true,
+        () => false
+      ),
     onConsentRequest: (cb) => client.subscribe(IPC.projectSetupConsentRequest, cb as Listener),
     onConsentDismiss: (cb) => client.subscribe(IPC.projectSetupConsentDismiss, cb as Listener),
     onEvent: (projectId, cb) => {
@@ -326,6 +348,15 @@ export function buildRealApi(
         client.cast(IPC.projectSetupUnsubscribe, projectId)
       }
     }
+  }
+
+  // REAL: registerWorktreeSharedPathsHandlers (core), same construction point as main/server. Wire
+  // carries exactly `(projectId, worktreePath)`; the server reads the sharedPaths list itself.
+  const worktree: NodeTerminalApi['worktree'] = {
+    materializeShared: (projectId, worktreePath) =>
+      client.request(IPC.worktreeMaterializeShared, projectId, worktreePath) as ReturnType<
+        NodeTerminalApi['worktree']['materializeShared']
+      >
   }
 
   const settings: SettingsApi = {
@@ -362,7 +393,7 @@ export function buildRealApi(
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, projectSettings, projectSetup, settings, agent, userDataDir }
+  return { pty, workspace, projectSettings, projectSetup, worktree, settings, agent, userDataDir }
 }
 
 export function buildGitHubApi(

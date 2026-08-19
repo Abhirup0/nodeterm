@@ -261,6 +261,8 @@ import {
   computeWorktreePath,
   resolveWorktreePath,
   displacedByWorktree,
+  effectiveWorktreeBaseRef,
+  effectiveWorktreeTemplate,
   isRemoteSessionNode,
   resolveBaseRef,
   sanitizeWorktreeBranch,
@@ -283,6 +285,11 @@ import {
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
 import { setupAckDecision, setupGateDone, useProjectSetup } from '../state/projectSetup'
+import {
+  ensureProjectLaunchInfo,
+  invalidateProjectLaunchInfo,
+  projectLaunchInfoNow
+} from '../state/projectLaunchInfo'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -323,7 +330,6 @@ import { pushSessionRename } from '../lib/sessionRename'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
-import { launchableDefaultAgent } from '../state/agentAvailability'
 import { activePermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
@@ -403,6 +409,7 @@ import {
   reparentNode,
   selectedRootIds,
   resolveNewNodeAccount,
+  resolveNewNodeAgent,
   accountsForProject,
   sshAccountsHint,
   ungroupNodes,
@@ -1143,6 +1150,15 @@ export function Canvas() {
   }, [getViewport, setViewport])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
+  // Project-level worktree defaults (basePath/baseRef) for the active project, read from the warmed
+  // launch-info cache. Fed to the "New worktree" dialog defaults below; the open-worktree verb reads
+  // its own project's entry separately. Absent (project never warmed, or it sets neither) → the
+  // `effectiveWorktree*` resolvers fall back to entries/global, i.e. today's exact behavior.
+  const activeWorktreePw = projectLaunchInfoNow(activeProjectId ?? '')?.resolved.worktree
+  const activeWorktreeDefaults = {
+    basePath: activeWorktreePw?.basePath?.value,
+    baseRef: activeWorktreePw?.baseRef?.value
+  }
   // Bumped by `requestReload()`; a dependency of the project-load effect so an in-place reload of
   // the ALREADY-active project actually re-runs it (see reloadActiveProject).
   const reloadNonce = useProjects((s) => s.reloadNonce)
@@ -2173,6 +2189,26 @@ export function Canvas() {
   useEffect(() => {
     setConflict(null)
   }, [activeProjectId])
+
+  // Warm the launch-info cache (`renderer/state/projectLaunchInfo.ts`) for whichever project just
+  // became active, so a launch on it reads a fresh `projectLaunchInfoNow` instead of null (fail
+  // open) the first time it asks. Fire-and-forget: `ensureProjectLaunchInfo` never rejects and is
+  // bounded on its own.
+  useEffect(() => {
+    if (!activeProjectId) return
+    void ensureProjectLaunchInfo(activeProjectId)
+  }, [activeProjectId])
+
+  // `project-trust:changed` (Task 2 emits it once a family is approved/revoked): drop the stale
+  // verdict and re-warm immediately, so a launch right after answering the consent dialog sees the
+  // new trust state instead of the pre-approval snapshot. Mount-once — the subscription itself is
+  // not per-project (the payload carries the id), unlike `projectSetup.onEvent`.
+  useEffect(() => {
+    return window.nodeTerminal.projectSettings.onTrustChanged(({ projectId }) => {
+      invalidateProjectLaunchInfo(projectId)
+      void ensureProjectLaunchInfo(projectId)
+    })
+  }, [])
 
   // Debounced auto-save for canvas edits. Suppressed while a conflict bar is up: the bar only ever
   // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"
@@ -3431,7 +3467,10 @@ export function Canvas() {
           prompt,
           undefined,
           account,
-          activePermissionMode()
+          activePermissionMode(),
+          // The owning project, for its own `.nodeterm/settings.json` launch command — the same
+          // project the account/cwd above are resolved from.
+          activeProjectId
         )
       ])
       markDirty()
@@ -3667,7 +3706,10 @@ export function Canvas() {
           initialPrompt,
           project?.ssh,
           account,
-          activePermissionMode(agentId)
+          activePermissionMode(agentId),
+          // Same funnel as the account above: the active project owns the node, so its own
+          // `.nodeterm/settings.json` launch command layers over the global one.
+          activeProjectId
         )
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
@@ -3695,7 +3737,13 @@ export function Canvas() {
       const at = spawnTeamDialog?.at
       setSpawnTeamDialog(null)
       addAgentNode(
-        useSettings.getState().settings.defaultAgent ?? 'claude',
+        // No explicit pick here — the conductor opens on whatever this project calls its default
+        // agent (`.nodeterm/settings.json` → agents.defaultAgentId), else the global one.
+        resolveNewNodeAgent(
+          undefined,
+          useProjects.getState().activeProjectId,
+          useSettings.getState().settings
+        ),
         at,
         undefined,
         undefined,
@@ -4403,7 +4451,18 @@ export function Canvas() {
       // A fresh checkout is the moment the project's `setup` script exists for: this is the single
       // shared post-create point (the dialog AND agent-control's open-worktree land here), so the
       // trigger lives here rather than being repeated — and never diverging — at each caller.
-      startWorktreeSetup(groupId, wt.path)
+      //
+      // Materialize the project's `sharedPaths` (symlink node_modules/etc back to the repo root)
+      // BEFORE the setup script runs, so a setup `npm install` sees those links. Fire-and-forget re
+      // the bind (it never blocks the frame), but ORDERED before `startWorktreeSetup` — main reads
+      // the sharedPaths list itself by projectId and validates `wt.path`, so a `[]`/reject is safe.
+      void (async () => {
+        const projectId = useProjects.getState().activeProjectId
+        if (projectId) {
+          await window.nodeTerminal.worktree.materializeShared(projectId, wt.path).catch(() => {})
+        }
+        startWorktreeSetup(groupId, wt.path)
+      })()
       // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
       // callers that need the id (agent-control's open-worktree reply) take it from here.
       return groupId
@@ -5255,7 +5314,9 @@ export function Canvas() {
         ...copy.data,
         // Built fresh here (never re-wrapping a persisted command), so it is flagged exactly once.
         initialCommand: withPermissionMode(
-          `${claudeLaunchCommand()} -r ${originalId}`,
+          // The branched copy stays in the project it was branched from, so it comes back through
+          // that project's wrapper exactly like the source node did.
+          `${claudeLaunchCommand(useProjects.getState().activeProjectId)} -r ${originalId}`,
           'claude',
           activePermissionMode()
         ),
@@ -5334,7 +5395,10 @@ export function Canvas() {
         source.data.accountId,
         // The mode belongs to the node being OPENED, so it is gated on the TARGET agent — a
         // handoff into grok must not inherit claude's version gate.
-        activePermissionMode(targetAgentId)
+        activePermissionMode(targetAgentId),
+        // The transfer target lands in the active project's canvas, so that project's launch
+        // command applies to it — the same project `projectSsh` was just resolved from.
+        activeProjectId
       )
       node.selected = true
       const placed = placeSpawned(node, at ?? besideNode(source))
@@ -5658,9 +5722,17 @@ export function Canvas() {
       'canvas.deleteSelection': deleteSelectionCommand,
       'node.newTerminal': () => { addTerminal(); return true },
       'node.newAgent': () => {
-        // launchableDefaultAgent, not the raw setting: a default naming a since-removed custom
-        // agent would otherwise type its bare `custom:<uuid>` id into the new node's shell.
-        addAgentNode(launchableDefaultAgent(useSettings.getState().settings))
+        // resolveNewNodeAgent, not the raw setting: this project's own default agent wins
+        // (`.nodeterm/settings.json` → agents.defaultAgentId), else the global one, and a default
+        // naming a since-removed custom agent is guarded so its bare `custom:<uuid>` id is never
+        // typed into the new node's shell (like launchableDefaultAgent).
+        addAgentNode(
+          resolveNewNodeAgent(
+            undefined,
+            useProjects.getState().activeProjectId,
+            useSettings.getState().settings
+          )
+        )
         return true
       }
       // node.close / node.toggleMarkdown: main-process intercepted on desktop; deliberately
@@ -6704,7 +6776,9 @@ export function Canvas() {
                   project,
                   useSettings.getState().settings.claudeAccounts
                 ),
-                activePermissionMode(choice.agentId)
+                activePermissionMode(choice.agentId),
+                // Board-created nodes belong to the active project like any other.
+                activeProjectId
               )
       setNodes((ns) => [...ns, node])
       const board = project?.kanban ?? seedBoard
@@ -6822,10 +6896,22 @@ export function Canvas() {
         focusNodeById(boundNodeId)
         return
       }
-      // No live node — open a resume node in the active project, using the transcript's cwd.
-      const cmd = resumeCommand('claude', hit.sessionId, false, agentLaunchOverride('claude'))
+      // No live node — open a resume node in the active project, using the transcript's cwd. The
+      // resume line goes through that project's launch command, like every other launch it owns.
+      const activeId = useProjects.getState().activeProjectId
+      const cmd = resumeCommand('claude', hit.sessionId, false, agentLaunchOverride('claude', activeId))
       if (!cmd) return
-      const node = createAgentNode('claude', nodesRef.current.length, hit.cwd, viewCenter())
+      const node = createAgentNode(
+        'claude',
+        nodesRef.current.length,
+        hit.cwd,
+        viewCenter(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        activeId
+      )
       // The resume command replaces (never wraps) the factory's command, so it is flagged once.
       node.data = {
         ...node.data,
@@ -7435,7 +7521,10 @@ export function Canvas() {
                   args.prompt,
                   sshFor(agentCwd),
                   account,
-                  activePermissionMode(agentId)
+                  activePermissionMode(agentId),
+                  // Same project the account funnel above resolves from: the canvas the verb runs
+                  // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
+                  projStore.activeProjectId
                 ),
                 after ?? [],
                 undefined,
@@ -7780,7 +7869,8 @@ export function Canvas() {
                 }),
                 sshFor(targetCwd),
                 vAccount,
-                vMode
+                vMode,
+                vStore.activeProjectId
               )
               return armAfter(
                 { ...node, data: { ...node.data, title: `Verify: ${lens}`, titleAuto: false } },
@@ -7804,7 +7894,8 @@ export function Canvas() {
                       }),
                       sshFor(targetCwd),
                       vAccount,
-                      vMode
+                      vMode,
+                      vStore.activeProjectId
                     )
                     return { ...j, data: { ...j.data, title: 'Verify: verdict', titleAuto: false } }
                   })(),
@@ -7892,7 +7983,8 @@ export function Canvas() {
                 r.prompt,
                 sshFor(srcCwd),
                 teamAccount,
-                activePermissionMode(memberAgent)
+                activePermissionMode(memberAgent),
+                teamStore.activeProjectId
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })
@@ -7964,14 +8056,22 @@ export function Canvas() {
               }
               bindGroupId = g.id
             }
-            const baseRef = args.base?.trim() || resolveBaseRef(entries)
+            // Project-level worktree defaults (basePath/baseRef) from the warmed launch-info cache,
+            // same as the "New worktree" dialog. Fail-open: no cached entry → `effectiveWorktree*`
+            // reduce to entries/global exactly as before. An explicit `--base` still wins.
+            const pw = projectLaunchInfoNow(project?.id ?? '')?.resolved.worktree
+            const projectDefaults = { basePath: pw?.basePath?.value, baseRef: pw?.baseRef?.value }
+            const baseRef = args.base?.trim() || effectiveWorktreeBaseRef(projectDefaults, entries)
             // Resolve from this session's repo root, so a relay tab still produces a path on the
             // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
               explicitPath: args.path,
               repoRoot,
               branch,
-              template: useSettings.getState().settings.worktreePathTemplate
+              template: effectiveWorktreeTemplate(
+                projectDefaults,
+                useSettings.getState().settings.worktreePathTemplate
+              )
             })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
@@ -10422,13 +10522,13 @@ export function Canvas() {
           intent={worktreeDialog.groupId ? 'bind' : 'create'}
           repoPath={worktreeRepoRoot ?? ''}
           existing={worktreeOrphans.filter((e) => !boundWorktreePaths.has(normWorktreePath(e.path)))}
-          defaultBaseRef={resolveBaseRef(worktreeEntries)}
+          defaultBaseRef={effectiveWorktreeBaseRef(activeWorktreeDefaults, worktreeEntries)}
           branches={worktreeBranches}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
               repoPath,
               branch,
-              settings.worktreePathTemplate
+              effectiveWorktreeTemplate(activeWorktreeDefaults, settings.worktreePathTemplate)
             )
           }
           busy={worktreeBusy}

@@ -65,7 +65,14 @@ import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
 import { ProjectTrustStore } from '../core/project-trust-store'
 import { ProjectSetupService } from '../core/project-setup-service'
-import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
+import {
+  makeProjectTrustRequester,
+  registerProjectSetupHandlers,
+  type ProjectSetupHandlerDeps
+} from '../core/project-setup-handlers'
+import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
+import { registerWorktreeSharedPathsHandlers } from '../core/worktree-shared-paths-handlers'
+import { makeProjectSpawnOverrides } from '../core/project-spawn-overrides'
 import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { makeSshSetupRunner } from './remote-ssh/ssh-setup-runner'
 import { registerGitHubIntegration } from '../core/github/integration'
@@ -492,10 +499,39 @@ const projectSetupService = new ProjectSetupService({
   // which is the fail-closed direction.
   sendConsent: (channel, payload) => sendToMain(channel, payload)
 })
-registerProjectSetupHandlers(corePlatform, projectSetupService, {
+const projectSetupDeps: ProjectSetupHandlerDeps = {
   projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
   worktreeList: (repoPath) => gitService.worktreeList(repoPath)
+}
+registerProjectSetupHandlers(corePlatform, projectSetupService, projectSetupDeps)
+// `worktree:materialize-shared` — same sibling-registrar shape and the SAME trust boundary as the
+// setup runner (rootPath/ssh derived from THIS process's index by projectId, `worktreePath`
+// re-validated against the project's actual git worktrees); the sharedPaths LIST is read here by
+// projectId, never taken off the wire. Reuses the very `projectTargetInfo`/`worktreeList` the setup
+// deps already carry, plus the store's own settings resolution.
+registerWorktreeSharedPathsHandlers(corePlatform, {
+  readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+  targetInfo: projectSetupDeps.projectTargetInfo,
+  worktreeList: projectSetupDeps.worktreeList
 })
+// `project-settings:launch-info` — a sibling registrar (not a widening of
+// WorkspaceStore.registerIpc()) sharing the trust store constructed above.
+registerProjectLaunchInfoHandlers(corePlatform, workspaceStore, projectTrustStore)
+// The SAME settings + trust pieces, aimed at the SPAWN (consumption Task 4): a session opened for a
+// project gets that project's env and terminal program, with the shared half admitted only by the
+// trust verdict `launch-info` reports from. `requestTrust` reuses the very requester the
+// `projectSetupRequestTrust` channel uses, so a spawn that refuses a shared value raises exactly the
+// dialog the renderer's own ask would — single-flighted inside `ensureFamilyTrusted`, so five nodes
+// launching at once raise one. Wired here (not in `ptyManager.init`) so both shells can call it
+// wherever their stores happen to be constructed.
+ptyManager.setProjectSpawnOverrides(
+  makeProjectSpawnOverrides({
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    targetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+    trust: projectTrustStore,
+    requestTrust: makeProjectTrustRequester(projectSetupService, projectSetupDeps)
+  })
+)
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
 // strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],

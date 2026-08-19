@@ -2,7 +2,7 @@ import { IPC } from '../shared/ipc'
 import type { ProjectSetupConsentAnswer, ProjectSetupKind, ProjectSetupRunResult } from '../shared/project-settings'
 import type { WorktreeListResult } from '../shared/worktree'
 import type { CorePlatform } from './platform'
-import type { ProjectSetupTarget } from './project-setup-service'
+import type { ProjectConsumerFamily, ProjectSetupTarget } from './project-setup-service'
 import { resolveProjectSetupTarget, type ProjectSetupTargetInfo } from './project-setup-runner-local'
 
 /**
@@ -27,6 +27,11 @@ export interface ProjectSetupHandlerService {
   run(target: ProjectSetupTarget, kind: ProjectSetupKind): Promise<ProjectSetupRunResult>
   cancel(runKey: string): boolean
   submitConsent(requestId: string, answer: ProjectSetupConsentAnswer): void
+  /** The launch-settings gate (`ProjectSetupService.ensureFamilyTrusted`). OPTIONAL so a service
+   *  built against the run-only surface still registers; the channel is registered either way and
+   *  simply answers `false` — fail closed, never a missing-handler rejection a caller has to
+   *  special-case. */
+  ensureFamilyTrusted?(target: ProjectSetupTarget, family: ProjectConsumerFamily): Promise<boolean>
 }
 
 /** What `registerProjectSetupHandlers` needs from its shell to resolve a trusted target — the
@@ -40,6 +45,30 @@ export interface ProjectSetupHandlerDeps {
 }
 
 const isKind = (v: unknown): v is ProjectSetupKind => v === 'setup' || v === 'archive'
+
+/**
+ * "Make sure this project's `<family>` is trusted", by project id alone — the derivation shared by
+ * the `projectSetupRequestTrust` channel below and by the SPAWN's own reader
+ * (`makeProjectSpawnOverrides`, wired in main/server). Same trust boundary as `run`: rootPath /
+ * projectName / ssh come from THIS process's workspace index, never from a caller.
+ *
+ * No worktree argument at all — trust is keyed to the project ROOT (a worktree inherits the root's
+ * approval), so there is no path-shaped input to validate. Answers `false` when the project cannot
+ * be resolved or the service has no gate; never throws.
+ */
+export function makeProjectTrustRequester(
+  service: ProjectSetupHandlerService,
+  deps: ProjectSetupHandlerDeps
+): (projectId: string, family: ProjectConsumerFamily) => Promise<boolean> {
+  return async (projectId, family) => {
+    const ask = service.ensureFamilyTrusted?.bind(service)
+    if (!ask) return false
+    const info = deps.projectTargetInfo(projectId)
+    const target = await resolveProjectSetupTarget(projectId, undefined, info, deps.worktreeList)
+    if (!target) return false
+    return ask(target, family)
+  }
+}
 
 export function registerProjectSetupHandlers(
   platform: CorePlatform,
@@ -59,6 +88,17 @@ export function registerProjectSetupHandlers(
       const target = await resolveProjectSetupTarget(projectId, worktreePath, info, deps.worktreeList)
       if (!target) return { status: 'skipped', reason: 'unavailable' }
       return service.run(target, kind)
+    }
+  )
+  const requestTrust = makeProjectTrustRequester(service, deps)
+  platform.handle(
+    IPC.projectSetupRequestTrust,
+    async (projectId: unknown, family: unknown): Promise<boolean> => {
+      // `setup` is NOT accepted: that family is gated inside `run` itself, and admitting it here
+      // would hand a caller a run-less way to raise (and then answer) the host's setup dialog.
+      if (typeof projectId !== 'string' || !projectId) return false
+      if (family !== 'agents' && family !== 'shell') return false
+      return requestTrust(projectId, family)
     }
   )
   platform.handle(IPC.projectSetupCancel, (runKey: unknown) =>

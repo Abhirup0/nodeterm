@@ -16,6 +16,10 @@ import { IPC } from './ipc'
  *    dialog. Either one alone is much weaker; the pair is a complete self-approval loop.
  *  - `project-setup:cancel` — the other side of the same run's control: a guest must not be able to
  *    kill the host's setup mid-write.
+ *  - `project-setup:request-trust` — RAISES the host's own consent dialog for a project's launch
+ *    settings. Alone it is prompt spam on someone else's screen; paired with an admitted
+ *    consent-submit it is the same self-approval loop as run+consent-submit, ending in a shared
+ *    `launchCmd`/`env` (or shell) approved for the host's own agent launches.
  *
  * DELIBERATELY NOT LISTED: `project-setup:subscribe`/`unsubscribe` and the `project-setup:event:*`
  * push. They neither start nor authorize anything, and a peer that can see the canvas can already
@@ -30,7 +34,8 @@ export const HOST_ONLY_CHANNEL_PREFIXES: readonly string[] = ['githubControl:']
 export const HOST_ONLY_CHANNELS: ReadonlySet<string> = new Set([
   IPC.projectSetupRun,
   IPC.projectSetupCancel,
-  IPC.projectSetupConsentSubmit
+  IPC.projectSetupConsentSubmit,
+  IPC.projectSetupRequestTrust
 ])
 
 /** What a refused peer is told. One wording, so the two shells answer identically. */
