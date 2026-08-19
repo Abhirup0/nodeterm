@@ -34,6 +34,8 @@ import { ProjectTrustStore, hashTrustContent, localTrustKey, sshTrustKey } from 
  *    runs; an expired prompt is never a retroactive yes.
  *  - Prompts are serialized app-wide: one dialog at a time, so a workspace opening five projects
  *    cannot stack five modals over each other.
+ *  - The prompt goes to the HOST's own UI (`sendConsent`), never to the broadcast fan-out: the
+ *    question — and the script bytes it renders — belongs to the human at this machine.
  *
  * Spawning itself is injected (`runLocal`/`runSsh`) — this file knows nothing about child_process
  * or ssh, which is also what makes the gate testable without a shell.
@@ -69,6 +71,19 @@ export interface ProjectSetupDeps {
   runLocal?: ProjectSetupRunner
   runSsh?: ProjectSetupRunner
   now?: () => number
+  /**
+   * WHERE a consent prompt (and its dismiss) is delivered. Injected because the answer differs per
+   * shell and `platform().broadcast` — the only fan-out the core can see — is the WRONG answer on
+   * the desktop: it also reaches every relay PEER, which would (a) disclose the shared script
+   * bodies, the exact bytes being approved, to a guest who may have no other way to read that file,
+   * and (b) put the host's trust dialog on a screen that is not the host's. Electron passes its
+   * main-window-only send; the Server Edition leaves the default, where every attached client is an
+   * authenticated operator of that host and broadcast is exactly right.
+   *
+   * Only the CONSENT pair is routed this way. Run `events` keep broadcasting: they are the canvas's
+   * shared run state (a peer's canvas shows the same run), not the approval question.
+   */
+  sendConsent?: (channel: string, payload: unknown) => void
 }
 
 /** Single-flight identity: one live run per LOCATION per kind. Two canvas nodes pointing at the
@@ -215,9 +230,21 @@ export class ProjectSetupService {
       // modal whose answer can no longer mean anything. Resolving the pending entry also drops it
       // from `pending`, so a late approve for it is a no-op.
       this.pending.get(requestId)?.(undefined)
-      platform().broadcast(IPC.projectSetupConsentDismiss, { requestId })
+      this.sendConsent(IPC.projectSetupConsentDismiss, { requestId })
     }
     return true
+  }
+
+  /**
+   * Shell shutdown: abort every run still in flight. A local run is a DETACHED process group
+   * (setsid, so a cancel can SIGKILL the whole tree) — which is also why quitting without this
+   * leaves `npm ci` churning with nothing left to report to, and, on the ssh leg, an orphaned remote
+   * command. Goes through `cancel`, so a run parked at its consent dialog is closed and its dialog
+   * dismissed too. Idempotent: Electron's `before-quit` runs twice, and the second pass finds
+   * nothing left.
+   */
+  disposeAll(): void {
+    for (const runKey of [...this.active.keys()]) this.cancel(runKey)
   }
 
   /** Renderer answer for a pending consent prompt. An unknown/stale requestId (expired, double
@@ -229,6 +256,12 @@ export class ProjectSetupService {
 
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now()
+  }
+
+  /** The consent pair's delivery, per shell (see `ProjectSetupDeps.sendConsent`). */
+  private sendConsent(channel: string, payload: unknown): void {
+    if (this.deps.sendConsent) this.deps.sendConsent(channel, payload)
+    else platform().broadcast(channel, payload)
   }
 
   private askConsent(
@@ -252,7 +285,7 @@ export class ProjectSetupService {
         }
         const timer = setTimeout(() => {
           settle(undefined) // expired, NOT declined
-          platform().broadcast(IPC.projectSetupConsentDismiss, { requestId })
+          this.sendConsent(IPC.projectSetupConsentDismiss, { requestId })
         }, CONSENT_EXPIRY_MS)
         timer.unref?.()
         this.pending.set(requestId, (answer) => {
@@ -261,7 +294,7 @@ export class ProjectSetupService {
         })
         entry.consentRequestId = requestId
         const payload: ProjectSetupConsentRequest = { ...req, requestId, previouslyApproved }
-        platform().broadcast(IPC.projectSetupConsentRequest, payload)
+        this.sendConsent(IPC.projectSetupConsentRequest, payload)
       })
     })
     // A rejected step must not poison the queue for every later prompt.

@@ -625,6 +625,9 @@ export async function startServer(
     return {
       port: 0, // nothing bound
       async close() {
+        // Kill any in-flight setup/archive run: it is a detached process group, so nothing else in
+        // this teardown reaches it. Same call, same reason, in the serving branch's close() below.
+        projectSetupService.disposeAll()
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
         pressure.stop()
@@ -677,6 +680,9 @@ export async function startServer(
   return {
     port,
     async close() {
+      // Kill any in-flight setup/archive run first: it is a detached process group (setsid), so
+      // neither the WS teardown nor ptyManager.killAll() below would ever reach it.
+      projectSetupService.disposeAll()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
       pressure.stop()

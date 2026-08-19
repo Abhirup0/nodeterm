@@ -20,6 +20,24 @@ describe('trust keys', () => {
     expect(ssh).toContain('u@h')
     expect(ssh).not.toBe(localTrustKey('/srv/x'))
   })
+
+  // `user@host` alone is not a machine. A jump host, a container, and a VM behind the same DNS name
+  // are routinely separated by PORT ONLY (sshAttachmentId already keys on host+user+port for exactly
+  // this reason), so an approval granted for the box on :2222 must not silently authorize the box on
+  // :22. The trust file is unreleased, so the key gains the port with no migration.
+  it('ssh keys are per PORT: the default :22 and an explicit :2222 are different locations', () => {
+    const base = { host: 'h', user: 'u' }
+    const implicit = sshTrustKey({ server: base, remoteCwd: '/srv/x' })
+    const explicit22 = sshTrustKey({ server: { ...base, port: 22 }, remoteCwd: '/srv/x' })
+    const alt = sshTrustKey({ server: { ...base, port: 2222 }, remoteCwd: '/srv/x' })
+    // An omitted port IS 22 (that is what ssh dials), so the two must be the SAME location.
+    expect(implicit).toBe(explicit22)
+    expect(alt).not.toBe(implicit)
+    expect(implicit).toContain('u@h:22')
+    expect(alt).toContain('u@h:2222')
+    // Still per-remoteCwd, and still not a local key.
+    expect(sshTrustKey({ server: { ...base, port: 2222 }, remoteCwd: '/srv/y' })).not.toBe(alt)
+  })
 })
 
 describe('ProjectTrustStore', () => {

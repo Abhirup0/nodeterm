@@ -623,3 +623,116 @@ describe('registerProjectSetupHandlers', () => {
     expect(consents).toEqual([['r1', 'approve']])
   })
 })
+
+/**
+ * The consent prompt carries the SCRIPT BODIES of a shared settings file — the exact bytes a human
+ * is being asked to authorize. `platform().broadcast` on the desktop fans out to every relay peer
+ * (a paired phone, another desktop), so broadcasting the prompt would hand a guest the contents of
+ * a file they may have no other way to read, and show them a dialog only the host may answer. The
+ * shell therefore injects WHERE a prompt goes; the default stays broadcast, which is right for the
+ * Server Edition (every attached client there is an authenticated operator of that host).
+ */
+describe('ProjectSetupService — consent delivery seam', () => {
+  const seam = (): { sent: Array<{ channel: string; payload: unknown }>; send: (channel: string, payload: unknown) => void } => {
+    const sent: Array<{ channel: string; payload: unknown }> = []
+    return { sent, send: (channel, payload) => sent.push({ channel, payload }) }
+  }
+
+  it('routes the consent REQUEST through sendConsent, never through the peer-fanning broadcast', async () => {
+    const s = seam()
+    const { calls, runner } = recorder()
+    const svc = new ProjectSetupService({
+      trust: new ProjectTrustStore(),
+      readSettings: async () => snapshot(sharedFile({ setup: { setupScript: 'npm ci --registry=secret' } })),
+      runLocal: runner,
+      sendConsent: s.send
+    })
+    const pending = svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(s.sent).toHaveLength(1))
+    expect(s.sent[0].channel).toBe(IPC.projectSetupConsentRequest)
+    const req = s.sent[0].payload as ProjectSetupConsentRequest
+    expect(req.scripts).toEqual({ setup: 'npm ci --registry=secret' })
+    // The script body never entered the broadcast fan-out at all.
+    expect(consentRequests()).toEqual([])
+    expect(JSON.stringify(plat.sent)).not.toContain('secret')
+
+    svc.submitConsent(req.requestId, 'approve')
+    expect(await pending).toMatchObject({ status: 'started' })
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    // Run EVENTS keep broadcasting: they are the canvas's own run state, not the approval question.
+    await vi.waitFor(() => expect(events().some((e) => e.state === 'done')).toBe(true))
+  })
+
+  it('routes the DISMISS through the same seam (cancel and expiry alike)', async () => {
+    const s = seam()
+    const { runner } = recorder()
+    const svc = new ProjectSetupService({
+      trust: new ProjectTrustStore(),
+      readSettings: async () => snapshot(sharedFile({ setup: { setupScript: 'npm ci' } })),
+      runLocal: runner,
+      sendConsent: s.send
+    })
+    const pending = svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(s.sent).toHaveLength(1))
+    const { requestId } = s.sent[0].payload as ProjectSetupConsentRequest
+
+    expect(svc.cancel(setupRunKey(target(), 'setup'))).toBe(true)
+    expect(s.sent[1]).toEqual({ channel: IPC.projectSetupConsentDismiss, payload: { requestId } })
+    expect(dismissed()).toEqual([]) // and not to the peers
+    expect(await pending).toEqual({ status: 'skipped', reason: 'declined' })
+  })
+})
+
+/**
+ * A local run is a DETACHED process group (setsid), deliberately, so a cancel can SIGKILL the whole
+ * tree. The same property means an app quit leaves one running with nothing left to report to:
+ * `npm ci` keeps churning after the window is gone. Every shell's shutdown path calls disposeAll.
+ */
+describe('ProjectSetupService — disposeAll', () => {
+  it('aborts every active run, so each runner sees its own signal fire', async () => {
+    const aborted: string[] = []
+    const runner: ProjectSetupRunner = ({ cwd, signal }) =>
+      new Promise((resolve) => {
+        signal.addEventListener('abort', () => {
+          aborted.push(cwd)
+          resolve({ exitCode: 137 })
+        })
+      })
+    const svc = new ProjectSetupService({
+      trust: new ProjectTrustStore(),
+      readSettings: async () => snapshot(null, { setup: { setupScript: 'sleep 100' } }),
+      runLocal: runner
+    })
+    const a = await svc.run(target({ projectId: 'p1', rootPath: '/a' }), 'setup')
+    const b = await svc.run(target({ projectId: 'p2', rootPath: '/b' }), 'setup')
+    expect([a.status, b.status]).toEqual(['started', 'started'])
+
+    svc.disposeAll()
+    expect(aborted.sort()).toEqual(['/a', '/b'])
+    await vi.waitFor(() => expect(events('p1').at(-1)?.state).toBe('cancelled'))
+    await vi.waitFor(() => expect(events('p2').at(-1)?.state).toBe('cancelled'))
+
+    // Idempotent: a second pass (Electron runs before-quit twice) has nothing left to abort.
+    expect(() => svc.disposeAll()).not.toThrow()
+    expect(aborted).toHaveLength(2)
+  })
+
+  it('also closes a run still waiting at its consent dialog, and dismisses that dialog', async () => {
+    const s: Array<{ channel: string; payload: unknown }> = []
+    const { calls, runner } = recorder()
+    const svc = new ProjectSetupService({
+      trust: new ProjectTrustStore(),
+      readSettings: async () => snapshot(sharedFile({ setup: { setupScript: 'npm ci' } })),
+      runLocal: runner,
+      sendConsent: (channel, payload) => s.push({ channel, payload })
+    })
+    const pending = svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(s).toHaveLength(1))
+    const { requestId } = s[0].payload as ProjectSetupConsentRequest
+
+    svc.disposeAll()
+    expect(s[1]).toEqual({ channel: IPC.projectSetupConsentDismiss, payload: { requestId } })
+    expect(await pending).toEqual({ status: 'skipped', reason: 'declined' })
+    expect(calls).toHaveLength(0)
+  })
+})

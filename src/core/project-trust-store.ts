@@ -17,8 +17,17 @@ export function localTrustKey(cwd: string): string {
   return `local\0${path.resolve(cwd)}`
 }
 
-export function sshTrustKey(ssh: { server: Pick<SshConnection, 'host' | 'user'>; remoteCwd: string }): string {
-  return `ssh\0${sshHostKey(ssh.server)}\0${ssh.remoteCwd}`
+/**
+ * `user@host:port` + remote path. The PORT is part of the location, not decoration: one `user@host`
+ * is routinely several different machines — a container, a VM, a jump host behind the same DNS name
+ * — separated by port alone (`sshAttachmentId` keys on host+user+port for exactly this reason). An
+ * approval granted for the box on :2222 must never authorize the box on :22. An omitted port IS 22,
+ * because that is what ssh dials, so the two spellings are one key.
+ */
+export function sshTrustKey(
+  ssh: { server: Pick<SshConnection, 'host' | 'user' | 'port'>; remoteCwd: string }
+): string {
+  return `ssh\0${sshHostKey(ssh.server)}:${ssh.server.port ?? 22}\0${ssh.remoteCwd}`
 }
 
 export function hashTrustContent(content: string): string {

@@ -40,13 +40,15 @@ import { ConfirmDialog } from './ConfirmDialog'
  * inside a script making a comment read as executable code, or vice versa) by pinning the DISPLAY
  * order to the byte order, WITHOUT altering a single byte of what is approved and run.
  *
- * KNOWN GAP (documented here, not fixable from this side — final-wave decision): a relay guest can
- * currently dispatch `project-setup:run` AND `project-setup:consent-submit` on the host
- * (`src/main/platform-electron.ts` — `dispatch` forbids only `githubControl:` methods), so a guest
- * could trigger a prompt and then answer it themselves without the host's user touching anything.
- * That is a main-side ADMISSION question — which methods a non-host peer may call — and no dialog
- * property can close it: this component cannot tell whose IPC message reached main. It is recorded
- * for the final wave's admission decision.
+ * WHO MAY ANSWER (closed in the final wave, main-side — nothing here could have closed it): a
+ * relay guest could otherwise dispatch `project-setup:run` and then cast
+ * `project-setup:consent-submit`, triggering a prompt and approving it itself with the host's user
+ * never touching anything. Both channels are now HOST-ONLY at the admission seam
+ * (`src/shared/host-control.ts`, enforced in `dispatch` AND `cast` in
+ * `src/main/platform-electron.ts`), and the prompt itself is delivered to the host's main window
+ * only (`ProjectSetupService`'s `sendConsent`) instead of the peer-fanning broadcast — so the
+ * script bytes rendered below are never disclosed to a guest either. This component still cannot
+ * tell whose message reached main; it does not have to.
  */
 
 /** Longest a name/location may be on screen, in characters. */
