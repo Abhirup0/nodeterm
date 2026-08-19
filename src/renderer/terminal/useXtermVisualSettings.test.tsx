@@ -202,23 +202,44 @@ describe('useXtermVisualSettings — project-scoped appearance', () => {
     expect(p.renders()).toBe(afterTheme)
   })
 
-  // The accepted cost of keeping the mirror in lockstep with the cache (see its doc comment): the
-  // panel's save path invalidates and immediately re-warms, so the project's terminals show this
-  // machine's global appearance for the length of one round trip. Asserted rather than left to be
-  // discovered — it is the visible half of the design decision.
-  it('falls back to global between an invalidate and the answer that follows it', async () => {
+  // `invalidate` runs after EVERY project-settings commit, of every family — a setup-script edit
+  // invalidates too. Dropping the mirrored appearance there would repaint the project's terminals
+  // to the global theme (and, with a project font, re-fit their grids into a possibly co-attached
+  // pty) on the way to re-reading the very document that hands the same value straight back — a
+  // flash on every committed field, seconds wide on an SSH project.
+  it('holds the project theme across an invalidate, so an unrelated save does not flash', async () => {
+    mockLaunchInfo({ p1: info({ theme: { value: 'dracula', source: 'shared' } }) })
+    const p = mount('p1')
+    await act(async () => {
+      await ensureProjectLaunchInfo('p1')
+    })
+    const settled = p.renders()
+    // What a setup-script save does: invalidate, then re-warm.
+    act(() => invalidateProjectLaunchInfo('p1'))
+    expect(p.theme()).toBe('dracula')
+    expect(p.renders()).toBe(settled) // not even a re-render, let alone a repaint
+    await act(async () => {
+      await ensureProjectLaunchInfo('p1')
+    })
+    expect(p.theme()).toBe('dracula')
+    expect(p.renders()).toBe(settled)
+  })
+
+  // Holding needs no expiry because the fresh read OVERWRITES unconditionally: this is the case
+  // that would otherwise strand a stale theme on screen — the override itself being deleted.
+  it('clears a held theme when the answer after an invalidate no longer sets one', async () => {
     mockLaunchInfo({ p1: info({ theme: { value: 'dracula', source: 'shared' } }) })
     const p = mount('p1')
     await act(async () => {
       await ensureProjectLaunchInfo('p1')
     })
     expect(p.theme()).toBe('dracula')
+    mockLaunchInfo({ p1: info({}) }) // the user removed the project's theme
     act(() => invalidateProjectLaunchInfo('p1'))
-    expect(p.theme()).toBe('nord')
     await act(async () => {
       await ensureProjectLaunchInfo('p1')
     })
-    expect(p.theme()).toBe('dracula')
+    expect(p.theme()).toBe('nord') // back to this machine's global setting, once and only once
   })
 
   it('keeps following the global setting for a project that overrides nothing', async () => {

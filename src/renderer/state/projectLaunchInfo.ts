@@ -49,13 +49,19 @@ const ENSURE_WAIT_MS = 3000
  * appearance slice alone, so `useXtermVisualSettings` can subscribe shallowly to exactly what it
  * renders.
  *
- * Kept in lockstep with `cache` — written by the same generation-guarded branch, cleared by
- * `invalidate` — so the mirror never claims a value the cache has already dropped. Clearing on
- * invalidate does mean the panel's save path (`invalidate` then re-`ensure`) shows this machine's
- * GLOBAL appearance for the length of one round trip before the project's own comes back. That is
- * accepted deliberately: the alternative — holding the last-known value across an invalidate — keeps
- * a project's colours on screen indefinitely whenever the re-read fails, and a theme that cannot be
- * explained by any document on disk is a worse bug than a repaint the user sees correct itself.
+ * Written ONLY by `syncVisuals`, on the same generation-guarded branch that writes `cache` — and
+ * deliberately NOT cleared by `invalidateProjectLaunchInfo`. The mirror is last-known appearance,
+ * not a cache entry, and the difference matters because `invalidate` runs after EVERY project
+ * settings commit of any family: clearing here would drop the project's theme (and, with a project
+ * font, re-fit the grid of a possibly co-attached pty twice) on its way to re-reading the very
+ * document that is about to hand the same value back — a visible flash on every committed field,
+ * seconds wide on an SSH project.
+ *
+ * Holding is self-healing, which is why it needs no expiry: all three `invalidate` call sites
+ * re-`ensure` immediately, and that answer OVERWRITES this entry unconditionally — a project whose
+ * override was just deleted answers `{ theme: undefined, fontFamily: undefined }`, which clears it.
+ * The only state that can persist a stale value is one where the re-read never lands at all, and
+ * there the honest thing to show is the appearance the project last actually asked for.
  */
 interface ProjectVisualsState {
   byProject: Record<string, ProjectVisualOverrides>
@@ -78,16 +84,6 @@ function syncVisuals(projectId: string, info: ProjectLaunchInfo | null): void {
   useProjectVisuals.setState((s) => {
     if (sameVisuals(s.byProject[projectId], next)) return s
     return { byProject: { ...s.byProject, [projectId]: next } }
-  })
-}
-
-/** Drop one project's mirrored appearance — its terminals fall back to the global settings until a
- *  fresh answer lands. */
-function clearVisuals(projectId: string): void {
-  useProjectVisuals.setState((s) => {
-    if (!(projectId in s.byProject)) return s
-    const { [projectId]: _dropped, ...rest } = s.byProject
-    return { byProject: rest }
   })
 }
 
@@ -170,7 +166,9 @@ export function ensureProjectLaunchInfo(projectId: string): Promise<void> {
  *  Called on `onTrustChanged` for the affected project, and after a settings-panel save. */
 export function invalidateProjectLaunchInfo(projectId: string): void {
   cache.delete(projectId)
-  clearVisuals(projectId)
+  // NOT `useProjectVisuals`: the appearance mirror is held across an invalidate on purpose — see
+  // its doc comment. Dropping it here would repaint every terminal of the project twice on its way
+  // to re-reading the same values.
   generation.set(projectId, currentGeneration(projectId) + 1)
   inFlight.delete(projectId)
 }
