@@ -164,3 +164,94 @@ describe('project settings — local leg', () => {
     expect(s?.shared).toBeNull()
   })
 })
+
+const remoteFs = new Map<string, string>()
+const fakeIO = {
+  read: async () => ({ status: 'absent' as const }),
+  write: async () => true,
+  readSettings: async (_id: string, ssh: { remoteCwd: string }) => {
+    const c = remoteFs.get(ssh.remoteCwd + '/.nodeterm/settings.json')
+    return c === undefined ? { status: 'absent' as const } : { status: 'ok' as const, content: c }
+  },
+  writeSettings: async (_id: string, ssh: { remoteCwd: string }, content: string) => {
+    remoteFs.set(ssh.remoteCwd + '/.nodeterm/settings.json', content); return true
+  }
+}
+const sshProject = () => project({ id: 'ps1', cwd: undefined, ssh: { server: { host: 'h', user: 'u' }, remoteCwd: '/srv/app' } })
+
+describe('project settings — ssh leg', () => {
+  beforeEach(() => remoteFs.clear())
+  it('write lands in the cache AND on the remote; read adopts the higher remote rev', async () => {
+    const store = new WorkspaceStore(fakeIO)
+    await store.save(ws([sshProject()]))
+    expect(await store.writeProjectSettings('ps1', { setup: { setupScript: 'make' } })).toBe(true)
+    expect(remoteFs.get('/srv/app/.nodeterm/settings.json')).toContain('make')
+    remoteFs.set('/srv/app/.nodeterm/settings.json', JSON.stringify(
+      { version: 1, rev: 9, savedAt: 't', setup: { setupScript: 'newer-remote' } }))
+    const s = await store.readProjectSettings('ps1')
+    expect(s?.shared?.setup?.setupScript).toBe('newer-remote')
+  })
+  it('remote read failure serves the cache (offline)', async () => {
+    const store = new WorkspaceStore({ ...fakeIO, readSettings: async () => ({ status: 'error' as const }) })
+    await store.save(ws([sshProject()]))
+    await store.writeProjectSettings('ps1', { setup: { setupScript: 'cached' } })
+    const s = await store.readProjectSettings('ps1')
+    expect(s?.shared?.setup?.setupScript).toBe('cached')
+  })
+  it('an absent remote file is healed from the cache on read', async () => {
+    const store = new WorkspaceStore(fakeIO)
+    await store.save(ws([sshProject()]))
+    await store.writeProjectSettings('ps1', { setup: { setupScript: 'mine' } })
+    remoteFs.clear()
+    await store.readProjectSettings('ps1')
+    expect(remoteFs.get('/srv/app/.nodeterm/settings.json')).toContain('mine')
+  })
+  it('settings cache survives a store reload via the index entry', async () => {
+    const store = new WorkspaceStore(fakeIO)
+    await store.save(ws([sshProject()]))
+    await store.writeProjectSettings('ps1', { setup: { setupScript: 'persisted' } })
+    const store2 = new WorkspaceStore({ ...fakeIO, readSettings: async () => ({ status: 'error' as const }) })
+    await store2.load()
+    const s = await store2.readProjectSettings('ps1')
+    expect(s?.shared?.setup?.setupScript).toBe('persisted')
+  })
+
+  it('an offline edit (cache newer than the remote) is pushed back and wins the read', async () => {
+    const store = new WorkspaceStore(fakeIO)
+    await store.save(ws([sshProject()]))
+    await store.writeProjectSettings('ps1', { setup: { setupScript: 'a' } }) // rev 1
+    await store.writeProjectSettings('ps1', { setup: { setupScript: 'offline-edit' } }) // rev 2
+    remoteFs.set('/srv/app/.nodeterm/settings.json', JSON.stringify(
+      { version: 1, rev: 1, savedAt: 't', setup: { setupScript: 'stale-remote' } }))
+    const s = await store.readProjectSettings('ps1')
+    expect(s?.shared?.setup?.setupScript).toBe('offline-edit')
+    expect(remoteFs.get('/srv/app/.nodeterm/settings.json')).toContain('offline-edit')
+  })
+
+  it('a conflict-marked remote file is reported as such and never overwritten', async () => {
+    const store = new WorkspaceStore(fakeIO)
+    await store.save(ws([sshProject()]))
+    const conflicted = '<<<<<<< a\n{}\n=======\n{}\n>>>>>>> b\n'
+    remoteFs.set('/srv/app/.nodeterm/settings.json', conflicted)
+    const s = await store.readProjectSettings('ps1')
+    expect(s?.conflict).toBe(true)
+    expect(s?.shared).toBeNull()
+    expect(remoteFs.get('/srv/app/.nodeterm/settings.json')).toBe(conflicted)
+  })
+
+  it('a remote write failure still keeps the edit (cache-first) and reports success', async () => {
+    const store = new WorkspaceStore({ ...fakeIO, writeSettings: async () => false })
+    await store.save(ws([sshProject()]))
+    expect(await store.writeProjectSettings('ps1', { setup: { setupScript: 'kept' } })).toBe(true)
+    const idx = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(idx.entries[0].settingsCache.setup.setupScript).toBe('kept')
+  })
+
+  it('an ssh project with no remote IO at all still reads and writes its cache', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([sshProject()]))
+    expect(await store.writeProjectSettings('ps1', { setup: { setupScript: 'no-io' } })).toBe(true)
+    const s = await store.readProjectSettings('ps1')
+    expect(s?.shared?.setup?.setupScript).toBe('no-io')
+  })
+})
