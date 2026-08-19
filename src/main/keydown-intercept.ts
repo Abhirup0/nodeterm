@@ -1,4 +1,6 @@
 import { IPC } from '../shared/ipc'
+import { getEffectiveBindings, sanitizeKeybindingOverrides } from '../shared/keybindings'
+import { matchesShortcut } from '../shared/shortcut'
 
 /**
  * The main window's `before-input-event` decision as ONE pure function — the desktop half of the
@@ -18,10 +20,15 @@ import { IPC } from '../shared/ipc'
  * **Why it is pure and lives here rather than in the callback.** Deleting a branch from an inline
  * callback breaks nothing and throws nothing — the shortcut just quietly starts minimizing the
  * window / closing it / resetting the WINDOW's page zoom instead of doing the app's thing. Worse,
- * the guard below is *shared* by three branches, so a change to it silently re-decides chords it
- * was not aimed at: loosen it and this window starts swallowing **bare** keystrokes app-wide, and
- * `index.ts` merges that kind of edit without a conflict. Both failures are invisible to a test
- * that reads the source; they are one assertion each against this function.
+ * a modifier test here is what keeps a branch off ordinary typing, so loosening one silently makes
+ * this window swallow **bare** keystrokes app-wide, and `index.ts` merges that kind of edit without
+ * a conflict. Both failures are invisible to a test that reads the source; they are one assertion
+ * each against this function.
+ *
+ * **This module stays the closed list of main-intercepted chords.** ⌘M and ⌘W are now resolved
+ * from the keybinding registry (`node.toggleMarkdown` / `node.close`), so the USER decides which
+ * chord they are — but nothing else is intercepted here, because everything else reaches the
+ * renderer's dispatcher on its own.
  *
  * Desktop-only by construction (it exists to fight a native menu), so it stays in `src/main` next
  * to `main-window.ts` rather than moving to `src/core` — the Server Edition's browser shell has no
@@ -53,26 +60,92 @@ export interface KeydownInterceptDecision {
   action: KeydownInterceptAction | null
 }
 
+/** The effective chords for the two REMAPPABLE commands this module intercepts. `readonly
+ *  string[]` in shortcut.ts's canonical spelling; `[]` means the user unbound the command, which
+ *  must read as "do not claim the key" — Electron's own menu item comes back. */
+export interface KeydownInterceptBindings {
+  closeNode: readonly string[]
+  toggleMarkdown: readonly string[]
+}
+
+/**
+ * Effective M/W chords from raw settings overrides (sanitized here so a hand-edited settings.json
+ * cannot crash or hijack the intercept — this runs on the way to `before-input-event`, the one
+ * code path where a throw eats every keystroke in the window).
+ */
+export function resolveInterceptBindings(
+  rawOverrides: unknown,
+  isMac: boolean
+): KeydownInterceptBindings {
+  const { overrides } = sanitizeKeybindingOverrides(rawOverrides, isMac)
+  return {
+    closeNode: getEffectiveBindings('node.close', overrides, isMac),
+    toggleMarkdown: getEffectiveBindings('node.toggleMarkdown', overrides, isMac)
+  }
+}
+
+/** Electron's `Input` flags in the shape `matchesShortcut` reads. */
+function toShortcutEvent(input: KeydownInterceptInput): {
+  metaKey: boolean
+  ctrlKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+  key: string
+} {
+  return {
+    metaKey: input.meta,
+    ctrlKey: input.control,
+    shiftKey: input.shift,
+    altKey: input.alt,
+    key: input.key
+  }
+}
+
 /**
  * PURE. What this `before-input-event` input means, or `null` to leave the key completely alone
  * (no `preventDefault` — the page and, failing that, the menu get it).
  *
- * The primary-modifier requirement is deliberately in the shared guard *and* is the only thing
- * standing between the branches below and ordinary typing: `m`, `w` and `0` are all characters a
- * user types. Any rewrite that moves the modifier decision into the individual branches has to
- * give **every** branch one — see `keydown-intercept.test.ts`, which presses each of them bare.
+ * **Every branch owns its own modifier requirement, and must.** The old shared guard was
+ * `type !== 'keyDown' || !(input.meta || input.control)`, which is exactly the check standing
+ * between these branches and ordinary typing — `m`, `w` and `0` are all characters a user types.
+ * It could not survive user-remappable bindings: an Alt-only chord is VALID per the registry's
+ * rules, and this module is its ONLY dispatcher (a chord we claim never reaches the renderer),
+ * so a primary-modifier gate above the matchers would make such a remap silently dead everywhere.
+ * Who that actually buys something for: **Windows/Linux Alt chords** (`Alt+M`, `Alt+W` — plain
+ * letter combos there), and on **macOS the Alt+non-letter ones** (`Alt+F5`, `Alt+ArrowUp`). It is
+ * NOT mac Option+letter: macOS composes those into a character, so ⌥M arrives as `key: 'µ'` and an
+ * `Alt+M` binding could never match there whatever this gate did.
+ * So the two remappable chords are matched EXACTLY (all four modifier flags, `matchesShortcut`),
+ * which is a modifier requirement per binding, and the hardcoded `Digit0` branch below carries
+ * the `meta || control` test it used to inherit. `keydown-intercept.test.ts` presses each of them
+ * bare; keep it that way.
  */
-export function keydownIntercept(input: KeydownInterceptInput): KeydownInterceptDecision | null {
-  if (input.type !== 'keyDown' || !(input.meta || input.control)) return null
-  const key = input.key.toLowerCase()
-  if (key === 'm') return { action: 'toggle-markdown' }
+export function keydownIntercept(
+  input: KeydownInterceptInput,
+  bindings: KeydownInterceptBindings,
+  isMac: boolean
+): KeydownInterceptDecision | null {
+  if (input.type !== 'keyDown') return null
+  // Matched against the user's effective bindings (defaults ⌘M / ⌘W). `matchesShortcut` is exact
+  // on meta/ctrl/alt/shift, so ⌘⇧M and ⌘⌥M — which the old `key === 'm'` branch also swallowed —
+  // are now different chords and go back to the page. Parsing is memoized in shortcut.ts, so this
+  // stays cheap on main's input path.
+  const ev = toShortcutEvent(input)
+  if (bindings.toggleMarkdown.some((s) => matchesShortcut(ev, s, isMac))) {
+    return { action: 'toggle-markdown' }
+  }
   // Repurpose Cmd/Ctrl+W: the renderer closes the selected node(s); if none are selected it asks
-  // us to close the window (the standard behavior). ⇧ is left to the menu's Close All Windows.
-  if (key === 'w' && !input.shift) return { action: 'close-node' }
-  // Matched on the physical `code`, like the renderer's half of the chord (`zoomShortcutChord`):
-  // on a non-US layout the zero key's `key` is not necessarily "0". Alt is excluded because AltGr
-  // reports as ctrl+alt and must keep typing a real character.
-  if (input.code === 'Digit0' && !input.shift && !input.alt) {
+  // us to close the window (the standard behavior). ⇧ is left to the menu's Close All Windows —
+  // now by the binding being `Cmd+W` and the match being exact, rather than by a `!input.shift`.
+  if (bindings.closeNode.some((s) => matchesShortcut(ev, s, isMac))) {
+    return { action: 'close-node' }
+  }
+  // NOT remappable: this is the renderer's `zoomShortcutChord` half of a canvas gesture, not a
+  // registry command. Matched on the physical `code`, like that half: on a non-US layout the zero
+  // key's `key` is not necessarily "0". Alt is excluded because AltGr reports as ctrl+alt and must
+  // keep typing a real character; `meta || control` is the primary-modifier test it used to
+  // inherit from the shared guard, and without it every bare `0` in the app is swallowed (#193).
+  if (input.code === 'Digit0' && (input.meta || input.control) && !input.shift && !input.alt) {
     // Auto-repeat is dropped here rather than in the renderer, so a held chord cannot restart the
     // 200ms zoom tween — the same rule `zoomShortcutChord` applies to the keydown path. Still
     // claimed, so a held ⌘0 does not fall through to `resetZoom` on the second repeat.
@@ -104,10 +177,18 @@ export interface KeydownInterceptTarget {
  * Wire `keydownIntercept` to `win`. The whole side-effecting half is these four lines, so a test
  * that calls this with a fake window exercises registration, the refusal, the `preventDefault` and
  * the forwarded channel together — everything except the single call site in `index.ts`.
+ *
+ * `getBindings` is read per event rather than captured: settings change while the window lives, and
+ * it returns a cached object (`index.ts` recomputes it on `settingsStore.onChange`, not here — a
+ * sanitize per keystroke would be real work on the input path).
  */
-export function installKeydownIntercepts(win: KeydownInterceptTarget): void {
+export function installKeydownIntercepts(
+  win: KeydownInterceptTarget,
+  getBindings: () => KeydownInterceptBindings,
+  isMac: boolean
+): void {
   win.webContents.on('before-input-event', (event, input) => {
-    const decision = keydownIntercept(input)
+    const decision = keydownIntercept(input, getBindings(), isMac)
     if (!decision) return
     event.preventDefault()
     if (decision.action) win.webContents.send(keydownInterceptChannel(decision.action))

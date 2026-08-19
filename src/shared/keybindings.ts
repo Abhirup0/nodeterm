@@ -353,6 +353,13 @@ export function resolveCommandForKeyEvent(
     // scm commands dispatch from their own focused composer (local onKeyDown), never from
     // the window listener — resolving them here would fire Commit with no composer focused.
     if (def.scope === 'scm') continue
+    // speech.dictation dispatches from its own dedicated listeners (the keyed gesture and the
+    // hold-mode effect, both reading settings.speech.shortcut), never from the registry — its
+    // row here is display-only, for ShortcutsPanel and the Settings section. A hand-edited KEYED
+    // override would otherwise RESOLVE, find no handler, and spend the chord: the dispatcher's
+    // claim protocol stops a resolved command from reaching the trailing gestures, so
+    // `{"speech.dictation": ["Cmd+0"]}` would silently kill zoom-to-100%.
+    if (def.id === 'speech.dictation') continue
     if (ctx.typing && !def.allowWhileTyping) continue
     if (ctx.terminal && !(def.scope === 'terminal' || def.allowInTerminal)) continue
     if (!ctx.terminal && def.scope === 'terminal') continue

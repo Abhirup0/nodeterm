@@ -367,6 +367,15 @@ describe('resolveCommandForKeyEvent', () => {
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'Enter' }), ctx(), {}, true))
       .toBeNull()
   })
+  it('never resolves speech.dictation — even a hand-edited KEYED override', () => {
+    // The registry row is display-only; dictation dispatches from its own listeners reading
+    // settings.speech.shortcut, so nothing here would ever handle it. Without the resolver skip
+    // this override RESOLVES, finds no handler, and the chord is spent — the trailing gestures
+    // (zoom / projectJump / copy) never see it, so a `Cmd+0` override kills zoom-to-100%.
+    // Passed straight in, bypassing sanitize: this is exactly the hand-edited settings.json case.
+    const o = { 'speech.dictation': ['Cmd+0'] }
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: '0' }), ctx(), o, true)).toBeNull()
+  })
   it('terminal focus admits terminal scope over a canvas command sharing the chord', () => {
     // Cmd+F sits on terminal.find; a canvas-scope override claims the same chord. The
     // terminal-focus gate drops canvas.fitAll before its bindings are ever read — this

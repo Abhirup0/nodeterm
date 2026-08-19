@@ -478,3 +478,12 @@ describe('resolvedModifiers', () => {
     expect(resolvedModifiers(p, false)).toEqual({ meta: false, ctrl: true, alt: false, shift: true })
   })
 })
+
+describe('parseShortcut memoization', () => {
+  it('returns the same frozen object for repeated input', () => {
+    const a = parseShortcut('Cmd+Shift+D')
+    const b = parseShortcut('Cmd+Shift+D')
+    expect(b).toBe(a)
+    expect(Object.isFrozen(a)).toBe(true)
+  })
+})
