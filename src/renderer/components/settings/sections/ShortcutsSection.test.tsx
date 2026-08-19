@@ -50,6 +50,12 @@ const setRecording = (): ReturnType<typeof vi.fn> =>
 const body = (): Element => host.querySelector<HTMLElement>('#shortcuts')!.lastElementChild!
 
 const row = (id: string): HTMLElement => host.querySelector<HTMLElement>(`[data-command="${id}"]`)!
+/** The policy row's SegmentedPill, found by the `ariaLabel` it is given (it carries no command id
+ *  — it is a setting, not a registry command). */
+const pill = (): HTMLElement | null =>
+  host.querySelector<HTMLElement>('[role="radiogroup"][aria-label="While a terminal has focus"]')
+const pillOption = (label: string): HTMLButtonElement =>
+  [...pill()!.querySelectorAll('button')].find((b) => b.textContent === label)!
 const button = (id: string, label: string): HTMLButtonElement | null =>
   row(id).querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
 /** The recorder button carries no per-command aria-label (it is a shared component), so it is
@@ -128,8 +134,10 @@ describe('ShortcutsSection rows', () => {
     expect([...host.querySelectorAll('[data-command]')].map((el) =>
       el.getAttribute('data-command')
     )).toEqual(['node.close'])
-    // Exactly the heading and the one row — no empty siblings.
-    expect(body().children).toHaveLength(2)
+    // Exactly the policy row (its description names Close), the heading and the one command row —
+    // no empty siblings.
+    expect(pill()).toBeTruthy()
+    expect(body().children).toHaveLength(3)
     expect([...body().children].every((c) => (c.textContent ?? '').trim() !== '')).toBe(true)
   })
 
@@ -146,7 +154,8 @@ describe('ShortcutsSection rows', () => {
   it('renders every group and row unfiltered, each as its own divided block', () => {
     render()
     expect(host.querySelectorAll('h3')).toHaveLength(6)
-    expect(body().children).toHaveLength(6 + COMMAND_DEFINITIONS.length)
+    // + 1 for the terminal-policy row, which sits above the groups as its own block.
+    expect(body().children).toHaveLength(1 + 6 + COMMAND_DEFINITIONS.length)
   })
 
   // The dictation row must not promise a second chord: every consumer reads
@@ -206,6 +215,32 @@ describe('ShortcutsSection rows', () => {
   })
 })
 
+describe('terminal shortcut policy row', () => {
+  // `app-first` is the shipped default and the byte-identical-behavior guarantee of the whole
+  // policy: a user who never opens this row must see the pre-feature app.
+  it('shows app-first checked by default', () => {
+    render()
+    expect(pillOption('App shortcuts first').getAttribute('aria-checked')).toBe('true')
+    expect(pillOption('Terminal first').getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('writes the setting when Terminal first is picked', () => {
+    render()
+    click(pillOption('Terminal first'))
+    expect(useSettings.getState().settings.terminalShortcutPolicy).toBe('terminal-first')
+    expect(pillOption('Terminal first').getAttribute('aria-checked')).toBe('true')
+  })
+
+  // The row is its OWN searchable unit, not part of a group Fragment: a query that matches only
+  // its keywords must keep it and drop every command group, heading included.
+  it('survives a query that drops every command group', () => {
+    render('tui')
+    expect(pill()).toBeTruthy()
+    expect(host.querySelectorAll('h3')).toHaveLength(0)
+    expect(host.querySelectorAll('[data-command]')).toHaveLength(0)
+  })
+})
+
 describe('commitCandidate', () => {
   it('refuses a conflicting candidate, naming the other command, and writes nothing', () => {
     setKb({ 'canvas.fitAll': [] })
@@ -255,5 +290,71 @@ describe('commitCandidate', () => {
     // Re-adding an existing chord is idempotent, not a self-conflict.
     expect(commitCandidate('canvas.fitAll', 'Cmd+Alt+F', 'add')).toEqual({ ok: true })
     expect(kb()['canvas.fitAll']).toEqual(['Cmd+Alt+G', 'Cmd+Alt+F'])
+  })
+
+  // Dictation is its own conflict bucket (Task 1), so NEITHER of the three gates above can see an
+  // overlap with it — the detector is silent by design and the load path deliberately permits one.
+  // These two gates are what makes `conflictBucket`'s "the Settings UI REFUSES to create one" true.
+  //
+  // They are SCOPED, and the four tests below are the discriminating matrix: the keyed gesture is
+  // offered only in plain app focus (`globalKeybindings.ts` — `!ctx.typing && !ctx.terminal &&
+  // !ctx.kanbanOpen`), so an 'app'/'canvas'-scope command really does lose the chord most of the
+  // time, while a 'terminal'/'scm'-scope one NEVER competes with it and must stay bindable.
+  it("refuses a canvas-scope command on Dictate's keyed chord, naming Dictate", () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt+D'] })
+    const r = commitCandidate('canvas.fitAll', 'Cmd+Alt+D', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Dictate')
+    expect(kb()['canvas.fitAll']).toBeUndefined()
+  })
+
+  it("refuses an app-scope command on Dictate's keyed chord, naming Dictate", () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt+D'] })
+    const r = commitCandidate('panel.explorer', 'Cmd+Alt+D', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Dictate')
+    expect(kb()['panel.explorer']).toBeUndefined()
+  })
+
+  // The other half of the pair, and the one that reds if gate 1 loses its scope check: Find in
+  // terminal fires only in terminal focus, where the gesture is not offered at all — so this
+  // binding was legal before the branch, works at dispatch, and must stay accepted.
+  it("allows a terminal-scope command on Dictate's keyed chord", () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt+D'] })
+    expect(commitCandidate('terminal.find', 'Cmd+Alt+D', 'replace')).toEqual({ ok: true })
+    expect(kb()['terminal.find']).toEqual(['Cmd+Alt+D'])
+  })
+
+  it('refuses a keyed Dictate chord that a global-bucket command already holds', () => {
+    const r = commitCandidate('speech.dictation', 'Cmd+K', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Command palette')
+    expect(kb()['speech.dictation']).toBeUndefined()
+  })
+
+  // Gate 2's mirror of the same rule, and it reds if the loop stops skipping the two focused
+  // scopes: Find in terminal holds Cmd+F and Commit holds Cmd+Enter, neither of which the keyed
+  // gesture could ever take from them.
+  it('allows a keyed Dictate chord that only a focused-surface command holds', () => {
+    expect(commitCandidate('speech.dictation', 'Cmd+F', 'replace')).toEqual({ ok: true })
+    expect(kb()['speech.dictation']).toEqual(['Cmd+F'])
+    expect(commitCandidate('speech.dictation', 'Cmd+Enter', 'replace')).toEqual({ ok: true })
+    expect(kb()['speech.dictation']).toEqual(['Cmd+Enter'])
+  })
+
+  // DOCUMENTATION OF A PROPERTY, not a guard test — stated honestly because both stay GREEN if the
+  // dictation gates are deleted outright. Nothing can make them red by deletion: a hold chord's
+  // identity ends in `:(hold)` and no keyed identity can equal it, so correct code has no path to
+  // a refusal here. What the second one does discriminate is a mutation of `bindingIdentity`
+  // itself — drop the key segment and the default `Cmd+Alt` hold chord starts swallowing every
+  // Cmd+Alt+<key> candidate.
+  it('documents that a HOLD dictation chord cannot trip the overlap gates', () => {
+    const r = commitCandidate('speech.dictation', 'Cmd+Ctrl', 'replace')
+    expect(r.ok).toBe(true)
+  })
+
+  it('documents that the default hold chord blocks no keyed candidate', () => {
+    const r = commitCandidate('canvas.fitAll', 'Cmd+Alt+F9', 'replace')
+    expect(r.ok).toBe(true)
   })
 })

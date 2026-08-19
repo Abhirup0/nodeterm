@@ -18,9 +18,15 @@
  * (`src/core/agents/node-auth-secret.ts` — sealed via safeStorage on the desktop, raw 0600 bytes on
  * the Server Edition). Unsigned/mis-signed records are ignored, not repaired.
  *
- * ACCOUNT SCOPING is deliberately absent here: managed Codex accounts are a later slice. The
- * storage shape is one file per thread id; scoping adds a directory level above it without
- * changing anything this file promises.
+ * ACCOUNT SCOPING (S6): managed Codex accounts add a directory level above the thread id. A
+ * SYSTEM record still lives at the bare root (`<root>/<threadId>`), so a machine with no managed
+ * accounts keeps the exact S4 layout and its legacy records keep resolving (Constraint 12). A
+ * MANAGED record lives under `<root>/<accountId>/<threadId>`. The HMAC now binds the full 4-tuple
+ * (threadId, accountScope, nodeId, hookEndpoint) — an empty account id is normalised to the scope
+ * string `system`, and a record whose `accountId=` line disagrees with the directory it sits in is
+ * rejected, so an account can never be edited to speak for another's threads. Records written
+ * before this slice carry no `accountId=` line and are verified with the original 3-tuple preimage
+ * at the system scope only — the one back-compat door, and it is a system-scope door.
  */
 import {
   chmodSync,
@@ -34,6 +40,35 @@ import {
 import path from 'path'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { platform } from './platform'
+import { ACCOUNT_ID_RE, isSafeAccountId } from '../shared/codex-account'
+
+/**
+ * The scope string for the SYSTEM account (`~/.codex`, no managed id). Empty/undefined account ids
+ * normalise to this both in the HMAC preimage and — for the directory — to the bare record root.
+ */
+export const SYSTEM_ACCOUNT_SCOPE = 'system'
+
+/**
+ * The one shape of a safe managed account id, re-exported from the shared seam so there is a single
+ * definition of the alphabet the path builders and this proxy both trust. Must start alphanumeric,
+ * which blocks `.`/`..`/leading-separator ids at the door before an id becomes a directory scope.
+ */
+export const SAFE_ACCOUNT_ID = ACCOUNT_ID_RE
+
+/**
+ * The scope string for an account id: `system` for empty/undefined, else the validated id itself.
+ * THROWS on an id that could escape the mapping directory (`..`, `a/b`, `/abs`, whitespace) — the
+ * supply-chain guard, since account ids arrive from hand-editable `settings.json` / `project.json`.
+ * A literal id of `system` is refused so the reserved bare-root scope can never be impersonated by
+ * a managed subdirectory.
+ */
+export function accountScope(accountId?: string): string {
+  if (!accountId) return SYSTEM_ACCOUNT_SCOPE
+  if (accountId === SYSTEM_ACCOUNT_SCOPE || !isSafeAccountId(accountId)) {
+    throw new Error('Invalid NodeTerm Codex account scope')
+  }
+  return accountId
+}
 
 /**
  * How long the SERVER gives itself to mint a thread (`startCodexThreadAt`'s default).
@@ -103,105 +138,270 @@ export function codexThreadIdentityRoot(): string {
   return path.join(platform().userDataDir, 'codex-thread-nodes')
 }
 
-function identitySignature(threadId: string, nodeId: string, hookEndpoint: string): string {
+/**
+ * The current 4-tuple preimage: HMAC-SHA256(threadId ␀ accountScope ␀ nodeId ␀ hookEndpoint). The
+ * account scope binds the record to ONE account; without it a record for account A could be moved,
+ * byte-for-byte, into account B's directory and still verify.
+ */
+function identitySignature(
+  threadId: string,
+  scope: string,
+  nodeId: string,
+  hookEndpoint: string
+): string {
+  if (!identityAuthSecret) throw new Error('NodeTerm Codex identity authentication is unavailable')
+  return createHmac('sha256', identityAuthSecret)
+    .update(`${threadId}\0${scope}\0${nodeId}\0${hookEndpoint}`)
+    .digest('base64url')
+}
+
+/**
+ * The pre-S6 3-tuple preimage (no account dimension). Accepted ONLY for a system-scope record that
+ * carries no `accountId=` line — i.e. one written before this slice. Every record this slice writes
+ * (system included) carries the account line and the 4-tuple, so the legacy door is system-only and
+ * closes itself the first time a machine rewrites the record.
+ */
+function legacyIdentitySignature(threadId: string, nodeId: string, hookEndpoint: string): string {
   if (!identityAuthSecret) throw new Error('NodeTerm Codex identity authentication is unavailable')
   return createHmac('sha256', identityAuthSecret)
     .update(`${threadId}\0${nodeId}\0${hookEndpoint}`)
     .digest('base64url')
 }
 
-function signatureMatches(threadId: string, identity: CodexThreadIdentity): boolean {
-  if (!identity.signature || !identityAuthSecret) return false
+function signatureEquals(presented: string, expected: string): boolean {
+  const a = Buffer.from(presented)
+  const b = Buffer.from(expected)
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/**
+ * Verify a parsed record sitting in the `dirScope` directory (Property 7). Two checks, in order:
+ *  1. the record's own `accountId=` line must AGREE with the directory it was found in, and
+ *  2. the HMAC must match — the 4-tuple for any record with an account line, with a system-only
+ *     3-tuple fallback for a legacy record that has no line at all.
+ *
+ * Check (1) (line-vs-directory) is defence in depth, kept legible rather than removed. What carries
+ * Property 7 is the SCOPE-bound HMAC in check (2): a record signed for `acct-A` verifies only with
+ * the preimage scope `acct-A`, so re-filing it under `acct-B` fails the MAC regardless of the line
+ * check. The legacy 3-tuple fallback is the ONE back-compat door and is restricted to the SYSTEM
+ * scope, so a scope-less signature can never be honoured under a managed account. (The mutations
+ * that redden these tests are the HMAC one and the `scope === SYSTEM_ACCOUNT_SCOPE` fallback guard;
+ * check (1) is redundant with the scope-bound HMAC and is documented as such.)
+ */
+function recordSignatureValid(threadId: string, dirScope: string, record: ParsedRecord): boolean {
+  if (!record.signature || !identityAuthSecret) return false
+  const scope = dirScope || SYSTEM_ACCOUNT_SCOPE
+  if (record.accountLinePresent) {
+    const lineScope = record.accountId || SYSTEM_ACCOUNT_SCOPE
+    if (lineScope !== scope) return false
+  }
   let expected = ''
   try {
-    expected = identitySignature(threadId, identity.nodeId, identity.hookEndpoint)
+    expected = identitySignature(threadId, scope, record.nodeId, record.hookEndpoint)
   } catch {
     return false
   }
-  const actual = Buffer.from(identity.signature)
-  const wanted = Buffer.from(expected)
-  return actual.length === wanted.length && timingSafeEqual(actual, wanted)
+  if (signatureEquals(record.signature, expected)) return true
+  if (!record.accountLinePresent && scope === SYSTEM_ACCOUNT_SCOPE) {
+    try {
+      return signatureEquals(
+        record.signature,
+        legacyIdentitySignature(threadId, record.nodeId, record.hookEndpoint)
+      )
+    } catch {
+      return false
+    }
+  }
+  return false
 }
 
 export interface CodexThreadIdentity {
+  /** '' for the system account; a managed account id otherwise. */
+  accountId: string
   nodeId: string
   hookEndpoint: string
   signature: string
+}
+
+interface ParsedRecord extends CodexThreadIdentity {
+  accountLinePresent: boolean
 }
 
 export function validCodexIdentity(nodeId: string, hookEndpoint: string): boolean {
   return SAFE_NODE_ID.test(nodeId) && SAFE_ENDPOINT.test(hookEndpoint)
 }
 
-function identityFile(threadId: string, root = codexThreadIdentityRoot()): string {
-  if (!isSafeThreadId(threadId)) throw new Error('Invalid NodeTerm Codex thread identity')
-  return path.join(root, threadId)
+/** The absolute path of a record for a thread under a scope (`system` ⇒ bare root). */
+function recordFilePath(root: string, scope: string, threadId: string): string {
+  return scope && scope !== SYSTEM_ACCOUNT_SCOPE
+    ? path.join(root, scope, threadId)
+    : path.join(root, threadId)
 }
 
-function parseCodexThreadIdentity(raw: string): CodexThreadIdentity {
+function identityFile(threadId: string, scope: string, root = codexThreadIdentityRoot()): string {
+  if (!isSafeThreadId(threadId)) throw new Error('Invalid NodeTerm Codex thread identity')
+  return recordFilePath(root, scope, threadId)
+}
+
+function parseCodexThreadIdentity(raw: string): ParsedRecord {
   const values: Record<string, string> = {}
   for (const line of raw.split('\n')) {
     const separator = line.indexOf('=')
     if (separator < 1) continue
-    values[line.slice(0, separator)] = line.slice(separator + 1)
+    const key = line.slice(0, separator)
+    // First occurrence wins, matching the `head -n 1` the sh prelude uses: a second `accountId=`
+    // line cannot be smuggled in to disagree with the first.
+    if (!(key in values)) values[key] = line.slice(separator + 1)
   }
   return {
+    accountId: values.accountId ?? '',
     nodeId: values.nodeId ?? '',
     hookEndpoint: values.endpoint ?? '',
-    signature: values.signature ?? ''
+    signature: values.signature ?? '',
+    accountLinePresent: 'accountId' in values
   }
 }
 
-/** The record for a thread, or undefined when it is absent, malformed or badly signed. */
-export function readCodexThreadIdentity(
+/**
+ * Read and verify the record for a thread AT A SPECIFIC SCOPE (`system` = bare root). Returns
+ * undefined when it is absent, malformed, badly signed, or its account line disagrees with the
+ * directory. The scope itself is validated so a hostile scan entry can never escape the root.
+ */
+export function readIdentityCandidate(
   threadId: string,
+  scope: string,
   root = codexThreadIdentityRoot()
 ): CodexThreadIdentity | undefined {
   if (!isSafeThreadId(threadId)) return undefined
+  const norm = scope || SYSTEM_ACCOUNT_SCOPE
+  if (norm !== SYSTEM_ACCOUNT_SCOPE && !isSafeAccountId(norm)) return undefined
   let raw: string
   try {
-    raw = readFileSync(path.join(root, threadId), 'utf8')
+    raw = readFileSync(recordFilePath(root, norm, threadId), 'utf8')
   } catch {
     return undefined
   }
-  const identity = parseCodexThreadIdentity(raw)
-  if (!validCodexIdentity(identity.nodeId, identity.hookEndpoint)) return undefined
-  if (!signatureMatches(threadId, identity)) return undefined
-  return identity
+  const record = parseCodexThreadIdentity(raw)
+  if (!validCodexIdentity(record.nodeId, record.hookEndpoint)) return undefined
+  if (!recordSignatureValid(threadId, norm, record)) return undefined
+  return {
+    accountId: record.accountId,
+    nodeId: record.nodeId,
+    hookEndpoint: record.hookEndpoint,
+    signature: record.signature
+  }
+}
+
+/**
+ * Every verified record for a thread, across every scope present on disk: the bare-root system
+ * record plus one per managed-account subdirectory. Unsafe scope names are skipped, never read.
+ */
+export function identityCandidates(
+  threadId: string,
+  root = codexThreadIdentityRoot()
+): Array<{ scope: string; identity: CodexThreadIdentity }> {
+  const out: Array<{ scope: string; identity: CodexThreadIdentity }> = []
+  const system = readIdentityCandidate(threadId, SYSTEM_ACCOUNT_SCOPE, root)
+  if (system) out.push({ scope: SYSTEM_ACCOUNT_SCOPE, identity: system })
+  let entries: Array<{ name: string; isDirectory(): boolean }>
+  try {
+    entries = readdirSync(root, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    if (entry.name === SYSTEM_ACCOUNT_SCOPE || !isSafeAccountId(entry.name)) continue
+    const identity = readIdentityCandidate(threadId, entry.name, root)
+    if (identity) out.push({ scope: entry.name, identity })
+  }
+  return out
+}
+
+/** The record for a thread at a scope (`accountId` empty/undefined ⇒ system), or undefined. */
+export function readCodexThreadIdentity(
+  threadId: string,
+  root = codexThreadIdentityRoot(),
+  accountId?: string
+): CodexThreadIdentity | undefined {
+  let scope: string
+  try {
+    scope = accountScope(accountId)
+  } catch {
+    return undefined
+  }
+  return readIdentityCandidate(threadId, scope, root)
 }
 
 /**
  * Recover a thread's owning node after the app restarts. tmux sessions outlive the app, so a
  * running Codex client can outlive every in-memory map we hold; the file is the only thing that
  * still knows which node it belongs to.
+ *
+ * With `accountId` given the answer is that one scope's record. WITHOUT it — the shared-app-server
+ * tool shell that only knows a bare thread id — every scope is scanned and an owner is returned
+ * ONLY when it is unambiguous (`owners.size === 1`). The same thread id owned by two accounts is
+ * NOT resolved: ambiguous ownership fails closed (Property 3), the same posture as an unproven pane
+ * claim in `pane-ownership.ts`.
  */
 export function resolveCodexThreadNodeIdentity(
   threadId: string,
-  root = codexThreadIdentityRoot()
+  root = codexThreadIdentityRoot(),
+  accountId?: string
 ): string | undefined {
-  return readCodexThreadIdentity(threadId, root)?.nodeId
+  if (accountId !== undefined) {
+    return readCodexThreadIdentity(threadId, root, accountId)?.nodeId
+  }
+  const candidates = identityCandidates(threadId, root)
+  const owners = new Set(candidates.map((c) => c.identity.nodeId))
+  return owners.size === 1 ? candidates[0].identity.nodeId : undefined
 }
 
-/** Write (or replace) the record for `threadId`, atomically. */
+/**
+ * Whether a thread id is owned by MORE THAN ONE currently-live node across scopes — a genuine
+ * ownership conflict the caller must refuse rather than pick a winner for. A single live owner (or
+ * none) is not a conflict. Fail-closed twin of the single-live-owner rule in `bindCodexThreadIdentity`.
+ */
+export function codexThreadIdentityHasLiveConflict(
+  threadId: string,
+  isNodeLive: (nodeId: string) => boolean,
+  root = codexThreadIdentityRoot()
+): boolean {
+  const liveOwners = new Set(
+    identityCandidates(threadId, root)
+      .map((c) => c.identity.nodeId)
+      .filter(isNodeLive)
+  )
+  return liveOwners.size > 1
+}
+
+/** Write (or replace) the record for `threadId` under its account scope, atomically. */
 export function writeCodexThreadIdentity(
   threadId: string,
   nodeId: string,
   hookEndpoint: string,
-  root = codexThreadIdentityRoot()
+  root = codexThreadIdentityRoot(),
+  accountId?: string
 ): void {
   if (!isSafeThreadId(threadId) || !validCodexIdentity(nodeId, hookEndpoint)) {
     throw new Error('Invalid NodeTerm Codex thread identity')
   }
-  const signature = identitySignature(threadId, nodeId, hookEndpoint)
-  const file = identityFile(threadId, root)
-  const tmp = path.join(root, `.${threadId}.${process.pid}.${Date.now()}`)
-  mkdirSync(root, { recursive: true, mode: 0o700 })
+  const scope = accountScope(accountId) // throws on an id that could escape the mapping directory
+  const signature = identitySignature(threadId, scope, nodeId, hookEndpoint)
+  const file = identityFile(threadId, scope, root)
+  const dir = path.dirname(file)
+  const tmp = path.join(dir, `.${threadId}.${process.pid}.${Date.now()}`)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
   let renamed = false
   try {
-    writeFileSync(tmp, `nodeId=${nodeId}\nendpoint=${hookEndpoint}\nsignature=${signature}\n`, {
-      encoding: 'utf8',
-      mode: 0o600
-    })
+    writeFileSync(
+      tmp,
+      `accountId=${accountId ?? ''}\nnodeId=${nodeId}\nendpoint=${hookEndpoint}\nsignature=${signature}\n`,
+      {
+        encoding: 'utf8',
+        mode: 0o600
+      }
+    )
     renameSync(tmp, file)
     renamed = true
   } finally {
@@ -226,17 +426,19 @@ export function bindCodexThreadIdentity(
   nodeId: string,
   hookEndpoint: string,
   isNodeLive: (nodeId: string) => boolean,
-  root = codexThreadIdentityRoot()
+  root = codexThreadIdentityRoot(),
+  accountId?: string
 ): void {
   if (!isSafeThreadId(threadId) || !validCodexIdentity(nodeId, hookEndpoint)) {
     throw new Error('Invalid NodeTerm Codex thread identity')
   }
-  const existing = readCodexThreadIdentity(threadId, root)
+  accountScope(accountId) // reject an escaping account id before any read or write
+  const existing = readCodexThreadIdentity(threadId, root, accountId)
   if (existing && existing.nodeId !== nodeId && isNodeLive(existing.nodeId)) {
     throw new Error('Codex thread is already bound to another live node')
   }
   if (existing && existing.nodeId === nodeId && existing.hookEndpoint === hookEndpoint) return
-  writeCodexThreadIdentity(threadId, nodeId, hookEndpoint, root)
+  writeCodexThreadIdentity(threadId, nodeId, hookEndpoint, root, accountId)
 }
 
 /**
@@ -255,21 +457,38 @@ export function forgetCodexThreadIdentitiesForNode(
   root = codexThreadIdentityRoot()
 ): void {
   if (!SAFE_NODE_ID.test(nodeId)) return
-  let entries: string[]
+  const forgetInScope = (scope: string, dir: string): void => {
+    let entries: Array<{ name: string; isFile(): boolean }>
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue // a managed-scope SUBDIRECTORY at the root is not a thread id
+      const threadId = entry.name
+      if (!isSafeThreadId(threadId)) continue
+      // Reads through the signature check, so a record we do not trust is also one we do not delete.
+      if (readIdentityCandidate(threadId, scope, root)?.nodeId !== nodeId) continue
+      try {
+        unlinkSync(path.join(dir, threadId))
+      } catch {
+        /* nothing to forget */
+      }
+    }
+  }
+  // System records live at the bare root; managed records one directory down, per account scope.
+  forgetInScope(SYSTEM_ACCOUNT_SCOPE, root)
+  let scopes: Array<{ name: string; isDirectory(): boolean }>
   try {
-    entries = readdirSync(root)
+    scopes = readdirSync(root, { withFileTypes: true })
   } catch {
     return
   }
-  for (const threadId of entries) {
-    if (!isSafeThreadId(threadId)) continue
-    // Reads through the signature check, so a record we do not trust is also one we do not delete.
-    if (readCodexThreadIdentity(threadId, root)?.nodeId !== nodeId) continue
-    try {
-      unlinkSync(path.join(root, threadId))
-    } catch {
-      /* nothing to forget */
-    }
+  for (const entry of scopes) {
+    if (!entry.isDirectory()) continue
+    if (entry.name === SYSTEM_ACCOUNT_SCOPE || !isSafeAccountId(entry.name)) continue
+    forgetInScope(entry.name, path.join(root, entry.name))
   }
 }
 
@@ -364,6 +583,15 @@ nt_preflight() {
   if [ "\${1-}" = resume ]; then
     case "\${2-}" in ''|*[!A-Za-z0-9._-]*) nt_fail thread-id-unavailable; return ;; esac
   fi
+  # The account scope (S6). Empty ⇒ the system account. A non-empty id is validated to the SAME
+  # shape the record store's accountScope() enforces — must START alphanumeric (so '.'/'..'/leading
+  # separators can never become a directory scope) — BEFORE it rides a POST body onward. A bad id
+  # falls back to plain codex rather than binding a thread under an attacker-shaped scope; the id
+  # travels in the request body, never on argv (Constraint 6).
+  case "\${NODETERM_CODEX_ACCOUNT_ID-}" in
+    '') ;;
+    [!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) nt_fail codex-account-invalid; return ;;
+  esac
   # The authoritative check runs FIRST and unchanged; the stat below only decides WHICH reason to
   # report. Ordering it the other way would let a codex that no longer needs the standalone runtime
   # fall back on a stat we had no business trusting more than the command itself.
@@ -422,6 +650,7 @@ if [ "\${1-}" = resume ]; then
   # Claim the caller-supplied thread for THIS node before Codex opens it. A refusal means another
   # live node owns it; two clients on one thread is worse than one plain session, so we fall back.
   if nt_post 20 --data-urlencode "nodeId=$NODETERM_NODE_ID" --data-urlencode "threadId=\${2-}" \\
+      --data-urlencode "accountId=\${NODETERM_CODEX_ACCOUNT_ID-}" \\
       "http://localhost:\${NODETERM_HOOK_PORT-0}/codex-thread/bind" >/dev/null; then
     exec codex --remote unix:// "$@"
   fi
@@ -430,6 +659,7 @@ if [ "\${1-}" = resume ]; then
 fi
 
 nt_thread=$(nt_post ${CODEX_THREAD_START_CLIENT_MAX_S} --data-urlencode "nodeId=$NODETERM_NODE_ID" --data-urlencode "cwd=$PWD" \\
+  --data-urlencode "accountId=\${NODETERM_CODEX_ACCOUNT_ID-}" \\
   "http://localhost:\${NODETERM_HOOK_PORT-0}/codex-thread/start") || nt_thread=''
 nt_thread=$(printf %s "$nt_thread" | tr -d '\\r\\n')
 case "$nt_thread" in

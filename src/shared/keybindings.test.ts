@@ -6,9 +6,11 @@ import {
   normalizeBindingForCommand,
   getEffectiveBindings,
   bindingIdentity,
+  conflictBucket,
   findKeybindingConflicts,
   sanitizeKeybindingOverrides,
   resolveCommandForKeyEvent,
+  normalizeTerminalShortcutPolicy,
   MAIN_INTERCEPTED_COMMAND_IDS,
   findMainInterceptShadowing
 } from './keybindings'
@@ -83,6 +85,8 @@ describe('registry invariants', () => {
         darwin: ['Delete', 'Backspace'], other: ['Delete', 'Backspace'], allowBareKey: true },
       { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
         darwin: [], other: [] },
+      { id: 'canvas.tidy', title: 'Tidy canvas', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+Shift+A'], other: ['Cmd+Shift+A'] },
       { id: 'canvas.groupSelection', title: 'Group selection', group: 'Canvas', scope: 'canvas',
         darwin: [], other: [] },
       { id: 'node.newTerminal', title: 'New terminal node', group: 'Nodes', scope: 'canvas',
@@ -190,6 +194,25 @@ describe('bindingIdentity', () => {
   it('still separates a modifier from a bare key, and a hold chord from a keyed one', () => {
     expect(bindingIdentity('Cmd+Delete', true)).not.toBe(bindingIdentity('Delete', true))
     expect(bindingIdentity('Cmd+Alt', true)).not.toBe(bindingIdentity('Cmd+Alt+D', true))
+  })
+})
+
+describe('conflictBucket', () => {
+  // The whole mapping, asserted over the REGISTRY rather than a hand-picked example per bucket:
+  // 'app' and 'canvas' share the global keyspace, 'terminal' and 'scm' are their own, and
+  // `speech.dictation` is the one command whose bucket comes from its id instead of its scope.
+  // Kills two mutants a per-bucket sample can miss: a scope-mapping typo (folding 'scm' — or a
+  // scope added later — into 'global', or dropping 'canvas' out of it), and the removal of the
+  // dictation branch, which would send Dictate back into 'global' and re-report the collision
+  // the bucket exists to stop.
+  it('maps every command to its scope bucket, dictation excepted', () => {
+    for (const def of COMMAND_DEFINITIONS) {
+      if (def.id === 'speech.dictation') continue
+      expect(conflictBucket(def)).toBe(
+        def.scope === 'app' || def.scope === 'canvas' ? 'global' : def.scope
+      )
+    }
+    expect(conflictBucket(COMMANDS_BY_ID.get('speech.dictation')!)).toBe('dictation')
   })
 })
 
@@ -316,8 +339,12 @@ describe('sanitizeKeybindingOverrides', () => {
 const ev = (over: Partial<ShortcutKeyEvent>): ShortcutKeyEvent => ({
   metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, key: '', ...over
 })
-const ctx = (over: Partial<{ typing: boolean; terminal: boolean; kanbanOpen: boolean }> = {}) => ({
-  typing: false, terminal: false, kanbanOpen: false, ...over
+const ctx = (
+  over: Partial<{
+    typing: boolean; terminal: boolean; kanbanOpen: boolean; terminalFirst: boolean
+  }> = {}
+) => ({
+  typing: false, terminal: false, kanbanOpen: false, terminalFirst: false, ...over
 })
 
 describe('resolveCommandForKeyEvent', () => {
@@ -437,5 +464,66 @@ describe('findMainInterceptShadowing', () => {
   })
   it('names exactly the two main-intercepted commands', () => {
     expect(MAIN_INTERCEPTED_COMMAND_IDS).toEqual(['node.close', 'node.toggleMarkdown'])
+  })
+})
+
+describe('normalizeTerminalShortcutPolicy', () => {
+  it('defaults everything but the literal terminal-first to app-first', () => {
+    expect(normalizeTerminalShortcutPolicy('terminal-first')).toBe('terminal-first')
+    expect(normalizeTerminalShortcutPolicy('app-first')).toBe('app-first')
+    expect(normalizeTerminalShortcutPolicy(undefined)).toBe('app-first')
+    expect(normalizeTerminalShortcutPolicy('shell-first')).toBe('app-first')
+  })
+})
+
+describe('resolver under terminal-first', () => {
+  const term = (terminalFirst: boolean) => ({
+    typing: false, terminal: true, kanbanOpen: false, terminalFirst
+  })
+  it('app-first keeps today: allowInTerminal app commands fire over a terminal', () => {
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), term(false), {}, true))
+      .toBe('app.commandPalette')
+  })
+  it('terminal-first blocks allowInTerminal app commands', () => {
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), term(true), {}, true))
+      .toBeNull()
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, shiftKey: true, key: 'b' }), term(true), {}, true))
+      .toBeNull()
+  })
+  it('terminal-first keeps terminal-scope commands alive', () => {
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'f' }), term(true), {}, true))
+      .toBe('terminal.find')
+  })
+  it('terminalFirst is inert outside terminal focus', () => {
+    const app = { typing: false, terminal: false, kanbanOpen: false, terminalFirst: true }
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), app, {}, true))
+      .toBe('app.commandPalette')
+  })
+})
+
+describe('dictation conflict bucket', () => {
+  it("a dictation override sharing another command's chord is NOT a conflict", () => {
+    expect(findKeybindingConflicts({ 'speech.dictation': ['Cmd+K'] }, true)).toEqual([])
+  })
+  it('sanitize keeps a colliding dictation override — the migration survival case', () => {
+    const r = sanitizeKeybindingOverrides({ 'speech.dictation': ['Cmd+K'] }, true)
+    expect(r).toEqual({ overrides: { 'speech.dictation': ['Cmd+K'] }, warnings: [] })
+  })
+  it("sanitize keeps BOTH sides when a user override shares dictation's chord", () => {
+    const r = sanitizeKeybindingOverrides(
+      { 'speech.dictation': ['Cmd+J'], 'app.commandPalette': ['Cmd+J'] },
+      true
+    )
+    expect(r.overrides).toEqual({
+      'speech.dictation': ['Cmd+J'],
+      'app.commandPalette': ['Cmd+J']
+    })
+    expect(r.warnings).toEqual([])
+  })
+  // Dictation is now OUTSIDE `includeDefaults`' reach: a future default colliding with its
+  // `Cmd+Alt` would not be caught here.
+  it('the shipped defaults stay conflict-free under full scrutiny (unchanged invariant)', () => {
+    expect(findKeybindingConflicts({}, true, { includeDefaults: true })).toEqual([])
+    expect(findKeybindingConflicts({}, false, { includeDefaults: true })).toEqual([])
   })
 })

@@ -1,3 +1,5 @@
+import { projectSectionId } from './project-settings-targets'
+
 export type SettingsSectionId =
   | 'terminal'
   | 'shell'
@@ -24,6 +26,13 @@ export type SettingsSectionId =
   | 'updates'
   | 'privacy'
   | 'debug'
+  | `project-${string}`
+
+export interface ProjectNavItem {
+  id: string
+  name: string
+  color: string
+}
 
 export interface SettingsSectionRef {
   id: SettingsSectionId
@@ -114,4 +123,19 @@ export function visibleSettingsGroups(isMac: boolean): SettingsGroup[] {
   return SETTINGS_GROUPS.map((g) => ({ ...g, sections: g.sections.filter((s) => !s.macOnly) })).filter(
     (g) => g.sections.length > 0
   )
+}
+
+/**
+ * Render-time only — deliberately NOT part of `SETTINGS_GROUPS`. Open projects change at
+ * runtime, so this builds a group from the current project list on every render instead of
+ * baking project ids into the static nav (which would break the `nav.test.ts` section-count
+ * pins). Returns null when there are no open projects, so callers can skip rendering the group.
+ */
+export function projectsSettingsGroup(projects: ProjectNavItem[]): SettingsGroup | null {
+  if (projects.length === 0) return null
+  return {
+    id: 'projects',
+    title: 'Projects',
+    sections: projects.map((p) => ({ id: projectSectionId(p.id), title: p.name }))
+  }
 }

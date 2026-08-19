@@ -294,6 +294,38 @@ export function buildStubApi(): Omit<
       saveGatewayCredential: U('agent.saveGatewayCredential'),
       clearGatewayCredential: U('agent.clearGatewayCredential')
     },
+    projectSettings: {
+      // Overridden by the real WS-backed namespace in ws-bridge (same registerIpc() call as
+      // `workspace`); this fallback only matters if some future assembly spreads the stub alone.
+      // Fail-closed rather than reject: an unknown/unreachable project reads as "no settings" and
+      // a write/update as "did not happen", matching the real handlers' contract for an unknown id.
+      read: () => Promise.resolve(null),
+      writeShared: () => Promise.resolve(false),
+      updateLocal: () => Promise.resolve(false),
+      launchInfo: () => Promise.resolve(null),
+      onTrustChanged: noopUnsub
+    },
+    projectSetup: {
+      // Same fallback story as `projectSettings` above — real over the bridge
+      // (`buildRealApi`'s `projectSetup`); this only matters if some future assembly spreads the
+      // stub alone. `run` fails closed with the SAME shape a real "nothing to run" answer uses, so
+      // a caller needs no extra branch to handle the stub differently from the real thing.
+      run: () => Promise.resolve({ status: 'skipped', reason: 'unavailable' }),
+      cancel: () => Promise.resolve(false),
+      consent: pnoop,
+      // Fails closed, like `run`: no bridge means no way to ask a human, and an unasked question
+      // is never an approval.
+      requestTrust: () => Promise.resolve(false),
+      onConsentRequest: noopUnsub,
+      onConsentDismiss: noopUnsub,
+      onEvent: noopUnsub
+    },
+    worktree: {
+      // Real over the bridge (`buildRealApi`'s `worktree`); this fallback only matters if some
+      // future assembly spreads the stub alone. Fails closed with the SAME empty-result shape a
+      // real "nothing was linked" answer uses, so a caller needs no extra branch.
+      materializeShared: () => Promise.resolve([])
+    },
     chat: {
       readTranscript: U('chat.readTranscript')
     },
@@ -302,6 +334,19 @@ export function buildStubApi(): Omit<
       waitLogin: U('claudeAccounts.waitLogin'),
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
       remove: U('claudeAccounts.remove')
+    },
+    codexAccounts: {
+      add: U('codexAccounts.add'),
+      waitLogin: U('codexAccounts.waitLogin'),
+      cancelWaitLogin: U('codexAccounts.cancelWaitLogin'),
+      identity: U('codexAccounts.identity'),
+      systemIdentity: U('codexAccounts.systemIdentity'),
+      remove: U('codexAccounts.remove'),
+      switchThread: U('codexAccounts.switchThread'),
+      commitSwitch: U('codexAccounts.commitSwitch'),
+      finishSwitch: U('codexAccounts.finishSwitch'),
+      rollbackSwitch: U('codexAccounts.rollbackSwitch'),
+      transferThreadToSsh: U('codexAccounts.transferThreadToSsh')
     },
     transcripts: {
       search: U('transcripts.search')
@@ -358,7 +403,12 @@ export function buildStubApi(): Omit<
       // `before-input-event` intercepts down, and a browser tab has no application menu to steal
       // ⌘W/⌘M/⌘0 back from — nothing intercepts here, so there is nothing to suspend. The
       // recorder's own preventDefault/stopPropagation is the whole path in this shell.
-      setRecording: noop
+      setRecording: noop,
+      // Deliberate no-op for the same reason, one step further: the mirror exists so the DESKTOP's
+      // intercepts can stand down under `terminal-first`, and there are no intercepts here to
+      // stand down. The policy itself still works in the browser — it is enforced by the
+      // renderer's own dispatcher (`keyDispatchContextFor`), which reads focus directly.
+      setTerminalFocused: noop
     },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,

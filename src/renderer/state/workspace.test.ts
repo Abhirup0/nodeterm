@@ -556,8 +556,13 @@ describe('accountId on Claude node factories', () => {
     const node = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, 'a1')
     expect(node.data.accountId).toBe('a1')
   })
-  it('does not stamp accountId onto a non-Claude agent node', () => {
+  it('stamps accountId onto a Codex agent node (S6 per-node account picker)', () => {
     const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'a1')
+    expect(node.data.accountId).toBe('a1')
+  })
+  it('does not stamp accountId onto a non-account agent node', () => {
+    // Accounts bind to the Claude/Codex builtins only — another agent never carries one.
+    const node = createAgentNode('gemini', 0, undefined, undefined, undefined, undefined, 'a1')
     expect(node.data.accountId).toBeUndefined()
   })
   it('omits accountId when none is given', () => {

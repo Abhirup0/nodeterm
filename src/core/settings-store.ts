@@ -26,12 +26,15 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   // write path keeps it in sync so an older build still finds the user's chord).
   // A shortcut EQUAL to the default seeds nothing: the override would only restate what the
   // registry already says, and would then pin that chord against any future default change.
-  // **Seeding here is not the same as surviving.** The value written below is a plain override,
-  // so the READ path's sanitizer (`sanitizeKeybindingOverrides`) can still STRIP it: if the
-  // legacy chord collides with another command's effective binding in the same conflict bucket,
-  // every OVERRIDDEN participant of that conflict is deleted — the seed goes, dictation silently
-  // falls back to the registry default chord, and the user's own colliding override is dropped
-  // with it. The only signal is a console warning; nothing surfaces in the UI.
+  // **The seeded value survives the read path.** `speech.dictation` has its OWN conflict bucket
+  // (`conflictBucket` in shared/keybindings.ts), so it can never be a participant in a
+  // cross-command collision, and the READ path's sanitizer (`sanitizeKeybindingOverrides`) has
+  // nothing to strip — neither the seed nor the user's own override on the same chord. (It used
+  // not to: both were deleted on load, and dictation silently fell back to the registry default.)
+  // What a shared chord costs is PRECEDENCE, not the binding: dictation's own keyed listener
+  // claims it first in plain app focus, and the other command still gets it everywhere dictation
+  // does not listen — terminal focus, say. That is exactly the pre-migration behavior of a legacy
+  // `speech.shortcut` that happened to match an app chord, which is what this seed must preserve.
   if (
     merged.speech.shortcut !== DEFAULT_SETTINGS.speech.shortcut &&
     !(merged.keybindings && "speech.dictation" in merged.keybindings)

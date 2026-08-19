@@ -138,6 +138,20 @@ export interface IndexEntryV3 {
    *  live in this same machine-local file already. */
   localExec?: LocalNodeExecMap
   /**
+   * MACHINE-LOCAL settings overlay for this entry — the half of the project settings that is NOT
+   * git-shared (`.nodeterm/settings.json` is the shared half). Same rule as `localExec`: it lives in
+   * userData because a shell, a launch command or an env var this user chose for THIS checkout is
+   * not something a repo may carry — and, read the other way, a repo may not put values here.
+   * Re-sanitized on every load (`sanitizeProjectLocalSettings`): workspace.json is hand-editable,
+   * so what comes back out of it is input, not state we wrote.
+   */
+  localSettings?: import('../shared/project-settings').ProjectLocalSettings
+  /** The last shared settings.json seen for an SSH entry — the settings twin of `cache`, used while
+   *  the server is unreachable. Never set for a local/inline entry (their shared doc is one disk
+   *  read away). Validated on load by re-parsing it, exactly like a file read off the remote host:
+   *  what sits in workspace.json is no more trusted than what sits on the server. */
+  settingsCache?: import('../shared/project-settings').ProjectSettingsFileV1
+  /**
    * The one-time exec migration has run for this entry: its project file has been searched once for
    * the exec values it carried from BEFORE the trust boundary existed (a jump host's `ProxyCommand`
    * put there by `createSshTerminalNode`), and they were hoisted into `localExec` above.

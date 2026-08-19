@@ -1623,6 +1623,36 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     warning reads that list and cannot derive it — main is not importable from the renderer. Note
     what the pin cannot cover: a HARDCODED intercept (the `Digit0` branch) has no command id, so it
     swallows its chord app-wide with the recorder reporting no conflict.
+  - **Dictation has its own conflict bucket** (`conflictBucket` — `speech.dictation` is never in
+    `global`), because it never competes at dispatch: the resolver skips it and its own keyed
+    listener claims the chord FIRST **in plain app focus only**, which is precedence, not ambiguity.
+    Overlap policy is deliberately asymmetric — the LOAD path PERMITS a shared chord (legacy
+    settings.json files contain them and `sanitizeKeybindingOverrides` would otherwise strip the
+    user's own binding with the migrated one), while the Settings UI REFUSES to create one
+    (`commitCandidate`'s two dictation gates, both keyed-only — a modifier-only hold chord renders
+    as `…:(hold)` and can never match a keyed identity).
+  - **The terminal-first stand-down is `policyStandsDown(policy, terminalFocused)`, and both halves
+    are refusals.** `settings.terminalShortcutPolicy` (`app-first` default, Settings → Keyboard
+    Shortcuts, read everywhere through `normalizeTerminalShortcutPolicy` because it is
+    hand-editable) never stands anything down under `app-first`, whatever the mirror reports — that
+    is the byte-identical guarantee for a user who never touched it. Under `terminal-first` with a
+    focused terminal, main stops claiming its chords AND disables the command-style menu items in
+    `menuItemIdsToSuspend` — Minimize, Toggle Kanban Board (⌘⇧B) and Settings (⌘,) everywhere, plus
+    Close off-mac, with **Reload deliberately excluded** (see **Window chrome**): not calling
+    `preventDefault` alone would hand ⌘M straight to `{role:'minimize'}`, which is strictly worse
+    than having no policy. **The MENU's state is the composed
+    `menuStandsDown(shortcutRecording, policy, terminalFocused)`** — an armed shortcut recorder
+    suspends the same items, so ⌘M / ⌘⇧B / ⌘, / off-mac Ctrl+W reach the recorder instead of the
+    menu item that owns them; `menuStandsDown(false, …)` is `policyStandsDown(…)` by construction.
+    The two INTERCEPT thunks stay independent parameters — only the menu ORs them.
+  - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
+    intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
+    change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
+    never had one all resolve to intercepts on — never to "off with nothing alive to turn them back
+    on". Consequence: clear the bit ONLY where the renderer's DOCUMENT is ending (window `closed`,
+    `render-process-gone`, main-frame navigation). Clearing it under a live page that is still
+    focused on its terminal strands mirror and main out of sync with no event that can reconcile
+    them, and the policy is dead until the user clicks away and back.
 
 ## Canvas interaction & panels (`Canvas.tsx` is the hub)
 
@@ -1630,7 +1660,8 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   pane right-click = add nodes at cursor (terminal / Claude / sticky / open file) + select
   all + fit + **Tidy canvas** (`arrangeAllNodes` — packs every top-level node, including group
   frames as rigid units, into a non-overlapping grid via `arrangeNodes`, sorted by current
-  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas"; both
+  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas" and in the
+  keybinding registry as `canvas.tidy` (default ⌘/Ctrl+Shift+A, remappable); both
   hidden below 2 top-level nodes, where it could only be a visual no-op that still writes
   `project.json`) + restart-idle-agents (the bulk in-place agent restart, mirrored in ⌘K; both
   hidden when the canvas holds no restartable agent node, where they could only report "0
@@ -1692,7 +1723,13 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   opens an editor node). These use `mkdir` + `exists` added to `FsApi`/`SshFsApi` across
   desktop/server/SSH (`core/fs-ops.ts`, `main/ssh-fs.ts`; relay remote-fs degrades to `false`).
   Expanded dirs **persist per project** across drawer close + app restart (`state/explorer.ts`
-  zustand store, localStorage `nodeterm.explorerExpanded`).
+  zustand store, localStorage `nodeterm.explorerExpanded`). The header pin docks it like the
+  sessions sidebar (`lib/explorerPin.ts`, `nodeterm.explorerPinned`, default off): overlay
+  click-outside closes the modal only, and a pinned overlay is `pointer-events: none` so it
+  cannot steal canvas clicks. × is a transient hide and does not clear the pin. Pinned z-index
+  is 26 so the tree stays visible on the kanban board with the controls cluster. Desktop +
+  Server Edition (personal `localStorage`). Mobile companion: N/A — no explorer there. Source
+  Control stays a modal.
 - **Source Control** (`main/git-service.ts` system `git` + `gh`, `SourceControlPanel.tsx`,
   ⎇): file-level **stage/unstage** (+/−), **discard**, click a file → **diff node**,
   **branch switch/create**, commit (message box at top) + push / sync / publish, **gh
@@ -1896,12 +1933,48 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
 - **Welcome** (`WelcomeScreen.tsx`): shown when no projects exist.
 - **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab
   bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a rounded pill of project
-  tabs. Cmd+M is intercepted in `main/index.ts` `before-input-event` (else macOS minimizes)
-  and forwarded to the renderer via `app:toggle-markdown`; Cmd+W (`app:close-node`) and Cmd+0
-  (`app:zoom-actual-size`) are taken back from the same default menu the same way. We never call
-  `Menu.setApplicationMenu`, so Electron's DEFAULT menu is live and owns every accelerator in it —
-  a chord that collides with one never reaches the renderer at all
-  (`main/menu-accelerator-intercepts.test.ts` pins the three we steal).
+  tabs. Cmd+M is intercepted in `main/keydown-intercept.ts` (`before-input-event`, installed from
+  `main/index.ts` — else macOS minimizes) and forwarded to the renderer via `app:toggle-markdown`;
+  Cmd+W (`app:close-node`) and Cmd+0 (`app:zoom-actual-size`) are taken back the same way. **The
+  application menu is OURS**: `buildAppMenu` (`main/index.ts`) calls `Menu.setApplicationMenu` and
+  re-runs on every settings change. (This bullet used to claim we never call it — false since that
+  function landed; check the template, not Electron's defaults.) **COMMAND-style accelerators are
+  handled ABOVE the page on every platform** — Minimize, Close, Toggle Kanban Board, Settings,
+  Reload — so a chord one of those owns never reaches the renderer, which is why those three are
+  stolen in `before-input-event`. **This is not a blanket claim about the whole menu:** the Edit
+  submenu's standard `{role:'cut'|'copy'|'paste'|'selectAll'|…}` items behave differently — Chromium
+  routes them into the focused element, so ⌘C in a terminal or a text field does the ordinary thing
+  and does not need stealing. Ask which kind an item is before reasoning from this bullet.
+  That difference is also why the **stand-down has a menu leg**: while a terminal
+  owns the keys under `terminal-first` **or while a shortcut recorder is armed**
+  (`menuStandsDown(shortcutRecording, policy, terminalFocused)`), `syncMenuForStandDown` disables
+  the command-style items
+  named in `menuItemIdsToSuspend` — Minimize (`MENU_ITEM_ID_MINIMIZE`), **Toggle Kanban Board
+  (`MENU_ITEM_ID_KANBAN`, ⌘⇧B)** and **Settings (`MENU_ITEM_ID_SETTINGS`, ⌘,)** on every platform,
+  plus Close (`MENU_ITEM_ID_CLOSE`) on Windows/Linux — because a disabled item suppresses its
+  accelerator and only then do those chords fall through to the terminal, or to the recorder. The
+  recorder leg is why ⌘M is bindable at all, and it fixed a live misfire: ⌘⇧B pressed into an armed
+  recorder used to open the kanban board behind the Settings dialog, and ⌘, to re-open Settings.
+  Kanban and Settings are
+  the ones a reader gets wrong: they are **not** intercepted chords at all but ordinary registry
+  commands (`view.kanbanToggle` / `app.settings`), so the renderer's dispatcher could never stand
+  them down itself — under app-first the menu takes them before the keydown exists, which is also
+  why their capture NOTICE is raised at the IPC receivers in `Canvas.tsx` rather than by the
+  dispatcher. **Reload (⌘R / ⌘⇧R) is the named exception and stays live while stood down**: it is
+  the crash-recovery lever (a wedged renderer is exactly when it is needed) and a main-frame
+  navigation is one of the three sites that reset `terminalFocused` / `shortcutRecording`. **Of the
+  items main suspends, Reload is therefore the deliberate exception** — the one it holds back from a
+  shortcut recorder — which is what the Keyboard Shortcuts section's description now says.
+  **KNOWN GAP, pre-existing and accepted:** the suspend list only ever covered the command-style
+  items the terminal-first policy needed, so the always-on app roles — `quit` (⌘Q), `hide` /
+  `hideOthers` (⌘H / ⌘⌥H), `toggleDevTools`, `togglefullscreen` — still act while a recorder is
+  armed (⌘Q pressed into one QUITS the app). They are deliberately NOT added: ONE list drives both
+  stand-downs, and making ⌘Q/⌘H unreachable for a terminal-first user is the worse trade — quit and
+  hide must never be policy-gated. Splitting the list per stand-down is the change that would close
+  it, and it has not been made.
+  `keydown-intercept.test.ts` pins both the stolen chords and the suspended item ids (including
+  that the list does not silently grow) — `getMenuItemById` answers `null` for a typo and the
+  fail-safe is to do nothing, which is indistinguishable from the feature working.
 - **Theme**: macOS dark palette as CSS tokens in `styles.css` `:root` (`--accent` = systemBlue,
   label/separator opacities, SF font stack). Canvas background is black with dot grid.
 
