@@ -12,6 +12,7 @@ import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from '
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
 import type { CodexAccount } from './codex-account'
+import type { ProjectIcon } from './project-icon'
 import type {
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
@@ -537,6 +538,10 @@ export interface Project {
   id: string
   name: string
   color: string
+  /** Optional icon shown beside `name` (tab, start screen). Git-shared like `name`/`color` — see
+   *  `sanitizeProjectIcon` (@shared/project-icon) for the hostile-input rules a stored value must
+   *  pass on load. */
+  icon?: ProjectIcon
   /** Default working directory for new terminals created in this project. */
   cwd?: string
   /** When set, this is an SSH project: its terminals run on `server` in `remoteCwd` (remote tmux). */
