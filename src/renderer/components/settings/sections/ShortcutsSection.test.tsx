@@ -58,12 +58,36 @@ const pillOption = (label: string): HTMLButtonElement =>
   [...pill()!.querySelectorAll('button')].find((b) => b.textContent === label)!
 const button = (id: string, label: string): HTMLButtonElement | null =>
   row(id).querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
-/** The recorder button carries no per-command aria-label (it is a shared component), so it is
- *  found by its idle text within the row. */
+/** An ARMED recorder shows its hint as text and carries no aria-label (the label is the IDLE
+ *  icon's), so the armed instance is still found by its text within the row. */
 const recorder = (id: string, text: string): HTMLButtonElement | undefined =>
   [...row(id).querySelectorAll('button')].find((b) => b.textContent === text)
 const click = (el: HTMLElement): void => {
   act(() => el.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+}
+
+const ids = (): (string | null)[] =>
+  [...host.querySelectorAll('[data-command]')].map((el) => el.getAttribute('data-command'))
+
+/** The rail's status pill — its own `ariaLabel`, so it never collides with the policy row's. */
+const statusPill = (): HTMLElement | null =>
+  host.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Filter shortcuts by status"]')
+const statusLabels = (): (string | null)[] =>
+  [...statusPill()!.querySelectorAll('button')].map((b) => b.textContent)
+const statusOption = (label: string): HTMLButtonElement =>
+  [...statusPill()!.querySelectorAll('button')].find((b) => b.textContent === label)!
+const filterInput = (): HTMLInputElement | null =>
+  host.querySelector<HTMLInputElement>('input[aria-label="Filter shortcuts"]')
+
+/** React listens for the native `input` event, so the value has to be set through the prototype
+ *  setter (React's own value tracker swallows a plain assignment). */
+function typeFilter(value: string): void {
+  const el = filterInput()!
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+  act(() => {
+    setter.call(el, value)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  })
 }
 
 beforeEach(() => {
@@ -85,10 +109,7 @@ afterEach(() => {
 describe('ShortcutsSection rows', () => {
   it('renders one row per command, in registry order, with its chips', () => {
     render()
-    const ids = [...host.querySelectorAll('[data-command]')].map((el) =>
-      el.getAttribute('data-command')
-    )
-    expect(ids).toEqual(COMMAND_DEFINITIONS.map((d) => d.id))
+    expect(ids()).toEqual(COMMAND_DEFINITIONS.map((d) => d.id))
     const palette = row('app.commandPalette')
     expect(palette.textContent).toContain('Command palette')
     expect([...palette.querySelectorAll('kbd')].map((k) => k.textContent)).toEqual(['⌘', 'K'])
@@ -99,9 +120,9 @@ describe('ShortcutsSection rows', () => {
     const fitAll = row('canvas.fitAll')
     expect(fitAll.querySelectorAll('kbd')).toHaveLength(0)
     expect(fitAll.textContent).toContain('—')
-    expect(recorder('canvas.fitAll', 'Record shortcut')).toBeTruthy()
+    expect(button('canvas.fitAll', 'Record shortcut for Fit all nodes in view')).toBeTruthy()
     // Nothing to add to, disable, or reset yet.
-    expect(recorder('canvas.fitAll', 'Add')).toBeUndefined()
+    expect(button('canvas.fitAll', 'Add a shortcut to Fit all nodes in view')).toBeNull()
     expect(button('canvas.fitAll', 'Disable Fit all nodes in view')).toBeNull()
     expect(button('canvas.fitAll', 'Reset Fit all nodes in view')).toBeNull()
   })
@@ -131,13 +152,13 @@ describe('ShortcutsSection rows', () => {
   it('drops a whole group when neither its header nor any of its rows match', () => {
     render('close')
     expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['Nodes'])
-    expect([...host.querySelectorAll('[data-command]')].map((el) =>
-      el.getAttribute('data-command')
-    )).toEqual(['node.close'])
-    // Exactly the policy row (its description names Close), the heading and the one command row —
-    // no empty siblings.
+    expect(ids()).toEqual(['node.close'])
+    // Exactly the policy row (its description names Close) and the ONE group wrapper holding the
+    // heading + its row — no empty siblings. The rail is a searchable row of its own and 'close'
+    // does not match it, so it is gone too.
     expect(pill()).toBeTruthy()
-    expect(body().children).toHaveLength(3)
+    expect(statusPill()).toBeNull()
+    expect(body().children).toHaveLength(2)
     expect([...body().children].every((c) => (c.textContent ?? '').trim() !== '')).toBe(true)
   })
 
@@ -146,16 +167,16 @@ describe('ShortcutsSection rows', () => {
   it('keeps the heading over a row that matched on its note', () => {
     render('tmux')
     expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['Terminal'])
-    expect([...host.querySelectorAll('[data-command]')].map((el) =>
-      el.getAttribute('data-command')
-    )).toEqual(['terminal.copySelection'])
+    expect(ids()).toEqual(['terminal.copySelection'])
   })
 
-  it('renders every group and row unfiltered, each as its own divided block', () => {
+  it('renders every group as its own divided block, rows packed inside it', () => {
     render()
     expect(host.querySelectorAll('h3')).toHaveLength(6)
-    // + 1 for the terminal-policy row, which sits above the groups as its own block.
-    expect(body().children).toHaveLength(1 + 6 + COMMAND_DEFINITIONS.length)
+    expect(ids()).toHaveLength(COMMAND_DEFINITIONS.length)
+    // The rows now live INSIDE their group's wrapper, so the shell's `divide-y` separates
+    // GROUPS: the policy row + the filter rail + one block per group.
+    expect(body().children).toHaveLength(2 + 6)
   })
 
   // The dictation row must not promise a second chord: every consumer reads
@@ -163,8 +184,8 @@ describe('ShortcutsSection rows', () => {
   it('offers Add for an ordinary command but never for Dictate', () => {
     setKb({ 'speech.dictation': ['Cmd+Alt', 'Cmd+Alt+D'] })
     render()
-    expect(recorder('app.commandPalette', 'Add')).toBeTruthy()
-    expect(recorder('speech.dictation', 'Add')).toBeUndefined()
+    expect(button('app.commandPalette', 'Add a shortcut to Command palette')).toBeTruthy()
+    expect(button('speech.dictation', 'Add a shortcut to Dictate')).toBeNull()
     // …and the chips show only the chord that is actually live.
     expect([...row('speech.dictation').querySelectorAll('kbd')].map((k) => k.textContent)).toEqual([
       '⌘',
@@ -191,15 +212,13 @@ describe('ShortcutsSection rows', () => {
   // re-arm the ⌘W/⌘M intercepts mid-capture.
   it('keeps the global recording bit while non-armed sibling recorders unmount', () => {
     render()
-    click(recorder('terminal.copySelection', 'Record')!)
+    click(button('terminal.copySelection', 'Record Copy terminal selection')!)
     expect(setRecording()).toHaveBeenCalledWith(true)
 
     // 'tmux' matches only Copy terminal selection (via its note) — every other row unmounts, and
     // the armed one keeps its identity (stable group/row keys), so it is still armed.
     rerender('tmux')
-    expect([...host.querySelectorAll('[data-command]')].map((el) =>
-      el.getAttribute('data-command')
-    )).toEqual(['terminal.copySelection'])
+    expect(ids()).toEqual(['terminal.copySelection'])
     expect(
       recorder('terminal.copySelection', 'Press keys…')?.getAttribute('data-shortcut-recording')
     ).toBe('true')
@@ -212,6 +231,121 @@ describe('ShortcutsSection rows', () => {
     act(() => r.unmount())
     host.remove()
     expect(setRecording().mock.calls.filter((c) => c[0] === false)).toHaveLength(1)
+  })
+})
+
+describe('the filter rail', () => {
+  // The counts describe the WHOLE registry under the current local query, never the status
+  // filter — a pill that reported its own filtered result would read `Modified 2 / Modified 2`.
+  it('renders four status options with live counts over every command', () => {
+    render()
+    expect(filterInput()).toBeTruthy()
+    expect(statusLabels()).toEqual([
+      `All ${COMMAND_DEFINITIONS.length}`,
+      'Modified 0',
+      // fitAll + groupSelection ship with no default chord.
+      'Unassigned 2',
+      'Disabled 0'
+    ])
+  })
+
+  it('counts a seeded override as Modified', () => {
+    setKb({ 'canvas.undo': ['Cmd+Alt+Z'] })
+    render()
+    expect(statusLabels()).toEqual([
+      `All ${COMMAND_DEFINITIONS.length}`,
+      'Modified 1',
+      'Unassigned 2',
+      'Disabled 0'
+    ])
+  })
+
+  // The counts follow the QUERY (post-search, pre-status-filter), so they say how big each bucket
+  // is inside what the user is currently looking at.
+  it('narrows the counts with the local query', () => {
+    render()
+    typeFilter('undo')
+    expect(statusLabels()).toEqual(['All 1', 'Modified 0', 'Unassigned 0', 'Disabled 0'])
+  })
+
+  it('keeps only the disabled rows under the disabled filter, and says so when none are left', () => {
+    setKb({ 'app.commandPalette': [] })
+    render()
+    click(statusOption('Disabled 1'))
+    expect(ids()).toEqual(['app.commandPalette'])
+    expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['General'])
+    // The counts describe the BUCKETS, not the selection — picking one must not zero the rest,
+    // or the pill stops being usable to see what else is there.
+    expect(statusLabels()).toEqual([
+      `All ${COMMAND_DEFINITIONS.length}`,
+      'Modified 1',
+      'Unassigned 2',
+      'Disabled 1'
+    ])
+
+    // A query that matches nothing leaves no group at all — and an empty section must SAY that
+    // rather than render six padded, divider-separated blanks.
+    typeFilter('zzzz')
+    expect(ids()).toEqual([])
+    expect(host.querySelectorAll('h3')).toHaveLength(0)
+    expect(body().textContent).toContain('No shortcuts match.')
+  })
+
+  // The chord the user SEES is searchable, which is the whole reason the local matcher exists —
+  // the global settings search has no idea what a command is bound to.
+  it('finds a row by the chord shown on its chip', () => {
+    render()
+    typeFilter('⌘K')
+    expect(ids()).toEqual(['app.commandPalette'])
+  })
+
+  // Parity with the sidebar search: a row can match on its NOTE there (`rowEntry.description`),
+  // so the rail is handed the same text or the two searches disagree about what exists.
+  it('finds a row by its note, exactly like the settings search does', () => {
+    render()
+    typeFilter('tmux')
+    expect(ids()).toEqual(['terminal.copySelection'])
+  })
+})
+
+describe('per-chip removal', () => {
+  it('drops exactly the chord whose × was clicked', () => {
+    setKb({ 'canvas.undo': ['Cmd+Z', 'Cmd+Alt+Z'] })
+    render()
+    click(button('canvas.undo', 'Remove ⌘⌥Z from Undo')!)
+    expect(kb()['canvas.undo']).toEqual(['Cmd+Z'])
+    // …and with one chord left there is nothing to remove: the last × would be a Disable in
+    // disguise, and Disable has its own control.
+    expect(button('canvas.undo', 'Remove ⌘Z from Undo')).toBeNull()
+  })
+
+  it('offers no × on a single-binding row', () => {
+    render()
+    expect(button('app.commandPalette', 'Remove ⌘K from Command palette')).toBeNull()
+  })
+
+  // Dictate is capped at one visible chip (`dictationBinding()` reads the first binding only), so
+  // its second chord has no × either — removing what is not shown is not a thing.
+  it('offers no × on Dictate, even holding two chords', () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt', 'Cmd+Alt+D'] })
+    render()
+    expect(row('speech.dictation').querySelectorAll('button[aria-label^="Remove "]')).toHaveLength(
+      0
+    )
+  })
+})
+
+describe('row badges', () => {
+  it('marks an overridden row Modified and a terminal-scope row Terminal', () => {
+    setKb({ 'canvas.undo': ['Cmd+Alt+Z'] })
+    render()
+    const badges = (id: string): (string | null)[] =>
+      [...row(id).querySelectorAll('[data-badge]')].map((b) => b.textContent)
+    expect(badges('canvas.undo')).toEqual(['Modified'])
+    expect(badges('canvas.redo')).toEqual([])
+    expect(badges('terminal.find')).toEqual(['Terminal'])
+    expect(badges('terminal.copySelection')).toEqual(['Terminal'])
+    expect(badges('app.commandPalette')).toEqual([])
   })
 })
 

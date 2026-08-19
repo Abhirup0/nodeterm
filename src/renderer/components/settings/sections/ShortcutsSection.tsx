@@ -1,6 +1,14 @@
 /**
- * The Keyboard Shortcuts settings section: one row per registry command, with its live chips,
- * a recorder, and Add / Disable / Reset.
+ * The Keyboard Shortcuts settings section: one dense row per registry command, with its live
+ * chips, a per-chip ×, and hover-revealed Record / Add / Disable / Reset icon controls, under a
+ * filter rail (a local query + a status pill carrying live counts).
+ *
+ * **The rail's filtering is LOCAL and additive to the global settings search.** A row is on
+ * screen only when all three agree: the settings search (`SearchableRow`, unchanged), the rail's
+ * query (`matchesShortcutQuery` — which also searches the CHORDS, something the global search
+ * cannot see) and the status filter. The rail's counts deliberately ignore the status filter, so
+ * they describe the buckets rather than the current selection. Groups get one wrapper each,
+ * because the shell's body is `divide-y [&>*]:py-5` and a row per direct child made 21 dividers.
  *
  * **The pre-save gate is `commitCandidate`, and it is where the refusal messages are decided.**
  * Design D3 is "same detector, different surfacing": `sanitizeKeybindingOverrides` applies what
@@ -25,7 +33,7 @@
  * Writes go through `setKeybindingOverride` (the single write path — it also mirrors
  * `speech.dictation` into the legacy `settings.speech.shortcut` field for one release).
  */
-import { Fragment, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   bindingIdentity,
   COMMANDS_BY_ID,
@@ -52,10 +60,18 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { ShortcutRecorderButton } from '../ShortcutRecorderButton'
-import { Button } from '@renderer/ui/Button'
+import { IconDisableSlash, IconResetArrow } from '../ShortcutRowIcons'
+import { Input } from '@renderer/ui/Input'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { useSettingsSearch } from '../context'
 import { matchesQuery, type SettingsSearchEntry } from '../search'
+import {
+  matchesShortcutQuery,
+  rowPassesStatus,
+  shortcutRowStatus,
+  type ShortcutRowStatus,
+  type ShortcutStatusFilter
+} from '../shortcutFilter'
 
 /** Per-command help text. Only commands whose BEHAVIOR needs explaining get one — a row that
  *  merely repeats its own title is noise in a 20-row list. */
@@ -87,6 +103,34 @@ function rowEntry(def: CommandDefinition): SettingsSearchEntry {
     keywords: ['shortcut', 'keybinding', 'hotkey', 'key', def.group, def.id]
   }
 }
+
+/**
+ * Everything the LOCAL matcher searches, derived from the entry the GLOBAL settings search
+ * already gets — so the two can never disagree about which rows exist.
+ *
+ * They are not the same shape: `rowEntry` puts the per-command NOTE in `description` (never in
+ * `keywords`), `matchesQuery` searches title + description + keywords, and
+ * `matchesShortcutQuery` has no description slot at all. Passing `entry.keywords` alone would
+ * therefore lose the note: 'tmux' finds Copy terminal selection in the sidebar search and
+ * NOTHING in the rail, on the same screen. The note rides along as one more keyword instead.
+ */
+function rowKeywords(entry: SettingsSearchEntry): string[] {
+  const keywords = entry.keywords ?? []
+  return entry.description ? [...keywords, entry.description] : keywords
+}
+
+/** The rail is not a registry command, so — like the policy row — it carries its own search
+ *  entry: a query for 'unassigned' must keep the control that offers that filter. */
+const RAIL_ROW: SettingsSearchEntry = {
+  title: 'Filter shortcuts',
+  keywords: ['filter', 'search', 'modified', 'unassigned', 'disabled']
+}
+
+/** The row's per-command controls: 16px glyph in a 24px hit target, color from the parent. */
+const ICON_BUTTON =
+  'flex size-6 items-center justify-center rounded-md text-muted hover:bg-fill-weak hover:text-text focus-visible:text-text'
+/** Shared pill geometry — the accent/neutral fill is appended per badge. */
+const BADGE = 'rounded-full px-2 py-0.5 text-[11px] font-medium'
 
 /** Commands whose consumers read the FIRST effective binding only, so a second chord would be
  *  dead on arrival. `speech.dictation` is the case: every dictation surface (the hold listener,
@@ -228,11 +272,30 @@ export function commitCandidate(
   return { ok: true }
 }
 
-/** `limit` exists for `speech.dictation`: its consumers read `dictationBinding()` — the FIRST
- *  effective binding — so showing a second chip would promise a chord that can never fire. */
-function Chips({ id, limit }: { id: CommandId; limit?: number }): React.JSX.Element {
-  const all = commandKeysFor(id)
-  const keys = limit === undefined ? all : all.slice(0, limit)
+/**
+ * The row's chords, as keycap chips.
+ *
+ * `limit` exists for `speech.dictation`: its consumers read `dictationBinding()` — the FIRST
+ * effective binding — so showing a second chip would promise a chord that can never fire.
+ *
+ * `onRemove` is what turns each chip group into a removable one (the trailing ×). It is
+ * `undefined` unless the caller decided removal is offered at all, so a chip that is the
+ * command's ONLY chord never grows an × — that would be a Disable in disguise, and Disable is
+ * its own control with its own meaning (`[]`, not "no override").
+ */
+function Chips({
+  chords,
+  limit,
+  title,
+  onRemove
+}: {
+  chords: readonly (readonly string[])[]
+  limit?: number
+  title: string
+  onRemove?: (index: number) => void
+}): React.JSX.Element {
+  const isMac = isMacPlatform()
+  const keys = limit === undefined ? chords : chords.slice(0, limit)
   if (keys.length === 0) return <></>
   return (
     <span className="flex items-center gap-2">
@@ -244,10 +307,33 @@ function Chips({ id, limit }: { id: CommandId; limit?: number }): React.JSX.Elem
               {keyLabel(p)}
             </kbd>
           ))}
+          {onRemove ? (
+            <button
+              type="button"
+              // The chord is named in the label because a row can hold several: "Remove" alone
+              // would leave a screen reader with N identical buttons.
+              aria-label={`Remove ${isMac ? parts.join('') : parts.join('+')} from ${title}`}
+              title="Remove this shortcut"
+              onClick={() => onRemove(i)}
+              className="cursor-pointer border-0 bg-transparent px-0.5 text-[12px] leading-none text-muted opacity-0 group-hover/row:opacity-60 hover:!opacity-100 focus-visible:opacity-100"
+            >
+              ×
+            </button>
+          ) : null}
         </span>
       ))}
     </span>
   )
+}
+
+/** One row's precomputed facts: its search entry, its chords (read ONCE — the counts and the
+ *  rendered list must not take two different reads of the override map) and its status. */
+interface RowModel {
+  def: CommandDefinition
+  entry: SettingsSearchEntry
+  keywords: string[]
+  chords: string[][]
+  status: ShortcutRowStatus
 }
 
 export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX.Element {
@@ -264,6 +350,10 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
   const update = useSettings((s) => s.update)
   const query = useSettingsSearch()
   const [errors, setErrors] = useState<Partial<Record<CommandId, string>>>({})
+  // The rail's two controls. Local to the section on purpose: they are a way of LOOKING at the
+  // list, not a setting — nothing about them belongs in settings.json.
+  const [filterQuery, setFilterQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<ShortcutStatusFilter>('all')
 
   const groups = useMemo(() => {
     const byGroup = new Map<CommandGroup, CommandDefinition[]>()
@@ -276,11 +366,47 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
   const entries = useMemo(
     () => [
       POLICY_ROW,
+      RAIL_ROW,
       ...groups.map(([group, defs]) => groupEntry(group, defs)),
       ...COMMAND_DEFINITIONS.map(rowEntry)
     ],
     [groups]
   )
+
+  // One read of the override map per render pass, shared by the counts and by the rendered rows.
+  // Two reads would be two chances to disagree — the pill saying `Modified 2` over one row.
+  const models = useMemo<RowModel[]>(
+    () =>
+      COMMAND_DEFINITIONS.map((def) => {
+        const entry = rowEntry(def)
+        const chords = commandKeysFor(def.id)
+        return {
+          def,
+          entry,
+          keywords: rowKeywords(entry),
+          chords,
+          status: shortcutRowStatus(def.id, overrides, chords.length)
+        }
+      }),
+    [overrides]
+  )
+  const modelById = useMemo(() => new Map(models.map((m) => [m.def.id, m])), [models])
+
+  // Counts are taken over EVERY command that passes the local query, before the status filter is
+  // applied — they say how big each bucket is inside what the user is looking at, which is the
+  // only reading that lets the pill be used to navigate. (A count that also honored the status
+  // filter would read `Modified 2` beside two rows and `0` beside every other option.)
+  const counts = useMemo(() => {
+    const c = { all: 0, modified: 0, unassigned: 0, disabled: 0 }
+    for (const m of models) {
+      if (!matchesShortcutQuery(m.def, m.keywords, m.chords, filterQuery)) continue
+      c.all += 1
+      if (m.status.modified) c.modified += 1
+      if (m.status.unassigned) c.unassigned += 1
+      if (m.status.disabled) c.disabled += 1
+    }
+    return c
+  }, [models, filterQuery])
 
   const apply = (id: CommandId, combo: string, mode: 'replace' | 'add'): void => {
     const r = commitCandidate(id, combo, mode)
@@ -289,6 +415,131 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
   const write = (id: CommandId, bindings: readonly string[] | null): void => {
     setKeybindingOverride(id, bindings)
     setErrors((prev) => ({ ...prev, [id]: undefined }))
+  }
+  /** Per-chip ×. A plain list write through `write`, deliberately NOT through `commitCandidate`:
+   *  taking a chord away cannot CREATE a conflict, so there is no candidate to gate — and routing
+   *  it through the gate would let an unrelated pre-existing refusal block a removal that is
+   *  always safe. The index is into `effectiveBindings`, which is the same order `commandKeysFor`
+   *  renders the chips in. */
+  const removeBinding = (id: CommandId, index: number): void => {
+    write(
+      id,
+      effectiveBindings(id).filter((_, i) => i !== index)
+    )
+  }
+
+  // What is on screen, decided before render because the group wrappers need the answer: a group
+  // renders only when the GLOBAL query keeps it (`groupVisible` — a heading must never outlive
+  // its rows) AND at least one of its rows survives the local query, the status filter and that
+  // same global query. An empty wrapper is not invisible here: the shell's body is
+  // `divide-y [&>*]:py-5`, so it draws a padded strip with a divider over nothing.
+  const localVisible = (m: RowModel): boolean =>
+    matchesShortcutQuery(m.def, m.keywords, m.chords, filterQuery) &&
+    rowPassesStatus(m.status, statusFilter)
+  const visibleGroups = groups.flatMap(([group, defs]) => {
+    if (!groupVisible(query, group, defs)) return []
+    const rows = defs.map((d) => modelById.get(d.id)!).filter(localVisible)
+    // The global leg is asked here only to COUNT; `SearchableRow` below is what actually mounts
+    // or drops the row (and with it its recorder — see ShortcutRecorderButton's release note).
+    if (!rows.some((m) => matchesQuery(query, m.entry))) return []
+    return [{ group, rows }]
+  })
+
+  const renderRow = (m: RowModel): React.JSX.Element => {
+    const { def, chords, status } = m
+    const single = SINGLE_BINDING_COMMANDS.has(def.id)
+    const bound = chords.length > 0
+    const note = NOTES[def.id]
+    const error = errors[def.id]
+    return (
+      <SearchableRow key={def.id} {...m.entry}>
+        <div
+          data-command={def.id}
+          className="group/row -mx-2 flex items-start justify-between gap-4 rounded-lg px-2 py-2 transition-colors hover:bg-fill-weak/60"
+        >
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium text-text">{def.title}</span>
+              {status.modified ? (
+                <span
+                  data-badge="modified"
+                  className={`${BADGE} bg-[color:var(--accent)]/15 text-[color:var(--accent)]`}
+                >
+                  Modified
+                </span>
+              ) : null}
+              {def.scope === 'terminal' ? (
+                <span data-badge="terminal" className={`${BADGE} bg-fill-weak text-muted`}>
+                  Terminal
+                </span>
+              ) : null}
+            </div>
+            {note ? <p className="mt-1 text-[12px] leading-relaxed text-muted">{note}</p> : null}
+            {error ? (
+              <p className="mt-1 text-[12px] leading-relaxed text-[color:var(--warn)]">{error}</p>
+            ) : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {bound ? (
+              <Chips
+                chords={chords}
+                limit={single ? 1 : undefined}
+                title={def.title}
+                onRemove={
+                  chords.length > 1 && !single ? (i) => removeBinding(def.id, i) : undefined
+                }
+              />
+            ) : status.disabled ? (
+              <span className={`${BADGE} bg-fill-weak text-muted`}>Disabled</span>
+            ) : (
+              <span className="text-[13px] text-muted">—</span>
+            )}
+            {/* Hidden until the row is hovered so a 21-row list reads as chords, not as a wall of
+                buttons — `focus-within` is the keyboard user's door to the same controls. */}
+            <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/row:opacity-100">
+              <ShortcutRecorderButton
+                commandId={def.id}
+                appearance="icon"
+                idleLabel={bound ? 'Record' : 'Record shortcut'}
+                label={bound ? `Record ${def.title}` : `Record shortcut for ${def.title}`}
+                onCommit={(combo) => apply(def.id, combo, 'replace')}
+              />
+              {bound && !single ? (
+                <ShortcutRecorderButton
+                  commandId={def.id}
+                  appearance="icon"
+                  idleLabel="Add"
+                  label={`Add a shortcut to ${def.title}`}
+                  onCommit={(combo) => apply(def.id, combo, 'add')}
+                />
+              ) : null}
+              {bound ? (
+                <button
+                  type="button"
+                  className={ICON_BUTTON}
+                  aria-label={`Disable ${def.title}`}
+                  title={`Disable ${def.title}`}
+                  onClick={() => write(def.id, [])}
+                >
+                  <IconDisableSlash />
+                </button>
+              ) : null}
+              {status.modified ? (
+                <button
+                  type="button"
+                  className={ICON_BUTTON}
+                  aria-label={`Reset ${def.title}`}
+                  title={`Reset ${def.title}`}
+                  onClick={() => write(def.id, null)}
+                >
+                  <IconResetArrow />
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </SearchableRow>
+    )
   }
 
   return (
@@ -327,77 +578,58 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
         </div>
       </SearchableRow>
 
-      {groups.map(([group, defs]) => {
-        // A group whose header AND every row are filtered out must not render at all. The shell's
-        // body is `divide-y [&>*]:py-5`, so an empty wrapper is not invisible — it draws a padded
-        // strip with a divider, and a narrow query left five of those above the one real hit.
-        if (!groupVisible(query, group, defs)) return null
-        return (
-          <Fragment key={group}>
-            <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted">
-              {group}
-            </h3>
-            {defs.map((def) => {
-              const override = overrides?.[def.id]
-              const disabled = Array.isArray(override) && override.length === 0
-              const single = SINGLE_BINDING_COMMANDS.has(def.id)
-              const bound = commandKeysFor(def.id).length > 0
-              return (
-                <SearchableRow key={def.id} {...rowEntry(def)}>
-                  <div data-command={def.id}>
-                    <FieldRow
-                      label={def.title}
-                      description={NOTES[def.id]}
-                      note={errors[def.id]}
-                      control={
-                        <div className="flex items-center gap-2">
-                          {bound ? (
-                            <Chips id={def.id} limit={single ? 1 : undefined} />
-                          ) : (
-                            <span className="text-[13px] text-muted">
-                              {disabled ? 'Disabled' : '—'}
-                            </span>
-                          )}
-                          <ShortcutRecorderButton
-                            commandId={def.id}
-                            idleLabel={bound ? 'Record' : 'Record shortcut'}
-                            onCommit={(combo) => apply(def.id, combo, 'replace')}
-                          />
-                          {bound && !single ? (
-                            <ShortcutRecorderButton
-                              commandId={def.id}
-                              idleLabel="Add"
-                              onCommit={(combo) => apply(def.id, combo, 'add')}
-                            />
-                          ) : null}
-                          {bound ? (
-                            <Button
-                              variant="ghost"
-                              aria-label={`Disable ${def.title}`}
-                              onClick={() => write(def.id, [])}
-                            >
-                              Disable
-                            </Button>
-                          ) : null}
-                          {override !== undefined ? (
-                            <Button
-                              variant="ghost"
-                              aria-label={`Reset ${def.title}`}
-                              onClick={() => write(def.id, null)}
-                            >
-                              Reset
-                            </Button>
-                          ) : null}
-                        </div>
-                      }
-                    />
-                  </div>
-                </SearchableRow>
-              )
-            })}
-          </Fragment>
-        )
-      })}
+      <SearchableRow {...RAIL_ROW}>
+        <div className="flex items-center justify-between gap-4">
+          <div className="relative">
+            {/* The sidebar's magnifier, verbatim — one search affordance, one look. */}
+            <svg
+              aria-hidden="true"
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-2"
+              width="14"
+              height="14"
+              viewBox="0 0 14 14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            >
+              <circle cx="6" cy="6" r="4" />
+              <path d="M9.2 9.2 12 12" />
+            </svg>
+            <Input
+              className="h-8 w-[220px] pl-8"
+              value={filterQuery}
+              onChange={(e) => setFilterQuery(e.target.value)}
+              placeholder="Filter shortcuts"
+              aria-label="Filter shortcuts"
+            />
+          </div>
+          <SegmentedPill<ShortcutStatusFilter>
+            value={statusFilter}
+            ariaLabel="Filter shortcuts by status"
+            options={[
+              { value: 'all', label: `All ${counts.all}` },
+              { value: 'modified', label: `Modified ${counts.modified}` },
+              { value: 'unassigned', label: `Unassigned ${counts.unassigned}` },
+              { value: 'disabled', label: `Disabled ${counts.disabled}` }
+            ]}
+            onChange={setStatusFilter}
+          />
+        </div>
+      </SearchableRow>
+
+      {/* One wrapper per group, so the shell's `divide-y` separates GROUPS rather than every
+          single row — 21 dividers is a table, not a list. */}
+      {visibleGroups.map(({ group, rows }) => (
+        <div key={group} className="space-y-1">
+          <h3 className="text-[13px] font-semibold uppercase tracking-wide text-muted">{group}</h3>
+          {rows.map(renderRow)}
+        </div>
+      ))}
+
+      {visibleGroups.length === 0 ? (
+        <p className="text-[13px] text-muted">No shortcuts match.</p>
+      ) : null}
     </SettingsSection>
   )
 }
