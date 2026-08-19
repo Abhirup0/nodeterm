@@ -2,7 +2,7 @@ import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
-import { existsSync, statSync } from 'fs'
+import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
@@ -398,6 +398,28 @@ wirePeerRegistry({
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters and
 // (via the closures below) to resolve a live SSH project's ControlMaster for remote workspace IO.
 let sshProjectManager: ReturnType<typeof initSshProject> | undefined
+
+// The standalone Codex relay bundle (`out/main/codex-relay.js`, built by scripts/build-codex-relay.mjs
+// after electron-vite build), uploaded to a Linux host for managed Codex accounts. Read once, beside
+// the main entry so the same `__dirname` resolves in dev and inside a packaged asar. Single-fd read
+// (open→fstat→read the SAME descriptor) — no stat-then-read on the path. Empty string on any miss so
+// the SSH manager degrades to "no managed Codex runtime" instead of throwing.
+let codexRelayBundleCache: string | undefined
+async function loadCodexRelayBundle(): Promise<string> {
+  if (codexRelayBundleCache !== undefined) return codexRelayBundleCache
+  try {
+    const fd = openSync(join(__dirname, 'codex-relay.js'), 'r')
+    try {
+      fstatSync(fd) // touch the open descriptor; the bundle is a plain file we just built
+      codexRelayBundleCache = readFileSync(fd, 'utf8')
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    codexRelayBundleCache = ''
+  }
+  return codexRelayBundleCache
+}
 // Remote SSH IO for the workspace store: mirrors each SSH project's <remoteCwd>/.nodeterm/project.json
 // over that project's live master. Resolves the ref lazily — the manager is created after the window
 // is ready — and fails open (no-op) while the project is disconnected.
@@ -3128,7 +3150,14 @@ app.whenReady().then(async () => {
       }).catch(() => {
         // best-effort: a failed resync leaves the stale sweep as the backstop, exactly as today
       })
-    }
+    },
+    // The standalone relay bundle uploaded to a Linux host for managed Codex accounts (S6 PR 6).
+    // Only executable code is ever uploaded — never a credential (Property 1). Reading it is
+    // single-fd (openSync→fstatSync→readFileSync(fd)) so there is no stat-then-read TOCTOU on the
+    // path, and the result is cached (the artifact never changes within an app run). A missing
+    // artifact resolves to '' — `installRemoteCodexRuntime` treats an empty bundle as "no runtime"
+    // and never fails a plain SSH connect over it.
+    loadCodexRelayBundle
   )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,
