@@ -3,6 +3,7 @@ import { mkdtempSync, promises as fs, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { IPC } from '../shared/ipc'
+import { sanitizeKeybindingOverrides } from '../shared/keybindings'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import { SettingsStore } from './settings-store'
@@ -199,6 +200,16 @@ describe('SettingsStore nested-default merge', () => {
       })
       const twice = loadWith({ ...once, keybindings: { 'speech.dictation': ['Cmd+Alt+K'] } })
       expect(twice.keybindings?.['speech.dictation']).toEqual(['Cmd+Alt+K'])
+    })
+
+    it('a legacy chord colliding with another command now survives load end-to-end', () => {
+      // The PR3-era hole, measured then: Cmd+K was seeded and then stripped by the sanitizer.
+      const s = loadWith({ speech: { engine: 'whisper', model: '', language: 'auto', shortcut: 'Cmd+K' } })
+      expect(s.keybindings?.['speech.dictation']).toEqual(['Cmd+K'])
+      // The read path is the renderer's sanitizer; assert its verdict here too so the
+      // end-to-end claim is one test, not an inference across two files.
+      expect(sanitizeKeybindingOverrides(s.keybindings, true).overrides['speech.dictation'])
+        .toEqual(['Cmd+K'])
     })
   })
 })

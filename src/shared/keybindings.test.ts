@@ -6,6 +6,7 @@ import {
   normalizeBindingForCommand,
   getEffectiveBindings,
   bindingIdentity,
+  conflictBucket,
   findKeybindingConflicts,
   sanitizeKeybindingOverrides,
   resolveCommandForKeyEvent,
@@ -193,6 +194,25 @@ describe('bindingIdentity', () => {
   it('still separates a modifier from a bare key, and a hold chord from a keyed one', () => {
     expect(bindingIdentity('Cmd+Delete', true)).not.toBe(bindingIdentity('Delete', true))
     expect(bindingIdentity('Cmd+Alt', true)).not.toBe(bindingIdentity('Cmd+Alt+D', true))
+  })
+})
+
+describe('conflictBucket', () => {
+  // The whole mapping, asserted over the REGISTRY rather than a hand-picked example per bucket:
+  // 'app' and 'canvas' share the global keyspace, 'terminal' and 'scm' are their own, and
+  // `speech.dictation` is the one command whose bucket comes from its id instead of its scope.
+  // Kills two mutants a per-bucket sample can miss: a scope-mapping typo (folding 'scm' — or a
+  // scope added later — into 'global', or dropping 'canvas' out of it), and the removal of the
+  // dictation branch, which would send Dictate back into 'global' and re-report the collision
+  // the bucket exists to stop.
+  it('maps every command to its scope bucket, dictation excepted', () => {
+    for (const def of COMMAND_DEFINITIONS) {
+      if (def.id === 'speech.dictation') continue
+      expect(conflictBucket(def)).toBe(
+        def.scope === 'app' || def.scope === 'canvas' ? 'global' : def.scope
+      )
+    }
+    expect(conflictBucket(COMMANDS_BY_ID.get('speech.dictation')!)).toBe('dictation')
   })
 })
 
@@ -478,5 +498,32 @@ describe('resolver under terminal-first', () => {
     const app = { typing: false, terminal: false, kanbanOpen: false, terminalFirst: true }
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), app, {}, true))
       .toBe('app.commandPalette')
+  })
+})
+
+describe('dictation conflict bucket', () => {
+  it("a dictation override sharing another command's chord is NOT a conflict", () => {
+    expect(findKeybindingConflicts({ 'speech.dictation': ['Cmd+K'] }, true)).toEqual([])
+  })
+  it('sanitize keeps a colliding dictation override — the migration survival case', () => {
+    const r = sanitizeKeybindingOverrides({ 'speech.dictation': ['Cmd+K'] }, true)
+    expect(r).toEqual({ overrides: { 'speech.dictation': ['Cmd+K'] }, warnings: [] })
+  })
+  it("sanitize keeps BOTH sides when a user override shares dictation's chord", () => {
+    const r = sanitizeKeybindingOverrides(
+      { 'speech.dictation': ['Cmd+J'], 'app.commandPalette': ['Cmd+J'] },
+      true
+    )
+    expect(r.overrides).toEqual({
+      'speech.dictation': ['Cmd+J'],
+      'app.commandPalette': ['Cmd+J']
+    })
+    expect(r.warnings).toEqual([])
+  })
+  // Dictation is now OUTSIDE `includeDefaults`' reach: a future default colliding with its
+  // `Cmd+Alt` would not be caught here.
+  it('the shipped defaults stay conflict-free under full scrutiny (unchanged invariant)', () => {
+    expect(findKeybindingConflicts({}, true, { includeDefaults: true })).toEqual([])
+    expect(findKeybindingConflicts({}, false, { includeDefaults: true })).toEqual([])
   })
 })
