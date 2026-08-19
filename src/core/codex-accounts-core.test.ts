@@ -1,7 +1,18 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'fs'
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  readdirSync,
+  linkSync,
+  rmSync,
+  statSync,
+  symlinkSync
+} from 'fs'
 import os from 'os'
 import path from 'path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   ACCOUNT_ID_RE,
   assertCodexAccountId,
@@ -21,7 +32,10 @@ import {
   remoteCodexTmuxEnvArgs,
   systemCodexHome,
   AUTH_ENV_STRIP,
-  stripCodexAuthEnv
+  stripCodexAuthEnv,
+  planCodexRolloutExposure,
+  commitCodexRolloutExposure,
+  type CodexRolloutExposurePlan
 } from './codex-accounts-core'
 
 describe('Codex account id validation (supply-chain guard)', () => {
@@ -282,5 +296,248 @@ describe('shared id predicate stays renderer-safe', () => {
     const src = readFileSync(path.join(__dirname, '..', 'shared', 'codex-account.ts'), 'utf8')
     expect(/from ['"](\.\.\/)*core\//.test(src)).toBe(false)
     expect(/from ['"]\.\/codex-accounts-core['"]/.test(src)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cross-account rollout exposure (S6 §5 property 2 — atomic hardlink, never-overwrite).
+// Proven against a REAL temp filesystem: real link(2)/symlink(2)/EEXIST, never a mock. The repo has
+// twice shipped a structural test that passed a real defect, so every assertion here runs the real
+// primitive under mkdtemp. Mirrors @Corvin's tests in PR #112.
+describe('cross-account rollout exposure (atomic, never-overwrite)', () => {
+  const THREAD = 'be28d3d4-c18c-430c-a257-ae550d3dd7ed'
+  // Path of the rollout RELATIVE to the account's `sessions/` root (what a plan reports back).
+  const SESSIONS_REL = path.join('2026', '08', '19', `rollout-2026-08-19T00-00-00-${THREAD}.jsonl`)
+  const REL = path.join('sessions', SESSIONS_REL)
+  const roots: string[] = []
+
+  afterEach(() => {
+    while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true })
+  })
+
+  const newRoot = (): string => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'cx-rollout-'))
+    roots.push(root)
+    return root
+  }
+
+  /** A real account home whose `sessions/` tree exists; returns the home dir. */
+  const makeHome = (root: string, name: string): string => {
+    const home = path.join(root, name)
+    mkdirSync(path.join(home, 'sessions'), { recursive: true })
+    return home
+  }
+
+  /** Write a real rollout file at the canonical relative path; returns its absolute path. */
+  const writeRollout = (home: string, body = '{"line":1}\n'): string => {
+    const file = path.join(home, REL)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, body)
+    return file
+  }
+
+  it('commits A to B to C as one inode and survives removal of the original account', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    const homeC = makeHome(root, 'c')
+    const sourcePath = writeRollout(homeA)
+    const originalIno = statSync(sourcePath).ino
+
+    const planAB = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    expect(planAB.targetRelativePath).toBe(SESSIONS_REL)
+    commitCodexRolloutExposure(planAB)
+    expect(statSync(planAB.targetPath).ino).toBe(originalIno)
+
+    // Idempotent re-expose: same inode already present ⇒ no throw, still one inode.
+    expect(() => commitCodexRolloutExposure(planAB)).not.toThrow()
+    expect(statSync(planAB.targetPath).ino).toBe(originalIno)
+
+    const planBC = planCodexRolloutExposure(homeB, homeC, planAB.targetPath, THREAD)
+    commitCodexRolloutExposure(planBC)
+    expect(statSync(planBC.targetPath).ino).toBe(originalIno)
+
+    // Deleting the ORIGINAL account home leaves C's link naming the very same inode.
+    rmSync(homeA, { recursive: true, force: true })
+    expect(existsSync(planBC.targetPath)).toBe(true)
+    expect(statSync(planBC.targetPath).ino).toBe(originalIno)
+  })
+
+  it('rejects a source path outside the source account', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    // A real regular file whose name still ends <thread>.jsonl, but OUTSIDE homeA/sessions.
+    const outside = path.join(root, `rollout-2026-08-19T00-00-00-${THREAD}.jsonl`)
+    writeFileSync(outside, '{}')
+    expect(() => planCodexRolloutExposure(homeA, homeB, outside, THREAD)).toThrow(
+      'Source Codex rollout is outside its account home'
+    )
+  })
+
+  it('a rejected plan mutates nothing on disk', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    const outside = path.join(root, `rollout-2026-08-19T00-00-00-${THREAD}.jsonl`)
+    writeFileSync(outside, '{}')
+    const before = readdirSync(path.join(homeB, 'sessions'))
+    expect(() => planCodexRolloutExposure(homeA, homeB, outside, THREAD)).toThrow()
+    // The plan writes nothing: the target account's sessions tree is untouched.
+    expect(readdirSync(path.join(homeB, 'sessions'))).toEqual(before)
+  })
+
+  it('refuses to overwrite a conflicting target rollout (different inode)', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    const sourcePath = writeRollout(homeA)
+    const plan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    // A DIFFERENT rollout (distinct inode) already occupies the target pathname.
+    mkdirSync(path.dirname(plan.targetPath), { recursive: true })
+    writeFileSync(plan.targetPath, '{"other":true}\n')
+    const foreignIno = statSync(plan.targetPath).ino
+    expect(() => commitCodexRolloutExposure(plan)).toThrow(
+      'Target Codex account already has a different rollout for this thread'
+    )
+    // Never overwritten: the foreign inode is still what sits at the target.
+    expect(statSync(plan.targetPath).ino).toBe(foreignIno)
+  })
+
+  it('refuses a target sessions symlink without writing through it', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const sourcePath = writeRollout(homeA)
+    // homeB/sessions is a SYMLINK pointing at an escape directory.
+    const homeB = path.join(root, 'b')
+    mkdirSync(homeB, { recursive: true })
+    const escape = path.join(root, 'escape')
+    mkdirSync(escape, { recursive: true })
+    symlinkSync(escape, path.join(homeB, 'sessions'))
+
+    const plan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    expect(() => commitCodexRolloutExposure(plan)).toThrow(
+      'Target Codex rollout path contains an unsafe directory'
+    )
+    // Nothing was written THROUGH the symlink into the escape directory.
+    expect(readdirSync(escape)).toEqual([])
+  })
+
+  it('refuses a symlink at a DEEPER target segment without writing through it', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const sourcePath = writeRollout(homeA)
+    // homeB/sessions is a real dir, but homeB/sessions/2026 is a symlink to an escape directory.
+    const homeB = makeHome(root, 'b')
+    const escape = path.join(root, 'escape')
+    mkdirSync(escape, { recursive: true })
+    symlinkSync(escape, path.join(homeB, 'sessions', '2026'))
+
+    const plan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    expect(() => commitCodexRolloutExposure(plan)).toThrow(
+      'Target Codex rollout path contains an unsafe directory'
+    )
+    // The deeper-segment guard also refuses to write through: the escape tree stays empty.
+    expect(readdirSync(escape)).toEqual([])
+  })
+
+  it('refuses a symlinked source rollout (plan, never followed)', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    // A real rollout file elsewhere, and a symlink to it sitting at the canonical source pathname.
+    const realFile = path.join(root, 'real.jsonl')
+    writeFileSync(realFile, '{"line":1}\n')
+    const symlinkedSource = path.join(homeA, REL)
+    mkdirSync(path.dirname(symlinkedSource), { recursive: true })
+    symlinkSync(realFile, symlinkedSource)
+
+    expect(() => planCodexRolloutExposure(homeA, homeB, symlinkedSource, THREAD)).toThrow(
+      'Source Codex rollout is not a regular file'
+    )
+  })
+
+  it('removes its temporary link when the source inode changes before link creation', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    const sourcePath = writeRollout(homeA)
+    const plan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    // A pre-created, kept-alive file gives a distinct inode that cannot be recycled from the freed
+    // original (which would defeat the race we are simulating).
+    const replacement = path.join(root, 'replacement.jsonl')
+    writeFileSync(replacement, '{"line":2}\n')
+    // Race: just before the source→temp link, the source pathname is swapped to that OTHER inode.
+    // The temp link then names the wrong inode, the pre-publish verify fails, and the temp is cleaned up.
+    let swapped = false
+    const racingLink: typeof linkSync = (from, to) => {
+      if (!swapped) {
+        swapped = true
+        rmSync(sourcePath)
+        linkSync(replacement, sourcePath) // sourcePath now names replacement's distinct inode
+      }
+      return linkSync(from as string, to as string)
+    }
+    expect(() => commitCodexRolloutExposure(plan, racingLink)).toThrow(
+      'Temporary Codex rollout did not preserve the verified source inode'
+    )
+    // No orphaned .nodeterm-link temp file is left behind, and no target was published.
+    const targetDir = path.dirname(plan.targetPath)
+    const leftover = existsSync(targetDir)
+      ? readdirSync(targetDir).filter((n) => n.endsWith('.nodeterm-link'))
+      : []
+    expect(leftover).toEqual([])
+    expect(existsSync(plan.targetPath)).toBe(false)
+  })
+
+  it('re-verifies the inode after publishing and refuses a raced-in wrong inode', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    const sourcePath = writeRollout(homeA)
+    const decoy = path.join(root, 'decoy.jsonl')
+    writeFileSync(decoy, '{"decoy":true}\n')
+    const plan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    // The private source→temp link is honest; the publish link is hijacked to a DIFFERENT inode,
+    // so ONLY the post-link re-verify can catch that the target is not our rollout.
+    const hijackPublish: typeof linkSync = (from, to) => {
+      if (to === plan.targetPath) return linkSync(decoy, to as string)
+      return linkSync(from as string, to as string)
+    }
+    expect(() => commitCodexRolloutExposure(plan, hijackPublish)).toThrow(
+      'Target Codex rollout did not preserve the verified source inode'
+    )
+    // Rollback: a failed commit leaves NOTHING published — the wrongly-linked target is removed, so
+    // no foreign inode is left permanently occupying the target account's real sessions path.
+    expect(existsSync(plan.targetPath)).toBe(false)
+  })
+
+  it('surfaces a named error on a cross-mount (EXDEV) link — no silent copy fallback', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    const sourcePath = writeRollout(homeA)
+    const plan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    const crossMount: typeof linkSync = () => {
+      const error = new Error('cross-device link not permitted') as NodeJS.ErrnoException
+      error.code = 'EXDEV'
+      throw error
+    }
+    expect(() => commitCodexRolloutExposure(plan, crossMount)).toThrow(
+      'Codex rollout accounts must share a filesystem; cross-mount rollout copy is not supported'
+    )
+    // Fails closed: the target rollout is not created.
+    expect(existsSync(plan.targetPath)).toBe(false)
+  })
+
+  it('plan captures the source dev/ino identity', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    const sourcePath = writeRollout(homeA)
+    const plan: CodexRolloutExposurePlan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    const stat = statSync(sourcePath)
+    expect(plan.sourceDev).toBe(stat.dev)
+    expect(plan.sourceIno).toBe(stat.ino)
   })
 })
