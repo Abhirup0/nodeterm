@@ -40,17 +40,22 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { COMMANDS_BY_ID, normalizeBindingForCommand, type CommandId } from '@shared/keybindings'
 import { isMacPlatform } from '@shared/platform-utils'
 import { recordingKeydown, recordingKeyup, type RecordingState } from './shortcutRecording'
+import { IconRecordKey } from './ShortcutRowIcons'
 
 const isMac = isMacPlatform()
 
 export function ShortcutRecorderButton({
   commandId,
   idleLabel,
-  onCommit
+  onCommit,
+  appearance = 'button',
+  label
 }: {
   commandId: CommandId
   idleLabel: string
   onCommit: (combo: string) => void
+  appearance?: 'button' | 'icon'
+  label?: string
 }): React.JSX.Element {
   const [capturing, setCapturing] = useState(false)
   const [hint, setHint] = useState('')
@@ -118,19 +123,40 @@ export function ShortcutRecorderButton({
     const action = recordingKeyup(stateRef.current, e, opts)
     if (action.kind === 'commit') commit(action.combo)
   }
+  const effectiveLabel = label ?? idleLabel
+  // ARMED look is the design spec's accent pill, identical for both appearances — an armed
+  // recorder should look the same everywhere. Idle look depends on `appearance`; the 'button'
+  // idle branch is byte-identical to the pre-appearance markup.
+  const className = capturing
+    ? 'min-w-[140px] rounded-md border border-accent bg-[color:var(--accent)]/10 px-3 py-1 text-[12px] text-text ring-1 ring-[color:var(--accent)]/40'
+    : appearance === 'icon'
+      ? 'flex size-6 items-center justify-center rounded-md text-muted hover:bg-fill-weak hover:text-text'
+      : 'min-w-[120px] cursor-pointer rounded-md border border-border bg-panel-header px-3 py-1.5 text-[13px] font-medium text-text outline-none hover:bg-[rgba(255,255,255,0.06)]'
+  const isIdleIcon = appearance === 'icon' && !capturing
   return (
     <button
       type="button"
       // Observability only — no dispatcher reads it (see the header). Keeps the armed state
       // visible to tests and to anyone inspecting the DOM.
       data-shortcut-recording={capturing || undefined}
-      className="min-w-[120px] cursor-pointer rounded-md border border-border bg-panel-header px-3 py-1.5 text-[13px] font-medium text-text outline-none hover:bg-[rgba(255,255,255,0.06)]"
+      className={className}
       onClick={start}
       onKeyDown={onKeyDown}
       onKeyUp={onKeyUp}
       onBlur={stop}
+      aria-label={isIdleIcon ? effectiveLabel : undefined}
+      title={isIdleIcon ? effectiveLabel : undefined}
     >
-      {capturing ? hint || 'Press keys…' : idleLabel}
+      {capturing ? (
+        <>
+          <span className="mr-1.5 inline-block size-1.5 rounded-full bg-accent animate-pulse" />
+          {hint || 'Press keys…'}
+        </>
+      ) : appearance === 'icon' ? (
+        <IconRecordKey />
+      ) : (
+        idleLabel
+      )}
     </button>
   )
 }
