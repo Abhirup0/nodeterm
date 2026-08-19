@@ -10,13 +10,22 @@
  * 1. **Gesture order.** Keyed dictation runs BEFORE the registry (a custom keyed chord may
  *    deliberately collide with a registry default and must keep winning — it predates the
  *    registry), and zoom → projectJump → copy run AFTER a registry miss, in that exact order.
- *    This mirrors today's if-chain in Canvas, so consolidating the listeners changes no outcome.
+ *    This mirrors today's if-chain ORDERING in Canvas, so consolidation changes no ordering
+ *    outcome; the typing-guard delta is separate and deliberate (see the registry's
+ *    `allowWhileTyping` flags — app-scope rows lack it, so typing now blocks them too).
  *
  * 2. **Claim protocol.** `preventDefault()` is called ONLY when a handler actually claims the key
  *    (returns true). A command that resolved but whose handler declined — or that has no handler
  *    registered at all — falls through to the PLATFORM (the focused surface, the terminal, the
  *    browser/main-process accelerator), and NEVER to a gesture that could reinterpret the same
  *    chord as something else.
+ *
+ *    The third fall-through path is the one to watch: a chord BLOCKED by the resolver's context
+ *    gates (typing, terminal, kanban) returns null exactly like an unbound chord, so the two are
+ *    indistinguishable here and BOTH reach the trailing gestures — Cmd+Z while typing misses the
+ *    registry and is offered to zoom → projectJump → copy. Those gestures receive the RAW event
+ *    with no context, so **each trailing gesture closure owes its own focus/typing guard**; keyed
+ *    dictation is the only gesture this module guards.
  */
 import { resolveCommandForKeyEvent, type CommandId, type KeybindingOverrides } from '@shared/keybindings'
 import { keyDispatchContextFor, type ContextElement } from './keyContext'
