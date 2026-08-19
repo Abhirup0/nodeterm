@@ -108,9 +108,13 @@ function toShortcutEvent(input: KeydownInterceptInput): {
  * **Every branch owns its own modifier requirement, and must.** The old shared guard was
  * `type !== 'keyDown' || !(input.meta || input.control)`, which is exactly the check standing
  * between these branches and ordinary typing — `m`, `w` and `0` are all characters a user types.
- * It could not survive user-remappable bindings: `Alt+M` is a VALID binding per the registry's
+ * It could not survive user-remappable bindings: an Alt-only chord is VALID per the registry's
  * rules, and this module is its ONLY dispatcher (a chord we claim never reaches the renderer),
  * so a primary-modifier gate above the matchers would make such a remap silently dead everywhere.
+ * Who that actually buys something for: **Windows/Linux Alt chords** (`Alt+M`, `Alt+W` — plain
+ * letter combos there), and on **macOS the Alt+non-letter ones** (`Alt+F5`, `Alt+ArrowUp`). It is
+ * NOT mac Option+letter: macOS composes those into a character, so ⌥M arrives as `key: 'µ'` and an
+ * `Alt+M` binding could never match there whatever this gate did.
  * So the two remappable chords are matched EXACTLY (all four modifier flags, `matchesShortcut`),
  * which is a modifier requirement per binding, and the hardcoded `Digit0` branch below carries
  * the `meta || control` test it used to inherit. `keydown-intercept.test.ts` presses each of them

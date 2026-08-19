@@ -2,6 +2,16 @@
  * One shared answer to "who owns this keystroke's focus" for the global-keybinding
  * dispatcher. Replaces the three inline `tagName` guards the Canvas keydown effects carried
  * (which disagreed about contentEditable and counted xterm's hidden textarea as typing).
+ *
+ * **This is not the codebase's only "in terminal" notion, and the difference is the point.**
+ * `presenceKeys.ts` (`closest(TYPING_ZONES)`, `.xterm` among them) and the copy gesture
+ * (inline `closest('.monaco-editor, .xterm')`) both ask an ANCESTRY question, because they are
+ * about a "/" keystroke or a mouse selection landing somewhere inside a terminal REGION, which
+ * the `.xterm` wrapper answers and this module's class check would not.
+ * DISPATCH asks a different question: who receives this keystroke. Whenever xterm owns the
+ * keyboard the focused element IS the helper textarea, so the class check here is exact — and it
+ * is what keeps `terminal` and `typing` disjoint (an ancestry check would report BOTH, and
+ * `typing` wins, making every terminal-scope command unreachable).
  */
 import type { KeyDispatchContext } from '@shared/keybindings'
 

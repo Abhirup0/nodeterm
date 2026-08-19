@@ -71,15 +71,17 @@ export function isModifierEventKey(key: string): boolean {
   return MODIFIER_KEYS.has(normalizeKey(key))
 }
 
+// Memo: dispatch re-parses every candidate binding on every keydown once the registry sits on
+// a window listener; distinct binding strings are few, so a small frozen-value cache removes
+// the hot-path cost for every consumer at once. The returned object's IDENTITY is stable only
+// until the size-cap clear below — never key a Map/WeakMap or a React dep array off a
+// `ParsedShortcut`; compare its fields, or the string it came from.
+const parseCache = new Map<string, ParsedShortcut>()
+
 /** Parse a canonical combo string, e.g. `"Cmd+Shift+D"` -> `{cmd:true, ctrl:false, shift:true,
  *  alt:false, key:'D'}`; a modifier-only chord, e.g. `"Cmd+Alt"` -> `{cmd:true, ctrl:false,
  *  shift:false, alt:true, key:null}` (see `isHoldChord`). `Ctrl`/`Control` set the LITERAL `ctrl`
  *  field — they are no longer a spelling of the abstract `Cmd`. */
-// Memo: dispatch re-parses every candidate binding on every keydown once the registry sits on
-// a window listener; distinct binding strings are few, so a small frozen-value cache removes
-// the hot-path cost for every consumer at once.
-const parseCache = new Map<string, ParsedShortcut>()
-
 export function parseShortcut(s: string): ParsedShortcut {
   const hit = parseCache.get(s)
   if (hit) return hit

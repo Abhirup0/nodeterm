@@ -103,6 +103,28 @@ describe('dispatchGlobalKeydown', () => {
     expect(dispatchGlobalKeydown(ev({ key: '!' , shiftKey: true }), deps({ gestures: g }))).toBe(false)
     expect(order).toEqual(['zoom', 'jump', 'copy'])
   })
+  it('the kanban board blocks the keyed-dictation gesture entirely', () => {
+    // The gate is `!typing && !terminal && !kanbanOpen`. Dropping the kanban half leaves a
+    // dictation overlay firing over the board with nothing on screen that asked for it — and
+    // the board is exactly where the canvas-only-shortcut discipline says gestures go quiet.
+    const dictation = vi.fn(() => true)
+    const g = { keyedDictation: dictation, zoom: noGesture, projectJump: noGesture, copy: noGesture }
+    const d = deps({ kanbanOpen: () => true, gestures: g })
+    expect(dispatchGlobalKeydown(ev({ metaKey: true, altKey: true, key: 'd' }), d)).toBe(false)
+    expect(dictation).not.toHaveBeenCalled()
+  })
+  it('a claiming trailing gesture short-circuits: the later ones never run', () => {
+    // The `if (...) return true` chain, not a run-them-all fan-out. Turning any of the three
+    // into an unconditional call would let one chord be interpreted twice (zoom AND jump).
+    const zoom = vi.fn(() => true)
+    const projectJump = vi.fn(() => true)
+    const copy = vi.fn(() => true)
+    const g = { keyedDictation: noGesture, zoom, projectJump, copy }
+    expect(dispatchGlobalKeydown(ev({ shiftKey: true, key: '!' }), deps({ gestures: g }))).toBe(true)
+    expect(zoom).toHaveBeenCalledTimes(1)
+    expect(projectJump).not.toHaveBeenCalled()
+    expect(copy).not.toHaveBeenCalled()
+  })
   it('overrides reroute dispatch', () => {
     const fit = vi.fn(() => true)
     const d = deps({

@@ -260,12 +260,24 @@ describe('binding-driven intercept', () => {
   // Alt-only chord is a valid binding per the registry's rules, this intercept is its only
   // dispatcher (the chord never reaches the renderer — the page does not see a claimed key), so a
   // `meta || control` gate above the matchers would make the remap dead everywhere with no error.
-  it('an Alt-only remap fires, and the bare key still does not', () => {
-    const alt = resolveInterceptBindings({ 'node.toggleMarkdown': ['Alt+M'] }, true)
-    expect(keydownIntercept(input({ alt: true, key: 'm', code: 'KeyM' }), alt, true)).toEqual({
+  // Pressed with **isMac: false** on purpose: `Alt+M` is a Windows/Linux chord. macOS composes
+  // Option+letter into a character (⌥M reports `key: 'µ'`), so this exact remap could not fire
+  // there whatever this module did — mac's stake in the gate is Alt+non-letter (F-keys, arrows).
+  it('an Alt-only remap fires off-mac, and the bare key still does not', () => {
+    const alt = resolveInterceptBindings({ 'node.toggleMarkdown': ['Alt+M'] }, false)
+    expect(keydownIntercept(input({ alt: true, key: 'm', code: 'KeyM' }), alt, false)).toEqual({
       action: 'toggle-markdown'
     })
-    expect(keydownIntercept(input({ key: 'm', code: 'KeyM' }), alt, true)).toBeNull()
+    expect(keydownIntercept(input({ key: 'm', code: 'KeyM' }), alt, false)).toBeNull()
+  })
+
+  // The mac half of the same gate, on a key macOS does NOT compose: ⌥F5 stays `key: 'F5'`.
+  it('a mac Alt+non-letter remap fires (what Option composition leaves reachable there)', () => {
+    const alt = resolveInterceptBindings({ 'node.toggleMarkdown': ['Alt+F5'] }, true)
+    expect(keydownIntercept(input({ alt: true, key: 'F5', code: 'F5' }), alt, true)).toEqual({
+      action: 'toggle-markdown'
+    })
+    expect(keydownIntercept(input({ key: 'F5', code: 'F5' }), alt, true)).toBeNull()
   })
 
   it('garbage overrides fall back to defaults', () => {
