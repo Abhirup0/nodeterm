@@ -63,6 +63,10 @@ import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
+import { ProjectTrustStore } from '../core/project-trust-store'
+import { ProjectSetupService } from '../core/project-setup-service'
+import { registerProjectSetupHandlers, type ProjectSetupHandlerService } from '../core/project-setup-handlers'
+import { makeLocalSetupRunner, resolveProjectSetupTarget } from '../core/project-setup-runner-local'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
 import {
@@ -339,6 +343,38 @@ workspaceStore.onPersist = () => {
   refreshNodeTokens()
 }
 const gitService = new GitService()
+
+// Project setup/archive runner (SDD: 2026-08-19-project-settings-trust). The trust store is keyed
+// by LOCATION, never project id (hostile-project-json), so one instance covers every project.
+// `readSettings` reuses WorkspaceStore's own resolution instead of re-reading disk.
+const projectTrustStore = new ProjectTrustStore()
+const projectSetupService = new ProjectSetupService({
+  trust: projectTrustStore,
+  readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+  runLocal: makeLocalSetupRunner()
+  // runSsh: a later task's manual-run leg. Until wired, an ssh target's run answers
+  // `{status:'skipped', reason:'unavailable'}` — same as any other missing runner.
+})
+// `registerProjectSetupHandlers` (project-setup-handlers.ts) shape-checks its wire `target` but
+// otherwise trusts whatever it is given — a deliberate low-level seam (Task 1). The TRUST boundary
+// lives here instead: `target.rootPath`/`projectName`/`ssh` are the wire's own placeholders (see
+// preload's `projectSetup.run`) and are IGNORED — rootPath/ssh/projectName are re-derived from THIS
+// machine's own workspace index by `target.projectId`, and `worktreePath` is independently
+// re-validated against the project's actual git worktrees (`resolveProjectSetupTarget`). Nothing
+// path-shaped that crosses the wire is trusted as-is (Task 1 review finding, carried to this task).
+const projectSetupHandlerService: ProjectSetupHandlerService = {
+  run: async (target, kind) => {
+    const info = workspaceStore.projectTargetInfo(target.projectId)
+    const resolved = await resolveProjectSetupTarget(target.projectId, target.worktreePath, info, (repoPath) =>
+      gitService.worktreeList(repoPath)
+    )
+    if (!resolved) return { status: 'skipped', reason: 'unavailable' }
+    return projectSetupService.run(resolved, kind)
+  },
+  cancel: (runKey) => projectSetupService.cancel(runKey),
+  submitConsent: (requestId, answer) => projectSetupService.submitConsent(requestId, answer)
+}
+registerProjectSetupHandlers(corePlatform, projectSetupHandlerService)
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
 // strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],

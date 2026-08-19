@@ -303,6 +303,18 @@ export function buildStubApi(): Omit<
       writeShared: () => Promise.resolve(false),
       updateLocal: () => Promise.resolve(false)
     },
+    projectSetup: {
+      // Same fallback story as `projectSettings` above — real over the bridge
+      // (`buildRealApi`'s `projectSetup`); this only matters if some future assembly spreads the
+      // stub alone. `run` fails closed with the SAME shape a real "nothing to run" answer uses, so
+      // a caller needs no extra branch to handle the stub differently from the real thing.
+      run: () => Promise.resolve({ status: 'skipped', reason: 'unavailable' }),
+      cancel: () => Promise.resolve(false),
+      consent: pnoop,
+      onConsentRequest: noopUnsub,
+      onConsentDismiss: noopUnsub,
+      onEvent: noopUnsub
+    },
     chat: {
       readTranscript: U('chat.readTranscript')
     },

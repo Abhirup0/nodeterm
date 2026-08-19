@@ -18,6 +18,7 @@ import type {
   WorkspaceMigrationKind
 } from '../shared/types'
 import type { ClientId, PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
+import type { ProjectSetupConsentRequest, ProjectSetupEvent } from '../shared/project-settings'
 
 // Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
 // this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
@@ -53,6 +54,15 @@ const subscribePeerPending = subscribe<[{ sas: string | null; id: string }]>(IPC
 const subscribeRelayPeerPending = subscribe<[RelayPeerPending]>(IPC.relayHostPeerPending)
 const subscribeRelayHostOpen = subscribe<[{ id: string; email?: string }]>(IPC.relayHostOpen)
 const subscribeRelayHostClosed = subscribe<[{ id: string }]>(IPC.relayHostClosed)
+
+// Project setup/archive (SDD: 2026-08-19-project-settings-trust): global (not per-project) main →
+// renderer prompts, fanned out the same way as the relay events above.
+const subscribeProjectSetupConsentRequest = subscribe<[ProjectSetupConsentRequest]>(
+  IPC.projectSetupConsentRequest
+)
+const subscribeProjectSetupConsentDismiss = subscribe<[{ requestId: string }]>(
+  IPC.projectSetupConsentDismiss
+)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -143,6 +153,35 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.projectSettingsWriteShared, projectId, doc),
     updateLocal: (projectId: string, local) =>
       ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local)
+  },
+  projectSetup: {
+    // The wire's `target` first argument is `project-setup-handlers.ts`'s `sanitizeTarget` shape
+    // (Task 1) — `projectName`/`rootPath` here are UNUSED PLACEHOLDERS satisfying that shape only;
+    // main re-derives the real rootPath/projectName/ssh from its own workspace index by projectId
+    // and never trusts what crosses this wire (Task 1 review finding — see main/index.ts's
+    // `projectSetupHandlerService`). Only `projectId`/`worktreePath` cross meaningfully.
+    run: (projectId, kind, worktreePath) =>
+      ipcRenderer.invoke(
+        IPC.projectSetupRun,
+        { projectId, projectName: '', rootPath: '.', ...(worktreePath ? { worktreePath } : {}) },
+        kind
+      ),
+    cancel: (runKey: string) => ipcRenderer.invoke(IPC.projectSetupCancel, runKey),
+    consent: async (requestId, answer) => {
+      ipcRenderer.send(IPC.projectSetupConsentSubmit, requestId, answer)
+    },
+    onConsentRequest: subscribeProjectSetupConsentRequest,
+    onConsentDismiss: subscribeProjectSetupConsentDismiss,
+    onEvent: (projectId, cb) => {
+      const ch = IPC.projectSetupEvent(projectId)
+      const handler = (_e: unknown, ev: ProjectSetupEvent): void => cb(ev)
+      ipcRenderer.on(ch, handler)
+      ipcRenderer.send(IPC.projectSetupSubscribe, projectId)
+      return () => {
+        ipcRenderer.removeListener(ch, handler)
+        ipcRenderer.send(IPC.projectSetupUnsubscribe, projectId)
+      }
+    }
   },
   dialog: {
     selectFolder: () => ipcRenderer.invoke(IPC.dialogSelectFolder),
