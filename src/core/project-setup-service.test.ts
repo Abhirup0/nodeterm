@@ -11,6 +11,7 @@ import {
   type ProjectSettingsFileV1,
   type ProjectSettingsSnapshot,
   type ProjectLocalSettings,
+  type ProjectConsentRequest,
   type ProjectSetupConsentRequest,
   type ProjectSetupEvent,
   type ProjectSetupRunResult
@@ -734,5 +735,231 @@ describe('ProjectSetupService — disposeAll', () => {
     expect(s[1]).toEqual({ channel: IPC.projectSetupConsentDismiss, payload: { requestId } })
     expect(await pending).toEqual({ status: 'skipped', reason: 'declined' })
     expect(calls).toHaveLength(0)
+  })
+})
+
+/**
+ * `ensureFamilyTrusted` — the SAME gate as the setup runner's, aimed at the two families nothing in
+ * this service executes: `agents` (launchCmd + env) and `shell` (the terminal program). A launcher
+ * asks before it consumes a shared-sourced value; the answer is recorded per FAMILY, at the
+ * LOCATION, and every asker's project is told to re-read its verdict.
+ */
+describe('ProjectSetupService — ensureFamilyTrusted', () => {
+  const familyPrompts = (family: 'agents' | 'shell'): ProjectConsentRequest[] =>
+    plat.sent
+      .filter((s) => s.channel === IPC.projectSetupConsentRequest)
+      .map((s) => s.args[0] as ProjectConsentRequest)
+      .filter((r) => r.family === family)
+
+  const trustChanged = (): string[] =>
+    plat.sent
+      .filter((s) => s.channel === IPC.projectTrustChanged)
+      .map((s) => (s.args[0] as { projectId: string }).projectId)
+
+  const agentsDoc: ProjectSettingsDoc = {
+    agents: { launchCmd: 'claude --mcp evil', env: { API_KEY: 'sk-1', PATH: '/evil/bin' } }
+  }
+
+  it('is promptless when the SHARED document has nothing executable in that family', async () => {
+    const trust = new ProjectTrustStore()
+    const svc = new ProjectSetupService({
+      trust,
+      // A LOCAL launchCmd is the user's own instruction and the shared doc sets nothing — there is
+      // no hostile input to gate, so a dialog here would be asking about the user's own typing.
+      readSettings: async () => snapshot(sharedFile({}), { agents: { launchCmd: 'mine' } })
+    })
+    expect(await svc.ensureFamilyTrusted(target(), 'agents')).toBe(true)
+    expect(await svc.ensureFamilyTrusted(target(), 'shell')).toBe(true)
+    expect(familyPrompts('agents')).toEqual([])
+    expect(familyPrompts('shell')).toEqual([])
+    expect(trustChanged()).toEqual([])
+  })
+
+  it('prompts with the whole agents family, and an approve records THE FAMILY hash + broadcasts', async () => {
+    const trust = new ProjectTrustStore()
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(agentsDoc)) })
+    const pending = svc.ensureFamilyTrusted(target(), 'agents')
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    const req = familyPrompts('agents')[0]
+    expect(req).toMatchObject({
+      family: 'agents',
+      projectName: 'App',
+      previouslyApproved: false,
+      launchCmd: 'claude --mcp evil',
+      // env is inside the hash (PATH/LD_PRELOAD hijack), so it is inside the question.
+      env: { API_KEY: 'sk-1', PATH: '/evil/bin' }
+    })
+    expect(req.locationLabel).toContain('/proj/app')
+
+    svc.submitConsent(req.requestId, 'approve')
+    expect(await pending).toBe(true)
+    const hash = hashTrustContent(projectTrustContent('agents', agentsDoc)!)
+    expect(await trust.isTrusted(localTrustKey('/proj/app'), 'agents', hash)).toBe(true)
+    // Per family: approving the launch settings approves NOTHING about the setup scripts.
+    expect(await trust.getRecord(localTrustKey('/proj/app'), 'setup')).toBeNull()
+    expect(trustChanged()).toEqual(['p1'])
+
+    // Already trusted → the next ask is promptless.
+    expect(await svc.ensureFamilyTrusted(target(), 'agents')).toBe(true)
+    expect(familyPrompts('agents')).toHaveLength(1)
+  })
+
+  it('a skip records nothing, broadcasts nothing and answers false', async () => {
+    const trust = new ProjectTrustStore()
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(agentsDoc)) })
+    const pending = svc.ensureFamilyTrusted(target(), 'agents')
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    svc.submitConsent(familyPrompts('agents')[0].requestId, 'skip')
+    expect(await pending).toBe(false)
+    expect(await trust.getRecord(localTrustKey('/proj/app'), 'agents')).toBeNull()
+    expect(trustChanged()).toEqual([])
+  })
+
+  it('an unanswered prompt expires: false, dismissed, nothing recorded — never a retroactive yes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const trust = new ProjectTrustStore()
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(agentsDoc)) })
+    const pending = svc.ensureFamilyTrusted(target(), 'agents')
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    const { requestId } = familyPrompts('agents')[0]
+
+    await vi.advanceTimersByTimeAsync(299_000)
+    expect(dismissed()).toEqual([])
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await pending).toBe(false)
+    expect(dismissed()).toEqual([requestId])
+    expect(await trust.getRecord(localTrustKey('/proj/app'), 'agents')).toBeNull()
+
+    svc.submitConsent(requestId, 'approve')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await trust.getRecord(localTrustKey('/proj/app'), 'agents')).toBeNull()
+    expect(trustChanged()).toEqual([])
+  })
+
+  it('re-prompts with previouslyApproved=true once the approved content changed', async () => {
+    const trust = new ProjectTrustStore()
+    const stale = hashTrustContent(projectTrustContent('agents', { agents: { launchCmd: 'old' } })!)
+    await trust.record(localTrustKey('/proj/app'), 'agents', stale, '2026-08-01T00:00:00.000Z')
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(agentsDoc)) })
+    const pending = svc.ensureFamilyTrusted(target(), 'agents')
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    expect(familyPrompts('agents')[0].previouslyApproved).toBe(true)
+    svc.submitConsent(familyPrompts('agents')[0].requestId, 'skip')
+    expect(await pending).toBe(false)
+  })
+
+  it('the shell variant carries the bare program and records under the shell family', async () => {
+    const doc: ProjectSettingsDoc = { terminal: { shell: '/tmp/evil.sh', theme: 'dark' } }
+    const trust = new ProjectTrustStore()
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(doc)) })
+    const pending = svc.ensureFamilyTrusted(target(), 'shell')
+    await vi.waitFor(() => expect(familyPrompts('shell')).toHaveLength(1))
+    const req = familyPrompts('shell')[0]
+    expect(req).toMatchObject({ family: 'shell', shell: '/tmp/evil.sh', projectName: 'App' })
+    svc.submitConsent(req.requestId, 'approve')
+    expect(await pending).toBe(true)
+    const hash = hashTrustContent(projectTrustContent('shell', doc)!)
+    expect(await trust.isTrusted(localTrustKey('/proj/app'), 'shell', hash)).toBe(true)
+    expect(await trust.getRecord(localTrustKey('/proj/app'), 'agents')).toBeNull()
+  })
+
+  it('single-flights per (location, family): concurrent asks share ONE prompt and ONE answer', async () => {
+    const trust = new ProjectTrustStore()
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(agentsDoc)) })
+    // Two canvas nodes on the SAME folder: different project ids, one location, one question.
+    const a = svc.ensureFamilyTrusted(target({ projectId: 'p1' }), 'agents')
+    const b = svc.ensureFamilyTrusted(target({ projectId: 'p2' }), 'agents')
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(familyPrompts('agents')).toHaveLength(1)
+
+    svc.submitConsent(familyPrompts('agents')[0].requestId, 'approve')
+    expect(await a).toBe(true)
+    expect(await b).toBe(true)
+    // Every asker's project is invalidated, not just whoever happened to raise the prompt.
+    expect(trustChanged().sort()).toEqual(['p1', 'p2'])
+  })
+
+  it('shares the app-wide queue with a setup run — one dialog at a time', async () => {
+    const trust = new ProjectTrustStore()
+    const { runner } = recorder()
+    const svc = new ProjectSetupService({
+      trust,
+      readSettings: async () => snapshot(sharedFile({ ...agentsDoc, setup: { setupScript: 'npm ci' } })),
+      runLocal: runner
+    })
+    const run = svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(consentRequests()).toHaveLength(1))
+    const ask = svc.ensureFamilyTrusted(target(), 'agents')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(familyPrompts('agents')).toEqual([])
+
+    svc.submitConsent(consentRequests()[0].requestId, 'skip')
+    expect(await run).toEqual({ status: 'skipped', reason: 'declined' })
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    svc.submitConsent(familyPrompts('agents')[0].requestId, 'skip')
+    expect(await ask).toBe(false)
+  })
+
+  it('a trust WRITE failure is not an approval', async () => {
+    const trust = new ProjectTrustStore()
+    trust.record = async () => {
+      throw new Error('EACCES')
+    }
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(agentsDoc)) })
+    const pending = svc.ensureFamilyTrusted(target(), 'agents')
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    svc.submitConsent(familyPrompts('agents')[0].requestId, 'approve')
+    // A grant that exists only in memory is no grant: fail closed, and tell nobody it changed.
+    expect(await pending).toBe(false)
+    expect(trustChanged()).toEqual([])
+  })
+
+  it('gates an ssh target on its ssh location key, never the local one', async () => {
+    const ssh = { server: { host: 'h', user: 'u' }, remoteCwd: '/srv/app' }
+    const trust = new ProjectTrustStore()
+    const svc = new ProjectSetupService({ trust, readSettings: async () => snapshot(sharedFile(agentsDoc)) })
+    const pending = svc.ensureFamilyTrusted(target({ ssh }), 'agents')
+    await vi.waitFor(() => expect(familyPrompts('agents')).toHaveLength(1))
+    expect(familyPrompts('agents')[0].locationLabel).toBe('u@h:/srv/app')
+    svc.submitConsent(familyPrompts('agents')[0].requestId, 'approve')
+    expect(await pending).toBe(true)
+    const hash = hashTrustContent(projectTrustContent('agents', agentsDoc)!)
+    expect(await trust.isTrusted(sshTrustKey(ssh), 'agents', hash)).toBe(true)
+    expect(await trust.isTrusted(localTrustKey('/proj/app'), 'agents', hash)).toBe(false)
+  })
+
+  it('project-setup:request-trust derives the target from the workspace index, never the caller', async () => {
+    const asks: Array<[ProjectSetupTarget, string]> = []
+    registerProjectSetupHandlers(
+      plat,
+      {
+        run: async () => ({ status: 'skipped', reason: 'unavailable' }) as const,
+        cancel: () => false,
+        submitConsent: () => {},
+        ensureFamilyTrusted: async (t, family) => {
+          asks.push([t, family])
+          return true
+        }
+      },
+      {
+        projectTargetInfo: (projectId) => (projectId === 'p1' ? { cwd: '/proj/app', name: 'App' } : null),
+        worktreeList: async () => ({ ok: true, entries: [] })
+      }
+    )
+    const call = plat.handlers[IPC.projectSetupRequestTrust]
+    expect(await call('p1', 'agents')).toBe(true)
+    expect(asks[0]).toEqual([{ projectId: 'p1', projectName: 'App', rootPath: '/proj/app' }, 'agents'])
+
+    // Unknown project; a family this channel does not own (`setup` is the runner's own gate — a
+    // renderer must not be able to raise a setup prompt out of band); a non-string id; a missing
+    // family. All refused without ever reaching the service.
+    expect(await call('missing', 'agents')).toBe(false)
+    expect(await call('p1', 'setup')).toBe(false)
+    expect(await call(42, 'agents')).toBe(false)
+    expect(await call('p1')).toBe(false)
+    expect(asks).toHaveLength(1)
   })
 })

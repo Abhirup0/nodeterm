@@ -301,7 +301,9 @@ export function buildStubApi(): Omit<
       // a write/update as "did not happen", matching the real handlers' contract for an unknown id.
       read: () => Promise.resolve(null),
       writeShared: () => Promise.resolve(false),
-      updateLocal: () => Promise.resolve(false)
+      updateLocal: () => Promise.resolve(false),
+      launchInfo: () => Promise.resolve(null),
+      onTrustChanged: noopUnsub
     },
     projectSetup: {
       // Same fallback story as `projectSettings` above — real over the bridge
@@ -311,6 +313,9 @@ export function buildStubApi(): Omit<
       run: () => Promise.resolve({ status: 'skipped', reason: 'unavailable' }),
       cancel: () => Promise.resolve(false),
       consent: pnoop,
+      // Fails closed, like `run`: no bridge means no way to ask a human, and an unasked question
+      // is never an approval.
+      requestTrust: () => Promise.resolve(false),
       onConsentRequest: noopUnsub,
       onConsentDismiss: noopUnsub,
       onEvent: noopUnsub

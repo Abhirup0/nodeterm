@@ -5,6 +5,9 @@ import path from 'path'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import { WorkspaceStore } from './workspace-store'
+import { ProjectTrustStore, hashTrustContent, localTrustKey } from './project-trust-store'
+import { registerProjectLaunchInfoHandlers } from './project-launch-info-handlers'
+import { projectTrustContent, type ProjectLaunchInfo } from '../shared/project-settings'
 import type { Project, Workspace } from '../shared/types'
 
 let userData: string
@@ -370,5 +373,68 @@ describe('project settings IPC registration', () => {
     expect(snap.shared?.terminal?.shell).toBe('/bin/zsh')
     expect(await handlers['project-settings:update-local']('p1', { ignoreShared: { setup: true } })).toBe(true)
     expect(await handlers['project-settings:read']('nope')).toBeNull()
+  })
+})
+
+describe('project-settings:launch-info', () => {
+  it('gates a shared launchCmd until recorded, and reports true for a family with nothing to gate', async () => {
+    const store = new WorkspaceStore()
+    const trust = new ProjectTrustStore()
+    registerProjectLaunchInfoHandlers(fake, store, trust)
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.writeProjectSettings('p1', { agents: { launchCmd: 'npm run dev' } })
+
+    const handler = fake.handlers['project-settings:launch-info']
+    const before = (await handler('p1')) as ProjectLaunchInfo
+    expect(before.resolved.agents.launchCmd).toEqual({ value: 'npm run dev', source: 'shared' })
+    expect(before.trusted.agents).toBe(false) // shared content exists, not yet approved
+    expect(before.trusted.shell).toBe(true) // no shared `terminal.shell` at all — nothing to gate
+
+    const key = localTrustKey(projRoot)
+    const content = projectTrustContent('agents', { agents: { launchCmd: 'npm run dev' } })!
+    await trust.record(key, 'agents', hashTrustContent(content), '2026-08-19T00:00:00.000Z')
+
+    const after = (await handler('p1')) as ProjectLaunchInfo
+    expect(after.trusted.agents).toBe(true)
+  })
+
+  it('answers null for an unknown project id, same as project-settings:read', async () => {
+    const store = new WorkspaceStore()
+    const trust = new ProjectTrustStore()
+    registerProjectLaunchInfoHandlers(fake, store, trust)
+    await store.save(ws([project({ cwd: projRoot })]))
+    expect(await fake.handlers['project-settings:launch-info']('nope')).toBeNull()
+  })
+
+  it('reports trusted.agents true when the SHARED doc has no launchCmd/env, even with a local agents overlay', async () => {
+    const store = new WorkspaceStore()
+    const trust = new ProjectTrustStore()
+    registerProjectLaunchInfoHandlers(fake, store, trust)
+    await store.save(ws([project({ cwd: projRoot })]))
+    // A shared doc exists but never sets anything in the `agents` family — nothing executable to
+    // gate — while this machine's own local overlay picks a launchCmd of its own (never gated: a
+    // value the user typed locally is their own instruction, not hostile shared input).
+    await store.writeProjectSettings('p1', { terminal: { shell: '/bin/zsh' } })
+    await store.updateLocalProjectSettings('p1', { agents: { launchCmd: 'npm run dev' } })
+
+    const info = (await fake.handlers['project-settings:launch-info']('p1')) as ProjectLaunchInfo
+    expect(info.resolved.agents.launchCmd).toEqual({ value: 'npm run dev', source: 'local' })
+    expect(info.trusted.agents).toBe(true)
+  })
+
+  it('a shared change invalidates the OLD approval — trusted flips back to false', async () => {
+    const store = new WorkspaceStore()
+    const trust = new ProjectTrustStore()
+    registerProjectLaunchInfoHandlers(fake, store, trust)
+    await store.save(ws([project({ cwd: projRoot })]))
+    await store.writeProjectSettings('p1', { agents: { launchCmd: 'npm run dev' } })
+    const key = localTrustKey(projRoot)
+    const oldContent = projectTrustContent('agents', { agents: { launchCmd: 'npm run dev' } })!
+    await trust.record(key, 'agents', hashTrustContent(oldContent), '2026-08-19T00:00:00.000Z')
+    expect(((await fake.handlers['project-settings:launch-info']('p1')) as ProjectLaunchInfo).trusted.agents).toBe(true)
+
+    await store.writeProjectSettings('p1', { agents: { launchCmd: 'npm run dev && rm -rf /' } })
+    const after = (await fake.handlers['project-settings:launch-info']('p1')) as ProjectLaunchInfo
+    expect(after.trusted.agents).toBe(false)
   })
 })

@@ -784,6 +784,13 @@ export interface ProjectSettingsApi {
     projectId: string,
     local: import('./project-settings').ProjectLocalSettings | undefined
   ): Promise<boolean>
+  /** Resolved settings + per-family trust verdict for one project — `null` for an unknown id. The
+   *  renderer cache (`renderer/state/projectLaunchInfo.ts`) warms this on activate and never awaits
+   *  it inline; a caller wanting the raw handshake calls this directly instead. */
+  launchInfo(projectId: string): Promise<import('./project-settings').ProjectLaunchInfo | null>
+  /** main → renderer: a family's trust verdict changed for `projectId` (a consent dialog answered,
+   *  an approval revoked). Nobody broadcasts this yet — Task 2 records approvals and emits it. */
+  onTrustChanged(cb: (p: { projectId: string }) => void): () => void
 }
 
 export interface ProjectSetupApi {
@@ -802,8 +809,19 @@ export interface ProjectSetupApi {
   cancel(runKey: string): Promise<boolean>
   /** Renderer's answer to a `onConsentRequest` prompt. A stale/unknown requestId is a silent no-op. */
   consent(requestId: string, answer: import('./project-settings').ProjectSetupConsentAnswer): Promise<void>
-  /** main → renderer: raise the trust dialog before a shared-sourced script runs. */
-  onConsentRequest(cb: (req: import('./project-settings').ProjectSetupConsentRequest) => void): () => void
+  /**
+   * Ask for this project's `agents`/`shell` family to be trusted, prompting the human if it is not
+   * yet — the call a launcher makes before consuming a shared-sourced `launchCmd`/`env`/`shell`.
+   * `true` only when the family is trusted at that project's location (nothing shared to gate, an
+   * existing grant, or a fresh approval); skip, expiry, an unknown project and a refused (relay
+   * guest) call are all `false`. Concurrent asks for one location share ONE dialog. On approval,
+   * `projectSettings.onTrustChanged` fires for the project, so a cached launch-info verdict is
+   * re-read rather than trusted from before the answer.
+   */
+  requestTrust(projectId: string, family: 'agents' | 'shell'): Promise<boolean>
+  /** main → renderer: raise the trust dialog before a shared-sourced script runs, or before a
+   *  shared-sourced launch setting is consumed — tagged by family (`ProjectConsentRequest`). */
+  onConsentRequest(cb: (req: import('./project-settings').ProjectConsentRequest) => void): () => void
   /** main → renderer: close a prompt nobody answered before the renderer did. */
   onConsentDismiss(cb: (p: { requestId: string }) => void): () => void
   /** Per-project run progress (`ProjectSetupEvent`), mirroring `boardLog.onChanged`'s ref-counted

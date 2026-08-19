@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type {
+  ProjectConsentRequest,
   ProjectSetupConsentAnswer,
   ProjectSetupConsentRequest,
   ProjectSetupKind
@@ -75,6 +76,20 @@ function safeLabel(raw: string): string {
 
 const KIND_LABEL: Record<ProjectSetupKind, string> = { setup: 'Setup', archive: 'Archive' }
 
+/**
+ * The pin that defeats Trojan-source reordering on APPROVED BYTES (a script body, a launch command,
+ * an env value, a shell path): it forces the DISPLAY order to the byte order, so a U+202E inside
+ * the content cannot make the reader see a different program than the one that will run. It alters
+ * nothing about the bytes themselves — which is the point: these are shown so they can be approved.
+ */
+const BIDI_PIN: React.CSSProperties = { unicodeBidi: 'bidi-override', direction: 'ltr' }
+
+/** The scroll box every approved-bytes block sits in. Carries NO conflicting utility (no border
+ *  colour, no whitespace mode): each use adds its own, so two Tailwind classes of the same family
+ *  never race — the winner of that race is stylesheet order, not string order. */
+const APPROVED_BOX =
+  'max-h-40 overflow-auto break-words rounded-md border bg-bg px-2.5 py-2 font-mono text-[12px] leading-relaxed text-text'
+
 /** The family's scripts, the one about to run FIRST, skipping the ones the family does not set. */
 function orderedScripts(req: ProjectSetupConsentRequest): { kind: ProjectSetupKind; body: string }[] {
   const order: ProjectSetupKind[] = req.kind === 'archive' ? ['archive', 'setup'] : ['setup', 'archive']
@@ -83,10 +98,23 @@ function orderedScripts(req: ProjectSetupConsentRequest): { kind: ProjectSetupKi
     .filter((s): s is { kind: ProjectSetupKind; body: string } => s.body !== undefined)
 }
 
+/**
+ * Which variant's content this request carries, or `null` for one this build cannot render.
+ *
+ * An untagged payload is the SETUP request — the only variant that predates the tag — so an older
+ * main is still answered correctly. An unknown tag is refused outright rather than rendered as the
+ * nearest variant: the whole point of this dialog is that nothing is approved that was not on
+ * screen, and a payload whose content this build cannot lay out is content it cannot show.
+ */
+function familyOf(req: ProjectConsentRequest): ProjectConsentRequest['family'] | null {
+  const tag = (req as { family?: string }).family ?? 'setup'
+  return tag === 'setup' || tag === 'agents' || tag === 'shell' ? tag : null
+}
+
 export function SetupConsentDialog(): React.JSX.Element | null {
   // A QUEUE, not a single request: two projects (or a run and a worktree archive) can ask at once,
   // and answering one must not lose the other. The head is the one on screen.
-  const [queue, setQueue] = useState<ProjectSetupConsentRequest[]>([])
+  const [queue, setQueue] = useState<ProjectConsentRequest[]>([])
   // Request ids already answered from here. Belt-and-braces against a double click landing before
   // the re-render drops the head — main treats an unknown/stale id as a no-op, but a second answer
   // must never leave this component in the first place.
@@ -95,6 +123,9 @@ export function SetupConsentDialog(): React.JSX.Element | null {
   useEffect(() => {
     const api = window.nodeTerminal.projectSetup
     const offRequest = api.onConsentRequest((req) => {
+      // Unrenderable variants never enter the queue at all — they must neither raise a dialog nor
+      // block the ones behind them (see `familyOf`).
+      if (!familyOf(req)) return
       setQueue((q) => (q.some((r) => r.requestId === req.requestId) ? q : [...q, req]))
     })
     // main answered (or expired) this one itself — drop it, silently and without submitting.
@@ -123,6 +154,118 @@ export function SetupConsentDialog(): React.JSX.Element | null {
   const name = safeLabel(head.projectName)
   const location = safeLabel(head.locationLabel)
 
+  // Per variant: the question, the grant button's wording, and the content the answer covers. The
+  // `setup` arm is the fallback, so an untagged (older-main) payload renders exactly as before.
+  const view =
+    head.family === 'agents'
+      ? {
+          message: `Use the shared agent launch settings for "${name}"?`,
+          confirmLabel: 'Approve',
+          changed: 'These settings have changed since you approved them for this project.',
+          intro: (
+            <>
+              They come from the project&apos;s shared <code>.nodeterm/settings.json</code>, so anyone
+              who can commit to the repo can change them. One answer covers the launch command and
+              every variable below.
+            </>
+          ),
+          detail: (
+            <>
+              {head.launchCmd !== undefined ? (
+                <div className="space-y-1">
+                  <p className="text-[12px] font-semibold text-text">Launch command</p>
+                  {/* Text child, never markup — and never truncated: this is what is approved. */}
+                  <pre
+                    style={BIDI_PIN}
+                    data-launch-cmd=""
+                    className={`${APPROVED_BOX} whitespace-pre-wrap border-accent`}
+                  >
+                    {head.launchCmd}
+                  </pre>
+                </div>
+              ) : null}
+              {head.env ? (
+                <div className="space-y-1">
+                  <p className="text-[12px] font-semibold text-text">Environment</p>
+                  {/* Every pair, verbatim: an env var is code's blast radius (PATH/LD_PRELOAD), so
+                      it is inside the hash and must be inside the question. The whole ROW is pinned
+                      to byte order, key included — a `KEY=value` line that renders in some other
+                      order than its bytes is the same Trojan-source problem as a reordered script,
+                      and this dialog must not depend on the sanitizer's key charset to be safe. */}
+                  <div className={`${APPROVED_BOX} border-accent`}>
+                    {Object.entries(head.env).map(([key, value]) => (
+                      <div key={key} data-env-key={key} style={BIDI_PIN} className="break-all">
+                        <span className="text-muted">{key}=</span>
+                        <span data-env-value="">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )
+        }
+      : head.family === 'shell'
+        ? {
+            message: `Use the shared terminal shell for "${name}"?`,
+            confirmLabel: 'Approve',
+            changed: 'This setting has changed since you approved it for this project.',
+            intro: (
+              <>
+                It comes from the project&apos;s shared <code>.nodeterm/settings.json</code>, so anyone
+                who can commit to the repo can change it. Every terminal you open for this project
+                starts this program.
+              </>
+            ),
+            detail: (
+              <div className="space-y-1">
+                <p className="text-[12px] font-semibold text-text">Shell</p>
+                <pre
+                  style={BIDI_PIN}
+                  data-shell=""
+                  className={`${APPROVED_BOX} whitespace-pre-wrap border-accent`}
+                >
+                  {head.shell}
+                </pre>
+              </div>
+            )
+          }
+        : {
+            message: `Run the ${KIND_LABEL[head.kind].toLowerCase()} script for "${name}"?`,
+            confirmLabel: 'Run once',
+            changed: 'These scripts have changed since you approved them for this project.',
+            intro: (
+              <>
+                They come from the project&apos;s shared <code>.nodeterm/settings.json</code>, so
+                anyone who can commit to the repo can change them. One answer covers both.
+              </>
+            ),
+            detail: (
+              <>
+                {orderedScripts(head).map((s) => (
+                  <div key={s.kind} className="space-y-1">
+                    <p className="text-[12px] font-semibold text-text">
+                      {KIND_LABEL[s.kind]} script{s.kind === head.kind ? ' (about to run)' : ''}
+                    </p>
+                    {/* Text child, never markup — and never truncated: this is what is being
+                        approved. `BIDI_PIN` pins the DISPLAY order to the byte order, so a U+202E in
+                        the script cannot make the reader see a different program than the one that
+                        will run (Trojan source). It changes nothing about the bytes themselves. */}
+                    <pre
+                      style={BIDI_PIN}
+                      data-script-kind={s.kind}
+                      className={`max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border px-2.5 py-2 font-mono text-[12px] leading-relaxed text-text ${
+                        s.kind === head.kind ? 'border-accent bg-bg' : 'border-border bg-bg opacity-80'
+                      }`}
+                    >
+                      {s.body}
+                    </pre>
+                  </div>
+                ))}
+              </>
+            )
+          }
+
   return (
     <ConfirmDialog
       // Keyed per request: the next prompt in the queue must be a FRESH dialog — its own
@@ -133,40 +276,16 @@ export function SetupConsentDialog(): React.JSX.Element | null {
         <div className="confirm__msg space-y-2">
           <p className="text-[13px] text-muted">{location}</p>
           {head.previouslyApproved ? (
-            <p className="text-[13px] text-[color:var(--warn)]">
-              These scripts have changed since you approved them for this project.
-            </p>
+            <p className="text-[13px] text-[color:var(--warn)]">{view.changed}</p>
           ) : null}
-          <p className="text-[13px] text-muted">
-            They come from the project&apos;s shared <code>.nodeterm/settings.json</code>, so anyone
-            who can commit to the repo can change them. One answer covers both.
-          </p>
-          {orderedScripts(head).map((s) => (
-            <div key={s.kind} className="space-y-1">
-              <p className="text-[12px] font-semibold text-text">
-                {KIND_LABEL[s.kind]} script{s.kind === head.kind ? ' (about to run)' : ''}
-              </p>
-              {/* Text child, never markup — and never truncated: this is what is being approved.
-                  `bidi-override`/`ltr` pins the DISPLAY order to the byte order, so a U+202E in the
-                  script cannot make the reader see a different program than the one that will run
-                  (Trojan source). It changes nothing about the bytes themselves. */}
-              <pre
-                style={{ unicodeBidi: 'bidi-override', direction: 'ltr' }}
-                data-script-kind={s.kind}
-                className={`max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border px-2.5 py-2 font-mono text-[12px] leading-relaxed text-text ${
-                  s.kind === head.kind ? 'border-accent bg-bg' : 'border-border bg-bg opacity-80'
-                }`}
-              >
-                {s.body}
-              </pre>
-            </div>
-          ))}
+          <p className="text-[13px] text-muted">{view.intro}</p>
+          {view.detail}
         </div>
       }
-      message={`Run the ${KIND_LABEL[head.kind].toLowerCase()} script for "${name}"?`}
-      confirmLabel="Run once"
+      message={view.message}
+      confirmLabel={view.confirmLabel}
       cancelLabel="Skip"
-      // "Run once" is the grant, so it carries the danger styling; no button takes focus.
+      // The confirm button is the grant, so it carries the danger styling; no button takes focus.
       danger
       enterConfirms={false}
       autoFocusButtons={false}

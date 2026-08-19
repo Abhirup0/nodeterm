@@ -33,7 +33,12 @@ import {
   CO_ATTACH_MOUSE_SEQ
 } from '../../terminal/terminal-config'
 import { useXtermVisualSettings } from '../../terminal/useXtermVisualSettings'
-import { resolveSshRemote, reportSshDrop, sshConnectionScope } from '../../nodes/TerminalNode'
+import {
+  owningProjectId,
+  resolveSshRemote,
+  reportSshDrop,
+  sshConnectionScope
+} from '../../nodes/TerminalNode'
 import { buildSshArgs, type SshConnection } from '@shared/ssh'
 
 /** The subset of a node's `data` a SECOND client needs to attach to its session the same way the
@@ -91,7 +96,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
   const transportRef = useRef<LocalTransport | null>(null)
   const agentSessionId = useAgentStatus((s) => s.byId[nodeId]?.sessionId)
   // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
-  const visual = useXtermVisualSettings()
+  // MIRROR TerminalNode: scoped to the OWNING project (`owningProjectId`, the active one — a modal
+  // only ever opens over it), deliberately NOT this card's connection scope. `sshConnectionScope`
+  // answers a project×host attachment id for a session on a foreign host, which names no project at
+  // all — the per-project appearance would silently vanish for exactly those cards.
+  const visual = useXtermVisualSettings(owningProjectId())
   const [dropping, setDropping] = useState(false)
   const [uploading, setUploading] = useState(false)
   // Same copy feedback as the canvas node — a copy here is the same act as a copy there, including

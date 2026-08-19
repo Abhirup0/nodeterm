@@ -18,7 +18,7 @@ import type {
   WorkspaceMigrationKind
 } from '../shared/types'
 import type { ClientId, PeerDiff, PeerIdentity, PeerState } from '../shared/presence'
-import type { ProjectSetupConsentRequest, ProjectSetupEvent } from '../shared/project-settings'
+import type { ProjectConsentRequest, ProjectSetupEvent } from '../shared/project-settings'
 
 // Fan a single ipcRenderer listener per channel out to many renderer subscribers. Without
 // this, every node that subscribes (e.g. Cmd+M markdown toggle on each terminal/editor) adds
@@ -57,12 +57,16 @@ const subscribeRelayHostClosed = subscribe<[{ id: string }]>(IPC.relayHostClosed
 
 // Project setup/archive (SDD: 2026-08-19-project-settings-trust): global (not per-project) main →
 // renderer prompts, fanned out the same way as the relay events above.
-const subscribeProjectSetupConsentRequest = subscribe<[ProjectSetupConsentRequest]>(
+const subscribeProjectSetupConsentRequest = subscribe<[ProjectConsentRequest]>(
   IPC.projectSetupConsentRequest
 )
 const subscribeProjectSetupConsentDismiss = subscribe<[{ requestId: string }]>(
   IPC.projectSetupConsentDismiss
 )
+// Not per-project like githubIssuesChanged: `project-trust:changed` is one global channel whose
+// payload carries the projectId, fanned out the same way — nobody broadcasts it yet (Task 2), but
+// the renderer cache subscribes ahead of the emitter.
+const subscribeProjectTrustChanged = subscribe<[{ projectId: string }]>(IPC.projectTrustChanged)
 
 const api: NodeTerminalApi = {
   pty: {
@@ -152,7 +156,9 @@ const api: NodeTerminalApi = {
     writeShared: (projectId: string, doc) =>
       ipcRenderer.invoke(IPC.projectSettingsWriteShared, projectId, doc),
     updateLocal: (projectId: string, local) =>
-      ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local)
+      ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local),
+    launchInfo: (projectId: string) => ipcRenderer.invoke(IPC.projectSettingsLaunchInfo, projectId),
+    onTrustChanged: subscribeProjectTrustChanged
   },
   projectSetup: {
     // Wire carries exactly `(projectId, kind, worktreePath?)` — no rootPath/projectName/ssh: main
@@ -164,6 +170,8 @@ const api: NodeTerminalApi = {
     consent: async (requestId, answer) => {
       ipcRenderer.send(IPC.projectSetupConsentSubmit, requestId, answer)
     },
+    requestTrust: (projectId, family) =>
+      ipcRenderer.invoke(IPC.projectSetupRequestTrust, projectId, family),
     onConsentRequest: subscribeProjectSetupConsentRequest,
     onConsentDismiss: subscribeProjectSetupConsentDismiss,
     onEvent: (projectId, cb) => {
