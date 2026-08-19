@@ -5242,6 +5242,7 @@ export function Canvas() {
       'canvas.undo': () => { undo(); return true },
       'canvas.redo': () => { redo(); return true },
       'canvas.fitAll': () => { fitAll(); return true },
+      'canvas.tidy': () => { arrangeAllNodes(); return true },
       'canvas.deleteSelection': deleteSelectionCommand,
       'node.newTerminal': () => { addTerminal(); return true },
       'node.newAgent': () => {

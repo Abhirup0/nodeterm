@@ -1630,7 +1630,8 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   pane right-click = add nodes at cursor (terminal / Claude / sticky / open file) + select
   all + fit + **Tidy canvas** (`arrangeAllNodes` — packs every top-level node, including group
   frames as rigid units, into a non-overlapping grid via `arrangeNodes`, sorted by current
-  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas"; both
+  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas" and in the
+  keybinding registry as `canvas.tidy` (default ⌘/Ctrl+Shift+A, remappable); both
   hidden below 2 top-level nodes, where it could only be a visual no-op that still writes
   `project.json`) + restart-idle-agents (the bulk in-place agent restart, mirrored in ⌘K; both
   hidden when the canvas holds no restartable agent node, where they could only report "0

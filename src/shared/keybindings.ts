@@ -49,6 +49,7 @@ export type CommandId =
   | 'canvas.redo'
   | 'canvas.deleteSelection'
   | 'canvas.fitAll'
+  | 'canvas.tidy'
   | 'canvas.groupSelection'
   | 'node.newTerminal'
   | 'node.newAgent'
@@ -94,6 +95,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     allowBareKey: true },
   { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
     defaultBindings: both() },
+  { id: 'canvas.tidy', title: 'Tidy canvas', group: 'Canvas', scope: 'canvas',
+    // arrangeAllNodes self-guards (kanban open, <2 top-level nodes), same as the ⌘K/menu entries.
+    defaultBindings: both('Cmd+Shift+A') },
   { id: 'canvas.groupSelection', title: 'Group selection', group: 'Canvas', scope: 'canvas',
     defaultBindings: both() },
 
