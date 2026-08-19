@@ -413,13 +413,16 @@ function SetupRunControls({
   canRun: boolean
   hasScript: Record<ProjectSetupKind, boolean>
 }): React.JSX.Element {
-  const run = useProjectSetup((s) => s.byProject[projectId])
+  // Resolved through the ATTACHMENT this component made at ack time, not through "whatever event
+  // arrived on the channel we subscribed to": events carry no lane discriminator, so a worktree's
+  // run and this panel's run are told apart only by who claimed which runKey.
+  const attached = useProjectSetup((s) => s.runForProject(projectId))
   const [busy, setBusy] = useState<'' | ProjectSetupKind | 'cancel'>('')
   const [notice, setNotice] = useState('')
-  /** The runKey main acknowledged, held until the store reports that run reaching a terminal
-   *  state. Without it the buttons flicker back to enabled in the window between the ack and the
-   *  first event — and that window contains the consent dialog, which can be minutes long. */
-  const [startedKey, setStartedKey] = useState<string | null>(null)
+  /** The run main acknowledged, held until the store reports THAT run (by `runId`). `runKey` alone
+   *  will not do: it is deterministic, so the entry sitting under it may still be the PREVIOUS run
+   *  of the same script — showing its exit badge over a script that is starting right now. */
+  const [started, setStarted] = useState<{ runKey: string; runId: string } | null>(null)
   const unsubRef = useRef<(() => void) | null>(null)
   useEffect(
     () => () => {
@@ -429,9 +432,12 @@ function SetupRunControls({
     []
   )
 
-  const awaitingStarted = startedKey !== null && (!run || run.runKey !== startedKey)
+  // The acked run's first event has not landed yet, so what sits in the lane (if anything) is the
+  // PREVIOUS run of the same script. It is not ours to show.
+  const awaitingStarted = started !== null && attached?.runId !== started.runId
+  const run = awaitingStarted ? undefined : attached
   const active = busy !== '' || run?.state === 'running' || awaitingStarted
-  const liveKey = run?.state === 'running' ? run.runKey : awaitingStarted ? startedKey : null
+  const liveKey = run?.state === 'running' ? run.runKey : awaitingStarted ? started.runKey : null
 
   const start = async (kind: ProjectSetupKind): Promise<void> => {
     setNotice('')
@@ -440,8 +446,14 @@ function SetupRunControls({
     if (!unsubRef.current) unsubRef.current = useProjectSetup.getState().subscribeProject(projectId)
     try {
       const res = await window.nodeTerminal.projectSetup.run(projectId, kind, undefined)
-      if (res.status === 'skipped') setNotice(SKIP_NOTE[res.reason])
-      else setStartedKey(res.runKey)
+      if (res.status === 'skipped') {
+        setNotice(SKIP_NOTE[res.reason])
+        return
+      }
+      // Claim the lane with the runKey main gave us — this is what makes the events ours rather
+      // than some other initiator's, and it is why `attachProject` takes the ACKED key.
+      useProjectSetup.getState().attachProject(projectId, res.runKey)
+      setStarted({ runKey: res.runKey, runId: res.runId })
     } catch {
       setNotice('Could not start the script — the project may have become unavailable.')
     } finally {
@@ -458,7 +470,9 @@ function SetupRunControls({
          the truth about whether it ended. */
     } finally {
       setBusy('')
-      setStartedKey(null)
+      // Stop waiting for an acked run we just asked to die: from here the event stream (a
+      // `cancelled`, or a terminal event that beat the cancel) owns what the box shows.
+      setStarted(null)
     }
   }
 

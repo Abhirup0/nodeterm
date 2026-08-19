@@ -29,11 +29,16 @@ import { ConfirmDialog } from './ConfirmDialog'
  * that a stranger may have written (a cloned repo, a teammate's commit). The rule here is TEXT
  * ONLY: they are rendered as React text children (never interpolated into markup, a template that
  * gets parsed, a `title`/`href`, or anything handed to a terminal) and they are clamped by
- * `safeLabel` first — control characters stripped and the length capped — so neither an ANSI
- * escape run nor a 50 KB name can rewrite or overflow the dialog that is asking the question. The
- * SCRIPT BODIES are deliberately NOT clamped: they are the thing being approved, and truncating
- * them would mean the user approves bytes that were never on screen. They are rendered as text in
- * a scrollable `<pre>`, which is inert.
+ * `safeLabel` first — control characters, bidi overrides and zero-width marks stripped, then the
+ * length capped — so neither an ANSI escape run, a U+202E that reverses the location, nor a 50 KB
+ * name can rewrite or overflow the dialog that is asking the question.
+ *
+ * The SCRIPT BODIES are deliberately NOT clamped: they are the thing being approved, and stripping
+ * or truncating them would mean the user approves bytes that were never on screen. They are
+ * rendered as text in a scrollable `<pre>`, which is inert — and that `<pre>` carries
+ * `unicode-bidi: bidi-override; direction: ltr`, which defeats Trojan-source reordering (a U+202E
+ * inside a script making a comment read as executable code, or vice versa) by pinning the DISPLAY
+ * order to the byte order, WITHOUT altering a single byte of what is approved and run.
  *
  * KNOWN GAP (documented here, not fixable from this side — final-wave decision): a relay guest can
  * currently dispatch `project-setup:run` AND `project-setup:consent-submit` on the host
@@ -47,10 +52,22 @@ import { ConfirmDialog } from './ConfirmDialog'
 /** Longest a name/location may be on screen, in characters. */
 export const SETUP_LABEL_MAX = 200
 
-/** Clamp for a cross-boundary label: control characters out (see `oneLine` — a name is one line of
- *  text and no control character has a glyph), then capped with an ellipsis. */
+/**
+ * Characters a cross-boundary LABEL may never contain — the same class, for the same reason, that
+ * `capName` strips from a presence display name (`src/shared/presence.ts`, `UNSAFE_NAME_CHARS`,
+ * where the rationale is written out): a bidi override (U+202E) reverses everything after it, so
+ * "app" + U+202E + "hs.live-nur" DISPLAYS as a different location than the one that inspects out
+ * of the file, and the zero-width marks/isolates (U+200B-200F, U+2066-2069, U+FEFF) do the same
+ * job invisibly. Replicated rather than imported because that constant is private to the presence
+ * module and its cap (`capName`) is a different one; keep the two in step.
+ */
+const UNSAFE_LABEL_CHARS = /[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+
+/** Clamp for a cross-boundary label: control characters out (see `oneLine` — a label is one line of
+ *  text and no control character has a glyph), then the bidi/zero-width spoofing set out, then
+ *  capped with an ellipsis. */
 function safeLabel(raw: string): string {
-  const flat = oneLine(raw)
+  const flat = oneLine(raw.replace(UNSAFE_LABEL_CHARS, '')).trim()
   return flat.length > SETUP_LABEL_MAX ? flat.slice(0, SETUP_LABEL_MAX - 1) + '…' : flat
 }
 
@@ -127,8 +144,12 @@ export function SetupConsentDialog(): React.JSX.Element | null {
               <p className="text-[12px] font-semibold text-text">
                 {KIND_LABEL[s.kind]} script{s.kind === head.kind ? ' (about to run)' : ''}
               </p>
-              {/* Text child, never markup — and never truncated: this is what is being approved. */}
+              {/* Text child, never markup — and never truncated: this is what is being approved.
+                  `bidi-override`/`ltr` pins the DISPLAY order to the byte order, so a U+202E in the
+                  script cannot make the reader see a different program than the one that will run
+                  (Trojan source). It changes nothing about the bytes themselves. */}
               <pre
+                style={{ unicodeBidi: 'bidi-override', direction: 'ltr' }}
                 data-script-kind={s.kind}
                 className={`max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border px-2.5 py-2 font-mono text-[12px] leading-relaxed text-text ${
                   s.kind === head.kind ? 'border-accent bg-bg' : 'border-border bg-bg opacity-80'

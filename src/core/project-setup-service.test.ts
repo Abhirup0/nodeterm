@@ -12,7 +12,8 @@ import {
   type ProjectSettingsSnapshot,
   type ProjectLocalSettings,
   type ProjectSetupConsentRequest,
-  type ProjectSetupEvent
+  type ProjectSetupEvent,
+  type ProjectSetupRunResult
 } from '../shared/project-settings'
 import { IPC } from '../shared/ipc'
 import {
@@ -100,6 +101,34 @@ describe('setupRunKey', () => {
 })
 
 describe('ProjectSetupService — local-sourced scripts', () => {
+  it('mints a FRESH runId per launch, while the runKey (the single-flight key) stays deterministic', async () => {
+    const { runner } = recorder()
+    const svc = new ProjectSetupService({
+      trust: new ProjectTrustStore(),
+      readSettings: async () => snapshot(null, { setup: { setupScript: 'echo hi' } }),
+      runLocal: runner
+    })
+    const first = await svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(events().some((e) => e.state === 'done')).toBe(true))
+    const second = await svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(events().filter((e) => e.state === 'done')).toHaveLength(2))
+
+    expect(first.status).toBe('started')
+    expect(second.status).toBe('started')
+    const a = first as Extract<ProjectSetupRunResult, { status: 'started' }>
+    const b = second as Extract<ProjectSetupRunResult, { status: 'started' }>
+    // Same script, same location => the SAME single-flight key (that is what makes a concurrent
+    // second launch `busy`)...
+    expect(b.runKey).toBe(a.runKey)
+    // ...and a DIFFERENT run identity, because both runs' `seq` counters start at 1 and a client
+    // folding on runKey alone would swallow the second run as the first one's stale tail.
+    expect(b.runId).not.toBe(a.runId)
+    const ids = new Set(events().map((e) => e.runId))
+    expect(ids).toEqual(new Set([a.runId, b.runId]))
+    // Each run numbers its own events from 1.
+    expect(events().filter((e) => e.runId === b.runId).map((e) => e.seq)).toEqual([1, 2, 3])
+  })
+
   it('runs a local-sourced script without any consent prompt', async () => {
     const { calls, runner } = recorder()
     const svc = new ProjectSetupService({
@@ -108,7 +137,14 @@ describe('ProjectSetupService — local-sourced scripts', () => {
       runLocal: runner
     })
     const res = await svc.run(target(), 'setup')
-    expect(res).toEqual({ status: 'started', runKey: setupRunKey(target(), 'setup'), waitForSetup: true })
+    // `runId` is a fresh uuid per launch (unlike the deterministic runKey), so it is matched by
+    // shape: it is what tells this run from the NEXT run of the same script.
+    expect(res).toEqual({
+      status: 'started',
+      runKey: setupRunKey(target(), 'setup'),
+      runId: expect.any(String),
+      waitForSetup: true
+    })
     expect(consentRequests()).toEqual([])
 
     await vi.waitFor(() => expect(events().some((e) => e.state === 'done')).toBe(true))
@@ -475,7 +511,7 @@ describe('registerProjectSetupHandlers', () => {
     const service = {
       run: async (t: ProjectSetupTarget, kind: 'setup' | 'archive') => {
         runs.push([t, kind])
-        return { status: 'started', runKey: 'k', waitForSetup: false } as const
+        return { status: 'started', runKey: 'k', runId: 'run-1', waitForSetup: false } as const
       },
       cancel: (runKey: string) => {
         cancels.push(runKey)

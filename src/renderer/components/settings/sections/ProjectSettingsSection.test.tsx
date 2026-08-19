@@ -795,8 +795,8 @@ describe('ProjectSettingsSection — setup run controls', () => {
   beforeEach(() => {
     host = document.createElement('div')
     document.body.appendChild(host)
-    useProjectSetup.setState({ byProject: {}, byGroup: {} })
-    runSetup = vi.fn(async () => ({ status: 'started', runKey: 'run-1', waitForSetup: false }))
+    useProjectSetup.setState({ byRunKey: {}, projectRunKey: {}, groupRunKey: {} })
+    runSetup = vi.fn(async () => ({ status: 'started', runKey: 'rk-setup', runId: 'run-a', waitForSetup: false }))
     cancel = vi.fn(async () => true)
     off = vi.fn()
     onEvent = vi.fn((_projectId: string, cb: (ev: ProjectSetupEvent) => void) => {
@@ -814,7 +814,7 @@ describe('ProjectSettingsSection — setup run controls', () => {
     act(() => root.unmount())
     host.remove()
     useProjects.setState({ projects: [], activeProjectId: '' })
-    useProjectSetup.setState({ byProject: {}, byGroup: {} })
+    useProjectSetup.setState({ byRunKey: {}, projectRunKey: {}, groupRunKey: {} })
   })
 
   it('runs the setup script for this project, SUBSCRIBING to the event channel first', async () => {
@@ -860,7 +860,7 @@ describe('ProjectSettingsSection — setup run controls', () => {
     await act(async () => {
       button('Run setup').click()
     })
-    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 1, state: 'running', chunk: 'compiling…\n' }))
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-a', kind: 'setup', seq: 1, state: 'running', chunk: 'compiling…\n' }))
     expect(log()!.textContent).toContain('compiling…')
     expect(button('Run setup').disabled).toBe(true)
     expect(button('Run archive').disabled).toBe(true)
@@ -872,11 +872,11 @@ describe('ProjectSettingsSection — setup run controls', () => {
     await act(async () => {
       button('Run setup').click()
     })
-    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 1, state: 'running', chunk: 'x' }))
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-a', kind: 'setup', seq: 1, state: 'running', chunk: 'x' }))
     await act(async () => {
       button('Cancel').click()
     })
-    expect(cancel).toHaveBeenCalledWith('run-1')
+    expect(cancel).toHaveBeenCalledWith('rk-setup')
   })
 
   it('reports the exit code when the run ends, and re-enables the buttons', async () => {
@@ -884,8 +884,8 @@ describe('ProjectSettingsSection — setup run controls', () => {
     await act(async () => {
       button('Run setup').click()
     })
-    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 1, state: 'running', chunk: 'boom\n' }))
-    act(() => emit({ runKey: 'run-1', kind: 'setup', seq: 2, state: 'failed', exitCode: 2 }))
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-a', kind: 'setup', seq: 1, state: 'running', chunk: 'boom\n' }))
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-a', kind: 'setup', seq: 2, state: 'failed', exitCode: 2 }))
     expect(host.textContent).toContain('2')
     expect(host.textContent?.toLowerCase()).toContain('failed')
     expect(button('Run setup').disabled).toBe(false)
@@ -900,6 +900,58 @@ describe('ProjectSettingsSection — setup run controls', () => {
     })
     expect(host.textContent?.toLowerCase()).toContain('skipped')
     expect(button('Run setup').disabled).toBe(false)
+  })
+
+  it('C1: a SECOND run of the same script (same runKey, new runId) resets the box and re-disables the buttons', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-a', kind: 'setup', seq: 1, state: 'running', chunk: 'first run\n' }))
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-a', kind: 'setup', seq: 2, state: 'failed', exitCode: 1 }))
+    expect(button('Run setup').disabled).toBe(false)
+    expect(host.textContent).toContain('Failed (exit 1)')
+
+    // Run it again. `runKey` is DETERMINISTIC (kind + location), so the second run re-uses it and
+    // its `seq` restarts at 1 — the exact shape that used to be swallowed as stale, leaving the
+    // failed badge standing over a live script.
+    runSetup.mockResolvedValue({ status: 'started', runKey: 'rk-setup', runId: 'run-b', waitForSetup: false })
+    await act(async () => {
+      button('Run setup').click()
+    })
+    // Between the ack and the first event the lane still holds run A: it must not be shown.
+    expect(button('Run setup').disabled).toBe(true)
+    expect(host.textContent).not.toContain('Failed (exit 1)')
+
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-b', kind: 'setup', seq: 1, state: 'running', chunk: 'second run\n' }))
+    expect(log()!.textContent).toContain('second run')
+    expect(log()!.textContent).not.toContain('first run')
+    expect(button('Run setup').disabled).toBe(true)
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-b', kind: 'setup', seq: 2, state: 'done', exitCode: 0 }))
+    expect(host.textContent).toContain('Finished (exit 0)')
+    expect(button('Run setup').disabled).toBe(false)
+  })
+
+  it('I3: an event stream for a runKey this panel never claimed does not surface here', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    // A worktree's run for the same project, on the same channel: it carries no lane
+    // discriminator, and only the ATTACHMENT (this panel claimed 'rk-setup') keeps it out.
+    act(() => emit({ runKey: 'rk-worktree', runId: 'run-w', kind: 'setup', seq: 1, state: 'running', chunk: 'someone else\n' }))
+    expect(log()).toBeNull()
+    act(() => emit({ runKey: 'rk-setup', runId: 'run-a', kind: 'setup', seq: 1, state: 'running', chunk: 'mine\n' }))
+    expect(log()!.textContent).toContain('mine')
+    expect(log()!.textContent).not.toContain('someone else')
+  })
+
+  it('attaches the ACKED runKey to this project’s lane', async () => {
+    await mountPanel(snapshotWith({ setupScript: 'make' }))
+    await act(async () => {
+      button('Run setup').click()
+    })
+    expect(useProjectSetup.getState().projectRunKey.p1).toBe('rk-setup')
   })
 
   it('drops the subscription when the pane goes away', async () => {

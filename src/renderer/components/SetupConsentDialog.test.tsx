@@ -257,6 +257,40 @@ describe('SetupConsentDialog', () => {
     expect(shown).toContain('\u2026')
   })
 
+  it('I2: strips BIDI OVERRIDES and zero-width marks from the labels — a name must not misrender', () => {
+    mount()
+    act(() =>
+      emitRequest(
+        request({
+          // The presence-name attack, aimed at a trust dialog instead: U+202E reverses everything
+          // after it, so this location DISPLAYS as something other than what it inspects as. Same
+          // class, same reasoning as shared/presence.ts's UNSAFE_NAME_CHARS.
+          projectName: 'safe-repo\u202eevil',
+          locationLabel: '~/code/\u200bap\ufeffp'
+        })
+      )
+    )
+    const shown = text()
+    expect(shown).not.toContain('\u202e')
+    expect(shown).not.toContain('\u200b')
+    expect(shown).not.toContain('\ufeff')
+    // Every VISIBLE character survives — the strip removes only what has no glyph.
+    expect(shown).toContain('safe-repoevil')
+    expect(shown).toContain('~/code/app')
+  })
+
+  it('I2: pins the script boxes to byte order, so a Trojan-source U+202E cannot reorder what is approved', () => {
+    mount()
+    // The bytes are NOT altered — this is what will run, and it must be shown verbatim — so the
+    // defence is presentational: bidi-override forces the display order to the byte order.
+    const body = 'rm -rf /\u202e # elbmaerp'
+    act(() => emitRequest(request({ scripts: { setup: body } })))
+    const pre = scripts()[0]
+    expect(pre.textContent).toBe(body)
+    expect(pre.style.unicodeBidi).toBe('bidi-override')
+    expect(pre.style.direction).toBe('ltr')
+  })
+
   it('renders the script bodies VERBATIM — they are what the approval covers', () => {
     mount()
     act(() => emitRequest(request({ scripts: { setup: 'echo "<img src=x>"\nmake  install' } })))

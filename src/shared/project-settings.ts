@@ -361,14 +361,23 @@ export interface ProjectSetupConsentRequest {
 export type ProjectSetupConsentAnswer = 'approve' | 'skip'
 
 export type ProjectSetupRunResult =
-  | { status: 'started'; runKey: string; waitForSetup: boolean }
+  | { status: 'started'; runKey: string; runId: string; waitForSetup: boolean }
   | { status: 'skipped'; reason: 'no-script' | 'declined' | 'unanswered' | 'busy' | 'unavailable' }
 
 /** main→renderer per-run progress on `IPC.projectSetupEvent(projectId)`. `seq` is monotonic per
  *  run, so a client that misses one knows it. */
 export interface ProjectSetupEvent {
+  /** The SINGLE-FLIGHT key: deterministic (kind + location), so a second launch of the same script
+   *  at the same place is refused as `busy`. It is therefore NOT unique over time — two sequential
+   *  runs of the same script share it. */
   runKey: string
+  /** Unique per RUN (a fresh uuid each launch). This is what a client folds on: two sequential runs
+   *  share a `runKey`, so without it the second run's events look like a continuation of the first
+   *  — its `seq` restarts at 1 and would be dropped as stale, leaving the finished run's exit badge
+   *  standing over a live script. */
+  runId: string
   kind: ProjectSetupKind
+  /** Monotonic within one `runId`, from 1. */
   seq: number
   state: 'running' | 'done' | 'failed' | 'cancelled'
   /** Appended output since the last event (stdout+stderr interleaved, capped). */

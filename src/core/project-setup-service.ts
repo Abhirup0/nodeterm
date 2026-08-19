@@ -110,6 +110,9 @@ function locationLabel(target: ProjectSetupTarget): string {
 
 interface ActiveRun {
   runKey: string
+  /** Unique per launch, unlike `runKey` (which is the deterministic single-flight key). Every event
+   *  carries it so a client can tell this run from the PREVIOUS run of the same script. */
+  runId: string
   projectId: string
   kind: ProjectSetupKind
   abort: AbortController
@@ -142,7 +145,7 @@ export class ProjectSetupService {
 
     // Claimed BEFORE the consent await on purpose: while a dialog for this location is open, a
     // second launch must be `busy`, not a second dialog asking about the same script.
-    const entry: ActiveRun = { runKey, projectId: target.projectId, kind, abort: new AbortController(), seq: 0, closed: false }
+    const entry: ActiveRun = { runKey, runId: randomUUID(), projectId: target.projectId, kind, abort: new AbortController(), seq: 0, closed: false }
     this.active.set(runKey, entry)
     const abandon = (reason: 'declined' | 'unanswered' | 'unavailable' | 'no-script'): ProjectSetupRunResult => {
       this.active.delete(runKey)
@@ -190,7 +193,14 @@ export class ProjectSetupService {
     if (entry.abort.signal.aborted) return abandon('declined')
 
     void this.execute(entry, runner, script, target)
-    return { status: 'started', runKey, waitForSetup: resolved.setup.waitForSetup?.value === true }
+    // `runId` travels back with the ack so the initiator can attach THIS run (not the previous run
+    // of the same script, which shares `runKey`) to its own lane.
+    return {
+      status: 'started',
+      runKey,
+      runId: entry.runId,
+      waitForSetup: resolved.setup.waitForSetup?.value === true
+    }
   }
 
   /** Aborts a run — live OR still waiting at its consent dialog. `false` = nothing by that runKey
@@ -302,12 +312,18 @@ export class ProjectSetupService {
     entry.closed = true
   }
 
-  private emit(entry: ActiveRun, ev: Omit<ProjectSetupEvent, 'runKey' | 'kind' | 'seq'>): void {
+  private emit(entry: ActiveRun, ev: Omit<ProjectSetupEvent, 'runKey' | 'runId' | 'kind' | 'seq'>): void {
     // A chunk arriving after the terminal event (a runner that keeps draining) would reopen a run
     // the UI has already closed out.
     if (entry.closed) return
     entry.seq += 1
-    const full: ProjectSetupEvent = { runKey: entry.runKey, kind: entry.kind, seq: entry.seq, ...ev }
+    const full: ProjectSetupEvent = {
+      runKey: entry.runKey,
+      runId: entry.runId,
+      kind: entry.kind,
+      seq: entry.seq,
+      ...ev
+    }
     platform().broadcast(IPC.projectSetupEvent(entry.projectId), full)
   }
 }

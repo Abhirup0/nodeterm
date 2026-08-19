@@ -1,34 +1,48 @@
 // @vitest-environment jsdom
 //
-// The renderer's view of a setup/archive run. Everything here exists because the event stream is a
-// LOSSY, RE-ORDERABLE wire: `ProjectSetupEvent.seq` is monotonic per run precisely so a client can
-// tell a duplicate (relay re-delivery) from a fresh chunk, and the output of a script is unbounded
-// while the panel's box is not.
+// The renderer's view of a setup/archive run. Everything here exists because of two properties of
+// the wire:
+//
+//  - it is LOSSY AND RE-ORDERABLE. `ProjectSetupEvent.seq` is monotonic per run precisely so a
+//    client can tell a duplicate (relay re-delivery) from a fresh chunk.
+//  - `runKey` IS NOT UNIQUE OVER TIME. It is the deterministic single-flight key (kind + location),
+//    so two sequential runs of the same script share it and each restart `seq` at 1. `runId` is the
+//    per-launch identity; folding on it is what keeps run 2 from being swallowed as run 1's stale
+//    tail.
+//
+// And because an event carries no lane discriminator, storage is keyed by `runKey` alone: the
+// initiator ATTACHES its run to a project (or a worktree group) at ack time, and the selectors
+// resolve through those attachments.
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { ProjectSetupEvent } from '@shared/project-settings'
 import { SETUP_TAIL_MAX, useProjectSetup } from './projectSetup'
 
 const ev = (over: Partial<ProjectSetupEvent> = {}): ProjectSetupEvent => ({
-  runKey: 'r1',
+  runKey: 'rk',
+  runId: 'run-a',
   kind: 'setup',
   seq: 1,
   state: 'running',
   ...over
 })
 
-const apply = (e: ProjectSetupEvent, groupId?: string): void =>
-  useProjectSetup.getState().applyEvent('p1', e, groupId)
+const apply = (e: ProjectSetupEvent): void => useProjectSetup.getState().applyEvent(e)
+const attachProject = (projectId: string, runKey: string): void =>
+  useProjectSetup.getState().attachProject(projectId, runKey)
+const runForProject = (projectId: string): ReturnType<typeof useProjectSetup.getState>['byRunKey'][string] =>
+  useProjectSetup.getState().runForProject(projectId)
 
 beforeEach(() => {
-  useProjectSetup.setState({ byProject: {}, byGroup: {} })
+  useProjectSetup.setState({ byRunKey: {}, projectRunKey: {}, groupRunKey: {} })
 })
 
-describe('useProjectSetup', () => {
+describe('useProjectSetup — folding the event stream', () => {
   it('opens a run entry from the first event and appends chunks in seq order', () => {
     apply(ev({ seq: 1, chunk: 'installing…\n' }))
     apply(ev({ seq: 2, chunk: 'done\n' }))
-    const run = useProjectSetup.getState().byProject.p1!
-    expect(run.runKey).toBe('r1')
+    const run = useProjectSetup.getState().byRunKey.rk!
+    expect(run.runKey).toBe('rk')
+    expect(run.runId).toBe('run-a')
     expect(run.kind).toBe('setup')
     expect(run.state).toBe('running')
     expect(run.tail).toBe('installing…\ndone\n')
@@ -38,7 +52,7 @@ describe('useProjectSetup', () => {
     apply(ev({ seq: 1, chunk: 'a' }))
     apply(ev({ seq: 2, chunk: 'b' }))
     apply(ev({ seq: 2, chunk: 'b' }))
-    expect(useProjectSetup.getState().byProject.p1!.tail).toBe('ab')
+    expect(useProjectSetup.getState().byRunKey.rk!.tail).toBe('ab')
   })
 
   it('drops a STALE seq that arrives after a newer one', () => {
@@ -47,7 +61,7 @@ describe('useProjectSetup', () => {
     // seq 2 lost the race; re-inserting it here would put the output out of order AND would let a
     // stale `running` overwrite a terminal state.
     apply(ev({ seq: 2, chunk: 'b', state: 'done', exitCode: 0 }))
-    const run = useProjectSetup.getState().byProject.p1!
+    const run = useProjectSetup.getState().byRunKey.rk!
     expect(run.tail).toBe('ac')
     expect(run.state).toBe('running')
     expect(run.exitCode).toBeUndefined()
@@ -56,7 +70,7 @@ describe('useProjectSetup', () => {
   it('caps the tail at 8 KB, keeping the END (the failure is at the bottom, not the top)', () => {
     apply(ev({ seq: 1, chunk: 'x'.repeat(SETUP_TAIL_MAX) }))
     apply(ev({ seq: 2, chunk: 'TAIL' }))
-    const { tail } = useProjectSetup.getState().byProject.p1!
+    const { tail } = useProjectSetup.getState().byRunKey.rk!
     expect(tail.length).toBe(SETUP_TAIL_MAX)
     expect(tail.endsWith('TAIL')).toBe(true)
     expect(tail.startsWith('x')).toBe(true)
@@ -64,41 +78,84 @@ describe('useProjectSetup', () => {
 
   it('caps a single over-long chunk too', () => {
     apply(ev({ seq: 1, chunk: 'y'.repeat(SETUP_TAIL_MAX * 3) }))
-    expect(useProjectSetup.getState().byProject.p1!.tail.length).toBe(SETUP_TAIL_MAX)
+    expect(useProjectSetup.getState().byRunKey.rk!.tail.length).toBe(SETUP_TAIL_MAX)
   })
 
   it('records the terminal state and exit code', () => {
     apply(ev({ seq: 1, chunk: 'boom\n' }))
     apply(ev({ seq: 2, state: 'failed', exitCode: 2 }))
-    const run = useProjectSetup.getState().byProject.p1!
+    const run = useProjectSetup.getState().byRunKey.rk!
     expect(run.state).toBe('failed')
     expect(run.exitCode).toBe(2)
     expect(run.tail).toBe('boom\n')
   })
 
-  it('a NEW runKey starts a fresh entry — the previous run’s output never bleeds into it', () => {
+  it('a NEW runKey is its own entry — one project’s setup and archive never share a slot', () => {
+    apply(ev({ seq: 1, chunk: 'setup output\n' }))
+    apply(ev({ runKey: 'rk-archive', runId: 'run-b', kind: 'archive', seq: 1, chunk: 'archive output\n' }))
+    expect(useProjectSetup.getState().byRunKey.rk!.tail).toBe('setup output\n')
+    expect(useProjectSetup.getState().byRunKey['rk-archive']!.tail).toBe('archive output\n')
+  })
+
+  it('C1: a SECOND run under the SAME runKey (new runId) starts fresh — seq restarting at 1 is not stale', () => {
     apply(ev({ seq: 1, chunk: 'first run\n' }))
-    apply(ev({ seq: 2, state: 'done', exitCode: 0 }))
-    apply(ev({ runKey: 'r2', kind: 'archive', seq: 1, chunk: 'second\n' }))
-    const run = useProjectSetup.getState().byProject.p1!
-    expect(run.runKey).toBe('r2')
-    expect(run.kind).toBe('archive')
+    apply(ev({ seq: 2, state: 'failed', exitCode: 1 }))
+    // The user hits Run again. Same script, same location ⇒ the SAME deterministic runKey, and the
+    // service's seq counter starts over. Folding on runKey+seq alone would drop every one of these
+    // as stale and leave the failed badge standing over a live run.
+    apply(ev({ runId: 'run-b', seq: 1, chunk: 'second run\n' }))
+    const run = useProjectSetup.getState().byRunKey.rk!
+    expect(run.runId).toBe('run-b')
     expect(run.state).toBe('running')
-    expect(run.tail).toBe('second\n')
+    expect(run.tail).toBe('second run\n')
     expect(run.exitCode).toBeUndefined()
+    expect(run.seq).toBe(1)
   })
 
-  it('routes a worktree run to byGroup, leaving the project entry alone', () => {
+  it('and the fresh entry then dedupes on its OWN seq', () => {
+    apply(ev({ seq: 1, chunk: 'first\n' }))
+    apply(ev({ runId: 'run-b', seq: 1, chunk: 'second\n' }))
+    apply(ev({ runId: 'run-b', seq: 1, chunk: 'second\n' }))
+    expect(useProjectSetup.getState().byRunKey.rk!.tail).toBe('second\n')
+  })
+})
+
+describe('useProjectSetup — lane attachment', () => {
+  it('records an event for a runKey nobody has attached yet', () => {
+    // The ack and the first event race; the attachment may land a tick later, and the head of the
+    // output must survive that.
+    apply(ev({ seq: 1, chunk: 'early\n' }))
+    expect(runForProject('p1')).toBeUndefined()
+    attachProject('p1', 'rk')
+    expect(runForProject('p1')!.tail).toBe('early\n')
+  })
+
+  it('does NOT surface an unattached run in a project’s lane', () => {
+    apply(ev({ runKey: 'someone-elses', runId: 'run-z', seq: 1, chunk: 'not mine\n' }))
+    attachProject('p1', 'rk')
+    expect(runForProject('p1')).toBeUndefined()
+  })
+
+  it('routes a worktree run through attachGroup, independently of the project lane', () => {
+    attachProject('p1', 'rk')
+    useProjectSetup.getState().attachGroup('g1', 'rk-worktree')
     apply(ev({ seq: 1, chunk: 'project\n' }))
-    apply(ev({ runKey: 'r9', seq: 1, chunk: 'group\n' }), 'g1')
-    expect(useProjectSetup.getState().byProject.p1!.tail).toBe('project\n')
-    expect(useProjectSetup.getState().byGroup.g1!.tail).toBe('group\n')
-    // …and the two dedupe independently: same seq, different lane.
-    apply(ev({ runKey: 'r9', seq: 2, chunk: 'more\n' }), 'g1')
-    expect(useProjectSetup.getState().byGroup.g1!.tail).toBe('group\nmore\n')
+    apply(ev({ runKey: 'rk-worktree', runId: 'run-w', seq: 1, chunk: 'worktree\n' }))
+    expect(runForProject('p1')!.tail).toBe('project\n')
+    expect(useProjectSetup.getState().runForGroup('g1')!.tail).toBe('worktree\n')
   })
 
-  it('subscribeProject wires api.projectSetup.onEvent into applyEvent and returns its unsubscribe', () => {
+  it('re-attaching moves a lane to the newer run', () => {
+    apply(ev({ seq: 1, chunk: 'old\n' }))
+    attachProject('p1', 'rk')
+    apply(ev({ runKey: 'rk2', runId: 'run-b', seq: 1, chunk: 'new\n' }))
+    attachProject('p1', 'rk2')
+    expect(runForProject('p1')!.tail).toBe('new\n')
+  })
+})
+
+describe('useProjectSetup — subscription', () => {
+  it('wires api.projectSetup.onEvent into applyEvent and returns its unsubscribe', () => {
     let emit: ((e: ProjectSetupEvent) => void) | null = null
     const off = vi.fn()
     const onEvent = vi.fn((_projectId: string, cb: (e: ProjectSetupEvent) => void) => {
@@ -109,7 +166,7 @@ describe('useProjectSetup', () => {
     const unsubscribe = useProjectSetup.getState().subscribeProject('p1')
     expect(onEvent).toHaveBeenCalledWith('p1', expect.any(Function))
     emit!(ev({ seq: 1, chunk: 'from the wire' }))
-    expect(useProjectSetup.getState().byProject.p1!.tail).toBe('from the wire')
+    expect(useProjectSetup.getState().byRunKey.rk!.tail).toBe('from the wire')
     unsubscribe()
     expect(off).toHaveBeenCalledTimes(1)
   })
