@@ -152,6 +152,7 @@ import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
 import { PtyPressureBanner } from '../components/PtyPressureBanner'
+import { ShortcutCaptureBanner } from '../components/ShortcutCaptureBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CapabilityNotice } from '../components/CapabilityNotice'
@@ -178,12 +179,13 @@ import {
   type GlobalKeyEvent,
   type GlobalKeydownDeps
 } from '../lib/globalKeybindings'
-import type { ContextElement } from '../lib/keyContext'
+import { isTerminalTarget, type ContextElement } from '../lib/keyContext'
 import {
   activeKeybindingOverrides,
   chipFor,
   commandTooltip,
   dictationBinding,
+  noteTerminalCapture,
   terminalShortcutPolicy
 } from '../lib/keybindingOverrides'
 import { UsageIndicator } from '../components/UsageIndicator'
@@ -3993,11 +3995,31 @@ export function Canvas() {
   // node's × button. With nothing selected it falls back to closing the window.
   useEffect(() => {
     return window.nodeTerminal.onCloseNode(() => {
+      // The two main-intercepted chords never reach the window dispatcher, so their capture
+      // notice has to be raised HERE, at the IPC receiver — asking the live focus, because the
+      // IPC carries no context. Notice only: nothing is consumed, and the close below runs
+      // exactly as it did before (`noteTerminalCapture` is silent under terminal-first, on a
+      // repeat, and outside a focused terminal).
+      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+        noteTerminalCapture('node.close')
+      }
       const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
       if (ids.length) deleteNodes(ids)
       else window.nodeTerminal.closeWindow()
     })
   }, [deleteNodes])
+
+  // The second main-intercepted chord (⌘/Ctrl+M). Canvas does NOT own the markdown toggle —
+  // TerminalNode and EditorNode each subscribe for themselves — so this listener exists ONLY to
+  // raise the same notice, and must stay side-effect-free: it consumes nothing, prevents nothing,
+  // and the nodes' own subscriptions are untouched by it.
+  useEffect(() => {
+    return window.nodeTerminal.onMarkdownToggle(() => {
+      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+        noteTerminalCapture('node.toggleMarkdown')
+      }
+    })
+  }, [])
 
   // Native View menu → renderer. The menu item click sends IPC; these listeners fire the canvas
   // action. Snap-to-Grid flips the setting (the `autoAlignGrid` effect above runs the arrange on
@@ -5230,6 +5252,10 @@ export function Canvas() {
     // Read per keystroke (the deps object is rebuilt each render anyway, but the thunk is what
     // the contract asks for): a policy change takes effect immediately, with no re-registration.
     terminalFirst: () => terminalShortcutPolicy() === 'terminal-first',
+    // The notice half. `noteTerminalCapture` re-asks the policy and the once-per-command ledger
+    // itself, so this is a plain pass-through — the dispatcher decides that a capture HAPPENED,
+    // the lib decides whether it is worth saying.
+    onTerminalCapture: noteTerminalCapture,
     handlers: {
       'app.commandPalette': () => { setPaletteOpen((v) => !v); return true },
       'app.settings': () => { setSettingsSection(undefined); setSettingsOpen(true); return true },
@@ -9170,6 +9196,14 @@ export function Canvas() {
         {/* This MACHINE is running out of pty devices — subscribes for itself; a failed
             "Fix automatically…" lands in the same notice strip as every other async op. */}
         <PtyPressureBanner onError={(text) => setNotice({ kind: 'error', text })} />
+        {/* App-first just took a chord from a focused terminal, once per command ever —
+            subscribes for itself; only the route into Settings is Canvas's to give. */}
+        <ShortcutCaptureBanner
+          onOpenShortcuts={() => {
+            setSettingsSection('shortcuts')
+            setSettingsOpen(true)
+          }}
+        />
         {migrationNote && (
           <div className="announce-banner announce-banner--info">
             <span className="announce-banner__dot" />
