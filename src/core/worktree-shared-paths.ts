@@ -68,6 +68,22 @@ async function realpathOrNull(p: string): Promise<string | null> {
   }
 }
 
+/** Realpath of the DEEPEST EXISTING ancestor of `p` (p itself if it exists, else walk up until a
+ *  component exists), or `null` on failure. Used to contain a path we are about to CREATE: the leaf
+ *  and some parents may not exist yet, but the first existing component realpath-resolves any
+ *  intermediate symlink — so we can prove where a `mkdir -p` would actually land BEFORE running it. */
+async function realpathDeepestExisting(p: string): Promise<string | null> {
+  let cur = p
+  // Walk up until an existing component is found. `path.dirname` is idempotent at the root, so the
+  // `parent === cur` check terminates the loop rather than spinning on `/` (which always exists).
+  for (;;) {
+    if (await lexists(cur)) return realpathOrNull(cur)
+    const parent = path.dirname(cur)
+    if (parent === cur) return null
+    cur = parent
+  }
+}
+
 /**
  * Symlink each relative `sharedPath` from `repoRoot` into `worktreeRoot`. Pure fs, never throws;
  * returns a per-entry result list (one `SharedPathResult` per input, order preserved).
@@ -132,6 +148,20 @@ async function materializeOne(
 
     // (6) Create the target's parent tree, then link. On Windows the symlink type matters (a file
     // link and a dir link are distinct); infer it from the source. On POSIX the type is ignored.
+    const realWtAbs = await realpathOrNull(wtAbs)
+
+    // (6a) PRE-mkdir containment. `mkdir -p` itself FOLLOWS intermediate symlinks, so for a deeper
+    // entry like `cfg/deep/x` where the checked-out tree has `cfg -> /outside`, the mkdir would
+    // create `/outside/deep` OUTSIDE the worktree root before the post-mkdir guard (6b) could reject
+    // it (an empty-directory-creation primitive from a hostile repo). The containment check must
+    // therefore run BEFORE the mkdir, not only after it: resolve the realpath of the deepest EXISTING
+    // ancestor of the parent-to-create (which realpath-resolves any such intermediate symlink) and
+    // assert it stays under the worktree root. Fail closed on realpath failure.
+    const realDeepest = await realpathDeepestExisting(path.dirname(target))
+    if (!realWtAbs || !isInsideDir(realDeepest ?? undefined, realWtAbs)) {
+      return { path: entry, status: 'skipped-unsafe' }
+    }
+
     await fs.mkdir(path.dirname(target), { recursive: true })
 
     // (6b) TARGET realpath containment — the authoritative guard against the symlink-plant escape.
@@ -140,7 +170,6 @@ async function materializeOne(
     // then write THROUGH it and plant a link OUTSIDE the worktree root. The target's parent exists
     // post-mkdir, so realpath resolves any such intermediate symlink; assert the REAL parent stays
     // inside the worktree. A realpath failure → fail closed as skipped-unsafe.
-    const realWtAbs = await realpathOrNull(wtAbs)
     const realParent = await realpathOrNull(path.dirname(target))
     if (!realWtAbs || !isInsideDir(realParent ?? undefined, realWtAbs)) {
       return { path: entry, status: 'skipped-unsafe' }

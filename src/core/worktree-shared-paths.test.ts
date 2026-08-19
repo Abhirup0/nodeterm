@@ -139,6 +139,23 @@ describe('materializeSharedPaths', () => {
     await expect(fs.lstat(path.join(worktreeRoot, 'evil', 'secret'))).rejects.toBeTruthy()
   })
 
+  it('does not mkdir -p through an intermediate symlink outside the worktree (empty-dir plant)', async () => {
+    // A real deep source so we get past the missing-source check and reach the parent-creation step.
+    await fs.mkdir(path.join(repoRoot, 'cfg', 'deep'), { recursive: true })
+    await fs.writeFile(path.join(repoRoot, 'cfg', 'deep', 'x'), 'PAYLOAD', 'utf-8')
+    // The checked-out worktree has `cfg` as a symlink OUTSIDE the worktree; `mkdir -p <wt>/cfg/deep`
+    // would follow it and create `<outside>/deep` before any post-mkdir guard.
+    const outside = path.join(base, 'outside-mkdir')
+    await fs.mkdir(outside, { recursive: true })
+    await fs.symlink(outside, path.join(worktreeRoot, 'cfg'))
+
+    const res = await materializeSharedPaths(repoRoot, worktreeRoot, ['cfg/deep/x'])
+
+    expect(statusOf(res, 'cfg/deep/x')).toBe('skipped-unsafe')
+    // The mkdir must NOT have run through the symlink.
+    await expect(fs.lstat(path.join(outside, 'deep'))).rejects.toBeTruthy()
+  })
+
   it('still links a legitimate in-repo symlink source (realpath stays under the repo root)', async () => {
     await fs.mkdir(path.join(repoRoot, 'real'), { recursive: true })
     await fs.writeFile(path.join(repoRoot, 'real', 'f'), 'INREPO', 'utf-8')
