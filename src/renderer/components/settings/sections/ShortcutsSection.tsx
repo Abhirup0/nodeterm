@@ -68,7 +68,7 @@ const NOTES: Partial<Record<CommandId, string>> = {
  *  knows about commands) decide whether a *setting* is on screen. */
 const POLICY_LABEL = 'While a terminal has focus'
 const POLICY_DESCRIPTION =
-  "App shortcuts first (the default): shared shortcuts like ⌘K keep working over a focused terminal, and the first time one is captured that way the terminal says so — once per chord, ever. Terminal first: every chord but the terminal's own reaches the shell or TUI, including Close (⌘W / Ctrl+W), Minimize (⌘M / Ctrl+M), actual size (⌘0) and the ⌘1–9 project jumps — the application menu's Minimize and Close entries grey out while a terminal is focused, so those chords can reach it."
+  "App shortcuts first (the default): shared shortcuts like ⌘K keep working over a focused terminal, and the first time one is captured that way the terminal says so — once per chord, ever. Terminal first: every chord but the terminal's own reaches the shell or TUI, including Close (⌘W / Ctrl+W), Minimize (⌘M / Ctrl+M), actual size (⌘0), the kanban board (⌘⇧B), Settings (⌘,) and the ⌘1–9 project jumps — the matching application-menu entries grey out while a terminal is focused, so those chords can reach it. Reload (⌘R / ⌘⇧R) is the one exception and always stays with the app, so a stuck window can still be recovered."
 const POLICY_ROW: SettingsSearchEntry = {
   title: POLICY_LABEL,
   description: POLICY_DESCRIPTION,

@@ -4001,12 +4001,17 @@ export function Canvas() {
       // IPC carries no context. Notice only: nothing is consumed, and the close below runs
       // exactly as it did before (`noteTerminalCapture` is silent under terminal-first, on a
       // repeat, and outside a focused terminal).
-      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
-        noteTerminalCapture('node.close')
-      }
       const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
-      if (ids.length) deleteNodes(ids)
-      else window.nodeTerminal.closeWindow()
+      // The notice sits INSIDE the branch that actually captured the key. With nothing selected
+      // ⌘W closes the WINDOW, and a notice raised there would burn this command's once-ever slot
+      // on a banner nobody can read — the window is going away in the same tick — leaving the user
+      // permanently unable to be told why ⌘W stops reaching their shell.
+      if (ids.length) {
+        if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+          noteTerminalCapture('node.close')
+        }
+        deleteNodes(ids)
+      } else window.nodeTerminal.closeWindow()
     })
   }, [deleteNodes])
 
@@ -4033,8 +4038,18 @@ export function Canvas() {
   useEffect(() => {
     return window.nodeTerminal.onFitView(() => fitAll())
   }, [fitAll])
+  // ⌘⇧B and ⌘, are the other two chords the dispatcher can never notice — not because main steals
+  // them (it does not; they are ordinary registry commands) but because the MENU owns their
+  // accelerators above the page under app-first, so the window keydown listener never runs and its
+  // notice half never fires. Like the two receivers above, the notice is raised HERE and asks the
+  // live focus, since the IPC carries no context. Notice ONLY: nothing is consumed, the toggle and
+  // the settings open run exactly as before, and `noteTerminalCapture` is silent under
+  // terminal-first, on a repeat, and outside a focused terminal.
   useEffect(() => {
     return window.nodeTerminal.onToggleKanban(() => {
+      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+        noteTerminalCapture('view.kanbanToggle')
+      }
       const id = useProjects.getState().activeProjectId
       if (id) useViewMode.getState().toggle(id)
     })
@@ -4043,6 +4058,9 @@ export function Canvas() {
   // Cmd+, keydown handler alone would leave the menu item inert — main forwards it as IPC.
   useEffect(() => {
     return window.nodeTerminal.onOpenSettings(() => {
+      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+        noteTerminalCapture('app.settings')
+      }
       setSettingsSection(undefined)
       setSettingsOpen(true)
     })

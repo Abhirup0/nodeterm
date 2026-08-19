@@ -127,9 +127,16 @@ describe('setKeybindingOverride', () => {
   })
 })
 
-// NODE ENV, deliberately: this file runs without jsdom (see the note on noteTerminalCapture),
-// so only the SETTINGS side is asserted here. The 'nodeterm:shortcut-captured' event is
-// window-guarded and its dispatch is covered by the banner's jsdom test.
+// NODE ENV, deliberately: this file runs without jsdom (see the note on noteTerminalCapture), so
+// only the SETTINGS side is asserted here — WHETHER a notice is raised (the policy gate, the
+// once-ever ledger), never what it looks like.
+//
+// The other side is `components/ShortcutCaptureBanner.test.tsx` (jsdom): it dispatches
+// 'nodeterm:shortcut-captured' ITSELF and asserts what the banner does with it — copy, replacement,
+// the 12s clock, dismissal, and the two silent cases (unknown id, unbound command). Be precise
+// about the seam: nothing presses `noteTerminalCapture`'s own `window.dispatchEvent` line, which is
+// `typeof window` guarded and cannot run here. The two files meet at the event NAME and its
+// `detail.commandId` shape, and that agreement is by convention, not by a test.
 describe('terminalShortcutPolicy / noteTerminalCapture', () => {
   const seen = () => useSettings.getState().settings.seenShortcutCaptureNotices
   const setSettings = (patch: Record<string, unknown>) =>

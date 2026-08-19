@@ -225,13 +225,18 @@ export function policyStandsDown(
 }
 
 /**
- * Menu item ids `buildAppMenu` stamps on the two roles whose ACCELERATORS survive an intercept
+ * Menu item ids `buildAppMenu` stamps on the items whose ACCELERATORS survive an intercept
  * stand-down. Exported constants used by both sides — the template that sets them and the sync that
  * looks them up — because `getMenuItemById` answers `null` for a typo and the fail-safe there is to
  * do nothing, which is indistinguishable from the feature working.
  */
 export const MENU_ITEM_ID_MINIMIZE = 'window-minimize'
 export const MENU_ITEM_ID_CLOSE = 'window-close'
+/** View ▸ Toggle Kanban Board (⌘⇧B). In `viewSubmenu`, which BOTH templates include. */
+export const MENU_ITEM_ID_KANBAN = 'view-kanban-toggle'
+/** The Settings item (⌘,) — mac's app menu, off-mac's own `Settings` menu; ONE `settingsItem`
+ *  object shared by both templates, so the id exists on every platform. */
+export const MENU_ITEM_ID_SETTINGS = 'app-settings'
 
 /**
  * PURE. Which menu items must be disabled while the intercepts are stood down.
@@ -252,13 +257,33 @@ export const MENU_ITEM_ID_CLOSE = 'window-close'
  * stands: nothing here re-enables recording those chords, because a recorder that silently disabled
  * Minimize for the duration of a keypress is a different and worse trade.
  *
- * mac carries only minimize: the mac template has no `{role:'close'}` at all (Window ▸ Minimize /
- * Zoom / Front), which is exactly why `keydownIntercept` is ⌘W's only handler there.
+ * mac carries no CLOSE id: the mac template has no `{role:'close'}` at all (Window ▸ Minimize /
+ * Zoom / Front), which is exactly why `keydownIntercept` is ⌘W's only handler there. Kanban and
+ * Settings are on BOTH platforms — one `viewSubmenu` array and one `settingsItem` object are shared
+ * by the two templates — so they are suspended on both.
+ *
+ * **What suspending kanban/settings actually buys, since neither is an intercepted chord.** ⌘⇧B and
+ * ⌘, are ordinary REGISTRY commands (`view.kanbanToggle` / `app.settings`); the renderer's
+ * dispatcher would resolve them if it ever saw the keydown, but under app-first the MENU takes them
+ * above the page and the dispatcher never runs. Disabling the items removes that theft, so under
+ * terminal-first with a terminal focused the chord reaches the page → the resolver, which REFUSES
+ * it (a terminal context under terminal-first matches only commands flagged `allowInTerminal`, and
+ * that flag is app-first-only) → xterm → the PTY. Without these two ids, terminal-first would
+ * deliver every chord to the shell EXCEPT the two the menu happened to own, which is the same
+ * inconsistency the minimize/close leg exists to remove.
+ *
+ * **RELOAD (⌘R / ⌘⇧R) is deliberately NOT here — named exception, do not "complete" the list.**
+ * `{role:'reload'}` / `{role:'forceReload'}` are the app's crash-recovery lever: a renderer wedged
+ * badly enough to stop dispatching keys is exactly when the user needs them, and a policy that
+ * suspended them would take the lever away precisely in the state that calls for it. The recovery
+ * also depends on the reload actually happening in MAIN — a main-frame navigation is one of the
+ * three sites that reset `terminalFocused`/`shortcutRecording` (see `navigationClearsRecording`),
+ * so suspending reload would strand the very bits a stuck page leaves set. The cost is honest and
+ * small: a terminal-first user's ⌘R reloads the window instead of reaching the shell.
  */
 export function menuItemIdsToSuspend(isMac: boolean): string[] {
-  return isMac
-    ? [MENU_ITEM_ID_MINIMIZE]
-    : [MENU_ITEM_ID_MINIMIZE, MENU_ITEM_ID_CLOSE]
+  const shared = [MENU_ITEM_ID_MINIMIZE, MENU_ITEM_ID_KANBAN, MENU_ITEM_ID_SETTINGS]
+  return isMac ? shared : [...shared, MENU_ITEM_ID_CLOSE]
 }
 
 /** The renderer channel a claimed action is forwarded on. */
@@ -299,9 +324,11 @@ export interface KeydownInterceptTarget {
  * **What this stand-down does NOT buy, and cannot.** It only stops US from taking the key; it has
  * no say over the application MENU, whose accelerators are handled above the page either way. So
  * every menu accelerator is unrecordable while this stands down — including **⌘M**, which
- * `{role:'minimize'}` owns on every platform, and **Ctrl+W** on Windows/Linux, where the Window
- * submenu has a `{role:'close'}`. Pressing one of those into an armed recorder minimizes/closes the
- * window instead of recording. Concretely, the stand-down fully delivers **⌘0** everywhere and
+ * `{role:'minimize'}` owns on every platform, **⌘⇧B** and **⌘,** (View ▸ Toggle Kanban Board and
+ * Settings, also every platform), and **Ctrl+W** on Windows/Linux, where the Window submenu has a
+ * `{role:'close'}`. Pressing one of those into an armed recorder minimizes/closes the window, opens
+ * the board or opens Settings instead of recording. Concretely, the stand-down fully delivers
+ * **⌘0** everywhere and
  * **⌘W on macOS** (neither is in the menu), and cannot deliver ⌘M anywhere. Fixing that means
  * suspending the MENU while recording (`Menu.setApplicationMenu(null)` around the armed window, or
  * per-item `enabled:false`) — a change to `buildAppMenu`, not to this module. Known limitation;
@@ -318,8 +345,9 @@ export interface KeydownInterceptTarget {
  *
  * **The policy stand-down DOES get the menu leg the recording one does not** — the two cases are
  * different and the paragraph above stays true for recording. `index.ts`'s `syncMenuForStandDown`
- * disables `{role:'minimize'}` (and, off-mac, `{role:'close'}`) for exactly as long as
- * `isStoodDown` is true, via the ids in `menuItemIdsToSuspend` below. It has to: not calling
+ * disables every item in `menuItemIdsToSuspend` below — `{role:'minimize'}`, Toggle Kanban Board
+ * and Settings on all platforms, plus off-mac `{role:'close'}`, with RELOAD deliberately left out —
+ * for exactly as long as `isStoodDown` is true. It has to: not calling
  * `preventDefault` hands the key to the page and, failing that, to the menu, so without the menu
  * leg a terminal-first user's ⌘M would minimize the window and their Ctrl+W — readline's kill-word
  * — would CLOSE it on Windows/Linux, which is strictly worse than not having the policy. With the

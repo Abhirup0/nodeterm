@@ -90,7 +90,9 @@ import {
 import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
 import {
   MENU_ITEM_ID_CLOSE,
+  MENU_ITEM_ID_KANBAN,
   MENU_ITEM_ID_MINIMIZE,
+  MENU_ITEM_ID_SETTINGS,
   installKeydownIntercepts,
   menuItemIdsToSuspend,
   navigationClearsRecording,
@@ -304,6 +306,11 @@ const currentInterceptBindings = (): KeydownInterceptBindings =>
 // `onChange`, never per keystroke. Normalized through the shared helper so an unknown value from a
 // hand-edited settings.json reads as the default `app-first` — i.e. as "keep intercepting", which
 // is the direction that leaves the app working.
+// FIRST-READ STALENESS IS BENIGN, and the ordering is what makes it so: `settingsStore.init()` runs
+// in `whenReady` well before `createWindow` → `buildAppMenu`, whose trailing `syncMenuForStandDown`
+// is the earliest possible read of this memo — so the value it latches is already the user's saved
+// policy, never DEFAULT_SETTINGS, and every later change arrives on `onChange`. The memo can
+// therefore only ever hold what settings.json says.
 let interceptPolicy: TerminalShortcutPolicy | null = null
 const currentInterceptPolicy = (): TerminalShortcutPolicy =>
   (interceptPolicy ??= normalizeTerminalShortcutPolicy(settingsStore.get().terminalShortcutPolicy))
@@ -529,7 +536,13 @@ function buildAppMenu(win: BrowserWindow): void {
   const send = (channel: string): void => {
     if (!win.isDestroyed()) win.webContents.send(channel)
   }
+  // ONE object, placed into BOTH templates below (mac's app menu, off-mac's own `Settings` menu),
+  // so `MENU_ITEM_ID_SETTINGS` resolves on every platform — which is why `menuItemIdsToSuspend`
+  // lists it unconditionally. ⌘, is an ordinary registry command (`app.settings`), not an
+  // intercepted chord: the menu just takes it above the page, and disabling this item under the
+  // stand-down is the only way it can reach a focused terminal.
   const settingsItem: Electron.MenuItemConstructorOptions = {
+    id: MENU_ITEM_ID_SETTINGS,
     label: isMac ? 'Settings…' : 'Settings',
     accelerator: 'CmdOrCtrl+,',
     click: () => send(IPC.appOpenSettings)
@@ -543,6 +556,12 @@ function buildAppMenu(win: BrowserWindow): void {
     // so a reload only re-hydrates the canvas from the workspace store — it never drops a session
     // (same path the crash-reload policy uses). No interceptor claims ⌘R, so the accelerator is
     // honest (unlike ⌘0, which `installKeydownIntercepts` owns for zoom-to-100%).
+    //
+    // These two carry NO id and are the NAMED EXCEPTION to the stand-down (see
+    // `menuItemIdsToSuspend`): ⌘R / ⌘⇧R keep working over a focused terminal under terminal-first,
+    // because a renderer wedged badly enough to stop dispatching keys is exactly when the user
+    // needs the lever — and the reload is also what resets `terminalFocused` / `shortcutRecording`
+    // in main. Do not "complete" the suspend list with them.
     { role: 'reload' },
     { role: 'forceReload' },
     { role: 'toggleDevTools' },
@@ -562,6 +581,11 @@ function buildAppMenu(win: BrowserWindow): void {
       click: () => send(IPC.appFitView)
     },
     {
+      // `viewSubmenu` goes into BOTH templates, so this id resolves on every platform (the same
+      // reason `menuItemIdsToSuspend` lists it unconditionally). ⌘⇧B is a registry command
+      // (`view.kanbanToggle`) the menu happens to own above the page; suspending the item is what
+      // lets a terminal-first user's ⌘⇧B reach the shell like every other chord.
+      id: MENU_ITEM_ID_KANBAN,
       label: 'Toggle Kanban Board',
       accelerator: 'CmdOrCtrl+Shift+B',
       click: () => send(IPC.appToggleKanban)
@@ -666,6 +690,12 @@ function buildAppMenu(win: BrowserWindow): void {
  * nothing matches) → xterm → the PTY. That is what makes "everything reaches the shell" true for
  * ⌘M and Ctrl+W too, not just for ⌘0 and mac's ⌘W.
  *
+ * The list is `menuItemIdsToSuspend` and it also carries **Toggle Kanban Board (⌘⇧B)** and
+ * **Settings (⌘,)** on every platform. Those two are not intercepted chords at all — they are
+ * ordinary registry commands the menu simply takes above the page, which is why the dispatcher
+ * never sees them and could not stand them down itself. **Reload (⌘R / ⌘⇧R) is the named
+ * exception** and stays live while stood down; see `menuItemIdsToSuspend`'s comment for why.
+ *
  * Called from every place the stood-down answer can change — the `ui:terminal-focus` receiver, the
  * policy recompute in `settingsStore.onChange`, `clearRendererKeyState`, and the end of
  * `buildAppMenu` (a rebuild resets `enabled`). NEVER per keystroke: this is a menu mutation, and
@@ -676,8 +706,9 @@ function buildAppMenu(win: BrowserWindow): void {
  * where the app still works — the cost is that a silent id drift is invisible, which is why both
  * sides of the lookup use the same exported constants rather than string literals.
  *
- * KNOWN COST, deliberate: while a terminal is focused under terminal-first, Window ▸ Minimize is
- * greyed out to the MOUSE as well. It re-enables the moment focus leaves the terminal (and the
+ * KNOWN COST, deliberate: while a terminal is focused under terminal-first, every suspended item —
+ * Window ▸ Minimize, View ▸ Toggle Kanban Board, Settings, and off-mac Window ▸ Close — is greyed
+ * out to the MOUSE as well. They re-enable the moment focus leaves the terminal (and the
  * traffic-light button is unaffected), so this is a visible but self-healing trade. The alternative
  * — rebuilding the whole menu without those accelerators on every focus change — costs a menu
  * rebuild per click between the canvas and a terminal, and closes any menu the user has open.

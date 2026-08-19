@@ -3,7 +3,9 @@ import { IPC } from '../shared/ipc'
 import { MAIN_INTERCEPTED_COMMAND_IDS } from '../shared/keybindings'
 import {
   MENU_ITEM_ID_CLOSE,
+  MENU_ITEM_ID_KANBAN,
   MENU_ITEM_ID_MINIMIZE,
+  MENU_ITEM_ID_SETTINGS,
   installKeydownIntercepts,
   keydownIntercept,
   menuItemIdsToSuspend,
@@ -491,12 +493,45 @@ describe('terminal-first stands every interception down while a terminal is focu
  * menu items for exactly as long as the intercepts are stood down, and this list is which ones.
  */
 describe('menuItemIdsToSuspend', () => {
-  it('is minimize everywhere and, off-mac, close as well', () => {
+  it('suspends minimize, kanban and settings everywhere, and close only off-mac', () => {
     // The mac template has no `{role:'close'}` at all (Window ▸ Minimize / Zoom / Front), which is
     // exactly why `keydownIntercept` is ⌘W's only handler there. Listing a close id on mac would
     // be a no-op today and a silent lie the day someone adds the role.
-    expect(menuItemIdsToSuspend(true)).toEqual([MENU_ITEM_ID_MINIMIZE])
-    expect(menuItemIdsToSuspend(false)).toEqual([MENU_ITEM_ID_MINIMIZE, MENU_ITEM_ID_CLOSE])
+    //
+    // Kanban and Settings, by contrast, ARE on both templates — `buildAppMenu` builds one
+    // `viewSubmenu` array and one `settingsItem` object and puts each into the mac and the
+    // Windows/Linux template — so an asymmetry for them would be the lie instead.
+    expect(menuItemIdsToSuspend(true)).toEqual([
+      MENU_ITEM_ID_MINIMIZE,
+      MENU_ITEM_ID_KANBAN,
+      MENU_ITEM_ID_SETTINGS
+    ])
+    expect(menuItemIdsToSuspend(false)).toEqual([
+      MENU_ITEM_ID_MINIMIZE,
+      MENU_ITEM_ID_KANBAN,
+      MENU_ITEM_ID_SETTINGS,
+      MENU_ITEM_ID_CLOSE
+    ])
+  })
+
+  // ⌘⇧B and ⌘, are ordinary registry commands, not intercepted chords — the menu simply takes them
+  // above the page, so under terminal-first they were the two chords that did NOT reach the shell.
+  // Membership is the whole fix, which is why it is pinned per-id rather than only by the arrays.
+  it('carries the two menu-owned registry chords on both platforms', () => {
+    for (const isMac of [true, false]) {
+      expect(menuItemIdsToSuspend(isMac)).toContain(MENU_ITEM_ID_KANBAN)
+      expect(menuItemIdsToSuspend(isMac)).toContain(MENU_ITEM_ID_SETTINGS)
+    }
+  })
+
+  // The named exception. `{role:'reload'}` / `{role:'forceReload'}` keep their accelerators while
+  // stood down ON PURPOSE: a wedged renderer is exactly when ⌘R is needed, and a main-frame
+  // navigation is one of the three sites that reset `terminalFocused` / `shortcutRecording`. There
+  // is no id to assert the absence of, so this pins the LENGTH — a fourth/fifth entry appearing
+  // here (a reload id being the likely one) reds this test and sends the author to the comment.
+  it('does not grow silently — reload is deliberately not suspended', () => {
+    expect(menuItemIdsToSuspend(true)).toHaveLength(3)
+    expect(menuItemIdsToSuspend(false)).toHaveLength(4)
   })
 
   // The ids are the ONLY link between `buildAppMenu`'s template and the sync that disables the
@@ -504,9 +539,14 @@ describe('menuItemIdsToSuspend', () => {
   // which looks exactly like the feature working. Both sides import these constants, so the typo
   // class cannot happen; this pins that they are distinct and non-empty.
   it('the ids are distinct and non-empty', () => {
-    expect(MENU_ITEM_ID_MINIMIZE).toBeTruthy()
-    expect(MENU_ITEM_ID_CLOSE).toBeTruthy()
-    expect(MENU_ITEM_ID_MINIMIZE).not.toBe(MENU_ITEM_ID_CLOSE)
+    const ids = [
+      MENU_ITEM_ID_MINIMIZE,
+      MENU_ITEM_ID_CLOSE,
+      MENU_ITEM_ID_KANBAN,
+      MENU_ITEM_ID_SETTINGS
+    ]
+    for (const id of ids) expect(id).toBeTruthy()
+    expect(new Set(ids).size).toBe(ids.length)
   })
 })
 
