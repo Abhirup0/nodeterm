@@ -88,7 +88,11 @@ import {
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
-import { installKeydownIntercepts } from './keydown-intercept'
+import {
+  installKeydownIntercepts,
+  resolveInterceptBindings,
+  type KeydownInterceptBindings
+} from './keydown-intercept'
 import {
   initNotchHud,
   applyNotchHudSettings,
@@ -276,6 +280,18 @@ function isSafeExternalUrl(url: unknown): url is string {
 }
 
 const settingsStore = new SettingsStore()
+// ⌘M / ⌘W are registry commands (`node.toggleMarkdown` / `node.close`), so what the window
+// intercepts follows the user's settings. Resolved LAZILY (first keystroke, long after
+// `settingsStore.init()` in `whenReady`) rather than at module load, where `get()` would still be
+// DEFAULT_SETTINGS and every override would be missed until the next save; recomputed on
+// `onChange`, which fires after a successful save. Never per keystroke — sanitize is real work.
+const interceptIsMac = process.platform === 'darwin'
+let interceptBindings: KeydownInterceptBindings | null = null
+const currentInterceptBindings = (): KeydownInterceptBindings =>
+  (interceptBindings ??= resolveInterceptBindings(settingsStore.get().keybindings, interceptIsMac))
+settingsStore.onChange((s) => {
+  interceptBindings = resolveInterceptBindings(s.keybindings, interceptIsMac)
+})
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
 // Dictation: local whisper.cpp models live under userData, one dir per install (same convention
@@ -668,8 +684,9 @@ function createWindow(): BrowserWindow {
 
   // Steal ⌘M / ⌘W / ⌘0 back from Electron's default application menu (minimize / close /
   // resetZoom) and forward each to the renderer instead. The decision — and, importantly, what it
-  // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test.
-  installKeydownIntercepts(win)
+  // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test. The first two
+  // are the user's effective `node.toggleMarkdown` / `node.close` bindings (⌘0 is not remappable).
+  installKeydownIntercepts(win, currentInterceptBindings, interceptIsMac)
 
   // Open external links in the system browser — only safe schemes (no file://, no custom
   // protocol handlers). Reachable from remotely-fetched announcement URLs and rendered

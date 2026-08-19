@@ -3,6 +3,8 @@ import { IPC } from '../shared/ipc'
 import {
   installKeydownIntercepts,
   keydownIntercept,
+  resolveInterceptBindings,
+  type KeydownInterceptBindings,
   type KeydownInterceptInput,
   type KeydownInterceptTarget
 } from './keydown-intercept'
@@ -38,12 +40,23 @@ function input(over: Partial<KeydownInterceptInput> = {}): KeydownInterceptInput
   }
 }
 
+/** The shipped bindings, per platform. `node.close` / `node.toggleMarkdown` default to `Cmd+W` /
+ *  `Cmd+M` on both, but `Cmd` RESOLVES differently — ⌘ on mac, Control elsewhere — which is what
+ *  makes `press(…, { isMac: false })` below the Windows/Linux run of the same chord. */
+const DEFAULTS = resolveInterceptBindings(undefined, true)
+const DEFAULTS_PC = resolveInterceptBindings(undefined, false)
+
 /**
  * Press a key at the real installation seam: register the handler on a fake window exactly as
  * `createWindow` does, then dispatch. Covers the wiring (`preventDefault` is called, the channel is
  * sent on `webContents`), not just the pure decision.
  */
-function press(over: Partial<KeydownInterceptInput> = {}): { prevented: boolean; sent: string[] } {
+function press(
+  over: Partial<KeydownInterceptInput> = {},
+  opts: { bindings?: KeydownInterceptBindings; isMac?: boolean } = {}
+): { prevented: boolean; sent: string[] } {
+  const isMac = opts.isMac ?? true
+  const bindings = opts.bindings ?? (isMac ? DEFAULTS : DEFAULTS_PC)
   let handler:
     | ((event: { preventDefault(): void }, input: KeydownInterceptInput) => void)
     | null = null
@@ -58,7 +71,7 @@ function press(over: Partial<KeydownInterceptInput> = {}): { prevented: boolean;
       }
     }
   }
-  installKeydownIntercepts(win)
+  installKeydownIntercepts(win, () => bindings, isMac)
   if (!handler) throw new Error('installKeydownIntercepts registered no before-input-event listener')
   let prevented = false
   ;(handler as (e: { preventDefault(): void }, i: KeydownInterceptInput) => void)(
@@ -116,6 +129,10 @@ describe('⌘0 → canvas back to 100%', () => {
 
   it('is intercepted under Ctrl too (Windows / Linux)', () => {
     expect(press({ control: true })).toEqual({ prevented: true, sent: [IPC.appZoomActualSize] })
+    expect(press({ control: true }, { isMac: false })).toEqual({
+      prevented: true,
+      sent: [IPC.appZoomActualSize]
+    })
   })
 
   // Matched on the physical key, so the chord survives a layout where the zero key prints
@@ -147,24 +164,22 @@ describe('⌘M → markdown view, stolen back from Window ▸ Minimize', () => {
       prevented: true,
       sent: [IPC.appToggleMarkdown]
     })
-    expect(press({ control: true, key: 'm', code: 'KeyM' })).toEqual({
+    // Windows / Linux: the same `Cmd+M` binding resolves to Control there.
+    expect(press({ control: true, key: 'm', code: 'KeyM' }, { isMac: false })).toEqual({
       prevented: true,
       sent: [IPC.appToggleMarkdown]
     })
   })
 
-  // The shipped breadth of this branch: unlike ⌘W and ⌘0 it tests no Shift/Alt, so ⌘⇧M and ⌘⌥M
-  // toggle too. Pinned as-is — narrowing it is a real behaviour change (⌘⇧M would go back to the
-  // menu) and should turn this red on purpose rather than slip through.
-  it('also claims ⌘⇧M and ⌘⌥M', () => {
-    expect(press({ meta: true, shift: true, key: 'M', code: 'KeyM' })).toEqual({
-      prevented: true,
-      sent: [IPC.appToggleMarkdown]
-    })
-    expect(press({ meta: true, alt: true, key: 'm', code: 'KeyM' })).toEqual({
-      prevented: true,
-      sent: [IPC.appToggleMarkdown]
-    })
+  // D-STRICT DELTA (named in the PR body). The old branch was `key === 'm'` under a
+  // `meta || control` guard, so ⌘⇧M, ⌘⌥M and — on mac — ⌃M all toggled too. Matching a real
+  // binding is exact on all four modifier flags, so each of those is now a different chord and
+  // goes back to the page/menu. This is the behaviour change; assert it rather than leave it to
+  // a reader of the diff.
+  it('no longer claims ⌘⇧M, ⌘⌥M, or ⌃M on mac', () => {
+    expect(press({ meta: true, shift: true, key: 'M', code: 'KeyM' })).toEqual(UNTOUCHED)
+    expect(press({ meta: true, alt: true, key: 'm', code: 'KeyM' })).toEqual(UNTOUCHED)
+    expect(press({ control: true, key: 'm', code: 'KeyM' })).toEqual(UNTOUCHED)
   })
 
   it('repeats keep toggling (no auto-repeat rule here, unlike ⌘0)', () => {
@@ -181,7 +196,7 @@ describe('⌘W → close the selected node, stolen back from Window ▸ Close', 
       prevented: true,
       sent: [IPC.appCloseNode]
     })
-    expect(press({ control: true, key: 'w', code: 'KeyW' })).toEqual({
+    expect(press({ control: true, key: 'w', code: 'KeyW' }, { isMac: false })).toEqual({
       prevented: true,
       sent: [IPC.appCloseNode]
     })
@@ -190,14 +205,87 @@ describe('⌘W → close the selected node, stolen back from Window ▸ Close', 
   it('leaves ⌘⇧W to the menu (Close All Windows)', () => {
     expect(press({ meta: true, shift: true, key: 'W', code: 'KeyW' })).toEqual(UNTOUCHED)
   })
+
+  // Same D-strict delta as ⌘M's: ⌃W was swallowed app-wide on mac (where it is readline's
+  // delete-word, not a menu accelerator) and now reaches the page.
+  it('no longer claims ⌃W on mac', () => {
+    expect(press({ control: true, key: 'w', code: 'KeyW' })).toEqual(UNTOUCHED)
+  })
 })
 
 describe('the decision is pure', () => {
   // Same function, called directly: a caller that is not a BrowserWindow (a future menu, a test,
   // the next intercept) gets the same answer, and `null` unambiguously means "not ours".
   it('returns null for anything unclaimed and an action for a claimed chord', () => {
-    expect(keydownIntercept(input())).toBeNull()
-    expect(keydownIntercept(input({ meta: true }))).toEqual({ action: 'zoom-actual-size' })
-    expect(keydownIntercept(input({ meta: true, isAutoRepeat: true }))).toEqual({ action: null })
+    expect(keydownIntercept(input(), DEFAULTS, true)).toBeNull()
+    expect(keydownIntercept(input({ meta: true }), DEFAULTS, true)).toEqual({
+      action: 'zoom-actual-size'
+    })
+    expect(keydownIntercept(input({ meta: true, isAutoRepeat: true }), DEFAULTS, true)).toEqual({
+      action: null
+    })
+  })
+})
+
+describe('binding-driven intercept', () => {
+  it('defaults reproduce today: Cmd+M and Cmd+W intercept, Shift variants do not', () => {
+    expect(keydownIntercept(input({ meta: true, key: 'm', code: 'KeyM' }), DEFAULTS, true)).toEqual({
+      action: 'toggle-markdown'
+    })
+    expect(keydownIntercept(input({ meta: true, key: 'w', code: 'KeyW' }), DEFAULTS, true)).toEqual({
+      action: 'close-node'
+    })
+    expect(keydownIntercept(input({ meta: true, shift: true, key: 'w', code: 'KeyW' }), DEFAULTS, true)).toBeNull()
+    // D-strict delta, named in the PR body: ⌘⇧M no longer intercepts (old code ignored shift on m).
+    expect(keydownIntercept(input({ meta: true, shift: true, key: 'm', code: 'KeyM' }), DEFAULTS, true)).toBeNull()
+  })
+
+  it('an unbound command stops intercepting (Electron default returns)', () => {
+    const unbound = resolveInterceptBindings({ 'node.close': [] }, true)
+    expect(keydownIntercept(input({ meta: true, key: 'w', code: 'KeyW' }), unbound, true)).toBeNull()
+    expect(keydownIntercept(input({ meta: true, key: 'm', code: 'KeyM' }), unbound, true)).toEqual({
+      action: 'toggle-markdown'
+    })
+  })
+
+  it('a remap moves the interception', () => {
+    const remapped = resolveInterceptBindings({ 'node.toggleMarkdown': ['Cmd+Shift+M'] }, true)
+    expect(keydownIntercept(input({ meta: true, key: 'm', code: 'KeyM' }), remapped, true)).toBeNull()
+    expect(keydownIntercept(input({ meta: true, shift: true, key: 'm', code: 'KeyM' }), remapped, true)).toEqual({
+      action: 'toggle-markdown'
+    })
+  })
+
+  // The reason the primary-modifier half of the old shared gate could NOT stay where it was: an
+  // Alt-only chord is a valid binding per the registry's rules, this intercept is its only
+  // dispatcher (the chord never reaches the renderer — the page does not see a claimed key), so a
+  // `meta || control` gate above the matchers would make the remap dead everywhere with no error.
+  it('an Alt-only remap fires, and the bare key still does not', () => {
+    const alt = resolveInterceptBindings({ 'node.toggleMarkdown': ['Alt+M'] }, true)
+    expect(keydownIntercept(input({ alt: true, key: 'm', code: 'KeyM' }), alt, true)).toEqual({
+      action: 'toggle-markdown'
+    })
+    expect(keydownIntercept(input({ key: 'm', code: 'KeyM' }), alt, true)).toBeNull()
+  })
+
+  it('garbage overrides fall back to defaults', () => {
+    expect(resolveInterceptBindings({ 'node.close': ['garbage+++'] }, true)).toEqual(DEFAULTS)
+  })
+
+  it('the Digit0 zoom gesture is untouched by bindings', () => {
+    const unbound = resolveInterceptBindings({ 'node.close': [], 'node.toggleMarkdown': [] }, true)
+    expect(keydownIntercept(input({ meta: true, code: 'Digit0' }), unbound, true)).toEqual({
+      action: 'zoom-actual-size'
+    })
+    // ...and it keeps the primary-modifier requirement it used to inherit from the shared gate.
+    expect(keydownIntercept(input({ code: 'Digit0' }), unbound, true)).toBeNull()
+  })
+
+  it('a remapped binding is dispatched at the install seam too', () => {
+    const remapped = resolveInterceptBindings({ 'node.close': ['Cmd+Shift+K'] }, true)
+    expect(press({ meta: true, shift: true, key: 'K', code: 'KeyK' }, { bindings: remapped })).toEqual(
+      { prevented: true, sent: [IPC.appCloseNode] }
+    )
+    expect(press({ meta: true, key: 'w', code: 'KeyW' }, { bindings: remapped })).toEqual(UNTOUCHED)
   })
 })
