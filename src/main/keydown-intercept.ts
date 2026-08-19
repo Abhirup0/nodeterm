@@ -225,6 +225,26 @@ export function policyStandsDown(
 }
 
 /**
+ * PURE. The MENU leg's composed stand-down state: `index.ts`'s `syncMenuForStandDown` disables
+ * `menuItemIdsToSuspend` for exactly as long as this is true.
+ *
+ * **The menu ORs the two suspensions; the INTERCEPTS do not.** `installKeydownIntercepts` keeps
+ * `isRecording` and `isStoodDown` as separate parameters on purpose (unrelated reasons, unrelated
+ * schedules — see its doc), and that stays. But a menu item is enabled or it is not: both reasons
+ * want the same items suspended, and one boolean is the honest shape for a single `enabled` write.
+ *
+ * `menuStandsDown(false, …)` is `policyStandsDown(…)` by construction, which is the byte-identical
+ * guarantee for every user who never arms the Settings recorder.
+ */
+export function menuStandsDown(
+  recording: boolean,
+  policy: TerminalShortcutPolicy,
+  terminalFocused: boolean
+): boolean {
+  return recording || policyStandsDown(policy, terminalFocused)
+}
+
+/**
  * Menu item ids `buildAppMenu` stamps on the items whose ACCELERATORS survive an intercept
  * stand-down. Exported constants used by both sides — the template that sets them and the sync that
  * looks them up — because `getMenuItemById` answers `null` for a typo and the fail-safe there is to
@@ -252,10 +272,26 @@ export const MENU_ITEM_ID_SETTINGS = 'app-settings'
  * nothing matches) → xterm → the PTY. That is what completes "under terminal-first everything
  * reaches the shell", ⌘M included.
  *
- * **This is NOT the recording stand-down's story** — keep the two apart. Recording is a transient,
- * user-initiated arming of a dialog, and its ⌘M limitation (documented on `installKeydownIntercepts`)
- * stands: nothing here re-enables recording those chords, because a recorder that silently disabled
- * Minimize for the duration of a keypress is a different and worse trade.
+ * **The list serves BOTH stand-downs** — the policy one above and an armed shortcut recorder
+ * (`menuStandsDown` composes them; `syncMenuForStandDown` disables these items for either). The
+ * earlier argument here was that a recorder greying out Minimize was a worse trade than an
+ * unrecordable ⌘M; that trade REVERSED once the menu leg existed for the policy anyway. The cost is
+ * now a momentary grey-out while a modal recorder is armed — self-healing the instant it disarms —
+ * and the benefit is that four chords now REACH the recorder instead of acting on the app: ⌘M
+ * everywhere, off-mac Ctrl+W, and ⌘⇧B / ⌘, which did not merely fail to record but FIRED —
+ * pressing ⌘⇧B into the recorder opened the kanban board behind the Settings dialog, and ⌘,
+ * re-opened Settings. **Reaching the recorder is all this buys, and it is the unconditional part.**
+ * Whether the chord can then be BOUND is a separate question, answered by the pre-save gates in
+ * `ShortcutsSection.commitCandidate`: while its owning command still holds it, it is refused there
+ * like any other taken chord — the user has to Disable or remap that command first.
+ *
+ * **KNOWN GAP for the recording half, pre-existing and accepted.** This list was written for the
+ * POLICY stand-down, so it covers only the command-style items that policy needed. The always-on
+ * app roles — `{role:'quit'}` (⌘Q), `{role:'hide'}`/`hideOthers`, `toggleDevTools`,
+ * `togglefullscreen` — are NOT here, so those chords still ACT while a recorder is armed (⌘Q quits
+ * the app). Adding them is refused rather than overlooked: ONE list drives both stand-downs, so
+ * they would also go dead for a terminal-first user with a terminal focused, and quit/hide must
+ * never be policy-gated. Closing it properly means splitting the list per stand-down.
  *
  * mac carries no CLOSE id: the mac template has no `{role:'close'}` at all (Window ▸ Minimize /
  * Zoom / Front), which is exactly why `keydownIntercept` is ⌘W's only handler there. Kanban and
@@ -321,18 +357,17 @@ export interface KeydownInterceptTarget {
  * not forwarding would still hand the recorder nothing — and forwarding is the live bug, since ⌘W
  * pressed into the recorder deletes the canvas's selected nodes.
  *
- * **What this stand-down does NOT buy, and cannot.** It only stops US from taking the key; it has
- * no say over the application MENU, whose accelerators are handled above the page either way. So
- * every menu accelerator is unrecordable while this stands down — including **⌘M**, which
- * `{role:'minimize'}` owns on every platform, **⌘⇧B** and **⌘,** (View ▸ Toggle Kanban Board and
- * Settings, also every platform), and **Ctrl+W** on Windows/Linux, where the Window submenu has a
- * `{role:'close'}`. Pressing one of those into an armed recorder minimizes/closes the window, opens
- * the board or opens Settings instead of recording. Concretely, the stand-down fully delivers
- * **⌘0** everywhere and
- * **⌘W on macOS** (neither is in the menu), and cannot deliver ⌘M anywhere. Fixing that means
- * suspending the MENU while recording (`Menu.setApplicationMenu(null)` around the armed window, or
- * per-item `enabled:false`) — a change to `buildAppMenu`, not to this module. Known limitation;
- * see the PR body.
+ * **What this stand-down buys on its own, and what the MENU leg adds.** This half only stops US
+ * from taking the key; it has no say over the application MENU, whose accelerators are handled
+ * above the page either way — so by itself it delivers **⌘0** everywhere and **⌘W on macOS**
+ * (neither is in the menu) and nothing else. **The menu now follows recording too**:
+ * `index.ts`'s `syncMenuForStandDown` asks `menuStandsDown(recording, policy, terminalFocused)`
+ * and disables every item in `menuItemIdsToSuspend` while a recorder is armed, so the suspended
+ * items' chords — **⌘M** (`{role:'minimize'}`, every platform), **⌘⇧B** and **⌘,** (View ▸ Toggle
+ * Kanban Board and Settings, every platform) and **Ctrl+W** on Windows/Linux — reach the recorder
+ * instead of minimizing the window, opening the board or opening Settings. **RELOAD (⌘R / ⌘⇧R)
+ * stays unrecordable by design**: it is the app's crash-recovery lever and is deliberately absent
+ * from that list (see `menuItemIdsToSuspend`).
  *
  * `isStoodDown` is the SECOND suspension and the same shape again, but a different fact:
  * `policyStandsDown(policy, terminalFocused)` — the user chose `terminal-first` AND an xterm
@@ -343,18 +378,19 @@ export interface KeydownInterceptTarget {
  * assert. Both are checked BEFORE `preventDefault` for the same reason: a claimed chord never
  * reaches the page at all, and the page is exactly who terminal-first stands down FOR.
  *
- * **The policy stand-down DOES get the menu leg the recording one does not** — the two cases are
- * different and the paragraph above stays true for recording. `index.ts`'s `syncMenuForStandDown`
- * disables every item in `menuItemIdsToSuspend` below — `{role:'minimize'}`, Toggle Kanban Board
- * and Settings on all platforms, plus off-mac `{role:'close'}`, with RELOAD deliberately left out —
- * for exactly as long as `isStoodDown` is true. It has to: not calling
- * `preventDefault` hands the key to the page and, failing that, to the menu, so without the menu
- * leg a terminal-first user's ⌘M would minimize the window and their Ctrl+W — readline's kill-word
- * — would CLOSE it on Windows/Linux, which is strictly worse than not having the policy. With the
- * items disabled the chord completes the trip it was promised: page → the renderer's dispatcher
- * (terminal context, terminal-first, nothing matches) → xterm → the PTY. Recording keeps the
- * limitation because a recorder that greyed out Minimize for the duration of a keypress is a worse
- * trade than an unrecordable ⌘M.
+ * **The menu leg is SHARED by the two suspensions, on the same item list.** `index.ts`'s
+ * `syncMenuForStandDown` disables every item in `menuItemIdsToSuspend` below —
+ * `{role:'minimize'}`, Toggle Kanban Board and Settings on all platforms, plus off-mac
+ * `{role:'close'}`, with RELOAD deliberately left out — for exactly as long as
+ * `menuStandsDown(recording, policy, terminalFocused)` is true. The policy half has to have it:
+ * not calling `preventDefault` hands the key to the page and, failing that, to the menu, so
+ * without the menu leg a terminal-first user's ⌘M would minimize the window and their Ctrl+W —
+ * readline's kill-word — would CLOSE it on Windows/Linux, which is strictly worse than not having
+ * the policy. With the items disabled the chord completes the trip it was promised: page → the
+ * renderer's dispatcher (terminal context, terminal-first, nothing matches) → xterm → the PTY.
+ * The recording half rides the same list for a different destination: page → the armed recorder.
+ * That the ITEM list is shared does not merge the two INTERCEPT thunks — they stay independent
+ * parameters below, and only the menu's single `enabled` boolean composes them.
  *
  * **The stand-down leg cannot be more reliable than the mirror behind it**, and the mirror is a
  * renderer reporting over fire-and-forget IPC. Every uncertainty therefore resolves to NOT stood

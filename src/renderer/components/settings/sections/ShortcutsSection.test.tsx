@@ -291,4 +291,70 @@ describe('commitCandidate', () => {
     expect(commitCandidate('canvas.fitAll', 'Cmd+Alt+F', 'add')).toEqual({ ok: true })
     expect(kb()['canvas.fitAll']).toEqual(['Cmd+Alt+G', 'Cmd+Alt+F'])
   })
+
+  // Dictation is its own conflict bucket (Task 1), so NEITHER of the three gates above can see an
+  // overlap with it — the detector is silent by design and the load path deliberately permits one.
+  // These two gates are what makes `conflictBucket`'s "the Settings UI REFUSES to create one" true.
+  //
+  // They are SCOPED, and the four tests below are the discriminating matrix: the keyed gesture is
+  // offered only in plain app focus (`globalKeybindings.ts` — `!ctx.typing && !ctx.terminal &&
+  // !ctx.kanbanOpen`), so an 'app'/'canvas'-scope command really does lose the chord most of the
+  // time, while a 'terminal'/'scm'-scope one NEVER competes with it and must stay bindable.
+  it("refuses a canvas-scope command on Dictate's keyed chord, naming Dictate", () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt+D'] })
+    const r = commitCandidate('canvas.fitAll', 'Cmd+Alt+D', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Dictate')
+    expect(kb()['canvas.fitAll']).toBeUndefined()
+  })
+
+  it("refuses an app-scope command on Dictate's keyed chord, naming Dictate", () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt+D'] })
+    const r = commitCandidate('panel.explorer', 'Cmd+Alt+D', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Dictate')
+    expect(kb()['panel.explorer']).toBeUndefined()
+  })
+
+  // The other half of the pair, and the one that reds if gate 1 loses its scope check: Find in
+  // terminal fires only in terminal focus, where the gesture is not offered at all — so this
+  // binding was legal before the branch, works at dispatch, and must stay accepted.
+  it("allows a terminal-scope command on Dictate's keyed chord", () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt+D'] })
+    expect(commitCandidate('terminal.find', 'Cmd+Alt+D', 'replace')).toEqual({ ok: true })
+    expect(kb()['terminal.find']).toEqual(['Cmd+Alt+D'])
+  })
+
+  it('refuses a keyed Dictate chord that a global-bucket command already holds', () => {
+    const r = commitCandidate('speech.dictation', 'Cmd+K', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Command palette')
+    expect(kb()['speech.dictation']).toBeUndefined()
+  })
+
+  // Gate 2's mirror of the same rule, and it reds if the loop stops skipping the two focused
+  // scopes: Find in terminal holds Cmd+F and Commit holds Cmd+Enter, neither of which the keyed
+  // gesture could ever take from them.
+  it('allows a keyed Dictate chord that only a focused-surface command holds', () => {
+    expect(commitCandidate('speech.dictation', 'Cmd+F', 'replace')).toEqual({ ok: true })
+    expect(kb()['speech.dictation']).toEqual(['Cmd+F'])
+    expect(commitCandidate('speech.dictation', 'Cmd+Enter', 'replace')).toEqual({ ok: true })
+    expect(kb()['speech.dictation']).toEqual(['Cmd+Enter'])
+  })
+
+  // DOCUMENTATION OF A PROPERTY, not a guard test — stated honestly because both stay GREEN if the
+  // dictation gates are deleted outright. Nothing can make them red by deletion: a hold chord's
+  // identity ends in `:(hold)` and no keyed identity can equal it, so correct code has no path to
+  // a refusal here. What the second one does discriminate is a mutation of `bindingIdentity`
+  // itself — drop the key segment and the default `Cmd+Alt` hold chord starts swallowing every
+  // Cmd+Alt+<key> candidate.
+  it('documents that a HOLD dictation chord cannot trip the overlap gates', () => {
+    const r = commitCandidate('speech.dictation', 'Cmd+Ctrl', 'replace')
+    expect(r.ok).toBe(true)
+  })
+
+  it('documents that the default hold chord blocks no keyed candidate', () => {
+    const r = commitCandidate('canvas.fitAll', 'Cmd+Alt+F9', 'replace')
+    expect(r.ok).toBe(true)
+  })
 })

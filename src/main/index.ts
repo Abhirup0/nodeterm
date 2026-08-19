@@ -95,6 +95,7 @@ import {
   MENU_ITEM_ID_SETTINGS,
   installKeydownIntercepts,
   menuItemIdsToSuspend,
+  menuStandsDown,
   navigationClearsRecording,
   policyStandsDown,
   resolveInterceptBindings,
@@ -331,7 +332,9 @@ settingsStore.onChange((s) => {
 // 1. `shortcutRecording` — Settings' shortcut recorder is armed: stand every intercept down so the
 //    chord the user presses reaches the recorder. Without it, recording ⌘W CLOSES THE SELECTED
 //    NODES — a claimed chord never reaches the page, so the recorder's own preventDefault cannot
-//    save it.
+//    save it. It ALSO drives the menu leg (`menuStandsDown` → `syncMenuForStandDown`, called from
+//    this bit's IPC receiver), which is what lets a menu-owned chord — ⌘M, ⌘⇧B, ⌘,, off-mac
+//    Ctrl+W — reach the recorder instead of the item that owns it.
 // 2. `terminalFocused` — an xterm holds keyboard focus, which under the `terminal-first` policy
 //    means the intercepts stand down so the terminal gets the chord. `before-input-event` fires
 //    before any renderer handler could answer, so the answer has to be sitting here in advance;
@@ -653,9 +656,11 @@ function buildAppMenu(win: BrowserWindow): void {
         { label: 'View', submenu: viewSubmenu },
         {
           label: 'Window',
-          // `id` on minimize: `syncMenuForStandDown` disables it while the intercepts are stood
-          // down, so ⌘M falls through to the terminal instead of minimizing the window. mac has no
-          // `{role:'close'}` here at all — which is why the intercept is ⌘W's only handler on mac.
+          // `id` on minimize: `syncMenuForStandDown` disables it while EITHER stand-down is in
+          // effect — a terminal focused under terminal-first, or an armed shortcut recorder — so
+          // ⌘M falls through to the terminal, or to the recorder, instead of minimizing the
+          // window. mac has no `{role:'close'}` here at all — which is why the intercept is ⌘W's
+          // only handler on mac.
           submenu: [
             { role: 'minimize', id: MENU_ITEM_ID_MINIMIZE },
             { role: 'zoom' },
@@ -702,7 +707,16 @@ function buildAppMenu(win: BrowserWindow): void {
 }
 
 /**
- * Enable/disable the menu items whose ACCELERATORS would otherwise beat the intercept stand-down.
+ * Enable/disable the menu items whose ACCELERATORS would otherwise beat a stand-down.
+ *
+ * **Two stand-downs share this leg**, composed by `menuStandsDown(shortcutRecording, policy,
+ * terminalFocused)`: the terminal-first policy (below) and an armed Settings shortcut RECORDER.
+ * The recorder needs it for the same structural reason and a different destination — a menu
+ * accelerator is handled above the page, so while it was armed ⌘M minimized the window, ⌘⇧B opened
+ * the kanban board behind the dialog and ⌘, re-opened Settings, none of them recordable. With the
+ * items suspended those chords reach the recorder. **Reload is still not among them** (see below),
+ * so ⌘R / ⌘⇧R remain unrecordable by design. The two INTERCEPT thunks stay independent parameters
+ * on `installKeydownIntercepts`; only this single `enabled` boolean ORs them.
  *
  * `installKeydownIntercepts` standing down means only that main stops calling `preventDefault` —
  * the key then reaches the page, and if the page ignores it, the MENU, which is handled above the
@@ -720,33 +734,38 @@ function buildAppMenu(win: BrowserWindow): void {
  * never sees them and could not stand them down itself. **Reload (⌘R / ⌘⇧R) is the named
  * exception** and stays live while stood down; see `menuItemIdsToSuspend`'s comment for why.
  *
- * Called from every place the stood-down answer can change — the `ui:terminal-focus` receiver, the
- * policy recompute in `settingsStore.onChange`, `clearRendererKeyState`, and the end of
- * `buildAppMenu` (a rebuild resets `enabled`). NEVER per keystroke: this is a menu mutation, and
- * `before-input-event` is the one path in the app where work is measured in keystrokes.
+ * Called from every place the composed answer can change — the `ui:terminal-focus` receiver, the
+ * `ui:shortcut-recording` receiver (the recorder arms and disarms once per chord the user records),
+ * the policy recompute in `settingsStore.onChange`, `clearRendererKeyState` (which clears BOTH
+ * bits), and the end of `buildAppMenu` (a rebuild resets `enabled`). NEVER per keystroke: this is a
+ * menu mutation, and `before-input-event` is the one path in the app where work is measured in
+ * keystrokes.
  *
  * FAIL-SAFE: a missing menu, or an item id that no longer resolves, does nothing at all. That
  * leaves the pre-feature behaviour (menu enabled, intercepts deciding), which is the direction
  * where the app still works — the cost is that a silent id drift is invisible, which is why both
  * sides of the lookup use the same exported constants rather than string literals.
  *
- * KNOWN COST, deliberate: while a terminal is focused under terminal-first, every suspended item —
- * Window ▸ Minimize, View ▸ Toggle Kanban Board, Settings, and off-mac Window ▸ Close — is greyed
- * out to the MOUSE as well. They re-enable the moment focus leaves the terminal (and the
+ * KNOWN COST, deliberate: while either stand-down holds, every suspended item — Window ▸ Minimize,
+ * View ▸ Toggle Kanban Board, Settings, and off-mac Window ▸ Close — is greyed out to the MOUSE as
+ * well. They re-enable the moment focus leaves the terminal, or the recorder disarms (and the
  * traffic-light button is unaffected), so this is a visible but self-healing trade. The alternative
  * — rebuilding the whole menu without those accelerators on every focus change — costs a menu
- * rebuild per click between the canvas and a terminal, and closes any menu the user has open.
+ * rebuild per click between the canvas and a terminal, and closes any menu the user has open. For
+ * the recorder the trade is smaller still: the greyed items sit behind a modal dialog the user
+ * opened to record a chord, and the alternative was four chords they could not bind at all.
  *
  * UNTESTED, and here is why: this is Electron menu mutation reached through the module-level
  * `Menu` singleton inside `src/main/index.ts`, which no test imports (the same gap the intercept
  * WIRING has — see `keydown-intercept.ts`'s header on why the decision lives in a pure module).
- * The two testable parts were extracted: `policyStandsDown` (the state) and `menuItemIdsToSuspend`
- * (the list, including the mac/non-mac asymmetry), both pinned in `keydown-intercept.test.ts`.
+ * The testable parts were extracted: `menuStandsDown` (the composed state) over `policyStandsDown`
+ * (the policy half) and `menuItemIdsToSuspend` (the list, including the mac/non-mac asymmetry), all
+ * pinned in `keydown-intercept.test.ts`.
  */
 function syncMenuForStandDown(): void {
   const menu = Menu.getApplicationMenu()
   if (!menu) return
-  const enabled = !policyStandsDown(currentInterceptPolicy(), terminalFocused)
+  const enabled = !menuStandsDown(shortcutRecording, currentInterceptPolicy(), terminalFocused)
   for (const id of menuItemIdsToSuspend(interceptIsMac)) {
     const item = menu.getMenuItemById(id)
     if (item) item.enabled = enabled
@@ -1138,6 +1157,13 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.uiShortcutRecording, (event, active: boolean) => {
     if (getMainWindow()?.webContents.id !== event.sender.id) return
     shortcutRecording = active === true
+    // The menu leg follows recording too (`menuStandsDown`), so an arm/disarm owes a sync — that is
+    // what lets ⌘M, ⌘⇧B, ⌘, and off-mac Ctrl+W reach the recorder instead of the menu item that
+    // owns them. A recorder arms and disarms once per chord the user records, which is the right
+    // cadence for a menu mutation; NEVER per keystroke (same rule as the focus mirror below). It
+    // must be INSIDE the guard for the same reason as there: a rejected sender must not move the
+    // menu either.
+    syncMenuForStandDown()
   })
 
   // The terminal-focus mirror, under the SAME sender guard and for a sharper version of the same

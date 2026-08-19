@@ -9,6 +9,7 @@ import {
   installKeydownIntercepts,
   keydownIntercept,
   menuItemIdsToSuspend,
+  menuStandsDown,
   navigationClearsRecording,
   policyStandsDown,
   resolveInterceptBindings,
@@ -573,6 +574,48 @@ describe('policyStandsDown', () => {
   it('the reset value (not focused) means intercepts stay on under either policy', () => {
     for (const policy of ['app-first', 'terminal-first'] as const) {
       expect(policyStandsDown(policy, false)).toBe(false)
+    }
+  })
+})
+
+/**
+ * The MENU leg's composed state — what `index.ts`'s `syncMenuForStandDown` asks. The INTERCEPT
+ * thunks stay two independent parameters (the describe above pins that); only the menu ORs them,
+ * because a menu item is enabled or it is not and both reasons want the same items suspended.
+ *
+ * Why recording joined at all: a menu accelerator is handled above the page, so while a recorder
+ * was armed ⌘M minimized the window, ⌘⇧B opened the kanban board and ⌘, opened Settings instead of
+ * being recorded. Suspending the items is what lets the chord reach the recorder.
+ */
+describe('menuStandsDown', () => {
+  it('recording alone suspends the menu leg, under either policy', () => {
+    expect(menuStandsDown(true, 'app-first', false)).toBe(true)
+    expect(menuStandsDown(true, 'terminal-first', false)).toBe(true)
+  })
+  it('without recording it is exactly the policy stand-down', () => {
+    expect(menuStandsDown(false, 'terminal-first', true)).toBe(true)
+    expect(menuStandsDown(false, 'terminal-first', false)).toBe(false)
+    expect(menuStandsDown(false, 'app-first', true)).toBe(false)
+  })
+
+  // The behaviour contract of this change, stated as a test: with no recorder armed the menu leg
+  // is BYTE-IDENTICAL to what it was before recording was composed in, so a user who never opens
+  // the Settings recorder sees exactly the previous app.
+  it('is exactly policyStandsDown over the whole non-recording matrix', () => {
+    for (const policy of ['app-first', 'terminal-first'] as const) {
+      for (const focused of [true, false]) {
+        expect(menuStandsDown(false, policy, focused)).toBe(policyStandsDown(policy, focused))
+      }
+    }
+  })
+
+  // Recording is the ALWAYS suspension (see `installKeydownIntercepts`): it does not consult the
+  // mirror, so a recorder armed with no terminal focused still gets its chords.
+  it('recording ignores the focus mirror entirely', () => {
+    for (const policy of ['app-first', 'terminal-first'] as const) {
+      for (const focused of [true, false]) {
+        expect(menuStandsDown(true, policy, focused)).toBe(true)
+      }
     }
   })
 })
