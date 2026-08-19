@@ -16,6 +16,7 @@ import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { DEFAULT_SETTINGS } from '../shared/types'
 import { AUTH_ENV_STRIP, isReservedSpawnEnvKey } from './claude-accounts-core'
 import { MODEL_GATEWAY_ENV_KEYS } from '../shared/agents/model-gateway'
+import { hookServer } from './agents/hook-server'
 import type { ProjectSpawnOverrides } from './project-spawn-overrides'
 
 interface SpawnCall {
@@ -95,6 +96,8 @@ describe('project settings at the spawn — LOCAL leg', () => {
     setRemoteSessionEnvWriter(null)
     resetPlatformForTests()
     vi.useRealTimers()
+    // hookServer is a process-wide singleton — a spy left on it would leak into every later test.
+    vi.restoreAllMocks()
   })
 
   const create = async (options: Record<string, unknown>): Promise<unknown> =>
@@ -158,12 +161,19 @@ describe('project settings at the spawn — LOCAL leg', () => {
   // pair that READS innocuous (`CLAUDE_CONFIG_DIR=./.tooling`) must still not out-rank the layers
   // that exist to control exactly those keys. See `isReservedSpawnEnvKey`.
   it('merges only the innocent key, never the reserved ones', async () => {
+    // A REAL hook env, so the NODETERM_ assertion below is about survival rather than absence:
+    // `not.toBe(evil)` would pass just as well against the `{}` a stub hookServer returns.
+    const hookEnv = { NODETERM_HOOK_ENDPOINT: '/run/nodeterm/real.sock', NODETERM_NODE_ID: NODE }
+    vi.spyOn(hookServer, 'buildPtyEnv').mockReturnValue(hookEnv)
     const mgr = await manager(async () => ({
       env: {
         ANTHROPIC_API_KEY: 'attacker',
         ANTHROPIC_BASE_URL: 'https://evil.example',
         CLAUDE_CONFIG_DIR: './.tooling',
+        CODEX_HOME: './.tooling',
+        XDG_CONFIG_HOME: './.tooling',
         NODETERM_HOOK_ENDPOINT: '/tmp/evil.sock',
+        NODETERM_NODE_ID: 'other-node',
         RAILS_ENV: 'test'
       }
     }))
@@ -173,8 +183,12 @@ describe('project settings at the spawn — LOCAL leg', () => {
     expect(spawns[0].env.ANTHROPIC_API_KEY).not.toBe('attacker')
     expect(spawns[0].env.ANTHROPIC_BASE_URL).not.toBe('https://evil.example')
     expect(spawns[0].env.CLAUDE_CONFIG_DIR).not.toBe('./.tooling')
-    // The hook env this manager set for the node is intact — not replaced by the project's.
-    expect(spawns[0].env.NODETERM_HOOK_ENDPOINT).not.toBe('/tmp/evil.sock')
+    expect(spawns[0].env.CODEX_HOME).not.toBe('./.tooling')
+    expect(spawns[0].env.XDG_CONFIG_HOME).not.toBe('./.tooling')
+    // The hook identity this manager set for the node survives INTACT — the project's forgery
+    // neither replaced it nor blanked it.
+    expect(spawns[0].env.NODETERM_HOOK_ENDPOINT).toBe('/run/nodeterm/real.sock')
+    expect(spawns[0].env.NODETERM_NODE_ID).toBe(NODE)
   })
 
   it('adds the project keys to tmux update-environment so a shared server copies them', async () => {
@@ -208,6 +222,14 @@ describe('isReservedSpawnEnvKey — the keys a project may never set', () => {
     expect(isReservedSpawnEnvKey('NODETERM_')).toBe(true)
   })
 
+  // Every agent's config dir, not just claude's: codex reads $CODEX_HOME (auth.json lives there,
+  // and the pane resolves it from its OWN env), opencode reads $XDG_CONFIG_HOME/opencode — which
+  // is where this app installs its managed PLUGIN, i.e. JavaScript the agent process executes.
+  it('reserves the OTHER agents config dirs too', () => {
+    expect(isReservedSpawnEnvKey('CODEX_HOME')).toBe(true)
+    expect(isReservedSpawnEnvKey('XDG_CONFIG_HOME')).toBe(true)
+  })
+
   // A base URL redirects the CLI's traffic — carrying the USER's own credentials — to whatever
   // endpoint the repo names, and "a URL" reads innocuous in a consent table. Every name in
   // MODEL_GATEWAY_ENV_KEYS is one this app itself emits to re-route a launched CLI, i.e. the
@@ -219,8 +241,12 @@ describe('isReservedSpawnEnvKey — the keys a project may never set', () => {
     expect(isReservedSpawnEnvKey('COPILOT_PROVIDER_BASE_URL')).toBe(true)
   })
 
+  // PATH and NODE_OPTIONS are ALLOWED on purpose, not by omission — pointing a project's terminals
+  // at its own tooling is the feature's stated purpose, and the consent dialog shows those pairs
+  // verbatim. The reserved list is for keys whose implications a dialog CANNOT convey. The written
+  // ruling lives in `isReservedSpawnEnvKey`'s doc block; this test pins it.
   it('reserves nothing else — a project may still set its own tooling env', () => {
-    for (const k of ['PATH', 'LANG', 'RAILS_ENV', 'DATABASE_URL', 'NODE_ENV', 'NODETERM'])
+    for (const k of ['PATH', 'NODE_OPTIONS', 'LANG', 'RAILS_ENV', 'DATABASE_URL', 'NODE_ENV', 'NODETERM'])
       expect(isReservedSpawnEnvKey(k)).toBe(false)
   })
 })

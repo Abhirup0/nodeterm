@@ -177,6 +177,10 @@ export const AUTH_ENV_STRIP = [
   'CLAUDE_CODE_OAUTH_TOKEN'
 ] as const
 
+/** Where each supported agent keeps its config, credentials and (for opencode) its plugin code.
+ *  One list because they are one hazard — see `isReservedSpawnEnvKey`'s clause on them. */
+const AGENT_CONFIG_DIR_ENV: readonly string[] = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CONFIG_HOME']
+
 /**
  * Env keys a PROJECT's settings document may never contribute to a spawn, however it is sourced
  * and however it was consented to (`makeProjectSpawnOverrides` → `PtyManager.spawnSession`, both
@@ -189,27 +193,49 @@ export const AUTH_ENV_STRIP = [
  *  - `AUTH_ENV_STRIP` is DELETED from the env when a managed account is selected, precisely so an
  *    inherited API key cannot shadow that account's OAuth login. A project re-adding one silently
  *    routes the session's traffic to a third party.
- *  - `CLAUDE_CONFIG_DIR` is where the agent reads and WRITES credentials. Redirected into the repo
- *    (`./.tooling` reads like a build directory) it becomes a credential exfiltration path.
+ *  - AGENT CONFIG DIRS — one clause, three names, because every supported agent has one and a repo
+ *    naming any of them redirects that agent's credentials or code loading into itself. All three
+ *    read like build directories (`./.tooling`) in a consent table:
+ *      · `CLAUDE_CONFIG_DIR` — where claude reads and WRITES credentials (the account path sets it).
+ *      · `CODEX_HOME` — the same for codex (`auth.json` lives there; this app emits it in
+ *        `usage/codex-usage.ts`, and the launched pane resolves it from its OWN environment, see
+ *        `codex-identity-proxy.ts`), so a repo-supplied value captures codex's auth writes.
+ *      · `XDG_CONFIG_HOME` — opencode is XDG-respecting and loads its plugins from
+ *        `$XDG_CONFIG_HOME/opencode` (`agents/hooks/opencode.ts`), which is where THIS app installs
+ *        its managed plugin. A repo pointing that at itself is arbitrary JavaScript executed inside
+ *        the agent process — the worst of the three, and the least legible as an env pair.
  *  - `MODEL_GATEWAY_ENV_KEYS` — the provider ROUTING vars (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
  *    `COPILOT_PROVIDER_BASE_URL`, and the keys that travel with them). A base URL redirects the
  *    CLI's traffic — carrying the USER's own credentials — to an attacker-chosen endpoint, and
  *    "a URL" reads innocuous in a consent table. This list is the demonstration, not a guess: it is
  *    what THIS app emits to re-route each launched CLI, so those CLIs are known to honor every name
- *    in it. LOCAL custom-agent config may still set these (that is the documented proxy use case) —
- *    this predicate governs PROJECT env, which is repo-supplied input, not user configuration.
+ *    in it. Custom-agent env may still set these — that is the documented proxy use case.
  *  - `NODETERM_*` is the hook channel's own identity and capability advertisement — endpoint, node
  *    id, token, permission-wait. Forging any of them lets one node speak as another.
- * Nothing here is a value a project legitimately needs to set; a project that wants its own auth
- * belongs in a custom agent, which is per-machine configuration the user typed themselves.
  *
- * Filtered SILENTLY at the merge — a spawn is not a place to raise a second question. (Surfacing
- * the skipped keys in the project settings panel is left to the observability wave.)
+ * WHAT IS DELIBERATELY *NOT* HERE — `PATH`, `NODE_OPTIONS`, and every ordinary application variable.
+ * Pointing a project's terminals at its own tooling IS this feature's purpose, and a consent dialog
+ * conveys those pairs perfectly well: a reader sees the directory or the flag and can judge it. The
+ * reserved list exists only for keys whose implications a dialog CANNOT convey — a credential
+ * directory, a silent traffic redirect, a hook identity — where what is shown ("a path", "a URL")
+ * and what is granted are different things. The line is legibility, not danger; a project that
+ * wants its own auth belongs in a custom agent.
+ *
+ * SCOPE, precisely: this filters the project's contribution — BOTH halves of it, the git-shared
+ * document AND this machine's local overlay. That is broader than the hostile-input argument
+ * strictly requires, and it is the deliberate trade: one rule is auditable where "reserved unless
+ * it came from the overlay" would be a provenance check on every key, at the spawn, forever. A user
+ * who genuinely wants one of these names on this machine sets it in custom-agent env, which is
+ * per-machine configuration they typed themselves and is merged after (and over) this.
+ *
+ * Filtered SILENTLY at the merge — a spawn is not a place to raise a second question. So a dropped
+ * key is currently invisible to its author; surfacing the skipped keys in the project settings
+ * panel is left to the observability wave.
  */
 export function isReservedSpawnEnvKey(key: string): boolean {
   return (
     key.startsWith('NODETERM_') ||
-    key === 'CLAUDE_CONFIG_DIR' ||
+    AGENT_CONFIG_DIR_ENV.includes(key) ||
     (AUTH_ENV_STRIP as readonly string[]).includes(key) ||
     (MODEL_GATEWAY_ENV_KEYS as readonly string[]).includes(key)
   )
