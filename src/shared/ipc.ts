@@ -75,6 +75,15 @@ export const IPC = {
    *  closing their selected nodes. Fire-and-forget `send`; desktop-only (a browser tab has no
    *  application menu to steal a chord back from, so the Server Edition stubs it). */
   uiShortcutRecording: 'ui:shortcut-recording',
+  /** Renderer → main: an xterm does (`true`) / does not (`false`) currently hold keyboard focus.
+   *  A MIRROR, not a request: under the `terminal-first` shortcut policy the intercepts above must
+   *  stand down while the user is typing in a terminal, and `before-input-event` fires before any
+   *  renderer handler could tell main so — the answer has to already be there. Change-deduped by
+   *  the sender, fire-and-forget `send`, and read fail-safe: main starts at `false` and every way
+   *  the page can stop existing resets it there, so a stale mirror means intercepts ON (the
+   *  pre-policy app), never a window whose ⌘W has silently gone back to the application menu.
+   *  Desktop-only, for the same reason as the recording bit — the Server Edition stubs it. */
+  uiTerminalFocus: 'ui:terminal-focus',
   appCloseWindow: 'app:close-window',
   /** Main → renderer: the native application menu's "Settings…" item (⌘,) was clicked. The
    *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */

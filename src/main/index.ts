@@ -91,9 +91,14 @@ import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloa
 import {
   installKeydownIntercepts,
   navigationClearsRecording,
+  policyStandsDown,
   resolveInterceptBindings,
   type KeydownInterceptBindings
 } from './keydown-intercept'
+import {
+  normalizeTerminalShortcutPolicy,
+  type TerminalShortcutPolicy
+} from '../shared/keybindings'
 import {
   initNotchHud,
   applyNotchHudSettings,
@@ -290,23 +295,47 @@ const interceptIsMac = process.platform === 'darwin'
 let interceptBindings: KeydownInterceptBindings | null = null
 const currentInterceptBindings = (): KeydownInterceptBindings =>
   (interceptBindings ??= resolveInterceptBindings(settingsStore.get().keybindings, interceptIsMac))
+// The user's terminal-shortcut policy, memoized on exactly the same terms and for exactly the same
+// reason as `interceptBindings` above: lazily on first keystroke (module load is before
+// `settingsStore.init()`, where every stored value still reads as DEFAULT_SETTINGS), recomputed on
+// `onChange`, never per keystroke. Normalized through the shared helper so an unknown value from a
+// hand-edited settings.json reads as the default `app-first` — i.e. as "keep intercepting", which
+// is the direction that leaves the app working.
+let interceptPolicy: TerminalShortcutPolicy | null = null
+const currentInterceptPolicy = (): TerminalShortcutPolicy =>
+  (interceptPolicy ??= normalizeTerminalShortcutPolicy(settingsStore.get().terminalShortcutPolicy))
 settingsStore.onChange((s) => {
   interceptBindings = resolveInterceptBindings(s.keybindings, interceptIsMac)
+  interceptPolicy = normalizeTerminalShortcutPolicy(s.terminalShortcutPolicy)
 })
-// Settings' shortcut recorder is armed: stand every intercept down so the chord the user presses
-// reaches the recorder. Without it, recording ⌘W CLOSES THE SELECTED NODES — a claimed chord never
-// reaches the page, so the recorder's own preventDefault cannot save it.
-// A module-level `let` read through a closure, exactly like `interceptBindings` above: the window
-// is created later and can be recreated (macOS dock reopen), so nothing may capture a value.
-// FAIL-SAFE DIRECTION: every uncertainty resolves to `false` (intercepts on). The alternative is
-// ⌘W/⌘M/⌘0 dead app-wide with no component left alive to release the bit, so EVERY way the page
-// that armed it can stop existing owes a clear — `createWindow` wires three (window `closed`,
-// `render-process-gone`, and a main-frame navigation, i.e. ⌘R). That is three known paths, not a
-// proof of exhaustiveness: a fourth would show up as "⌘W stopped working after I did X", so add
-// its reset beside the others rather than assuming this list is closed.
+// TWO bits the RENDERER owns and main only mirrors. Both are module-level `let`s read through a
+// closure, exactly like `interceptBindings` above: the window is created later and can be recreated
+// (macOS dock reopen), so nothing may capture a value.
+//
+// 1. `shortcutRecording` — Settings' shortcut recorder is armed: stand every intercept down so the
+//    chord the user presses reaches the recorder. Without it, recording ⌘W CLOSES THE SELECTED
+//    NODES — a claimed chord never reaches the page, so the recorder's own preventDefault cannot
+//    save it.
+// 2. `terminalFocused` — an xterm holds keyboard focus, which under the `terminal-first` policy
+//    means the intercepts stand down so the terminal gets the chord. `before-input-event` fires
+//    before any renderer handler could answer, so the answer has to be sitting here in advance;
+//    `renderer/lib/terminalFocusMirror.ts` keeps it current and change-deduped.
+//
+// FAIL-SAFE DIRECTION, and it is the same one for both: every uncertainty resolves to `false`
+// (intercepts ON — the app as it behaved before either feature). The alternative is ⌘W/⌘M/⌘0
+// silently handed back to the application MENU app-wide, with no component left alive to release
+// the bit. So EVERY way the page that set one can stop existing owes a clear, and `createWindow`
+// wires three — window `closed`, `render-process-gone`, and a main-frame navigation (⌘R). That is
+// three known paths, not a proof of exhaustiveness: a fourth would show up as "⌘W stopped working
+// after I did X", so add its reset beside the others rather than assuming this list is closed.
+// The two bits are cleared TOGETHER, by one function called at all three sites, because they die
+// for the same reason (the page is gone) and a reset that remembered only one of them would be
+// invisible until a user hit the policy path.
 let shortcutRecording = false
-const clearShortcutRecording = (): void => {
+let terminalFocused = false
+const clearRendererKeyState = (): void => {
   shortcutRecording = false
+  terminalFocused = false
 }
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
@@ -638,11 +667,11 @@ function createWindow(): BrowserWindow {
     // client to co-attach to that node would inherit a frozen terminal. The tmux sessions
     // themselves keep running, exactly as they do on quit (killAll).
     ptyManager.dropClient(presenceId)
-    // The window that armed the recorder is gone, so nothing can ever disarm it. Leaving the bit
-    // set would suppress ⌘W/⌘M/⌘0 for the NEXT window too (the flag outlives the window; a dock
-    // reopen builds a fresh one). Same shape as the dropClient above: state this window owned,
-    // released where its departure is observed.
-    clearShortcutRecording()
+    // The window that armed the recorder — or reported a focused terminal — is gone, so nothing
+    // can ever release either bit. Leaving one set would suppress ⌘W/⌘M/⌘0 for the NEXT window too
+    // (the flags outlive the window; a dock reopen builds a fresh one). Same shape as the
+    // dropClient above: state this window owned, released where its departure is observed.
+    clearRendererKeyState()
   })
   // A crashed/killed renderer is the same story, minus the window: drop its subscriptions so the
   // reloaded renderer reattaches to live sessions instead of inheriting the dead one's state.
@@ -653,9 +682,10 @@ function createWindow(): BrowserWindow {
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
-    // A dead renderer sends no disarm. The reloaded page mounts no recorder, so without this the
-    // user would come back to an app where ⌘W does nothing at all.
-    clearShortcutRecording()
+    // A dead renderer sends no disarm and no focus-lost report. The reloaded page mounts no
+    // recorder and no terminal, so without this the user would come back to an app where ⌘W does
+    // nothing at all (recording) or minimizes the window (stood down).
+    clearRendererKeyState()
     if (quitting || win.isDestroyed()) return
     const action = crashReload(details.reason, Date.now())
     if (action === 'reload') {
@@ -710,16 +740,26 @@ function createWindow(): BrowserWindow {
   // resetZoom) and forward each to the renderer instead. The decision — and, importantly, what it
   // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test. The first two
   // are the user's effective `node.toggleMarkdown` / `node.close` bindings (⌘0 is not remappable).
-  installKeydownIntercepts(win, currentInterceptBindings, interceptIsMac, () => shortcutRecording)
+  // The two suspensions are separate thunks on purpose (see `installKeydownIntercepts`): the
+  // recorder suspends ALWAYS, the policy only while the mirror says a terminal has focus. Both are
+  // read per keystroke — the settings memo and the mirror both change under a live window.
+  installKeydownIntercepts(
+    win,
+    currentInterceptBindings,
+    interceptIsMac,
+    () => shortcutRecording,
+    () => policyStandsDown(currentInterceptPolicy(), terminalFocused)
+  )
 
-  // The THIRD way the page that armed a recorder can go away: a reload. The View menu above
-  // restores `{role:'reload'}` / `{role:'forceReload'}`, and ⌘R/⌘⇧R are accelerators — handled
-  // above the page, so the recorder cannot preventDefault its way out of one, and a same-process
-  // reload fires neither `closed` nor `render-process-gone`. `navigationClearsRecording` is the
-  // (tested) filter: a same-document navigation is the SAME page with the recorder still armed,
-  // and a subframe is not this page at all.
+  // The THIRD way the page that armed a recorder (or reported terminal focus) can go away: a
+  // reload. The View menu above restores `{role:'reload'}` / `{role:'forceReload'}`, and ⌘R/⌘⇧R are
+  // accelerators — handled above the page, so the recorder cannot preventDefault its way out of
+  // one, and a same-process reload fires neither `closed` nor `render-process-gone`.
+  // `navigationClearsRecording` is the (tested) filter: a same-document navigation is the SAME page
+  // with the recorder still armed and the terminal still focused, and a subframe is not this page
+  // at all.
   win.webContents.on('did-start-navigation', (details) => {
-    if (navigationClearsRecording(details)) clearShortcutRecording()
+    if (navigationClearsRecording(details)) clearRendererKeyState()
   })
 
   // Open external links in the system browser — only safe schemes (no file://, no custom
@@ -954,6 +994,16 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.uiShortcutRecording, (event, active: boolean) => {
     if (getMainWindow()?.webContents.id !== event.sender.id) return
     shortcutRecording = active === true
+  })
+
+  // The terminal-focus mirror, under the SAME sender guard and for a sharper version of the same
+  // reason: a <webview> guest is a webContents in this process, and this bit decides whether the
+  // window claims ⌘W/⌘M/⌘0 at all — an arbitrary page in a browser node could otherwise hand
+  // itself the window's shortcuts by claiming a terminal is focused. `focused === true` so a
+  // malformed payload reads as NOT focused, the fail-safe direction (intercepts on).
+  ipcMain.on(IPC.uiTerminalFocus, (event, focused: boolean) => {
+    if (getMainWindow()?.webContents.id !== event.sender.id) return
+    terminalFocused = focused === true
   })
 
   // Bring the window forward after a file is dropped into a terminal. On macOS a drag-drop from

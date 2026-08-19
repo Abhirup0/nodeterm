@@ -2496,6 +2496,15 @@ export interface ShortcutsApi {
    *  no-op (a browser tab has no application menu to steal a chord back from, so nothing
    *  intercepts). */
   setRecording(active: boolean): void
+  /** Mirror whether an xterm currently holds keyboard focus, so the desktop's intercepts can stand
+   *  down under the `terminal-first` shortcut policy — `before-input-event` fires before any
+   *  renderer handler could answer, so main needs the answer in advance. Sent on CHANGE only.
+   *  Fire-and-forget, and **not optional**: the mirror is the only thing that makes the policy
+   *  reach the three main-intercepted chords. Read fail-safe on the far side (a missing or stale
+   *  mirror = not focused = intercepts on), so the failure mode of never sending is the app
+   *  behaving as it did before the policy existed. Server Edition: a documented no-op, like
+   *  `setRecording` — a browser tab has no application menu to steal a chord back from. */
+  setTerminalFocused(focused: boolean): void
 }
 
 export interface NodeTerminalApi {

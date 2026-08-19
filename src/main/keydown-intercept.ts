@@ -1,5 +1,9 @@
 import { IPC } from '../shared/ipc'
-import { getEffectiveBindings, sanitizeKeybindingOverrides } from '../shared/keybindings'
+import {
+  getEffectiveBindings,
+  sanitizeKeybindingOverrides,
+  type TerminalShortcutPolicy
+} from '../shared/keybindings'
 import { matchesShortcut } from '../shared/shortcut'
 
 /**
@@ -195,6 +199,31 @@ export function navigationClearsRecording(details: {
   return details.isMainFrame && !details.isSameDocument
 }
 
+/**
+ * PURE. Does the user's `terminalShortcutPolicy` mean this window must stop claiming chords right
+ * now? The composition `index.ts` hands to `installKeydownIntercepts`' 5th parameter, exported so
+ * it can be pressed instead of living untested inside a closure in a 5000-line file.
+ *
+ * **Both halves are refusals and both matter.** `app-first` is the shipped default, so it must be
+ * false whatever the mirror reports — that is the byte-identical guarantee of this feature: a user
+ * who never touched the setting sees exactly the pre-feature intercepts, even though their
+ * renderer is reporting terminal focus all day. And `terminalFocused` is a MIRROR of the
+ * renderer's `document.activeElement`, which is why `false` is its reset value everywhere: a page
+ * that died mid-report, a window that never had one, a reload — all resolve to "intercepts on",
+ * never to "intercepts off with nothing alive to turn them back on".
+ *
+ * Why the policy is read here rather than the intercepts simply being uninstalled under
+ * `terminal-first`: the policy is a live setting and the focus changes per keystroke, so there is
+ * nothing static to install against — and an app-first user's window must not be a different
+ * window from a terminal-first user's.
+ */
+export function policyStandsDown(
+  policy: TerminalShortcutPolicy,
+  terminalFocused: boolean
+): boolean {
+  return policy === 'terminal-first' && terminalFocused
+}
+
 /** The renderer channel a claimed action is forwarded on. */
 export function keydownInterceptChannel(action: KeydownInterceptAction): string {
   if (action === 'toggle-markdown') return IPC.appToggleMarkdown
@@ -240,15 +269,32 @@ export interface KeydownInterceptTarget {
  * suspending the MENU while recording (`Menu.setApplicationMenu(null)` around the armed window, or
  * per-item `enabled:false`) — a change to `buildAppMenu`, not to this module. Known limitation;
  * see the PR body.
+ *
+ * `isStoodDown` is the SECOND suspension and the same shape again, but a different fact:
+ * `policyStandsDown(policy, terminalFocused)` — the user chose `terminal-first` AND an xterm
+ * currently holds keyboard focus in the renderer. It is a separate parameter rather than an `||`
+ * folded into `isRecording` because the two suspend for unrelated reasons on unrelated schedules
+ * (a Settings dialog being armed vs. a live focus mirror), and one boolean would make "the
+ * recorder still works for an app-first user" — the overwhelmingly common case — impossible to
+ * assert. Both are checked BEFORE `preventDefault` for the same reason: a claimed chord never
+ * reaches the page at all, and the page is exactly who terminal-first stands down FOR.
+ *
+ * **The stand-down leg cannot be more reliable than the mirror behind it**, and the mirror is a
+ * renderer reporting over fire-and-forget IPC. Every uncertainty therefore resolves to NOT stood
+ * down (intercepts on = the pre-feature app): `index.ts` starts `terminalFocused` false and every
+ * way the page can stop existing resets it there. Getting that direction backwards would leave ⌘W
+ * and ⌘M with the application MENU — closing and minimizing the window — with no live component
+ * able to correct it.
  */
 export function installKeydownIntercepts(
   win: KeydownInterceptTarget,
   getBindings: () => KeydownInterceptBindings,
   isMac: boolean,
-  isRecording: () => boolean
+  isRecording: () => boolean,
+  isStoodDown: () => boolean
 ): void {
   win.webContents.on('before-input-event', (event, input) => {
-    if (isRecording()) return
+    if (isRecording() || isStoodDown()) return
     const decision = keydownIntercept(input, getBindings(), isMac)
     if (!decision) return
     event.preventDefault()

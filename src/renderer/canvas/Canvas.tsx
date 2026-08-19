@@ -180,6 +180,7 @@ import {
   type GlobalKeydownDeps
 } from '../lib/globalKeybindings'
 import { isTerminalTarget, type ContextElement } from '../lib/keyContext'
+import { installTerminalFocusMirror } from '../lib/terminalFocusMirror'
 import {
   activeKeybindingOverrides,
   chipFor,
@@ -5314,6 +5315,25 @@ export function Canvas() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
+
+  // Mirror "an xterm has keyboard focus" to main, so the DESKTOP's `before-input-event` intercepts
+  // can stand down under the `terminal-first` policy: that intercept fires before any renderer
+  // handler could tell it, so the answer has to already be in main. The mirror is deliberately NOT
+  // gated on the policy — main composes `policy === 'terminal-first' && terminalFocused`, so a user
+  // who flips the setting with a terminal already focused gets the new behaviour on their very next
+  // keystroke, rather than after the next focus change. Under the shipped `app-first` default main's
+  // half is false regardless, so nothing about this app's shortcuts changes.
+  // The logic (change-dedup, the microtask-settled read, the window-blur leg and the re-check that
+  // catches a focused terminal being torn out of the DOM by a park / offscreen release / delete)
+  // lives in `lib/terminalFocusMirror.ts`, where it is pressed against a real DOM. Server Edition:
+  // the bridge stubs `setTerminalFocused` — there is no main-process intercept there to suspend.
+  useEffect(
+    () =>
+      installTerminalFocusMirror({
+        report: (focused) => window.nodeTerminal.shortcuts.setTerminalFocused(focused)
+      }),
+    []
+  )
 
   // ⌘/Ctrl+0 on the DESKTOP never reaches the keydown handler above: Electron's default View menu
   // binds the accelerator to `resetZoom`, and a menu accelerator is handled before the page sees

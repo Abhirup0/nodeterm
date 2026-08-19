@@ -5,6 +5,7 @@ import {
   installKeydownIntercepts,
   keydownIntercept,
   navigationClearsRecording,
+  policyStandsDown,
   resolveInterceptBindings,
   type KeydownInterceptBindings,
   type KeydownInterceptInput,
@@ -59,9 +60,11 @@ function press(
 ): { prevented: boolean; sent: string[] } {
   const isMac = opts.isMac ?? true
   const bindings = opts.bindings ?? (isMac ? DEFAULTS : DEFAULTS_PC)
-  // Not recording: the ordinary state of the app, and the baseline every case below asserts
-  // against. The armed state has its own describe block at the bottom of this file.
-  const seam = install(() => bindings, isMac, () => false)
+  // Neither recording nor stood down: the ordinary state of the app, and the baseline every case
+  // below asserts against. Each suspended state has its own describe block at the bottom of this
+  // file. Both thunks are spelled out rather than defaulted, so a THIRD suspension added to
+  // `installKeydownIntercepts` cannot silently inherit "off" here.
+  const seam = install(() => bindings, isMac, () => false, () => false)
   seam.fire(over)
   return { prevented: seam.prevented.length > 0, sent: seam.sent }
 }
@@ -74,7 +77,8 @@ function press(
 function install(
   getBindings: () => KeydownInterceptBindings,
   isMac: boolean,
-  isRecording: () => boolean
+  isRecording: () => boolean,
+  isStoodDown: () => boolean
 ): { fire: (over?: Partial<KeydownInterceptInput>) => void; prevented: string[]; sent: string[] } {
   let handler:
     | ((event: { preventDefault(): void }, input: KeydownInterceptInput) => void)
@@ -91,7 +95,7 @@ function install(
       }
     }
   }
-  installKeydownIntercepts(win, getBindings, isMac, isRecording)
+  installKeydownIntercepts(win, getBindings, isMac, isRecording, isStoodDown)
   if (!handler) throw new Error('installKeydownIntercepts registered no before-input-event listener')
   const fire = (over: Partial<KeydownInterceptInput> = {}): void => {
     const i = input(over)
@@ -346,7 +350,7 @@ describe('binding-driven intercept', () => {
 describe('an armed shortcut recorder suspends every interception', () => {
   it('suppresses while armed and resumes on disarm', () => {
     let recording = true
-    const seam = install(() => DEFAULTS, true, () => recording)
+    const seam = install(() => DEFAULTS, true, () => recording, () => false)
     seam.fire({ meta: true, key: 'w', code: 'KeyW' })
     seam.fire({ meta: true, key: 'm', code: 'KeyM' })
     seam.fire({ meta: true, code: 'Digit0' })
@@ -368,7 +372,7 @@ describe('an armed shortcut recorder suspends every interception', () => {
   // This mirrors index.ts's wiring exactly — the listener runs the same predicate.
   it('a reload while armed restores interception; an in-page navigation does not', () => {
     let recording = true
-    const seam = install(() => DEFAULTS, true, () => recording)
+    const seam = install(() => DEFAULTS, true, () => recording, () => false)
     const onNavigation = (d: { isMainFrame: boolean; isSameDocument: boolean }): void => {
       if (navigationClearsRecording(d)) recording = false
     }
@@ -397,10 +401,107 @@ describe('an armed shortcut recorder suspends every interception', () => {
     // The bit lives in a module-level `let` in index.ts that the renderer flips over IPC long
     // after the window was created; a captured boolean would make the whole feature inert.
     let recording = false
-    const seam = install(() => DEFAULTS, true, () => recording)
+    const seam = install(() => DEFAULTS, true, () => recording, () => false)
     seam.fire({ meta: true, key: 'w', code: 'KeyW' })
     recording = true
     seam.fire({ meta: true, key: 'w', code: 'KeyW' })
     expect(seam.sent).toEqual([IPC.appCloseNode])
+  })
+})
+
+/**
+ * The SECOND suspension, and a different fact from the first. `terminal-first` is the user saying
+ * "while I am typing in a terminal, the terminal gets the chord" — so main must stop claiming keys
+ * it would otherwise steal from the page, for exactly as long as an xterm holds keyboard focus.
+ *
+ * It is a separate thunk rather than an `||` folded into `isRecording` because the two suspend for
+ * unrelated reasons and on unrelated schedules: recording is a Settings dialog being armed and
+ * suspends ALWAYS, the policy one is a live focus mirror and suspends only while the mirror says a
+ * terminal is focused. One boolean would make "recording still works when the policy is off" — the
+ * first case below — untestable, and would hide a future bug where one reason silently ate the
+ * other.
+ */
+describe('terminal-first stands every interception down while a terminal is focused', () => {
+  it('suppresses all three chords while stood down, and resumes when it flips back', () => {
+    let stoodDown = true
+    const seam = install(() => DEFAULTS, true, () => false, () => stoodDown)
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    seam.fire({ meta: true, key: 'm', code: 'KeyM' })
+    seam.fire({ meta: true, code: 'Digit0' })
+    // ⌘0 is in the list on purpose: it is the one chord with no registry command behind it, so a
+    // stand-down written against `getBindings` alone would leave it claimed — and the canvas would
+    // still snap to 100% under a user who asked their terminal to own the key.
+    // Not swallowed either: `preventDefault` takes the key from the PAGE as well as the menu, and
+    // the page is who the terminal-first policy is standing down FOR, so the suppression must
+    // return before it rather than merely skip the send.
+    expect(seam.prevented).toEqual([])
+    expect(seam.sent).toEqual([])
+    // Focus leaves the terminal (or the user switches back to app-first): every chord is ours again.
+    stoodDown = false
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    seam.fire({ meta: true, key: 'm', code: 'KeyM' })
+    seam.fire({ meta: true, code: 'Digit0' })
+    expect(seam.sent).toEqual([IPC.appCloseNode, IPC.appToggleMarkdown, IPC.appZoomActualSize])
+    expect(seam.prevented).toEqual(['KeyW', 'KeyM', 'Digit0'])
+  })
+
+  it('the two suspensions are independent — either one alone suppresses', () => {
+    let recording = false
+    let stoodDown = false
+    const seam = install(() => DEFAULTS, true, () => recording, () => stoodDown)
+    // Recording alone, with the policy off: the Settings recorder must keep working for a user who
+    // never chose terminal-first (i.e. everybody, by default).
+    recording = true
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([])
+    // Stood down alone, with no recorder armed: the policy suspension does not depend on the other.
+    recording = false
+    stoodDown = true
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([])
+    // Neither: back to the ordinary app.
+    stoodDown = false
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([IPC.appCloseNode])
+  })
+
+  it('is read per event, not captured at install time', () => {
+    // Same reason as the recording bit's twin test: the focus mirror flips a module-level `let` in
+    // index.ts over IPC while the window lives. A captured boolean would make the policy inert for
+    // whichever value happened to be true at `createWindow` time — i.e. always inert, since the
+    // window is built before any renderer has reported focus.
+    let stoodDown = false
+    const seam = install(() => DEFAULTS, true, () => false, () => stoodDown)
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    stoodDown = true
+    seam.fire({ meta: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([IPC.appCloseNode])
+  })
+})
+
+/**
+ * The composition index.ts hands to the 5th parameter, as a pure function so it can be pressed.
+ * The BYTE-IDENTICAL claim of this whole change lives here: on the shipped default (`app-first`)
+ * it is false whatever the mirror says, so nothing about the intercepts changes for a user who
+ * never touched the setting — including one whose renderer is reporting terminal focus all day.
+ */
+describe('policyStandsDown', () => {
+  it('stands down only under terminal-first, and only while a terminal is focused', () => {
+    expect(policyStandsDown('terminal-first', true)).toBe(true)
+    expect(policyStandsDown('terminal-first', false)).toBe(false)
+  })
+
+  it('app-first never stands down, focused or not', () => {
+    expect(policyStandsDown('app-first', true)).toBe(false)
+    expect(policyStandsDown('app-first', false)).toBe(false)
+  })
+
+  // The fail-safe direction, stated as a test: main starts at `terminalFocused = false` and every
+  // reset returns it there, so a mirror that never reported — or a page that died mid-report —
+  // leaves the intercepts ON (the pre-feature behaviour), never off.
+  it('the reset value (not focused) means intercepts stay on under either policy', () => {
+    for (const policy of ['app-first', 'terminal-first'] as const) {
+      expect(policyStandsDown(policy, false)).toBe(false)
+    }
   })
 })
