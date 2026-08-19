@@ -1,4 +1,5 @@
 import { projectSectionId } from './project-settings-targets'
+import type { ProjectIcon } from '@shared/project-icon'
 
 export type SettingsSectionId =
   | 'terminal'
@@ -32,6 +33,7 @@ export interface ProjectNavItem {
   id: string
   name: string
   color: string
+  icon?: ProjectIcon
 }
 
 export interface SettingsSectionRef {
@@ -39,6 +41,11 @@ export interface SettingsSectionRef {
   title: string
   /** Only meaningful on macOS (the notch capsule) — hidden elsewhere by `visibleSettingsGroups`. */
   macOnly?: boolean
+  /** Project-section rows only (`project-${string}` ids): the project's own color/icon, so the
+   *  sidebar can render its `ProjectGlyph` beside the title instead of the generic folder glyph
+   *  every project section used to share. Absent on every static section. */
+  color?: string
+  icon?: ProjectIcon
 }
 
 export interface SettingsGroup {
@@ -136,6 +143,11 @@ export function projectsSettingsGroup(projects: ProjectNavItem[]): SettingsGroup
   return {
     id: 'projects',
     title: 'Projects',
-    sections: projects.map((p) => ({ id: projectSectionId(p.id), title: p.name }))
+    sections: projects.map((p) => ({
+      id: projectSectionId(p.id),
+      title: p.name,
+      color: p.color,
+      icon: p.icon
+    }))
   }
 }

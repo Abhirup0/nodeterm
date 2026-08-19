@@ -13,6 +13,7 @@ import { tabClickAction } from '../session/relay-tab'
 import { useMenuFlip } from '../ui/useMenuFlip'
 import { commandTooltip } from '../lib/keybindingOverrides'
 import { IconCanvasView, IconKanban } from './icons'
+import { ProjectGlyph } from './ProjectGlyph'
 import {
   ALL_PERMISSION_MODES,
   PERMISSION_MODE_LABELS,
@@ -301,9 +302,12 @@ export function TabBar({
                       : p.cwd || undefined
                 }
               >
-                <span
+                <ProjectGlyph
+                  icon={p.icon}
+                  color={active ? p.color : undefined}
+                  name={p.name}
+                  variant="dot"
                   className="tab__dot"
-                  style={active ? { background: p.color } : undefined}
                 />
                 {/* An SSH project looks identical to a local one once it is named, and the
                     difference matters: its terminals, git and file ops all run on another
