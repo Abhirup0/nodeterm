@@ -21,11 +21,11 @@ interface Row {
 /** Registry rows derive their keys from the effective binding, so a remap in settings.json
  *  shows up here without touching this file — and a command the user unbound (or that ships
  *  unassigned) drops off the panel instead of advertising a chord that no longer fires.
- *  That promise only holds while every row's KEYBOARD path also reads the registry, which is
- *  what makes the panel and the key agree. One row does not yet: `terminal.find` still matches
- *  a hardcoded Cmd/Ctrl+F in TerminalNode — it becomes registry-backed in the next change.
- *  Gesture/mouse rows stay literal: they are not commands and the registry knows nothing
- *  about them. "Dictate" also stays literal — its chord still lives in
+ *  That promise holds because every row's KEYBOARD path also reads the registry, which is
+ *  what makes the panel and the key agree — `terminal.find` included, whose match in
+ *  TerminalNode now reads `effectiveBindings('terminal.find')` instead of a hardcoded
+ *  Cmd/Ctrl+F. Gesture/mouse rows stay literal: they are not commands and the registry knows
+ *  nothing about them. "Dictate" also stays literal — its chord still lives in
  *  `settings.speech.shortcut` (the registry's `speech.dictation` row is display-only for now),
  *  and a modifier-only chord is hold-to-talk, which the label spells out. */
 function buildSections(dictationKeys: string[], dictationLabel: string): { title: string; rows: Row[] }[] {

@@ -166,11 +166,16 @@ import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
-import { chipFor } from '../lib/keybindingOverrides'
+import { chipFor, effectiveBindings } from '../lib/keybindingOverrides'
+import { matchesShortcut } from '@shared/shortcut'
+import { isMacPlatform } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
 import { connectHostAttachment } from '../lib/sshAttachments'
+
+/** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
+const isMac = isMacPlatform()
 
 /** How long a remote terminal waits for its project's ControlMaster before giving up and showing
  *  the offline overlay. Sized for the SLOW-but-fine case (a cold app load whose connect is still
@@ -4117,7 +4122,7 @@ export function TerminalNode({
   // needed (the Electron renderer has no native find UI), unlike Cmd+M.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'f' && hoveredRef.current) {
+      if (hoveredRef.current && effectiveBindings('terminal.find').some((s) => matchesShortcut(e, s, isMac))) {
         e.preventDefault()
         setSearchOpen((v) => !v)
       }
