@@ -307,7 +307,12 @@ describe('account-scoped ownership', () => {
       path.join(recordsRoot, 'acct-B', 'thread-1')
     )
     expect(readCodexThreadIdentity('thread-1', recordsRoot, 'acct-A')?.nodeId).toBe('node-1')
-    // MUTATION TARGET: drop the line-vs-directory agreement check ⇒ acct-B honours it and reddens.
+    // The scope-bound HMAC is what actually carries this: the record was signed under scope
+    // `acct-A`, so recomputing the expected signature under scope `acct-B` mismatches and the record
+    // is rejected regardless. The explicit accountId-line-vs-directory agreement check is
+    // defence-in-depth layered on top (a clearer refusal, and belt-and-braces if the preimage ever
+    // changed). So this asserts the OUTCOME — acct-B never honours acct-A's record — not that the
+    // line check alone is load-bearing (carried PR-2 minor: the earlier comment overstated that).
     expect(readCodexThreadIdentity('thread-1', recordsRoot, 'acct-B')).toBeUndefined()
   })
 

@@ -161,6 +161,25 @@ export function resolveRelayThreadResponse(
   }
 }
 
+/**
+ * The JSON-RPC error a rewritten relay response carries when the observation failed, or `null` when
+ * it succeeded. Two DISTINCT failures reach `resolveRelayThreadResponse` as `{ ok: false }`, and
+ * before this they were both rewritten to the SAME "Codex changed the conversation id" message:
+ *  - `unexpectedThreadId` set — a `thread/resume` came back under a DIFFERENT id: the silent-fork
+ *    case the `-32004` guard exists for (§4.2 step 5 / Property 5).
+ *  - `unexpectedThreadId` UNSET — the response's thread id was missing or malformed: NOT an id
+ *    change. Telling the operator "the id changed" here is wrong, so it gets a distinct internal
+ *    error wording (carried PR-4 minor: tighten the -32004 wording).
+ */
+export function relayThreadResponseError(
+  observed: RelayThreadResponse
+): { code: number; message: string } | null {
+  if (observed.ok) return null
+  return observed.unexpectedThreadId !== undefined
+    ? { code: -32004, message: 'Codex changed the conversation id during account switch' }
+    : { code: -32603, message: 'Codex returned a malformed conversation id during account switch' }
+}
+
 type RelayThread = Record<string, any> & {
   id: string
   path?: string | null
@@ -468,7 +487,21 @@ export function relayControlPost(
   })
 }
 
+/**
+ * Create the `~/.nodeterm` relay root, mode `0o700`, idempotently. `serve()` already makes it, but
+ * that runs in the DETACHED daemon child — a caller reaching for the relay from the app process
+ * (the state file, the process lock, `ensureServer`) needs the directory to exist first. Only
+ * `serve()` created it before S6 PR 5, so `ensureServer` / any first relay use in the app process
+ * could race a missing root (carried PR-4 obligation). Exported so the main-side account wiring can
+ * ensure it at boot too. `target` is injectable so a test never touches the real home.
+ */
+export function ensureCodexRelayRoot(target: string = root): void {
+  mkdirSync(target, { recursive: true, mode: 0o700 })
+}
+
 async function ensureServer(): Promise<State> {
+  // The root must exist before we read the state file or take the process lock — both live under it.
+  ensureCodexRelayRoot()
   const current = readState()
   if (current) {
     try {
@@ -1405,14 +1438,10 @@ function serve(): void {
           }
           const observed = resolveRelayThreadResponse(pending, message)
           if (observed && !observed.ok) {
+            // Distinguish the silent-fork case (-32004) from a plain malformed-id response — see
+            // relayThreadResponseError. Both used to be labelled "changed the conversation id".
             outbound = Buffer.from(
-              JSON.stringify({
-                id: message.id,
-                error: {
-                  code: -32004,
-                  message: 'Codex changed the conversation id during account switch'
-                }
-              })
+              JSON.stringify({ id: message.id, error: relayThreadResponseError(observed) })
             )
           }
           const committed = observed?.ok
