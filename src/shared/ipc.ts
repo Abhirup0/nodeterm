@@ -325,6 +325,7 @@ export const IPC = {
   githubIssuesCreateLabels: 'githubIssues:create-labels',
   githubIssuesClearCache: 'githubIssues:clear-cache',
   githubIssuesChanged: (projectId: string) => `githubIssues:changed:${projectId}`,
+  githubProjectAvatar: 'github:projectAvatar',
   githubControlStatus: 'githubControl:status',
   githubControlApprove: 'githubControl:approve',
   githubControlRevoke: 'githubControl:revoke',

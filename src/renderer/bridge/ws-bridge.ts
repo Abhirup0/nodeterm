@@ -419,6 +419,10 @@ export function buildGitHubApi(
       >,
     clearCache: (projectId) =>
       client.request(IPC.githubIssuesClearCache, projectId) as Promise<void>,
+    projectAvatar: (projectId) =>
+      client.request(IPC.githubProjectAvatar, projectId) as ReturnType<
+        GitHubIssuesApi['projectAvatar']
+      >,
     onChanged: (projectId, listener) =>
       client.subscribe(IPC.githubIssuesChanged(projectId), listener as Listener)
   }
