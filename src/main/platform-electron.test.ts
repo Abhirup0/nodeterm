@@ -305,3 +305,60 @@ describe('electronPlatform.dispatch / cast (the peer inbound path)', () => {
     expect(Object.keys(h.handlers).sort()).toEqual(['c1', 'c2', 'c3'])
   })
 })
+
+/**
+ * A relay guest is NOT the host's user. `project-setup:run` starts a script on the host, and
+ * `project-setup:consent-submit` is the ANSWER to the host's own trust prompt — a guest reaching
+ * both could trigger a run and then approve it themselves, with the host's human never touching
+ * anything. BOTH legs of the peer surface are gated: `dispatch` (request/response — how `run` and
+ * `cancel` arrive) and `cast` (fire-and-forget — how `consent-submit` arrives). Gating only the
+ * first would leave the self-approval half wide open.
+ */
+describe('electronPlatform host-only admission (project-setup)', () => {
+  const REFUSAL = {
+    code: 'E_FORBIDDEN',
+    message: 'host-control method is not available to relay peers'
+  }
+  const GATED = ['project-setup:run', 'project-setup:cancel', 'project-setup:consent-submit']
+
+  it('refuses a peer dispatch of run/cancel/consent-submit without reaching the handler', async () => {
+    const p = electronPlatform()
+    const reached: string[] = []
+    for (const ch of GATED) {
+      p.handle(ch, () => {
+        reached.push(ch)
+        return 'must-not-run'
+      })
+    }
+    let id = 0
+    for (const ch of GATED) {
+      id += 1
+      expect(await p.dispatch(PEER, { t: 'req', id, method: ch, args: [] })).toEqual({
+        t: 'res', id, ok: false, error: REFUSAL
+      })
+    }
+    expect(reached).toEqual([])
+  })
+
+  it('refuses a peer CAST of consent-submit — the self-approval path', () => {
+    const p = electronPlatform()
+    const answers: unknown[][] = []
+    p.on('project-setup:consent-submit', (...args: unknown[]) => answers.push(args))
+    p.cast(PEER, 'project-setup:consent-submit', ['req-1', 'approve'])
+    expect(answers).toEqual([])
+  })
+
+  it('still admits the harmless project-setup lifecycle channels', () => {
+    const p = electronPlatform()
+    const seen: string[] = []
+    p.on('project-setup:subscribe', () => seen.push('sub'))
+    p.cast(PEER, 'project-setup:subscribe', ['p1'])
+    expect(seen).toEqual(['sub'])
+  })
+
+  it('the LOCAL window is unaffected — its ipcMain registration still answers', async () => {
+    const p = electronPlatform()
+    p.handle('project-setup:run', (projectId: string) => `ran:${projectId}`)
+    expect(await h.handlers['project-setup:run']({ sender: { id: 1 } }, 'p1')).toBe('ran:p1')
+  })
+})

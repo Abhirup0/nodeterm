@@ -24,6 +24,7 @@ import {
   toXtermText,
   xtermScrollback,
   applyLiveOptions,
+  mergeProjectVisuals,
   terminalLetterSpacing,
   terminalLineHeight,
   xtermOptionsFromSettings,
@@ -906,5 +907,65 @@ describe('applyLiveOptions', () => {
     expect(term.options.fontSize).toBe(18)
     expect(term.options.cursorStyle).toBe('underline')
     expect(term.options.theme).toBe(resolveTerminalTheme('nord').theme)
+  })
+})
+
+describe('mergeProjectVisuals (a project\'s own theme / font over the global settings)', () => {
+  it('returns the base BY IDENTITY when the project overrides nothing', () => {
+    const base = visual()
+    expect(mergeProjectVisuals(base, undefined)).toBe(base)
+    expect(mergeProjectVisuals(base, {})).toBe(base)
+  })
+
+  it('lets a project theme win over the global one', () => {
+    const merged = mergeProjectVisuals(visual({ terminalTheme: 'nord' }), { theme: 'dracula' })
+    expect(merged.terminalTheme).toBe('dracula')
+    expect(xtermOptionsFromSettings(merged).theme).toBe(resolveTerminalTheme('dracula').theme)
+  })
+
+  it('lets a project font family win over the global one', () => {
+    const merged = mergeProjectVisuals(visual({ fontFamily: 'Menlo' }), { fontFamily: 'Iosevka' })
+    expect(merged.fontFamily).toBe('Iosevka')
+    expect(xtermOptionsFromSettings(merged).fontFamily).toBe('Iosevka')
+  })
+
+  // The whole reason `isKnownTerminalThemeId` exists: `resolveTerminalTheme` is total, so passing an
+  // unknown override straight through would repaint the project's terminals with the APP DEFAULT
+  // rather than leaving the user's own global choice alone.
+  it('falls back to the GLOBAL theme for an unknown id, not to the app default', () => {
+    const merged = mergeProjectVisuals(visual({ terminalTheme: 'nord' }), { theme: 'bogus' })
+    expect(merged.terminalTheme).toBe('nord')
+    expect(xtermOptionsFromSettings(merged).theme).toBe(resolveTerminalTheme('nord').theme)
+    expect(xtermOptionsFromSettings(merged).theme).not.toBe(
+      resolveTerminalTheme('nodeterm-dark').theme
+    )
+  })
+
+  it('ignores a blank font family rather than handing xterm an empty string', () => {
+    const base = visual({ fontFamily: 'Menlo' })
+    expect(mergeProjectVisuals(base, { fontFamily: '' })).toBe(base)
+    expect(mergeProjectVisuals(base, { fontFamily: '   ' })).toBe(base)
+  })
+
+  it('overrides one value without disturbing the other twelve', () => {
+    const base = visual({ fontSize: 15, cursorStyle: 'bar' })
+    const merged = mergeProjectVisuals(base, { theme: 'nord' })
+    expect(merged).toEqual({ ...base, terminalTheme: 'nord' })
+  })
+
+  // Live application rides the EXISTING machinery: nothing new re-fits, and a project font is a
+  // cell-geometry change exactly like a global one (see the co-attach caveat on mergeProjectVisuals).
+  it('feeds applyLiveOptions the same way a global change does', () => {
+    const base = visual()
+    const backing = xtermOptionsFromSettings(base) as unknown as Record<string, unknown>
+    const term = { options: backing } as LiveOptionTarget
+    expect(applyLiveOptions(term, mergeProjectVisuals(base, { theme: 'nord' }))).toEqual({
+      metricsChanged: false,
+      themeChanged: true
+    })
+    expect(applyLiveOptions(term, mergeProjectVisuals(base, { fontFamily: 'Iosevka' }))).toEqual({
+      metricsChanged: true,
+      themeChanged: true // back off `nord` — the project no longer sets a theme in this call
+    })
   })
 })

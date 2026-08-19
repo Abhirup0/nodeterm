@@ -1364,6 +1364,55 @@ body,
   animation: nt-pulse 1.1s ease-in-out infinite;
 }
 
+/* DRIVING: an agent holds a control lease on this browser node (S8 PR 6). Same clay as RUNNING so
+   it reads as agent activity, but it carries a label + a Stop button, so it is wider than the plain
+   status badges. Always on — no setting hides it (decision 4). */
+.term-node__status--driven {
+  color: #d97757;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.term-node__status--driven .term-node__status-dot {
+  animation: nt-pulse 1.1s ease-in-out infinite;
+}
+
+.browser-driving__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* The one obvious Stop. Quiet by default, clay on hover — it is a deliberate act, so it should read
+   as available without shouting. */
+.browser-driving__stop {
+  flex-shrink: 0;
+  margin-left: 2px;
+  padding: 0 6px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: rgba(var(--tint-rgb), 0.08);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.browser-driving__stop:hover {
+  color: #d97757;
+  border-color: rgba(217, 119, 87, 0.5);
+}
+
+/* The dot's pulse is decoration; the state still reads frozen at the lit end (matches the mascot
+   pulse contract above). */
+@media (prefers-reduced-motion: reduce) {
+  .term-node__status--driven .term-node__status-dot {
+    animation: none;
+  }
+}
+
 /* Walking mascot (docs/mascot-sprites.md): sits where the pulsing dot would, INSIDE the RUNNING
    badge, pure CSS spritesheet stepping — no per-node JS timers. Sizes come from lib/mascot.ts via
    the inline CSS vars so the animation and the rendered sheet can never desync. Fixed heights ≤
@@ -1687,6 +1736,30 @@ body,
 
 .term-node__chat:hover {
   background: rgba(10, 132, 255, 0.18);
+  color: var(--accent-text);
+}
+
+.term-node__hide-fanout,
+.term-node__tidy-fanout {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.term-node__hide-fanout:hover,
+.term-node__tidy-fanout:hover {
+  background: rgba(10, 132, 255, 0.18);
+  color: var(--accent-text);
+}
+
+.term-node__hide-fanout[aria-pressed='true'] {
   color: var(--accent-text);
 }
 
@@ -3542,6 +3615,7 @@ body,
 /* Overlays/menus that can overlap the macOS title-bar strip must opt out of window-drag,
    otherwise clicks on their top controls (×, ↻, …) drag the window instead. */
 .drawer-overlay,
+.drawer--pinned,
 .palette-overlay,
 .sc-overlay,
 .confirm-overlay,
@@ -3568,6 +3642,32 @@ body,
 
 .drawer.scm {
   width: 460px;
+}
+
+/* Pinned explorer: no scrim, clicks pass through to the canvas. The drawer is a floating
+   card on the right — same shape as the sessions sidebar on the left — so the controls
+   cluster (top: 54px, right: 14px, 34px tall) stays reachable. z 26 sits with that cluster
+   above the kanban board (25) and below the tab bar (30) / dialogs (55+). pointer-events
+   on the overlay is load-bearing: a transparent overlay that still captures would freeze
+   the canvas even with the click-to-close handler removed. */
+.drawer-overlay--pinned {
+  background: transparent;
+  pointer-events: none;
+  z-index: 26;
+}
+.drawer-overlay--pinned .drawer--pinned {
+  pointer-events: auto;
+  position: absolute;
+  top: 96px; /* 54 (cluster) + 34 (buttons) + 8 (gap) — must sit BELOW the cluster */
+  right: 14px;
+  bottom: 14px;
+  height: auto;
+  max-height: none;
+  width: 320px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, calc(0.45 * var(--shadow-k)));
 }
 
 .drawer__head {
@@ -4173,6 +4273,14 @@ body,
 
 .ex-head-actions button:hover {
   color: var(--text);
+}
+
+.ex-head-actions button.is-on {
+  color: var(--accent);
+}
+
+.ex-head-actions button svg {
+  display: block;
 }
 
 .ex-body {
@@ -5390,6 +5498,44 @@ body,
 
 .group-node__wt-dirty {
   color: var(--warn);
+}
+
+/* Project setup/archive script state for this checkout — same quiet weight as the status
+   suffixes above; only a failure earns a color. */
+.group-node__setup {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: help;
+}
+
+.group-node__setup--done {
+  color: var(--success);
+}
+
+.group-node__setup--failed,
+.group-node__setup--cancelled {
+  color: var(--warn);
+}
+
+/* A failed SETUP is a button (re-run), not a label — it is the only path that can release the
+   nodes the failure left armed. Styled as the chip it replaces, plus a click affordance. */
+button.group-node__setup {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+button.group-node__setup:hover:not(:disabled) {
+  background: var(--panel-header);
+}
+
+/* A launch is already in flight (or running) — the click would only earn a `busy` refusal. */
+button.group-node__setup:disabled {
+  cursor: default;
+  opacity: 0.75;
 }
 
 .group-node__wt-btn {
@@ -10866,4 +11012,52 @@ body,
 }
 * {
   scrollbar-width: thin;
+}
+
+/* S6 — account identity + provenance pills (AccountIdentityPills). One cluster wherever a Codex
+   account is shown (settings, node chrome, create/switch menus) so an account reads identically
+   everywhere. Theme-aware via --tint-rgb / semantic tokens; no new colour language. */
+.account-identity-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  vertical-align: middle;
+}
+.account-identity-pill {
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  background: rgba(var(--tint-rgb), 0.08);
+}
+.account-provenance-pill {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  background: rgba(var(--tint-rgb), 0.05);
+  border: 1px solid var(--border);
+}
+.account-identity-check {
+  flex: none;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--accent);
+}
+/* A managed home that is missing / an account that cannot be operated: the same cluster, warned.
+   Recolour text + outline with the warn token; no tinted fill (there is no --warn-rgb to build
+   a translucent background from, and the theme guard forbids referencing an undefined variable). */
+.account-identity-pills--warning .account-identity-pill,
+.account-identity-pills--warning .account-provenance-pill {
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  background: transparent;
 }

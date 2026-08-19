@@ -184,3 +184,39 @@ describe('useSshConn — host attachments', () => {
     expect(useSshConn.getState().attachmentScopesOf('local-1')).toEqual([])
   })
 })
+
+// The remote Codex runtime paths (launcher + relay bundle + node) ride the connect result so a
+// Codex node's launch/import can route to the SSH host. Absent when the host has no managed Codex
+// runtime (node/codex/curl missing) or the scope isn't connected — never a partial guess.
+describe('useSshConn — remote Codex runtime (getCodexRuntime)', () => {
+  it('returns the three codex paths from a connected scope, all-undefined otherwise', () => {
+    const s = useSshConn.getState()
+    // never connected → all undefined (not a throw, not a partial)
+    expect(s.getCodexRuntime('p1')).toEqual({
+      codexLauncherPath: undefined,
+      codexRelayScriptPath: undefined,
+      codexRelayRuntimePath: undefined
+    })
+    s.setConn('p1', {
+      controlPath: '/cm.sock',
+      codexLauncherPath: '/home/u/.nodeterm/bin/nodeterm-codex',
+      codexRelayScriptPath: '/home/u/.nodeterm/bin/codex-relay.js',
+      codexRelayRuntimePath: '/usr/bin/node'
+    })
+    expect(useSshConn.getState().getCodexRuntime('p1')).toEqual({
+      codexLauncherPath: '/home/u/.nodeterm/bin/nodeterm-codex',
+      codexRelayScriptPath: '/home/u/.nodeterm/bin/codex-relay.js',
+      codexRelayRuntimePath: '/usr/bin/node'
+    })
+  })
+
+  it('a host with no managed Codex runtime keeps every codex path undefined', () => {
+    const s = useSshConn.getState()
+    s.setConn('p2', { controlPath: '/cm2.sock', remoteHome: '/home/u' })
+    expect(useSshConn.getState().getCodexRuntime('p2')).toEqual({
+      codexLauncherPath: undefined,
+      codexRelayScriptPath: undefined,
+      codexRelayRuntimePath: undefined
+    })
+  })
+})

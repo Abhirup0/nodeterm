@@ -11,6 +11,7 @@ import { useSystemAccount } from '../state/systemAccount'
 import { sessionCount, sessionForProject, useProjectSession } from '../session/session'
 import { tabClickAction } from '../session/relay-tab'
 import { useMenuFlip } from '../ui/useMenuFlip'
+import { commandTooltip } from '../lib/keybindingOverrides'
 import { IconCanvasView, IconKanban } from './icons'
 import {
   ALL_PERMISSION_MODES,
@@ -39,6 +40,9 @@ interface TabBarProps {
   onSetDefaultAccount: (id: string, accountId: string | undefined) => void
   /** Set (or clear, with undefined = use the global setting) the project's default permission mode. */
   onSetDefaultPermissionMode: (id: string, mode: AgentPermissionMode | undefined) => void
+  /** Deep-link to this project's own pane in Settings — everything this menu can change plus the
+   *  shared/machine-local settings families, which have no other entry point. */
+  onOpenProjectSettings: (id: string) => void
 }
 
 /**
@@ -73,7 +77,8 @@ export function TabBar({
   onCloseProject,
   onRemoteAccess,
   onSetDefaultAccount,
-  onSetDefaultPermissionMode
+  onSetDefaultPermissionMode,
+  onOpenProjectSettings
 }: TabBarProps) {
   // Select the raw array and filter in a memo, a `.filter()` inside the selector returns a
   // fresh array every store snapshot, which re-rendered the TabBar on EVERY projects change.
@@ -335,9 +340,16 @@ export function TabBar({
                 )}
 
                 {active && editingId !== p.id && (
+                  // The title was a hardcoded `(⌘⇧B)` — mac glyphs shown to Linux/Windows users
+                  // (a pre-existing bug: it was never even hintLabel-wrapped), and stale after a
+                  // remap. `commandTooltip` fixes both and drops the chord entirely when the
+                  // command is unbound.
                   <button
                     className="tab__board-toggle"
-                    title={kanbanActive ? 'Canvas view (⌘⇧B)' : 'Kanban view (⌘⇧B)'}
+                    title={commandTooltip(
+                      kanbanActive ? 'Canvas view' : 'Kanban view',
+                      'view.kanbanToggle'
+                    )}
                     onClick={(e) => {
                       e.stopPropagation() // a tab click switches projects, this only flips the view
                       useViewMode.getState().toggle(p.id)
@@ -504,6 +516,14 @@ export function TabBar({
                 ))}
               </div>
             )}
+            <button
+              onClick={() => {
+                onOpenProjectSettings(menuProject.id)
+                closeMenu()
+              }}
+            >
+              Project settings…
+            </button>
             <button
               onClick={() => {
                 onCloseProject(menuProject.id)

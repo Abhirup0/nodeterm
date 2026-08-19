@@ -6,7 +6,7 @@ import type {
   TerminalCursorInactiveStyle,
   TerminalCursorStyle
 } from '@shared/types'
-import { resolveTerminalTheme } from './themes'
+import { isKnownTerminalThemeId, resolveTerminalTheme } from './themes'
 
 /**
  * Pure decisions behind the xterm instance in `TerminalNode` — extracted so they can be tested
@@ -250,6 +250,58 @@ export const XTERM_VISUAL_KEYS = [
   'terminalTheme',
   'tmuxScrollback'
 ] as const satisfies readonly (keyof XtermVisualSettings)[]
+
+/**
+ * The two appearance values a PROJECT may set for its own terminals (`terminal.theme` /
+ * `terminal.fontFamily` in `.nodeterm/settings.json`, local-over-shared already applied).
+ *
+ * Deliberately UNGATED by the project trust store, unlike the same family's `shell`: neither value
+ * can execute anything — the worst a hostile shared document achieves is an ugly terminal, which is
+ * visible and one edit away from being undone. Gating them would put a consent dialog in front of a
+ * colour.
+ */
+export interface ProjectVisualOverrides {
+  theme?: string
+  fontFamily?: string
+}
+
+/**
+ * Layer a project's appearance overrides on top of this machine's global appearance settings.
+ *
+ * Returns `base` BY IDENTITY when nothing is overridden — the result is a `useMemo`/effect
+ * dependency in `useXtermVisualSettings`, and a fresh object per render would re-run the live
+ * re-option pass on every terminal for nothing.
+ *
+ * Two rules, both about failing back to the GLOBAL value rather than to the app default:
+ *  - an unknown theme id is ignored (see `isKnownTerminalThemeId`),
+ *  - an empty/blank `fontFamily` is ignored — handing xterm `''` yields the browser default font,
+ *    which is not what "this project sets no font" means.
+ *
+ * CO-ATTACH CAVEAT (the reason this merge is worth a comment at all): `fontFamily` is CELL GEOMETRY,
+ * so a project-scoped font makes `applyLiveOptions` report `metricsChanged` and the caller re-fit —
+ * and under co-attach (one pty, N subscribers) the pty runs at the SMALLEST subscriber's grid. A
+ * project font therefore re-reports THIS viewer's grid to a pty that other viewers may share (a
+ * modal card over the same session, another device attached to it), exactly as a global font change
+ * already does. That is the existing machinery working as designed, not a new hazard — but it does
+ * mean a per-project font is not visually private to that project's window. Nothing extra is done
+ * here: the re-fit is precisely what keeps the pty from being clamped to a stale grid.
+ */
+export function mergeProjectVisuals(
+  base: XtermVisualSettings,
+  overrides: ProjectVisualOverrides | undefined
+): XtermVisualSettings {
+  const theme = isKnownTerminalThemeId(overrides?.theme) ? overrides!.theme! : undefined
+  const fontFamily =
+    typeof overrides?.fontFamily === 'string' && overrides.fontFamily.trim() !== ''
+      ? overrides.fontFamily
+      : undefined
+  if (theme === undefined && fontFamily === undefined) return base
+  return {
+    ...base,
+    ...(theme !== undefined ? { terminalTheme: theme } : {}),
+    ...(fontFamily !== undefined ? { fontFamily } : {})
+  }
+}
 
 /** The appearance-derived options, resolved and clamped. */
 export interface XtermVisualOptions {
