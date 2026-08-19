@@ -500,6 +500,8 @@ describe('dictation conflict bucket', () => {
     })
     expect(r.warnings).toEqual([])
   })
+  // Dictation is now OUTSIDE `includeDefaults`' reach: a future default colliding with its
+  // `Cmd+Alt` would not be caught here.
   it('the shipped defaults stay conflict-free under full scrutiny (unchanged invariant)', () => {
     expect(findKeybindingConflicts({}, true, { includeDefaults: true })).toEqual([])
     expect(findKeybindingConflicts({}, false, { includeDefaults: true })).toEqual([])

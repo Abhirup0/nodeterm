@@ -239,8 +239,13 @@ export function bindingIdentity(binding: string, isMac: boolean): string {
  *
  *  **Overlap policy is deliberately asymmetric.** The LOAD path PERMITS a shared chord — legacy
  *  settings.json files already contain them and silently dropping a user's chord is the failure
- *  this closes. The Settings UI REFUSES to create one, because a user picking a chord interactively
- *  should be told about the precedence rather than discover it later. */
+ *  this closes. The Settings UI REFUSES to create one (`commitCandidate`'s two dictation gates),
+ *  because a user picking a chord interactively should be told about the precedence rather than
+ *  discover it later. One case the permissive load path cannot rescue: a keyed dictation override
+ *  on a MAIN-INTERCEPTED chord (⌘W / ⌘M) wins NOWHERE — main steals those in `before-input-event`
+ *  before the page exists, so such a hand-edit survives sanitization as a permanently dead chord.
+ *  The UI can never create it (`commitCandidate`'s reverse-shadow gate refuses it one step earlier
+ *  than the dictation gates). */
 export function conflictBucket(
   def: Pick<CommandDefinition, 'id' | 'scope'>
 ): 'global' | 'terminal' | 'scm' | 'dictation' {

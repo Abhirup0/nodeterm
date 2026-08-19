@@ -291,4 +291,34 @@ describe('commitCandidate', () => {
     expect(commitCandidate('canvas.fitAll', 'Cmd+Alt+F', 'add')).toEqual({ ok: true })
     expect(kb()['canvas.fitAll']).toEqual(['Cmd+Alt+G', 'Cmd+Alt+F'])
   })
+
+  // Dictation is its own conflict bucket (Task 1), so NEITHER of the three gates above can see an
+  // overlap with it — the detector is silent by design and the load path deliberately permits one.
+  // These two gates are what makes `conflictBucket`'s "the Settings UI REFUSES to create one" true.
+  it("refuses binding another command onto Dictate's keyed chord, naming Dictate", () => {
+    setKb({ 'speech.dictation': ['Cmd+Alt+D'] })
+    const r = commitCandidate('canvas.fitAll', 'Cmd+Alt+D', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Dictate')
+    expect(kb()['canvas.fitAll']).toBeUndefined()
+  })
+
+  it('refuses a keyed Dictate chord that another command already holds', () => {
+    const r = commitCandidate('speech.dictation', 'Cmd+K', 'replace')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toContain('Command palette')
+    expect(kb()['speech.dictation']).toBeUndefined()
+  })
+
+  // Both gates are keyed-only for free: a hold chord's identity ends in `:(hold)`, which no keyed
+  // identity can equal — so neither direction needs an explicit hold guard.
+  it('a HOLD dictation chord never trips the overlap gates', () => {
+    const r = commitCandidate('speech.dictation', 'Cmd+Ctrl', 'replace')
+    expect(r.ok).toBe(true)
+  })
+
+  it('the default hold chord does not block other commands (keyed-only gate)', () => {
+    const r = commitCandidate('canvas.fitAll', 'Cmd+Alt+F9', 'replace')
+    expect(r.ok).toBe(true)
+  })
 })

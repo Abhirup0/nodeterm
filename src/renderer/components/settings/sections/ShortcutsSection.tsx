@@ -6,11 +6,14 @@
  * Design D3 is "same detector, different surfacing": `sanitizeKeybindingOverrides` applies what
  * survives on LOAD, while this section refuses a bad candidate BEFORE anything is written, so the
  * user learns which chord was refused and why instead of watching a saved shortcut disappear on
- * the next launch. Three checks, in this order, and the order is the whole dedupe:
+ * the next launch. The checks run in this order, and the order is the whole dedupe:
  *   1. `normalizeBindingForCommand` — already inside `ShortcutRecorderButton`, so an invalid chord
  *      never reaches `onCommit` (its own hint is shown in the recorder button itself).
  *   2. `findKeybindingConflicts` over the candidate map — a same-bucket collision.
  *   3. `findMainInterceptShadowing` — a CROSS-bucket hit the conflict check cannot see.
+ *   4. REVERSE shadowing — the same collision seen from the non-intercepted side.
+ *   5. The two DICTATION overlap gates — the one overlap `conflictBucket` deliberately does not
+ *      report, refused here in both directions (see the block itself for why).
  * (2) returns early, so a candidate that trips both detectors (a main-intercepted command taking
  * a chord another GLOBAL command already holds — `node.close` ← `Cmd+K`) produces exactly ONE
  * message. The shadow message is reserved for what only it can see: `node.close` ← `Cmd+F`, where
@@ -58,7 +61,7 @@ const NOTES: Partial<Record<CommandId, string>> = {
   // Reused verbatim from the old SpeechSection row: the mode is derived from the chord's SHAPE,
   // which is not guessable from a chip.
   'speech.dictation':
-    'With a key = toggle (press to start, press again to stop and insert); modifiers only = hold to talk (hold to record, release to stop and insert). The Dock mic uses the same shortcut.',
+    'With a key = toggle (press to start, press again to stop and insert); modifiers only = hold to talk (hold to record, release to stop and insert). The Dock mic uses the same shortcut. A keyed dictation chord is claimed before any other shortcut while the canvas has focus.',
   'canvas.deleteSelection': 'Bare keys are allowed here; the typing guard keeps Backspace safe.',
   'terminal.copySelection': 'Applies to a selection xterm owns — a tmux drag copies through OSC 52.'
 }
@@ -165,6 +168,44 @@ export function commitCandidate(
       return {
         ok: false,
         error: `${chord} is intercepted app-wide for ${title}; it would never reach ${own}.`
+      }
+    }
+  }
+
+  // DICTATION OVERLAP, both directions. `speech.dictation` is its own conflict bucket (see
+  // `conflictBucket` in @shared/keybindings), so gate (2) above is silent about it BY DESIGN —
+  // dictation never competes at dispatch, it PRE-EMPTS: the resolver skips it and its own keyed
+  // listener claims the chord first while the canvas has focus. That is precedence, not ambiguity,
+  // which is why the LOAD path permits an overlap (legacy files contain them, and dropping a user's
+  // chord is the failure that bucket closes) while a chord a user picks HERE is refused instead:
+  // an interactive pick deserves to be told about the precedence, not to discover it later.
+  //
+  // Both gates are keyed-only WITHOUT an explicit hold guard: `bindingIdentity` renders a
+  // modifier-only chord as `…:(hold)`, which no keyed identity can ever equal — so the default
+  // `Cmd+Alt` hold chord blocks nothing, and a hold candidate trips nothing.
+  const dictationId: CommandId = 'speech.dictation'
+  const dictationTitle = COMMANDS_BY_ID.get(dictationId)?.title ?? dictationId
+  const identity = bindingIdentity(combo, isMac)
+  if (id !== dictationId) {
+    // "rarely", not "never": dictation's keyed listener only claims the chord where it listens.
+    // In terminal or typing focus the gesture is not offered and this command CAN still fire —
+    // the message must not overclaim a chord that is merely usually lost.
+    const taken = effectiveBindings(dictationId).some((b) => bindingIdentity(b, isMac) === identity)
+    if (taken) {
+      const own = COMMANDS_BY_ID.get(id)?.title ?? id
+      return {
+        ok: false,
+        error: `${chord} is used by ${dictationTitle}, which claims it first; it would rarely reach ${own}.`
+      }
+    }
+  } else {
+    for (const def of COMMAND_DEFINITIONS) {
+      if (def.id === dictationId) continue
+      const hit = effectiveBindings(def.id).some((b) => bindingIdentity(b, isMac) === identity)
+      if (!hit) continue
+      return {
+        ok: false,
+        error: `${chord} is already used by ${def.title}; ${dictationTitle} would claim it first and hide it.`
       }
     }
   }
