@@ -1123,9 +1123,11 @@ export interface Settings {
   /** Ids of terminal node header buttons the user has hidden; empty = everything visible. Gated by
    *  HIDEABLE_HEADER_BUTTONS the same way. */
   hiddenHeaderButtons: string[]
-  /** Whether usage percentages render as consumed ("32% used") or remaining ("68% left").
-   *  'remaining' is the historical default; users coming from other tools expect 'used'. */
-  usagePercentMode: 'used' | 'remaining'
+  /** Whether usage percentages render as consumed ("32% used"), remaining ("68% left"), or raw
+   *  token counts ("48k/200k tokens" — context-window surfaces only; provider quota surfaces
+   *  have no token counts and fall back to 'used' display). 'remaining' is the historical
+   *  default; users coming from other tools expect 'used'. */
+  usagePercentMode: 'used' | 'remaining' | 'tokens'
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
   /** The permission mode Claude TERMINAL (CLI) sessions START in — passed as `--permission-mode`
