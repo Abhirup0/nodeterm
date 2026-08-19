@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { SpeechModelInfo } from '@shared/types'
+import { DEFAULT_SETTINGS, type SpeechModelInfo } from '@shared/types'
 import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type BuiltinAgentId } from '@shared/agents/config'
 import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
 import { hasSpeechModel, SPEECH_MODEL_NONE } from '@shared/speech'
 import { keyLabel } from '@shared/platform-utils'
+import { dictationBinding } from '../../lib/keybindingOverrides'
 import { IOS_APP_STORE_URL } from '../../lib/links'
 import { useSettings } from '../../state/settings'
 import { useEntitlement } from '../../state/entitlement'
@@ -159,8 +160,14 @@ export function OnboardingFlow({ onClose }: { onClose: () => void }) {
     ? (settings.defaultAgent as BuiltinAgentId)
     : 'claude'
   const agent = AGENT_CONFIG[agentId]
-  const dictKeys = shortcutKeyParts(settings.speech.shortcut, isMac)
-  const dictHold = isHoldChord(settings.speech.shortcut)
+  // The registry's dictation chord. `''` (the user unbound it) falls back to the DEFAULT chord
+  // with the copy unchanged: the tour TEACHES the feature, and a fresh install — the only place
+  // this flow runs on its own — cannot have it disabled. Telling a first-run user "dictation is
+  // off" on a screen whose whole job is to introduce dictation would be a worse lie than the
+  // chord being stale for the one user who re-opened the tour after unbinding it.
+  const dictationChord = useSettings(() => dictationBinding()) || DEFAULT_SETTINGS.speech.shortcut
+  const dictKeys = shortcutKeyParts(dictationChord, isMac)
+  const dictHold = isHoldChord(dictationChord)
 
   const stepId: StepId = STEPS[step] ?? 'cover'
   const next = () => setStep((s) => Math.min(s + 1, STEP_COUNT - 1))
