@@ -241,6 +241,14 @@ const sshDisconnect = (scopeId: string): Promise<unknown> =>
   window.nodeTerminal.sshProject.disconnect(scopeId)
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
+import {
+  explorerIsOpen,
+  nextExplorerPin,
+  nextExplorerShow,
+  readExplorerPinned,
+  writeExplorerPinned,
+  type ExplorerShowAction
+} from '../lib/explorerPin'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
@@ -841,7 +849,26 @@ export function Canvas() {
       .then((v) => setAppVersion(v))
       .catch(() => {})
   }, [])
-  const [explorerOpen, setExplorerOpen] = useState(false)
+  // Explorer visibility: pin is a persisted preference (default off — it is a modal today;
+  // flipping the default would dock it on every existing user's next launch). `dismissed` is
+  // the transient × hide and does NOT clear the pin, matching the sessions sidebar. `open`
+  // is the unpinned (modal) flag. See `lib/explorerPin.ts`.
+  const [explorer, setExplorer] = useState(() => ({
+    pinned: readExplorerPinned(),
+    dismissed: false,
+    open: false
+  }))
+  const explorerOpen = explorerIsOpen(explorer)
+  const showExplorer = useCallback((action: ExplorerShowAction) => {
+    setExplorer((s) => ({ ...s, ...nextExplorerShow(s, action) }))
+  }, [])
+  const toggleExplorerPin = useCallback(() => {
+    setExplorer((s) => {
+      const next = nextExplorerPin(s)
+      writeExplorerPinned(next.pinned)
+      return next
+    })
+  }, [])
   // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
   // distinct so revealing the same file twice still re-fires the Explorer effect.
   const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null)
@@ -3274,9 +3301,9 @@ export function Canvas() {
   /** Reveal a file in the Explorer drawer: open the drawer and hand it the (relative) path.
    *  Each call bumps a nonce so revealing the same file twice still re-fires the effect. */
   const revealProjectFile = useCallback((relPath: string) => {
-    setExplorerOpen(true)
+    showExplorer('reveal')
     setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
-  }, [])
+  }, [showExplorer])
 
   // Cmd+click file links inside terminal output (TerminalNode dispatches these — it has no
   // direct line to the canvas). Files open as editor nodes; directories reveal in Explorer.
@@ -5236,7 +5263,7 @@ export function Canvas() {
         useViewMode.getState().toggle(id)
         return true
       },
-      'panel.explorer': () => { setExplorerOpen((v) => !v); return true },
+      'panel.explorer': () => { showExplorer('toggle'); return true },
       'panel.sourceControl': () => { setScOpen((v) => !v); return true },
       'panel.sessions': () => { toggleSessionsPin(); return true },
       'canvas.undo': () => { undo(); return true },
@@ -9358,7 +9385,7 @@ export function Canvas() {
           <span className="cluster-search__icon">⌕</span>
           {paletteChip && <span className="kbd">{paletteChip}</span>}
         </button>
-        <button title={commandTooltip('Explorer', 'panel.explorer')} onClick={() => setExplorerOpen(true)}>
+        <button title={commandTooltip('Explorer', 'panel.explorer')} onClick={() => showExplorer('toggle')}>
           <IconExplorer />
         </button>
         <button title={commandTooltip('Source Control', 'panel.sourceControl')} onClick={() => setScOpen(true)}>
@@ -9722,9 +9749,11 @@ export function Canvas() {
 
       {explorerOpen && (
         <ExplorerPanel
-          onClose={() => setExplorerOpen(false)}
+          onClose={() => showExplorer('close')}
           onOpenFile={(path, isSsh) => openFile(path, undefined, isSsh)}
           reveal={reveal}
+          pinned={explorer.pinned}
+          onTogglePin={toggleExplorerPin}
         />
       )}
 
