@@ -281,6 +281,14 @@ export const MENU_ITEM_ID_SETTINGS = 'app-settings'
  * ⌘⇧B / ⌘, which did not merely fail to record but FIRED — pressing ⌘⇧B into the recorder opened
  * the kanban board behind the Settings dialog, and ⌘, re-opened Settings.
  *
+ * **KNOWN GAP for the recording half, pre-existing and accepted.** This list was written for the
+ * POLICY stand-down, so it covers only the command-style items that policy needed. The always-on
+ * app roles — `{role:'quit'}` (⌘Q), `{role:'hide'}`/`hideOthers`, `toggleDevTools`,
+ * `togglefullscreen` — are NOT here, so those chords still ACT while a recorder is armed (⌘Q quits
+ * the app). Adding them is refused rather than overlooked: ONE list drives both stand-downs, so
+ * they would also go dead for a terminal-first user with a terminal focused, and quit/hide must
+ * never be policy-gated. Closing it properly means splitting the list per stand-down.
+ *
  * mac carries no CLOSE id: the mac template has no `{role:'close'}` at all (Window ▸ Minimize /
  * Zoom / Front), which is exactly why `keydownIntercept` is ⌘W's only handler there. Kanban and
  * Settings are on BOTH platforms — one `viewSubmenu` array and one `settingsItem` object are shared

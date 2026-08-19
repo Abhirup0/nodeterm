@@ -332,7 +332,9 @@ settingsStore.onChange((s) => {
 // 1. `shortcutRecording` — Settings' shortcut recorder is armed: stand every intercept down so the
 //    chord the user presses reaches the recorder. Without it, recording ⌘W CLOSES THE SELECTED
 //    NODES — a claimed chord never reaches the page, so the recorder's own preventDefault cannot
-//    save it.
+//    save it. It ALSO drives the menu leg (`menuStandsDown` → `syncMenuForStandDown`, called from
+//    this bit's IPC receiver), which is what lets a menu-owned chord — ⌘M, ⌘⇧B, ⌘,, off-mac
+//    Ctrl+W — reach the recorder instead of the item that owns it.
 // 2. `terminalFocused` — an xterm holds keyboard focus, which under the `terminal-first` policy
 //    means the intercepts stand down so the terminal gets the chord. `before-input-event` fires
 //    before any renderer handler could answer, so the answer has to be sitting here in advance;

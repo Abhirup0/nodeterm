@@ -1956,9 +1956,16 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   why their capture NOTICE is raised at the IPC receivers in `Canvas.tsx` rather than by the
   dispatcher. **Reload (⌘R / ⌘⇧R) is the named exception and stays live while stood down**: it is
   the crash-recovery lever (a wedged renderer is exactly when it is needed) and a main-frame
-  navigation is one of the three sites that reset `terminalFocused` / `shortcutRecording`. It is
-  therefore also the one chord a shortcut recorder can never capture, which is what the Keyboard
-  Shortcuts section's description now says.
+  navigation is one of the three sites that reset `terminalFocused` / `shortcutRecording`. **Of the
+  items main suspends, Reload is therefore the deliberate exception** — the one it holds back from a
+  shortcut recorder — which is what the Keyboard Shortcuts section's description now says.
+  **KNOWN GAP, pre-existing and accepted:** the suspend list only ever covered the command-style
+  items the terminal-first policy needed, so the always-on app roles — `quit` (⌘Q), `hide` /
+  `hideOthers` (⌘H / ⌘⌥H), `toggleDevTools`, `togglefullscreen` — still act while a recorder is
+  armed (⌘Q pressed into one QUITS the app). They are deliberately NOT added: ONE list drives both
+  stand-downs, and making ⌘Q/⌘H unreachable for a terminal-first user is the worse trade — quit and
+  hide must never be policy-gated. Splitting the list per stand-down is the change that would close
+  it, and it has not been made.
   `keydown-intercept.test.ts` pins both the stolen chords and the suspended item ids (including
   that the list does not silently grow) — `getMenuItemById` answers `null` for a typo and the
   fail-safe is to do nothing, which is indistinguishable from the feature working.
