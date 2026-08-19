@@ -185,6 +185,13 @@ const api: NodeTerminalApi = {
       }
     }
   },
+  worktree: {
+    // Wire carries exactly `(projectId, worktreePath)` — never the sharedPaths list: main reads it
+    // itself by projectId and validates the path against the project's own git worktrees
+    // (worktree-shared-paths-handlers.ts).
+    materializeShared: (projectId: string, worktreePath: string) =>
+      ipcRenderer.invoke(IPC.worktreeMaterializeShared, projectId, worktreePath)
+  },
   dialog: {
     selectFolder: () => ipcRenderer.invoke(IPC.dialogSelectFolder),
     selectFile: () => ipcRenderer.invoke(IPC.dialogSelectFile)

@@ -276,6 +276,13 @@ export const IPC = {
   projectSetupEvent: (projectId: string) => `project-setup:event:${projectId}`,
   projectSetupSubscribe: 'project-setup:subscribe',
   projectSetupUnsubscribe: 'project-setup:unsubscribe',
+  /** Renderer → core: symlink a project's `sharedPaths` from its repo root into a freshly-created
+   *  git worktree. Args carry ONLY `(projectId, worktreePath)` — NEVER the path list, which the
+   *  handler reads itself by projectId (the list is untrusted from a renderer). The handler
+   *  validates `worktreePath` is that project's rootPath or one of its actual git worktrees, and
+   *  refuses an SSH project (local-only this PR); an unknown/invalid input answers `[]`. Resolves
+   *  `SharedPathResult[]`. See core/worktree-shared-paths-handlers.ts. */
+  worktreeMaterializeShared: 'worktree:materialize-shared',
   // main → renderer events
   workspaceMigrated: 'workspace:migrated',
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */

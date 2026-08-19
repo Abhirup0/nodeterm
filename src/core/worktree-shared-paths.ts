@@ -20,20 +20,12 @@
 
 import { promises as fs } from 'fs'
 import path from 'path'
-import { isInsideDir } from '../shared/worktree'
+import { isInsideDir, type SharedPathResult } from '../shared/worktree'
 
-export interface SharedPathResult {
-  path: string
-  status:
-    | 'linked'
-    | 'skipped-missing-source'
-    | 'skipped-exists'
-    | 'skipped-reserved'
-    | 'skipped-unsafe'
-    | 'error'
-  /** Present only for `error` (or a noteworthy skip): a short human-readable reason. */
-  note?: string
-}
+// The type lives in `shared/worktree.ts` so the renderer's `WorktreeApi` can name it without a
+// wrong-direction import into core; re-exported here so this module's own callers/tests keep
+// importing it from where it originated.
+export type { SharedPathResult }
 
 // Mirror of the sanitizer's relative-safety checks in src/shared/project-settings.ts
 // (`hasTraversalSegment` + the absolute / Windows-drive rejection). Values are already sanitized at

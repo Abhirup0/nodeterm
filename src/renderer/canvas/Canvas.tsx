@@ -4432,7 +4432,18 @@ export function Canvas() {
       // A fresh checkout is the moment the project's `setup` script exists for: this is the single
       // shared post-create point (the dialog AND agent-control's open-worktree land here), so the
       // trigger lives here rather than being repeated — and never diverging — at each caller.
-      startWorktreeSetup(groupId, wt.path)
+      //
+      // Materialize the project's `sharedPaths` (symlink node_modules/etc back to the repo root)
+      // BEFORE the setup script runs, so a setup `npm install` sees those links. Fire-and-forget re
+      // the bind (it never blocks the frame), but ORDERED before `startWorktreeSetup` — main reads
+      // the sharedPaths list itself by projectId and validates `wt.path`, so a `[]`/reject is safe.
+      void (async () => {
+        const projectId = useProjects.getState().activeProjectId
+        if (projectId) {
+          await window.nodeTerminal.worktree.materializeShared(projectId, wt.path).catch(() => {})
+        }
+        startWorktreeSetup(groupId, wt.path)
+      })()
       // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
       // callers that need the id (agent-control's open-worktree reply) take it from here.
       return groupId

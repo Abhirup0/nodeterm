@@ -320,6 +320,12 @@ export function buildStubApi(): Omit<
       onConsentDismiss: noopUnsub,
       onEvent: noopUnsub
     },
+    worktree: {
+      // Real over the bridge (`buildRealApi`'s `worktree`); this fallback only matters if some
+      // future assembly spreads the stub alone. Fails closed with the SAME empty-result shape a
+      // real "nothing was linked" answer uses, so a caller needs no extra branch.
+      materializeShared: () => Promise.resolve([])
+    },
     chat: {
       readTranscript: U('chat.readTranscript')
     },

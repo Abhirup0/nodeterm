@@ -11,6 +11,22 @@ export interface GroupWorktree {
   createdByApp: boolean
 }
 
+/** One entry's outcome from materializing a project's `sharedPaths` into a worktree
+ *  (core/worktree-shared-paths.ts). Lives here in `shared` so the renderer's `WorktreeApi` type can
+ *  name it without importing core; core's module re-exports it for its own callers/tests. */
+export interface SharedPathResult {
+  path: string
+  status:
+    | 'linked'
+    | 'skipped-missing-source'
+    | 'skipped-exists'
+    | 'skipped-reserved'
+    | 'skipped-unsafe'
+    | 'error'
+  /** Present only for `error` (or a noteworthy skip): a short human-readable reason. */
+  note?: string
+}
+
 export interface WorktreeEntry {
   path: string
   branch: string | null

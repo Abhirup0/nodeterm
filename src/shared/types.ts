@@ -821,6 +821,23 @@ export interface ProjectSetupApi {
   onEvent(projectId: string, cb: (ev: import('./project-settings').ProjectSetupEvent) => void): () => void
 }
 
+export interface WorktreeApi {
+  /**
+   * Symlink a project's configured `sharedPaths` (git-ignored dirs like `node_modules`) from its
+   * repo root into a freshly-created git worktree, so a setup `npm install` there sees the links.
+   *
+   * The renderer passes ONLY `(projectId, worktreePath)` — never the path list: main reads the list
+   * itself out of the project's settings by `projectId`, derives the repo root from its own
+   * workspace index, and validates `worktreePath` is that project's rootPath or one of its actual
+   * git worktrees. An unknown project, an unvalidated path, or an SSH project (local-only this PR)
+   * all resolve `[]`. Never rejects — a per-entry `SharedPathResult[]` reports what happened.
+   */
+  materializeShared(
+    projectId: string,
+    worktreePath: string
+  ): Promise<import('./worktree').SharedPathResult[]>
+}
+
 export interface DialogApi {
   /** Opens a native folder picker; returns the chosen path or null if cancelled. */
   selectFolder(): Promise<string | null>
@@ -2532,6 +2549,7 @@ export interface NodeTerminalApi {
   workspace: WorkspaceApi
   projectSettings: ProjectSettingsApi
   projectSetup: ProjectSetupApi
+  worktree: WorktreeApi
   dialog: DialogApi
   settings: SettingsApi
   speech: SpeechApi
