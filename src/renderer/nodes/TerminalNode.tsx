@@ -1383,9 +1383,14 @@ export function TerminalNode({
   // it is armed, and by WHAT it is blocked — dep titles read straight off the live canvas, since
   // "waits for term-17" tells the user nothing.
   const pendingLaunch = data.pendingLaunch as PendingLaunch | undefined
-  const pendingWaitingOn = (pendingLaunch?.after ?? [])
-    .map((depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId)
-    .join(', ')
+  const pendingWaitingOn = [
+    ...(pendingLaunch?.after ?? []).map(
+      (depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId
+    ),
+    // The other thing a launch can be held on: this worktree's project setup script. Named, or the
+    // tooltip on a setup-only hold would read "Waiting for  to finish".
+    ...(pendingLaunch?.awaitSetupGroup ? ['the project setup script'] : [])
+  ].join(', ')
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
   const useChat = mdMode && showChat && !!status?.sessionId

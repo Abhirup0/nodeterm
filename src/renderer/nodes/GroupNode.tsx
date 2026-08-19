@@ -4,6 +4,7 @@ import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import { NODE_COLORS, ungroupNodes, type CanvasNode } from '../state/workspace'
 import { useProjects } from '../state/projects'
 import { useWorktrees, WORKTREE_STATUS_POLL_MS } from '../state/worktrees'
+import { useProjectSetup } from '../state/projectSetup'
 
 export type WorktreeAction = 'merge' | 'remove' | 'unbind'
 
@@ -37,6 +38,14 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // (WORKTREE_STATUS_THROTTLE_MS) and is epoch-guarded, so asking often is free.
   const status = useWorktrees((s) => (wt ? s.statusByPath[wt.path] : undefined))
   const stale = useWorktrees((s) => (wt ? s.staleGroupIds.includes(id) : false))
+  // The project setup/archive script Canvas launched for THIS checkout, resolved through the
+  // attachment its ack made (an event carries no lane — see the store's header). Selected as the
+  // entry itself, so a render happens only when this group's run changes, not on every chunk of
+  // every other project's script.
+  const setupRun = useProjectSetup((s) => {
+    const runKey = s.groupRunKey[id]
+    return runKey === undefined ? undefined : s.byRunKey[runKey]
+  })
 
   // On an SSH project the poll is OFF, not merely useless: `git status <path>` would be answered by
   // the LOCAL filesystem for a project whose checkout lives on the host (remote git routing is
@@ -209,6 +218,25 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
                     · {status.behind}↓
                   </em>
                 )}
+              </span>
+            )}
+            {setupRun && (
+              // What the project's script is doing to this checkout. Status only — the OUTPUT lives
+              // in the settings panel's run box (this is a frame header, not a log viewer), and the
+              // failed state is the one that has to be visible here: a node armed behind a failed
+              // setup is still holding its launch, and nothing else on the canvas says why.
+              <span
+                className={`group-node__setup group-node__setup--${setupRun.state}`}
+                title={
+                  `${setupRun.kind === 'archive' ? 'Archive' : 'Setup'} script: ${setupRun.state}` +
+                  (setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`) +
+                  (setupRun.state === 'failed'
+                    ? '\nNodes waiting on it keep holding their launch — re-run it from Project settings.'
+                    : '')
+                }
+              >
+                {setupRun.kind === 'archive' ? 'archive' : 'setup'}
+                {setupRun.state === 'running' ? ' …' : setupRun.state === 'done' ? ' ✓' : ' ✕'}
               </span>
             )}
             {!stale && (

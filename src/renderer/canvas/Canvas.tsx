@@ -267,6 +267,7 @@ import {
   pastedFiles
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
+import { useProjectSetup } from '../state/projectSetup'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -718,6 +719,31 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
       nodeClassName={nodeClassName}
     />
   )
+}
+
+/**
+ * `window.nodeTerminal` rather than the session `api`: the run store's `subscribeProject` listens on
+ * the LOCAL core's channel, so raising a run anywhere else would leave its events unheard — the chip
+ * would sit blank over a script that is really running.
+ */
+function setupApi(): typeof window.nodeTerminal.projectSetup {
+  return window.nodeTerminal.projectSetup
+}
+
+/**
+ * The setup gate an armed node asks about (`PendingLaunch.awaitSetupGroup`): may a node opened into
+ * this worktree frame run its command yet?
+ *
+ * NO ENTRY counts as DONE. The run store is rebuilt from live events, so a group with nothing on
+ * record is either a worktree whose setup never ran or one whose run predates this app start — in
+ * both cases no event is ever coming, and reading that as "still preparing" would strand the node
+ * forever. A FAILED or CANCELLED run is not done: the checkout is in whatever half-state the script
+ * left it, so the node keeps holding its launch until a re-run from the settings panel reports
+ * `done` (or the user fires it by hand from the node's QUEUED badge).
+ */
+function setupDoneForGroup(groupId: string): boolean {
+  const run = useProjectSetup.getState().runForGroup(groupId)
+  return !run || run.state === 'done'
 }
 
 export function Canvas() {
@@ -1301,6 +1327,19 @@ export function Canvas() {
     }
     return sig
   })
+  // The same trick for the OTHER gate: a signature over the setup-run state of every group an armed
+  // node is waiting on, so a run going `done` re-runs the launch effect. Subscribing to the whole
+  // store would re-render the canvas on every output chunk of every script.
+  const armedSetupSig = useProjectSetup((s) => {
+    let sig = ''
+    for (const n of nodesRef.current) {
+      const g = n.data.pendingLaunch?.awaitSetupGroup
+      if (!g) continue
+      const runKey = s.groupRunKey[g]
+      sig += `${n.id}:${g}=${runKey === undefined ? '-' : (s.byRunKey[runKey]?.state ?? '')}|`
+    }
+    return sig
+  })
   // Bumped to re-run the launch effect after a refused delivery (see LAUNCH_RETRY_MS).
   const [launchRetry, setLaunchRetry] = useState(0)
   // Ids whose held launch has been handed to the pty. An id stays here FOREVER once delivery
@@ -1316,7 +1355,8 @@ export function Canvas() {
     const ready = launchesToFire(
       nodes as unknown as ArmedNode[],
       useAgentStatus.getState().byId,
-      live
+      live,
+      setupDoneForGroup
     ).filter((f) => !launchInFlight.current.has(f.id))
     for (const f of ready) {
       launchInFlight.current.add(f.id)
@@ -1340,8 +1380,8 @@ export function Canvas() {
         }
       })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/launchRetry are the triggers
-  }, [nodes, armedDepSig, launchRetry])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedSetupSig/launchRetry are the triggers
+  }, [nodes, armedDepSig, armedSetupSig, launchRetry])
 
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes), owned by
   // the agent-nodes store so the cards themselves can set it — see `selectable: false` below.
@@ -3899,6 +3939,88 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId]
   )
 
+  // ---- project setup/archive scripts on the worktree lifecycle ----
+  //
+  // The event channel is per PROJECT and ref-counted in preload, so one subscription per project
+  // covers every worktree of it; the unsubscribes are held here and released on unmount.
+  const setupSubsRef = useRef<Map<string, () => void>>(new Map())
+  // Groups whose CURRENT setup run was acked with `waitForSetup` — the only groups that arm the
+  // nodes opened into them. Runtime-only by design: after a restart there is no run to hear from,
+  // and `launchesToFire`'s probe then reads the missing entry as done rather than stranding a node.
+  const setupWaitGroupsRef = useRef<Set<string>>(new Set())
+  useEffect(
+    () => () => {
+      setupSubsRef.current.forEach((off) => off())
+      setupSubsRef.current.clear()
+    },
+    []
+  )
+  /** Subscribe BEFORE the run is raised — the head of a script's output must not be lost to the
+   *  gap between the ack and the first listener. Idempotent per project. */
+  const ensureSetupSubscription = useCallback((projectId: string): void => {
+    if (setupSubsRef.current.has(projectId)) return
+    setupSubsRef.current.set(projectId, useProjectSetup.getState().subscribeProject(projectId))
+  }, [])
+  /**
+   * Kick a worktree's `setup` script and hand the run to the group's chip. Asked UNCONDITIONALLY:
+   * the service answers `no-script` cheaply, and reading the project's settings here would put a
+   * file read (SSH: a network round-trip) on the hot path of creating a worktree.
+   *
+   * Fire-and-observe — nothing awaits the script. What the ack decides is only (a) which run the
+   * frame's chip reports, and (b) whether nodes opened into this group meanwhile hold their launch.
+   */
+  const startWorktreeSetup = useCallback(
+    (groupId: string, worktreePath: string): void => {
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      ensureSetupSubscription(projectId)
+      void setupApi()
+        .run(projectId, 'setup', worktreePath)
+        .then((res) => {
+          if (res.status !== 'started') {
+            // no-script / declined / unavailable: nothing runs, so nothing may wait on it.
+            setupWaitGroupsRef.current.delete(groupId)
+            return
+          }
+          useProjectSetup.getState().attachGroup(groupId, res.runKey)
+          // Only `waitForSetup` holds launches. Without it the script runs alongside whatever the
+          // user opens — which is the default, and the honest reading of a project that never asked
+          // its collaborators to wait.
+          if (res.waitForSetup) setupWaitGroupsRef.current.add(groupId)
+          else setupWaitGroupsRef.current.delete(groupId)
+        })
+        .catch(() => {
+          setupWaitGroupsRef.current.delete(groupId)
+        })
+    },
+    [ensureSetupSubscription]
+  )
+  /**
+   * Kick the `archive` script for a worktree that is about to be unbound or removed.
+   *
+   * TRADEOFF, deliberate: this awaits the LAUNCH RESULT (`started`/`skipped`) and nothing more. The
+   * script keeps running while the binding is dropped, and its completion is observed through the
+   * store like any other run. Awaiting completion instead would let a hung archive script trap the
+   * user in a group they asked to close — the removal is their decision, not the script's. The cost
+   * is that a slow script can still be writing when a `--delete from disk` removal pulls the
+   * directory out from under it; it then exits non-zero and says so in the chip.
+   */
+  const runWorktreeArchive = useCallback(
+    async (groupId: string, worktreePath: string): Promise<void> => {
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      ensureSetupSubscription(projectId)
+      const res = await setupApi()
+        .run(projectId, 'archive', worktreePath)
+        .catch(() => null)
+      // The group is on its way out, so this attachment only serves the moment the chip is still
+      // on screen — and it must not be left pointing at the finished SETUP run while an archive
+      // script is live.
+      if (res?.status === 'started') useProjectSetup.getState().attachGroup(groupId, res.runKey)
+    },
+    [ensureSetupSubscription]
+  )
+
   /**
    * Everything a group owes the world when its worktree BINDING is dropped — minus the dropping
    * itself, which each caller does its own way (clear `data.worktree`, dissolve the frame, delete
@@ -3928,6 +4050,9 @@ export function Canvas() {
     async (groupId: string): Promise<void> => {
       const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
       if (!wt || isSshProject) return
+      // The project's `archive` script gets its chance BEFORE anything else — this is the one place
+      // every unbinding path passes through. Only the launch is awaited (see `runWorktreeArchive`).
+      await runWorktreeArchive(groupId, wt.path)
       if (!useWorktrees.getState().staleGroupIds.includes(groupId)) return
       resetDisplacedCwd(groupId, wt.path, false)
       // A failed prune must still let the binding go — dropping it is the user's ask, and a
@@ -3936,7 +4061,7 @@ export function Canvas() {
         .worktreeRemove(wt.repoPath, wt.path, false, true)
         .catch(() => {})
     },
-    [isSshProject, resetDisplacedCwd]
+    [isSshProject, resetDisplacedCwd, runWorktreeArchive]
   )
 
   // ---- multi-node actions (context menu) ----
@@ -4227,11 +4352,15 @@ export function Canvas() {
       }
       markDirty()
       refreshWorktreeStore({ bind: { groupId, worktree: wt } })
+      // A fresh checkout is the moment the project's `setup` script exists for: this is the single
+      // shared post-create point (the dialog AND agent-control's open-worktree land here), so the
+      // trigger lives here rather than being repeated — and never diverging — at each caller.
+      startWorktreeSetup(groupId, wt.path)
       // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
       // callers that need the id (agent-control's open-worktree reply) take it from here.
       return groupId
     },
-    [setNodes, markDirty, viewCenter, refreshWorktreeStore]
+    [setNodes, markDirty, viewCenter, refreshWorktreeStore, startWorktreeSetup]
   )
 
   const createWorktreeAndGroup = useCallback(
@@ -4401,6 +4530,10 @@ export function Canvas() {
       setNotice({ kind: 'info', text: `Unbound ${wt.branch}. The worktree is still on disk.` })
       return
     }
+    // 0) The `archive` script's last chance — after step 1 the directory is gone. Only its LAUNCH is
+    //    awaited (see `runWorktreeArchive`), so a hung script cannot hold the removal hostage; the
+    //    unbind-only branch above gets the same call through `releaseWorktreeBinding`.
+    await runWorktreeArchive(t.groupId, wt.path)
     // 1) Remove the worktree FIRST; only delete the branch if the branch is ours (we created it).
     //    The sessions are killed after, not before: `worktreeRemove` can still REFUSE (a dangerous
     //    path, a locked worktree, EPERM), and killing every child terminal's tmux session up front
@@ -4446,7 +4579,14 @@ export function Canvas() {
     resetDisplacedCwd(t.groupId, wt.path, true)
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
-  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, resetDisplacedCwd, releaseWorktreeBinding])
+  }, [
+    removeTarget,
+    deleteFromDisk,
+    clearWorktreeBinding,
+    resetDisplacedCwd,
+    releaseWorktreeBinding,
+    runWorktreeArchive
+  ])
 
   // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
   // what the dialog said is exactly what runs — and the result banner names the push either way.
@@ -6771,9 +6911,23 @@ export function Canvas() {
       // `extraLive` names nodes being created in this same tick — `verify` arms its judge on
       // reviewers that are not on the canvas yet, and without this they would look DELETED,
       // which counts as satisfied, and the judge would fire before a single review existed.
-      const armAfter = (node: CanvasNode, after: string[], extraLive?: Iterable<string>): CanvasNode => {
+      // `intoGroup` adds the SECOND reason to hold a launch: the node is being opened into a
+      // worktree frame whose project setup script is still preparing the checkout (and said
+      // `waitForSetup`). Same mechanism, same escape hatch on the node — see `awaitSetupGroup`.
+      const armAfter = (
+        node: CanvasNode,
+        after: string[],
+        extraLive?: Iterable<string>,
+        intoGroup?: string | null
+      ): CanvasNode => {
         const command = node.data.initialCommand as string | undefined
-        if (!after.length || !command) return node
+        if (!command) return node
+        // A group only counts while its acked run said `waitForSetup` AND that run has not finished.
+        const awaitSetupGroup =
+          intoGroup && setupWaitGroupsRef.current.has(intoGroup) && !setupDoneForGroup(intoGroup)
+            ? intoGroup
+            : undefined
+        if (!after.length && !awaitSetupGroup) return node
         // If the wait is ALREADY over, don't arm at all — leave the command as the node's
         // `initialCommand` so its own mount path delivers it through `writeWhenShellReady`
         // (which waits for the shell prompt and echo-verifies). Arming would instead hand
@@ -6785,10 +6939,14 @@ export function Canvas() {
           useAgentStatus.getState().byId,
           live
         )
-        if (!unmet.length) return node
+        if (!unmet.length && !awaitSetupGroup) return node
         return {
           ...node,
-          data: { ...node.data, initialCommand: undefined, pendingLaunch: { after, command } }
+          data: {
+            ...node.data,
+            initialCommand: undefined,
+            pendingLaunch: { after, command, ...(awaitSetupGroup ? { awaitSetupGroup } : {}) }
+          }
         }
       }
       // Open `count` nodes INTO a group frame: grow the frame FIRST (extent:'parent' would
@@ -6862,7 +7020,9 @@ export function Canvas() {
                   args.cmd,
                   sshFor(termCwd)
                 ),
-                after ?? []
+                after ?? [],
+                undefined,
+                intoGroupId
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -6913,7 +7073,9 @@ export function Canvas() {
                   account,
                   activePermissionMode(agentId)
                 ),
-                after ?? []
+                after ?? [],
+                undefined,
+                intoGroupId
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)

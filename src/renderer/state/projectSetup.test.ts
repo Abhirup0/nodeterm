@@ -145,6 +145,21 @@ describe('useProjectSetup — lane attachment', () => {
     expect(useProjectSetup.getState().runForGroup('g1')!.tail).toBe('worktree\n')
   })
 
+  it('a group lane follows its run through running → done (what the frame’s chip reads)', () => {
+    useProjectSetup.getState().attachGroup('g1', 'rk')
+    apply(ev({ seq: 1, chunk: 'npm ci\n' }))
+    expect(useProjectSetup.getState().runForGroup('g1')!.state).toBe('running')
+    apply(ev({ seq: 2, state: 'done', exitCode: 0 }))
+    const run = useProjectSetup.getState().runForGroup('g1')!
+    expect(run.state).toBe('done')
+    expect(run.exitCode).toBe(0)
+    // …and a FAILED archive run attached later replaces it, so the chip reports the newer one.
+    useProjectSetup.getState().attachGroup('g1', 'rk-archive')
+    apply(ev({ runKey: 'rk-archive', runId: 'run-c', kind: 'archive', seq: 1, state: 'failed', exitCode: 3 }))
+    expect(useProjectSetup.getState().runForGroup('g1')!.kind).toBe('archive')
+    expect(useProjectSetup.getState().runForGroup('g1')!.state).toBe('failed')
+  })
+
   it('re-attaching moves a lane to the newer run', () => {
     apply(ev({ seq: 1, chunk: 'old\n' }))
     attachProject('p1', 'rk')

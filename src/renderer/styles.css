@@ -5441,6 +5441,24 @@ body,
   color: var(--warn);
 }
 
+/* Project setup/archive script state for this checkout — same quiet weight as the status
+   suffixes above; only a failure earns a color. */
+.group-node__setup {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: help;
+}
+
+.group-node__setup--done {
+  color: var(--success);
+}
+
+.group-node__setup--failed,
+.group-node__setup--cancelled {
+  color: var(--warn);
+}
+
 .group-node__wt-btn {
   background: var(--surface-sunken);
   border: 1px solid var(--border);
