@@ -205,6 +205,20 @@ describe('ShortcutsSection rows', () => {
     ])
   })
 
+  // The idle icon buttons have no text, so `aria-label` is their only accessible name — and it
+  // must not vanish the moment the recorder is armed, which is exactly when a screen-reader user
+  // needs to know which command they are recording for.
+  it('keeps the recorder named and focus-styled while it is armed', () => {
+    render()
+    const record = button('app.commandPalette', 'Record Command palette')!
+    // Same keyboard-focus affordance the Disable/Reset buttons beside it carry.
+    expect(record.className).toContain('focus-visible:text-text')
+    click(record)
+    const armed = recorder('app.commandPalette', 'Press keys…')!
+    expect(armed.getAttribute('data-shortcut-recording')).toBe('true')
+    expect(armed.getAttribute('aria-label')).toBe('Record Command palette')
+  })
+
   // Record and Add sit side by side in the same hover-revealed cluster with no text, so two
   // identical keycaps would leave the pair unreadable — the icon is the whole label.
   it('gives Add a different glyph than Record', () => {
@@ -327,6 +341,19 @@ describe('the filter rail', () => {
     expect(ids()).toEqual([])
     expect(host.querySelectorAll('h3')).toHaveLength(0)
     expect(body().textContent).toContain('No shortcuts match.')
+  })
+
+  // The empty state is a sentence ABOUT the rail, so it must not outlive it. A global settings
+  // query can keep this section for the policy row alone ('policy' appears in no command title,
+  // id, group or note) — and answering that with "No shortcuts match." describes a filter control
+  // that is not on screen, in a section showing exactly what was asked for.
+  it('stays silent when a global query keeps only the policy row', () => {
+    render('policy')
+    expect(pill()).toBeTruthy()
+    expect(statusPill()).toBeNull()
+    expect(ids()).toEqual([])
+    expect(body().textContent).not.toContain('No shortcuts match.')
+    expect(body().children).toHaveLength(1)
   })
 
   // The chord the user SEES is searchable, which is the whole reason the local matcher exists —

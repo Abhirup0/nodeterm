@@ -137,7 +137,7 @@ export function ShortcutRecorderButton({
   const className = capturing
     ? 'min-w-[140px] rounded-md border border-accent bg-[color:var(--accent)]/10 px-3 py-1 text-[12px] text-text ring-1 ring-[color:var(--accent)]/40'
     : appearance === 'icon'
-      ? 'flex size-6 items-center justify-center rounded-md text-muted hover:bg-fill-weak hover:text-text'
+      ? 'flex size-6 items-center justify-center rounded-md text-muted hover:bg-fill-weak hover:text-text focus-visible:text-text'
       : 'min-w-[120px] cursor-pointer rounded-md border border-border bg-panel-header px-3 py-1.5 text-[13px] font-medium text-text outline-none hover:bg-[rgba(255,255,255,0.06)]'
   const isIdleIcon = appearance === 'icon' && !capturing
   return (
@@ -151,7 +151,13 @@ export function ShortcutRecorderButton({
       onKeyDown={onKeyDown}
       onKeyUp={onKeyUp}
       onBlur={stop}
-      aria-label={isIdleIcon ? effectiveLabel : undefined}
+      // The icon button has no text in EITHER state, so the label is its only accessible name —
+      // and it must survive arming. Dropping it on capture (as this did) left a screen-reader
+      // user with a button whose name flipped to the hint text mid-interaction, i.e. no way to
+      // tell which command is being recorded for. The 'button' appearance keeps its own text and
+      // is deliberately untouched. `title` stays idle-only: the armed pill already says
+      // "Press keys…" on screen, and a hover tooltip over a live capture is noise.
+      aria-label={appearance === 'icon' ? effectiveLabel : undefined}
       title={isIdleIcon ? effectiveLabel : undefined}
     >
       {capturing ? (

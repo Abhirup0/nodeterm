@@ -658,9 +658,16 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
         </div>
       ))}
 
-      {visibleGroups.length === 0 ? (
-        <p className="text-[13px] text-muted">No shortcuts match.</p>
-      ) : null}
+      {/* The sentence is ABOUT the rail, so it rides the rail's OWN search entry and can never
+          outlive the control it explains. A global settings query can keep this section for the
+          policy row alone ('policy', 'shell', 'tui', 'minimize' appear in no command title, id,
+          group or note) — and answering that with "No shortcuts match." would describe a filter
+          that is not on screen, in a section showing exactly what was asked for. */}
+      <SearchableRow {...RAIL_ROW}>
+        {visibleGroups.length === 0 ? (
+          <p className="text-[13px] text-muted">No shortcuts match.</p>
+        ) : null}
+      </SearchableRow>
     </SettingsSection>
   )
 }
