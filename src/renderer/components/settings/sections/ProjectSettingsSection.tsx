@@ -345,6 +345,9 @@ function EditableProjectSection({
         // Same predicate today, deliberately a separate prop: this one gates SPAWNING a setup
         // script, not writing the shared file — see `FamilySection`'s `canRun`.
         canRun={Boolean(project.cwd || project.ssh)}
+        // An SSH project has no local checkout, so the worktree family is inert — the panel says so
+        // on each of its rows (both creation sites already refuse SSH).
+        ssh={Boolean(project.ssh)}
         saveShared={settings.saveShared}
         saveLocal={settings.saveLocal}
         reload={settings.reload}

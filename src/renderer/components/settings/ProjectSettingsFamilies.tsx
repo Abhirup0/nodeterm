@@ -104,7 +104,16 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
   worktree: {
     title: 'Worktree',
     fields: [
-      { key: 'basePath', label: 'Base path', kind: 'input' },
+      {
+        key: 'basePath',
+        label: 'Base path',
+        // NB: no literal "project" in this searchable copy — see `fieldEntry` / the "project" query
+        // guard in ProjectSettingsSection.test.tsx. "Local checkouts only" carries the same meaning
+        // as the SSH-inert note without the trap word.
+        description:
+          'Directory new worktrees are created under; overrides the global template. Local checkouts only.',
+        kind: 'input'
+      },
       {
         key: 'baseRef',
         label: 'Base ref',
@@ -113,8 +122,11 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
       },
       {
         key: 'sharedPaths',
+        // Honest now that the linker exists (core/worktree-shared-paths.ts): it does not error on a
+        // missing source or a target that already exists — it SKIPS them (SharedPathResult).
         label: 'Shared paths',
-        description: 'One relative path per line, symlinked into every worktree.',
+        description:
+          'Relative paths symlinked into each new worktree — e.g. .env, node_modules. Skipped when the source is missing or the target already exists.',
         kind: 'list'
       }
     ]
@@ -476,6 +488,16 @@ const RUN_LABEL: Record<ProjectSetupKind, string> = { setup: 'Run setup', archiv
 export const LAUNCH_CMD_UNPAIRED_NOTE =
   'Launch command applies only when a Default agent id is set above.'
 
+/**
+ * The whole worktree family is INERT on an SSH project: `git worktree` runs against the local
+ * filesystem, and an SSH project has no local checkout to create worktrees in (both creation sites —
+ * the "New worktree" dialog and the `open-worktree` verb — refuse SSH outright). Shown on every
+ * worktree row so a value typed there does not look as if it will ever take effect. Unlike the
+ * searchable field copy this note may say "project" — it is a `note`, not part of any search entry.
+ */
+export const WORKTREE_SSH_INERT_NOTE =
+  'Worktree settings apply to local projects; this is an SSH project.'
+
 /** How a finished run reads in the badge. */
 function exitNote(state: 'done' | 'failed' | 'cancelled', exitCode: number | undefined): string {
   if (state === 'cancelled') return 'Cancelled'
@@ -629,6 +651,7 @@ function FamilySection({
   ready,
   sharedEditable,
   canRun,
+  ssh,
   saveShared,
   saveLocal,
   reload
@@ -654,6 +677,9 @@ function FamilySection({
    *  shared-editing gate entirely (a machine-local script on a folderless project still cannot
    *  run). */
   canRun: boolean
+  /** SSH project → the whole `worktree` family is inert (no local checkout). Drives the per-row
+   *  caveat below; ignored by every other family. */
+  ssh: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
   saveLocal: (
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
@@ -723,15 +749,21 @@ function FamilySection({
     family === 'agents' &&
     resolvedFamily.launchCmd !== undefined &&
     resolvedFamily.defaultAgentId === undefined
+  // The whole worktree family cannot take effect on an SSH project (no local checkout) — every row
+  // of it carries the caveat, not just one.
+  const worktreeInert = family === 'worktree' && ssh
   /** The caveat WINS over the provenance note ("Active" / "Overridden on this machine"): where the
    *  value comes from hardly matters while nothing consumes it. */
-  const unpairedNote = (f: FieldConfig): string | undefined =>
-    launchCmdUnpaired && f.key === 'launchCmd' ? LAUNCH_CMD_UNPAIRED_NOTE : undefined
+  const caveatNote = (f: FieldConfig): string | undefined => {
+    if (worktreeInert) return WORKTREE_SSH_INERT_NOTE
+    if (launchCmdUnpaired && f.key === 'launchCmd') return LAUNCH_CMD_UNPAIRED_NOTE
+    return undefined
+  }
 
   const renderShared = (f: FieldConfig): React.JSX.Element => {
     const overridden = resolvedFamily[f.key]?.source === 'local'
     const id = `project-${family}-${f.key}-${projectId}`
-    const overrideNote = unpairedNote(f) ?? (overridden ? 'Overridden on this machine' : undefined)
+    const overrideNote = caveatNote(f) ?? (overridden ? 'Overridden on this machine' : undefined)
     if (f.kind === 'switch') {
       return (
         <SwitchField
@@ -792,7 +824,7 @@ function FamilySection({
   const renderLocal = (f: FieldConfig): React.JSX.Element => {
     const active = resolvedFamily[f.key]?.source === 'local'
     const id = `project-${family}-${f.key}-local-${projectId}`
-    const activeNote = unpairedNote(f) ?? (active ? 'Active' : undefined)
+    const activeNote = caveatNote(f) ?? (active ? 'Active' : undefined)
     if (f.kind === 'switch') {
       return (
         <SwitchField
@@ -905,6 +937,7 @@ export function ProjectFamilyEditors({
   conflict,
   sharedEditable,
   canRun,
+  ssh = false,
   saveShared,
   saveLocal,
   reload
@@ -926,6 +959,9 @@ export function ProjectFamilyEditors({
   /** See `FamilySection`'s `canRun`: where a PROCESS may be spawned, which is a different question
    *  from where the shared file may be written. */
   canRun: boolean
+  /** SSH project → the worktree family is inert (local-only feature). Defaults false; forwarded to
+   *  each `FamilySection` for its per-row caveat. */
+  ssh?: boolean
   saveShared: (doc: ProjectSettingsDoc) => Promise<boolean>
   saveLocal: (
     update: (current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined
@@ -959,6 +995,7 @@ export function ProjectFamilyEditors({
           ready={ready}
           sharedEditable={sharedEditable}
           canRun={canRun}
+          ssh={ssh}
           saveShared={saveShared}
           saveLocal={saveLocal}
           reload={reload}
