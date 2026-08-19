@@ -405,8 +405,8 @@ import {
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
-import { codexAccountSelectable } from './codex-account-switch'
-import { resolveNewCodexNodeAccount } from './codex-account-ops'
+import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
+import { resolveNewCodexNodeAccount, planCodexAccountSwitch } from './codex-account-ops'
 import type { CodexAccount } from '@shared/codex-account'
 import { useSystemCodexAccount } from '../state/systemCodexAccount'
 import { toKanbanSession } from './toKanbanSession'
@@ -4836,6 +4836,117 @@ export function Canvas() {
     )
   }, [setNodes, markDirty])
 
+  // S6 §3.5 — originate an owner-authorized Codex account SWITCH for a running node, then recycle
+  // its pane onto the target account. The renderer is NOT the security boundary: PR 5's three-phase
+  // handler is owner-authorized (only the WebContents that reserved may commit/finish) and refuses a
+  // missing/hostile id; here we fail closed BEFORE originating (planCodexAccountSwitch routes the
+  // target through codexAccountSelectable) and re-check `codexAccountSwitchStillEligible` before the
+  // recycle so a diverged/forked pane is never bound onto the switched account — the conversation id
+  // passed to switchThread is the node's own, so the switch RESUMES it, never forks.
+  const switchCodexAccountNode = useCallback(
+    async (nodeId: string, targetAccountId: string | undefined) => {
+      const codexApi = window.nodeTerminal.codexAccounts
+      const snapshot = (): {
+        agentId?: string
+        cwd?: string
+        accountId?: string
+        ssh?: boolean
+        sessionId?: string
+        state?: string
+      } => {
+        const n = nodesRef.current.find((x) => x.id === nodeId)
+        const st = useAgentStatus.getState().byId[nodeId]
+        return {
+          agentId: n?.data.agentId as string | undefined,
+          cwd: n?.data.cwd as string | undefined,
+          accountId: (n?.data.accountId as string | undefined) || undefined,
+          ssh: !!n?.data.ssh,
+          sessionId: restartSessionId(st?.sessionId, n?.data.agentSessionId),
+          state: st?.state
+        }
+      }
+      const decision = planCodexAccountSwitch(
+        snapshot(),
+        targetAccountId,
+        useSettings.getState().settings.codexAccounts,
+        connectedProjectIdForHost
+      )
+      if (!decision.ok) {
+        if (decision.reason === 'same-account') return // no-op: already on this account
+        setNotice({
+          kind: 'error',
+          text:
+            decision.reason === 'no-connection'
+              ? 'That Codex account lives on a host that is not connected — connect its SSH project first.'
+              : decision.reason === 'no-session'
+                ? 'This session has no resumable conversation id yet — nothing to switch.'
+                : 'That Codex account is no longer available. Nothing was changed.'
+        })
+        return
+      }
+      const { plan } = decision
+      let token: string | undefined
+      try {
+        const res = await codexApi.switchThread(
+          plan.sessionId,
+          plan.cwd,
+          plan.sourceAccountId,
+          plan.targetAccountId
+        )
+        token = res.rollbackToken
+        // A no-op or unreserved answer (no token) means main-side did not stage an exposure — done.
+        if (!token) return
+        // The fork took seconds — refuse to recycle unless the pane is STILL the exact idle
+        // conversation the user chose (Corvin's #112 recycle guard). Else roll the reservation back.
+        if (!codexAccountSwitchStillEligible(plan.expected, snapshot())) {
+          await codexApi.rollbackSwitch(token)
+          setNotice({
+            kind: 'error',
+            text: 'This session changed while the switch was preparing — nothing was changed.'
+          })
+          return
+        }
+        await codexApi.commitSwitch(token)
+        // Bind the node to the target account, THEN recycle its shell so codex relaunches under the
+        // target CODEX_HOME and `--resume <sessionId>` resumes the SAME conversation from it.
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId && x.type === 'terminal'
+              ? { ...x, data: { ...x.data, accountId: plan.targetAccountId } }
+              : x
+          )
+        )
+        markDirty()
+        const fn = agentRestartFn(nodeId)
+        const outcome = fn ? await settleRestart(() => fn(undefined, undefined, true)) : 'not-eligible'
+        await codexApi.finishSwitch(token)
+        setNotice(
+          outcome === 'restarted'
+            ? { kind: 'info', text: 'Codex account switched — conversation resumed.' }
+            : {
+                kind: 'error',
+                text:
+                  'Codex account switched, but the pane could not be relaunched — restart the ' +
+                  'agent to resume on the new account.'
+              }
+        )
+      } catch {
+        if (token) {
+          try {
+            await codexApi.rollbackSwitch(token)
+          } catch {
+            // Best-effort rollback; the reservation also releases on its TTL / owner destruction.
+          }
+        }
+        setNotice({
+          kind: 'error',
+          text: 'The Codex account switch failed and was rolled back. Nothing was changed.'
+        })
+      }
+    },
+    [setNodes, markDirty, connectedProjectIdForHost]
+  )
+
   // Who the bulk restart would act on, right now: the ACTIVE project's canvas (nodesRef holds
   // exactly that). Read fresh at every call — agent state and session ids arrive asynchronously.
   const bulkRestartPlan = useCallback((): BulkRestartPlan => {
@@ -5701,6 +5812,57 @@ export function Canvas() {
                                 'Configure a URL and API key in Settings → Model gateway.'
                       }
                     ] as MenuItem[])
+                : []),
+              // Switch this running Codex node onto another machine-scoped account (S6 §3.5). Shown
+              // only for a Codex node with managed accounts on its machine. Each row is gated through
+              // `codexAccountSelectable`; the actual switch is owner-authorized MAIN-SIDE and resumes
+              // the SAME conversation id (`switchCodexAccountNode`) — the UI is not the boundary.
+              ...(sourceAgentId === 'codex'
+                ? (() => {
+                    const codexAll = useSettings.getState().settings.codexAccounts
+                    const hostKey = n?.data.ssh ? sshHostKey(n.data.ssh as SshServer) : undefined
+                    const onMachine = codexAll.filter(
+                      (a) => !a.pending && (hostKey ? a.host === hostKey : !a.host)
+                    )
+                    if (onMachine.length === 0) return []
+                    const currentAccountId = (n?.data.accountId as string | undefined) || undefined
+                    const systemCodexLabel = systemAccountDisplay(
+                      undefined,
+                      useSystemCodexAccount.getState().email
+                    )
+                    const row = (
+                      id: string | undefined,
+                      label: string
+                    ): MenuItem => {
+                      const isCurrent = (id || undefined) === currentAccountId
+                      const sel = codexAccountSelectable(id, onMachine, connectedProjectIdForHost)
+                      return {
+                        label: `${isCurrent ? '✓ ' : ''}${label}`,
+                        icon: <AgentIcon agentId="codex" />,
+                        disabled: !!why || isCurrent || !sel.ok,
+                        hint: isCurrent
+                          ? 'This node already runs on this account.'
+                          : !sel.ok
+                            ? sel.reason === 'no-connection'
+                              ? 'This account lives on a host that is not connected.'
+                              : 'This account is no longer available.'
+                            : (why ??
+                              'Moves this conversation to the account and resumes it there (same conversation).'),
+                        onClick: () => void switchCodexAccountNode(ids[0], id)
+                      }
+                    }
+                    return [
+                      {
+                        type: 'submenu',
+                        label: 'Switch Codex account',
+                        icon: <IconSwitch />,
+                        children: [
+                          row(undefined, systemCodexLabel),
+                          ...onMachine.map((a) => row(a.id, a.label))
+                        ]
+                      }
+                    ] as MenuItem[]
+                  })()
                 : [])
             ] as MenuItem[]
           })()
@@ -5721,6 +5883,8 @@ export function Canvas() {
     toggleMarkdown,
     reloadTerminals,
     restartAgentNode,
+    switchCodexAccountNode,
+    connectedProjectIdForHost,
     deleteNodes,
     gatewayModels,
     gatewayStatus,
