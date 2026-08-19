@@ -15,7 +15,7 @@
 // resolve through those attachments.
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { ProjectSetupEvent } from '@shared/project-settings'
-import { SETUP_TAIL_MAX, useProjectSetup } from './projectSetup'
+import { SETUP_TAIL_MAX, setupGateDone, useProjectSetup, type SetupRunState } from './projectSetup'
 
 const ev = (over: Partial<ProjectSetupEvent> = {}): ProjectSetupEvent => ({
   runKey: 'rk',
@@ -160,12 +160,68 @@ describe('useProjectSetup — lane attachment', () => {
     expect(useProjectSetup.getState().runForGroup('g1')!.state).toBe('failed')
   })
 
+  it('RECOVERY: re-running setup for the same GROUP re-attaches its lane and opens the gate again', () => {
+    // The frame's chip is the only re-run affordance that can do this: the settings panel's own Run
+    // executes at the project ROOT and attaches the PROJECT lane, so it can never clear a worktree
+    // group's failed run — the group would stay `failed` forever and its armed nodes with it.
+    useProjectSetup.getState().attachGroup('g1', 'rk')
+    apply(ev({ seq: 1, state: 'failed', exitCode: 1, chunk: 'npm ci exploded\n' }))
+    expect(setupGateDone(useProjectSetup.getState().runForGroup('g1'), false)).toBe(false)
+    // Chip clicked → a fresh launch for the SAME worktree. Deterministic runKey, so the ack hands
+    // back the same key; the fresh `runId` is what makes it a new run rather than a stale tail.
+    useProjectSetup.getState().attachGroup('g1', 'rk')
+    apply(ev({ runId: 'run-b', seq: 1, state: 'running' }))
+    expect(useProjectSetup.getState().runForGroup('g1')!.state).toBe('running')
+    apply(ev({ runId: 'run-b', seq: 2, state: 'done', exitCode: 0 }))
+    expect(setupGateDone(useProjectSetup.getState().runForGroup('g1'), false)).toBe(true)
+  })
+
   it('re-attaching moves a lane to the newer run', () => {
     apply(ev({ seq: 1, chunk: 'old\n' }))
     attachProject('p1', 'rk')
     apply(ev({ runKey: 'rk2', runId: 'run-b', seq: 1, chunk: 'new\n' }))
     attachProject('p1', 'rk2')
     expect(runForProject('p1')!.tail).toBe('new\n')
+  })
+})
+
+describe('setupGateDone — may a node armed on this worktree run yet?', () => {
+  const run = (state: SetupRunState['state']): SetupRunState => ({
+    runKey: 'rk',
+    runId: 'run-a',
+    kind: 'setup',
+    state,
+    tail: '',
+    seq: 1
+  })
+
+  it('is CLOSED while a launch is pending, even with nothing on record', () => {
+    // `projectSetup.run` resolves only after the consent dialog is answered — the window this flag
+    // covers is as long as the user takes to read it, not a millisecond.
+    expect(setupGateDone(undefined, true)).toBe(false)
+  })
+
+  it('stays closed while the run is still going', () => {
+    expect(setupGateDone(run('running'), false)).toBe(false)
+  })
+
+  it('stays closed on a FAILED run — a half-prepared checkout is not a prepared one', () => {
+    expect(setupGateDone(run('failed'), false)).toBe(false)
+    expect(setupGateDone(run('cancelled'), false)).toBe(false)
+  })
+
+  it('opens on done', () => {
+    expect(setupGateDone(run('done'), false)).toBe(true)
+  })
+
+  it('opens when nothing is on record and nothing is pending', () => {
+    // After an app restart the run store is empty and no event is ever coming; holding here would
+    // strand a persisted arming forever.
+    expect(setupGateDone(undefined, false)).toBe(true)
+  })
+
+  it('pending wins over a stale record of the PREVIOUS run', () => {
+    expect(setupGateDone(run('done'), true)).toBe(false)
   })
 })
 

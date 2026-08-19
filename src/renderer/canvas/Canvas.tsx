@@ -267,7 +267,7 @@ import {
   pastedFiles
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
-import { useProjectSetup } from '../state/projectSetup'
+import { setupGateDone, useProjectSetup } from '../state/projectSetup'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -728,22 +728,6 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
  */
 function setupApi(): typeof window.nodeTerminal.projectSetup {
   return window.nodeTerminal.projectSetup
-}
-
-/**
- * The setup gate an armed node asks about (`PendingLaunch.awaitSetupGroup`): may a node opened into
- * this worktree frame run its command yet?
- *
- * NO ENTRY counts as DONE. The run store is rebuilt from live events, so a group with nothing on
- * record is either a worktree whose setup never ran or one whose run predates this app start — in
- * both cases no event is ever coming, and reading that as "still preparing" would strand the node
- * forever. A FAILED or CANCELLED run is not done: the checkout is in whatever half-state the script
- * left it, so the node keeps holding its launch until a re-run from the settings panel reports
- * `done` (or the user fires it by hand from the node's QUEUED badge).
- */
-function setupDoneForGroup(groupId: string): boolean {
-  const run = useProjectSetup.getState().runForGroup(groupId)
-  return !run || run.state === 'done'
 }
 
 export function Canvas() {
@@ -1327,8 +1311,30 @@ export function Canvas() {
     }
     return sig
   })
-  // The same trick for the OTHER gate: a signature over the setup-run state of every group an armed
-  // node is waiting on, so a run going `done` re-runs the launch effect. Subscribing to the whole
+  // ---- the setup gate an armed node waits on ----
+  // The two runtime-only facts the gate needs live up here (beside the launch effect that reads
+  // them); the runs themselves are launched from the worktree-lifecycle block far below.
+  //
+  // Runtime-only is deliberate for BOTH: after a restart neither a pending launch nor a
+  // wait-for-setup obligation survives, there is no run left to hear from, and `setupGateDone`'s
+  // "nothing on record and nothing pending" rule then releases a persisted arming rather than
+  // stranding it.
+  /** Groups whose setup launch has been REQUESTED but not yet acked. Marked BEFORE the invoke,
+   *  because `projectSetup.run` resolves only after the consent dialog is answered — the window is
+   *  as long as the user takes to read it, and nodes opened into the group meanwhile must wait. */
+  const setupPendingRef = useRef<Set<string>>(new Set())
+  /** Groups whose acked setup run said `waitForSetup` — the ones that arm what is opened into them. */
+  const setupWaitGroupsRef = useRef<Set<string>>(new Set())
+  const setupDoneForGroup = useCallback(
+    (groupId: string): boolean =>
+      setupGateDone(
+        useProjectSetup.getState().runForGroup(groupId),
+        setupPendingRef.current.has(groupId)
+      ),
+    []
+  )
+  // A signature over the setup-run state of every group an armed node is waiting on, so a run going
+  // `done` re-runs the launch effect — the same trick as `armedDepSig`. Subscribing to the whole
   // store would re-render the canvas on every output chunk of every script.
   const armedSetupSig = useProjectSetup((s) => {
     let sig = ''
@@ -3944,10 +3950,6 @@ export function Canvas() {
   // The event channel is per PROJECT and ref-counted in preload, so one subscription per project
   // covers every worktree of it; the unsubscribes are held here and released on unmount.
   const setupSubsRef = useRef<Map<string, () => void>>(new Map())
-  // Groups whose CURRENT setup run was acked with `waitForSetup` — the only groups that arm the
-  // nodes opened into them. Runtime-only by design: after a restart there is no run to hear from,
-  // and `launchesToFire`'s probe then reads the missing entry as done rather than stranding a node.
-  const setupWaitGroupsRef = useRef<Set<string>>(new Set())
   useEffect(
     () => () => {
       setupSubsRef.current.forEach((off) => off())
@@ -3961,6 +3963,23 @@ export function Canvas() {
     if (setupSubsRef.current.has(projectId)) return
     setupSubsRef.current.set(projectId, useProjectSetup.getState().subscribeProject(projectId))
   }, [])
+  /** Drop the SETUP half of the hold on every node armed for this group, leaving its `after` deps
+   *  (if any) to decide. The launch effect re-runs on the `nodes` change and fires what is now free. */
+  const releaseSetupArming = useCallback(
+    (groupId: string): void => {
+      if (!nodesRef.current.some((n) => n.data.pendingLaunch?.awaitSetupGroup === groupId)) return
+      setNodes((ns) =>
+        ns.map((n) => {
+          const p = n.data.pendingLaunch
+          if (p?.awaitSetupGroup !== groupId) return n
+          const { awaitSetupGroup: _released, ...rest } = p
+          return { ...n, data: { ...n.data, pendingLaunch: rest } }
+        })
+      )
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
   /**
    * Kick a worktree's `setup` script and hand the run to the group's chip. Asked UNCONDITIONALLY:
    * the service answers `no-script` cheaply, and reading the project's settings here would put a
@@ -3968,42 +3987,61 @@ export function Canvas() {
    *
    * Fire-and-observe — nothing awaits the script. What the ack decides is only (a) which run the
    * frame's chip reports, and (b) whether nodes opened into this group meanwhile hold their launch.
+   *
+   * Also the RE-RUN path: the frame's chip calls this again on a failed run, and the new ack
+   * re-attaches the group's lane, which is what releases nodes the failure left armed. (The settings
+   * panel's Run cannot do this — it runs at the project ROOT and attaches the PROJECT lane.)
    */
   const startWorktreeSetup = useCallback(
     (groupId: string, worktreePath: string): void => {
       const projectId = useProjects.getState().activeProjectId
       if (!projectId) return
       ensureSetupSubscription(projectId)
+      // Pending BEFORE the invoke, and cleared on every exit below. `run` resolves only once the
+      // consent dialog has been answered, so this window is human-length, not a round-trip: an
+      // agent that gets its `open-worktree` reply and immediately opens nodes into the group lands
+      // inside it, and those nodes must wait rather than launch into an unprepared checkout.
+      setupPendingRef.current.add(groupId)
       void setupApi()
         .run(projectId, 'setup', worktreePath)
         .then((res) => {
-          if (res.status !== 'started') {
-            // no-script / declined / unavailable: nothing runs, so nothing may wait on it.
-            setupWaitGroupsRef.current.delete(groupId)
+          setupPendingRef.current.delete(groupId)
+          if (res.status === 'started') useProjectSetup.getState().attachGroup(groupId, res.runKey)
+          // Only `waitForSetup` holds launches. Without it the script runs alongside whatever the
+          // user opens — the default, and the honest reading of a project that never asked its
+          // collaborators to wait.
+          if (res.status === 'started' && res.waitForSetup) {
+            setupWaitGroupsRef.current.add(groupId)
             return
           }
-          useProjectSetup.getState().attachGroup(groupId, res.runKey)
-          // Only `waitForSetup` holds launches. Without it the script runs alongside whatever the
-          // user opens — which is the default, and the honest reading of a project that never asked
-          // its collaborators to wait.
-          if (res.waitForSetup) setupWaitGroupsRef.current.add(groupId)
-          else setupWaitGroupsRef.current.delete(groupId)
+          setupWaitGroupsRef.current.delete(groupId)
+          // Nothing to wait for after all (no script, declined, or a script this project runs
+          // unblocked) — so release whatever the pending window armed. Without this a node from
+          // that window would hold on a run whose completion the gate only accepts as `done`, and
+          // a run that FAILS never gets there.
+          releaseSetupArming(groupId)
         })
         .catch(() => {
+          setupPendingRef.current.delete(groupId)
           setupWaitGroupsRef.current.delete(groupId)
+          releaseSetupArming(groupId)
         })
     },
-    [ensureSetupSubscription]
+    [ensureSetupSubscription, releaseSetupArming]
   )
   /**
    * Kick the `archive` script for a worktree that is about to be unbound or removed.
    *
-   * TRADEOFF, deliberate: this awaits the LAUNCH RESULT (`started`/`skipped`) and nothing more. The
-   * script keeps running while the binding is dropped, and its completion is observed through the
-   * store like any other run. Awaiting completion instead would let a hung archive script trap the
-   * user in a group they asked to close — the removal is their decision, not the script's. The cost
-   * is that a slow script can still be writing when a `--delete from disk` removal pulls the
-   * directory out from under it; it then exits non-zero and says so in the chip.
+   * TRADEOFF, deliberate: this awaits the LAUNCH RESULT (`started`/`skipped`) and nothing more.
+   * Awaiting completion would let a hung archive script trap the user in a group they asked to close
+   * — the removal is their decision, not the script's.
+   *
+   * The cost is real and currently UNSURFACED: the script keeps running after the binding drops, so
+   * the frame that would have shown its chip is already gone, and a slow script can still be writing
+   * when a delete-from-disk removal pulls the directory out from under it. Its outcome — including
+   * that failure — is recorded in the run store but has nowhere on screen to appear. Giving archive
+   * runs an observable home belongs to the observability wave, not here; until then this is a
+   * fire-and-forget in practice, and the comment says so rather than promising a chip nobody sees.
    */
   const runWorktreeArchive = useCallback(
     async (groupId: string, worktreePath: string): Promise<void> => {
@@ -4613,7 +4651,7 @@ export function Canvas() {
   // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
   // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
   const onWorktreeAction = useCallback(
-    (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+    (groupId: string, action: 'merge' | 'remove' | 'unbind' | 'rerun-setup') => {
       // A binding can only predate the SSH gate (hand-edited project file, or a project that became
       // an SSH project), but it can still exist — and merge/remove would run against the LOCAL
       // filesystem for a project whose git and terminals live on the remote host. Refuse them, out
@@ -4669,11 +4707,27 @@ export function Canvas() {
             if (!res.ok && res.error) setNotice({ kind: 'error', text: res.error })
           })
           break
+        case 'rerun-setup': {
+          // The failed-setup chip. This is the ONLY re-run that can clear a worktree group's failed
+          // run and release the nodes it left armed: it runs at the WORKTREE path and its ack
+          // re-attaches THIS group's lane. The settings panel's Run does neither (project root,
+          // project lane), which is why the chip does not merely point at it.
+          const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+          if (!wt) return
+          startWorktreeSetup(groupId, wt.path)
+          break
+        }
         default:
           break
       }
     },
-    [requestRemoveWorktree, clearWorktreeBinding, releaseWorktreeBinding, activeProjectId]
+    [
+      requestRemoveWorktree,
+      clearWorktreeBinding,
+      releaseWorktreeBinding,
+      activeProjectId,
+      startWorktreeSetup
+    ]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
@@ -6922,11 +6976,14 @@ export function Canvas() {
       ): CanvasNode => {
         const command = node.data.initialCommand as string | undefined
         if (!command) return node
-        // A group only counts while its acked run said `waitForSetup` AND that run has not finished.
-        const awaitSetupGroup =
-          intoGroup && setupWaitGroupsRef.current.has(intoGroup) && !setupDoneForGroup(intoGroup)
-            ? intoGroup
-            : undefined
+        // A group counts while its launch is still PENDING (the ack — and with it `waitForSetup` —
+        // has not come back yet; holding is the safe side of that unknown, and a non-waiting ack
+        // releases these again) or while its acked run said `waitForSetup` and has not finished.
+        const holdsForSetup =
+          !!intoGroup &&
+          (setupPendingRef.current.has(intoGroup) || setupWaitGroupsRef.current.has(intoGroup)) &&
+          !setupDoneForGroup(intoGroup)
+        const awaitSetupGroup = holdsForSetup ? intoGroup ?? undefined : undefined
         if (!after.length && !awaitSetupGroup) return node
         // If the wait is ALREADY over, don't arm at all — leave the command as the node's
         // `initialCommand` so its own mount path delivers it through `writeWhenShellReady`

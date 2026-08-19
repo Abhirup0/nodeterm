@@ -67,6 +67,28 @@ interface ProjectSetupState {
   subscribeProject(projectId: string): () => void
 }
 
+/**
+ * The gate a node armed with `PendingLaunch.awaitSetupGroup` waits on: may it run its command in
+ * this worktree yet? Pure, so the whole matrix is testable without a canvas — the caller supplies
+ * the group's run (`runForGroup`) and whether a launch for it has been REQUESTED but not yet acked.
+ *
+ * - `pending` closes the gate on its own, and it is not a micro-optimisation: `projectSetup.run`
+ *   resolves only AFTER the consent dialog is answered, so a shared-sourced script leaves this
+ *   window open for as long as the user takes to read it. The agent pattern `open-worktree` → ok →
+ *   `open-agent --group` lands squarely inside it, and without this flag those nodes would neither
+ *   be armed nor waiting — they would launch into a checkout nothing had prepared yet.
+ * - NO RUN and not pending = done. The store is rebuilt from live events, so a group with nothing on
+ *   record either never ran a script or ran one before this app start; no event is ever coming, and
+ *   reading that as "still preparing" would strand the node forever.
+ * - `failed` / `cancelled` are NOT done. The checkout is in whatever half-state the script left it,
+ *   so the node keeps holding its launch until a re-run reports `done` (the frame's chip is the
+ *   re-run affordance) or the user fires it by hand from the node's QUEUED badge.
+ */
+export function setupGateDone(run: SetupRunState | undefined, pending: boolean): boolean {
+  if (pending) return false
+  return !run || run.state === 'done'
+}
+
 /** Appends `chunk` and keeps only the last `SETUP_TAIL_MAX` characters. */
 function appendTail(prev: string, chunk: string | undefined): string {
   if (!chunk) return prev

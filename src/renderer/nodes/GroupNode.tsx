@@ -6,7 +6,7 @@ import { useProjects } from '../state/projects'
 import { useWorktrees, WORKTREE_STATUS_POLL_MS } from '../state/worktrees'
 import { useProjectSetup } from '../state/projectSetup'
 
-export type WorktreeAction = 'merge' | 'remove' | 'unbind'
+export type WorktreeAction = 'merge' | 'remove' | 'unbind' | 'rerun-setup'
 
 /**
  * Worktree-action handler bridge. React Flow instantiates custom nodes itself, so we can't
@@ -220,25 +220,42 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 )}
               </span>
             )}
-            {setupRun && (
+            {setupRun &&
               // What the project's script is doing to this checkout. Status only — the OUTPUT lives
               // in the settings panel's run box (this is a frame header, not a log viewer), and the
               // failed state is the one that has to be visible here: a node armed behind a failed
               // setup is still holding its launch, and nothing else on the canvas says why.
-              <span
-                className={`group-node__setup group-node__setup--${setupRun.state}`}
-                title={
-                  `${setupRun.kind === 'archive' ? 'Archive' : 'Setup'} script: ${setupRun.state}` +
-                  (setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`) +
-                  (setupRun.state === 'failed'
-                    ? '\nNodes waiting on it keep holding their launch — re-run it from Project settings.'
-                    : '')
-                }
-              >
-                {setupRun.kind === 'archive' ? 'archive' : 'setup'}
-                {setupRun.state === 'running' ? ' …' : setupRun.state === 'done' ? ' ✓' : ' ✕'}
-              </span>
-            )}
+              //
+              // A FAILED SETUP IS THEREFORE A BUTTON, not a label. It is the only re-run that can
+              // clear this: the settings panel's Run executes at the project ROOT and claims the
+              // PROJECT lane, so it can never re-attach a worktree group's run — clicking it would
+              // leave this chip failed and its nodes armed forever. Re-running here re-attaches the
+              // group's lane, and a `done` from the new run releases them.
+              (setupRun.kind === 'setup' && setupRun.state === 'failed' ? (
+                <button
+                  className="group-node__setup group-node__setup--failed nodrag"
+                  title={
+                    `Setup script failed${setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`}.` +
+                    '\nNodes opened into this worktree may still be holding their launch.' +
+                    '\nClick to run it again — a successful run releases them.' +
+                    '\n(Its output is in Project settings → Setup.)'
+                  }
+                  onClick={() => worktreeActionHandler?.(id, 'rerun-setup')}
+                >
+                  setup ✕ ↻
+                </button>
+              ) : (
+                <span
+                  className={`group-node__setup group-node__setup--${setupRun.state}`}
+                  title={
+                    `${setupRun.kind === 'archive' ? 'Archive' : 'Setup'} script: ${setupRun.state}` +
+                    (setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`)
+                  }
+                >
+                  {setupRun.kind === 'archive' ? 'archive' : 'setup'}
+                  {setupRun.state === 'running' ? ' …' : setupRun.state === 'done' ? ' ✓' : ' ✕'}
+                </span>
+              ))}
             {!stale && (
               <button
                 className="group-node__wt-btn"
