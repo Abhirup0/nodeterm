@@ -6,10 +6,17 @@
  * (so ⌘W/⌘M/⌘0 interception cannot swallow the capture) is Task 5's: `window.nodeTerminal
  * .shortcuts` does not exist on `NodeTerminalApi` yet, and that type lives in
  * `src/shared/types.ts` — a file this task does not own. An optional-chained call does NOT
- * typecheck against a member the interface never declares, so the two calls are marked below
- * rather than shipped broken.
+ * typecheck against a member the interface never declares, so the three call sites are marked
+ * below rather than shipped broken.
+ *
+ * **That bit is GLOBAL, so it owes an unmount release.** Chromium does not reliably fire `blur`
+ * on a focused element that is REMOVED from the DOM, so closing Settings while the recorder is
+ * armed can skip `onBlur` entirely — leaving the main-process bit set with no component left to
+ * clear it, suppressing ⌘W/⌘M/⌘0 app-wide until the next arm/disarm cycle. `release` (below) is
+ * the teardown both `stop()` and the unmount cleanup run; it touches refs only, so it is stable
+ * and safe to run when the recorder was never armed.
  */
-import { useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { COMMANDS_BY_ID, normalizeBindingForCommand, type CommandId } from '@shared/keybindings'
 import { isMacPlatform } from '@shared/platform-utils'
 import { recordingKeydown, recordingKeyup, type RecordingState } from './shortcutRecording'
@@ -31,11 +38,19 @@ export function ShortcutRecorderButton({
   const def = COMMANDS_BY_ID.get(commandId)!
   const opts = { isMac, allowHold: def.allowHoldChord === true }
 
+  // Refs only ⇒ stable with no deps, so the mount-time cleanup below cannot capture stale state,
+  // and idempotent ⇒ running it on an unmount that was never armed is a no-op.
+  const release = useCallback((): void => {
+    stateRef.current = { mods: null }
+    // Task 5 wires the main-process recording bit here: setRecording(false)
+  }, [])
+  // Task 5: setRecording(false) must also be called from this unmount cleanup — see the header.
+  useEffect(() => release, [release])
+
   const stop = (): void => {
     setCapturing(false)
     setHint('')
-    stateRef.current = { mods: null }
-    // Task 5 wires the main-process recording bit here: setRecording(false)
+    release()
   }
   const start = (): void => {
     stateRef.current = { mods: null }

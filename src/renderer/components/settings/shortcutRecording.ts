@@ -25,6 +25,18 @@
  * has no spelling in this grammar (same rule `captureToShortcut` already applies to keyed
  * captures, here extended to the hold path).
  *
+ * **Deliberate divergence from the legacy field — losing the primary modifier DISARMS.** When a
+ * modifier-only keydown arrives with the primary modifier NOT pressed, the legacy field showed the
+ * `Hold ⌘…` hint and returned, leaving `modsRef` holding whatever it had armed earlier. That let a
+ * gesture commit a chord the user was no longer making: arm `Cmd+Alt`, release ⌘ while keeping ⌥,
+ * add ⇧ — the ⇧ keydown left `{cmd:true, alt:true}` armed, and the eventual full release committed
+ * `Cmd+Alt` even though the user finished on ⌥⇧. Under exact matching that stored chord then never
+ * fires from the gesture that recorded it. Here the same event clears `mods`, so a hold chord is
+ * only ever committed from a state where the primary was observed down alongside it; the user
+ * simply presses the chord again. (`recordingKeydown` still preserves an armed chord across a
+ * REFUSED KEYED press — see the `captureToShortcut` fall-through below — because that path cannot
+ * lose the primary without a modifier keyup/keydown passing through here first.)
+ *
  * Pure: no DOM, no React, no clock. The component owns `RecordingState` in a ref and the caller
  * validates the committed combo through `normalizeBindingForCommand` — this module decides only
  * what the gesture MEANT, never whether the command accepts it.

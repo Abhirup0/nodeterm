@@ -50,6 +50,16 @@ describe('recordingKeydown', () => {
       expect(r.hint).toContain('Super')
     }
   })
+  // Deliberate divergence from the legacy SpeechSection field, which left modsRef untouched here:
+  // arm Cmd+Alt, release ⌘ while keeping ⌥, add ⇧ — the baseline still committed Cmd+Alt on the
+  // eventual full release, a chord the finished gesture (⌥⇧) could never fire under exact
+  // matching. Losing the primary modifier must DISARM.
+  it('a modifier-only keydown without the primary disarms an armed hold chord', () => {
+    const armed = { mods: { cmd: true, ctrl: false, alt: true, shift: false } }
+    const r = recordingKeydown(armed, e({ altKey: true, shiftKey: true, key: 'Shift' }), HOLD)
+    expect(r.kind).toBe('pending')
+    if (r.kind === 'pending') expect(r.state.mods).toBeNull()
+  })
   it('modifier-only keydown without allowHold just previews the requirement', () => {
     const r = recordingKeydown({ mods: null }, e({ metaKey: true, key: 'Meta' }), KEYED)
     expect(r.kind).toBe('pending')
