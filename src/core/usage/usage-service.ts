@@ -60,7 +60,9 @@ interface OAuthCreds {
  * Adding a provider is one entry here plus its fetcher — no changes to the service or the UI.
  */
 const OTHER_PROVIDERS: { id: string; fetch: () => Promise<ProviderUsage> }[] = [
-  { id: 'codex', fetch: fetchCodexUsage },
+  // Codex is NOT here — it is account-scoped (one system row + one row per managed account,
+  // built dynamically in runProviders so each row is keyed by its own accountId and can never
+  // collapse into another). See the Codex block in runProviders and S6 §4.3 (no mixing).
   { id: 'gemini', fetch: fetchGeminiUsage },
   { id: 'grok', fetch: fetchGrokUsage },
   { id: 'kimi', fetch: fetchKimiUsage },
@@ -186,11 +188,31 @@ export interface UsageServiceOptions {
    */
   shouldPoll?: () => boolean
   /**
+   * Override the poll gate when the phone-facing MIRROR needs fresh data even though the shell's
+   * own `shouldPoll` says no. On desktop `shouldPoll` is "is the window focused" — for the PILL —
+   * but the phone reads the agent-status mirror's `usage` block with no window focused at all, so a
+   * focus-only gate froze that block into fossil bars whenever the Mac was in the background (the
+   * same "nobody connected ≠ nobody looking" bug the Server Edition already runs UNGATED to avoid).
+   * When this returns true the background poll fires regardless of `shouldPoll`, at the same 15-min
+   * cadence (4 req/hour/account — well inside the endpoint budget). Default: never (desktop wires it
+   * to "a phone is paired / has a push grant"; the Server Edition leaves it unset and polls anyway).
+   */
+  mirrorMayBeRead?: () => boolean
+  /**
    * Local managed accounts to poll ALONGSIDE the system account on the background cadence (spec:
    * mobile-usage-inbox). Returns their account ids (settings' non-`host`, non-`pending` claude
    * accounts). The shell owns this because settings live in the shell. Absent ⇒ system only.
    */
   localAccounts?: () => string[]
+  /**
+   * Local managed Codex accounts (settings' non-`host`, non-`pending` codex accounts), each with
+   * the isolated home its `auth.json` lives in. Every one is fetched SEPARATELY and rendered by
+   * account — there is no reduce/merge step, so one account's usage can never be attributed to
+   * another (S6 §4.3, Property 9). The shell owns this because settings live in the shell. Must
+   * never throw — a throwing provider fails closed to system-only, never a fabricated account.
+   * Absent ⇒ the system Codex account only (the merged S4 flat-identity behavior is untouched).
+   */
+  codexAccounts?: () => Array<{ id: string; home: string; label: string; email?: string | null }>
   /**
    * Fired after any account's cache is (re)populated — the mirror wires this to a flush so the
    * phone-facing `usage` block refreshes when a poll lands. Best-effort; must never throw.
@@ -231,6 +253,7 @@ export interface UsageService {
  */
 export function startUsageService(opts: UsageServiceOptions = {}): UsageService {
   const shouldPoll = opts.shouldPoll ?? ((): boolean => true)
+  const mirrorMayBeRead = opts.mirrorMayBeRead ?? ((): boolean => false)
 
   // Per-account caches keyed by `accountId ?? ''`. The empty key is the system account, the only
   // one that's proactively polled + pushed; managed-account rows fetch on demand from the popover.
@@ -290,17 +313,62 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   let providersAt = 0
   let providersCache: ProviderUsage[] = []
   let providersInFlight: Promise<ProviderUsage[]> | null = null
+  // The account set the current cache was built from. When it changes (an account added, removed,
+  // or relabelled) the cache is busted so a snapshot from a DIFFERENT account set is never served —
+  // switching accounts can't show stale numbers (S6 §4.3, cache fingerprint).
+  let codexAccountsFingerprint = ''
+
+  // A throwing provider must never break the sweep — fail closed to the empty set (system-only),
+  // never a fabricated account (S6 §4.3).
+  const readCodexAccounts = (): ReturnType<NonNullable<UsageServiceOptions['codexAccounts']>> => {
+    try {
+      return opts.codexAccounts?.() ?? []
+    } catch {
+      return []
+    }
+  }
+
+  // `id\0home\0label\0email` per account, NUL-joined — every field that changes what a row reports
+  // participates, so a relabel or a home move busts the cache too, not just add/remove.
+  const fingerprintCodexAccounts = (
+    accounts: ReturnType<NonNullable<UsageServiceOptions['codexAccounts']>>
+  ): string =>
+    accounts.map((a) => `${a.id}\0${a.home}\0${a.label}\0${a.email ?? ''}`).join('\x01')
 
   const runProviders = async (): Promise<ProviderUsage[]> => {
     if (providersInFlight) return providersInFlight
+    // Codex is account-scoped: one system fetcher (no identity ⇒ accountId undefined, the un-owned
+    // row stays un-owned) plus one fetcher per managed account against ITS OWN home + identity.
+    // No reduce/dedupe merge step — each row is keyed by its own accountId and can never collapse
+    // into another (Property 9). The account id is carried on the descriptor so even a THROWN fetch
+    // stays attributed to its own account (fail closed), never masquerading as the system row.
+    const codexAccounts = readCodexAccounts()
+    codexAccountsFingerprint = fingerprintCodexAccounts(codexAccounts)
+    type ProviderFetcher = {
+      id: string
+      accountId?: string
+      fetch: () => Promise<ProviderUsage>
+    }
+    const codexProviders: ProviderFetcher[] = [
+      { id: 'codex', fetch: () => fetchCodexUsage() },
+      ...codexAccounts.map((account) => ({
+        id: 'codex',
+        accountId: account.id,
+        fetch: () => fetchCodexUsage(account.home, account)
+      }))
+    ]
+    const allProviders: ProviderFetcher[] = [...codexProviders, ...OTHER_PROVIDERS]
     // One slow provider must not withhold the others — settle each independently.
     providersInFlight = Promise.all(
-      OTHER_PROVIDERS.map((p) =>
+      allProviders.map((p) =>
         p.fetch().catch(
           (): ProviderUsage => ({
             provider: p.id,
             limits: [],
             account: null,
+            // Keep the failing row attributed to its own account (undefined for the un-owned
+            // rows) so an error fails closed to THIS account, never another's or a fabricated one.
+            accountId: p.accountId,
             updatedAt: Date.now(),
             status: 'error'
           })
@@ -335,6 +403,10 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   })
 
   platform().handle(IPC.usageProviders, (force?: boolean) => {
+    // Bust the debounce when the Codex account set has changed since the cache was built, so a
+    // snapshot from a different account set (stale numbers after an add/remove/switch) is never
+    // served (S6 §4.3). runProviders re-stamps the fingerprint from the fresh set.
+    if (fingerprintCodexAccounts(readCodexAccounts()) !== codexAccountsFingerprint) providersAt = 0
     if (!force && providersAt && Date.now() - providersAt < REFETCH_DEBOUNCE_MS) {
       return providersCache
     }
@@ -404,7 +476,9 @@ export function startUsageService(opts: UsageServiceOptions = {}): UsageService 
   // system row. Each account is one request per cadence; the request-budget gate (`shouldPoll`)
   // still fronts the whole sweep.
   const pollAll = (): void => {
-    if (!shouldPoll()) return
+    // Fire when the shell wants it (focused pill) OR when a phone may be reading the mirror — the
+    // latter keeps the phone's `usage` block fresh on a backgrounded desktop instead of fossilizing.
+    if (!shouldPoll() && !mirrorMayBeRead()) return
     // Fire-and-forget: a poll that lands after shutdown (or a test's platform reset) throws
     // from platform()-dependent fetch paths — in an un-awaited chain that is an unhandled
     // rejection, not a signal (same hardening as push()'s broadcast).

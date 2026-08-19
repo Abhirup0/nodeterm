@@ -27,6 +27,14 @@ describe('tmuxConf', () => {
     expect(c).not.toContain('Ms=')
   })
 
+  it('declares RGB via terminal-features so truecolor is not clamped to 256 colors (issue #78)', () => {
+    // Without an RGB terminal-features (or Tc) entry for the outer terminal, tmux quantizes every
+    // 24-bit SGR to the 256-color palette — canvas terminals never match the user's real terminal.
+    expect(c).toContain('set -as terminal-features ",*:RGB"')
+    // Only via terminal-features: the overrides array must stay unset (see the MIGRATION note).
+    expect(c).not.toMatch(/set -a[gs]? terminal-overrides/)
+  })
+
   it('copies mouse selections through tmux (OSC 52), with no macOS-only pbcopy pipe', () => {
     expect(c).toContain('bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')
     expect(c).toContain('bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')

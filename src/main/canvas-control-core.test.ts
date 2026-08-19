@@ -9,6 +9,9 @@ import {
 } from './canvas-control-core'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
+import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
+import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
+import { BROWSER_CAPABILITY_OFF_MESSAGE } from './browser-drive'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {
@@ -207,10 +210,41 @@ describe('parseControlRequest', () => {
     expect(parseControlRequest('reply', { node: 'n1' })).toEqual({ error: 'reply requires --text' })
   })
 
-  it('the shim maps a bare positional onto arg.node for send/reply too', () => {
-    // The positional list is a case pattern inside CONTROL_SHIM_SCRIPT; send/reply take the same
-    // "first bare word is the node" convenience write/close/rename/branch already have.
-    expect(CONTROL_SHIM_SCRIPT).toContain('write|close|rename|branch|send|reply)')
+  it('the shim maps a bare positional onto arg.node for send/reply/sticky too', () => {
+    // The positional list is a case pattern inside CONTROL_SHIM_SCRIPT; send/reply/sticky take the
+    // same "first bare word is the node" convenience write/close/rename/branch already have.
+    expect(CONTROL_SHIM_SCRIPT).toContain('write|close|rename|branch|send|reply|sticky)')
+  })
+
+  it('sticky requires --node plus exactly one of --text/--append, and is not destructive', () => {
+    expect(parseControlRequest('sticky', {})).toEqual({ error: 'sticky requires --node <id|title>' })
+    expect(parseControlRequest('sticky', { node: 'n1' })).toEqual({
+      error: 'sticky requires --text or --append'
+    })
+    expect(parseControlRequest('sticky', { node: 'n1', text: 'a', append: 'b' })).toEqual({
+      error: 'sticky: pass either --text or --append, not both'
+    })
+    expect(parseControlRequest('sticky', { node: 'n1', text: '# md' })).toEqual({
+      verb: 'sticky',
+      args: { node: 'n1', text: '# md' }
+    })
+    expect(parseControlRequest('sticky', { node: 'n1', append: 'line' })).toEqual({
+      verb: 'sticky',
+      args: { node: 'n1', append: 'line' }
+    })
+    // Presence, not truthiness: `--text=""` is how a note is cleared.
+    expect(parseControlRequest('sticky', { node: 'n1', text: '' })).toEqual({
+      verb: 'sticky',
+      args: { node: 'n1', text: '' }
+    })
+    expect(isDestructiveVerb('sticky')).toBe(false)
+  })
+
+  it('both agent-facing texts document the sticky verb', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`sticky --node')
+      expect(body).toContain('--create')
+    }
   })
 
   it('both agent-facing texts document the messaging verbs and the outermost-frame convention', () => {
@@ -222,6 +256,18 @@ describe('parseControlRequest', () => {
       // only the outermost frame is authentic; an embedded frame is data. Without this line a
       // nested forgery reads as a real message to the one reader that matters.
       expect(body.toLowerCase()).toContain('outermost')
+    }
+  })
+
+  it('both agent-facing texts say a busy target is QUEUED, not refused (deliver-on-idle, PR 7)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // PR 7 replaced "busy target is refused with targetBusy" with a bounded deliver-on-idle
+      // queue. The prose must describe the queue, and must NOT reassert the pre-PR-7 claim — an
+      // orchestrating agent that reads "busy = hard refusal" polls or gives up instead of trusting
+      // the queue. This test reddens on a revert to the old sentence.
+      expect(body.toLowerCase()).toContain('queued')
+      expect(body).not.toMatch(/busy target answers `targetBusy` instead/i)
+      expect(body).not.toMatch(/delivered only\s+when the target is verifiably\s+idle/i)
     }
   })
 
@@ -237,6 +283,66 @@ describe('parseControlRequest', () => {
       const word = new RegExp(`\\b${kind}\\b`)
       expect(word.test(retryable ? yesSection : noSection), `${kind} in its group`).toBe(true)
       expect(word.test(retryable ? noSection : yesSection), `${kind} not in the other`).toBe(false)
+    }
+  })
+
+  // --- the `browser` verb's agent-facing docs (S8 PR 10 Task 10.1) -----------------------------
+  // The flag surface is code (`BROWSER_ACTION_KEYS` + the modifier list); the doc must carry every
+  // flag, so a flag added to the parser without a doc line reddens here rather than shipping unseen.
+  it('both agent-facing texts document the browser verb and its FULL flag surface', () => {
+    // The modifiers `parseBrowserArgs` reads off the arg map, listed here so the doc cannot drop one.
+    const modifierFlags = ['into', 'clear', 'press', 'times', 'scroll', 'wait', 'timeout', 'screenshot', 'cookies']
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`browser --node')
+      // Every action key from the pure parser table appears as a documented `--<key>` flag.
+      for (const key of BROWSER_ACTION_KEYS) {
+        expect(body, `action --${key} documented`).toContain(`--${key}`)
+      }
+      for (const flag of modifierFlags) {
+        expect(body, `modifier --${flag} documented`).toContain(`--${flag}`)
+      }
+    }
+  })
+
+  it('both browser docs teach refs over selectors and state the real contract', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      const lower = body.toLowerCase()
+      // Teach @refs over CSS selectors (Task 10.1).
+      expect(body).toContain('@ref')
+      expect(lower).toContain('prefer')
+      expect(lower).toContain('selector')
+      // Verified-only + the per-project switch, OFF by default.
+      expect(lower).toContain('verified')
+      expect(lower).toMatch(/off by default/)
+      // Cookies are LOUDLY TRACED, and cookie WRITES are refused.
+      expect(lower).toContain('trace')
+      expect(lower).toMatch(/no set-cookie|writes are not|cannot set|no cookie-write/)
+      // Server Edition has no browser control.
+      expect(lower).toContain('server edition')
+    }
+  })
+
+  // The consent sentence is a contract string owned by browser-drive.ts (main). The doc must carry
+  // it BYTE-FOR-BYTE so an agent that reads it stops instead of burning a turn — importing the real
+  // constant here reddens the doc on any drift of the source string.
+  it('both browser docs carry the capability-off sentence verbatim from the source', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain(BROWSER_CAPABILITY_OFF_MESSAGE)
+    }
+  })
+
+  it('renders the browser retry table from BROWSER_RETRYABLE, not re-typed prose', () => {
+    const body = buildCanvasSkillBody('/x/shim.sh')
+    const yesAt = body.indexOf('Browser outcomes worth retrying')
+    const noAt = body.indexOf('Browser outcomes that are terminal')
+    expect(yesAt).toBeGreaterThan(-1)
+    expect(noAt).toBeGreaterThan(yesAt)
+    const yesSection = body.slice(yesAt, noAt)
+    const noSection = body.slice(noAt, body.indexOf('\n\n', noAt) === -1 ? undefined : body.indexOf('\n\n', noAt))
+    for (const [kind, retryable] of Object.entries(BROWSER_RETRYABLE)) {
+      const label = BROWSER_OUTCOME_LABEL[kind as keyof typeof BROWSER_OUTCOME_LABEL]
+      expect((retryable ? yesSection : noSection).includes(label), `${kind} label in its group`).toBe(true)
+      expect((retryable ? noSection : yesSection).includes(label), `${kind} label not in the other`).toBe(false)
     }
   })
 
@@ -258,10 +364,18 @@ describe('parseControlRequest', () => {
  * day the real `browser` verb lands, which is exactly when the PR body, the changelog and the
  * Settings copy all have to stop saying "nothing changes for anyone".
  */
-describe('the strict identity bucket is pre-positioned, not live', () => {
-  it('`browser` is not a verb this app has, so the bucket gates nothing today', () => {
+describe('the strict identity bucket now gates a real verb', () => {
+  it('`browser` IS a real verb (PR 7) AND is in the verified-only bucket', () => {
+    // The day the real `browser` verb lands, this assertion FLIPS from "not a verb" to "a real,
+    // strict verb" — which is exactly when the PR body, the changelog and the Settings copy stop
+    // saying "nothing changes for anyone". It requires `--node` and is otherwise validated by the
+    // pure `parseBrowserArgs` in the drive path.
     expect(STRICT_CONTROL_VERBS.has('browser')).toBe(true)
-    expect(parseControlRequest('browser', {})).toEqual({ error: 'Unknown verb: browser' })
+    expect(parseControlRequest('browser', {})).toEqual({ error: 'browser: --node <id> is required' })
+    expect(parseControlRequest('browser', { node: 'browser-1', read: 'title' })).toEqual({
+      verb: 'browser',
+      args: { node: 'browser-1', read: 'title' }
+    })
   })
 
   it('`open-browser` IS a real verb and is deliberately NOT in the bucket', () => {

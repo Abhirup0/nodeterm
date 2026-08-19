@@ -595,6 +595,38 @@ function newestUnresolved(events: ReadonlyArray<InboxEvent>, nodeId: string): In
   return undefined
 }
 
+/**
+ * Trim the feed to the rolling history `cap`, but PRESERVE the load-bearing per-node events that
+ * `ackDone` / `isEventUnresolved` / the phone's newest-done depend on — the newest `done` per node
+ * and the newest UNRESOLVED approval/question per node — even when they fall OUTSIDE the newest-`cap`
+ * window (audit P2-7). Without this, on a busy multi-agent host a node's `done` (or live ask) ages
+ * off the front within minutes: `ackDone` then no-ops (a retained DONE card on the phone never
+ * dismisses) and the phone loses that node's end-reason / newest-done. A RESOLVED ask is not
+ * protected — it drops with plain history as before — so the retained-past-cap set is bounded by
+ * ~2 per node. Order (oldest→newest) is preserved, and the wire shape is unchanged: the extra
+ * survivors ride the same `events` array every reader already walks. Pure — `events` untouched.
+ */
+export function trimInboxFeed(events: InboxEvent[], cap: number): InboxEvent[] {
+  if (events.length <= cap) return events
+  // The newest write per node wins each map (feed is oldest→newest, so a later match overwrites).
+  const newestDoneId = new Map<string, string>()
+  const newestUnresolvedAskId = new Map<string, string>()
+  for (const e of events) {
+    if (e.kind === 'done') newestDoneId.set(e.nodeId, e.id)
+    else if (!e.resolved && (e.kind === 'approval' || e.kind === 'question')) {
+      newestUnresolvedAskId.set(e.nodeId, e.id)
+    }
+  }
+  const protectedIds = new Set<string>([...newestDoneId.values(), ...newestUnresolvedAskId.values()])
+  // Keep the newest-`cap` window wholesale (history); older events survive only if protected.
+  const windowStart = events.length - cap
+  const kept: InboxEvent[] = []
+  for (let i = 0; i < events.length; i++) {
+    if (i >= windowStart || protectedIds.has(events[i].id)) kept.push(events[i])
+  }
+  return kept
+}
+
 // ---- Stateful singleton (production side) --------------------------------------------------
 
 const state = new Map<string, MirrorEntry>()
@@ -678,7 +710,9 @@ export interface NodeStateChange {
    *  nobody heard from a `working` node for `WORKING_STALE_MS`, so it is presumed gone (see
    *  shared/agents/stale.ts). Like `interrupted`, it must never be celebrated as a completion. */
   stale?: boolean
-  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than finishing.
+  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than
+   *  finishing — or a session boundary (SessionStart/SessionEnd) reset the node while it was
+   *  still `working`, which is the same story: the run stopped without producing anything.
    *  Consumers that celebrate a completion (notification, the notch HUD's "finished, unseen"
    *  highlight) skip it — nothing was accomplished, so there is nothing to go and read. */
   interrupted?: boolean
@@ -937,10 +971,10 @@ function pushInboxEvent(e: Omit<InboxEvent, 'id'>): void {
   const id = `${e.ts}-${++inboxSeq}`
   const full: InboxEvent = { id, ...e }
   inboxEvents.push(full)
-  // Cap the feed from the front (oldest fall off).
-  if (inboxEvents.length > INBOX_EVENTS_CAP) {
-    inboxEvents = inboxEvents.slice(inboxEvents.length - INBOX_EVENTS_CAP)
-  }
+  // Cap the feed from the front (oldest fall off), but keep each node's newest done + newest
+  // unresolved ask past the cut so `ackDone` / `isEventUnresolved` / the phone's newest-done
+  // don't lose the load-bearing event on a busy multi-agent host (audit P2-7).
+  inboxEvents = trimInboxFeed(inboxEvents, INBOX_EVENTS_CAP)
   // Notify actionable-event subscribers (only reached AFTER the dedup early-returns above it).
   for (const cb of inboxActionableListeners) {
     try {
@@ -1105,8 +1139,9 @@ function loadPersisted(file: string): void {
       let events = doc.inbox.events.filter(
         (e): e is InboxEvent => !!e && typeof e === 'object' && typeof e.id === 'string'
       )
-      if (events.length > INBOX_EVENTS_CAP) events = events.slice(events.length - INBOX_EVENTS_CAP)
-      inboxEvents = events
+      // Same per-node retention as the live cap (audit P2-7): a restored feed keeps each node's
+      // newest done + newest unresolved ask past the cut, so a restart doesn't strand a DONE card.
+      inboxEvents = trimInboxFeed(events, INBOX_EVENTS_CAP)
       let maxSeq = 0
       for (const e of inboxEvents) {
         const m = /-(\d+)$/.exec(e.id)

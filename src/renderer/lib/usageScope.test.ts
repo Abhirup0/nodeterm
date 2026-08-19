@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
+  accountRowAction,
+  dedupeProviderRows,
+  providerRowKey,
   scopeFromKey,
   scopeUsage,
   usageScopeFor,
@@ -168,5 +171,80 @@ describe('scopeUsage — SSH project', () => {
     const out = scopeUsage({ scope, claude: usage([limit()]), accounts: ACCOUNTS, providers: PROVIDERS, remote: [] })
     expect(out.pillLimits).toEqual([])
     expect(out.remote).toEqual([])
+  })
+})
+
+/**
+ * Issue #142 — the "Use for new sessions" affordance on the popover's account rows. The rules
+ * deliberately mirror resolveNewNodeAccount at node creation; drifting apart would mark one
+ * account here and launch another there.
+ */
+describe('accountRowAction', () => {
+  const eligible = [{ id: 'a1' }, { id: 'a2' }]
+
+  it('marks the System row as default when no override is set', () => {
+    expect(accountRowAction(null, eligible, undefined)).toBe('default')
+    expect(accountRowAction('a1', eligible, undefined)).toBe('offer')
+  })
+
+  it('marks the overriding account and offers the rest, System included', () => {
+    expect(accountRowAction('a1', eligible, 'a1')).toBe('default')
+    expect(accountRowAction('a2', eligible, 'a1')).toBe('offer')
+    expect(accountRowAction(null, eligible, 'a1')).toBe('offer')
+  })
+
+  it('treats a STALE default (account since removed) as System — never a ghost row', () => {
+    expect(accountRowAction(null, eligible, 'gone')).toBe('default')
+    expect(accountRowAction('a1', eligible, 'gone')).toBe('offer')
+  })
+
+  it("refuses to act on a row this project cannot launch (another host's account)", () => {
+    expect(accountRowAction('other-host-acct', eligible, undefined)).toBe('none')
+  })
+
+  it('with no managed accounts the System row is default and nothing is offered', () => {
+    expect(accountRowAction(null, [], undefined)).toBe('default')
+  })
+})
+
+describe('providerRowKey / dedupeProviderRows (U8 — per-account Codex rows)', () => {
+  const codex = (over: Partial<ProviderUsage> = {}): ProviderUsage => ({
+    provider: 'codex',
+    limits: [limit()],
+    account: null,
+    updatedAt: 0,
+    status: 'ok',
+    ...over
+  })
+
+  it('keys each Codex account distinctly and the system row as system', () => {
+    expect(providerRowKey(codex())).toBe('codex:system')
+    expect(providerRowKey(codex({ accountId: 'acc-1' }))).toBe('codex:acc-1')
+    expect(providerRowKey(codex({ accountId: 'acc-2' }))).toBe('codex:acc-2')
+  })
+
+  it('keeps distinct per-account rows instead of colliding them onto one key', () => {
+    const rows = [
+      codex({ account: 'sys@x' }),
+      codex({ accountId: 'acc-1', account: 'a@x' }),
+      codex({ accountId: 'acc-2', account: 'b@x' })
+    ]
+    const out = dedupeProviderRows(rows)
+    expect(out).toHaveLength(3)
+    expect(out.map(providerRowKey)).toEqual(['codex:system', 'codex:acc-1', 'codex:acc-2'])
+  })
+
+  it('collapses two rows with the same account key, keeping the informative one', () => {
+    const empty = codex({ accountId: 'acc-1', limits: [], status: 'fetching' })
+    const full = codex({ accountId: 'acc-1', account: 'a@x' })
+    const out = dedupeProviderRows([empty, full])
+    expect(out).toHaveLength(1)
+    expect(out[0].status).toBe('ok')
+    expect(out[0].limits).toHaveLength(1)
+  })
+
+  it('does not merge across different providers that happen to share a system slot', () => {
+    const out = dedupeProviderRows([codex(), { ...codex(), provider: 'gemini' }])
+    expect(out.map(providerRowKey)).toEqual(['codex:system', 'gemini:system'])
   })
 })

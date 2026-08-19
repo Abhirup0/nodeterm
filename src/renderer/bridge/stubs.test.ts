@@ -72,6 +72,11 @@ describe('bridge stubs', () => {
     await expect(s.sessionMemory.read()).resolves.toEqual({ ok: false, rows: [], mem: null })
     await expect(s.sessionMemory.host()).resolves.toBeNull()
     await expect(s.license.getStatus()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    // The license layer runs only in src/main, so the key + device cap cannot be read here. These
+    // must REJECT rather than resolve a fabricated LicenseDetail — an `{used:0, seats:0}` with a
+    // null error would render "0 of 0 devices" and an empty key as fact in Settings → License.
+    await expect(s.license.detail()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.license.releaseOthers()).rejects.toMatchObject({ code: E_UNSUPPORTED })
   })
 
   it('shell.openExternal opens a new browser tab; reveal/openPath are documented no-ops', () => {
@@ -93,6 +98,15 @@ describe('bridge stubs', () => {
       s.setBadgeCount(3)
       s.contextLink.setLinks({} as never)
       s.sendAgentControlResult({} as never)
+      // The shortcut recorder calls this on every arm AND on unmount; a throw here would leave
+      // Settings unusable in the browser, where there is no main-process intercept to suspend.
+      s.shortcuts.setRecording(true)
+      s.shortcuts.setRecording(false)
+      // The focus mirror fires on every click into and out of a terminal, so a throw here would
+      // break the browser canvas on the first keystroke — and the browser has no main-process
+      // intercept for it to suspend in the first place.
+      s.shortcuts.setTerminalFocused(true)
+      s.shortcuts.setTerminalFocused(false)
     }).not.toThrow()
   })
 })

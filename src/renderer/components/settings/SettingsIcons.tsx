@@ -1,8 +1,13 @@
 import type { SettingsSectionId } from './nav'
+import { parseProjectSectionId } from './project-settings-targets'
+
+/** The closed part of `SettingsSectionId` — everything except the dynamic `project-${string}`
+ *  ids, which don't get their own icon (see the fallback in `SectionIcon`). */
+type StaticSettingsSectionId = Exclude<SettingsSectionId, `project-${string}`>
 
 /** One small line glyph per settings section, used in the sidebar nav.
  *  16×16, currentColor stroke — color is driven by the parent (active = accent). */
-const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
+const PATHS: Record<StaticSettingsSectionId, React.JSX.Element> = {
   terminal: (
     <>
       <rect x="2" y="3" width="12" height="10" rx="2" />
@@ -40,6 +45,13 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
     <>
       <rect x="6" y="2.2" width="4" height="7" rx="2" />
       <path d="M4 8.2a4 4 0 0 0 8 0M8 12.2v1.6M6.2 13.8h3.6" />
+    </>
+  ),
+  // A keyboard: the outline, two key rows, and a wide space bar.
+  shortcuts: (
+    <>
+      <rect x="1.5" y="4" width="13" height="8" rx="1.8" />
+      <path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4 9.6h8" />
     </>
   ),
   agents: (
@@ -127,10 +139,24 @@ const PATHS: Record<SettingsSectionId, React.JSX.Element> = {
     </>
   ),
   updates: <path d="M8 2.6v7M5 6.6 8 9.6l3-3M3.6 12.6h8.8" />,
-  privacy: <path d="M8 2.4 12.4 4.2V8c0 3-2 4.8-4.4 5.6C5.6 12.8 3.6 11 3.6 8V4.2Z" />
+  privacy: <path d="M8 2.4 12.4 4.2V8c0 3-2 4.8-4.4 5.6C5.6 12.8 3.6 11 3.6 8V4.2Z" />,
+  // A tiny bug (the debug section).
+  debug: (
+    <>
+      <circle cx="8" cy="9" r="3.5" />
+      <path d="M8 5.5V3.5M4.9 6.6 3.4 5.1M11.1 6.6l1.5-1.5M4.5 9H2.5M13.5 9h-2M4.9 11.4l-1.5 1.5M11.1 11.4l1.5 1.5" />
+    </>
+  )
 }
 
+// A small folder glyph, used for project sections — those ids are dynamic (one per open
+// project), so there's no per-project entry in `PATHS`.
+const PROJECT_FALLBACK: React.JSX.Element = (
+  <path d="M2.5 4.8A1.3 1.3 0 0 1 3.8 3.5h2.6l1.3 1.5h4.5a1.3 1.3 0 0 1 1.3 1.3v5A1.3 1.3 0 0 1 12.2 12.6H3.8a1.3 1.3 0 0 1-1.3-1.3Z" />
+)
+
 export function SectionIcon({ id }: { id: SettingsSectionId }): React.JSX.Element {
+  const path = parseProjectSectionId(id) !== null ? PROJECT_FALLBACK : PATHS[id as StaticSettingsSectionId]
   return (
     <svg
       width="16"
@@ -143,7 +169,7 @@ export function SectionIcon({ id }: { id: SettingsSectionId }): React.JSX.Elemen
       strokeLinejoin="round"
       aria-hidden="true"
     >
-      {PATHS[id]}
+      {path}
     </svg>
   )
 }

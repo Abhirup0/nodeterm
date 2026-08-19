@@ -34,7 +34,7 @@ import {
   type PublicDevice,
   type RelayPairingBlock
 } from './pairing-core'
-import type { Settings } from '../shared/types'
+import type { DeviceRevokeResult, DeviceRevokeServerOutcome, Settings } from '../shared/types'
 import { publicKeyToB64, deriveSharedKey, encrypt, decrypt, type KeyPair } from './remote/e2ee'
 import { hostIdFromPublicKeyB64 } from './remote/relay-id'
 import { getDeviceId } from '../core/device-id'
@@ -114,6 +114,51 @@ async function mintRelayDevice(
   }
 }
 
+/** How long a revoke waits for the backend before calling it unreachable. */
+const REVOKE_TIMEOUT_MS = 8000
+
+/**
+ * Take a paired phone's Pro entitlement back. Until this existed, Remove was purely local — the
+ * peer key was unpinned and the socket cut, while the server kept minting Pro for that phone
+ * forever.
+ *
+ * Three outcomes, because two cannot tell the truth here:
+ *  - 'ok'      the route answered 204. It is deliberately idempotent and reveals nothing about
+ *              WHICH of its four cases applied (revoked it / unknown device / the row carries a
+ *              'free:'/'apple:' id so there was nothing of ours on it / already revoked) — all
+ *              four mean the phone holds no entitlement of ours, which is what we asked for.
+ *  - 'failed'  we asked and were refused (403 = someone else's row, 401 = the token did not
+ *              verify) or could not reach the server. The caller must NOT report a clean removal.
+ *  - 'skipped' we did not ask, and that is a normal state: a free-tier desktop holds no
+ *              entitlement to sign the request with (and has no Pro of ours on that phone to
+ *              reclaim), or there is no device (and so no row) to name at all.
+ *
+ * `relayDeviceId` is phone-supplied, unvalidated text, so it rides the JSON body — never a URL.
+ */
+export async function revokeRelayDevice(
+  apiBase: string,
+  relayDeviceId: string,
+  entitlement: string | null
+): Promise<DeviceRevokeServerOutcome> {
+  // Authorization for anything that moves a license is the signed entitlement, never a deviceId.
+  if (!entitlement || !relayDeviceId || !apiBase) return 'skipped'
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), REVOKE_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${apiBase}/v1/relay/device/revoke`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: relayDeviceId, entitlement }),
+      signal: ctrl.signal
+    })
+    return res.ok ? 'ok' : 'failed'
+  } catch {
+    return 'failed'
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
  * Compute this host's relay reachability block WITHOUT any network call (just the host key →
  * hostId), so the QR renders instantly. Returns null (LAN-only) when phone access is off or
@@ -179,8 +224,13 @@ export interface PairingService {
   stop(): void
   /** All paired devices (token stripped) from ~/.nodeterm/agent.json. */
   listDevices(): Promise<PublicDevice[]>
-  /** Revoke a device: drop its agent.json entry AND delete its authorized_keys line. */
-  revokeDevice(id: string): Promise<void>
+  /**
+   * Revoke a device: drop its agent.json entry, delete its authorized_keys line, AND take its Pro
+   * entitlement back on the relay backend. The two legs are reported separately — see
+   * `DeviceRevokeResult`; this never throws, because a failure the caller cannot see is exactly
+   * how the server leg went missing in the first place.
+   */
+  revokeDevice(id: string): Promise<DeviceRevokeResult>
   /** Live re-probe of sshd (127.0.0.1:22), for the Remote Login warning's auto-clear. */
   probeSsh(): Promise<boolean>
 }
@@ -570,6 +620,12 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
         const deviceId = randomUUID()
         const agentToken = randomBytes(24).toString('base64url')
         const name = normalizeDeviceName(body.deviceName)
+        // The phone's OWN id — the key the relay backend stores its device row under, and the
+        // only one it would recognize in a later revoke. Resolved here rather than at the mint
+        // below so the registry entry can carry it; the fallback (phone sent none ⇒ our id) is
+        // unchanged, and the mint still reads this same value.
+        const phoneDeviceId =
+          typeof body.deviceId === 'string' && body.deviceId.trim() ? body.deviceId.trim() : deviceId
         // One unit, and queued behind any in-flight revoke: a pairing that interleaves with one
         // would either append onto the inode the revoke is about to rename over, or lose its
         // agent.json entry to the revoke's stale read.
@@ -580,17 +636,14 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
             name,
             token: agentToken,
             pairedAt: Date.now(),
-            lastSeenAt: 0
+            lastSeenAt: 0,
+            relayDeviceId: phoneDeviceId
           })
         })
         // Provision relay access for the phone when enabled + Pro. Any failure ⇒ LAN-only: we
         // never fail the pairing over a relay hiccup (the phone still got its SSH key installed).
         let relayFields: { relay?: RelayPairingBlock; relayDeviceToken?: string } = {}
         if (relayCtx) {
-          const phoneDeviceId =
-            typeof body.deviceId === 'string' && body.deviceId.trim()
-              ? body.deviceId.trim()
-              : deviceId
           const minted = await mintRelayDevice(relayDeps!.apiBase, {
             entitlement: relayCtx.entitlement,
             deviceId: phoneDeviceId,
@@ -663,13 +716,58 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
   // device still listed — visible to its owner, with the Revoke button still there to finish the
   // job. The reverse order fails the other way: the device disappears from the list while its key
   // is still live, so the owner believes it revoked and has no way left to retry.
-  const revokeDevice = (id: string): Promise<void> =>
-    serialize(async () => {
-      await removeAuthorizedKeysForDevice(id)
-      const obj = await readAgentJson()
-      const devices = removeDevice(readDevices(obj), id)
-      await writeAgentJson({ ...obj, devices })
+  //
+  // The relay device id is read BEFORE either write and kept even when the local leg fails: the
+  // entitlement is what authorizes the server leg, not the local write's success, and a phone the
+  // user asked to remove should stop being minted Pro either way.
+  const revokeDevice = async (id: string): Promise<DeviceRevokeResult> => {
+    const { local, relayId, found } = await serialize(async () => {
+      const entry = readDevices(await readAgentJson()).find((d) => d.id === id)
+      const relayId = entry?.relayDeviceId
+      const found = !!entry
+      try {
+        await removeAuthorizedKeysForDevice(id)
+        const obj = await readAgentJson()
+        const devices = removeDevice(readDevices(obj), id)
+        await writeAgentJson({ ...obj, devices })
+        return { local: true, relayId, found }
+      } catch (err) {
+        // Reported, not thrown: `local:false` is what the UI turns into "try again", and the
+        // server leg below is still worth running. The detail belongs in the log.
+        console.warn('[pairing] local revoke failed:', err)
+        return { local: false, relayId, found }
+      }
     })
+    // A device paired before `relayDeviceId` was recorded still falls back to OUR id — which is
+    // not a guess. `id` is the per-pairing `randomUUID()` above, and when the phone sent no id of
+    // its own the mint sent exactly this value as the row's `deviceId` (see `phoneDeviceId`), so
+    // the row really is keyed on it. It is NOT this desktop's machine id (`getDeviceId()`), which
+    // is never a key in `relay_devices` — it lives only in the non-key `host_device_id` column,
+    // and /v1/relay/host-token writes no row at all — so this cannot reach the desktop's own
+    // registration. Nor can it reach a stranger's: the route authorizes by the row's licenseId /
+    // hostDeviceId and answers 403 otherwise, and 204 (no write) for a row carrying a
+    // 'free:'/'apple:' id — which is what keeps an Apple purchase bridged to this desktop safe.
+    //
+    // RESIDUAL LEAK, deliberately not closed here: a pre-Task-12 pairing where the phone DID send
+    // its own id (every iOS build since 2026-07-10 does) has a row keyed by a value we never
+    // recorded, and the backend's 204 reveals nothing — so this reports 'ok' having asked about a
+    // row that is not that phone's, and the phone keeps Pro. The desktop cannot name that row at
+    // all; re-pairing the phone records its id (the phone's id is stable and the mint upserts on
+    // it), after which a removal revokes for real. Closing it properly needs a
+    // server-side "devices for this host" read, which does not exist yet.
+    //
+    // Deliberately OUTSIDE the mutation chain: this is a network round trip, and holding the
+    // agent.json/authorized_keys queue open for it would stall a concurrent pairing POST behind
+    // an unreachable backend. No local state depends on the answer.
+    const server = found
+      ? await revokeRelayDevice(
+          relayDeps?.apiBase ?? '',
+          relayId ?? id,
+          relayDeps?.getEntitlement() ?? null
+        )
+      : 'skipped'
+    return { local, server }
+  }
 
   return { start, stop, listDevices, revokeDevice, probeSsh }
 }

@@ -44,6 +44,19 @@ export function formatModelLabel(model: string | null): string | null {
   return version ? `${family} ${version}` : family
 }
 
+/**
+ * Fill color for a CONTEXT-WINDOW meter: green while low, yellow from 60% used, red past 85%.
+ * Keyed to USED percent — the inverse scale of `barColor`/`severityColor`, which are keyed to
+ * REMAINING provider quota. The two measure different things and must not share thresholds.
+ * One definition for every context surface (ContextMeter, session rows, the notch HUD) — each
+ * used to carry its own copy of these numbers (issue #78).
+ */
+export function contextFillColor(usedPercent: number): string {
+  if (usedPercent > 85) return '#ff453a'
+  if (usedPercent >= 60) return '#ffd60a'
+  return '#30d158'
+}
+
 /** Bar color by remaining quota: green > 40%, yellow 20–40%, red < 20%. */
 export function barColor(leftPercent: number): string {
   if (leftPercent > 40) return '#30d158'
@@ -71,24 +84,47 @@ export function severityColor(severity: string | null, leftPercent: number): str
   }
 }
 
-/** The percentage a limit renders as, honouring the used/remaining display setting. */
-export function percentText(usedPercent: number, mode: 'used' | 'remaining'): string {
-  return mode === 'used'
-    ? `${Math.round(usedPercent)}% used`
-    : `${Math.round(100 - usedPercent)}% left`
+/**
+ * The percentage a limit renders as, honouring the used/remaining/tokens display setting.
+ * 'tokens' has no meaning for a percent-only surface (provider quota limits carry no raw token
+ * count), so it folds to the 'used' wording there — never silently treated as 'remaining'.
+ */
+export function percentText(usedPercent: number, mode: 'used' | 'remaining' | 'tokens'): string {
+  return mode === 'remaining'
+    ? `${Math.round(100 - usedPercent)}% left`
+    : `${Math.round(usedPercent)}% used`
 }
 
 /** Compact form for the pill: the bare number, no suffix (the segment label follows it). */
-export function percentNumber(usedPercent: number, mode: 'used' | 'remaining'): number {
-  return Math.round(mode === 'used' ? usedPercent : 100 - usedPercent)
+export function percentNumber(usedPercent: number, mode: 'used' | 'remaining' | 'tokens'): number {
+  return Math.round(mode === 'remaining' ? 100 - usedPercent : usedPercent)
 }
 
 /**
- * Bar fill, honouring the used/remaining display setting — the fill tracks the same quantity as
- * the adjacent number, so "92% used" shows a nearly-full bar instead of a barely-visible sliver.
+ * Bar fill, honouring the used/remaining/tokens display setting — the fill tracks the same
+ * quantity as the adjacent number, so "92% used" shows a nearly-full bar instead of a
+ * barely-visible sliver. 'tokens' fills the same as 'used' (it just relabels the number).
  * Color is a separate call (`severityColor`/`barColor`) keyed to the true remaining percentage,
  * never to this value, so severity red/yellow/green doesn't flip meaning with the mode.
  */
-export function barFillPercent(usedPercent: number, mode: 'used' | 'remaining'): number {
-  return mode === 'used' ? usedPercent : 100 - usedPercent
+export function barFillPercent(usedPercent: number, mode: 'used' | 'remaining' | 'tokens'): number {
+  return mode === 'remaining' ? 100 - usedPercent : usedPercent
+}
+
+/** Humanize a token count: 48000 → "48k", 1_000_000 → "1M", 850 → "850". */
+export function formatTokensShort(n: number): string {
+  if (n >= 1_000_000) return `${Number((n / 1_000_000).toFixed(1)).toString()}M`
+  if (n >= 1000) return `${Math.round(n / 1000)}k`
+  return String(n)
+}
+
+/**
+ * Context-window pill text: token fraction in 'tokens' mode ("48k/200k"), else the percent
+ * number with no suffix (caller appends "%"). Only context-window surfaces (ContextMeter,
+ * SessionRow) have usedTokens/windowTokens to show; nothing else should call this.
+ */
+export function contextPillText(usedTokens: number, windowTokens: number, usedPercent: number, mode: 'used' | 'remaining' | 'tokens'): string {
+  return mode === 'tokens'
+    ? `${formatTokensShort(usedTokens)}/${formatTokensShort(windowTokens)}`
+    : `${percentNumber(usedPercent, mode)}%`
 }

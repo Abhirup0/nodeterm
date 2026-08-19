@@ -9,6 +9,8 @@ import { HUD_BRAND_PULSE_CLASS, brandPulseBackground, brandPulsePlan } from '../
 import { createGrokMarkSvg } from '../lib/grokMark'
 import { createCopilotMarkSvg } from '../lib/copilotMark'
 import { buildIndicator, orderIndicatorAgents } from './indicator'
+import { HUD_ROW_CAP, overflowLabel, splitPanelRows } from './panel-rows'
+import { percentText } from '../lib/usageFormat'
 import codexPet from '../assets/pet-codex.webp'
 
 // Local mirror of the preload's HUD contract (src/preload/hud.ts) — kept self-contained so this
@@ -28,6 +30,8 @@ interface HudRow {
   activity?: string
   contextPercent?: number
   subagents: HudSubagentRow[]
+  /** Finished and not yet looked at — the sidebar's `unread` mark, ranked + labelled here. */
+  unread: boolean
   updatedAt: number
 }
 interface HudPush {
@@ -38,6 +42,7 @@ interface HudPush {
   notchCenterX: number
   hasNotch: boolean
   hoverExpand: boolean
+  percentMode?: 'used' | 'remaining' | 'tokens'
 }
 interface HudApi {
   onRows(cb: (push: HudPush) => void): () => void
@@ -74,8 +79,14 @@ let latestRows: HudRow[] = []
 let notchWidthPx = 168
 // Hover-to-expand (settings.notchHoverExpand). Off = the capsule only expands on click.
 let hoverExpand = true
+// settings.usagePercentMode — the same number/label the other context surfaces render (issue #78).
+let percentMode: 'used' | 'remaining' | 'tokens' = 'remaining'
 // Which subagent disclosures the user has opened (by nodeId), preserved across re-renders.
 const openSubs = new Set<string>()
+// The user clicked "+N more" — draw every pushed row instead of the first HUD_ROW_CAP. Reset when
+// the panel closes: the cap is the glance default, and an expansion is about the panel in front of
+// you, not a preference.
+let showAllRows = false
 
 // ---- Interaction: click-through hotspot + expand/collapse ----------------------------------
 
@@ -107,8 +118,12 @@ indicator.addEventListener('click', () => {
 function setExpanded(next: boolean): void {
   if (expanded === next) return
   expanded = next
+  if (!expanded && showAllRows) {
+    showAllRows = false
+    renderPanel(latestRows)
+  }
   capsule.classList.toggle('expanded', expanded)
-  syncCapsuleSymmetry() // expanded: drop the padding so the panel gets the full width
+  syncCapsuleOverhang() // expanded: drop the padding so the panel gets the full width
   window.hud.setExpanded(expanded)
 }
 
@@ -242,7 +257,9 @@ function renderIndicator(rows: HudRow[]): void {
 
 function renderPanel(rows: HudRow[]): void {
   panel.replaceChildren()
-  const shown = rows.slice(0, 6)
+  // Rows arrive in state-priority order (main's `hudRowRank`), so the cap always cuts from the
+  // least urgent end — but it still cuts, and what it cut is counted below rather than dropped.
+  const { shown, hidden } = splitPanelRows(rows, showAllRows ? rows.length : HUD_ROW_CAP)
   shown.forEach((row, i) => {
     // Dithered pixel separator between rows (agent-notch's DitherSeparator).
     if (i > 0) {
@@ -252,6 +269,22 @@ function renderPanel(rows: HudRow[]): void {
     }
     panel.append(buildRow(row))
   })
+  const label = overflowLabel(hidden)
+  if (label || showAllRows) panel.append(buildMore(label))
+}
+
+/** The "+N more · 2 unread" footer — click to draw the rest (the panel scrolls), click again to
+ *  return to the glance-sized list. */
+function buildMore(label: string | undefined): HTMLElement {
+  const el = document.createElement('div')
+  el.className = 'hud-panel__more'
+  el.textContent = showAllRows ? 'Show fewer' : (label ?? '')
+  el.addEventListener('click', (e) => {
+    e.stopPropagation()
+    showAllRows = !showAllRows
+    renderPanel(latestRows)
+  })
+  return el
 }
 
 function buildRow(row: HudRow): HTMLElement {
@@ -270,14 +303,28 @@ function buildRow(row: HudRow): HTMLElement {
 
   const title = document.createElement('div')
   title.className = 'hud-row__title'
-  title.textContent = row.title
+  const name = document.createElement('span')
+  name.className = 'hud-row__name'
+  name.textContent = row.title
+  title.append(name)
+  // Say "unread" out loud. The row's mere existence used to be the only sign that a finished
+  // session was new for you — invisible next to five other rows, and indistinguishable from a
+  // glitch when it vanished on a read-ack from the phone. Same word the sessions sidebar uses.
+  if (row.unread) {
+    const badge = document.createElement('span')
+    badge.className = 'hud-row__badge'
+    badge.textContent = 'Unread'
+    title.append(badge)
+  }
 
   const tag = document.createElement('div')
   tag.className = `hud-row__tag hud-row__tag--${row.state}`
   const parts: string[] = []
   if (row.model) parts.push(row.model)
   parts.push(reltime(row.updatedAt))
-  if (typeof row.contextPercent === 'number') parts.push(`${Math.round(row.contextPercent)}%`)
+  // Labeled, not a bare number: "42% used" / "58% left" per the display setting — the label is
+  // what keeps a context percentage from reading as provider quota.
+  if (typeof row.contextPercent === 'number') parts.push(percentText(row.contextPercent, percentMode))
   tag.textContent = parts.join(' · ')
 
   const sub = document.createElement('div')
@@ -327,10 +374,13 @@ function buildRow(row: HudRow): HTMLElement {
   return el
 }
 
+// Sub-line fallback wording, borrowed from the sessions sidebar's labels (STATE_LABEL /
+// STATUS_GROUP_LABEL in renderer/lib/sessionList.ts) so one session does not have two names on two
+// surfaces. `done` reads "Done" — the "new for you" half of it is the Unread badge's job.
 function stateLabel(state: HudRow['state']): string {
-  if (state === 'working') return 'Working…'
+  if (state === 'working') return 'Running'
   if (state === 'needsYou') return 'Needs you'
-  if (state === 'done') return 'Finished'
+  if (state === 'done') return 'Done'
   return 'Idle'
 }
 
@@ -367,24 +417,26 @@ function buildSubItem(s: HudSubagentRow): HTMLElement {
 
 // ---- Render + geometry ---------------------------------------------------------------------
 
-// The capsule is CENTRED on the notch and its content (the mascots) occupies only the strip LEFT of
-// it, so we pad the right by `notch + content` — that makes the black stick out by exactly the same
-// amount on both sides (owner: "soldan ne kadar genişlettiysen sağdan da o kadar"). The content width
-// is measured, not guessed, so it stays symmetric as slots come and go.
-function syncCapsuleSymmetry(): void {
+// The capsule grows LEFT-ONLY: its right edge stays flush with the notch's right edge, and the
+// content (the mascots) occupies only the strip LEFT of the notch — the right padding covers
+// exactly the notch itself, nothing more. This retires the earlier symmetric growth ("soldan ne
+// kadar genişlettiysen sağdan da o kadar"): on a crowded menu bar the symmetric right-hand
+// overhang sat ON TOP of the status items, and because the capsule is the click-through hotspot,
+// hovering there also swallowed their clicks (issue #78 — grow-left approved by the owner there).
+function syncCapsuleOverhang(): void {
   if (expanded) {
     capsule.style.paddingRight = ''
     return
   }
   const ext = indicator.offsetWidth
-  capsule.style.paddingRight = ext > 0 ? `${notchWidthPx + ext}px` : ''
+  capsule.style.paddingRight = ext > 0 ? `${notchWidthPx}px` : ''
 }
 
 function render(rows: HudRow[]): void {
   latestRows = rows
   renderIndicator(rows)
   renderPanel(rows)
-  syncCapsuleSymmetry()
+  syncCapsuleOverhang()
   // Idle → hide the whole capsule (no empty black pill); active → the fused capsule shows.
   capsule.classList.toggle('hud-capsule--hidden', rows.length === 0)
   // Auto-collapse if there is nothing to show.
@@ -400,6 +452,7 @@ function applyGeometry(push: HudPush): void {
   }
   if (typeof push.notchCenterX === 'number') rs.setProperty('--notch-center-x', `${push.notchCenterX}px`)
   if (typeof push.hoverExpand === 'boolean') hoverExpand = push.hoverExpand
+  if (push.percentMode === 'used' || push.percentMode === 'remaining' || push.percentMode === 'tokens') percentMode = push.percentMode
   // No physical notch → draw a standalone floating pill instead of fusing to y=0.
   document.documentElement.classList.toggle('notchless', push.hasNotch === false)
 }

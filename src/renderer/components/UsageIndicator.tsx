@@ -4,7 +4,14 @@ import { AGENT_CONFIG } from '@shared/agents/config'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
-import { scopeFromKey, scopeUsage, usageScopeKey } from '../lib/usageScope'
+import {
+  accountRowAction,
+  dedupeProviderRows,
+  providerRowKey,
+  scopeFromKey,
+  scopeUsage,
+  usageScopeKey
+} from '../lib/usageScope'
 import {
   barFillPercent,
   formatResetCountdown,
@@ -34,7 +41,7 @@ const USAGE_HOVER_CLOSE_MS = 220
  * beside it; its color stays keyed to the TRUE remaining percentage via `severityColor`, so
  * severity red/yellow/green never flips meaning when the mode does.
  */
-function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remaining' }) {
+function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remaining' | 'tokens' }) {
   const left = 100 - limit.usedPercent
   const fill = barFillPercent(limit.usedPercent, mode)
   return (
@@ -59,6 +66,43 @@ function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remainin
 }
 
 /**
+ * The account-row affordance for issue #142 — the switch lives where the decision is made.
+ * It writes `project.defaultAccountId` and nothing else: `data.accountId` is resolved once at
+ * node creation and is immutable after, so the copy says "new sessions" and running sessions
+ * never move. `isDefault` marks the row the project currently resolves to; `onUse` is absent
+ * when there is nothing honest to offer (no active project, or a row whose account this
+ * project cannot launch).
+ */
+function DefaultAccountMark({
+  isDefault,
+  onUse
+}: {
+  isDefault: boolean
+  onUse?: () => void
+}) {
+  if (isDefault)
+    return (
+      <span
+        className="usage-account__default"
+        title="New Claude nodes in this project open under this account."
+      >
+        ✓ new sessions
+      </span>
+    )
+  if (!onUse) return null
+  return (
+    <button
+      type="button"
+      className="usage-account__use"
+      title="New Claude nodes in this project will open under this account. Running sessions keep theirs."
+      onClick={onUse}
+    >
+      Use for new sessions
+    </button>
+  )
+}
+
+/**
  * One account's limit bars under a label, for the multi-account popover. Reuses LimitRow's
  * markup — `u` is null while its on-demand fetch is in flight.
  */
@@ -66,16 +110,23 @@ function AccountUsageBlock({
   label,
   email,
   u,
-  mode
+  mode,
+  isDefault = false,
+  onUse
 }: {
   label: string
   email?: string
   u: ClaudeUsage | null
-  mode: 'used' | 'remaining'
+  mode: 'used' | 'remaining' | 'tokens'
+  isDefault?: boolean
+  onUse?: () => void
 }) {
   return (
     <div className="usage-account">
-      <div className="usage-account__label">{label}</div>
+      <div className="usage-account__label">
+        {label}
+        <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
+      </div>
       {(email ?? u?.email) && <div className="usage-account__email">{email ?? u?.email}</div>}
       {u?.limits.map((l) => (
         <LimitRow key={limitKey(l)} limit={l} mode={mode} />
@@ -95,7 +146,17 @@ function AccountUsageBlock({
  * `claude` has nothing to report, and listing it would turn "connect an SSH project" into "grow
  * a permanent empty section".
  */
-function RemoteUsageBlock({ row, mode }: { row: RemoteAccountUsage; mode: 'used' | 'remaining' }) {
+function RemoteUsageBlock({
+  row,
+  mode,
+  isDefault = false,
+  onUse
+}: {
+  row: RemoteAccountUsage
+  mode: 'used' | 'remaining' | 'tokens'
+  isDefault?: boolean
+  onUse?: () => void
+}) {
   if (row.usage.status === 'unavailable') return null
   const showHost = row.label !== row.hostKey
   return (
@@ -105,6 +166,7 @@ function RemoteUsageBlock({ row, mode }: { row: RemoteAccountUsage; mode: 'used'
         <span className="usage-account__host" title={`Read on ${row.hostKey} over SSH`}>
           {showHost ? row.hostKey : 'SSH'}
         </span>
+        <DefaultAccountMark isDefault={isDefault} onUse={onUse} />
       </div>
       {row.usage.email && <div className="usage-account__email">{row.usage.email}</div>}
       {row.usage.limits.map((l) => (
@@ -131,7 +193,7 @@ function labelFor(provider: string): string {
   return providerLabel(provider, agentLabel)
 }
 
-function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remaining' }) {
+function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remaining' | 'tokens' }) {
   if (u.status === 'unavailable') return null
   const label = labelFor(u.provider)
   return (
@@ -156,7 +218,15 @@ function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remainin
  * last-known data shown on stale/error. Compact pill = mini-bar + one "N% label" per limit,
  * e.g. "93% 5h · 39% wk · 13% Fable" — the bar tracks whichever limit is closest to biting.
  */
-export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): JSX.Element | null {
+export function UsageIndicator({
+  overBoard = false,
+  onSetDefaultAccount
+}: {
+  overBoard?: boolean
+  /** Writes `project.defaultAccountId` + persists (Canvas's own TabBar handler). When absent the
+   *  popover is a pure readout, exactly as before issue #142. */
+  onSetDefaultAccount?: (projectId: string, accountId: string | undefined) => void
+}): JSX.Element | null {
   const [usage, setUsage] = useState<ClaudeUsage | null>(null)
   const [open, setOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -184,6 +254,37 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
     usageScopeKey(s.projects.find((p) => p.id === s.activeProjectId))
   )
   const scope = useMemo(() => scopeFromKey(scopeHostKey), [scopeHostKey])
+
+  // Issue #142 — "Use for new sessions" on the account rows. A PRIMITIVE selector on purpose
+  // (see scopeHostKey above): selecting the project object would re-render the pill on every
+  // canvas edit.
+  const projectDefaultId = useProjects(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId)?.defaultAccountId
+  )
+  // The accounts THIS project can actually launch — the same host rule the whole panel follows
+  // (local project: local accounts; SSH project: that host's). The persisted default is validated
+  // against them, exactly as resolveNewNodeAccount does at node creation: a stale id (account
+  // since removed) marks the System row, never a ghost.
+  const eligibleAccounts = useMemo(
+    () =>
+      claudeAccounts.filter(
+        (a) => !a.pending && (scopeHostKey ? a.host === scopeHostKey : !a.host)
+      ),
+    [claudeAccounts, scopeHostKey]
+  )
+  // One rule for every row, local and remote alike — `accountRowAction` (pure, tested) decides
+  // default/offer/none; this pair just turns its answer into props. Absent handler / no project =
+  // pure readout, exactly as before. null = the System row (clears the override).
+  const rowMark = (accountId: string | null): { isDefault: boolean; onUse?: () => void } => {
+    const action = accountRowAction(accountId, eligibleAccounts, projectDefaultId)
+    return {
+      isDefault: action === 'default',
+      onUse:
+        action === 'offer' && onSetDefaultAccount && activeProjectId
+          ? () => onSetDefaultAccount(activeProjectId, accountId ?? undefined)
+          : undefined
+    }
+  }
 
   useEffect(() => {
     void window.nodeTerminal.usage.fetch().then(setUsage)
@@ -400,9 +501,17 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
                   // Avoid printing the email twice when it's already the display label.
                   email={systemLabelSetting.trim() ? (claudeUsage.email ?? undefined) : undefined}
                   u={claudeUsage}
+                  {...rowMark(null)}
                 />
                 {scoped.accounts.map((a) => (
-                  <AccountUsageBlock key={a.id} mode={percentMode} label={a.label} email={a.email} u={acctUsage[a.id] ?? null} />
+                  <AccountUsageBlock
+                    key={a.id}
+                    mode={percentMode}
+                    label={a.label}
+                    email={a.email}
+                    u={acctUsage[a.id] ?? null}
+                    {...rowMark(a.id)}
+                  />
                 ))}
               </>
             ) : (
@@ -426,16 +535,26 @@ export function UsageIndicator({ overBoard = false }: { overBoard?: boolean }): 
             ))}
           {/* On an SSH project these are the whole panel; the host badge is what says the numbers
               were read somewhere other than this machine. */}
+          {/* The same offer on an SSH project's rows — scoped as ever: only the host's system
+              identity and THIS host's managed accounts are actionable (accountRowAction). */}
           {visibleRemote.map((r) => (
-            <RemoteUsageBlock key={`${r.hostKey}#${r.accountId ?? ''}`} row={r} mode={percentMode} />
+            <RemoteUsageBlock
+              key={`${r.hostKey}#${r.accountId ?? ''}`}
+              row={r}
+              mode={percentMode}
+              {...rowMark(r.accountId)}
+            />
           ))}
           {scope.kind === 'ssh' && visibleRemote.length === 0 && (
             <div className="usage-popover__empty">
               No usage from this host yet — it is read once the project connects.
             </div>
           )}
-          {visibleProviders.map((p) => (
-            <ProviderBlock key={p.provider} u={p} mode={percentMode} />
+          {/* U8 (owed from PR 7): Codex emits one row per account, all `provider: 'codex'`.
+              Key on provider+accountId so each account renders distinctly, and reduce true
+              duplicates (two settings entries → the same underlying account) to one row. */}
+          {dedupeProviderRows(visibleProviders).map((p) => (
+            <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
           ))}
         </div>
       )}

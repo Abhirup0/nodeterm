@@ -48,7 +48,15 @@ export function appendBoardLogVia(
   return Promise.resolve(false)
 }
 
-export function registerBoardLogHandlers(platform: CorePlatform, router: BoardLogRouter): void {
+/** What `registerBoardLogHandlers` hands back: an in-process `append` that a MAIN-side caller (the
+ *  `browser --cookies` trace, PR 9 Task 9.2) uses to write a board-log line WITHOUT an IPC round-trip
+ *  through the renderer — the same local/remote/unsupported routing the `boardLogAppend` handler
+ *  performs, sharing the one `localStore`. */
+export interface BoardLogHandlers {
+  append(projectId: string, entry: BoardLogEntry): Promise<boolean>
+}
+
+export function registerBoardLogHandlers(platform: CorePlatform, router: BoardLogRouter): BoardLogHandlers {
   const localStore = new BoardLogStore({})
 
   platform.handle(IPC.boardLogAppend, async (projectId: string, entry: BoardLogEntry): Promise<boolean> => {
@@ -119,4 +127,11 @@ export function registerBoardLogHandlers(platform: CorePlatform, router: BoardLo
       subs.delete(projectId)
     }
   })
+
+  // The in-process append: shares this registration's router + localStore, so a main-side writer and
+  // the IPC handler can never route a project's log differently.
+  return {
+    append: (projectId: string, entry: BoardLogEntry): Promise<boolean> =>
+      appendBoardLogVia(router, projectId, entry, localStore)
+  }
 }

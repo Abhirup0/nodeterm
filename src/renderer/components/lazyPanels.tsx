@@ -68,6 +68,9 @@ export const MobileLaunchCard = withSuspense(
 export const PhonePairPopover = withSuspense(
   lazy(() => import('./PhonePairPopover').then((m) => ({ default: m.PhonePairPopover })))
 )
+export const LogPanel = withSuspense(
+  lazy(() => import('./LogPanel').then((m) => ({ default: m.LogPanel })))
+)
 export const KanbanView = withSuspense(
   lazy(() => import('./kanban/KanbanView').then((m) => ({ default: m.KanbanView })))
 )

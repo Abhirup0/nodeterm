@@ -286,6 +286,66 @@ export function SceneNotify() {
   )
 }
 
+/** Keep-awake: a crossed-out moon drifts above a term-node that stays RUNNING — while an
+ *  agent works, idle sleep doesn't happen, and the slash shares the RUNNING clay so the
+ *  badge reads as the thing cancelling sleep. Built entirely from existing vocabulary:
+ *  the node is the agents scene's `.onb-node` (held on screen via static inline overrides)
+ *  with the app's real RUNNING badge classes, and the moon borrows `.onb-ghost`'s float
+ *  loop — so every animation here is one styles.css already freezes under
+ *  `prefers-reduced-motion`, and no new keyframes were needed. */
+export function SceneKeepAwake({ agentId, label, color }: { agentId: AgentId; label: string; color: string }) {
+  return (
+    <div
+      className="onb-scene-canvas"
+      aria-hidden="true"
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 30 }}
+    >
+      {/* the sleep that doesn't happen: onb-ghost supplies the gentle float (and its
+          reduced-motion freeze); the ghost's box look is neutralized inline */}
+      <div
+        className="onb-ghost"
+        style={{ position: 'relative', width: 'auto', height: 'auto', border: 'none', background: 'none' }}
+      >
+        <svg
+          viewBox="0 0 34 28"
+          width="72"
+          height="60"
+          fill="none"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ color: 'var(--muted)' }}
+        >
+          <path d="M13 6a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" stroke="currentColor" strokeWidth="1.8" />
+          <path d="M25 3h4.5l-4.5 4.5h4.5" stroke="currentColor" strokeWidth="1.5" opacity="0.75" />
+          <path d="M29 11h3l-3 3h3" stroke="currentColor" strokeWidth="1.3" opacity="0.5" />
+          <line x1="4" y1="26" x2="31" y2="2" stroke="#d97757" strokeWidth="2.6" />
+        </svg>
+      </div>
+      {/* the agent that outlasts it: the agents scene's node, pop loop off, with the real
+          RUNNING badge — the pulsing status dot is the live part */}
+      <div
+        className="onb-node"
+        style={{ position: 'relative', left: 'auto', top: 'auto', opacity: 1, animation: 'none', width: 200, borderTopColor: color }}
+      >
+        <div className="onb-node__head">
+          <span className="onb-node__color" style={{ background: color }} />
+          <AgentIcon agentId={agentId} size={13} />
+          <span className="onb-node__title">{label}</span>
+          <span className="term-node__status term-node__status--busy" style={{ marginLeft: 'auto' }}>
+            <span className="term-node__status-dot" />
+            RUNNING
+          </span>
+        </div>
+        <div className="onb-node__body">
+          <div className="onb-line onb-line--w70" />
+          <div className="onb-line onb-line--w50" />
+          <div className="onb-line onb-line--w60" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** The mobile companion as a floating phone mockup: live session rows with real status
  *  badges + a terminal line — live on the App Store (the step links to it). */
 export function ScenePhone() {

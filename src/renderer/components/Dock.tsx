@@ -3,7 +3,7 @@ import { AGENT_CONFIG, BUILTIN_AGENT_IDS, type AgentId, type BuiltinAgentId } fr
 import type { CustomAgent } from '@shared/types'
 import { formatShortcut, isHoldChord } from '@shared/shortcut'
 import { hasSpeechModel } from '@shared/speech'
-import { hintLabel } from '@shared/platform-utils'
+import { commandTooltip, dictationBinding } from '../lib/keybindingOverrides'
 import { AgentIcon } from '../lib/agentIcons'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
@@ -19,6 +19,8 @@ interface DockProps {
   canRedo: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
+  /** Opens the Spawn-a-team dialog (issue #78) — the conductor lands at the Dock's default spot. */
+  onSpawnTeam: () => void
   onAddDino: () => void
   onAddAgent: (agentId: AgentId, accountId?: string) => void
   onOpenFile: () => void
@@ -51,6 +53,7 @@ export function Dock({
   canRedo,
   onAddTerminal,
   onAddSticky,
+  onSpawnTeam,
   onAddDino,
   onAddAgent,
   onOpenFile,
@@ -74,7 +77,10 @@ export function Dock({
   // ≥1 inheriting custom agent (one with a `baseAgent` matching it); otherwise it stays a flat
   // button, byte-identical to before this nesting existed.
   const [openSub, setOpenSub] = useState<BuiltinAgentId | null>(null)
-  const dictationShortcut = useSettings((s) => s.settings.speech.shortcut)
+  // The registry's first effective `speech.dictation` binding, `''` when the user unbound it.
+  // The selector returns a STRING, so zustand's default equality keeps an unrelated settings
+  // write from re-rendering the dock.
+  const dictationShortcut = useSettings(() => dictationBinding())
   const speechEngine = useSettings((s) => s.settings.speech.engine)
   const speechModel = useSettings((s) => s.settings.speech.model)
   // Whisper with the explicit None selection = dictation off (issue #143). The mic stays visible
@@ -126,6 +132,7 @@ export function Dock({
     browser: onAddBrowser,
     web: onAddWeb,
     sticky: onAddSticky,
+    spawnTeam: onSpawnTeam,
     dino: onAddDino,
     openFile: onOpenFile,
     newFile: onNewFile,
@@ -277,10 +284,10 @@ export function Dock({
 
         <span className="dock-sep" />
 
-        <button className="dock-btn" title={hintLabel('Undo (⌘Z)')} disabled={!canUndo} onClick={onUndo}>
+        <button className="dock-btn" title={commandTooltip('Undo', 'canvas.undo')} disabled={!canUndo} onClick={onUndo}>
           <UndoIcon />
         </button>
-        <button className="dock-btn" title={hintLabel('Redo (⌘⇧Z)')} disabled={!canRedo} onClick={onRedo}>
+        <button className="dock-btn" title={commandTooltip('Redo', 'canvas.redo')} disabled={!canRedo} onClick={onRedo}>
           <RedoIcon />
         </button>
 
@@ -298,9 +305,13 @@ export function Dock({
           title={
             dictationOff
               ? 'Dictation off — choose a model in Settings → Speech'
-              : isHoldChord(dictationShortcut)
-                ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
-                : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
+              : // The user unbound the shortcut: the mic button still dictates, so the tooltip
+                // keeps the label and drops the chord rather than promising a key that is gone.
+                dictationShortcut === ''
+                ? 'Dictate'
+                : isHoldChord(dictationShortcut)
+                  ? `Dictate (hold ${formatShortcut(dictationShortcut, isMac)})`
+                  : `Dictate (${formatShortcut(dictationShortcut, isMac)})`
           }
           onClick={onDictate}
         >
