@@ -11,6 +11,7 @@ import {
 } from '@shared/keybindings'
 import { shortcutKeyParts } from '@shared/shortcut'
 import { isMacPlatform } from '@shared/platform-utils'
+import { DEFAULT_SETTINGS } from '@shared/types'
 import { useSettings } from '../state/settings'
 
 const UNSET = Symbol('unset')
@@ -52,4 +53,42 @@ export function commandTooltip(text: string, id: CommandId, isMac: boolean = isM
 export function chipFor(id: CommandId, isMac: boolean = isMacPlatform()): string {
   const parts = commandKeys(id, isMac)
   return isMac ? parts.join('') : parts.join('+')
+}
+
+/** The single WRITE path for overrides. `null` = reset (delete the key, defaults return);
+ *  `[]` = disabled. Values are stored as given — callers pass canonical strings from
+ *  `normalizeBindingForCommand`; the read path's sanitizer remains the safety net for
+ *  hand-edited files. `speech.dictation` also mirrors its first binding into the legacy
+ *  `speech.shortcut` field for one release, so a downgraded build keeps the user's chord.
+ *  On DISABLE (`[]`) `bindings?.[0]` is `undefined`, so the mirror falls back to the DEFAULT
+ *  chord rather than an empty string: a downgraded build then gets default dictation instead
+ *  of a broken value it cannot parse. */
+export function setKeybindingOverride(id: CommandId, bindings: readonly string[] | null): void {
+  const state = useSettings.getState()
+  const next: KeybindingOverrides = { ...(state.settings.keybindings ?? {}) }
+  if (bindings === null) delete next[id]
+  else next[id] = [...bindings]
+  if (id === 'speech.dictation') {
+    const mirror = bindings?.[0] ?? DEFAULT_SETTINGS.speech.shortcut
+    state.update({
+      keybindings: next,
+      speech: { ...state.settings.speech, shortcut: mirror }
+    })
+    return
+  }
+  state.update({ keybindings: next })
+}
+
+/** Display parts for EVERY effective binding (the panel shows the first; the Settings section
+ *  shows them all). [] when unbound/disabled. */
+export function commandKeysFor(id: CommandId, isMac: boolean = isMacPlatform()): string[][] {
+  return getEffectiveBindings(id, activeKeybindingOverrides(), isMac).map((b) =>
+    shortcutKeyParts(b, isMac)
+  )
+}
+
+/** The dictation chord's single source: the first effective `speech.dictation` binding.
+ *  `''` = the user disabled it (dictation shortcut off; the mic button still works). */
+export function dictationBinding(): string {
+  return effectiveBindings('speech.dictation')[0] ?? ''
 }
