@@ -181,8 +181,12 @@ export interface PtyCreateResult {
    * Only ever set for a create that would have SPAWNED: a co-attach to a live session for this
    * node id still joins (the session is already running wherever it runs), so a second view of a
    * healthy remote terminal is unaffected.
+   *
+   * `'codex-account'` is the S6 fail-closed twin: a LOCAL Codex node that explicitly selected a
+   * managed account whose home is missing refuses rather than spawning against the system login
+   * (§5 property 4). Same contract — nothing spawned, the renderer shows the node's refusal.
    */
-  unavailable?: 'ssh'
+  unavailable?: 'ssh' | 'codex-account'
 }
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
