@@ -1623,6 +1623,22 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     warning reads that list and cannot derive it — main is not importable from the renderer. Note
     what the pin cannot cover: a HARDCODED intercept (the `Digit0` branch) has no command id, so it
     swallows its chord app-wide with the recorder reporting no conflict.
+  - **The terminal-first stand-down is `policyStandsDown(policy, terminalFocused)`, and both halves
+    are refusals.** `settings.terminalShortcutPolicy` (`app-first` default, Settings → Keyboard
+    Shortcuts, read everywhere through `normalizeTerminalShortcutPolicy` because it is
+    hand-editable) never stands anything down under `app-first`, whatever the mirror reports — that
+    is the byte-identical guarantee for a user who never touched it. Under `terminal-first` with a
+    focused terminal, main stops claiming its chords AND disables the menu's Minimize/Close items
+    (see **Window chrome**): not calling `preventDefault` alone would hand ⌘M straight to
+    `{role:'minimize'}`, which is strictly worse than having no policy.
+  - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
+    intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
+    change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
+    never had one all resolve to intercepts on — never to "off with nothing alive to turn them back
+    on". Consequence: clear the bit ONLY where the renderer's DOCUMENT is ending (window `closed`,
+    `render-process-gone`, main-frame navigation). Clearing it under a live page that is still
+    focused on its terminal strands mirror and main out of sync with no event that can reconcile
+    them, and the policy is dead until the user clicks away and back.
 
 ## Canvas interaction & panels (`Canvas.tsx` is the hub)
 
@@ -1897,12 +1913,20 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
 - **Welcome** (`WelcomeScreen.tsx`): shown when no projects exist.
 - **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab
   bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a rounded pill of project
-  tabs. Cmd+M is intercepted in `main/index.ts` `before-input-event` (else macOS minimizes)
-  and forwarded to the renderer via `app:toggle-markdown`; Cmd+W (`app:close-node`) and Cmd+0
-  (`app:zoom-actual-size`) are taken back from the same default menu the same way. We never call
-  `Menu.setApplicationMenu`, so Electron's DEFAULT menu is live and owns every accelerator in it —
-  a chord that collides with one never reaches the renderer at all
-  (`main/menu-accelerator-intercepts.test.ts` pins the three we steal).
+  tabs. Cmd+M is intercepted in `main/keydown-intercept.ts` (`before-input-event`, installed from
+  `main/index.ts` — else macOS minimizes) and forwarded to the renderer via `app:toggle-markdown`;
+  Cmd+W (`app:close-node`) and Cmd+0 (`app:zoom-actual-size`) are taken back the same way. **The
+  application menu is OURS**: `buildAppMenu` (`main/index.ts`) calls `Menu.setApplicationMenu` and
+  re-runs on every settings change. (This bullet used to claim we never call it — false since that
+  function landed; check the template, not Electron's defaults.) Menu accelerators are handled
+  ABOVE the page on every platform, so a chord one of them owns never reaches the renderer at all —
+  which is why those three are stolen in `before-input-event`, and why the **terminal-first
+  stand-down has a menu leg**: while a terminal owns the keys under `terminal-first`,
+  `syncMenuForStandDown` disables the menu's Minimize (`MENU_ITEM_ID_MINIMIZE`, every platform)
+  and, on Windows/Linux, Close (`MENU_ITEM_ID_CLOSE`), because a disabled item suppresses its
+  accelerator and only then do ⌘M / Ctrl+W fall through to the terminal. `keydown-intercept.test.ts`
+  pins both the stolen chords and those item ids — `getMenuItemById` answers `null` for a typo and
+  the fail-safe is to do nothing, which is indistinguishable from the feature working.
 - **Theme**: macOS dark palette as CSS tokens in `styles.css` `:root` (`--accent` = systemBlue,
   label/separator opacities, SF font stack). Canvas background is black with dot grid.
 
