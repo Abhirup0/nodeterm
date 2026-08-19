@@ -24,9 +24,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { localTmuxPasteArgs, localTmuxEnterArgs, pasteBufferName } from './tmux-naming'
+import { makeTmuxTmpdir } from './tmux-test-socket'
 import { sanitizePasteText } from './paste-injection'
 
 /** A private socket, never `TMUX_SOCKET` — this must not touch a running nodeterm's tmux server. */
@@ -39,6 +39,10 @@ const SESSION = 'nt-probe'
  * `kill-server` stops the server but does not unlink the socket file, so a per-pid socket name in
  * the shared dir leaves one stale entry behind per run, forever. Pointing `TMUX_TMPDIR` at `work`
  * makes `afterAll`'s `rm -rf` the one cleanup path for everything this file created.
+ *
+ * `makeTmuxTmpdir` picks the dir, because private is not the only constraint — the bound socket
+ * path also has to fit `sun_path`, and under the macOS per-user temp root this file's own name
+ * came to 106 of the 103 characters available. See `tmux-test-socket.ts`.
  */
 function tmuxEnv(): NodeJS.ProcessEnv {
   return { ...process.env, TMUX_TMPDIR: work }
@@ -121,7 +125,7 @@ function freshPane(): void {
 
 beforeAll(() => {
   if (!TMUX) return
-  work = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsendkeys-'))
+  work = makeTmuxTmpdir('nts-', SOCKET)
 })
 
 afterAll(() => {
