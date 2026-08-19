@@ -176,6 +176,36 @@ export const AUTH_ENV_STRIP = [
   'CLAUDE_CODE_OAUTH_TOKEN'
 ] as const
 
+/**
+ * Env keys a PROJECT's settings document may never contribute to a spawn, however it is sourced
+ * and however it was consented to (`makeProjectSpawnOverrides` → `PtyManager.spawnSession`, both
+ * the local merge and the ssh `remoteEnvPairs` join).
+ *
+ * WHY, given the value already passed a trust dialog: consent proves a human saw the PAIRS, not
+ * that they understood what each one out-ranks. A project's settings.json is a git-shared file —
+ * one commit reaches every clone — and it is merged AFTER the three layers whose entire job is to
+ * control these exact names:
+ *  - `AUTH_ENV_STRIP` is DELETED from the env when a managed account is selected, precisely so an
+ *    inherited API key cannot shadow that account's OAuth login. A project re-adding one silently
+ *    routes the session's traffic to a third party.
+ *  - `CLAUDE_CONFIG_DIR` is where the agent reads and WRITES credentials. Redirected into the repo
+ *    (`./.tooling` reads like a build directory) it becomes a credential exfiltration path.
+ *  - `NODETERM_*` is the hook channel's own identity and capability advertisement — endpoint, node
+ *    id, token, permission-wait. Forging any of them lets one node speak as another.
+ * Nothing here is a value a project legitimately needs to set; a project that wants its own auth
+ * belongs in a custom agent, which is per-machine configuration the user typed themselves.
+ *
+ * Filtered SILENTLY at the merge — a spawn is not a place to raise a second question. (Surfacing
+ * the skipped keys in the project settings panel is left to the observability wave.)
+ */
+export function isReservedSpawnEnvKey(key: string): boolean {
+  return (
+    key.startsWith('NODETERM_') ||
+    key === 'CLAUDE_CONFIG_DIR' ||
+    (AUTH_ENV_STRIP as readonly string[]).includes(key)
+  )
+}
+
 /** tmux `-e` pair injecting the account config dir (shared server → per-session env). */
 export function accountTmuxEnvArgs(configDir: string): string[] {
   return ['-e', `CLAUDE_CONFIG_DIR=${configDir}`]

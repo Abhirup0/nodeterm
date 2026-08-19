@@ -14,6 +14,7 @@ import { setRemoteSessionEnvWriter } from './remote-ssh/session-env'
 import { IPC } from '../shared/ipc'
 import { TMUX_SOCKET, sessionName } from './tmux-naming'
 import { DEFAULT_SETTINGS } from '../shared/types'
+import { AUTH_ENV_STRIP, isReservedSpawnEnvKey } from './claude-accounts-core'
 import type { ProjectSpawnOverrides } from './project-spawn-overrides'
 
 interface SpawnCall {
@@ -152,6 +153,27 @@ describe('project settings at the spawn — LOCAL leg', () => {
     expect(spawns[0].env.OWN).toBe('p')
   })
 
+  // A project's settings.json is git-shared, and one consent covers every pair in it at once — so a
+  // pair that READS innocuous (`CLAUDE_CONFIG_DIR=./.tooling`) must still not out-rank the layers
+  // that exist to control exactly those keys. See `isReservedSpawnEnvKey`.
+  it('merges only the innocent key, never the reserved ones', async () => {
+    const mgr = await manager(async () => ({
+      env: {
+        ANTHROPIC_API_KEY: 'attacker',
+        CLAUDE_CONFIG_DIR: './.tooling',
+        NODETERM_HOOK_ENDPOINT: '/tmp/evil.sock',
+        RAILS_ENV: 'test'
+      }
+    }))
+    ;(mgr as unknown as { getSettings: () => unknown }).getSettings = () => DEFAULT_SETTINGS
+    await create({ persistKey: NODE, ownerProjectId: PROJECT, agentId: 'claude' })
+    expect(spawns[0].env.RAILS_ENV).toBe('test')
+    expect(spawns[0].env.ANTHROPIC_API_KEY).not.toBe('attacker')
+    expect(spawns[0].env.CLAUDE_CONFIG_DIR).not.toBe('./.tooling')
+    // The hook env this manager set for the node is intact — not replaced by the project's.
+    expect(spawns[0].env.NODETERM_HOOK_ENDPOINT).not.toBe('/tmp/evil.sock')
+  })
+
   it('adds the project keys to tmux update-environment so a shared server copies them', async () => {
     const mgr = await manager(async () => ({ env: { PROJECT_TOKEN: 'abc' } }), {
       tmux: '/usr/bin/tmux'
@@ -168,6 +190,24 @@ describe('project settings at the spawn — LOCAL leg', () => {
     expect(seen[0]).toContain('PROJECT_TOKEN')
     // The VALUE never rides the tmux argv (that is the whole point of update-environment).
     expect(spawns[0].args.join(' ')).not.toContain('abc')
+  })
+})
+
+describe('isReservedSpawnEnvKey — the keys a project may never set', () => {
+  it('reserves the auth vars the account path STRIPS, in every spelling it strips', () => {
+    for (const k of AUTH_ENV_STRIP) expect(isReservedSpawnEnvKey(k)).toBe(true)
+  })
+
+  it('reserves the credential directory and every NODETERM_ name', () => {
+    expect(isReservedSpawnEnvKey('CLAUDE_CONFIG_DIR')).toBe(true)
+    expect(isReservedSpawnEnvKey('NODETERM_HOOK_ENDPOINT')).toBe(true)
+    expect(isReservedSpawnEnvKey('NODETERM_NODE_ID')).toBe(true)
+    expect(isReservedSpawnEnvKey('NODETERM_')).toBe(true)
+  })
+
+  it('reserves nothing else — a project may still set its own tooling env', () => {
+    for (const k of ['PATH', 'LANG', 'RAILS_ENV', 'ANTHROPIC_BASE_URL', 'NODE_ENV', 'NODETERM'])
+      expect(isReservedSpawnEnvKey(k)).toBe(false)
   })
 })
 
@@ -251,6 +291,23 @@ describe('project settings at the spawn — SSH leg', () => {
     // The value appears NOWHERE on the command line of the long-lived ssh client.
     expect(spawns[0].args.join(' ')).not.toContain('sekrit')
     expect(spawns[0].env.PROJECT_TOKEN).toBeUndefined()
+  })
+
+  it('never stages a reserved key — the remote leg applies the same filter', async () => {
+    await manager(async () => ({
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'attacker',
+        CLAUDE_CONFIG_DIR: '/tmp/creds',
+        NODETERM_NODE_ID: 'other-node',
+        RAILS_ENV: 'test'
+      }
+    }))
+    await create({ persistKey: NODE, ownerProjectId: PROJECT, sshRemote })
+    expect(staged[0].content).toContain("export RAILS_ENV='test'")
+    expect(staged[0].content).not.toContain('ANTHROPIC_AUTH_TOKEN')
+    expect(staged[0].content).not.toContain('CLAUDE_CONFIG_DIR')
+    expect(staged[0].content).not.toContain('NODETERM_NODE_ID')
+    expect(spawns[0].args.join(' ')).not.toContain('attacker')
   })
 
   it('warns and skips (never argv) when the remote $HOME is unknown', async () => {

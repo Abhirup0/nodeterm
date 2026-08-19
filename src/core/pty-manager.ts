@@ -70,7 +70,12 @@ import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
-import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
+import {
+  AUTH_ENV_STRIP,
+  accountTmuxEnvArgs,
+  isReservedSpawnEnvKey,
+  remoteAccountConfigDirAbs
+} from './claude-accounts-core'
 import { NODE_ID_MAX, isSafeNodeId } from './remote-safety'
 import { presenceHub } from './presence/hub'
 import {
@@ -1805,8 +1810,14 @@ export class PtyManager {
     }
     // Resolved HERE rather than inside `spawnSession` because that function is synchronous and two
     // of its three callers (`createDetached`/`attachDetached`, the relay host's attach path) are
-    // synchronous public API. Those two carry no `ownerProjectId` — they attach to a session the
-    // host already spawned — so this is also the only path that could contribute overrides at all.
+    // synchronous public API.
+    //
+    // Those two are NOT merely attaches — `attachDetached` goes through `tmux new-session -A`, which
+    // CREATES when the host's session died (that is exactly what `sessionExists` is asked ahead of,
+    // and what `fresh` reports). What makes them override-less is narrower and true either way: the
+    // relay host passes only `{cols, rows}` (host-service.ts), so those spawns carry no
+    // `ownerProjectId` — and no cwd, agent, account or hook env either. A mirrored client that
+    // lands on a re-created session gets the same bare login shell it got before this feature.
     const projectOverrides = await this.projectSpawnOverrides(options)
     const sessionId = this.spawnSession(options, clientId, undefined, projectOverrides)
     const spawned = this.sessions.get(sessionId)
@@ -2199,7 +2210,16 @@ export class PtyManager {
     // settings.json is git-shared hostile input — expanding it would turn an approved-looking
     // literal into a read of this machine's process environment. The keys/values are already
     // bounded and identifier-shaped by the settings sanitizer.
+    // RESERVED KEYS are dropped here, before either leg reads `projectEnv` — one filter, applied
+    // once, so the local merge below and the ssh `remoteEnvPairs` join further down cannot drift
+    // apart. Consent is not the gate for these: it proves a human saw the pairs, not that they
+    // understood a git-shared file was out-ranking the auth-strip / account / hook layers that
+    // exist to control exactly those names. See `isReservedSpawnEnvKey`.
     const projectEnv = overrides?.env
+      ? Object.fromEntries(
+          Object.entries(overrides.env).filter(([k]) => !isReservedSpawnEnvKey(k))
+        )
+      : undefined
     if (!options.sshRemote && projectEnv) {
       for (const [k, v] of Object.entries(projectEnv)) env[k] = v
     }
