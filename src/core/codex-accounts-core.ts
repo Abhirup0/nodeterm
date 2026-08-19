@@ -438,6 +438,19 @@ export function commitCodexRolloutExposure(
       return false
     }
   }
+  // The inode our own publish link(2) created at `plan.targetPath`, if it succeeded. Used to roll
+  // that link back on a later failure — but ONLY while the target still names that exact inode, so
+  // a legitimate entry a concurrent process raced into the pathname AFTER us is never deleted.
+  let publishedTarget: { dev: number; ino: number } | null = null
+  const publishedTargetStillOurs = (): boolean => {
+    if (!publishedTarget) return false
+    try {
+      const currentTarget = lstatSync(plan.targetPath)
+      return currentTarget.dev === publishedTarget.dev && currentTarget.ino === publishedTarget.ino
+    } catch {
+      return false
+    }
+  }
   try {
     if (!isVerifiedRollout(temporaryPath)) {
       throw new Error('Temporary Codex rollout did not preserve the verified source inode')
@@ -446,13 +459,27 @@ export function commitCodexRolloutExposure(
       // link(2) is no-overwrite. Publishing from the verified private name prevents cleanup from
       // ever deleting an unrelated entry raced into the final pathname.
       link(temporaryPath, plan.targetPath)
+      // We created this exact entry: remember its inode so a post-link failure can undo it.
+      const created = lstatSync(plan.targetPath)
+      publishedTarget = { dev: created.dev, ino: created.ino }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || !isVerifiedRollout(plan.targetPath))
         throw error
+      // EEXIST + verified ⇒ idempotent re-expose; the target was NOT created by us, never rolled back.
     }
     if (!isVerifiedRollout(plan.targetPath)) {
       throw new Error('Target Codex rollout did not preserve the verified source inode')
     }
+  } catch (error) {
+    // Roll back a target THIS call published so a failed commit leaves the target as it was found
+    // (nothing published). Guarded to our own inode: an idempotent EEXIST match or a foreign entry
+    // raced in after us is left untouched.
+    if (publishedTargetStillOurs()) {
+      try {
+        unlinkSync(plan.targetPath)
+      } catch {}
+    }
+    throw error
   } finally {
     // The private pathname may itself have been replaced. Delete it only while it still names the
     // exact inode created by our link(2), even when a source race made that inode invalid.

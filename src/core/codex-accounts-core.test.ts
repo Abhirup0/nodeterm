@@ -423,6 +423,40 @@ describe('cross-account rollout exposure (atomic, never-overwrite)', () => {
     expect(readdirSync(escape)).toEqual([])
   })
 
+  it('refuses a symlink at a DEEPER target segment without writing through it', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const sourcePath = writeRollout(homeA)
+    // homeB/sessions is a real dir, but homeB/sessions/2026 is a symlink to an escape directory.
+    const homeB = makeHome(root, 'b')
+    const escape = path.join(root, 'escape')
+    mkdirSync(escape, { recursive: true })
+    symlinkSync(escape, path.join(homeB, 'sessions', '2026'))
+
+    const plan = planCodexRolloutExposure(homeA, homeB, sourcePath, THREAD)
+    expect(() => commitCodexRolloutExposure(plan)).toThrow(
+      'Target Codex rollout path contains an unsafe directory'
+    )
+    // The deeper-segment guard also refuses to write through: the escape tree stays empty.
+    expect(readdirSync(escape)).toEqual([])
+  })
+
+  it('refuses a symlinked source rollout (plan, never followed)', () => {
+    const root = newRoot()
+    const homeA = makeHome(root, 'a')
+    const homeB = makeHome(root, 'b')
+    // A real rollout file elsewhere, and a symlink to it sitting at the canonical source pathname.
+    const realFile = path.join(root, 'real.jsonl')
+    writeFileSync(realFile, '{"line":1}\n')
+    const symlinkedSource = path.join(homeA, REL)
+    mkdirSync(path.dirname(symlinkedSource), { recursive: true })
+    symlinkSync(realFile, symlinkedSource)
+
+    expect(() => planCodexRolloutExposure(homeA, homeB, symlinkedSource, THREAD)).toThrow(
+      'Source Codex rollout is not a regular file'
+    )
+  })
+
   it('removes its temporary link when the source inode changes before link creation', () => {
     const root = newRoot()
     const homeA = makeHome(root, 'a')
@@ -473,6 +507,9 @@ describe('cross-account rollout exposure (atomic, never-overwrite)', () => {
     expect(() => commitCodexRolloutExposure(plan, hijackPublish)).toThrow(
       'Target Codex rollout did not preserve the verified source inode'
     )
+    // Rollback: a failed commit leaves NOTHING published — the wrongly-linked target is removed, so
+    // no foreign inode is left permanently occupying the target account's real sessions path.
+    expect(existsSync(plan.targetPath)).toBe(false)
   })
 
   it('surfaces a named error on a cross-mount (EXDEV) link — no silent copy fallback', () => {
