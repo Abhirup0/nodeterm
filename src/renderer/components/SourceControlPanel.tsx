@@ -16,7 +16,9 @@ import { buildCommitMenuItems } from './git-history/git-history-menu'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { PublishDialog } from './PublishDialog'
 import { defaultScmScope, type ScmScope } from '@shared/scm-scope'
-import { chipFor } from '../lib/keybindingOverrides'
+import { chipFor, effectiveBindings } from '../lib/keybindingOverrides'
+import { matchesShortcut } from '@shared/shortcut'
+import { isMacPlatform } from '@shared/platform-utils'
 
 export interface SourceControlPanelProps {
   onClose: () => void
@@ -36,6 +38,9 @@ export interface SourceControlPanelProps {
 }
 
 const AUTO_FETCH_MS = 180_000
+
+/** Which physical modifier the registry's abstract `Cmd` resolves to for the commit chord. */
+const isMac = isMacPlatform()
 
 const STATUS_COLOR: Record<string, string> = {
   M: '#ffd60a',
@@ -404,8 +409,9 @@ export function SourceControlPanel({
     )
   }
 
-  // Whatever Commit is bound to; '' when unbound, in which case the box is just "Message" —
-  // the button below it still commits.
+  // Whatever Commit is bound to; '' when unbound — in which case the box is just "Message" AND
+  // the keyboard path below is disabled with it (no binding to match), so the placeholder never
+  // promises a chord the textarea would ignore. The Commit button is the fallback either way.
   const commitChip = chipFor('scm.commit')
 
   return createPortal(
@@ -511,7 +517,13 @@ export function SourceControlPanel({
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
                     onKeyDown={(e) => {
-                      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') commitAndPush()
+                      // Registry-driven (L2: a local listener reads its binding from the registry),
+                      // so a remapped scm.commit changes the KEY as well as the placeholder above.
+                      // Matching is exact on all four modifiers, unlike the old
+                      // `metaKey || ctrlKey` — see the named losses in the keybindings notes.
+                      if (effectiveBindings('scm.commit').some((s) => matchesShortcut(e, s, isMac))) {
+                        commitAndPush()
+                      }
                     }}
                   />
                   <button

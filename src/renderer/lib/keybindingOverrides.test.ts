@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { DEFAULT_SETTINGS } from '@shared/types'
+import { matchesShortcut, type ShortcutKeyEvent } from '@shared/shortcut'
 import { useSettings } from '../state/settings'
 import {
   activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip, chipFor
@@ -51,6 +52,43 @@ describe('effectiveBindings / commandKeys / commandTooltip', () => {
   it('unbound commands render without a chord suffix', () => {
     expect(commandTooltip('Fit all', 'canvas.fitAll', true)).toBe('Fit all')
     expect(commandKeys('canvas.fitAll', true)).toEqual([])
+  })
+})
+
+// The exact composition SourceControlPanel's commit textarea now runs on keydown. It replaced a
+// lax `(e.metaKey || e.ctrlKey) && e.key === 'Enter'`, so the D-strict losses below are pinned
+// here rather than asserted in prose: matching is EXACT on all four modifiers.
+describe('the commit textarea matcher (scm.commit)', () => {
+  const key = (over: Partial<ShortcutKeyEvent> = {}): ShortcutKeyEvent =>
+    ({ metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, key: 'Enter', ...over })
+  const commits = (e: ShortcutKeyEvent, isMac: boolean) =>
+    effectiveBindings('scm.commit').some((s) => matchesShortcut(e, s, isMac))
+
+  it('commits on the platform chord', () => {
+    expect(commits(key({ metaKey: true }), true)).toBe(true)
+    expect(commits(key({ ctrlKey: true }), false)).toBe(true)
+  })
+  it('no longer commits on the OTHER platform primary (the named D-strict losses)', () => {
+    expect(commits(key({ ctrlKey: true }), true)).toBe(false) // mac Ctrl+Enter
+    expect(commits(key({ metaKey: true }), false)).toBe(false) // non-mac Meta+Enter
+  })
+  it('no longer commits with an extra modifier held on top', () => {
+    expect(commits(key({ metaKey: true, shiftKey: true }), true)).toBe(false)
+    expect(commits(key({ metaKey: true, altKey: true }), true)).toBe(false)
+  })
+  it('follows a remap, so the key agrees with the placeholder chip', () => {
+    setKb({ 'scm.commit': ['Cmd+Shift+Enter'] })
+    expect(commits(key({ metaKey: true }), true)).toBe(false)
+    expect(commits(key({ metaKey: true, shiftKey: true }), true)).toBe(true)
+    expect(chipFor('scm.commit', true)).toBe('⌘⇧Enter')
+  })
+  it('is inert when unbound — the placeholder drops its chord for the same reason', () => {
+    setKb({ 'scm.commit': [] })
+    expect(commits(key({ metaKey: true }), true)).toBe(false)
+    expect(chipFor('scm.commit', true)).toBe('')
+  })
+  it('plain Enter never commits (it types a newline)', () => {
+    expect(commits(key(), true)).toBe(false)
   })
 })
 
