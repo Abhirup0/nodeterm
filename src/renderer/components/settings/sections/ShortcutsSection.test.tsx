@@ -50,6 +50,12 @@ const setRecording = (): ReturnType<typeof vi.fn> =>
 const body = (): Element => host.querySelector<HTMLElement>('#shortcuts')!.lastElementChild!
 
 const row = (id: string): HTMLElement => host.querySelector<HTMLElement>(`[data-command="${id}"]`)!
+/** The policy row's SegmentedPill, found by the `ariaLabel` it is given (it carries no command id
+ *  — it is a setting, not a registry command). */
+const pill = (): HTMLElement | null =>
+  host.querySelector<HTMLElement>('[role="radiogroup"][aria-label="While a terminal has focus"]')
+const pillOption = (label: string): HTMLButtonElement =>
+  [...pill()!.querySelectorAll('button')].find((b) => b.textContent === label)!
 const button = (id: string, label: string): HTMLButtonElement | null =>
   row(id).querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
 /** The recorder button carries no per-command aria-label (it is a shared component), so it is
@@ -128,8 +134,10 @@ describe('ShortcutsSection rows', () => {
     expect([...host.querySelectorAll('[data-command]')].map((el) =>
       el.getAttribute('data-command')
     )).toEqual(['node.close'])
-    // Exactly the heading and the one row — no empty siblings.
-    expect(body().children).toHaveLength(2)
+    // Exactly the policy row (its description names Close), the heading and the one command row —
+    // no empty siblings.
+    expect(pill()).toBeTruthy()
+    expect(body().children).toHaveLength(3)
     expect([...body().children].every((c) => (c.textContent ?? '').trim() !== '')).toBe(true)
   })
 
@@ -146,7 +154,8 @@ describe('ShortcutsSection rows', () => {
   it('renders every group and row unfiltered, each as its own divided block', () => {
     render()
     expect(host.querySelectorAll('h3')).toHaveLength(6)
-    expect(body().children).toHaveLength(6 + COMMAND_DEFINITIONS.length)
+    // + 1 for the terminal-policy row, which sits above the groups as its own block.
+    expect(body().children).toHaveLength(1 + 6 + COMMAND_DEFINITIONS.length)
   })
 
   // The dictation row must not promise a second chord: every consumer reads
@@ -203,6 +212,32 @@ describe('ShortcutsSection rows', () => {
     act(() => r.unmount())
     host.remove()
     expect(setRecording().mock.calls.filter((c) => c[0] === false)).toHaveLength(1)
+  })
+})
+
+describe('terminal shortcut policy row', () => {
+  // `app-first` is the shipped default and the byte-identical-behavior guarantee of the whole
+  // policy: a user who never opens this row must see the pre-feature app.
+  it('shows app-first checked by default', () => {
+    render()
+    expect(pillOption('App shortcuts first').getAttribute('aria-checked')).toBe('true')
+    expect(pillOption('Terminal first').getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('writes the setting when Terminal first is picked', () => {
+    render()
+    click(pillOption('Terminal first'))
+    expect(useSettings.getState().settings.terminalShortcutPolicy).toBe('terminal-first')
+    expect(pillOption('Terminal first').getAttribute('aria-checked')).toBe('true')
+  })
+
+  // The row is its OWN searchable unit, not part of a group Fragment: a query that matches only
+  // its keywords must keep it and drop every command group, heading included.
+  it('survives a query that drops every command group', () => {
+    render('tui')
+    expect(pill()).toBeTruthy()
+    expect(host.querySelectorAll('h3')).toHaveLength(0)
+    expect(host.querySelectorAll('[data-command]')).toHaveLength(0)
   })
 })
 

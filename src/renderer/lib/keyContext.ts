@@ -39,9 +39,12 @@ export function isTypingTarget(el: ContextElement | null): boolean {
   return el.isContentEditable === true
 }
 
+/** `terminalFirst` is REQUIRED, not defaulted: it is a user policy, and a default here would let
+ *  a call site silently answer "app-first" for a user who chose otherwise. Every caller decides. */
 export function keyDispatchContextFor(
   el: ContextElement | null,
-  kanbanOpen: boolean
+  kanbanOpen: boolean,
+  terminalFirst: boolean
 ): KeyDispatchContext {
-  return { typing: isTypingTarget(el), terminal: isTerminalTarget(el), kanbanOpen }
+  return { typing: isTypingTarget(el), terminal: isTerminalTarget(el), kanbanOpen, terminalFirst }
 }

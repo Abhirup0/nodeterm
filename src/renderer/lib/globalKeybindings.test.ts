@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
+import type { CommandId } from '@shared/keybindings'
 import { dispatchGlobalKeydown, type GlobalKeydownDeps, type GlobalKeyEvent } from './globalKeybindings'
-import { XTERM_INPUT_CLASS } from './keyContext'
+import { XTERM_INPUT_CLASS, type ContextElement } from './keyContext'
 
 const ev = (over: Partial<GlobalKeyEvent>): GlobalKeyEvent => ({
   metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, key: '',
@@ -9,13 +10,22 @@ const ev = (over: Partial<GlobalKeyEvent>): GlobalKeyEvent => ({
   ...over
 })
 const noGesture = () => false
+const noGestures = {
+  keyedDictation: noGesture, zoom: noGesture, projectJump: noGesture, copy: noGesture
+}
+/** xterm's hidden helper textarea — what `activeElement` reports whenever a terminal owns
+ *  the keyboard, i.e. the only element shape that makes `ctx.terminal` true. */
+const xtermEl = (): ContextElement => ({
+  tagName: 'TEXTAREA', classList: { contains: (n: string) => n === XTERM_INPUT_CLASS }
+})
 const deps = (over: Partial<GlobalKeydownDeps> = {}): GlobalKeydownDeps => ({
   activeElement: () => null,
   kanbanOpen: () => false,
   overrides: () => ({}),
   isMac: true,
+  terminalFirst: () => false,
   handlers: {},
-  gestures: { keyedDictation: noGesture, zoom: noGesture, projectJump: noGesture, copy: noGesture },
+  gestures: { ...noGestures },
   ...over
 })
 
@@ -51,10 +61,7 @@ describe('dispatchGlobalKeydown', () => {
     expect(term).not.toHaveBeenCalled()
     const typing = deps({ gestures: g, activeElement: () => ({ tagName: 'INPUT' }) })
     expect(dispatchGlobalKeydown(ev({ metaKey: true, key: 't' }), typing)).toBe(false)
-    const terminal = deps({
-      gestures: g,
-      activeElement: () => ({ tagName: 'TEXTAREA', classList: { contains: (n: string) => n === XTERM_INPUT_CLASS } })
-    })
+    const terminal = deps({ gestures: g, activeElement: xtermEl })
     dispatchGlobalKeydown(ev({ metaKey: true, key: 't' }), terminal)
     expect(dictation).toHaveBeenCalledTimes(1)
   })
@@ -133,5 +140,56 @@ describe('dispatchGlobalKeydown', () => {
     })
     expect(dispatchGlobalKeydown(ev({ metaKey: true, key: 'k' }), d)).toBe(true)
     expect(fit).toHaveBeenCalled()
+  })
+  it('terminal-first: trailing gestures are not offered while a terminal has focus', () => {
+    // The registry half of terminal-first lives in the resolver; the gestures never went
+    // through it, so without this gate Cmd+0 would still zoom the canvas out from under a
+    // user who reserved every chord for the shell.
+    const zoom = vi.fn(() => true)
+    const d = deps({
+      terminalFirst: () => true,
+      activeElement: xtermEl,
+      gestures: { ...noGestures, zoom }
+    })
+    expect(dispatchGlobalKeydown(ev({ metaKey: true, key: '0' }), d)).toBe(false)
+    expect(zoom).not.toHaveBeenCalled()
+  })
+  it('app-first: a terminal-context claim reports a capture exactly at claim time', () => {
+    const captured: string[] = []
+    const d = deps({
+      activeElement: xtermEl,
+      handlers: { 'app.commandPalette': () => true },
+      onTerminalCapture: (id) => captured.push(id)
+    })
+    dispatchGlobalKeydown(ev({ metaKey: true, key: 'k' }), d)
+    expect(captured).toEqual(['app.commandPalette'])
+  })
+  it('no capture report outside terminal focus, on decline, or under terminal-first', () => {
+    const captured: string[] = []
+    const base = { onTerminalCapture: (id: CommandId) => captured.push(id) }
+    // Plain app focus: nothing was taken from a terminal.
+    dispatchGlobalKeydown(ev({ metaKey: true, key: 'k' }),
+      deps({ ...base, handlers: { 'app.commandPalette': () => true } }))
+    // Declined: the chord fell through to the PTY, so nothing was captured.
+    dispatchGlobalKeydown(ev({ metaKey: true, key: 'k' }),
+      deps({ ...base, activeElement: xtermEl, handlers: { 'app.commandPalette': () => false } }))
+    // A TERMINAL-scope claim under terminal-first is the terminal's own key — legitimate
+    // ownership, not a capture.
+    dispatchGlobalKeydown(ev({ metaKey: true, key: 'f' }),
+      deps({ ...base, activeElement: xtermEl, terminalFirst: () => true,
+             handlers: { 'terminal.find': () => true } }))
+    expect(captured).toEqual([])
+  })
+  it('a terminal-scope claim under APP-first is ownership too, not a capture', () => {
+    // The scope check is the load-bearing half: gating only on `!terminalFirst` would report
+    // Cmd+F ("Find in terminal") as a chord app-first stole from the terminal.
+    const captured: string[] = []
+    const d = deps({
+      activeElement: xtermEl,
+      handlers: { 'terminal.find': () => true },
+      onTerminalCapture: (id: CommandId) => captured.push(id)
+    })
+    expect(dispatchGlobalKeydown(ev({ metaKey: true, key: 'f' }), d)).toBe(true)
+    expect(captured).toEqual([])
   })
 })
