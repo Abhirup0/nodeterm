@@ -103,4 +103,51 @@ describe('materializeSharedPaths', () => {
   it('returns an empty list for no shared paths', async () => {
     expect(await materializeSharedPaths(repoRoot, worktreeRoot, [])).toEqual([])
   })
+
+  // Security: `git worktree add` checks out attacker-controllable TRACKED symlinks, so the lexical
+  // within-root guard is insufficient — a link can be planted OUTSIDE the worktree/repo THROUGH an
+  // intermediate symlink. The realpath-of-deepest-existing-ancestor checks are the authoritative
+  // containment guards.
+  it('refuses a target that escapes the worktree through an intermediate symlink (plant primitive)', async () => {
+    // A real source so we get past the missing-source check and reach the target guard.
+    await fs.mkdir(path.join(repoRoot, 'cfg'), { recursive: true })
+    await fs.writeFile(path.join(repoRoot, 'cfg', 'x'), 'PAYLOAD', 'utf-8')
+    // The checked-out worktree contains `cfg` as a symlink pointing OUTSIDE the worktree root.
+    const outside = path.join(base, 'outside')
+    await fs.mkdir(outside, { recursive: true })
+    await fs.symlink(outside, path.join(worktreeRoot, 'cfg'))
+
+    const res = await materializeSharedPaths(repoRoot, worktreeRoot, ['cfg/x'])
+
+    expect(statusOf(res, 'cfg/x')).toBe('skipped-unsafe')
+    // Nothing was planted at the escape location.
+    await expect(fs.lstat(path.join(outside, 'x'))).rejects.toBeTruthy()
+  })
+
+  it('refuses a source that escapes the repo through an intermediate symlink', async () => {
+    // Outside-the-repo content the hostile symlink points at.
+    const outside = path.join(base, 'outside-repo')
+    await fs.mkdir(outside, { recursive: true })
+    await fs.writeFile(path.join(outside, 'secret'), 'LEAKED', 'utf-8')
+    // A tracked symlink inside the repo that escapes it.
+    await fs.symlink(outside, path.join(repoRoot, 'evil'))
+
+    const res = await materializeSharedPaths(repoRoot, worktreeRoot, ['evil/secret'])
+
+    expect(statusOf(res, 'evil/secret')).toBe('skipped-unsafe')
+    // Materialization surfaced nothing from outside the repo.
+    await expect(fs.lstat(path.join(worktreeRoot, 'evil', 'secret'))).rejects.toBeTruthy()
+  })
+
+  it('still links a legitimate in-repo symlink source (realpath stays under the repo root)', async () => {
+    await fs.mkdir(path.join(repoRoot, 'real'), { recursive: true })
+    await fs.writeFile(path.join(repoRoot, 'real', 'f'), 'INREPO', 'utf-8')
+    // A relative, in-repo symlink — resolves back under the repo, so it is allowed.
+    await fs.symlink('./real', path.join(repoRoot, 'link'))
+
+    const res = await materializeSharedPaths(repoRoot, worktreeRoot, ['link/f'])
+
+    expect(statusOf(res, 'link/f')).toBe('linked')
+    expect(await fs.readFile(path.join(worktreeRoot, 'link', 'f'), 'utf-8')).toBe('INREPO')
+  })
 })

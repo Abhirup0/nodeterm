@@ -58,6 +58,16 @@ async function lexists(p: string): Promise<boolean> {
   }
 }
 
+/** Realpath fully resolved, or `null` if it cannot be resolved (broken link / ENOENT race). Callers
+ *  treat `null` as "fail closed" — an unresolvable path cannot be proven contained, so it is unsafe. */
+async function realpathOrNull(p: string): Promise<string | null> {
+  try {
+    return await fs.realpath(p)
+  } catch {
+    return null
+  }
+}
+
 /**
  * Symlink each relative `sharedPath` from `repoRoot` into `worktreeRoot`. Pure fs, never throws;
  * returns a per-entry result list (one `SharedPathResult` per input, order preserved).
@@ -101,6 +111,21 @@ async function materializeOne(
     // (4) Source missing → not an error: a fresh clone whose `node_modules` isn't installed yet.
     if (!(await lexists(source))) return { path: entry, status: 'skipped-missing-source' }
 
+    // (4b) SOURCE realpath containment. The lexical check in (3) is path-string only, but the source
+    // may resolve THROUGH a symlink the repo committed — `git worktree add` checks out attacker-
+    // controllable tracked symlinks, so a lexical path check is insufficient. Realpath of the source
+    // (it exists per (4)) is the authoritative containment check: a repo-internal symlink escaping
+    // the repo must not let materialization surface content from OUTSIDE the repo. A legitimate
+    // in-repo symlink (e.g. a relative link to another repo dir) resolves back under repoAbs and is
+    // allowed. A realpath failure (broken link / ENOENT race) → fail closed as skipped-unsafe.
+    // The root itself is realpath'd too, so a symlinked prefix (e.g. macOS `/tmp -> /private/tmp`)
+    // in the root path doesn't spuriously make a legitimately-contained source look outside it.
+    const realRepoAbs = await realpathOrNull(repoAbs)
+    const realSource = await realpathOrNull(source)
+    if (!realRepoAbs || !isInsideDir(realSource ?? undefined, realRepoAbs)) {
+      return { path: entry, status: 'skipped-unsafe' }
+    }
+
     // (5) Target exists (lstat, even a broken symlink) → never overwrite. This also protects the
     // worktree's own `.git` file and anything git already wrote into the tree.
     if (await lexists(target)) return { path: entry, status: 'skipped-exists' }
@@ -108,6 +133,19 @@ async function materializeOne(
     // (6) Create the target's parent tree, then link. On Windows the symlink type matters (a file
     // link and a dir link are distinct); infer it from the source. On POSIX the type is ignored.
     await fs.mkdir(path.dirname(target), { recursive: true })
+
+    // (6b) TARGET realpath containment — the authoritative guard against the symlink-plant escape.
+    // The lexical check in (3) resolves `<wt>/cfg/x` as a string, but `git worktree add` may have
+    // checked out an intermediate tracked symlink (e.g. `<wt>/cfg -> /outside`); `fs.symlink` would
+    // then write THROUGH it and plant a link OUTSIDE the worktree root. The target's parent exists
+    // post-mkdir, so realpath resolves any such intermediate symlink; assert the REAL parent stays
+    // inside the worktree. A realpath failure → fail closed as skipped-unsafe.
+    const realWtAbs = await realpathOrNull(wtAbs)
+    const realParent = await realpathOrNull(path.dirname(target))
+    if (!realWtAbs || !isInsideDir(realParent ?? undefined, realWtAbs)) {
+      return { path: entry, status: 'skipped-unsafe' }
+    }
+
     let type: 'dir' | 'file' = 'file'
     try {
       if ((await fs.stat(source)).isDirectory()) type = 'dir'
