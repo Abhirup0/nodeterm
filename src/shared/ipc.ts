@@ -41,6 +41,20 @@ export const IPC = {
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
+  // Machine-scoped managed Codex accounts (S6). Add/device-login/removal, plus the three-phase,
+  // owner-authorized account switch (resume the SAME conversation id, never fork) and the
+  // source-side leg of moving an idle conversation to an SSH account. See main/codex-accounts.ts.
+  codexAccountsAdd: 'codex-accounts:add',
+  codexAccountsWaitLogin: 'codex-accounts:wait-login',
+  codexAccountsCancelWait: 'codex-accounts:cancel-wait',
+  codexAccountsIdentity: 'codex-accounts:identity',
+  codexAccountsSystemIdentity: 'codex-accounts:system-identity',
+  codexAccountsRemove: 'codex-accounts:remove',
+  codexAccountsSwitchThread: 'codex-accounts:switch-thread',
+  codexAccountsCommitSwitch: 'codex-accounts:commit-switch',
+  codexAccountsFinishSwitch: 'codex-accounts:finish-switch',
+  codexAccountsRollbackSwitch: 'codex-accounts:rollback-switch',
+  codexAccountsTransferThreadToSsh: 'codex-accounts:transfer-thread-to-ssh',
   claudeCliCaps: 'claude-cli:caps',
   /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
   codexIdentityCaps: 'codex-identity:caps',

@@ -23,6 +23,7 @@ import {
   codexSocketForAccount,
   codexTmuxEnvArgs,
   codexUsageAccounts,
+  ensureSharedCodexDaemon,
   legacyCodexAccountHome,
   migrateLegacyCodexAccountHome,
   migrateLegacyCodexAccountHomes,
@@ -539,5 +540,29 @@ describe('cross-account rollout exposure (atomic, never-overwrite)', () => {
     const stat = statSync(sourcePath)
     expect(plan.sourceDev).toBe(stat.dev)
     expect(plan.sourceIno).toBe(stat.ino)
+  })
+})
+
+describe('ensureSharedCodexDaemon: reuse-if-reachable-else-start-once (§2.2)', () => {
+  it('does NOT start when the app-server is already reachable', async () => {
+    let started = 0
+    await ensureSharedCodexDaemon(
+      async () => true,
+      async () => {
+        started++
+      }
+    )
+    expect(started).toBe(0)
+  })
+
+  it('starts exactly once when the app-server is not reachable', async () => {
+    let started = 0
+    await ensureSharedCodexDaemon(
+      async () => false,
+      async () => {
+        started++
+      }
+    )
+    expect(started).toBe(1)
   })
 })

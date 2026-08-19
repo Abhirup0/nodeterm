@@ -303,6 +303,19 @@ export function buildStubApi(): Omit<
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
       remove: U('claudeAccounts.remove')
     },
+    codexAccounts: {
+      add: U('codexAccounts.add'),
+      waitLogin: U('codexAccounts.waitLogin'),
+      cancelWaitLogin: U('codexAccounts.cancelWaitLogin'),
+      identity: U('codexAccounts.identity'),
+      systemIdentity: U('codexAccounts.systemIdentity'),
+      remove: U('codexAccounts.remove'),
+      switchThread: U('codexAccounts.switchThread'),
+      commitSwitch: U('codexAccounts.commitSwitch'),
+      finishSwitch: U('codexAccounts.finishSwitch'),
+      rollbackSwitch: U('codexAccounts.rollbackSwitch'),
+      transferThreadToSsh: U('codexAccounts.transferThreadToSsh')
+    },
     transcripts: {
       search: U('transcripts.search')
     },

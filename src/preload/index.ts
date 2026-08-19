@@ -468,6 +468,34 @@ const api: NodeTerminalApi = {
     cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsCancelWait, id),
     remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx)
   },
+  codexAccounts: {
+    add: () => ipcRenderer.invoke(IPC.codexAccountsAdd),
+    waitLogin: (id) => ipcRenderer.invoke(IPC.codexAccountsWaitLogin, id),
+    cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.codexAccountsCancelWait, id),
+    identity: (id) => ipcRenderer.invoke(IPC.codexAccountsIdentity, id),
+    systemIdentity: () => ipcRenderer.invoke(IPC.codexAccountsSystemIdentity),
+    remove: (id) => ipcRenderer.invoke(IPC.codexAccountsRemove, id),
+    switchThread: (threadId, cwd, sourceAccountId, targetAccountId) =>
+      ipcRenderer.invoke(
+        IPC.codexAccountsSwitchThread,
+        threadId,
+        cwd,
+        sourceAccountId,
+        targetAccountId
+      ),
+    commitSwitch: (token) => ipcRenderer.invoke(IPC.codexAccountsCommitSwitch, token),
+    finishSwitch: (token) => ipcRenderer.invoke(IPC.codexAccountsFinishSwitch, token),
+    rollbackSwitch: (token) => ipcRenderer.invoke(IPC.codexAccountsRollbackSwitch, token),
+    transferThreadToSsh: (threadId, cwd, projectId, targetAccountId, sourceAccountId) =>
+      ipcRenderer.invoke(
+        IPC.codexAccountsTransferThreadToSsh,
+        threadId,
+        cwd,
+        projectId,
+        targetAccountId,
+        sourceAccountId
+      )
+  },
   transcripts: {
     search: (query: string) => ipcRenderer.invoke(IPC.transcriptSearch, query)
   },
