@@ -340,17 +340,19 @@ export type ProjectTrustFamily = 'setup' | 'agents' | 'shell'
 /** Which of the setup family's two scripts a run executes. */
 export type ProjectSetupKind = 'setup' | 'archive'
 
-/** main→renderer: raise the consent dialog for ONE shared-sourced script about to run. Approving
- *  covers the whole `setup` family (both scripts are hashed together), so `script` is what is about
- *  to run, not the full extent of what is being approved — the dialog says so. */
+/** main→renderer: raise the consent dialog before a shared-sourced script runs. One answer approves
+ *  the whole `setup` family (both scripts are hashed together), so the payload carries BOTH — a
+ *  dialog must be able to show everything the approval covers, not just the half about to run. */
 export interface ProjectSetupConsentRequest {
   requestId: string
+  /** Which script is about to run — the one the dialog highlights. */
   kind: ProjectSetupKind
   projectName: string
   /** Human-readable location ("~/code/app" or "user@host:/srv/app"). */
   locationLabel: string
-  /** The script about to run (the family's OTHER script is covered by the same approval). */
-  script: string
+  /** The family's full executable content, straight from the SHARED document: exactly what the
+   *  approved hash covers. A field is absent when that script is not set. */
+  scripts: { setup?: string; archive?: string }
   /** A prior approval exists for this family at this location (dialog copy: "changed since you
    *  approved"). Copy only — never a grant; the grant is the hash comparison. */
   previouslyApproved: boolean

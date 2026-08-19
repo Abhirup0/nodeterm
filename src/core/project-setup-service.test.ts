@@ -166,7 +166,13 @@ describe('ProjectSetupService — consent gate', () => {
     const pending = svc.run(target(), 'setup')
     await vi.waitFor(() => expect(consentRequests()).toHaveLength(1))
     const req = consentRequests()[0]
-    expect(req).toMatchObject({ kind: 'setup', projectName: 'App', script: 'npm ci', previouslyApproved: false })
+    expect(req).toMatchObject({
+      kind: 'setup',
+      projectName: 'App',
+      // The dialog is handed the WHOLE family, because that is what one answer approves.
+      scripts: { setup: 'npm ci', archive: 'rm -rf node_modules' },
+      previouslyApproved: false
+    })
     expect(req.locationLabel).toContain('/proj/app')
     expect(calls).toHaveLength(0)
 
@@ -182,6 +188,73 @@ describe('ProjectSetupService — consent gate', () => {
     await vi.waitFor(() => expect(calls).toHaveLength(2))
     expect(calls[1].script).toBe('rm -rf node_modules')
     expect(consentRequests()).toHaveLength(1)
+  })
+
+  it('hashes and shows the SHARED family only — a local override never enters the trust content', async () => {
+    const trust = new ProjectTrustStore()
+    const { calls, runner } = recorder()
+    // The two documents disagree about the family's OTHER script. The merged/effective doc would
+    // hash `local-archive`; only the shared doc may be approved.
+    const shared: ProjectSettingsDoc = { setup: { setupScript: 'npm ci', archiveScript: 'shared-archive' } }
+    const merged: ProjectSettingsDoc = { setup: { setupScript: 'npm ci', archiveScript: 'local-archive' } }
+    const svc = new ProjectSetupService({
+      trust,
+      readSettings: async () => snapshot(sharedFile(shared), { setup: { archiveScript: 'local-archive' } }),
+      runLocal: runner
+    })
+    const pending = svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(consentRequests()).toHaveLength(1))
+    expect(consentRequests()[0].scripts).toEqual({ setup: 'npm ci', archive: 'shared-archive' })
+    svc.submitConsent(consentRequests()[0].requestId, 'approve')
+    expect(await pending).toMatchObject({ status: 'started' })
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+
+    const key = localTrustKey('/proj/app')
+    const record = await trust.getRecord(key, 'setup')
+    expect(record?.contentHash).toBe(hashTrustContent(projectTrustContent('setup', shared)!))
+    expect(record?.contentHash).not.toBe(hashTrustContent(projectTrustContent('setup', merged)!))
+  })
+
+  it('a local override of a shared script is local-sourced: it runs promptless', async () => {
+    const { calls, runner } = recorder()
+    const svc = new ProjectSetupService({
+      trust: new ProjectTrustStore(),
+      readSettings: async () =>
+        snapshot(sharedFile({ setup: { setupScript: 'npm ci' } }), { setup: { setupScript: 'my own setup' } }),
+      runLocal: runner
+    })
+    expect(await svc.run(target(), 'setup')).toMatchObject({ status: 'started' })
+    await vi.waitFor(() => expect(calls).toHaveLength(1))
+    expect(calls[0].script).toBe('my own setup')
+    expect(consentRequests()).toEqual([])
+  })
+
+  it('cancel while the dialog is open dismisses it, and a late approve cannot revive the run', async () => {
+    const trust = new ProjectTrustStore()
+    const { calls, runner } = recorder()
+    const svc = new ProjectSetupService({
+      trust,
+      readSettings: async () => snapshot(sharedFile({ setup: { setupScript: 'npm ci' } })),
+      runLocal: runner
+    })
+    const pending = svc.run(target(), 'setup')
+    await vi.waitFor(() => expect(consentRequests()).toHaveLength(1))
+    const { requestId } = consentRequests()[0]
+
+    expect(svc.cancel(setupRunKey(target(), 'setup'))).toBe(true)
+    expect(dismissed()).toEqual([requestId])
+    expect(await pending).toEqual({ status: 'skipped', reason: 'declined' })
+
+    svc.submitConsent(requestId, 'approve')
+    await vi.waitFor(() => expect(consentRequests()).toHaveLength(1))
+    expect(calls).toHaveLength(0)
+    expect(await trust.getRecord(localTrustKey('/proj/app'), 'setup')).toBeNull()
+    expect(events()).toEqual([])
+    // The queue is free again: the next project still gets its dialog.
+    const next = svc.run(target({ projectId: 'p2', rootPath: '/b' }), 'setup')
+    await vi.waitFor(() => expect(consentRequests()).toHaveLength(2))
+    svc.submitConsent(consentRequests()[1].requestId, 'skip')
+    await next
   })
 
   it('skip does not run and does not record', async () => {
@@ -271,7 +344,7 @@ describe('ProjectSetupService — consent gate', () => {
     expect(await second).toEqual({ status: 'skipped', reason: 'declined' })
     // Both were asked — one after the other, never both at once (the queue order itself is not
     // part of the contract).
-    expect(consentRequests().map((r) => r.script).sort()).toEqual(['build p1', 'build p2'])
+    expect(consentRequests().map((r) => r.scripts.setup).sort()).toEqual(['build p1', 'build p2'])
   })
 
   it('gates an ssh target on its ssh location key', async () => {
@@ -434,6 +507,44 @@ describe('registerProjectSetupHandlers', () => {
     }
     expect(await call(target(), 'launch')).toEqual({ status: 'skipped', reason: 'unavailable' })
     expect(runs).toHaveLength(1)
+  })
+
+  it('rejects a malformed ssh target instead of stripping it down to a LOCAL run', async () => {
+    const { runs } = stub()
+    const call = plat.handlers[IPC.projectSetupRun]
+    const bad = [
+      'garbage',
+      7,
+      { server: { host: 'h' } },
+      { server: { host: 'h', user: 'u' } }, // no remoteCwd
+      { server: { host: 'h', user: 'u', port: '22' }, remoteCwd: '/srv' },
+      { server: { host: 'h', user: 'u', identityFile: 3 }, remoteCwd: '/srv' },
+      { server: 'h@u', remoteCwd: '/srv' }
+    ]
+    for (const ssh of bad) {
+      expect(await call({ ...target(), ssh }, 'setup')).toEqual({ status: 'skipped', reason: 'unavailable' })
+    }
+    expect(runs).toHaveLength(0)
+  })
+
+  it('end to end: a malformed ssh target never reaches the local runner', async () => {
+    const { calls, runner } = recorder()
+    const service = new ProjectSetupService({
+      trust: new ProjectTrustStore(),
+      readSettings: async () => snapshot(null, { setup: { setupScript: 'echo hi' } }),
+      runLocal: runner
+    })
+    registerProjectSetupHandlers(plat, service)
+    const call = plat.handlers[IPC.projectSetupRun]
+    expect(await call({ ...target(), ssh: 'garbage' }, 'setup')).toEqual({
+      status: 'skipped',
+      reason: 'unavailable'
+    })
+    expect(await call({ ...target(), ssh: { server: { host: 'h' } } }, 'setup')).toEqual({
+      status: 'skipped',
+      reason: 'unavailable'
+    })
+    expect(calls).toHaveLength(0)
   })
 
   it('cancel and consent-submit reject junk arguments', async () => {

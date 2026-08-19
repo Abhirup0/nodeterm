@@ -92,6 +92,15 @@ function trustKeyFor(target: ProjectSetupTarget): string {
     : localTrustKey(target.rootPath)
 }
 
+/** Exactly the two fields `projectTrustContent('setup', …)` hashes, from the SHARED document — so a
+ *  dialog rendering this shows the full extent of what one approval covers, and nothing else. */
+function familyScripts(sharedDoc: ProjectSettingsDoc): ProjectSetupConsentRequest['scripts'] {
+  const out: ProjectSetupConsentRequest['scripts'] = {}
+  if (sharedDoc.setup?.setupScript !== undefined) out.setup = sharedDoc.setup.setupScript
+  if (sharedDoc.setup?.archiveScript !== undefined) out.archive = sharedDoc.setup.archiveScript
+  return out
+}
+
 function locationLabel(target: ProjectSetupTarget): string {
   if (target.ssh) return `${target.ssh.server.user}@${target.ssh.server.host}:${target.ssh.remoteCwd}`
   const abs = path.resolve(target.rootPath)
@@ -106,6 +115,9 @@ interface ActiveRun {
   abort: AbortController
   seq: number
   closed: boolean
+  /** The dialog this run is currently blocked on, so `cancel` can close it instead of leaving a
+   *  modal up for a run that no longer exists. */
+  consentRequestId?: string
 }
 
 export class ProjectSetupService {
@@ -152,12 +164,17 @@ export class ProjectSetupService {
         return abandon('unavailable')
       }
       if (!trusted) {
-        const answer = await this.askConsent(key, {
+        const answer = await this.askConsent(entry, key, {
           kind,
           projectName: target.projectName,
           locationLabel: locationLabel(target),
-          script
+          // The FAMILY is what gets approved, so the dialog is handed both scripts — and from the
+          // shared document alone, so what it renders is exactly what the hash covers.
+          scripts: familyScripts(sharedDoc)
         })
+        // A cancel raised while the dialog was open already aborted this run; it must not proceed
+        // on an answer (or a race with one) that arrived anyway.
+        if (entry.abort.signal.aborted) return abandon('declined')
         if (answer !== 'approve') return abandon(answer === 'skip' ? 'declined' : 'unanswered')
         try {
           await this.deps.trust.record(key, 'setup', hash, new Date(this.now()).toISOString())
@@ -169,15 +186,27 @@ export class ProjectSetupService {
       }
     }
 
+    // Covers a cancel raised during any of the awaits above (readSettings, the trust read/write).
+    if (entry.abort.signal.aborted) return abandon('declined')
+
     void this.execute(entry, runner, script, target)
     return { status: 'started', runKey, waitForSetup: resolved.setup.waitForSetup?.value === true }
   }
 
-  /** Aborts a live run. `false` = nothing by that runKey is running (already finished, or never was). */
+  /** Aborts a run — live OR still waiting at its consent dialog. `false` = nothing by that runKey
+   *  exists (already finished, or never did). */
   cancel(runKey: string): boolean {
     const entry = this.active.get(runKey)
     if (!entry) return false
     entry.abort.abort()
+    const requestId = entry.consentRequestId
+    if (requestId) {
+      // The run this dialog belonged to is gone: close it (and free the queue) rather than leave a
+      // modal whose answer can no longer mean anything. Resolving the pending entry also drops it
+      // from `pending`, so a late approve for it is a no-op.
+      this.pending.get(requestId)?.(undefined)
+      platform().broadcast(IPC.projectSetupConsentDismiss, { requestId })
+    }
     return true
   }
 
@@ -193,27 +222,34 @@ export class ProjectSetupService {
   }
 
   private askConsent(
+    entry: ActiveRun,
     trustKey: string,
     req: Omit<ProjectSetupConsentRequest, 'requestId' | 'previouslyApproved'>
   ): Promise<ProjectSetupConsentAnswer | undefined> {
     const step = this.consentQueue.then(async () => {
+      // Cancelled while queued behind another dialog — never raise one for a run that is gone.
+      if (entry.abort.signal.aborted) return undefined
       // Read at PROMPT time, not at enqueue time: an earlier prompt in the queue may have just
       // recorded an approval for this same location. Dialog copy only — the grant was the
       // `isTrusted` hash comparison, which already said no.
       const previouslyApproved = !!(await this.deps.trust.getRecord(trustKey, 'setup'))
       return new Promise<ProjectSetupConsentAnswer | undefined>((resolve) => {
         const requestId = randomUUID()
-        const timer = setTimeout(() => {
+        const settle = (answer: ProjectSetupConsentAnswer | undefined): void => {
           this.pending.delete(requestId)
+          entry.consentRequestId = undefined
+          resolve(answer)
+        }
+        const timer = setTimeout(() => {
+          settle(undefined) // expired, NOT declined
           platform().broadcast(IPC.projectSetupConsentDismiss, { requestId })
-          resolve(undefined) // expired, NOT declined
         }, CONSENT_EXPIRY_MS)
         timer.unref?.()
         this.pending.set(requestId, (answer) => {
           clearTimeout(timer)
-          this.pending.delete(requestId)
-          resolve(answer)
+          settle(answer)
         })
+        entry.consentRequestId = requestId
         const payload: ProjectSetupConsentRequest = { ...req, requestId, previouslyApproved }
         platform().broadcast(IPC.projectSetupConsentRequest, payload)
       })

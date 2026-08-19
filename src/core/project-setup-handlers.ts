@@ -36,15 +36,20 @@ function sanitizeTarget(v: unknown): ProjectSetupTarget | null {
     rootPath: t.rootPath
   }
   if (typeof t.worktreePath === 'string' && t.worktreePath) out.worktreePath = t.worktreePath
-  const ssh = t.ssh as Record<string, unknown> | undefined
-  const server = ssh?.server as Record<string, unknown> | undefined
-  if (
-    ssh &&
-    typeof server?.host === 'string' &&
-    typeof server?.user === 'string' &&
-    typeof ssh.remoteCwd === 'string' &&
-    ssh.remoteCwd
-  ) {
+  if (t.ssh !== undefined) {
+    // A malformed `ssh` is REJECTED, never stripped: dropping the field would silently downgrade a
+    // remote run into a local one, executing the remote project's script on this machine — and
+    // against the wrong (local) trust key.
+    const ssh = typeof t.ssh === 'object' && t.ssh !== null ? (t.ssh as Record<string, unknown>) : null
+    if (!ssh) return null
+    const server =
+      typeof ssh.server === 'object' && ssh.server !== null ? (ssh.server as Record<string, unknown>) : null
+    if (!server) return null
+    if (typeof server.host !== 'string' || !server.host) return null
+    if (typeof server.user !== 'string' || !server.user) return null
+    if (server.port !== undefined && typeof server.port !== 'number') return null
+    if (server.identityFile !== undefined && typeof server.identityFile !== 'string') return null
+    if (typeof ssh.remoteCwd !== 'string' || !ssh.remoteCwd) return null
     out.ssh = {
       server: {
         host: server.host,
