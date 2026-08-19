@@ -238,6 +238,9 @@ export const IPC = {
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
+  projectSettingsRead: 'project-settings:read',
+  projectSettingsWriteShared: 'project-settings:write-shared',
+  projectSettingsUpdateLocal: 'project-settings:update-local',
   // main → renderer events
   workspaceMigrated: 'workspace:migrated',
   /** Payload: the `workspace.json.corrupt-<ts>` filename the unreadable index was preserved as. */

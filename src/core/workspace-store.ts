@@ -16,7 +16,8 @@ import { readProjectSettingsFile, writeProjectSettingsFile } from './project-set
 import {
   parseProjectSettingsFile, sameProjectSettingsContent, sanitizeProjectLocalSettings,
   sanitizeProjectSettingsDoc, serializeProjectSettingsFile,
-  type ProjectLocalSettings, type ProjectSettingsDoc, type ProjectSettingsFileV1
+  type ProjectLocalSettings, type ProjectSettingsDoc, type ProjectSettingsFileV1,
+  type ProjectSettingsSnapshot
 } from '../shared/project-settings'
 import { readProjectCapabilities, type ProjectCapability } from '../shared/project-capabilities'
 import type { CapabilityAckMap } from './project-capability-consent'
@@ -41,17 +42,10 @@ export interface RemoteWorkspaceIO {
 
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
 
-/** What one project's settings look like right now: the git-shared document (null when there is
- *  none, or it cannot be trusted/read) plus this machine's own overlay. `resolveProjectSettings`
- *  turns the pair into effective values; this type only reports what each side says. */
-export interface ProjectSettingsState {
-  shared: ProjectSettingsFileV1 | null
-  local: ProjectLocalSettings | undefined
-  /** The shared file exists but is git-conflict-marked, so it is left untouched for the user to
-   *  resolve. `shared` is null for a local ref; for an ssh project the last-known-good offline cache
-   *  is still served alongside the flag (it is the only readable copy of that document). */
-  conflict?: true
-}
+/** Alias of the shared `ProjectSettingsSnapshot` (moved to `shared/project-settings.ts` so the
+ *  renderer's `ProjectSettingsApi` can name the shape without importing core) — the store's
+ *  methods keep this name in their signatures. */
+export type ProjectSettingsState = ProjectSettingsSnapshot
 
 /** A parsed project file together with the exact bytes it was parsed from. `lastWritten` must
  *  record `raw` — see the field it caches. */
@@ -184,6 +178,13 @@ export class WorkspaceStore {
     platform().handle(IPC.workspaceLoad, () => this.load())
     platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
+    platform().handle(IPC.projectSettingsRead, (projectId: unknown) =>
+      typeof projectId === 'string' ? this.readProjectSettings(projectId) : null)
+    platform().handle(IPC.projectSettingsWriteShared, (projectId: unknown, doc: ProjectSettingsDoc) =>
+      typeof projectId === 'string' ? this.writeProjectSettings(projectId, doc) : false)
+    platform().handle(IPC.projectSettingsUpdateLocal,
+      (projectId: unknown, local: ProjectLocalSettings | undefined) =>
+        typeof projectId === 'string' ? this.updateLocalProjectSettings(projectId, local) : false)
   }
 
   /**
@@ -655,11 +656,13 @@ export class WorkspaceStore {
    *
    * False = there is nowhere to write it, or writing would destroy something. On BOTH legs: an
    * unknown id, an inline canvas (no folder), and a git-conflicted shared file — the user's to
-   * resolve, left untouched (the local leg sees it in the read-before-write, the ssh leg remembers
-   * it from the last read, since looking again would cost a round trip per keystroke). Local leg
-   * only: an unreadable file (a failed read is never evidence of absence, so it may not be
-   * clobbered either) or a failed write. SSH leg only: an index write that did not persist —
-   * a failed REMOTE write is not false there, because the cache already holds the edit.
+   * resolve, left untouched (the local leg sees it in the read-before-write; the ssh leg sees it
+   * WARM from a cache or last-read doc this run already has, or — COLD, when neither map knows this
+   * project yet — from the one read `writeSshSettings` does itself before its first write, per its
+   * own docstring above). Local leg only: an unreadable file (a failed read is never evidence of
+   * absence, so it may not be clobbered either) or a failed write. SSH leg only: an index write that
+   * did not persist — a failed REMOTE write is not false there, because the cache already holds
+   * the edit.
    */
   async writeProjectSettings(projectId: string, doc: ProjectSettingsDoc): Promise<boolean> {
     const e = this.index?.entries.find((x) => x.id === projectId)

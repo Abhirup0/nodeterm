@@ -755,6 +755,19 @@ export interface WorkspaceApi {
   onExternalChange(cb: (project: Project) => void): () => void
 }
 
+export interface ProjectSettingsApi {
+  /** `{shared, local, conflict?}` for a known project id, or null for an unknown one. */
+  read(projectId: string): Promise<import('./project-settings').ProjectSettingsSnapshot | null>
+  /** Whole-document write of the git-shared `.nodeterm/settings.json`. See
+   *  `WorkspaceStore.writeProjectSettings` for the false-vs-true contract. */
+  writeShared(projectId: string, doc: import('./project-settings').ProjectSettingsDoc): Promise<boolean>
+  /** This machine's own overlay; `local: undefined` clears it. */
+  updateLocal(
+    projectId: string,
+    local: import('./project-settings').ProjectLocalSettings | undefined
+  ): Promise<boolean>
+}
+
 export interface DialogApi {
   /** Opens a native folder picker; returns the chosen path or null if cancelled. */
   selectFolder(): Promise<string | null>
@@ -2464,6 +2477,7 @@ export interface PresenceApi {
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
+  projectSettings: ProjectSettingsApi
   dialog: DialogApi
   settings: SettingsApi
   speech: SpeechApi
