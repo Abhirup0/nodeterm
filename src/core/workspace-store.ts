@@ -12,6 +12,11 @@ import {
   serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
+import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
+import {
+  parseProjectSettingsFile, sanitizeProjectLocalSettings,
+  type ProjectLocalSettings, type ProjectSettingsDoc, type ProjectSettingsFileV1
+} from '../shared/project-settings'
 import { readProjectCapabilities, type ProjectCapability } from '../shared/project-capabilities'
 import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
@@ -29,6 +34,16 @@ export interface RemoteWorkspaceIO {
 }
 
 const projectFilePath = (cwd: string): string => path.join(cwd, PROJECT_DIR, PROJECT_FILE)
+
+/** What one project's settings look like right now: the git-shared document (null when there is
+ *  none, or it cannot be trusted/read) plus this machine's own overlay. `resolveProjectSettings`
+ *  turns the pair into effective values; this type only reports what each side says. */
+export interface ProjectSettingsState {
+  shared: ProjectSettingsFileV1 | null
+  local: ProjectLocalSettings | undefined
+  /** Shared file exists but is git-conflict-marked; `shared` is null until the user resolves it. */
+  conflict?: true
+}
 
 /** A parsed project file together with the exact bytes it was parsed from. `lastWritten` must
  *  record `raw` — see the field it caches. */
@@ -127,6 +142,18 @@ export class WorkspaceStore {
    *  node we never had, and the tie is broken toward rescuing (a resurrected node is visible and
    *  deletable again; a deleted session node is gone with no trace of where it went). */
   private clearedNodes = new Map<string, Set<string>>()
+  /** project id -> this machine's settings overlay, already sanitized. The map — not the index
+   *  entry — is the live copy: `splitWorkspace` rebuilds entries from the renderer's Workspace,
+   *  which has never carried machine-local state, so every save would otherwise drop the overlay
+   *  (the same reason `localExec`/`cache` are re-attached below). Absent = no overlay. */
+  private localSettingsByProject = new Map<string, ProjectLocalSettings>()
+  /** ssh project id -> last shared settings.json seen on that host (offline copy). Only entries that
+   *  round-tripped through `parseProjectSettingsFile` are in here. */
+  private settingsCacheByProject = new Map<string, ProjectSettingsFileV1>()
+  /** project id -> the shared settings file as last read/written, i.e. the rev source for the NEXT
+   *  write. Runtime-only: a write that has not read first starts at rev 1, which is the same thing
+   *  a fresh file means. */
+  private lastSharedSettings = new Map<string, ProjectSettingsFileV1>()
   /** Last index written/loaded — lets readLocalRef/refresh resolve entries without a full load. */
   private index: WorkspaceIndexV3 | null = null
   /** Optional hook fired after every load()/save() — the watcher re-syncs its watch set (Task 5). */
@@ -276,6 +303,8 @@ export class WorkspaceStore {
       }
     }
     await this.repairDuplicateIds(built, sideline)
+    // AFTER the repair: it re-keys entries in place, and the maps are keyed by project id.
+    this.adoptSettingsFromIndex(index)
     const projects = built.map((b) => b.project)
     const active = projects.some((p) => p.id === index.activeProjectId && !p.unavailable)
       ? index.activeProjectId
@@ -380,6 +409,130 @@ export class WorkspaceStore {
   }
 
   /**
+   * Loads the settings halves out of a just-read index into the two runtime maps.
+   *
+   * workspace.json is hand-editable (and, on Server Edition, sits next to other users' reach), so
+   * neither field is trusted on the way in: the overlay goes through the same sanitizer a settings
+   * file gets, and a cached SHARED file is accepted only if it still parses as one — the parser is
+   * reused as the validator so there is exactly one definition of "a valid settings file",
+   * wherever the bytes came from.
+   */
+  private adoptSettingsFromIndex(index: WorkspaceIndexV3): void {
+    this.localSettingsByProject.clear()
+    this.settingsCacheByProject.clear()
+    for (const e of index.entries) {
+      const local = sanitizeProjectLocalSettings(e.localSettings)
+      if (local && Object.keys(local).length) this.localSettingsByProject.set(e.id, local)
+      if (!e.ssh || !e.settingsCache) continue
+      const parsed = parseProjectSettingsFile(JSON.stringify(e.settingsCache))
+      if (parsed.status === 'ok') this.settingsCacheByProject.set(e.id, parsed.file)
+    }
+  }
+
+  /** Writes the maps back onto an index about to be persisted — the machine-local half that
+   *  `splitWorkspace` cannot know about. Runs on every index write, so an entry the maps no longer
+   *  cover loses the field rather than keeping a stale copy of it. */
+  private applySettingsToIndex(index: WorkspaceIndexV3): void {
+    for (const e of index.entries) {
+      const local = this.localSettingsByProject.get(e.id)
+      if (local) e.localSettings = local
+      else delete e.localSettings
+      // Only an ssh entry has anywhere to cache: a local ref's shared file is one disk read away,
+      // and an inline canvas has no shared file at all.
+      const cached = e.ssh ? this.settingsCacheByProject.get(e.id) : undefined
+      if (cached) e.settingsCache = cached
+      else delete e.settingsCache
+    }
+  }
+
+  /**
+   * The shared + local settings of one project. `null` means the id names no entry (never "no
+   * settings" — an entry with neither file nor overlay answers `{shared: null, local: undefined}`).
+   *
+   * The shared doc is read from disk on every call rather than cached: `.nodeterm/settings.json` is
+   * a git-tracked file a checkout/merge/teammate rewrites behind our back, and a settings read is
+   * rare enough (a panel opening, a launch) that a stale answer would cost more than the read does.
+   */
+  async readProjectSettings(projectId: string): Promise<ProjectSettingsState | null> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return null
+    const local = this.localSettingsByProject.get(projectId)
+    // SSH: the offline cache is all this task can answer with — the remote read lands in Task 7.
+    if (e.ssh) return { shared: this.settingsCacheByProject.get(projectId) ?? null, local }
+    // An inline canvas has no folder, so there is no shared document to have.
+    if (!e.cwd) return { shared: null, local }
+    const read = await readProjectSettingsFile(e.cwd)
+    if (read.status === 'ok') {
+      // The rev source for the next write — a write that skipped the read would restart at rev 1
+      // and lose the counter a remote/offline comparison depends on.
+      this.lastSharedSettings.set(projectId, read.file)
+      return { shared: read.file, local }
+    }
+    // conflict: the file exists but is mid-merge; it is left untouched for the user to resolve and
+    // reported as such, so a caller shows "resolve this" instead of "this project has no settings".
+    if (read.status === 'conflict') return { shared: null, local, conflict: true }
+    return { shared: null, local } // absent / invalid (sidelined) / unreadable
+  }
+
+  /**
+   * Whole-document write of the GIT-SHARED settings file. Whole-document on purpose: a per-field
+   * patch grammar would have to merge against a file that another writer (a teammate's commit, the
+   * user's editor) may have changed since the caller read it, and silently merging into a file the
+   * caller never saw is how the shared half stops meaning what the repo says.
+   *
+   * False = there is nowhere to write it: an unknown id, an inline canvas (no folder), an ssh
+   * project (Task 7 gives it the remote leg), or the write itself failed.
+   */
+  async writeProjectSettings(projectId: string, doc: ProjectSettingsDoc): Promise<boolean> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e || e.ssh || !e.cwd) return false
+    try {
+      const written = await writeProjectSettingsFile(
+        e.cwd, doc, this.lastSharedSettings.get(projectId) ?? null, new Date().toISOString()
+      )
+      this.lastSharedSettings.set(projectId, written)
+      return true
+    } catch {
+      // Folder gone / read-only checkout: the caller is told the doc did not land, exactly like a
+      // failed project.json write leaves the entry stale rather than pretending it saved.
+      return false
+    }
+  }
+
+  /**
+   * Replaces this machine's overlay for one project (undefined = clear it) and persists the index
+   * NOW, without waiting for a canvas save: a settings edit is often the only thing the user did in
+   * that session, and an overlay that lives only in memory until the next node is dragged is an
+   * overlay that quietly disappears when the app quits.
+   */
+  async updateLocalProjectSettings(
+    projectId: string,
+    local: ProjectLocalSettings | undefined
+  ): Promise<boolean> {
+    const e = this.index?.entries.find((x) => x.id === projectId)
+    if (!e) return false
+    const clean = local === undefined ? undefined : sanitizeProjectLocalSettings(local)
+    if (clean && Object.keys(clean).length) this.localSettingsByProject.set(projectId, clean)
+    else this.localSettingsByProject.delete(projectId)
+    await this.persistIndexNow()
+    return true
+  }
+
+  /** Rewrites the CURRENT index with the settings maps applied. On `saveChain` like every other
+   *  index write, so it can neither interleave with a save's own rewrite nor invent entries: it
+   *  persists exactly what `this.index` already holds (and does nothing before the first load). */
+  private persistIndexNow(): Promise<void> {
+    const run = this.saveChain.then(async () => {
+      const index = this.index
+      if (!index) return
+      this.applySettingsToIndex(index)
+      await writeAtomic(this.indexPath, JSON.stringify(index))
+    })
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  /**
    * Reads + parses one project file. Only the authoritative loadV3 path passes `sideline: true`,
    * which renames an unparsable/wrong-shape file to `.corrupt-<ts>` so a later save can't overwrite
    * the only copy. Read-only callers (probeFolder — an RPC reachable with arbitrary paths on Server
@@ -459,6 +612,11 @@ export class WorkspaceStore {
       const previous = this.index?.entries.find((candidate) => candidate.id === entry.id)
       entry.localApprovalId = previous?.localApprovalId || randomUUID()
     }
+
+    // The settings overlay / ssh settings cache ride every index write, like `localExec` and
+    // `cache`: `splitWorkspace` builds entries from the renderer's Workspace, which carries no
+    // machine-local state, so without this each autosave would erase them from disk.
+    this.applySettingsToIndex(index)
 
     // An unavailable placeholder carries no real data. splitWorkspace already dropped its file
     // and cache; here we restore the machine-local payload (ssh offline cache) from the previous
