@@ -57,6 +57,8 @@ export interface NodeData {
   group: string | null
   tags?: string[]
   collapsed?: boolean
+  /** Agent nodes only: when true, this node's subagent/loop fan-out cards are hidden. */
+  hideFanout?: boolean
   /** Expanded height to restore when un-collapsing (kept out of the persisted size). */
   expandedHeight?: number
   /** One-shot command run once when the terminal first opens (not persisted). */
@@ -1316,6 +1318,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         group: n.group,
         tags: n.tags,
         collapsed,
+        hideFanout: n.hideFanout,
         expandedHeight: n.size.height,
         shell: n.shell,
         cwd: n.cwd,
@@ -1385,6 +1388,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         group: n.data.group,
         tags: n.data.tags,
         collapsed: n.data.collapsed,
+        hideFanout: n.data.hideFanout,
         parentId: n.parentId,
         shell: n.data.shell,
         cwd: n.data.cwd,

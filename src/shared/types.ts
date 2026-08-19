@@ -181,8 +181,12 @@ export interface PtyCreateResult {
    * Only ever set for a create that would have SPAWNED: a co-attach to a live session for this
    * node id still joins (the session is already running wherever it runs), so a second view of a
    * healthy remote terminal is unaffected.
+   *
+   * `'codex-account'` is the S6 fail-closed twin: a LOCAL Codex node that explicitly selected a
+   * managed account whose home is missing refuses rather than spawning against the system login
+   * (§5 property 4). Same contract — nothing spawned, the renderer shows the node's refusal.
    */
-  unavailable?: 'ssh'
+  unavailable?: 'ssh' | 'codex-account'
 }
 
 /** Payload of `pty:recycled` — see IPC.ptyRecycled and `recycleAction` in the renderer. */
@@ -236,6 +240,8 @@ export interface CanvasNodeState {
   tags?: string[]
   /** When true the node body is hidden (header-only). */
   collapsed?: boolean
+  /** Agent nodes only: when true, this node's subagent/loop fan-out cards are hidden. */
+  hideFanout?: boolean
   /** Parent group node id, if this node belongs to a group frame. */
   parentId?: string
   // terminal-only
@@ -2066,6 +2072,53 @@ export interface ClaudeAccountsApi {
   remove(id: string, ctx?: AccountSshCtx): Promise<void>
 }
 
+/**
+ * Machine-scoped managed Codex accounts (S6). LOCAL accounts on this Mac are reachable through
+ * PR 5; SSH remote accounts land in PR 6. The account LIST is renderer-owned in `settings.json`
+ * (`codexAccounts`), exactly like `claudeAccounts`; main owns only the fs + daemon lifecycle and
+ * the switch protocol.
+ */
+export interface CodexAccountsApi {
+  /** Mint a new managed account: create its private CODEX_HOME (0700) and symlink the shared,
+   *  non-secret runtime assets in. Returns the new id + its home. */
+  add(): Promise<{ id: string; home: string }>
+  /** Poll the account's `auth.json` (a real file, never a symlink) every 2s up to 5min for a
+   *  completed device login, then read its email; null on timeout/cancel. */
+  waitLogin(id: string): Promise<{ email: string | null } | null>
+  /** Cancel an in-flight `waitLogin` for this account. */
+  cancelWaitLogin(id: string): Promise<void>
+  /** Read a managed account's already-logged-in identity (email), or null if not logged in. */
+  identity(id: string): Promise<{ email: string | null } | null>
+  /** Read the system (`~/.codex`) account's identity. */
+  systemIdentity(): Promise<{ email: string | null } | null>
+  /** Remove a managed account: stop its daemon and delete its home. Refused while a switch
+   *  reservation holds it or a concurrent removal is in flight (Property 10). */
+  remove(id: string): Promise<void>
+  /** Phase 1 of the owner-authorized same-machine switch: plan + reserve the rollout exposure of a
+   *  conversation from one account to another under a `rollbackToken` (TTL 60s, owner = caller). */
+  switchThread(
+    threadId: string,
+    cwd: string,
+    sourceAccountId?: string,
+    targetAccountId?: string
+  ): Promise<{ threadId: string; rollbackToken?: string }>
+  /** Phase 2: commit the reserved exposure (atomic hardlink into the target account). */
+  commitSwitch(rollbackToken: string): Promise<void>
+  /** Phase 3a: finish a committed switch, releasing the reservation. */
+  finishSwitch(rollbackToken: string): Promise<void>
+  /** Phase 3b: roll back a reservation (releases it; a committed link is left for cleanup). */
+  rollbackSwitch(rollbackToken: string): Promise<void>
+  /** Source-side leg of moving an idle LOCAL conversation to an SSH account: validate strict source
+   *  containment then hand the upload to the remote import path (PR 6). Local rollout untouched. */
+  transferThreadToSsh(
+    threadId: string,
+    cwd: string,
+    projectId: string,
+    targetAccountId?: string,
+    sourceAccountId?: string
+  ): Promise<{ threadId: string; imported: boolean }>
+}
+
 /** One ranked search hit across all on-disk Claude session transcripts. */
 export interface TranscriptHit {
   sessionId: string
@@ -2548,6 +2601,7 @@ export interface NodeTerminalApi {
   agent: AgentApi
   chat: ChatApi
   claudeAccounts: ClaudeAccountsApi
+  codexAccounts: CodexAccountsApi
   transcripts: TranscriptsApi
   remoteHost: RemoteHostApi
   relayHost: RelayHostApi

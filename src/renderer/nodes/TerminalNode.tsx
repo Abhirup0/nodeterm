@@ -119,7 +119,7 @@ import {
 } from '../terminal/agent-restart'
 import { WakeInputBuffer } from '../terminal/wake-input-buffer'
 import { FindBar } from '../components/FindBar'
-import { IconSearch, IconChat, IconMic, IconReload } from '../components/icons'
+import { IconSearch, IconChat, IconMic, IconReload, IconEye, IconEyeOff, IconGrid } from '../components/icons'
 import { NodeLabels } from '../components/kanban/NodeLabels'
 import { Tooltip } from '../components/Tooltip'
 import { useTerminalSearch } from '../terminal/useTerminalSearch'
@@ -148,6 +148,7 @@ import { accountChipLabel, agentLaunchOverride, COLLAPSED_HEIGHT, NODE_COLORS, t
 import {
   hasHooks,
   canRecur,
+  canSubagent,
   canContextLink,
   hasUsage,
   canChat,
@@ -1290,6 +1291,12 @@ export function TerminalNode({
     !remoteSession &&
     (data.cwd as string | undefined) !== parentWtPath
   const status = useAgentStatus((s) => s.byId[id])
+  // Fan-out (subagent/loop card) visibility + tidy — any agent capable of either kind of card.
+  const fanoutCapable = !!agentId && (canSubagent(agentId) || canRecur(agentId))
+  const hideFanout = !!data.hideFanout
+  const fanoutCount = useAgentNodes(
+    (s) => Object.values(s.byId).filter((v) => v.parentNodeId === id).length
+  )
   // Transient, per-launch: what this node's Codex launcher reported it actually got. Undefined for
   // every non-codex node and for a codex node whose launcher never spoke.
   const codexIdentity = useCodexIdentity((s) => s.byId[id])
@@ -4517,6 +4524,38 @@ export function TerminalNode({
             </button>
           </Tooltip>
         )}
+        {fanoutCapable && !isHidden('hide-fanout', hiddenHeaderButtons) && (
+          <Tooltip label={hideFanout ? 'Show subagent/loop cards' : 'Hide subagent/loop cards'}>
+            <button
+              className="term-node__hide-fanout nodrag"
+              title={hideFanout ? 'Show subagent/loop cards' : 'Hide subagent/loop cards'}
+              aria-pressed={hideFanout}
+              onClick={(e) => {
+                e.stopPropagation()
+                updateNodeData(id, { hideFanout: !hideFanout })
+              }}
+            >
+              {hideFanout ? <IconEyeOff /> : <IconEye />}
+            </button>
+          </Tooltip>
+        )}
+        {fanoutCapable &&
+          !hideFanout &&
+          fanoutCount >= 2 &&
+          !isHidden('tidy-fanout', hiddenHeaderButtons) && (
+            <Tooltip label="Tidy subagent cards into a grid">
+              <button
+                className="term-node__tidy-fanout nodrag"
+                title="Tidy subagent cards into a grid"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  useAgentNodes.getState().tidyFanout(id)
+                }}
+              >
+                <IconGrid />
+              </button>
+            </Tooltip>
+          )}
         <button
           className="term-node__close"
           title="Close (ends the session)"

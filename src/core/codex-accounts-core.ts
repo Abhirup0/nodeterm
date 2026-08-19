@@ -156,6 +156,22 @@ export function remoteCodexTmuxEnvArgs(remoteHome: string, accountId?: string): 
 }
 
 /**
+ * One shared Codex `app-server` per (machine, account): reuse it if it is already reachable, else
+ * start it exactly once (§2.2, the RAM-saver — not one app-server per node). `probe` answers "is a
+ * live app-server already listening on this account's control socket?"; `start` boots one. Kept in
+ * core (pure control flow over two injected effects) so the same primitive arms on desktop and on
+ * headless Server Edition, and so a test drives it with fakes rather than a real Codex CLI.
+ * Based on @Corvin's `ensureSharedCodexDaemon` in PR #112.
+ */
+export async function ensureSharedCodexDaemon(
+  probe: () => Promise<boolean>,
+  start: () => Promise<void>
+): Promise<void> {
+  if (await probe()) return
+  await start()
+}
+
+/**
  * Explicit per-session env. An EMPTY account id means the system account and is written
  * explicitly, so it OVERWRITES any managed `NODETERM_CODEX_ACCOUNT_ID` inherited from a parent
  * (tmux shares one server env) rather than silently acting as the wrong login.
