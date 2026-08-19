@@ -1,0 +1,315 @@
+import { useEffect, useMemo, useState } from 'react'
+import type { Project } from '@shared/types'
+import {
+  ALL_PERMISSION_MODES,
+  PERMISSION_MODE_LABELS,
+  type AgentPermissionMode
+} from '@shared/agents/config'
+import { Input } from '@renderer/ui/Input'
+import { Select } from '@renderer/ui/Select'
+import { cn } from '@renderer/ui/cn'
+import { useProjects } from '../../../state/projects'
+import { useSettings } from '../../../state/settings'
+import { useSystemAccount } from '../../../state/systemAccount'
+import {
+  NODE_COLORS,
+  accountsForProject,
+  sshAccountsHint,
+  systemAccountDisplay
+} from '../../../state/workspace'
+import { FieldRow } from '../FieldRow'
+import { SearchableRow } from '../SearchableRow'
+import { SettingsSection } from '../SettingsSection'
+import { useSettingsSearch } from '../context'
+import { projectSectionId } from '../project-settings-targets'
+import { matchesQuery, type SettingsSearchEntry } from '../search'
+import { useProjectSettings } from '../useProjectSettings'
+
+/**
+ * Saves the whole workspace after an identity/defaults edit — the SAME route Canvas takes after
+ * `renameProject` / `setProjectColor` / `setProjectDefault*` (Canvas.tsx `persist`): the store
+ * setters are pure state, and nothing else pushes them to `.nodeterm/project.json`.
+ *
+ * Canvas's `persist` first commits its live React Flow nodes into the store; this cannot (React
+ * Flow is Canvas-owned) and must not need to — the canvas is not being edited while the Settings
+ * page is up, and its own 800ms autosave has already committed anything that was. What we write is
+ * the store's current truth for every project, exactly like every other save.
+ */
+async function persistWorkspace(): Promise<void> {
+  await window.nodeTerminal.workspace.save(useProjects.getState().toWorkspace())
+}
+
+function rowsFor(name: string): Record<string, SettingsSearchEntry> {
+  // The project's own name rides every row's keywords: searching a project by name has to surface
+  // its controls, not just the section header.
+  return {
+    name: { title: 'Project name', keywords: ['rename', 'project', 'title', name] },
+    folder: { title: 'Folder', keywords: ['cwd', 'path', 'directory', 'ssh', 'server', name] },
+    color: { title: 'Color', keywords: ['accent', 'swatch', 'tab', 'monogram', name] },
+    permission: {
+      title: 'Default permission mode',
+      keywords: ['claude', 'plan', 'accept edits', 'bypass', 'approval', name]
+    },
+    account: {
+      title: 'Default Claude account',
+      keywords: ['account', 'login', 'claude', 'system', name]
+    }
+  }
+}
+
+/** Where this project's terminals run: a local folder, or `user@host:/remote/path` for SSH. */
+function projectTarget(project: Project): string {
+  if (project.ssh) return `${project.ssh.server.user}@${project.ssh.server.host}:${project.ssh.remoteCwd}`
+  return project.cwd || 'No folder set'
+}
+
+/**
+ * One project's settings pane. Dynamic (`project-<id>`): the nav group and this list are both
+ * built from the same live project list, so a section always has a row and vice versa.
+ *
+ * The visibility gate is evaluated HERE as well as inside `SettingsSection`, deliberately: the body
+ * reads `.nodeterm/settings.json`, which for an SSH project is a network round-trip, so a pane that
+ * is neither active nor matched by the search must not mount the hook at all.
+ */
+export function ProjectSettingsSection({
+  projectId,
+  isActive
+}: {
+  projectId: string
+  isActive: boolean
+}): React.JSX.Element | null {
+  const project = useProjects((s) => s.projects.find((p) => p.id === projectId))
+  const query = useSettingsSearch()
+  const rows = useMemo(() => rowsFor(project?.name ?? ''), [project?.name])
+  const entries = useMemo(() => Object.values(rows), [rows])
+  if (!project) return null
+  const visible = query.trim() !== '' ? entries.some((e) => matchesQuery(query, e)) : isActive
+  if (!visible) return null
+  // A relay tab is a live connection to ANOTHER machine's project, and an unavailable project's
+  // files cannot be read at all. Both get an explanation and zero editors: `projectSettings.*`
+  // here would read and write THIS machine's store, so an editor would silently edit the wrong
+  // project (or nothing).
+  if (project.remote || project.unavailable) {
+    return <ExplanatoryProjectSection project={project} isActive={isActive} entries={entries} />
+  }
+  return (
+    <EditableProjectSection project={project} isActive={isActive} entries={entries} rows={rows} />
+  )
+}
+
+function ExplanatoryProjectSection({
+  project,
+  isActive,
+  entries
+}: {
+  project: Project
+  isActive: boolean
+  entries: SettingsSearchEntry[]
+}): React.JSX.Element {
+  return (
+    <SettingsSection
+      id={projectSectionId(project.id)}
+      title={project.name}
+      isActive={isActive}
+      searchEntries={entries}
+    >
+      <p className="text-[13px] leading-relaxed text-muted">
+        {project.remote
+          ? `This tab is a live connection to a project on another machine (${projectTarget(project)}). Its settings live there and are edited on that machine — nothing changed here would reach it.`
+          : `This project is unavailable: its files could not be read (folder missing, server unreachable, or the file is corrupt). Reconnect or reopen it to change its settings.`}
+      </p>
+    </SettingsSection>
+  )
+}
+
+function EditableProjectSection({
+  project,
+  isActive,
+  entries,
+  rows
+}: {
+  project: Project
+  isActive: boolean
+  entries: SettingsSearchEntry[]
+  rows: Record<string, SettingsSearchEntry>
+}): React.JSX.Element {
+  const settings = useProjectSettings(project.id)
+  const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
+  const globalMode = useSettings((s) => s.settings.claudePermissionMode)
+  const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
+  const systemEmail = useSystemAccount((s) => s.email)
+  const systemLabel = systemAccountDisplay(systemLabelSetting, systemEmail)
+  const accounts = accountsForProject(claudeAccounts, project)
+  const accountsHint = sshAccountsHint(project, accounts)
+
+  // Editors commit on BLUR, never per keystroke: each commit is a disk write.
+  const [nameDraft, setNameDraft] = useState(project.name)
+  useEffect(() => setNameDraft(project.name), [project.name])
+
+  const snapshot = settings.snapshot
+  // A git-conflicted settings.json is left untouched for the user to resolve, so every editor of
+  // the SHARED document is disabled while it stands (Task 4's family editors take this as their
+  // `disabled`; identity/defaults below live in project.json and are unaffected).
+  const conflict = snapshot !== 'loading' && snapshot?.conflict === true
+
+  const commitName = (): void => {
+    const next = nameDraft.trim()
+    if (!next || next === project.name) {
+      setNameDraft(project.name)
+      return
+    }
+    useProjects.getState().renameProject(project.id, next)
+    void persistWorkspace()
+  }
+
+  return (
+    <SettingsSection
+      id={projectSectionId(project.id)}
+      title={project.name}
+      description={`Settings for this project only. Name, color and defaults live in ${project.ssh ? 'the project file on the server' : '.nodeterm/project.json'}, which is shared with anyone who has the repo.`}
+      isActive={isActive}
+      searchEntries={entries}
+    >
+      {conflict ? (
+        <div
+          role="status"
+          className="rounded-xl border border-[color:var(--warn)]/40 bg-[color:var(--warn)]/10 px-4 py-3 text-[13px] leading-relaxed text-text"
+        >
+          This project&apos;s <code>.nodeterm/settings.json</code> has unresolved git conflict
+          markers. It is left exactly as it is — resolve the conflict in your editor, then reopen
+          this pane. Shared settings cannot be edited until then.
+          {/* Rendered whether or not any family editor is on screen: the pane must explain why the
+              file it is about is being ignored, even before Task 4's editors exist. */}
+        </div>
+      ) : null}
+      <SearchableRow {...rows.name}>
+        <FieldRow
+          label="Project name"
+          description="Shown on the tab and in the project switcher."
+          htmlFor={`project-name-${project.id}`}
+          control={
+            <Input
+              id={`project-name-${project.id}`}
+              className="w-72"
+              value={nameDraft}
+              aria-label="Project name"
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={commitName}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur()
+                if (e.key === 'Escape') setNameDraft(project.name)
+              }}
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...rows.folder}>
+        <FieldRow
+          label={project.ssh ? 'Server folder' : 'Folder'}
+          description="Where this project's terminals start. Change it from the project tab's menu."
+          control={
+            <span className="max-w-[26rem] truncate text-[13px] text-muted" title={projectTarget(project)}>
+              {projectTarget(project)}
+            </span>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...rows.color}>
+        <FieldRow
+          label="Color"
+          description="Accent for this project's tab and monogram."
+          control={
+            <div className="flex items-center gap-1.5">
+              {NODE_COLORS.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  data-project-color={c}
+                  aria-label={`Color ${c}`}
+                  aria-pressed={project.color === c}
+                  style={{ background: c }}
+                  className={cn(
+                    'size-5 rounded-full border-0 outline-none transition-transform hover:scale-110',
+                    project.color === c && 'ring-2 ring-white/80 ring-offset-2 ring-offset-transparent'
+                  )}
+                  onClick={() => {
+                    useProjects.getState().setProjectColor(project.id, c)
+                    void persistWorkspace()
+                  }}
+                />
+              ))}
+            </div>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...rows.permission}>
+        <FieldRow
+          label="Default permission mode"
+          description="Start-up permission mode for new Claude terminal sessions in this project. Saved in the shared project file, so it travels to everyone who clones the repo."
+          htmlFor={`project-permission-mode-${project.id}`}
+          control={
+            <Select
+              id={`project-permission-mode-${project.id}`}
+              aria-label="Default permission mode"
+              value={project.defaultPermissionMode ?? ''}
+              onChange={(e) => {
+                const v = e.target.value
+                useProjects
+                  .getState()
+                  .setProjectDefaultPermissionMode(
+                    project.id,
+                    v === '' ? undefined : (v as AgentPermissionMode)
+                  )
+                void persistWorkspace()
+              }}
+            >
+              <option value="">Use global ({PERMISSION_MODE_LABELS[globalMode]})</option>
+              {ALL_PERMISSION_MODES.map((m) => (
+                <option key={m} value={m}>
+                  {PERMISSION_MODE_LABELS[m]}
+                </option>
+              ))}
+            </Select>
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...rows.account}>
+        <FieldRow
+          label="Default Claude account"
+          description="Account new Claude and chat nodes in this project use."
+          note={accountsHint ?? undefined}
+          htmlFor={`project-account-${project.id}`}
+          control={
+            <Select
+              id={`project-account-${project.id}`}
+              aria-label="Default Claude account"
+              value={project.defaultAccountId ?? ''}
+              onChange={(e) => {
+                const v = e.target.value
+                useProjects.getState().setProjectDefaultAccount(project.id, v === '' ? undefined : v)
+                void persistWorkspace()
+              }}
+            >
+              <option value="">{systemLabel}</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.label}
+                </option>
+              ))}
+              {/* A default naming an account this machine does not have (a teammate's pick, or one
+                  since removed) must READ as itself, not silently as the system account. */}
+              {project.defaultAccountId && !accounts.some((a) => a.id === project.defaultAccountId) ? (
+                <option value={project.defaultAccountId}>
+                  {project.defaultAccountId} (not on this machine)
+                </option>
+              ) : null}
+            </Select>
+          }
+        />
+      </SearchableRow>
+      {/* Task 4 hangs the per-family editors (setup / worktree / agents / terminal) here; they take
+          `settings.resolved`, `settings.saveShared`, `settings.saveLocal`, and `conflict` as their
+          disabled flag — the hook needs no change to grow them. */}
+    </SettingsSection>
+  )
+}

@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useEntitlement } from '../../state/entitlement'
+import { useProjects } from '../../state/projects'
 import { SettingsSearchContext } from './context'
 import { SettingsSidebar } from './SettingsSidebar'
-import { FIRST_SECTION_ID, type SettingsSectionId } from './nav'
+import { FIRST_SECTION_ID, projectsSettingsGroup, type SettingsSectionId } from './nav'
+import { projectSectionId } from './project-settings-targets'
+import { ProjectSettingsSection } from './sections/ProjectSettingsSection'
 import { TerminalSection } from './sections/TerminalSection'
 import { ShellSection } from './sections/ShellSection'
 import { BehaviorSection } from './sections/BehaviorSection'
@@ -43,6 +46,18 @@ export function SettingsPage({
   const [active, setActive] = useState<SettingsSectionId>(initialSection ?? FIRST_SECTION_ID)
   const [query, setQuery] = useState('')
 
+  // ONE list feeds both the nav rows and the panes below, so a "Projects" row can never point at a
+  // section that is not rendered (or vice versa). Memoized: `projects.filter(...)` inside a zustand
+  // selector would return a fresh array on every store snapshot and re-render the whole page.
+  const projects = useProjects((s) => s.projects)
+  const openProjects = useMemo(() => projects.filter((p) => !p.closed), [projects])
+  const extraGroups = useMemo(() => {
+    const group = projectsSettingsGroup(
+      openProjects.map((p) => ({ id: p.id, name: p.name, color: p.color }))
+    )
+    return group ? [group] : []
+  }, [openProjects])
+
   useEffect(() => {
     void hydrate()
   }, [hydrate])
@@ -68,6 +83,7 @@ export function SettingsPage({
         onSelect={setActive}
         onQueryChange={setQuery}
         onClose={onClose}
+        extraGroups={extraGroups}
       />
       <SettingsSearchContext.Provider value={query}>
         <main className="min-w-0 flex-1 overflow-y-auto px-12 py-10">
@@ -96,6 +112,13 @@ export function SettingsPage({
             <UpdatesSection isActive={active === 'updates'} />
             <PrivacySection isActive={active === 'privacy'} />
             <DebugSection isActive={active === 'debug'} />
+            {openProjects.map((p) => (
+              <ProjectSettingsSection
+                key={p.id}
+                projectId={p.id}
+                isActive={active === projectSectionId(p.id)}
+              />
+            ))}
           </div>
         </main>
       </SettingsSearchContext.Provider>
