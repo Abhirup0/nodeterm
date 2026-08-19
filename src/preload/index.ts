@@ -626,7 +626,11 @@ const api: NodeTerminalApi = {
     // this page can stop existing — window closed, renderer died, main-frame navigation (⌘R) —
     // but those are a backstop for a page that VANISHED, not a general safety net: an ordinary
     // disarm that never sends leaves the shortcuts suppressed until one of them happens.
-    setRecording: (active: boolean) => ipcRenderer.send(IPC.uiShortcutRecording, active)
+    setRecording: (active: boolean) => ipcRenderer.send(IPC.uiShortcutRecording, active),
+    // The terminal-focus mirror, same fire-and-forget shape and the same fail-safe reading on the
+    // far side: main starts at "not focused" and the three page-death resets return it there, so a
+    // report that never arrives costs the terminal-first policy, not the app's shortcuts.
+    setTerminalFocused: (focused: boolean) => ipcRenderer.send(IPC.uiTerminalFocus, focused)
   },
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),

@@ -371,7 +371,12 @@ export function buildStubApi(): Omit<
       // `before-input-event` intercepts down, and a browser tab has no application menu to steal
       // ⌘W/⌘M/⌘0 back from — nothing intercepts here, so there is nothing to suspend. The
       // recorder's own preventDefault/stopPropagation is the whole path in this shell.
-      setRecording: noop
+      setRecording: noop,
+      // Deliberate no-op for the same reason, one step further: the mirror exists so the DESKTOP's
+      // intercepts can stand down under `terminal-first`, and there are no intercepts here to
+      // stand down. The policy itself still works in the browser — it is enforced by the
+      // renderer's own dispatcher (`keyDispatchContextFor`), which reads focus directly.
+      setTerminalFocused: noop
     },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,

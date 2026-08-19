@@ -6,8 +6,8 @@
  * ShortcutsPanel, and tooltips cannot disagree.
  */
 import {
-  getEffectiveBindings, sanitizeKeybindingOverrides,
-  type CommandId, type KeybindingOverrides
+  getEffectiveBindings, sanitizeKeybindingOverrides, normalizeTerminalShortcutPolicy,
+  type CommandId, type KeybindingOverrides, type TerminalShortcutPolicy
 } from '@shared/keybindings'
 import { shortcutKeyParts } from '@shared/shortcut'
 import { isMacPlatform } from '@shared/platform-utils'
@@ -98,4 +98,35 @@ export function commandKeysFor(id: CommandId, isMac: boolean = isMacPlatform()):
  *  `''` = the user disabled it (dictation shortcut off; the mic button still works). */
 export function dictationBinding(): string {
   return effectiveBindings('speech.dictation')[0] ?? ''
+}
+
+/** Who wins while an xterm has focus. Read through the normalizer, NOT as the raw field: the
+ *  setting is hand-editable JSON, so its compile-time type is not a runtime guarantee, and an
+ *  unknown value must degrade to `app-first` (today's behavior) rather than reach dispatch. */
+export function terminalShortcutPolicy(): TerminalShortcutPolicy {
+  return normalizeTerminalShortcutPolicy(useSettings.getState().settings.terminalShortcutPolicy)
+}
+
+/** Once per command, ever (persisted in settings so Server Edition shares it): record that
+ *  app-first captured this command's chord from a focused terminal, and tell the banner.
+ *  Silent under terminal-first — nothing is being taken from the terminal there.
+ *
+ *  `seenShortcutCaptureNotices` is hand-editable too, so its SHAPE is guarded before use: a
+ *  string would make `.includes` answer true for any substring (swallowing the first notice),
+ *  and a number/object would throw inside a keydown handler. Anything that is not an array of
+ *  strings is treated as empty and REPLACED by a clean array on the next write.
+ *
+ *  The event is window-guarded because this module is imported by node-environment unit
+ *  tests (the same guard `state/settings.ts` carries for its save timer); the settings write
+ *  is the durable half and happens either way. */
+export function noteTerminalCapture(id: CommandId): void {
+  if (terminalShortcutPolicy() !== 'app-first') return
+  const state = useSettings.getState()
+  const raw = state.settings.seenShortcutCaptureNotices
+  const seen = Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string') : []
+  if (seen.includes(id)) return
+  state.update({ seenShortcutCaptureNotices: [...seen, id] })
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('nodeterm:shortcut-captured', { detail: { commandId: id } }))
+  }
 }

@@ -41,15 +41,29 @@ describe('isTypingTarget', () => {
 
 describe('keyDispatchContextFor', () => {
   it('typing and terminal are disjoint by construction', () => {
-    expect(keyDispatchContextFor(el('TEXTAREA', { classes: [XTERM_INPUT_CLASS] }), false)).toEqual({
+    expect(
+      keyDispatchContextFor(el('TEXTAREA', { classes: [XTERM_INPUT_CLASS] }), false, false)
+    ).toEqual({
       typing: false,
       terminal: true,
-      kanbanOpen: false
+      kanbanOpen: false,
+      terminalFirst: false
     })
-    expect(keyDispatchContextFor(el('INPUT'), true)).toEqual({
+    expect(keyDispatchContextFor(el('INPUT'), true, false)).toEqual({
       typing: true,
       terminal: false,
-      kanbanOpen: true
+      kanbanOpen: true,
+      terminalFirst: false
+    })
+  })
+  it('carries the terminal-first policy through as given', () => {
+    expect(
+      keyDispatchContextFor(el('TEXTAREA', { classes: [XTERM_INPUT_CLASS] }), false, true)
+    ).toEqual({
+      typing: false,
+      terminal: true,
+      kanbanOpen: false,
+      terminalFirst: true
     })
   })
 })

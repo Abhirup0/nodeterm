@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { createServer } from 'http'
 import { spawnSync } from 'child_process'
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
@@ -734,19 +737,24 @@ describe('exposeForeignThread — PR 3 primitive + verify-then-recycle (§4.2a, 
     const { root, threadId, sourceSocket, targetSocket, sourceRollout, targetRollout } = setup()
     // A DIFFERENT, unrelated rollout (distinct inode) already sits where the copy would land.
     writeFileSync(targetRollout, 'a different conversation')
-    const differentIno = statSync(targetRollout).ino
     const stopSource = await fakeAccountServer(sourceSocket, (id) =>
       id === threadId ? { id, path: sourceRollout, cwd: '/repo' } : null
     )
     const stopTarget = await fakeAccountServer(targetSocket, () => null)
+    // Hold ONE descriptor open across the whole operation. never-overwrite means the target inode is
+    // never replaced, so the same open file object before and after the expose proves the target
+    // survived untouched — a stronger claim than re-opening the path, and no stat-then-read race.
+    const heldFd = openSync(targetRollout, 'r')
+    const differentIno = fstatSync(heldFd).ino
     try {
       await expect(
         exposeForeignThread(targetSocket, threadId, [targetSocket, sourceSocket])
       ).rejects.toThrow('different rollout')
-      // The pre-existing target is byte- and inode-preserved: never overwritten, never rolled back.
-      expect(statSync(targetRollout).ino).toBe(differentIno)
-      expect(readFileSync(targetRollout, 'utf8')).toBe('a different conversation')
+      // Same held fd: inode unchanged and contents intact ⇒ never overwritten, never rolled back.
+      expect(fstatSync(heldFd).ino).toBe(differentIno)
+      expect(readFileSync(heldFd, 'utf8')).toBe('a different conversation')
     } finally {
+      closeSync(heldFd)
       await Promise.all([stopSource(), stopTarget()])
       rmSync(root, { recursive: true, force: true })
     }
@@ -861,12 +869,23 @@ describe('relay self-spawn + token transport (probe U6, GC 6 argv-spy)', () => {
       // The node token is not echoed back into the relay's stdout.
       expect(ok.stdout).not.toContain(token)
 
-      // The control token lives only in the 0600 state file, and it is not the node token.
+      // The control token lives only in the 0600 state file, and it is not the node token. One
+      // descriptor proves the mode AND the contents belong to the same inode — no stat-then-read
+      // race on the state path.
       const statePath = path.join(home, '.nodeterm', 'codex-relay-v6.json')
-      const state = JSON.parse(readFileSync(statePath, 'utf8')) as { token: string; pid: number }
-      expect((statSync(statePath).mode & 0o777).toString(8)).toBe('600')
+      const stateFd = openSync(statePath, 'r')
+      let raw: string
+      let mode: number
+      try {
+        mode = fstatSync(stateFd).mode & 0o777
+        raw = readFileSync(stateFd, 'utf8')
+      } finally {
+        closeSync(stateFd)
+      }
+      const state = JSON.parse(raw) as { token: string; pid: number }
+      expect(mode.toString(8)).toBe('600')
       expect(state.token).not.toBe(token)
-      expect(readFileSync(statePath, 'utf8')).not.toContain(token)
+      expect(raw).not.toContain(token)
 
       // Tear down the detached serve child the round-trip spawned.
       try {

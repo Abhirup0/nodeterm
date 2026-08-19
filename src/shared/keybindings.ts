@@ -363,6 +363,18 @@ export function sanitizeKeybindingOverrides(
   return { overrides, warnings }
 }
 
+/** Who wins while an xterm has focus. 'app-first' (default): allowInTerminal app commands still
+ *  fire (today's behavior). 'terminal-first': ONLY scope:'terminal' commands fire; everything
+ *  else — allowInTerminal app commands, the main-intercepted ⌘W/⌘M, the registry-less gestures —
+ *  reaches the PTY. NOTE: the naive reading "terminal-first = the existing allowInTerminal gate"
+ *  is vacuous here — that gate IS app-first; this flag tightens past it. */
+export type TerminalShortcutPolicy = 'app-first' | 'terminal-first'
+
+/** Unknown/legacy values read as app-first (the safe, current-behavior direction). */
+export function normalizeTerminalShortcutPolicy(v: unknown): TerminalShortcutPolicy {
+  return v === 'terminal-first' ? 'terminal-first' : 'app-first'
+}
+
 /** `typing` and `terminal` are expected to be DISJOINT — xterm's hidden textarea is a terminal,
  *  not a typing surface, so a caller classifying focus must not report both. If one does anyway,
  *  `typing` wins (it is checked first) and every terminal-scope command becomes unreachable. */
@@ -373,6 +385,9 @@ export interface KeyDispatchContext {
   terminal: boolean
   /** The kanban board is open for the active project. */
   kanbanOpen: boolean
+  /** terminal-first policy is active: while `terminal` is true, only scope:'terminal' commands
+   *  may resolve (allowInTerminal is an app-first concept). Inert when `terminal` is false. */
+  terminalFirst: boolean
 }
 
 /** Pure dispatch core: the first registry command (source order) whose effective bindings
@@ -398,7 +413,9 @@ export function resolveCommandForKeyEvent(
     // `{"speech.dictation": ["Cmd+0"]}` would silently kill zoom-to-100%.
     if (def.id === 'speech.dictation') continue
     if (ctx.typing && !def.allowWhileTyping) continue
-    if (ctx.terminal && !(def.scope === 'terminal' || def.allowInTerminal)) continue
+    if (ctx.terminal) {
+      if (def.scope !== 'terminal' && (ctx.terminalFirst || !def.allowInTerminal)) continue
+    }
     if (!ctx.terminal && def.scope === 'terminal') continue
     if (ctx.kanbanOpen && def.scope === 'canvas') continue
     for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {

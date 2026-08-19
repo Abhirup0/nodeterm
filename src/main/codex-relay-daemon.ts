@@ -40,9 +40,12 @@
  *      remote leg (uploaded `codex-relay.js` via `nodeterm-codex`) needs a live SSH host — owed. */
 import { createHash, randomUUID, timingSafeEqual } from 'crypto'
 import {
+  closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -403,12 +406,45 @@ export function acquireProcessLock(lock: string): boolean {
     }
   }
   if (attempt()) return true
+  // Read the lock's type, mtime and (legacy-file) owner from ONE descriptor, and the directory
+  // owner file from ONE open+read — never a `statSync(path)` followed by a `readFileSync(path)` on
+  // the same path (that check-then-use is a real fs race; here the fd IS the check-and-use, one
+  // inode). Same liveness semantics as before: a live pid holds the lock; a missing owner inside a
+  // fresh directory is the post-mkdir/pre-write window and is left alone for a grace period.
   let owner = 0
   let directory = false
+  let lockMtimeMs = 0
+  let fd: number | undefined
   try {
-    directory = statSync(lock).isDirectory()
-    owner = Number(readFileSync(directory ? path.join(lock, 'owner') : lock, 'utf8').trim())
-  } catch {}
+    fd = openSync(lock, 'r')
+    const stat = fstatSync(fd)
+    directory = stat.isDirectory()
+    lockMtimeMs = stat.mtimeMs
+    if (!directory) owner = Number(readFileSync(fd, 'utf8').trim())
+  } catch {
+    /* the lock vanished after our attempt failed — nothing to reclaim */
+  } finally {
+    if (fd !== undefined)
+      try {
+        closeSync(fd)
+      } catch {}
+  }
+  if (directory) {
+    // The owner file is a child of the lock directory; read it in a single open+read (no prior
+    // stat), so a missing owner surfaces as an open error, not a separate existence check.
+    let ownerFd: number | undefined
+    try {
+      ownerFd = openSync(path.join(lock, 'owner'), 'r')
+      owner = Number(readFileSync(ownerFd, 'utf8').trim())
+    } catch {
+      /* no owner file yet: the tiny post-mkdir/pre-write window */
+    } finally {
+      if (ownerFd !== undefined)
+        try {
+          closeSync(ownerFd)
+        } catch {}
+    }
+  }
   if (owner > 0) {
     try {
       process.kill(owner, 0)
@@ -417,12 +453,9 @@ export function acquireProcessLock(lock: string): boolean {
   }
   if (directory && owner <= 0) {
     // A missing owner is the tiny post-mkdir/pre-write window of a live contender. Only reclaim it
-    // after it has remained incomplete long enough that the creator demonstrably died.
-    try {
-      if (Date.now() - statSync(lock).mtimeMs < 10_000) return false
-    } catch {
-      return false
-    }
+    // after it has remained incomplete long enough that the creator demonstrably died. `lockMtimeMs`
+    // came from the same `fstatSync` above — no extra stat, no new race.
+    if (Date.now() - lockMtimeMs < 10_000) return false
   }
   try {
     if (directory) rmSync(lock, { recursive: true, force: true })
@@ -459,6 +492,12 @@ export function relayControlPost(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body)
+    // LOOPBACK-ONLY IPC, not an external request. The hostname is the hardcoded literal `127.0.0.1`
+    // (never a variable, never a remote host); the only recipient is THIS machine's own relay daemon
+    // on an ephemeral loopback port, gated by the per-process control token read from the relay's own
+    // `0600` state file and compared with `timingSafeEqual` on the far side. No file content is
+    // exfiltrated off-box: the "file data" a taint tracker sees is that local capability token
+    // travelling to the local socket that minted it. See docs/superpowers/probes for the transport.
     const req = request(
       {
         hostname: '127.0.0.1',

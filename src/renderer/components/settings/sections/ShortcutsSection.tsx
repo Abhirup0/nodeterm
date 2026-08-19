@@ -28,9 +28,11 @@ import {
   findKeybindingConflicts,
   findMainInterceptShadowing,
   MAIN_INTERCEPTED_COMMAND_IDS,
+  normalizeTerminalShortcutPolicy,
   type CommandDefinition,
   type CommandGroup,
-  type CommandId
+  type CommandId,
+  type TerminalShortcutPolicy
 } from '@shared/keybindings'
 import { formatShortcut } from '@shared/shortcut'
 import { isMacPlatform, keyLabel } from '@shared/platform-utils'
@@ -46,6 +48,7 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { ShortcutRecorderButton } from '../ShortcutRecorderButton'
 import { Button } from '@renderer/ui/Button'
+import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { useSettingsSearch } from '../context'
 import { matchesQuery, type SettingsSearchEntry } from '../search'
 
@@ -58,6 +61,18 @@ const NOTES: Partial<Record<CommandId, string>> = {
     'With a key = toggle (press to start, press again to stop and insert); modifiers only = hold to talk (hold to record, release to stop and insert). The Dock mic uses the same shortcut.',
   'canvas.deleteSelection': 'Bare keys are allowed here; the typing guard keeps Backspace safe.',
   'terminal.copySelection': 'Applies to a selection xterm owns — a tmux drag copies through OSC 52.'
+}
+
+/** The policy row is NOT a registry command, so it carries its own search entry and its own
+ *  `SearchableRow` — putting it inside a group Fragment would make `groupVisible` (which only
+ *  knows about commands) decide whether a *setting* is on screen. */
+const POLICY_LABEL = 'While a terminal has focus'
+const POLICY_DESCRIPTION =
+  "App shortcuts first (the default): shared shortcuts like ⌘K keep working over a focused terminal, and the first time one is captured that way the terminal says so — once per chord, ever. Terminal first: every chord but the terminal's own reaches the shell or TUI, including Close (⌘W / Ctrl+W), Minimize (⌘M / Ctrl+M), actual size (⌘0), the kanban board (⌘⇧B), Settings (⌘,) and the ⌘1–9 project jumps — the matching application-menu entries grey out while a terminal is focused, so those chords can reach it. Reload (⌘R / ⌘⇧R) is the one exception and always stays with the app, so a stuck window can still be recovered."
+const POLICY_ROW: SettingsSearchEntry = {
+  title: POLICY_LABEL,
+  description: POLICY_DESCRIPTION,
+  keywords: ['shortcut', 'terminal', 'tui', 'shell', 'policy', 'first', 'capture', 'minimize']
 }
 
 function rowEntry(def: CommandDefinition): SettingsSearchEntry {
@@ -184,6 +199,14 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
   // Any remap re-renders every row: chips, and the Add/Disable/Reset visibility, are all derived
   // from the override map.
   const overrides = useSettings((s) => s.settings.keybindings)
+  // Read through the normalizer, never as the raw field: settings.json is hand-editable, so the
+  // compile-time type is not a runtime guarantee and an unknown value must render as `app-first`
+  // — the same degrade `terminalShortcutPolicy()` applies at dispatch, so the pill cannot show a
+  // policy the dispatcher is not using.
+  const policy = normalizeTerminalShortcutPolicy(
+    useSettings((s) => s.settings.terminalShortcutPolicy)
+  )
+  const update = useSettings((s) => s.update)
   const query = useSettingsSearch()
   const [errors, setErrors] = useState<Partial<Record<CommandId, string>>>({})
 
@@ -197,6 +220,7 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
 
   const entries = useMemo(
     () => [
+      POLICY_ROW,
       ...groups.map(([group, defs]) => groupEntry(group, defs)),
       ...COMMAND_DEFINITIONS.map(rowEntry)
     ],
@@ -224,6 +248,26 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
       isActive={isActive}
       searchEntries={entries}
     >
+      <SearchableRow {...POLICY_ROW}>
+        <div data-setting="terminal-shortcut-policy">
+          <FieldRow
+            label={POLICY_LABEL}
+            description={POLICY_DESCRIPTION}
+            control={
+              <SegmentedPill<TerminalShortcutPolicy>
+                value={policy}
+                ariaLabel={POLICY_LABEL}
+                options={[
+                  { value: 'app-first', label: 'App shortcuts first' },
+                  { value: 'terminal-first', label: 'Terminal first' }
+                ]}
+                onChange={(v) => update({ terminalShortcutPolicy: v })}
+              />
+            }
+          />
+        </div>
+      </SearchableRow>
+
       {groups.map(([group, defs]) => {
         // A group whose header AND every row are filtered out must not render at all. The shell's
         // body is `divide-y [&>*]:py-5`, so an empty wrapper is not invisible — it draws a padded
