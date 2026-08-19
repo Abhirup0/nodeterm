@@ -65,7 +65,8 @@ export interface GlobalKeydownDeps {
 export function dispatchGlobalKeydown(e: GlobalKeyEvent, deps: GlobalKeydownDeps): boolean {
   // A child handler (find bar, dialogs, terminal) that already claimed the key wins outright.
   if (e.defaultPrevented) return false
-  const ctx = keyDispatchContextFor(deps.activeElement(), deps.kanbanOpen())
+  // Task 2 threads the real policy (a deps thunk); app-first until then, which is today's behavior.
+  const ctx = keyDispatchContextFor(deps.activeElement(), deps.kanbanOpen(), false)
   // Keyed dictation predates the registry and may deliberately collide with a default; it
   // keeps first claim, but only in plain app focus (its old guard blocked inputs AND xterm).
   if (!ctx.typing && !ctx.terminal && !ctx.kanbanOpen && deps.gestures.keyedDictation(e)) return true
