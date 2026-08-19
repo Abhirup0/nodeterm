@@ -13,7 +13,32 @@ export interface SshSetupRef {
   controlPath: string
 }
 
+/**
+ * The FULL identity a setup run must be resolved against. Not just the remote cwd: the default
+ * remoteCwd is `~`, so cwd alone collides across every project that never picked a directory, and
+ * host+user alone collides across ports (containers / hosts behind one NAT are routinely the same
+ * `user@host` on different ports). Resolving on anything less either runs the script on the wrong
+ * machine or permanently refuses one of two legitimate projects. `port` absent = ssh's default 22.
+ */
+export interface SshSetupEndpoint {
+  host: string
+  user: string
+  port?: number
+  remoteCwd: string
+}
+
 type SshTarget = NonNullable<ProjectSetupTarget['ssh']>
+
+/** `user@host` for a message, with the port only when it is not the default (a `:22` in every
+ *  refusal would be noise; a non-default port is exactly the detail that explains the refusal). */
+function endpointLabel(e: { host: string; user: string; port?: number }): string {
+  return e.port !== undefined && e.port !== 22 ? `${e.user}@${e.host}:${e.port}` : `${e.user}@${e.host}`
+}
+
+/** Same endpoint? Ports compare by EFFECTIVE value, so `undefined` and `22` are one host. */
+function sameEndpoint(a: { host: string; user: string; port?: number }, b: { host: string; user: string; port?: number }): boolean {
+  return a.host === b.host && a.user === b.user && (a.port ?? 22) === (b.port ?? 22)
+}
 
 /** `ssh` itself uses 255 for "could not run the command at all" (auth failure, dead link, unknown
  *  host). Every refusal below reports the same code deliberately: to the UI, "the remote never ran
@@ -86,7 +111,7 @@ export function buildSetupRemoteCommand(cwd: string, env: Record<string, string>
  * never something to retry. The manager's watchdog is what repairs masters; this file only reports.
  */
 export function makeSshSetupRunner(
-  resolveRef: (remoteCwd: string) => SshSetupRef | null | undefined,
+  resolveRef: (endpoint: SshSetupEndpoint) => SshSetupRef | null | undefined,
   opts?: { timeoutMs?: number; sshPath?: () => string; agentEnv?: () => Record<string, string> }
 ): ProjectSetupRunner {
   const timeoutMs = opts?.timeoutMs ?? SETUP_TIMEOUT_MS
@@ -118,9 +143,16 @@ export function makeSshSetupRunner(
         return
       }
       const target: SshTarget = ssh
+      // The whole endpoint goes to the resolver, never the cwd alone — see `SshSetupEndpoint`.
+      const endpoint: SshSetupEndpoint = {
+        host: target.server.host,
+        user: target.server.user,
+        port: target.server.port,
+        remoteCwd: target.remoteCwd
+      }
       let ref: SshSetupRef | null | undefined
       try {
-        ref = resolveRef(target.remoteCwd)
+        ref = resolveRef(endpoint)
       } catch (e) {
         // The injected resolver reaches into the ssh-project manager; a throw there must degrade to
         // a reported failure, never to a rejected runner promise (`ProjectSetupRunner` NEVER
@@ -129,17 +161,19 @@ export function makeSshSetupRunner(
         return
       }
       if (!ref) {
-        refuse(`Cannot run: not connected to ${target.server.user}@${target.server.host}.`)
+        // "No live connection for THIS endpoint" — which covers both a disconnected project and one
+        // whose only matching-cwd connection belongs to a different machine. Never a reason to dial:
+        // connecting is the manager's job, and doing it here would be a login per failed run.
+        refuse(`Cannot run: not connected to ${endpointLabel(endpoint)} (${endpoint.remoteCwd}).`)
         return
       }
-      // The ref is resolved by remote PATH, and two different hosts can absolutely both have
-      // `/srv/app`. Running the project's script against whichever connection happened to match the
-      // path first would execute it on a machine the target never named — so the resolved
-      // connection must BE the one the (machine-local, non-renderer) target describes.
-      if (ref.conn.host !== target.server.host || ref.conn.user !== target.server.user) {
+      // Defense in depth, not the primary check (the resolver owns matching): a resolver that ever
+      // answered with a connection to a machine the target never named would execute the project's
+      // script there. Cheap to verify, and the failure it prevents is unrecoverable.
+      if (!sameEndpoint(ref.conn, target.server)) {
         refuse(
-          `Cannot run: the live connection for ${target.remoteCwd} is ` +
-            `${ref.conn.user}@${ref.conn.host}, not ${target.server.user}@${target.server.host}.`
+          `Cannot run: the resolved connection for ${endpoint.remoteCwd} is ` +
+            `${endpointLabel(ref.conn)}, not ${endpointLabel(endpoint)}.`
         )
         return
       }
@@ -159,12 +193,26 @@ export function makeSshSetupRunner(
         return
       }
 
-      // NO process group here, unlike the local runner's `detached` + `kill(-pid)`. The thing worth
-      // killing lives on the OTHER machine, and killing a process group locally cannot reach it:
-      // what ends the remote work is the CHANNEL closing. SIGKILL on the local ssh client tears the
-      // session down, the remote sshd sees EOF and SIGHUPs the command it started, and our pipes
-      // close because the only process holding them is this child. (A `detached` ssh client would
-      // also be a nohup-shaped liability of its own: an orphaned mux client outliving the app.)
+      // SIGKILL the LOCAL ssh client, and no process group — unlike the local runner, which needs
+      // `detached` + `kill(-pid)` because the script's children are on THIS machine holding OUR
+      // pipes. Here the only local process is the mux client: killing it closes the channel, our
+      // pipes close with it, and the run finishes promptly. That prompt finish is what cancel and
+      // timeout actually owe the user.
+      //
+      // ── WHAT THIS DOES NOT DO: END THE REMOTE COMMAND ───────────────────────────────────────────
+      // There is no `-t` here (a setup script must not be handed a tty), so the remote session has
+      // no controlling terminal and sshd delivers NO SIGHUP when the channel closes — it just closes
+      // the command's pipes. The remote `sh -lc …` therefore keeps running until it next writes to a
+      // closed stdout and takes SIGPIPE, which for a quiet or output-buffered script may be a long
+      // time, or never. Killing a local process group cannot change this: the work is on another
+      // machine. (`detached` would additionally be its own liability — an orphaned mux client
+      // outliving the app.)
+      //
+      // The consequence to know before trusting cancel: single-flight is enforced LOCALLY (the
+      // service's runKey map, which this kill releases), so a re-run started right after a cancel
+      // can race a still-live remote command — two `npm install`s in one checkout. Ending the remote
+      // side for real would need a wrapper that records a remote pid and a second connection to kill
+      // it; that is deliberately not in this task. The user is told instead (chunk below).
       const kill = (): void => {
         try {
           child.kill('SIGKILL')
@@ -173,9 +221,19 @@ export function makeSshSetupRunner(
         }
       }
 
-      const timeoutTimer = setTimeout(kill, timeoutMs)
+      // Say the true thing at the moment it becomes relevant, rather than letting "cancelled" imply
+      // a stop that did not happen. (Swallowed if the run already blew the output cap — in which
+      // case the truncation note has already told the user the transcript is incomplete.)
+      const REMOTE_MAY_SURVIVE = 'the remote command may still be running on the host'
+      const timeoutTimer = setTimeout(() => {
+        append(`\n[timed out — killed the local ssh client; ${REMOTE_MAY_SURVIVE}]\n`)
+        kill()
+      }, timeoutMs)
       timeoutTimer.unref?.()
-      const onAbort = (): void => kill()
+      const onAbort = (): void => {
+        append(`\n[cancelled — killed the local ssh client; ${REMOTE_MAY_SURVIVE}]\n`)
+        kill()
+      }
       signal.addEventListener('abort', onAbort)
 
       const finish = (exitCode: number): void => {

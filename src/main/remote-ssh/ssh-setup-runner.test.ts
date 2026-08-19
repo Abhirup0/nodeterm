@@ -10,7 +10,9 @@ vi.mock('node:child_process', async (importOriginal) => {
   return { ...actual, spawn: spawnMock }
 })
 
-import { makeSshSetupRunner, type SshSetupRef } from './ssh-setup-runner'
+import { makeSshSetupRunner, type SshSetupEndpoint, type SshSetupRef } from './ssh-setup-runner'
+import { SshProjectManager } from './ssh-project'
+import { controlPathFor } from '../../core/remote-ssh/control-master'
 
 /** The child `spawn` returns: an EventEmitter with `stdout`/`stderr` emitters and a spy `kill`. */
 class FakeChild extends EventEmitter {
@@ -76,9 +78,9 @@ describe('makeSshSetupRunner', () => {
       script?: string
       cwd?: string
       env?: Record<string, string>
-      resolveRef?: (remoteCwd: string) => SshSetupRef | null
+      resolveRef?: (endpoint: SshSetupEndpoint) => SshSetupRef | null
       timeoutMs?: number
-      ssh?: typeof ssh | undefined
+      ssh?: { server: { host: string; user: string; port?: number }; remoteCwd: string } | undefined
       signal?: AbortSignal
     } = {}
   ) => {
@@ -114,12 +116,68 @@ describe('makeSshSetupRunner', () => {
     expect(argv()).toContain('deploy@example.test')
   })
 
+  it('hands the resolver the FULL endpoint, not just the remote cwd', async () => {
+    const seen: SshSetupEndpoint[] = []
+    const { promise } = run({
+      ssh: { server: { host: 'example.test', user: 'deploy', port: 2222 }, remoteCwd: '/srv/app' },
+      resolveRef: (e) => {
+        seen.push(e)
+        return { conn: { host: 'example.test', user: 'deploy', port: 2222 }, controlPath: '/tmp/c.sock' }
+      }
+    })
+    child.emit('close', 0)
+    await promise
+    expect(seen).toEqual([{ host: 'example.test', user: 'deploy', port: 2222, remoteCwd: '/srv/app' }])
+  })
+
+  it('refuses a resolved connection on the WRONG PORT (same user@host is not the same machine)', async () => {
+    const { promise, chunks } = run({
+      ssh: { server: { host: 'example.test', user: 'deploy', port: 2222 }, remoteCwd: '/srv/app' },
+      resolveRef: () => ({ conn: { host: 'example.test', user: 'deploy', port: 2022 }, controlPath: '/tmp/c.sock' })
+    })
+    const result = await promise
+    expect(result.exitCode).toBe(255)
+    expect(chunks.join('')).toContain('deploy@example.test:2022')
+    expect(spawnMock).not.toHaveBeenCalled()
+  })
+
+  it('treats an absent port and an explicit 22 as the same endpoint', async () => {
+    const { promise } = run({
+      ssh: { server: { host: 'example.test', user: 'deploy', port: 22 }, remoteCwd: '/srv/app' },
+      resolveRef: () => ref // conn has no `port` at all
+    })
+    child.emit('close', 0)
+    const result = await promise
+    expect(result.exitCode).toBe(0)
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+  })
+
   it('the remote command cds into the quoted remote cwd and runs the script through sh -lc', async () => {
     const { promise } = run({ script: 'make build', cwd: '/srv/app' })
     child.emit('close', 0)
     await promise
     expect(remoteCommand()).toContain(`cd '/srv/app' &&`)
     expect(remoteCommand()).toContain(`sh -lc 'make build'`)
+  })
+
+  // The whole reason the `cd` uses quoteRemotePath instead of posixQuote: single quotes suppress
+  // tilde expansion, and `~` is the DEFAULT remoteCwd — `cd '~/app'` would look for a directory
+  // literally named `~`. Swapping back to posixQuote must fail this pair.
+  it('leaves a leading ~ bare so the remote shell expands it, quoting the rest of the path', async () => {
+    const { promise } = run({ cwd: '~/app' })
+    child.emit('close', 0)
+    await promise
+    expect(remoteCommand()).toContain(`cd ~/'app' &&`)
+    expect(remoteCommand()).not.toContain(`cd '~/app'`)
+  })
+
+  it('a bare ~ is the whole carve-out: a ~-prefixed hostile path is still fully quoted', async () => {
+    const { promise } = run({ cwd: '~$(touch /tmp/pwned)' })
+    child.emit('close', 0)
+    await promise
+    const cmd = remoteCommand()
+    expect(cmd).toContain(`cd '~$(touch /tmp/pwned)' &&`)
+    expect(unquotedPart(cmd)).not.toContain('$(')
   })
 
   it('inlines the env as quoted assignments (ssh forwards no local env)', async () => {
@@ -204,6 +262,26 @@ describe('makeSshSetupRunner', () => {
     expect(spawnMock).toHaveBeenCalledTimes(1)
   })
 
+  it('says out loud that a cancel does NOT stop the remote command', async () => {
+    const controller = new AbortController()
+    const { promise, chunks } = run({ signal: controller.signal, timeoutMs: 60_000 })
+    controller.abort()
+    child.emit('close', null)
+    await promise
+    const combined = chunks.join('')
+    expect(combined).toContain('cancelled')
+    expect(combined).toContain('may still be running')
+  })
+
+  it('says the same about a timeout kill', async () => {
+    const { promise, chunks } = run({ timeoutMs: 10 })
+    await new Promise((r) => setTimeout(r, 40))
+    child.emit('close', null)
+    await promise
+    expect(chunks.join('')).toContain('timed out')
+    expect(chunks.join('')).toContain('may still be running')
+  })
+
   it('refuses to start when already aborted', async () => {
     const controller = new AbortController()
     controller.abort()
@@ -282,5 +360,81 @@ describe('makeSshSetupRunner', () => {
     expect(result.exitCode).toBe(255)
     expect(chunks.join('')).toContain('Connection refused')
     expect(spawnMock).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * The resolver seam against the REAL manager, wired exactly as `src/main/index.ts` wires it. A
+   * fake resolver could not catch the two collisions that made cwd-only resolution wrong, because
+   * the collision lives in the LOOKUP, not in the runner.
+   */
+  describe('resolved through SshProjectManager.refForEndpoint (as main wires it)', () => {
+    const makeMgr = (): SshProjectManager =>
+      new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run: vi.fn(async () => ({ code: 0, stdout: '' })),
+        runScp: vi.fn(async () => ({ code: 0 })),
+        getHook: () => ({ port: 51234, token: 'tok', version: '1' }),
+        onStatus: () => {}
+      })
+
+    const runVia = (mgr: SshProjectManager, target: { server: { host: string; user: string; port?: number }; remoteCwd: string }) => {
+      const runner = makeSshSetupRunner((endpoint) => mgr.refForEndpoint(endpoint) ?? null, {
+        sshPath: () => '/usr/bin/ssh',
+        agentEnv: () => ({})
+      })
+      const chunks: string[] = []
+      const promise = runner({
+        script: 'echo hi',
+        cwd: target.remoteCwd,
+        env: {},
+        onChunk: (t) => chunks.push(t),
+        signal: new AbortController().signal,
+        ssh: target
+      })
+      return { promise, chunks }
+    }
+
+    it('picks the connection on the TARGET port when one user@host is live on two ports', async () => {
+      const mgr = makeMgr()
+      await mgr.connect('p-2022', { host: 'h', user: 'u', port: 2022 }, '/srv/app')
+      await mgr.connect('p-2222', { host: 'h', user: 'u', port: 2222 }, '/srv/app')
+
+      const { promise } = runVia(mgr, { server: { host: 'h', user: 'u', port: 2222 }, remoteCwd: '/srv/app' })
+      child.emit('close', 0)
+      expect((await promise).exitCode).toBe(0)
+      expect(argv()).toContain(`ControlPath=${controlPathFor('p-2222')}`)
+      expect(argv().join(' ')).toContain('-p 2222')
+    })
+
+    it('refuses when only the WRONG-port connection is live — no spawn, no dial', async () => {
+      const mgr = makeMgr()
+      await mgr.connect('p-2022', { host: 'h', user: 'u', port: 2022 }, '/srv/app')
+
+      const { promise, chunks } = runVia(mgr, { server: { host: 'h', user: 'u', port: 2222 }, remoteCwd: '/srv/app' })
+      expect((await promise).exitCode).toBe(255)
+      expect(chunks.join('')).toContain('u@h:2222')
+      expect(spawnMock).not.toHaveBeenCalled()
+    })
+
+    it('two hosts sharing the default remoteCwd each resolve to their OWN connection', async () => {
+      const mgr = makeMgr()
+      await mgr.connect('p-a', { host: 'a.test', user: 'u' }, '~')
+      await mgr.connect('p-b', { host: 'b.test', user: 'u' }, '~')
+
+      const a = runVia(mgr, { server: { host: 'a.test', user: 'u' }, remoteCwd: '~' })
+      child.emit('close', 0)
+      expect((await a.promise).exitCode).toBe(0)
+      expect(argv()).toContain(`ControlPath=${controlPathFor('p-a')}`)
+
+      spawnMock.mockReset()
+      const secondChild = new FakeChild()
+      spawnMock.mockReturnValue(secondChild)
+      const b = runVia(mgr, { server: { host: 'b.test', user: 'u' }, remoteCwd: '~' })
+      secondChild.emit('close', 0)
+      expect((await b.promise).exitCode).toBe(0)
+      expect(argv()).toContain(`ControlPath=${controlPathFor('p-b')}`)
+      expect(b.chunks.join('')).not.toContain('Cannot run')
+    })
   })
 })

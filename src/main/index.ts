@@ -358,12 +358,14 @@ const projectSetupService = new ProjectSetupService({
   trust: projectTrustStore,
   readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
   runLocal: makeLocalSetupRunner(),
-  // The ssh leg streams over the project's LIVE ControlMaster, resolved lazily by remote cwd (the
-  // manager is created only once the window is ready) — the same seam remote git uses. A
-  // disconnected project resolves to null and the runner reports that as a failed run rather than
-  // dialing a fresh connection. Server Edition has no ssh-project manager at all, so it wires
-  // `runLocal` only and an ssh target there stays `{status:'skipped', reason:'unavailable'}`.
-  runSsh: makeSshSetupRunner((remoteCwd) => sshProjectManager?.refForRemoteCwd(remoteCwd) ?? null)
+  // The ssh leg streams over the project's LIVE ControlMaster, resolved lazily (the manager is
+  // created only once the window is ready) on the FULL endpoint — host+user+port+remoteCwd, not the
+  // cwd alone: the default remoteCwd is `~`, and one `user@host` can be several machines on
+  // different ports. A project with no matching live connection resolves to null and the runner
+  // reports that as a failed run rather than dialing a fresh connection. Server Edition has no
+  // ssh-project manager at all, so it wires `runLocal` only and an ssh target there stays
+  // `{status:'skipped', reason:'unavailable'}`.
+  runSsh: makeSshSetupRunner((endpoint) => sshProjectManager?.refForEndpoint(endpoint) ?? null)
 })
 registerProjectSetupHandlers(corePlatform, projectSetupService, {
   projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
