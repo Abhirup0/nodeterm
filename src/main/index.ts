@@ -1307,12 +1307,12 @@ app.whenReady().then(async () => {
   // workspace that no longer holds it) is free to be re-claimed; one whose owner is still there is
   // not, and the launcher then falls back rather than putting two clients on one conversation.
   const codexNodeIsLive = (nodeId: string): boolean => !!workspaceStore.getNode(nodeId)
-  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint }) => {
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId }) => {
     const threadId = await startCodexThread(cwd)
-    writeCodexThreadIdentity(threadId, nodeId, hookEndpoint)
+    writeCodexThreadIdentity(threadId, nodeId, hookEndpoint, undefined, accountId)
     return threadId
   })
-  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint }) => {
+  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint, accountId }) => {
     // Ask the app-server whether this conversation exists BEFORE recording that a node owns it.
     // The id reaching us is whatever the node persisted — it can be stale, or from a session that
     // ran under plain codex and the shared server has never heard of. Binding it anyway writes a
@@ -1321,7 +1321,7 @@ app.whenReady().then(async () => {
     if (!(await codexThreadExists(threadId))) {
       throw new Error('Codex thread is unknown to the shared app-server')
     }
-    bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive)
+    bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive, undefined, accountId)
   })
   // SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
   // passphrase-protected identity file's prompt back through the app instead of failing auth.
