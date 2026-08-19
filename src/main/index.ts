@@ -498,6 +498,41 @@ let activeRemote: { cwd: string; ref: GitRemoteRef } | null = null
 // True from the first before-quit on: lets window close-events through (see hide-on-close).
 let quitting = false
 
+// Confirm-before-quit gate. Set once the user has answered "Quit" in the dialog below, or when
+// a quit is app-initiated rather than user-initiated (auto-update restart) and should not be
+// interrupted by a prompt for a decision already made. `pending` dedupes concurrent triggers
+// (shortcut + menu + window-close firing in the same tick) into a single dialog.
+let quitConfirmed = false
+let skipQuitConfirmation = false
+let quitConfirmationPending = false
+
+/** Resolves true once quitting may proceed. Shows a native confirm dialog (all platforms) on
+ * first call; a Quit answer is remembered so the re-issued app.quit() below is not re-prompted.
+ * Read at ASK TIME, not captured: the Settings toggle must apply to the very next ⌘Q. */
+function confirmQuit(parentWin: BrowserWindow | null): Promise<boolean> {
+  if (!settingsStore.get().confirmBeforeQuit) return Promise.resolve(true)
+  if (quitConfirmed || skipQuitConfirmation) return Promise.resolve(true)
+  if (quitConfirmationPending) return Promise.resolve(false)
+  quitConfirmationPending = true
+  const opts = {
+    type: 'question' as const,
+    buttons: ['Cancel', 'Quit'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'Quit nodeterm?',
+    message: 'Quit nodeterm?',
+    detail: 'Terminal sessions keep running in the background and will still be here next time you open nodeterm.'
+  }
+  const p =
+    parentWin && !parentWin.isDestroyed() ? dialog.showMessageBox(parentWin, opts) : dialog.showMessageBox(opts)
+  return p.then(({ response }) => {
+    quitConfirmationPending = false
+    const confirmed = response === 1
+    if (confirmed) quitConfirmed = true
+    return confirmed
+  })
+}
+
 // Keep-awake tracker (created in whenReady next to the notch HUD, disposed in before-quit).
 let keepAwake: KeepAwakeTracker | undefined
 
@@ -885,17 +920,32 @@ function createWindow(): BrowserWindow {
   let leavingFullScreen = false
   win.on('close', (e) => {
     const action = closeAction(process.platform, quitting, win.isFullScreen())
-    if (action === 'default') return
-    e.preventDefault()
     if (action === 'hide') {
+      e.preventDefault()
       win.hide()
-    } else if (!leavingFullScreen) {
-      leavingFullScreen = true
-      win.once('leave-full-screen', () => {
-        leavingFullScreen = false
-        if (!win.isDestroyed() && !quitting) win.hide()
+      return
+    }
+    if (action === 'leave-fullscreen-then-hide') {
+      e.preventDefault()
+      if (!leavingFullScreen) {
+        leavingFullScreen = true
+        win.once('leave-full-screen', () => {
+          leavingFullScreen = false
+          if (!win.isDestroyed() && !quitting) win.hide()
+        })
+        win.setFullScreen(false)
+      }
+      return
+    }
+    // action === 'default': the window is really closing. On Windows/Linux the native title-bar
+    // × reaches this directly (no app.quit() first), so the confirm gate must sit here too, not
+    // only in before-quit — otherwise the window (and with it the only place to show a dialog)
+    // would already be gone by the time we asked.
+    if (!quitConfirmed && !skipQuitConfirmation) {
+      e.preventDefault()
+      void confirmQuit(win).then((ok) => {
+        if (ok) app.quit()
       })
-      win.setFullScreen(false)
     }
   })
 
@@ -1566,8 +1616,11 @@ app.whenReady().then(async () => {
   if (NT_MULTI && process.platform === 'darwin') app.dock?.setBadge('TEST')
   // Flip `quitting` before quitAndInstall so the window's close-event actually closes (not hides);
   // quitAndInstall closes all windows then calls app.quit(), which our hide-on-close would block.
+  // Also skip the confirm dialog — this is a restart-to-update the user already asked for via the
+  // "Restart to update" card, not an exit, and a modal here would just block the install.
   initUpdater(() => {
     quitting = true
+    skipQuitConfirmation = true
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
@@ -3321,6 +3374,16 @@ app.on('window-all-closed', () => {
 // the quit just long enough for them to land, capped so a hung tmux can never block quit.
 let quitFlushed = false
 app.on('before-quit', (e) => {
+  // Menu Quit / Cmd+Q / Ctrl+Q reach here directly (no window-close event first), so the confirm
+  // gate is repeated here for that path. quitConfirmed short-circuits this on the re-issued
+  // app.quit() below once the user has answered, and on the win.close() gate's own re-issue.
+  if (!quitConfirmed && !skipQuitConfirmation) {
+    e.preventDefault()
+    void confirmQuit(getMainWindow() as unknown as BrowserWindow | null).then((ok) => {
+      if (ok) app.quit()
+    })
+    return
+  }
   quitting = true // from here on, window close-events must NOT be turned into hide
   destroyNotchHud()
   // Electron releases power assertions at exit anyway; disposing keeps the hold/release log
