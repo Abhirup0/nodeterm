@@ -4,7 +4,7 @@ import type { SessionRowVM } from '../lib/sessionList'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSettings } from '../state/settings'
-import { contextFillColor, percentNumber, percentText } from '../lib/usageFormat'
+import { contextFillColor, contextPillText, percentText } from '../lib/usageFormat'
 
 export interface SessionRowProps {
   row: SessionRowVM
@@ -137,7 +137,7 @@ export function SessionRow({
               title={`Context window — ${percentText(usage.usedPercent, percentMode)}`}
               style={{ background: contextFillColor(usage.usedPercent) }}
             >
-              {percentNumber(usage.usedPercent, percentMode)}%
+              {contextPillText(usage.usedTokens, usage.windowTokens, usage.usedPercent, percentMode)}
             </span>
           )}
           <button

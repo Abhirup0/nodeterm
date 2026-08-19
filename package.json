@@ -11,7 +11,8 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "electron-vite build && npm run build:codex-relay",
+    "build:codex-relay": "node scripts/build-codex-relay.mjs",
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",

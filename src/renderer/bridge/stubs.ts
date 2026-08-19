@@ -303,6 +303,19 @@ export function buildStubApi(): Omit<
       cancelWaitLogin: U('claudeAccounts.cancelWaitLogin'),
       remove: U('claudeAccounts.remove')
     },
+    codexAccounts: {
+      add: U('codexAccounts.add'),
+      waitLogin: U('codexAccounts.waitLogin'),
+      cancelWaitLogin: U('codexAccounts.cancelWaitLogin'),
+      identity: U('codexAccounts.identity'),
+      systemIdentity: U('codexAccounts.systemIdentity'),
+      remove: U('codexAccounts.remove'),
+      switchThread: U('codexAccounts.switchThread'),
+      commitSwitch: U('codexAccounts.commitSwitch'),
+      finishSwitch: U('codexAccounts.finishSwitch'),
+      rollbackSwitch: U('codexAccounts.rollbackSwitch'),
+      transferThreadToSsh: U('codexAccounts.transferThreadToSsh')
+    },
     transcripts: {
       search: U('transcripts.search')
     },
@@ -352,6 +365,18 @@ export function buildStubApi(): Omit<
       openRemoteLoginSettings: U('pairing.openRemoteLoginSettings'),
       listDevices: U('pairing.listDevices'),
       revokeDevice: U('pairing.revokeDevice')
+    },
+    shortcuts: {
+      // Deliberate no-op (not a gap): the recording bit exists to stand the DESKTOP's
+      // `before-input-event` intercepts down, and a browser tab has no application menu to steal
+      // ⌘W/⌘M/⌘0 back from — nothing intercepts here, so there is nothing to suspend. The
+      // recorder's own preventDefault/stopPropagation is the whole path in this shell.
+      setRecording: noop,
+      // Deliberate no-op for the same reason, one step further: the mirror exists so the DESKTOP's
+      // intercepts can stand down under `terminal-first`, and there are no intercepts here to
+      // stand down. The policy itself still works in the browser — it is enforced by the
+      // renderer's own dispatcher (`keyDispatchContextFor`), which reads focus directly.
+      setTerminalFocused: noop
     },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,

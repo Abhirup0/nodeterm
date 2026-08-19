@@ -1,14 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useContextWindow } from '../state/contextWindow'
 import { useSettings } from '../state/settings'
-import { barFillPercent, contextFillColor, formatModelLabel, formatTimeAgo, percentNumber, percentText } from '../lib/usageFormat'
-
-/** Humanize a token count: 48000 → "48k", 1_000_000 → "1M", 850 → "850". */
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${Number((n / 1_000_000).toFixed(1)).toString()}M`
-  if (n >= 1000) return `${Math.round(n / 1000)}k`
-  return String(n)
-}
+import { barFillPercent, contextFillColor, contextPillText, formatModelLabel, formatTimeAgo, formatTokensShort, percentText } from '../lib/usageFormat'
 
 /**
  * Per-Claude-node context-window meter. A small header pill (mini-bar + "NN%") that toggles
@@ -30,9 +23,10 @@ export function ContextMeter({ sessionId }: { sessionId: string | null }): JSX.E
   }, [open])
 
   if (!usage) return null
-  // The NUMBER honours the used/remaining display setting; the bar and its color stay keyed to
-  // context FILL, so the severity colors keep meaning the same thing in both modes (issue #78).
-  const pct = percentNumber(usage.usedPercent, percentMode)
+  // The NUMBER honours the used/remaining/tokens display setting; the bar and its color stay
+  // keyed to context FILL, so the severity colors keep meaning the same thing in every mode
+  // (issue #78).
+  const pillText = contextPillText(usage.usedTokens, usage.windowTokens, usage.usedPercent, percentMode)
   const color = contextFillColor(usage.usedPercent)
   const modelLabel = formatModelLabel(usage.model)
 
@@ -45,7 +39,7 @@ export function ContextMeter({ sessionId }: { sessionId: string | null }): JSX.E
             <div className="ctx-bar__fill" style={{ width: `${barFillPercent(usage.usedPercent, percentMode)}%`, background: color }} />
           </div>
           <div className="ctx-popover__meta">
-            ~{formatTokens(usage.usedTokens)} / {formatTokens(usage.windowTokens)} tokens
+            ~{formatTokensShort(usage.usedTokens)} / {formatTokensShort(usage.windowTokens)} tokens
           </div>
           <div className="ctx-popover__sub">
             {/* No model read ⇒ say nothing. This used to fall back to the literal 'claude', which
@@ -67,7 +61,7 @@ export function ContextMeter({ sessionId }: { sessionId: string | null }): JSX.E
         <span className="ctx-pill__bar">
           <span className="ctx-pill__fill" style={{ width: `${barFillPercent(usage.usedPercent, percentMode)}%`, background: color }} />
         </span>
-        <span className="ctx-pill__num">{pct}%</span>
+        <span className="ctx-pill__num">{pillText}</span>
       </button>
     </div>
   )
