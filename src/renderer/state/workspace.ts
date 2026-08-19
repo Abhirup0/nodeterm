@@ -67,6 +67,8 @@ export interface NodeData {
   group: string | null
   tags?: string[]
   collapsed?: boolean
+  /** Agent nodes only: when true, this node's subagent/loop fan-out cards are hidden. */
+  hideFanout?: boolean
   /** Expanded height to restore when un-collapsing (kept out of the persisted size). */
   expandedHeight?: number
   /** One-shot command run once when the terminal first opens (not persisted). */
@@ -620,9 +622,12 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      // Accounts are inherently Claude-only — never stamp one onto another agent's node. A custom
-      // agent inheriting claude is still its own agent; account binding stays claude-the-builtin.
-      ...(accountId && agentId === 'claude' ? { accountId } : {}),
+      // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another
+      // builtin, and never to a custom agent even when it inherits one of those bases. A custom
+      // agent inheriting claude/codex is still its own agent; account binding stays with the
+      // builtin the account picker offered it for. The Codex spawn side honours `data.accountId`
+      // (resolveCodexSessionScope), the same field Claude uses.
+      ...(accountId && (agentId === 'claude' || agentId === 'codex') ? { accountId } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
@@ -1467,6 +1472,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         group: n.group,
         tags: n.tags,
         collapsed,
+        hideFanout: n.hideFanout,
         expandedHeight: n.size.height,
         shell: n.shell,
         cwd: n.cwd,
@@ -1536,6 +1542,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         group: n.data.group,
         tags: n.data.tags,
         collapsed: n.data.collapsed,
+        hideFanout: n.data.hideFanout,
         parentId: n.parentId,
         shell: n.data.shell,
         cwd: n.data.cwd,

@@ -10,10 +10,17 @@ import os from 'node:os'
 import http from 'node:http'
 import path from 'node:path'
 import { WebSocketServer, type WebSocket } from 'ws'
+import { createHash } from 'node:crypto'
 import {
   codexThreadExistsAt,
   codexUnixWebSocketUrl,
+  forgetCodexSessionNames,
+  readCodexAccountAt,
+  readCodexSessionName,
   readCodexSessionNameAt,
+  readCodexThreadAt,
+  relayedCodexSessionName,
+  rememberCodexSessionName,
   waitForCodexAppServer
 } from './codex-session-name'
 
@@ -158,5 +165,133 @@ describe('codexUnixWebSocketUrl', () => {
     expect(() => codexUnixWebSocketUrl('relative/app-server.sock')).toThrow()
     expect(() => codexUnixWebSocketUrl('/tmp/with space/app.sock')).toThrow()
     expect(() => codexUnixWebSocketUrl('/tmp/a?b/app.sock')).toThrow()
+  })
+})
+
+describe('relayedCodexSessionName (the on-disk relay fallback)', () => {
+  it('reads, trims and caps the name the relay stored under the socket-scoped path', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-relay-name-'))
+    const socketPath = '/home/x/.codex/app-server-control/app-server-control.sock'
+    const scope = createHash('sha256').update(socketPath).digest('hex').slice(0, 16)
+    const nameDir = path.join(home, '.nodeterm', 'codex-thread-names', scope)
+    fs.mkdirSync(nameDir, { recursive: true })
+    fs.writeFileSync(path.join(nameDir, 'thread-1'), `  ${'z'.repeat(600)}  `)
+    const value = relayedCodexSessionName(socketPath, 'thread-1', home)
+    expect(value).toBe('z'.repeat(500))
+    expect(relayedCodexSessionName(socketPath, 'thread-missing', home)).toBeNull()
+    expect(relayedCodexSessionName(socketPath, '../escape', home)).toBeNull()
+    fs.rmSync(home, { recursive: true, force: true })
+  })
+})
+
+describe('readCodexSessionName relay fallback wiring', () => {
+  it('falls back to the relayed name when the app-server reports none, and a real name wins', async () => {
+    const savedHome = process.env.HOME
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-name-wire-'))
+    process.env.HOME = home
+    forgetCodexSessionNames()
+    try {
+      const scope = createHash('sha256').update(sock).digest('hex').slice(0, 16)
+      const nameDir = path.join(home, '.nodeterm', 'codex-thread-names', scope)
+      fs.mkdirSync(nameDir, { recursive: true })
+      fs.writeFileSync(path.join(nameDir, 'thread-nameless'), 'Relayed title')
+      // The server has this thread but with a null name → the relay copy fills in.
+      expect(await readCodexSessionName('thread-nameless', sock)).toBe('Relayed title')
+      forgetCodexSessionNames()
+      // A real server name always wins over the relay copy.
+      fs.writeFileSync(path.join(nameDir, 'thread-known'), 'Stale relayed title')
+      expect(await readCodexSessionName('thread-known', sock)).toBe('Named by codex')
+    } finally {
+      forgetCodexSessionNames()
+      if (savedHome === undefined) delete process.env.HOME
+      else process.env.HOME = savedHome
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('rememberCodexSessionName', () => {
+  it('seeds the cache so the next read serves it without a socket, and rejects a bad id', async () => {
+    forgetCodexSessionNames()
+    try {
+      // A dead socket would answer null; the seeded value is served instead.
+      const dead = path.join(dir, 'dead-remember.sock')
+      rememberCodexSessionName('thread-seeded', 'Seeded title', dead)
+      expect(await readCodexSessionName('thread-seeded', dead)).toBe('Seeded title')
+      rememberCodexSessionName('../bad', 'ignored', dead)
+      expect(relayedCodexSessionName(dead, '../bad')).toBeNull()
+    } finally {
+      forgetCodexSessionNames()
+    }
+  })
+})
+
+describe('readCodexThreadAt / readCodexAccountAt', () => {
+  let d = ''
+  let s = ''
+  let srv: http.Server
+  let w: WebSocketServer
+
+  beforeAll(async () => {
+    d = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-cx2-'))
+    s = path.join(d, 'as.sock')
+    srv = http.createServer()
+    w = new WebSocketServer({ server: srv })
+    w.on('connection', (ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(raw.toString()) as Record<string, any>
+        if (msg.method === 'initialize') return ws.send(JSON.stringify({ id: msg.id, result: {} }))
+        if (msg.method === 'thread/read') {
+          const id = msg.params?.threadId as string
+          if (id === 'thread-a')
+            return ws.send(
+              JSON.stringify({
+                id: msg.id,
+                result: { thread: { id, name: 'A', path: '/abs/rollout-thread-a.jsonl' } }
+              })
+            )
+          if (id === 'thread-b')
+            return ws.send(
+              JSON.stringify({ id: msg.id, result: { thread: { id, name: null, path: 'relative' } } })
+            )
+          if (id === 'thread-forked')
+            // The server answers with a DIFFERENT id — must be refused.
+            return ws.send(
+              JSON.stringify({ id: msg.id, result: { thread: { id: 'other', path: '/abs/x.jsonl' } } })
+            )
+          return ws.send(JSON.stringify({ id: msg.id, error: { message: 'no rollout found' } }))
+        }
+        if (msg.method === 'account/read')
+          return ws.send(
+            JSON.stringify({ id: msg.id, result: { account: { email: '  dev@example.com  ' } } })
+          )
+      })
+    })
+    await new Promise<void>((resolve) => srv.listen(s, resolve))
+  })
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => w.close(() => resolve()))
+    await new Promise<void>((resolve) => srv.close(() => resolve()))
+    fs.rmSync(d, { recursive: true, force: true })
+  })
+
+  it('reads id, name and absolute path; drops a non-absolute path to null', async () => {
+    expect(await readCodexThreadAt(s, 'thread-a')).toEqual({
+      id: 'thread-a',
+      name: 'A',
+      path: '/abs/rollout-thread-a.jsonl'
+    })
+    expect(await readCodexThreadAt(s, 'thread-b')).toEqual({ id: 'thread-b', name: null, path: null })
+  })
+
+  it('refuses a response whose thread id does not match the one asked for', async () => {
+    expect(await readCodexThreadAt(s, 'thread-forked')).toBeNull()
+    expect(await readCodexThreadAt(s, 'thread-unknown')).toBeNull()
+    expect(await readCodexThreadAt(s, '../../etc/passwd')).toBeNull()
+  })
+
+  it('reads and trims the account email', async () => {
+    expect(await readCodexAccountAt(s)).toEqual({ email: 'dev@example.com' })
   })
 })

@@ -96,6 +96,20 @@ describe('the zoom chords go through their guarded decision, on both routes', ()
   })
 })
 
+describe('the trailing gestures are handed to the dispatcher', () => {
+  // The checks above read the gesture BODIES, which is one hop short: `zoomGesture` can be
+  // perfectly wired internally and simply never reach `dispatchGlobalKeydown`. Deleting
+  // `zoom: zoomGesture,` from the gestures object keeps every assertion in this file — and in
+  // globalKeybindings.test.ts, which supplies its own fakes — green while Shift+1 and the
+  // keydown ⌘0 route quietly stop moving the camera. Same shape for the other two: the project
+  // jump and the file-reference copy have no other call site either.
+  it('wires zoom, projectJump and copy into the dispatcher deps', () => {
+    expect(CANVAS_SRC).toContain('zoom: zoomGesture')
+    expect(CANVAS_SRC).toContain('projectJump: projectJumpGesture')
+    expect(CANVAS_SRC).toContain('copy: copyGesture')
+  })
+})
+
 describe('the end-session confirm describes both things it does', () => {
   // `closeSession` stops the tmux session AND deletes the canvas node. The wording is inherited
   // from the sessions sidebar, where deleting the node is the obvious intent — but the

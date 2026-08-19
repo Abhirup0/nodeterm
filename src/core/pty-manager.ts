@@ -76,6 +76,13 @@ import {
   isReservedSpawnEnvKey,
   remoteAccountConfigDirAbs
 } from './claude-accounts-core'
+import {
+  AUTH_ENV_STRIP as CODEX_AUTH_ENV_STRIP,
+  codexSessionEnv,
+  isCodexScopeRefusal,
+  needsCodexAccountScope,
+  resolveCodexSessionScope
+} from './codex-accounts-core'
 import { NODE_ID_MAX, isSafeNodeId } from './remote-safety'
 import { presenceHub } from './presence/hub'
 import {
@@ -1780,6 +1787,20 @@ export class PtyManager {
     if (options.requireRemote && !(options.sshRemote && options.persistKey && findSsh())) {
       return { sessionId: '', fresh: false, unavailable: 'ssh' }
     }
+    // FAIL-CLOSED Codex account scope (S6 §5 property 4 / Decision 2, the carried PR-1 obligation).
+    // A LOCAL Codex spawn that EXPLICITLY selected a managed account whose home is missing REFUSES
+    // here — it must never fall through and spawn against the SYSTEM `~/.codex` (silently acting as
+    // the wrong login is a worse failure for an explicit switch than for a first spawn). This is
+    // deliberately STRICTER than the Claude account path below, which falls back with a warning
+    // chip. `resolveCodexSessionScope` returns `{ unavailable: 'codex-account' }` for exactly that
+    // case; we map it straight through to a real refusal and spawn NOTHING. The system account (no
+    // id) always resolves. Remote (ssh) Codex sessions carry their account env via tmux `-e`.
+    if (needsCodexAccountScope(options.agentId, options.accountId) && !options.sshRemote) {
+      const scope = resolveCodexSessionScope(platform().userDataDir, options.accountId)
+      if (isCodexScopeRefusal(scope)) {
+        return { sessionId: '', fresh: false, unavailable: 'codex-account' }
+      }
+    }
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -2178,6 +2199,21 @@ export class PtyManager {
     if (accountDir) {
       env.CLAUDE_CONFIG_DIR = accountDir
       for (const k of AUTH_ENV_STRIP) delete env[k]
+    }
+
+    // Managed/system Codex account scope (S6 §2.1). A LOCAL Codex session runs under an EXPLICIT
+    // CODEX_HOME + NODETERM_CODEX_ACCOUNT_ID: a managed id points at that account's private home
+    // (its own auth.json + thread DB); the SYSTEM account (no id) is written EXPLICITLY so it
+    // overwrites any managed scope a parent tmux server leaked in, rather than silently acting as
+    // the wrong login. The missing-explicit-account case already refused in spawnNew (fail-closed,
+    // property 4), so `codexSessionEnv` here never resolves an explicit id to the system home. Also
+    // strip env vars that would shadow the account's OAuth login with API-key auth. Remote (ssh)
+    // Codex sessions get this via the remote tmux `-e` list, not the local ssh client env.
+    if (needsCodexAccountScope(options.agentId, options.accountId) && !options.sshRemote) {
+      const codexScope = codexSessionEnv(platform().userDataDir, options.accountId)
+      env.CODEX_HOME = codexScope.CODEX_HOME
+      env.NODETERM_CODEX_ACCOUNT_ID = codexScope.NODETERM_CODEX_ACCOUNT_ID
+      for (const k of CODEX_AUTH_ENV_STRIP) delete env[k]
     }
 
     // Shared model gateway: resolve through the node's BASE harness in one shared mapping, then

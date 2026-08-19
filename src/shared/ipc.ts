@@ -41,6 +41,20 @@ export const IPC = {
   claudeAccountsWaitLogin: 'claude-accounts:wait-login',
   claudeAccountsCancelWait: 'claude-accounts:cancel-wait',
   claudeAccountsRemove: 'claude-accounts:remove',
+  // Machine-scoped managed Codex accounts (S6). Add/device-login/removal, plus the three-phase,
+  // owner-authorized account switch (resume the SAME conversation id, never fork) and the
+  // source-side leg of moving an idle conversation to an SSH account. See main/codex-accounts.ts.
+  codexAccountsAdd: 'codex-accounts:add',
+  codexAccountsWaitLogin: 'codex-accounts:wait-login',
+  codexAccountsCancelWait: 'codex-accounts:cancel-wait',
+  codexAccountsIdentity: 'codex-accounts:identity',
+  codexAccountsSystemIdentity: 'codex-accounts:system-identity',
+  codexAccountsRemove: 'codex-accounts:remove',
+  codexAccountsSwitchThread: 'codex-accounts:switch-thread',
+  codexAccountsCommitSwitch: 'codex-accounts:commit-switch',
+  codexAccountsFinishSwitch: 'codex-accounts:finish-switch',
+  codexAccountsRollbackSwitch: 'codex-accounts:rollback-switch',
+  codexAccountsTransferThreadToSsh: 'codex-accounts:transfer-thread-to-ssh',
   claudeCliCaps: 'claude-cli:caps',
   /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
   codexIdentityCaps: 'codex-identity:caps',
@@ -69,6 +83,21 @@ export const IPC = {
    *  Electron's default View menu binds that accelerator to `resetZoom`, which resets the WINDOW's
    *  page zoom rather than the canvas's. */
   appZoomActualSize: 'app:zoom-actual-size',
+  /** Renderer → main: the Settings shortcut recorder is armed (`true`) or disarmed (`false`).
+   *  While armed the main window's `before-input-event` intercepts above stand down entirely, so
+   *  the chord the user is recording — ⌘W and ⌘M among them — reaches the recorder instead of
+   *  closing their selected nodes. Fire-and-forget `send`; desktop-only (a browser tab has no
+   *  application menu to steal a chord back from, so the Server Edition stubs it). */
+  uiShortcutRecording: 'ui:shortcut-recording',
+  /** Renderer → main: an xterm does (`true`) / does not (`false`) currently hold keyboard focus.
+   *  A MIRROR, not a request: under the `terminal-first` shortcut policy the intercepts above must
+   *  stand down while the user is typing in a terminal, and `before-input-event` fires before any
+   *  renderer handler could tell main so — the answer has to already be there. Change-deduped by
+   *  the sender, fire-and-forget `send`, and read fail-safe: main starts at `false` and every way
+   *  the page can stop existing resets it there, so a stale mirror means intercepts ON (the
+   *  pre-policy app), never a window whose ⌘W has silently gone back to the application menu.
+   *  Desktop-only, for the same reason as the recording bit — the Server Edition stubs it. */
+  uiTerminalFocus: 'ui:terminal-focus',
   appCloseWindow: 'app:close-window',
   /** Main → renderer: the native application menu's "Settings…" item (⌘,) was clicked. The
    *  renderer opens the settings page — same path as the in-canvas gear button / Cmd+, keydown. */
