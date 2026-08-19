@@ -405,6 +405,10 @@ import {
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
+import { codexAccountSelectable } from './codex-account-switch'
+import { resolveNewCodexNodeAccount } from './codex-account-ops'
+import type { CodexAccount } from '@shared/codex-account'
+import { useSystemCodexAccount } from '../state/systemCodexAccount'
 import { toKanbanSession } from './toKanbanSession'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -3548,6 +3552,18 @@ export function Canvas() {
   // the "System account" entry with it.
   useEffect(() => useSystemAccount.getState().ensure(), [])
 
+  // The connected SSH project whose host owns a remote account, or undefined when no matching
+  // project is currently connected (live ControlMaster in useSshConn). The fail-closed Codex
+  // account gates (`codexAccountSelectable`) refuse a remote account without one, so it can never
+  // run against the LOCAL login. Mirrors AccountsSection's helper of the same name.
+  const connectedProjectIdForHost = useCallback((host?: string): string | undefined => {
+    if (!host) return undefined
+    const conn = useSshConn.getState().byProject
+    return useProjects
+      .getState()
+      .projects.find((p) => p.ssh && sshHostKey(p.ssh.server) === host && conn[p.id])?.id
+  }, [])
+
   const addAgentNode = useCallback(
     (
       agentId: AgentId,
@@ -3558,13 +3574,37 @@ export function Canvas() {
     ) => {
       const project = useProjects.getState().getProject(activeProjectId)
       const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
-      // Funnel through resolveNewNodeAccount so the project default applies even without an
-      // explicit pick. The factory drops the account for non-claude agents.
-      const account = resolveNewNodeAccount(
-        accountId,
-        project,
-        useSettings.getState().settings.claudeAccounts
-      )
+      // Codex accounts (S6) resolve through their OWN fail-closed gate: an explicitly picked account
+      // that is missing/hostile/unconnected is REFUSED here rather than silently downgraded to the
+      // system login (Property 4). Claude keeps its project-default-aware resolver. The factory
+      // stamps the id only for the claude/codex builtins.
+      let account: string | undefined
+      if (agentId === 'codex') {
+        const decision = resolveNewCodexNodeAccount(
+          accountId,
+          useSettings.getState().settings.codexAccounts,
+          connectedProjectIdForHost
+        )
+        if (!decision.create) {
+          setNotice({
+            kind: 'error',
+            text:
+              decision.reason === 'no-connection'
+                ? 'That Codex account lives on a host that is not connected — connect its SSH project first.'
+                : 'That Codex account is no longer available. Nothing was created.'
+          })
+          return
+        }
+        account = decision.accountId
+      } else {
+        // Funnel through resolveNewNodeAccount so the project default applies even without an
+        // explicit pick. The factory drops the account for non-claude agents.
+        account = resolveNewNodeAccount(
+          accountId,
+          project,
+          useSettings.getState().settings.claudeAccounts
+        )
+      }
       setNodes((ns) => {
         const node = createAgentNode(
           agentId,
@@ -3580,7 +3620,15 @@ export function Canvas() {
       })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, emptyNodePos, cwdForNewNodeIn, parentInto]
+    [
+      setNodes,
+      markDirty,
+      activeProjectId,
+      emptyNodePos,
+      cwdForNewNodeIn,
+      parentInto,
+      connectedProjectIdForHost
+    ]
   )
 
   // "Spawn a team…" (issue #78): the dialog collects the task; this opens ONE conductor node
@@ -5708,6 +5756,18 @@ export function Canvas() {
       // where this host's accounts come from — local accounts are correctly invisible here, and
       // a bare flat entry read as "multi-account is broken on SSH".
       const accountsHint = sshAccountsHint(project, accounts)
+      // Codex accounts (S6 §3.4): the accounts belonging to THIS project's machine — local accounts
+      // for a local project, this host's accounts for an SSH project — mirroring accountsForProject.
+      const codexHostKey = project?.ssh ? sshHostKey(project.ssh.server) : undefined
+      const codexAccountsHere = useSettings
+        .getState()
+        .settings.codexAccounts.filter(
+          (a) => !a.pending && (codexHostKey ? a.host === codexHostKey : !a.host)
+        )
+      const codexSystemLabel = systemAccountDisplay(
+        undefined,
+        useSystemCodexAccount.getState().email
+      )
       return [
         ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
           // Claude gets an account picker submenu when ≥1 account exists; System = project
@@ -5743,6 +5803,42 @@ export function Canvas() {
               ]
             }
           }
+          // Codex gets its own account picker submenu when ≥1 managed account lives on this
+          // project's machine (S6 §3.4). Every managed row is gated through `codexAccountSelectable`
+          // — a missing/hostile/unconnected account renders DISABLED, so the fail-closed refusal is
+          // enforced before the click, and again in `addAgentNode` (the UI is not the boundary).
+          if (aid === 'codex' && codexAccountsHere.length > 0) {
+            return {
+              type: 'submenu',
+              label: `New ${AGENT_CONFIG[aid].label}`,
+              icon: <AgentIcon agentId={aid} />,
+              children: [
+                {
+                  label: codexSystemLabel,
+                  icon: <AgentIcon agentId="codex" />,
+                  onClick: () => addAgentNode('codex', at, groupId)
+                },
+                ...codexAccountsHere.map((a): MenuItem => {
+                  const sel = codexAccountSelectable(
+                    a.id,
+                    codexAccountsHere,
+                    connectedProjectIdForHost
+                  )
+                  return {
+                    label: a.label,
+                    icon: <AgentIcon agentId="codex" />,
+                    disabled: !sel.ok,
+                    hint: sel.ok
+                      ? undefined
+                      : sel.reason === 'no-connection'
+                        ? 'This account lives on a host that is not connected — connect its SSH project first.'
+                        : 'This account is no longer available.',
+                    onClick: () => addAgentNode('codex', at, groupId, a.id)
+                  }
+                })
+              ]
+            }
+          }
           return {
             label: `New ${AGENT_CONFIG[aid].label}`,
             icon: <AgentIcon agentId={aid} />,
@@ -5761,7 +5857,7 @@ export function Canvas() {
           )
       ]
     },
-    [addAgentNode]
+    [addAgentNode, connectedProjectIdForHost]
   )
 
   const groupItems = useCallback(

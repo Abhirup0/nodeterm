@@ -471,9 +471,12 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      // Accounts are inherently Claude-only — never stamp one onto another agent's node. A custom
-      // agent inheriting claude is still its own agent; account binding stays claude-the-builtin.
-      ...(accountId && agentId === 'claude' ? { accountId } : {}),
+      // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another
+      // builtin, and never to a custom agent even when it inherits one of those bases. A custom
+      // agent inheriting claude/codex is still its own agent; account binding stays with the
+      // builtin the account picker offered it for. The Codex spawn side honours `data.accountId`
+      // (resolveCodexSessionScope), the same field Claude uses.
+      ...(accountId && (agentId === 'claude' || agentId === 'codex') ? { accountId } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
