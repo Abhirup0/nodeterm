@@ -1627,9 +1627,10 @@ export class SshProjectManager {
    *
    * The discipline PR 3 enforced locally, now over SSH:
    *  - **No-op if the thread already exists** on the target (never re-import).
-   *  - **Never overwrite** an existing remote target: the install `sh` `exit 17`s if the path is
-   *    already present, and this surfaces `exit 17` as a refusal — a partial/racing import can never
-   *    corrupt a target account's rollout.
+   *  - **Never overwrite** an existing remote target: the install `sh` uses `ln` (hardlink), which
+   *    fails ATOMICALLY with `EEXIST` when the target exists — the same never-overwrite primitive as
+   *    PR 3's local `linkSync`, with no check-then-act race. `mv` is deliberately NOT used (it would
+   *    silently clobber). A partial/racing import can never corrupt a target account's rollout.
    *  - **Verify-before-recycle:** after install, re-catalog and re-check discoverability; if the far
    *    side cannot see the thread, ROLL THE STAGED FILE BACK and refuse — no half-landed state.
    *
@@ -1687,16 +1688,23 @@ export class SshProjectManager {
         .catch(() => {})
       throw new Error('Could not upload Codex conversation')
     }
-    // Atomic install that REFUSES to overwrite: if the target already exists, drop the staged file
-    // and `exit 17` (never clobber a remote rollout — Property 2/11). Only on a clear target does the
-    // `mv` (atomic within one filesystem) land it, `chmod 600` (credential-adjacent conversation).
+    // Atomic install that NEVER overwrites — the same discipline as PR 3's local `linkSync`
+    // (`commitCodexRolloutExposure`), now over SSH: `ln` (hardlink) is used, NOT `mv`, precisely
+    // because POSIX `mv` SILENTLY overwrites its destination. `link(2)` instead fails atomically
+    // with `EEXIST` (non-zero) when the target already exists — there is no check-then-act window a
+    // concurrent writer could race (a bare `[ -e ] && mv` would have one). Same-filesystem holds:
+    // staging (`$HOME/.nodeterm/codex-imports`) and target (`$HOME/.nodeterm/cx/<digest>/sessions`
+    // or `$HOME/.codex/sessions`) are both under the host `$HOME`; a cross-device `ln` (`EXDEV`)
+    // also fails closed here (exit 17), it is never silently copied. On success `chmod 600` the
+    // shared inode (credential-adjacent conversation) and drop the staging name, leaving the target.
     const installed = await this.r.run(
       childArgs(
         c!.conn,
         c!.controlPath,
-        `if [ -e ${posixQuote(target)} ]; then rm -f ${posixQuote(staging)}; exit 17; fi; ` +
-          `mkdir -p ${posixQuote(targetDir)} && chmod 700 ${posixQuote(targetDir)} && ` +
-          `mv ${posixQuote(staging)} ${posixQuote(target)} && chmod 600 ${posixQuote(target)}`
+        `mkdir -p ${posixQuote(targetDir)} && chmod 700 ${posixQuote(targetDir)} || { rm -f ${posixQuote(staging)}; exit 70; }; ` +
+          `if ln ${posixQuote(staging)} ${posixQuote(target)} 2>/dev/null; then ` +
+          `chmod 600 ${posixQuote(target)}; rm -f ${posixQuote(staging)}; ` +
+          `else rm -f ${posixQuote(staging)}; exit 17; fi`
       )
     )
     if (installed.code !== 0) {

@@ -2286,7 +2286,7 @@ describe('SshProjectManager — atomic remote import (Task 6.2, Property 2 + 11)
     expect(runScp.mock.calls.length).toBe(0)
   })
 
-  it('installs atomically and NEVER overwrites: exit-17 guard present, mv is not forced', async () => {
+  it('installs with an ATOMIC hardlink that never overwrites (ln, not mv) — fails closed on EEXIST', async () => {
     let phase = 0
     const cm = await makeCodexMgr({
       handler: (cmd) => {
@@ -2296,13 +2296,15 @@ describe('SshProjectManager — atomic remote import (Task 6.2, Property 2 + 11)
     })
     const out = await cm.mgr.remoteCodexImportThread('p1', 'acc1', 'thread1', REL, '/l/r.jsonl')
     expect(out).toEqual({ imported: true })
-    const install = cm.runCalls.find((c) => c.cmd.includes('exit 17'))
+    const install = cm.runCalls.find((c) => c.cmd.includes(' ln '))
     expect(install).toBeTruthy()
-    // The never-overwrite guard: refuse if the target exists, drop the staged file, exit 17.
-    expect(install!.cmd).toMatch(/if \[ -e '[^']*rollout-x\.jsonl' \]; then rm -f '[^']*\.part'; exit 17; fi/)
-    // The land is a bare `mv` (atomic within one fs), NEVER `mv -f` (which would clobber).
-    expect(install!.cmd).toMatch(/(^| )mv '[^']*\.part' '[^']*rollout-x\.jsonl'/)
-    expect(install!.cmd).not.toMatch(/mv -f /)
+    // The land is an atomic hardlink of the staged .part onto the target — link(2) fails with
+    // EEXIST if the target already exists, so there is no check-then-act window (PR 3 discipline).
+    expect(install!.cmd).toMatch(/ln '[^']*\.part' '[^']*rollout-x\.jsonl'/)
+    // `mv` is NEVER used: POSIX `mv` silently overwrites, which is exactly the racy primitive this
+    // avoids. On the ln-failure branch it drops the staged file and exits non-zero (17).
+    expect(install!.cmd).not.toMatch(/\bmv\b/)
+    expect(install!.cmd).toMatch(/else rm -f '[^']*\.part'; exit 17; fi/)
   })
 
   it('refuses when the install hits an existing target (exit 17 surfaces as a refusal)', async () => {

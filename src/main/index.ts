@@ -410,8 +410,9 @@ async function loadCodexRelayBundle(): Promise<string> {
   try {
     const fd = openSync(join(__dirname, 'codex-relay.js'), 'r')
     try {
-      fstatSync(fd) // touch the open descriptor; the bundle is a plain file we just built
-      codexRelayBundleCache = readFileSync(fd, 'utf8')
+      // fstat the OPEN descriptor (not the path) and read the SAME fd — a regular-file check with no
+      // stat-then-read window. A non-regular entry (fifo/dir/device) is treated as "no bundle".
+      codexRelayBundleCache = fstatSync(fd).isFile() ? readFileSync(fd, 'utf8') : ''
     } finally {
       closeSync(fd)
     }
