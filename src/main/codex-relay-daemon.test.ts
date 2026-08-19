@@ -702,26 +702,24 @@ describe('exposeForeignThread — PR 3 primitive + verify-then-recycle (§4.2a, 
     const { root, threadId, sourceSocket, targetSocket, sourceRollout, targetRollout } = setup()
     // A DIFFERENT, unrelated rollout (distinct inode) already sits where the copy would land.
     writeFileSync(targetRollout, 'a different conversation')
-    const differentIno = statSync(targetRollout).ino
     const stopSource = await fakeAccountServer(sourceSocket, (id) =>
       id === threadId ? { id, path: sourceRollout, cwd: '/repo' } : null
     )
     const stopTarget = await fakeAccountServer(targetSocket, () => null)
+    // Hold ONE descriptor open across the whole operation. never-overwrite means the target inode is
+    // never replaced, so the same open file object before and after the expose proves the target
+    // survived untouched — a stronger claim than re-opening the path, and no stat-then-read race.
+    const heldFd = openSync(targetRollout, 'r')
+    const differentIno = fstatSync(heldFd).ino
     try {
       await expect(
         exposeForeignThread(targetSocket, threadId, [targetSocket, sourceSocket])
       ).rejects.toThrow('different rollout')
-      // The pre-existing target is byte- and inode-preserved: never overwritten, never rolled back.
-      // One descriptor proves the inode AND the contents belong to the same file — no stat-then-read
-      // race on the target path.
-      const fd = openSync(targetRollout, 'r')
-      try {
-        expect(fstatSync(fd).ino).toBe(differentIno)
-        expect(readFileSync(fd, 'utf8')).toBe('a different conversation')
-      } finally {
-        closeSync(fd)
-      }
+      // Same held fd: inode unchanged and contents intact ⇒ never overwritten, never rolled back.
+      expect(fstatSync(heldFd).ino).toBe(differentIno)
+      expect(readFileSync(heldFd, 'utf8')).toBe('a different conversation')
     } finally {
+      closeSync(heldFd)
       await Promise.all([stopSource(), stopTarget()])
       rmSync(root, { recursive: true, force: true })
     }
