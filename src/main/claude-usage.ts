@@ -17,6 +17,9 @@ export { resolveClaudeAccessToken } from '../core/usage/usage-service'
  *  SSH projects, so it passes none and `usage:remote` answers empty). */
 export interface InitClaudeUsageOpts {
   localAccounts?: () => string[]
+  /** Local managed Codex accounts (id + isolated home) to aggregate usage for, one row each and
+   *  never merged. See UsageServiceOptions.codexAccounts. */
+  codexAccounts?: () => Array<{ id: string; home: string; label: string; email?: string | null }>
   onCacheUpdate?: () => void
   remote?: RemoteUsageDeps
   /** "A phone may be reading the agent-status mirror" (paired / has a push grant). When true the
@@ -36,6 +39,7 @@ export function initClaudeUsage(win: BrowserWindow, opts: InitClaudeUsageOpts = 
     shouldPoll: () => win.isFocused(),
     mirrorMayBeRead: opts.mirrorMayBeRead,
     localAccounts: opts.localAccounts,
+    codexAccounts: opts.codexAccounts,
     onCacheUpdate: opts.onCacheUpdate,
     remote: opts.remote
   })

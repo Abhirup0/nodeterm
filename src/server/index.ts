@@ -47,8 +47,8 @@ import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
-import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
-import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
+import { refreshNodeTokens } from '../core/agents/node-token-service'
+import { armServerNodeIdentity } from './node-identity-arm'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -523,10 +523,12 @@ export async function startServer(
   // arming the secret, and a headless host in legacy mode is where it is most likely to be needed.
   hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
   try {
-    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
-    // Materialise a token file for every persisted node so an already-running session becomes
-    // verified at its next hook event with no restart. No-ops into legacy mode without a secret.
-    initNodeTokens({ canvases: () => workspaceStore.persistedCanvases() })
+    // The whole node-identity arming (node secret + the S6 Codex record secret + node tokens) lives
+    // in one REAL production function so the boot test can drive the shipped path rather than a
+    // re-implementation of it (constraint 8). It arms `setCodexThreadIdentityAuthSecret` with the
+    // same secret so a MANAGED Codex account on a headless host signs/verifies its ownership records
+    // instead of throwing "identity authentication is unavailable" (Decision 1, both-shells).
+    await armServerNodeIdentity(hookServer, () => workspaceStore.persistedCanvases())
   } catch (error) {
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }
