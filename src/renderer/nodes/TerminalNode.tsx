@@ -201,7 +201,7 @@ export function sshConnectionScope(conn: SshConnection): string {
  * in the active project's React Flow (same reasoning `sshConnectionScope` states), so the active
  * project is its owner; an SSH project's own nodes answer the same id either way.
  */
-function owningProjectId(): string {
+export function owningProjectId(): string {
   return useProjects.getState().activeProjectId
 }
 
@@ -979,7 +979,9 @@ export function TerminalNode({
   // field it actually uses changes — not on every unrelated settings edit.
   const panHoverDelay = useSettings((s) => s.settings.panHoverDelay)
   // One shallow-compared subscription for the whole appearance slice — see useXtermVisualSettings.
-  const visual = useXtermVisualSettings()
+  // Scoped to the OWNING project so its `terminal.theme` / `terminal.fontFamily` layer over the
+  // global settings for this node, and for no other project's nodes.
+  const visual = useXtermVisualSettings(owningProjectId())
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   // Header buttons the user chose to hide (Settings). A selector, so toggling one re-renders every
   // mounted node right away instead of waiting for a remount. Search, Close and the worktree-move

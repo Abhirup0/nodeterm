@@ -10,7 +10,9 @@ import type {
 } from '@shared/project-settings'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
+import { Select } from '@renderer/ui/Select'
 import { Switch } from '@renderer/ui/Switch'
+import { isKnownTerminalThemeId, TERMINAL_THEMES } from '@renderer/terminal/themes'
 import { useProjectSetup } from '../../state/projectSetup'
 import { useSettingsSearch } from './context'
 import { FieldRow } from './FieldRow'
@@ -28,7 +30,7 @@ import { matchesQuery, type SettingsSearchEntry } from './search'
  * would have pushed that file well past ~400 lines.
  */
 
-type FieldKind = 'input' | 'textarea' | 'switch' | 'env' | 'list'
+type FieldKind = 'input' | 'textarea' | 'switch' | 'env' | 'list' | 'theme'
 
 interface FieldConfig {
   key: string
@@ -49,7 +51,12 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
       {
         key: 'setupScript',
         label: 'Setup script',
-        description: 'Runs once when a worktree for this project is created.',
+        // Not only "when a worktree is created": `attachWorktree` is the single post-bind point, so
+        // adopting an existing worktree and re-binding one to a group run it too (as does the failed
+        // chip's Re-run). A script written for a fresh checkout only, and re-run over a working one,
+        // is the kind of surprise the row itself has to warn about.
+        description:
+          'Runs when a worktree for this project is created, adopted, or re-bound to a group.',
         kind: 'textarea'
       },
       {
@@ -60,7 +67,13 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
       },
       {
         key: 'waitForSetup',
-        label: 'Wait for setup to finish before opening a terminal',
+        // The old label ("…before opening a terminal") promised something this switch never did:
+        // the terminal opens immediately either way. What waits is the node's QUEUED LAUNCH COMMAND
+        // (`launchesToFire`'s setup gate) — the agent command must not race an `npm ci` still
+        // writing node_modules under it.
+        label: 'Hold queued launch commands until the setup script finishes',
+        description:
+          'Nodes opened into a new worktree still open right away; only their queued command waits.',
         kind: 'switch'
       }
     ]
@@ -110,8 +123,21 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
     title: 'Terminal',
     fields: [
       { key: 'shell', label: 'Shell', kind: 'input' },
-      { key: 'theme', label: 'Theme', kind: 'input' },
-      { key: 'fontFamily', label: 'Font family', kind: 'input' }
+      // Neither description says the word "project": every row in this pane is a project setting,
+      // so it discriminates nothing while making the query "project" match the whole pane — the
+      // very thing `fieldEntry`'s keyword list is careful to avoid.
+      {
+        key: 'theme',
+        label: 'Theme',
+        description: 'Overrides the global terminal theme. Terminals already open repaint.',
+        kind: 'theme'
+      },
+      {
+        key: 'fontFamily',
+        label: 'Font family',
+        description: 'Overrides the global terminal font.',
+        kind: 'input'
+      }
     ]
   }
 }
@@ -289,6 +315,68 @@ function EnvField({
           onBlur={commit}
           className={textareaClass(disabled)}
         />
+      }
+    />
+  )
+}
+
+/**
+ * The terminal `theme` row: a Select over the ids this build actually ships, not a free-text box.
+ *
+ * Three properties the plain Input could not have:
+ *  - the ids are not guessable ('catppuccin-mocha', 'tokyo-night'), and a typo used to be
+ *    indistinguishable from a working value — the merge ignores an unknown id, so the terminal just
+ *    kept the global theme with nothing on screen saying why.
+ *  - the empty option is INHERIT, not "no theme": it clears the field so this machine's global
+ *    setting (or, on a local row, the shared document) decides.
+ *  - a stored id this build does not know must still READ AS ITSELF rather than silently showing as
+ *    "inherit" — same precedent as the identity pane's unknown-account option. A teammate's newer
+ *    theme name, or one since removed, is a real value sitting in a real document; presenting the
+ *    box as empty would invite a save that erases it.
+ */
+function ThemeField({
+  id,
+  label,
+  ariaLabel,
+  description,
+  note,
+  value,
+  disabled,
+  onCommit
+}: {
+  id: string
+  label: string
+  ariaLabel?: string
+  description?: string
+  note?: string
+  value: string
+  disabled?: boolean
+  onCommit: (value: string | undefined) => void
+}): React.JSX.Element {
+  const unknown = value !== '' && !isKnownTerminalThemeId(value)
+  return (
+    <FieldRow
+      label={label}
+      description={description}
+      note={note}
+      htmlFor={id}
+      control={
+        <Select
+          id={id}
+          className="w-72"
+          aria-label={ariaLabel}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => onCommit(e.target.value === '' ? undefined : e.target.value)}
+        >
+          <option value="">Inherit (use this machine&rsquo;s setting)</option>
+          {TERMINAL_THEMES.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.label}
+            </option>
+          ))}
+          {unknown ? <option value={value}>{value} (not in this version)</option> : null}
+        </Select>
       }
     />
   )
@@ -672,6 +760,20 @@ function FamilySection({
         />
       )
     }
+    if (f.kind === 'theme') {
+      return (
+        <ThemeField
+          key={f.key}
+          id={id}
+          label={f.label}
+          description={f.description}
+          note={overrideNote}
+          disabled={sharedDisabled}
+          value={textOf(f.kind, sharedFamily?.[f.key])}
+          onCommit={(v) => commitShared(f.key, v)}
+        />
+      )
+    }
     return (
       <StringField
         key={f.key}
@@ -717,6 +819,21 @@ function FamilySection({
           text={formatEnvLines(localFamily?.[f.key] as Record<string, string> | undefined)}
           overrideNote={activeNote}
           onCommitValue={(v) => commitLocal(f.key, v)}
+        />
+      )
+    }
+    if (f.kind === 'theme') {
+      return (
+        <ThemeField
+          key={f.key}
+          id={id}
+          label={f.label}
+          ariaLabel={`${f.label} (this machine)`}
+          description={f.description}
+          note={activeNote}
+          disabled={localDisabled}
+          value={textOf(f.kind, localFamily?.[f.key])}
+          onCommit={(v) => commitLocal(f.key, v)}
         />
       )
     }

@@ -1,4 +1,6 @@
+import { create } from 'zustand'
 import type { ProjectLaunchInfo } from '@shared/project-settings'
+import type { ProjectVisualOverrides } from '../terminal/terminal-config'
 
 /**
  * Warmed renderer cache of `project-settings:launch-info` (`projectLaunchInfoNow` /
@@ -34,6 +36,60 @@ const generation = new Map<string, number>()
 /** How long `ensureProjectLaunchInfo` waits on the round trip before giving up on it — same bound
  *  as `permissionMode.ts`'s `CAPS_WAIT_MS`. A launch must never block on this. */
 const ENSURE_WAIT_MS = 3000
+
+/**
+ * The REACTIVE mirror of the cache above — and only of the two cosmetic terminal values
+ * (`terminal.theme` / `terminal.fontFamily`), never of the trust verdict.
+ *
+ * The cache is deliberately not a store: a launch READS it at the moment it launches, so nothing
+ * needs to re-render when it changes. Live terminal appearance is the one consumer that does — a
+ * project's theme has to reach terminals that are already on screen — and a module-level `Map` can
+ * never notify them. Rather than turn the whole cache into a store (which would re-render every
+ * terminal on the canvas whenever an unrelated launch field or trust bit moved), this carries the
+ * appearance slice alone, so `useXtermVisualSettings` can subscribe shallowly to exactly what it
+ * renders.
+ *
+ * Kept in lockstep with `cache` — written by the same generation-guarded branch, cleared by
+ * `invalidate` — so the mirror never claims a value the cache has already dropped. Clearing on
+ * invalidate does mean the panel's save path (`invalidate` then re-`ensure`) shows this machine's
+ * GLOBAL appearance for the length of one round trip before the project's own comes back. That is
+ * accepted deliberately: the alternative — holding the last-known value across an invalidate — keeps
+ * a project's colours on screen indefinitely whenever the re-read fails, and a theme that cannot be
+ * explained by any document on disk is a worse bug than a repaint the user sees correct itself.
+ */
+interface ProjectVisualsState {
+  byProject: Record<string, ProjectVisualOverrides>
+}
+export const useProjectVisuals = create<ProjectVisualsState>(() => ({ byProject: {} }))
+
+function sameVisuals(a: ProjectVisualOverrides | undefined, b: ProjectVisualOverrides): boolean {
+  return a !== undefined && a.theme === b.theme && a.fontFamily === b.fontFamily
+}
+
+/** Push one project's appearance slice into the mirror. No-ops when nothing changed, INCLUDING the
+ *  object identity — a re-ensure that answers the same values must not re-render a canvas full of
+ *  terminals (the subscription is shallow, but the entry itself is what it compares). */
+function syncVisuals(projectId: string, info: ProjectLaunchInfo | null): void {
+  const terminal = info?.resolved.terminal
+  const next: ProjectVisualOverrides = {
+    theme: terminal?.theme?.value,
+    fontFamily: terminal?.fontFamily?.value
+  }
+  useProjectVisuals.setState((s) => {
+    if (sameVisuals(s.byProject[projectId], next)) return s
+    return { byProject: { ...s.byProject, [projectId]: next } }
+  })
+}
+
+/** Drop one project's mirrored appearance — its terminals fall back to the global settings until a
+ *  fresh answer lands. */
+function clearVisuals(projectId: string): void {
+  useProjectVisuals.setState((s) => {
+    if (!(projectId in s.byProject)) return s
+    const { [projectId]: _dropped, ...rest } = s.byProject
+    return { byProject: rest }
+  })
+}
 
 function currentGeneration(projectId: string): number {
   return generation.get(projectId) ?? 0
@@ -77,7 +133,10 @@ export function ensureProjectLaunchInfo(projectId: string): Promise<void> {
       // A newer claim since this fetch started means it was superseded (an invalidate, or this
       // very fetch having already been abandoned by a timeout and reissued) — never let a stale
       // answer land over whatever a fresher fetch already wrote.
-      if (currentGeneration(projectId) === gen) cache.set(projectId, { info, fetchedAt: Date.now() })
+      if (currentGeneration(projectId) !== gen) return
+      cache.set(projectId, { info, fetchedAt: Date.now() })
+      // Same branch, same guard: the reactive mirror only ever reflects what the cache accepted.
+      syncVisuals(projectId, info)
     })
     .catch(() => {
       // Fail open: leave whatever is cached (possibly nothing) alone.
@@ -111,6 +170,7 @@ export function ensureProjectLaunchInfo(projectId: string): Promise<void> {
  *  Called on `onTrustChanged` for the affected project, and after a settings-panel save. */
 export function invalidateProjectLaunchInfo(projectId: string): void {
   cache.delete(projectId)
+  clearVisuals(projectId)
   generation.set(projectId, currentGeneration(projectId) + 1)
   inFlight.delete(projectId)
 }
@@ -120,4 +180,5 @@ export function resetProjectLaunchInfoForTests(): void {
   cache.clear()
   inFlight.clear()
   generation.clear()
+  useProjectVisuals.setState({ byProject: {} })
 }
