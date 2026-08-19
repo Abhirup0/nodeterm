@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { IPC } from '../shared/ipc'
 import { MAIN_INTERCEPTED_COMMAND_IDS } from '../shared/keybindings'
 import {
+  MENU_ITEM_ID_CLOSE,
+  MENU_ITEM_ID_MINIMIZE,
   installKeydownIntercepts,
   keydownIntercept,
+  menuItemIdsToSuspend,
   navigationClearsRecording,
   policyStandsDown,
   resolveInterceptBindings,
@@ -476,6 +479,34 @@ describe('terminal-first stands every interception down while a terminal is focu
     stoodDown = true
     seam.fire({ meta: true, key: 'w', code: 'KeyW' })
     expect(seam.sent).toEqual([IPC.appCloseNode])
+  })
+})
+
+/**
+ * Standing the INTERCEPTS down is only half of "the terminal gets the chord". The other half is the
+ * application MENU, which is handled above the page either way — so a stand-down that only stopped
+ * `preventDefault` would hand ⌘M to `{role:'minimize'}` and, on Windows/Linux, Ctrl+W to
+ * `{role:'close'}`. For a terminal-first user that is strictly WORSE than not having the policy:
+ * a Linux user's readline kill-word would close their window. `index.ts` therefore disables those
+ * menu items for exactly as long as the intercepts are stood down, and this list is which ones.
+ */
+describe('menuItemIdsToSuspend', () => {
+  it('is minimize everywhere and, off-mac, close as well', () => {
+    // The mac template has no `{role:'close'}` at all (Window ▸ Minimize / Zoom / Front), which is
+    // exactly why `keydownIntercept` is ⌘W's only handler there. Listing a close id on mac would
+    // be a no-op today and a silent lie the day someone adds the role.
+    expect(menuItemIdsToSuspend(true)).toEqual([MENU_ITEM_ID_MINIMIZE])
+    expect(menuItemIdsToSuspend(false)).toEqual([MENU_ITEM_ID_MINIMIZE, MENU_ITEM_ID_CLOSE])
+  })
+
+  // The ids are the ONLY link between `buildAppMenu`'s template and the sync that disables the
+  // items — `getMenuItemById` answers `null` for a typo, and the fail-safe there is to do nothing,
+  // which looks exactly like the feature working. Both sides import these constants, so the typo
+  // class cannot happen; this pins that they are distinct and non-empty.
+  it('the ids are distinct and non-empty', () => {
+    expect(MENU_ITEM_ID_MINIMIZE).toBeTruthy()
+    expect(MENU_ITEM_ID_CLOSE).toBeTruthy()
+    expect(MENU_ITEM_ID_MINIMIZE).not.toBe(MENU_ITEM_ID_CLOSE)
   })
 })
 

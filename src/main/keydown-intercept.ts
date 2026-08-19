@@ -224,6 +224,43 @@ export function policyStandsDown(
   return policy === 'terminal-first' && terminalFocused
 }
 
+/**
+ * Menu item ids `buildAppMenu` stamps on the two roles whose ACCELERATORS survive an intercept
+ * stand-down. Exported constants used by both sides — the template that sets them and the sync that
+ * looks them up — because `getMenuItemById` answers `null` for a typo and the fail-safe there is to
+ * do nothing, which is indistinguishable from the feature working.
+ */
+export const MENU_ITEM_ID_MINIMIZE = 'window-minimize'
+export const MENU_ITEM_ID_CLOSE = 'window-close'
+
+/**
+ * PURE. Which menu items must be disabled while the intercepts are stood down.
+ *
+ * **Why the stand-down needs a menu leg at all.** `preventDefault` is the only lever this module
+ * has, and NOT calling it hands the key to the page *and*, if the page ignores it, to the menu —
+ * whose accelerators are handled above the page either way. So a stand-down that stopped at the
+ * intercept would deliver ⌘0 and (on macOS) ⌘W to the terminal, and hand ⌘M to
+ * `{role:'minimize'}` and, on Windows/Linux, Ctrl+W to `{role:'close'}`. For a terminal-first user
+ * that is strictly WORSE than not having the policy: Ctrl+W is readline's kill-word, and a Linux
+ * user pressing it would close their window. Disabling the item suppresses its accelerator, so the
+ * chord falls through to the page → the renderer's dispatcher (terminal context, terminal-first:
+ * nothing matches) → xterm → the PTY. That is what completes "under terminal-first everything
+ * reaches the shell", ⌘M included.
+ *
+ * **This is NOT the recording stand-down's story** — keep the two apart. Recording is a transient,
+ * user-initiated arming of a dialog, and its ⌘M limitation (documented on `installKeydownIntercepts`)
+ * stands: nothing here re-enables recording those chords, because a recorder that silently disabled
+ * Minimize for the duration of a keypress is a different and worse trade.
+ *
+ * mac carries only minimize: the mac template has no `{role:'close'}` at all (Window ▸ Minimize /
+ * Zoom / Front), which is exactly why `keydownIntercept` is ⌘W's only handler there.
+ */
+export function menuItemIdsToSuspend(isMac: boolean): string[] {
+  return isMac
+    ? [MENU_ITEM_ID_MINIMIZE]
+    : [MENU_ITEM_ID_MINIMIZE, MENU_ITEM_ID_CLOSE]
+}
+
 /** The renderer channel a claimed action is forwarded on. */
 export function keydownInterceptChannel(action: KeydownInterceptAction): string {
   if (action === 'toggle-markdown') return IPC.appToggleMarkdown
@@ -278,6 +315,18 @@ export interface KeydownInterceptTarget {
  * recorder still works for an app-first user" — the overwhelmingly common case — impossible to
  * assert. Both are checked BEFORE `preventDefault` for the same reason: a claimed chord never
  * reaches the page at all, and the page is exactly who terminal-first stands down FOR.
+ *
+ * **The policy stand-down DOES get the menu leg the recording one does not** — the two cases are
+ * different and the paragraph above stays true for recording. `index.ts`'s `syncMenuForStandDown`
+ * disables `{role:'minimize'}` (and, off-mac, `{role:'close'}`) for exactly as long as
+ * `isStoodDown` is true, via the ids in `menuItemIdsToSuspend` below. It has to: not calling
+ * `preventDefault` hands the key to the page and, failing that, to the menu, so without the menu
+ * leg a terminal-first user's ⌘M would minimize the window and their Ctrl+W — readline's kill-word
+ * — would CLOSE it on Windows/Linux, which is strictly worse than not having the policy. With the
+ * items disabled the chord completes the trip it was promised: page → the renderer's dispatcher
+ * (terminal context, terminal-first, nothing matches) → xterm → the PTY. Recording keeps the
+ * limitation because a recorder that greyed out Minimize for the duration of a keypress is a worse
+ * trade than an unrecordable ⌘M.
  *
  * **The stand-down leg cannot be more reliable than the mirror behind it**, and the mirror is a
  * renderer reporting over fire-and-forget IPC. Every uncertainty therefore resolves to NOT stood

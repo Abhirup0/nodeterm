@@ -166,11 +166,20 @@ describe('installTerminalFocusMirror', () => {
     expect(report).not.toHaveBeenCalled()
   })
 
-  it('stops completely on teardown — no listeners, no timer', async () => {
+  it('releases the bit on teardown, then stops completely — no listeners, no timer', async () => {
     const term = terminalTextarea()
+    term.focus()
     stop = installTerminalFocusMirror({ report })
+    await settle()
+    report.mockClear()
+
+    // Teardown reports `false` on its way out rather than leaving main holding a `true` nobody
+    // owns any more. Main's three page-death resets cover the page VANISHING; this covers the
+    // ordinary case where the page lives and only this mirror stops. A remount re-reports from
+    // scratch (`last` starts null), so nothing is lost by releasing here.
     stop()
     stop = null
+    expect(report.mock.calls).toEqual([[false]])
     report.mockClear()
 
     term.focus()

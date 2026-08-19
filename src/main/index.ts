@@ -89,7 +89,10 @@ import {
 } from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
 import {
+  MENU_ITEM_ID_CLOSE,
+  MENU_ITEM_ID_MINIMIZE,
   installKeydownIntercepts,
+  menuItemIdsToSuspend,
   navigationClearsRecording,
   policyStandsDown,
   resolveInterceptBindings,
@@ -307,6 +310,11 @@ const currentInterceptPolicy = (): TerminalShortcutPolicy =>
 settingsStore.onChange((s) => {
   interceptBindings = resolveInterceptBindings(s.keybindings, interceptIsMac)
   interceptPolicy = normalizeTerminalShortcutPolicy(s.terminalShortcutPolicy)
+  // A policy flip changes the stood-down answer with no focus event behind it, so the menu leg
+  // owes a sync here too. (`buildAppMenu` re-runs on this same hook and syncs at its end, so this
+  // is belt-and-braces for the ordering between the two `onChange` subscribers — cheap, and not
+  // something to leave to subscriber registration order.)
+  syncMenuForStandDown()
 })
 // TWO bits the RENDERER owns and main only mirrors. Both are module-level `let`s read through a
 // closure, exactly like `interceptBindings` above: the window is created later and can be recreated
@@ -331,11 +339,24 @@ settingsStore.onChange((s) => {
 // The two bits are cleared TOGETHER, by one function called at all three sites, because they die
 // for the same reason (the page is gone) and a reset that remembered only one of them would be
 // invisible until a user hit the policy path.
+//
+// ONE RULE FOR A FOURTH RESET, and it is specific to `terminalFocused`: only clear it where the
+// renderer's DOCUMENT is ending. The mirror is change-deduped and never re-asserts — it holds its
+// own `last` and reports only on a change — so clearing main's bit under a page that is still
+// alive and still focused on its terminal strands the two out of sync (`last === true` there,
+// `false` here) with no event that will ever reconcile them, and the policy is dead until the user
+// happens to click away and back. The three below are safe precisely because each one means that
+// page, and its mirror, are gone. `shortcutRecording` has no such constraint (the recorder
+// re-arms), so do not reason about the two bits interchangeably.
 let shortcutRecording = false
 let terminalFocused = false
 const clearRendererKeyState = (): void => {
   shortcutRecording = false
   terminalFocused = false
+  // The menu leg follows the same state, so it must follow it here too — otherwise a crash or a
+  // reload while stood down would leave Window ▸ Minimize disabled with nothing left to re-enable
+  // it, i.e. ⌘M dead app-wide. Safe before any window exists: it no-ops without a menu.
+  syncMenuForStandDown()
 }
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
@@ -584,7 +605,15 @@ function buildAppMenu(win: BrowserWindow): void {
         { label: 'View', submenu: viewSubmenu },
         {
           label: 'Window',
-          submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+          // `id` on minimize: `syncMenuForStandDown` disables it while the intercepts are stood
+          // down, so ⌘M falls through to the terminal instead of minimizing the window. mac has no
+          // `{role:'close'}` here at all — which is why the intercept is ⌘W's only handler on mac.
+          submenu: [
+            { role: 'minimize', id: MENU_ITEM_ID_MINIMIZE },
+            { role: 'zoom' },
+            { type: 'separator' },
+            { role: 'front' }
+          ]
         }
       ]
     : [
@@ -604,9 +633,69 @@ function buildAppMenu(win: BrowserWindow): void {
         },
         { label: 'View', submenu: viewSubmenu },
         { label: 'Settings', submenu: [settingsItem] },
-        { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }] }
+        // Both ids matter off-mac: `{role:'close'}` owns Ctrl+W here, which is readline's kill-word
+        // in a terminal — a stand-down that left it enabled would CLOSE the window on a keystroke
+        // a terminal-first user meant for their shell.
+        {
+          label: 'Window',
+          submenu: [
+            { role: 'minimize', id: MENU_ITEM_ID_MINIMIZE },
+            { role: 'close', id: MENU_ITEM_ID_CLOSE }
+          ]
+        }
       ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+  // A REBUILD resets every item to `enabled: true`, and this function runs on every settings
+  // change — so without this line, a terminal-first user with a terminal focused would have ⌘M
+  // silently start minimizing again the moment they toggled any unrelated setting. The sync is
+  // idempotent and cheap; it belongs at the end of every path that installs a menu, not only at
+  // the paths where the stand-down state changes.
+  syncMenuForStandDown()
+}
+
+/**
+ * Enable/disable the menu items whose ACCELERATORS would otherwise beat the intercept stand-down.
+ *
+ * `installKeydownIntercepts` standing down means only that main stops calling `preventDefault` —
+ * the key then reaches the page, and if the page ignores it, the MENU, which is handled above the
+ * page either way. So under `terminal-first` with a terminal focused, ⌘M would still hit
+ * `{role:'minimize'}` and (Windows/Linux) Ctrl+W would still hit `{role:'close'}` — the latter
+ * closing the window on what a terminal user means as readline's kill-word, i.e. strictly worse
+ * than not having the policy at all. Disabling the item suppresses its accelerator, so the chord
+ * falls through: page → the renderer's dispatcher (terminal context under terminal-first, where
+ * nothing matches) → xterm → the PTY. That is what makes "everything reaches the shell" true for
+ * ⌘M and Ctrl+W too, not just for ⌘0 and mac's ⌘W.
+ *
+ * Called from every place the stood-down answer can change — the `ui:terminal-focus` receiver, the
+ * policy recompute in `settingsStore.onChange`, `clearRendererKeyState`, and the end of
+ * `buildAppMenu` (a rebuild resets `enabled`). NEVER per keystroke: this is a menu mutation, and
+ * `before-input-event` is the one path in the app where work is measured in keystrokes.
+ *
+ * FAIL-SAFE: a missing menu, or an item id that no longer resolves, does nothing at all. That
+ * leaves the pre-feature behaviour (menu enabled, intercepts deciding), which is the direction
+ * where the app still works — the cost is that a silent id drift is invisible, which is why both
+ * sides of the lookup use the same exported constants rather than string literals.
+ *
+ * KNOWN COST, deliberate: while a terminal is focused under terminal-first, Window ▸ Minimize is
+ * greyed out to the MOUSE as well. It re-enables the moment focus leaves the terminal (and the
+ * traffic-light button is unaffected), so this is a visible but self-healing trade. The alternative
+ * — rebuilding the whole menu without those accelerators on every focus change — costs a menu
+ * rebuild per click between the canvas and a terminal, and closes any menu the user has open.
+ *
+ * UNTESTED, and here is why: this is Electron menu mutation reached through the module-level
+ * `Menu` singleton inside `src/main/index.ts`, which no test imports (the same gap the intercept
+ * WIRING has — see `keydown-intercept.ts`'s header on why the decision lives in a pure module).
+ * The two testable parts were extracted: `policyStandsDown` (the state) and `menuItemIdsToSuspend`
+ * (the list, including the mac/non-mac asymmetry), both pinned in `keydown-intercept.test.ts`.
+ */
+function syncMenuForStandDown(): void {
+  const menu = Menu.getApplicationMenu()
+  if (!menu) return
+  const enabled = !policyStandsDown(currentInterceptPolicy(), terminalFocused)
+  for (const id of menuItemIdsToSuspend(interceptIsMac)) {
+    const item = menu.getMenuItemById(id)
+    if (item) item.enabled = enabled
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -1004,6 +1093,10 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.uiTerminalFocus, (event, focused: boolean) => {
     if (getMainWindow()?.webContents.id !== event.sender.id) return
     terminalFocused = focused === true
+    // The mirror is change-deduped, so this fires only on a real focus transition — the right
+    // cadence for a menu mutation, and the reason the sync is here rather than on the keystroke
+    // path. It must be INSIDE the guard: a rejected sender must not move the menu either.
+    syncMenuForStandDown()
   })
 
   // Bring the window forward after a file is dropped into a terminal. On macOS a drag-drop from

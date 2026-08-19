@@ -123,6 +123,11 @@ export function installTerminalFocusMirror(opts: TerminalFocusMirrorOptions): ()
   push(focusedNow())
 
   return () => {
+    // Release the bit on the way out rather than leaving main holding a `true` that nobody owns
+    // any more. Main's resets cover the page VANISHING; this covers the ordinary case where the
+    // page lives and only this mirror stops. Before `stopped`, or `push` would refuse it. A
+    // remount re-reports from scratch (`last` starts null), so nothing is lost.
+    push(false)
     stopped = true
     window.removeEventListener('focusin', onFocusIn)
     window.removeEventListener('focusout', onFocusOut)
