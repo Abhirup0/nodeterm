@@ -27,6 +27,13 @@ export interface ProjectIconPickerProps {
   colors: readonly string[]
   /** App's resolved appearance — forced onto the emoji picker rather than its own auto. */
   dark: boolean
+  /**
+   * Whether this project's section is the one the user is actively viewing. The GitHub-avatar probe
+   * is gated on this: a settings SEARCH mounts every matching project's picker (`sectionVisible`),
+   * but only ONE is active — probing on bare mount would fire an uncached live API call per project.
+   * Defaults to true so a standalone picker (no search shell) still probes on open.
+   */
+  active?: boolean
   onIcon: (icon: ProjectIcon | undefined) => void
   onColor: (color: string) => void
 }
@@ -40,6 +47,7 @@ export function ProjectIconPicker({
   color,
   colors,
   dark,
+  active = true,
   onIcon,
   onColor
 }: ProjectIconPickerProps): React.JSX.Element {
@@ -72,8 +80,12 @@ export function ProjectIconPicker({
   // origin resolves → reveal the Avatar tab; if the stored icon is a github avatar whose bytes have
   // drifted, quietly re-commit the fresh src. ANTI-CLOBBER: a null/failed resolve touches nothing —
   // it must never blank an already-set github icon, and a no-origin project simply keeps the tab
-  // hidden. Fires only here (mount / projectId change) — never on a timer or on every render.
+  // hidden. Gated on `active`: during a settings SEARCH every matching project's picker mounts, but
+  // only the ACTIVE section is the real "open" — probing on bare mount would fire one uncached live
+  // API call (credential resolve + repo detect + api.github.com + avatar fetch) PER project. So the
+  // probe fires when the section becomes active, not on mount — never on a timer or every render.
   useEffect(() => {
+    if (!active) return
     let cancelled = false
     void (async () => {
       const res = await fetchAvatar()
@@ -88,7 +100,7 @@ export function ProjectIconPicker({
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId])
+  }, [projectId, active])
 
   const onUseGithubAvatar = async (): Promise<void> => {
     setAvatarError(undefined)

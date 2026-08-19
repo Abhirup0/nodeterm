@@ -229,4 +229,46 @@ describe('ProjectIconPicker', () => {
     await flush()
     expect(projectAvatar).toHaveBeenCalledTimes(1)
   })
+
+  // A settings SEARCH mounts every matching project's picker, but only ONE section is active.
+  const renderActive = async (active: boolean): Promise<void> => {
+    await act(async () => {
+      root.render(
+        <ProjectIconPicker
+          projectId="p1"
+          name="Alpha"
+          icon={undefined}
+          color="#0a84ff"
+          colors={COLORS}
+          dark
+          active={active}
+          onIcon={onIcon}
+          onColor={onColor}
+        />
+      )
+    })
+  }
+
+  it('does NOT probe while the section is visible-but-not-active (a search match)', async () => {
+    const projectAvatar = vi.fn(async () => ({ dataUrl: 'data:image/png;base64,AV==' }))
+    useAvatar(projectAvatar)
+    root = createRoot(host)
+    await renderActive(false)
+    await flush()
+    expect(projectAvatar).not.toHaveBeenCalled()
+    expect(tab('Avatar').disabled).toBe(true)
+  })
+
+  it('probes once when the section becomes active (the real open)', async () => {
+    const projectAvatar = vi.fn(async () => ({ dataUrl: 'data:image/png;base64,AV==' }))
+    useAvatar(projectAvatar)
+    root = createRoot(host)
+    await renderActive(false)
+    await flush()
+    expect(projectAvatar).not.toHaveBeenCalled()
+    await renderActive(true)
+    await flush()
+    expect(projectAvatar).toHaveBeenCalledTimes(1)
+    expect(tab('Avatar').disabled).toBe(false)
+  })
 })

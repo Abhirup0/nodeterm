@@ -262,6 +262,10 @@ function EditableProjectSection({
               color={project.color}
               colors={NODE_COLORS}
               dark={appTheme === 'dark'}
+              // Only the section the user is actually viewing probes the (uncached, live) GitHub
+              // avatar. During a settings SEARCH many sections are VISIBLE-but-not-active — gating
+              // on `active` keeps a keyword like "avatar" from firing one live API call per project.
+              active={isActive}
               onIcon={(icon: ProjectIcon | undefined) => {
                 useProjects.getState().setProjectIcon(project.id, icon)
                 persistIdentityEdit()
