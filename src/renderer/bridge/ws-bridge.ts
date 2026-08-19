@@ -305,15 +305,13 @@ export function buildRealApi(
   }
 
   // REAL: registerProjectSetupHandlers (core) is wired on the same construction-order point as
-  // src/main/index.ts — see the "target.rootPath/projectName/ssh are placeholders" comment there.
-  // `run`'s wire shape mirrors the preload's exactly, for the same reason.
+  // src/main/index.ts. Wire carries exactly `(projectId, kind, worktreePath?)` — no rootPath/
+  // projectName/ssh; the server derives those itself from its own workspace index, same as main.
   const projectSetup: NodeTerminalApi['projectSetup'] = {
     run: (projectId, kind, worktreePath) =>
-      client.request(
-        IPC.projectSetupRun,
-        { projectId, projectName: '', rootPath: '.', ...(worktreePath ? { worktreePath } : {}) },
-        kind
-      ) as ReturnType<NodeTerminalApi['projectSetup']['run']>,
+      client.request(IPC.projectSetupRun, projectId, kind, worktreePath) as ReturnType<
+        NodeTerminalApi['projectSetup']['run']
+      >,
     cancel: (runKey) => client.request(IPC.projectSetupCancel, runKey) as Promise<boolean>,
     consent: async (requestId, answer) => {
       client.cast(IPC.projectSetupConsentSubmit, requestId, answer)

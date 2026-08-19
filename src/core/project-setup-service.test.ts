@@ -21,7 +21,8 @@ import {
   type ProjectSetupRunner,
   type ProjectSetupTarget
 } from './project-setup-service'
-import { registerProjectSetupHandlers } from './project-setup-handlers'
+import { registerProjectSetupHandlers, type ProjectSetupHandlerDeps } from './project-setup-handlers'
+import type { WorktreeListResult } from '../shared/worktree'
 
 let userData: string
 let plat: FakePlatform
@@ -455,7 +456,19 @@ describe('ProjectSetupService — single-flight, cancel and absent scripts', () 
 })
 
 describe('registerProjectSetupHandlers', () => {
-  const stub = () => {
+  const okWorktrees = (paths: string[] = []): ProjectSetupHandlerDeps['worktreeList'] =>
+    async (): Promise<WorktreeListResult> => ({
+      ok: true,
+      entries: paths.map((p) => ({ path: p, branch: null, head: null, isBare: false }))
+    })
+
+  const defaultDeps = (over: Partial<ProjectSetupHandlerDeps> = {}): ProjectSetupHandlerDeps => ({
+    projectTargetInfo: (projectId) => (projectId === 'p1' ? { cwd: '/proj/app', name: 'App' } : null),
+    worktreeList: okWorktrees(),
+    ...over
+  })
+
+  const stub = (deps: Partial<ProjectSetupHandlerDeps> = {}) => {
     const runs: Array<[ProjectSetupTarget, string]> = []
     const cancels: string[] = []
     const consents: Array<[string, string]> = []
@@ -472,7 +485,7 @@ describe('registerProjectSetupHandlers', () => {
         consents.push([requestId, answer])
       }
     }
-    registerProjectSetupHandlers(plat, service)
+    registerProjectSetupHandlers(plat, service, defaultDeps(deps))
     return { runs, cancels, consents }
   }
 
@@ -492,58 +505,73 @@ describe('registerProjectSetupHandlers', () => {
     expect(() => plat.listeners[IPC.projectSetupUnsubscribe]('p1')).not.toThrow()
   })
 
-  it('passes a well-formed target through and answers a malformed one instead of throwing', async () => {
+  it('derives rootPath/projectName from projectTargetInfo — the wire carries only projectId/kind', async () => {
     const { runs } = stub()
     const call = plat.handlers[IPC.projectSetupRun]
-    const ssh = { server: { host: 'h', user: 'u', port: 2222 }, remoteCwd: '/srv/app' }
-    expect(await call({ ...target(), worktreePath: '/wt', ssh, bogus: 'x' }, 'archive')).toMatchObject({
-      status: 'started'
-    })
-    expect(runs[0][1]).toBe('archive')
-    expect(runs[0][0]).toEqual({ ...target(), worktreePath: '/wt', ssh })
-
-    for (const bad of [null, {}, { projectId: 'p', projectName: 'n' }, 'nope']) {
-      expect(await call(bad, 'setup')).toEqual({ status: 'skipped', reason: 'unavailable' })
-    }
-    expect(await call(target(), 'launch')).toEqual({ status: 'skipped', reason: 'unavailable' })
+    expect(await call('p1', 'archive')).toMatchObject({ status: 'started' })
     expect(runs).toHaveLength(1)
+    expect(runs[0]).toEqual([{ projectId: 'p1', projectName: 'App', rootPath: '/proj/app' }, 'archive'])
   })
 
-  it('rejects a malformed ssh target instead of stripping it down to a LOCAL run', async () => {
+  it('derives an ssh target from projectTargetInfo alone — nothing ssh-shaped is on the wire', async () => {
+    const ssh = { server: { host: 'h', user: 'u', port: 2222 }, remoteCwd: '/srv/app' }
+    const { runs } = stub({ projectTargetInfo: (id) => (id === 'p1' ? { name: 'App', ssh } : null) })
+    const call = plat.handlers[IPC.projectSetupRun]
+    expect(await call('p1', 'setup')).toMatchObject({ status: 'started' })
+    expect(runs[0][0]).toEqual({ projectId: 'p1', projectName: 'App', rootPath: '/srv/app', ssh })
+  })
+
+  it('answers unavailable for a malformed call instead of throwing, and never calls service.run', async () => {
     const { runs } = stub()
     const call = plat.handlers[IPC.projectSetupRun]
-    const bad = [
-      'garbage',
-      7,
-      { server: { host: 'h' } },
-      { server: { host: 'h', user: 'u' } }, // no remoteCwd
-      { server: { host: 'h', user: 'u', port: '22' }, remoteCwd: '/srv' },
-      { server: { host: 'h', user: 'u', identityFile: 3 }, remoteCwd: '/srv' },
-      { server: 'h@u', remoteCwd: '/srv' }
-    ]
-    for (const ssh of bad) {
-      expect(await call({ ...target(), ssh }, 'setup')).toEqual({ status: 'skipped', reason: 'unavailable' })
+    for (const args of [[null, 'setup'], [7, 'setup'], ['', 'setup'], ['p1', 'launch'], ['p1', null]] as const) {
+      expect(await call(...args)).toEqual({ status: 'skipped', reason: 'unavailable' })
     }
+    // A non-string worktreePath (a hostile/buggy caller) is refused outright, not coerced.
+    expect(await call('p1', 'setup', 42)).toEqual({ status: 'skipped', reason: 'unavailable' })
     expect(runs).toHaveLength(0)
   })
 
-  it('end to end: a malformed ssh target never reaches the local runner', async () => {
+  it('refuses an unknown projectId — service.run is never reached', async () => {
+    const { runs } = stub()
+    const call = plat.handlers[IPC.projectSetupRun]
+    expect(await call('missing', 'setup')).toEqual({ status: 'skipped', reason: 'unavailable' })
+    expect(runs).toHaveLength(0)
+  })
+
+  it('refuses a relative worktreePath — service.run is never reached', async () => {
+    const { runs } = stub()
+    const call = plat.handlers[IPC.projectSetupRun]
+    expect(await call('p1', 'setup', 'relative/path')).toEqual({ status: 'skipped', reason: 'unavailable' })
+    expect(runs).toHaveLength(0)
+  })
+
+  it('refuses a hostile absolute worktreePath that is not one of the project\'s actual git worktrees', async () => {
+    const { runs } = stub({ worktreeList: okWorktrees(['/proj/app.worktrees/real-branch']) })
+    const call = plat.handlers[IPC.projectSetupRun]
+    expect(await call('p1', 'setup', '/etc/passwd')).toEqual({ status: 'skipped', reason: 'unavailable' })
+    expect(runs).toHaveLength(0)
+  })
+
+  it('accepts a worktreePath that matches one of the project\'s actual git worktrees', async () => {
+    const wt = '/proj/app.worktrees/real-branch'
+    const { runs } = stub({ worktreeList: okWorktrees([wt]) })
+    const call = plat.handlers[IPC.projectSetupRun]
+    expect(await call('p1', 'setup', wt)).toMatchObject({ status: 'started' })
+    expect(runs[0][0]).toEqual({ projectId: 'p1', projectName: 'App', rootPath: '/proj/app', worktreePath: wt })
+  })
+
+  it('end to end: an unknown projectId never reaches the local runner', async () => {
     const { calls, runner } = recorder()
     const service = new ProjectSetupService({
       trust: new ProjectTrustStore(),
       readSettings: async () => snapshot(null, { setup: { setupScript: 'echo hi' } }),
       runLocal: runner
     })
-    registerProjectSetupHandlers(plat, service)
+    registerProjectSetupHandlers(plat, service, defaultDeps())
     const call = plat.handlers[IPC.projectSetupRun]
-    expect(await call({ ...target(), ssh: 'garbage' }, 'setup')).toEqual({
-      status: 'skipped',
-      reason: 'unavailable'
-    })
-    expect(await call({ ...target(), ssh: { server: { host: 'h' } } }, 'setup')).toEqual({
-      status: 'skipped',
-      reason: 'unavailable'
-    })
+    expect(await call('missing', 'setup')).toEqual({ status: 'skipped', reason: 'unavailable' })
+    expect(await call('p1', 'setup', '/etc/passwd')).toEqual({ status: 'skipped', reason: 'unavailable' })
     expect(calls).toHaveLength(0)
   })
 

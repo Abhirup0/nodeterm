@@ -241,8 +241,10 @@ export const IPC = {
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',
-  /** Run a project's setup/archive script. Answers a ProjectSetupRunResult — `started` only means
-   *  the run was admitted (gated + single-flight), not that it finished; progress arrives on
+  /** Run a project's setup/archive script. Args: (projectId, kind, worktreePath?) — NO rootPath/
+   *  projectName/ssh: the handler derives those itself from its own workspace index by projectId,
+   *  never the caller (project-setup-handlers.ts). Answers a ProjectSetupRunResult — `started` only
+   *  means the run was admitted (gated + single-flight), not that it finished; progress arrives on
    *  projectSetupEvent. */
   projectSetupRun: 'project-setup:run',
   projectSetupCancel: 'project-setup:cancel',

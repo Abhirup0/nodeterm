@@ -33,8 +33,8 @@ import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
 import { ProjectTrustStore } from '../core/project-trust-store'
 import { ProjectSetupService } from '../core/project-setup-service'
-import { registerProjectSetupHandlers, type ProjectSetupHandlerService } from '../core/project-setup-handlers'
-import { makeLocalSetupRunner, resolveProjectSetupTarget } from '../core/project-setup-runner-local'
+import { registerProjectSetupHandlers } from '../core/project-setup-handlers'
+import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -270,33 +270,23 @@ export async function startServer(
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
-  // Project setup/archive runner — same construction + trust boundary as src/main/index.ts. No ssh
-  // leg here at all (the Server Edition has no SSH projects, same reason board-log's router below
-  // never resolves one): `resolveProjectSetupTarget` degrades an ssh-shaped index entry to
-  // `unavailable` on its own since `info.ssh` is never populated on this shell.
+  // Project setup/archive runner — same construction as src/main/index.ts, and the SAME
+  // `registerProjectSetupHandlers` trust boundary (project-setup-handlers.ts): it derives rootPath/
+  // ssh/projectName from THIS process's own workspace index by projectId, never the renderer, and
+  // re-validates `worktreePath` against the project's actual git worktrees. No ssh leg here at all
+  // (the Server Edition has no SSH projects, same reason board-log's router below never resolves
+  // one) — `projectTargetInfo` never populates `ssh` on this shell, so an ssh-shaped target simply
+  // never arises.
   const projectTrustStore = new ProjectTrustStore()
   const projectSetupService = new ProjectSetupService({
     trust: projectTrustStore,
     readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
     runLocal: makeLocalSetupRunner()
   })
-  // See src/main/index.ts's matching comment: `target.rootPath`/`projectName`/`ssh` on the wire are
-  // placeholders (preload/ws-bridge never send real ones) and are IGNORED here — rootPath/ssh/
-  // projectName are re-derived from this process's own workspace index by `target.projectId`, and
-  // `worktreePath` is independently re-validated against the project's actual git worktrees.
-  const projectSetupHandlerService: ProjectSetupHandlerService = {
-    run: async (target, kind) => {
-      const info = workspaceStore.projectTargetInfo(target.projectId)
-      const resolved = await resolveProjectSetupTarget(target.projectId, target.worktreePath, info, (repoPath) =>
-        gitService.worktreeList(repoPath)
-      )
-      if (!resolved) return { status: 'skipped', reason: 'unavailable' }
-      return projectSetupService.run(resolved, kind)
-    },
-    cancel: (runKey) => projectSetupService.cancel(runKey),
-    submitConsent: (requestId, answer) => projectSetupService.submitConsent(requestId, answer)
-  }
-  registerProjectSetupHandlers(platform, projectSetupHandlerService)
+  registerProjectSetupHandlers(platform, projectSetupService, {
+    projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+    worktreeList: (repoPath) => gitService.worktreeList(repoPath)
+  })
 
   const github = registerGitHubIntegration({
     platform,

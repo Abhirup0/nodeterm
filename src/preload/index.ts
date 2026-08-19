@@ -155,17 +155,11 @@ const api: NodeTerminalApi = {
       ipcRenderer.invoke(IPC.projectSettingsUpdateLocal, projectId, local)
   },
   projectSetup: {
-    // The wire's `target` first argument is `project-setup-handlers.ts`'s `sanitizeTarget` shape
-    // (Task 1) — `projectName`/`rootPath` here are UNUSED PLACEHOLDERS satisfying that shape only;
-    // main re-derives the real rootPath/projectName/ssh from its own workspace index by projectId
-    // and never trusts what crosses this wire (Task 1 review finding — see main/index.ts's
-    // `projectSetupHandlerService`). Only `projectId`/`worktreePath` cross meaningfully.
+    // Wire carries exactly `(projectId, kind, worktreePath?)` — no rootPath/projectName/ssh: main
+    // derives those itself from its own workspace index by projectId and never trusts what crosses
+    // this wire (project-setup-handlers.ts's `registerProjectSetupHandlers`, Task 1 review finding).
     run: (projectId, kind, worktreePath) =>
-      ipcRenderer.invoke(
-        IPC.projectSetupRun,
-        { projectId, projectName: '', rootPath: '.', ...(worktreePath ? { worktreePath } : {}) },
-        kind
-      ),
+      ipcRenderer.invoke(IPC.projectSetupRun, projectId, kind, worktreePath),
     cancel: (runKey: string) => ipcRenderer.invoke(IPC.projectSetupCancel, runKey),
     consent: async (requestId, answer) => {
       ipcRenderer.send(IPC.projectSetupConsentSubmit, requestId, answer)

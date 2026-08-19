@@ -1,7 +1,9 @@
 import { IPC } from '../shared/ipc'
 import type { ProjectSetupConsentAnswer, ProjectSetupKind, ProjectSetupRunResult } from '../shared/project-settings'
+import type { WorktreeListResult } from '../shared/worktree'
 import type { CorePlatform } from './platform'
 import type { ProjectSetupTarget } from './project-setup-service'
+import { resolveProjectSetupTarget, type ProjectSetupTargetInfo } from './project-setup-runner-local'
 
 /**
  * RPC surface for the setup/archive runner, registered once for every shell (Electron main + Server
@@ -12,9 +14,14 @@ import type { ProjectSetupTarget } from './project-setup-service'
  * `projectSetupEvent` push is registered unconditionally. The channels exist so the renderer's
  * lifecycle (and a later ref-counted gate) needs no protocol change.
  *
- * Everything crossing this seam is renderer/client input, so the target is shape-checked here
- * rather than trusted — the service's own gate protects the dangerous half, but a malformed target
- * must answer a result, not throw an IPC error.
+ * The wire's `run` carries ONLY `(projectId, kind, worktreePath?)` — the same three things
+ * `ProjectSetupApi.run` exposes to the renderer. `rootPath`/`projectName`/`ssh` are never on the
+ * wire at all: this registrar derives them itself, from `deps.projectTargetInfo` (this shell's own
+ * workspace index, never the renderer) by `projectId`, and independently re-validates
+ * `worktreePath` against `deps.worktreeList`'s answer for that project (`resolveProjectSetupTarget`,
+ * project-setup-runner-local.ts) — a hostile/compromised renderer cannot name an arbitrary path or
+ * forge an `ssh` target this way. `cancel`/`consentSubmit` carry no path-shaped data and are
+ * shape-checked in place, same as before.
  */
 export interface ProjectSetupHandlerService {
   run(target: ProjectSetupTarget, kind: ProjectSetupKind): Promise<ProjectSetupRunResult>
@@ -22,56 +29,38 @@ export interface ProjectSetupHandlerService {
   submitConsent(requestId: string, answer: ProjectSetupConsentAnswer): void
 }
 
-const isKind = (v: unknown): v is ProjectSetupKind => v === 'setup' || v === 'archive'
-
-function sanitizeTarget(v: unknown): ProjectSetupTarget | null {
-  if (typeof v !== 'object' || v === null) return null
-  const t = v as Record<string, unknown>
-  if (typeof t.projectId !== 'string' || !t.projectId) return null
-  if (typeof t.projectName !== 'string') return null
-  if (typeof t.rootPath !== 'string' || !t.rootPath) return null
-  const out: ProjectSetupTarget = {
-    projectId: t.projectId,
-    projectName: t.projectName,
-    rootPath: t.rootPath
-  }
-  if (typeof t.worktreePath === 'string' && t.worktreePath) out.worktreePath = t.worktreePath
-  if (t.ssh !== undefined) {
-    // A malformed `ssh` is REJECTED, never stripped: dropping the field would silently downgrade a
-    // remote run into a local one, executing the remote project's script on this machine — and
-    // against the wrong (local) trust key.
-    const ssh = typeof t.ssh === 'object' && t.ssh !== null ? (t.ssh as Record<string, unknown>) : null
-    if (!ssh) return null
-    const server =
-      typeof ssh.server === 'object' && ssh.server !== null ? (ssh.server as Record<string, unknown>) : null
-    if (!server) return null
-    if (typeof server.host !== 'string' || !server.host) return null
-    if (typeof server.user !== 'string' || !server.user) return null
-    if (server.port !== undefined && typeof server.port !== 'number') return null
-    if (server.identityFile !== undefined && typeof server.identityFile !== 'string') return null
-    if (typeof ssh.remoteCwd !== 'string' || !ssh.remoteCwd) return null
-    out.ssh = {
-      server: {
-        host: server.host,
-        user: server.user,
-        ...(typeof server.port === 'number' ? { port: server.port } : {}),
-        ...(typeof server.identityFile === 'string' ? { identityFile: server.identityFile } : {})
-      },
-      remoteCwd: ssh.remoteCwd
-    }
-  }
-  return out
+/** What `registerProjectSetupHandlers` needs from its shell to resolve a trusted target — the
+ *  Task 1 review finding, closed centrally here so main/server share the ONE implementation instead
+ *  of each re-deriving it. */
+export interface ProjectSetupHandlerDeps {
+  /** This shell's own workspace index lookup (e.g. `WorkspaceStore.projectTargetInfo`). */
+  projectTargetInfo(projectId: string): ProjectSetupTargetInfo | null
+  /** `git worktree list` for a repo root (e.g. `GitService#worktreeList` bound to the caller). */
+  worktreeList(repoPath: string): Promise<WorktreeListResult>
 }
+
+const isKind = (v: unknown): v is ProjectSetupKind => v === 'setup' || v === 'archive'
 
 export function registerProjectSetupHandlers(
   platform: CorePlatform,
-  service: ProjectSetupHandlerService
+  service: ProjectSetupHandlerService,
+  deps: ProjectSetupHandlerDeps
 ): void {
-  platform.handle(IPC.projectSetupRun, async (target: unknown, kind: unknown): Promise<ProjectSetupRunResult> => {
-    const t = sanitizeTarget(target)
-    if (!t || !isKind(kind)) return { status: 'skipped', reason: 'unavailable' }
-    return service.run(t, kind)
-  })
+  platform.handle(
+    IPC.projectSetupRun,
+    async (projectId: unknown, kind: unknown, worktreePath?: unknown): Promise<ProjectSetupRunResult> => {
+      if (typeof projectId !== 'string' || !projectId || !isKind(kind)) {
+        return { status: 'skipped', reason: 'unavailable' }
+      }
+      if (worktreePath !== undefined && typeof worktreePath !== 'string') {
+        return { status: 'skipped', reason: 'unavailable' }
+      }
+      const info = deps.projectTargetInfo(projectId)
+      const target = await resolveProjectSetupTarget(projectId, worktreePath, info, deps.worktreeList)
+      if (!target) return { status: 'skipped', reason: 'unavailable' }
+      return service.run(target, kind)
+    }
+  )
   platform.handle(IPC.projectSetupCancel, (runKey: unknown) =>
     typeof runKey === 'string' ? service.cancel(runKey) : false)
   platform.on(IPC.projectSetupConsentSubmit, (requestId: unknown, answer: unknown) => {
