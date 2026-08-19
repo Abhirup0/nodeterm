@@ -47,6 +47,13 @@ const PATHS: Record<StaticSettingsSectionId, React.JSX.Element> = {
       <path d="M4 8.2a4 4 0 0 0 8 0M8 12.2v1.6M6.2 13.8h3.6" />
     </>
   ),
+  // A keyboard: the outline, two key rows, and a wide space bar.
+  shortcuts: (
+    <>
+      <rect x="1.5" y="4" width="13" height="8" rx="1.8" />
+      <path d="M4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M4 9.6h8" />
+    </>
+  ),
   agents: (
     <path d="M8 2.3 9.4 5.9 13 7.3 9.4 8.7 8 12.3 6.6 8.7 3 7.3 6.6 5.9z" />
   ),
