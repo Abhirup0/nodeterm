@@ -475,6 +475,34 @@ const api: NodeTerminalApi = {
     cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.claudeAccountsCancelWait, id),
     remove: (id, ctx) => ipcRenderer.invoke(IPC.claudeAccountsRemove, id, ctx)
   },
+  codexAccounts: {
+    add: () => ipcRenderer.invoke(IPC.codexAccountsAdd),
+    waitLogin: (id) => ipcRenderer.invoke(IPC.codexAccountsWaitLogin, id),
+    cancelWaitLogin: (id) => ipcRenderer.invoke(IPC.codexAccountsCancelWait, id),
+    identity: (id) => ipcRenderer.invoke(IPC.codexAccountsIdentity, id),
+    systemIdentity: (ctx) => ipcRenderer.invoke(IPC.codexAccountsSystemIdentity, ctx),
+    remove: (id) => ipcRenderer.invoke(IPC.codexAccountsRemove, id),
+    switchThread: (threadId, cwd, sourceAccountId, targetAccountId) =>
+      ipcRenderer.invoke(
+        IPC.codexAccountsSwitchThread,
+        threadId,
+        cwd,
+        sourceAccountId,
+        targetAccountId
+      ),
+    commitSwitch: (token) => ipcRenderer.invoke(IPC.codexAccountsCommitSwitch, token),
+    finishSwitch: (token) => ipcRenderer.invoke(IPC.codexAccountsFinishSwitch, token),
+    rollbackSwitch: (token) => ipcRenderer.invoke(IPC.codexAccountsRollbackSwitch, token),
+    transferThreadToSsh: (threadId, cwd, projectId, targetAccountId, sourceAccountId) =>
+      ipcRenderer.invoke(
+        IPC.codexAccountsTransferThreadToSsh,
+        threadId,
+        cwd,
+        projectId,
+        targetAccountId,
+        sourceAccountId
+      )
+  },
   transcripts: {
     search: (query: string) => ipcRenderer.invoke(IPC.transcriptSearch, query)
   },
@@ -600,6 +628,17 @@ const api: NodeTerminalApi = {
   },
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.
+  shortcuts: {
+    // Fire-and-forget: nothing waits on the answer. Main clears the bit itself on the three ways
+    // this page can stop existing — window closed, renderer died, main-frame navigation (⌘R) —
+    // but those are a backstop for a page that VANISHED, not a general safety net: an ordinary
+    // disarm that never sends leaves the shortcuts suppressed until one of them happens.
+    setRecording: (active: boolean) => ipcRenderer.send(IPC.uiShortcutRecording, active),
+    // The terminal-focus mirror, same fire-and-forget shape and the same fail-safe reading on the
+    // far side: main starts at "not focused" and the three page-death resets return it there, so a
+    // report that never arrives costs the terminal-first policy, not the app's shortcuts.
+    setTerminalFocused: (focused: boolean) => ipcRenderer.send(IPC.uiTerminalFocus, focused)
+  },
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),
   onZoomActualSize: subscribe(IPC.appZoomActualSize),

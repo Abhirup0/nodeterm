@@ -18,6 +18,34 @@ describe('loop node overrides vs per-turn fan-out', () => {
     expect(useAgentNodes.getState().positions['loop-n1']).toEqual({ x: 5, y: 6 })
   })
 
+  it('tidyFanout drops only the given parent\'s subagent overrides, keeping the loop card and other parents', () => {
+    const s = useAgentNodes.getState()
+    s.start('tu1', { parentNodeId: 'n1' })
+    s.start('tu2', { parentNodeId: 'n1' })
+    s.start('tu3', { parentNodeId: 'n2' })
+    s.setPosition('tu1', { x: 1, y: 2 })
+    s.setSize('tu2', { width: 400, height: 300 })
+    s.toggleExpanded('tu2')
+    s.setPosition('tu3', { x: 9, y: 9 })
+    s.setPosition('loop-n1', { x: 5, y: 6 })
+    s.tidyFanout('n1')
+    const st = useAgentNodes.getState()
+    expect(st.positions['tu1']).toBeUndefined()
+    expect(st.sizes['tu2']).toBeUndefined()
+    expect(st.expanded['tu2']).toBeUndefined()
+    expect(st.positions['tu3']).toEqual({ x: 9, y: 9 })
+    expect(st.positions['loop-n1']).toEqual({ x: 5, y: 6 })
+    // The cards themselves survive — only their placement overrides are dropped.
+    expect(st.byId['tu1']).toBeDefined()
+    expect(st.byId['tu2']).toBeDefined()
+  })
+
+  it('tidyFanout is a no-op for a parent with no subagents', () => {
+    const before = useAgentNodes.getState()
+    useAgentNodes.getState().tidyFanout('nobody')
+    expect(useAgentNodes.getState()).toBe(before)
+  })
+
   it('clearLoop drops only the loop card overrides', () => {
     const s = useAgentNodes.getState()
     s.start('tu1', { parentNodeId: 'n1' })
