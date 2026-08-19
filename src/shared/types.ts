@@ -2,13 +2,16 @@
 
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
+import type { KeybindingOverrides, TerminalShortcutPolicy } from './keybindings'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
+import type { BrowserLeasePush } from './browser-indicator'
 import type { GroupWorktree } from './worktree'
 import type { ClientId, DinoSnapshot, PeerDiff, PeerIdentity, PeerState } from './presence'
 import type { WhisperModelInfo } from './speech'
 import type { ProjectKanbanGitHub } from './github-issues'
+import type { CodexAccount } from './codex-account'
 import type {
   ModelDiscoveryResult,
   ModelGatewayCredentialStatus,
@@ -285,6 +288,13 @@ export interface CanvasNodeState {
   fileMissing?: boolean
   /** web-only: when set, the web node loads this live URL (else it loads `filePath` as local html). */
   url?: string
+  /**
+   * browser-only: the Electron session partition for an AGENT-opened browser node
+   * (`persist:nt-agent-browser-<projectId>`), set once at creation and never mutated. Absent for a
+   * USER-opened node (default session, no migration). Persisted so the jar survives reopen; carried
+   * through untouched on Server Edition / mobile, where a browser node renders with no <webview>.
+   */
+  partition?: string
   /** diff-only: true = staged diff (HEAD vs index), false = unstaged (index vs working). */
   diffStaged?: boolean
   /** diff-only: when set, the diff shows parent (<oid>^) vs commit (<oid>) for a file from history. */
@@ -427,6 +437,12 @@ export interface BoardLogEvent {
      *  is the delivery's outcome kind — a trace that cannot answer "did it land?" answers the only
      *  question anyone asks it with silence. Written by `agent-message-trace.recordDelivery`. */
     | 'agent-message'
+    /** An agent read a site's cookies through `browser --cookies` — a data-exfiltration surface the
+     *  owner allowed but that MUST be loudly traced (PR 9 Task 9.2/9.3). `from` = the owner agent
+     *  node's title, `to` = the domain read, `title` = the browser node's title; `nodeId` = the owner
+     *  agent node so it files under that agent's card. Written BEFORE the read (fail-closed): a cookie
+     *  read that happened but was not recorded is the one outcome this trace exists to prevent. */
+    | 'agent-read-cookies'
   from?: string
   to?: string
   /** Column title for column-added/deleted; card title for card-created; outcome for agent-message. */
@@ -833,6 +849,16 @@ export interface BrowserApi {
   unregister(webContentsId: number): void
   /** Fires when a browser guest requested a new window; the renderer opens another browser node. */
   onBrowserNewWindow(listener: (e: { url: string; sourceNodeId: string }) => void): () => void
+  /** Push: the current set of browser nodes an agent is driving (chip / rope / kill row). `stopped`
+   *  ids drop from the chip immediately, skipping the anti-flicker linger. */
+  onLeaseChanged(listener: (push: BrowserLeasePush) => void): () => void
+  /** Stop agent control of ONE browser node — the chip button and the node context menu. Detaches
+   *  the debugger + drops the lease in main; a later drive from that owner is refused by name. */
+  stop(nodeId: string): void
+  /** Stop agent control of EVERY driven node — the Settings kill row's Stop-all. */
+  stopAll(): void
+  /** Stop agent control of every node in a project — the project's browser-control switch going off. */
+  stopProject(projectId: string): void
 }
 
 /** A user-defined agent (BYO CLI). With no `baseAgent` it is in no capability list, so it gets
@@ -1083,6 +1109,9 @@ export interface Settings {
   agentLaunchCommands: Partial<Record<BuiltinAgentId, string>>
   /** Managed Claude accounts (config-dir isolated). See ClaudeAccount. */
   claudeAccounts: ClaudeAccount[]
+  /** Managed Codex accounts (CODEX_HOME isolated, machine-scoped by `host`). See CodexAccount.
+   *  Renderer-owned in settings.json exactly like `claudeAccounts`; main owns only fs lifecycle. */
+  codexAccounts: CodexAccount[]
   /** Custom display label for the SYSTEM Claude account (~/.claude) in pickers/settings.
    *  Empty = unset → fall back to the detected login email, else "System account". */
   systemAccountLabel: string
@@ -1098,9 +1127,11 @@ export interface Settings {
   /** Ids of terminal node header buttons the user has hidden; empty = everything visible. Gated by
    *  HIDEABLE_HEADER_BUTTONS the same way. */
   hiddenHeaderButtons: string[]
-  /** Whether usage percentages render as consumed ("32% used") or remaining ("68% left").
-   *  'remaining' is the historical default; users coming from other tools expect 'used'. */
-  usagePercentMode: 'used' | 'remaining'
+  /** Whether usage percentages render as consumed ("32% used"), remaining ("68% left"), or raw
+   *  token counts ("48k/200k tokens" — context-window surfaces only; provider quota surfaces
+   *  have no token counts and fall back to 'used' display). 'remaining' is the historical
+   *  default; users coming from other tools expect 'used'. */
+  usagePercentMode: 'used' | 'remaining' | 'tokens'
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
   /** The permission mode Claude TERMINAL (CLI) sessions START in — passed as `--permission-mode`
@@ -1154,6 +1185,14 @@ export interface Settings {
    *  hook holds briefly for a phone/canvas Approve/Deny before falling through to the normal
    *  interactive prompt. Off ⇒ the env var is absent ⇒ exact legacy behavior. Claude-only. */
   hookReplyApprovals: boolean
+  /** Hold an idle-sleep power assertion while a LOCAL agent node is working, so long runs
+   *  survive an unattended laptop. Released when the last one stops (or goes stale). Cannot
+   *  hold through a closed lid. Asked in the setup tour; Settings → Behavior. */
+  keepAwakeWhileAgentsWork: boolean
+  /** Ask before the app actually quits (⌘/Ctrl+Q, menu Quit, or the Windows/Linux title-bar ×).
+   *  The auto-update "Restart to update" flow never asks — that decision was already made.
+   *  Settings → Behavior. */
+  confirmBeforeQuit: boolean
   /** macOS Notch HUD (docs/notch-hud.md): a transparent always-on-top strip by the notch showing
    *  walking agent mascots while agents work, expanding into a mini session panel. Default on;
    *  macOS + desktop only (ignored on other platforms / Server Edition). */
@@ -1166,9 +1205,22 @@ export interface Settings {
   notchHoverExpand: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
+  /** Keyboard-shortcut overrides by command id (see shared/keybindings.ts). Absent id = the
+   *  command's default bindings; `[]` = disabled. Hand-editable; invalid or conflicting
+   *  entries are dropped with a console warning at read time (sanitizeKeybindingOverrides).
+   *  Optional and deliberately not in DEFAULT_SETTINGS: absent simply means "no overrides". */
+  keybindings?: KeybindingOverrides
+  /** Who wins while a terminal has keyboard focus: 'app-first' (default) lets allowInTerminal
+   *  app commands fire over an xterm; 'terminal-first' reserves every chord but the terminal's
+   *  own (find, copy) for the shell/TUI — including ⌘W/⌘M and the zoom/project-jump gestures. */
+  terminalShortcutPolicy: TerminalShortcutPolicy
+  /** Command ids whose "this chord was captured from your terminal" notice has been shown
+   *  (app-first only, once per command). Optional and absent from DEFAULT_SETTINGS: absent
+   *  means none seen. Lives in settings, not localStorage, so Server Edition shares it. */
+  seenShortcutCaptureNotices?: string[]
   /** Per-node hook identity enforcement (src/core/agents/node-identity-policy.ts).
    *
-   *  The ONLY optional key in this interface, and deliberately so: it is a TRI-state, and the two
+   *  One of the three optional keys in this interface, and deliberately so: it is a TRI-state, and the two
    *  non-default states are opposite escape hatches. Absent (the default — it is not in
    *  DEFAULT_SETTINGS) follows `NODE_IDENTITY_STRICT_AFTER`, so the rollout has one schedule for
    *  everybody. `true` opts in to strict enforcement before that date. `false` keeps the warning
@@ -1224,6 +1276,9 @@ export const DEFAULT_SETTINGS: Settings = {
   commitAgent: 'claude',
   commitAgentCommand: '',
   commitExtraPrompt: '',
+  // 'app-first' reproduces today's dispatch bit-for-bit: allowInTerminal app commands keep
+  // firing over a focused xterm. Opting into 'terminal-first' is the user's call, never ours.
+  terminalShortcutPolicy: 'app-first',
   seenShortcuts: false,
   seenOnboarding: false,
   notifyOnClaudeDone: true,
@@ -1235,6 +1290,7 @@ export const DEFAULT_SETTINGS: Settings = {
   modelGateway: { baseUrl: '', apiKey: '' },
   agentLaunchCommands: {},
   claudeAccounts: [],
+  codexAccounts: [],
   systemAccountLabel: '',
   // All three builtin agents (Claude/Codex/Gemini) show in the Add menus out of the box.
   // Existing users keep whatever they've saved (their persisted disabledAgents overrides this).
@@ -1265,6 +1321,12 @@ export const DEFAULT_SETTINGS: Settings = {
   // Deterministic hook-reply approvals default ON (existing users pick it up on hydrate). Only
   // affects Claude terminal sessions; off reproduces the pre-feature launch bit-for-bit.
   hookReplyApprovals: true,
+  // Keep-awake-while-agents-work default ON (existing users pick it up on hydrate — deliberate,
+  // same note style as hookReplyApprovals). Held only while a local agent is actually working.
+  keepAwakeWhileAgentsWork: true,
+  // Confirm-before-quit default ON: sessions survive a quit anyway, but an accidental ⌘Q
+  // tears down every window at once; the toggle is one switch away for who finds it noisy.
+  confirmBeforeQuit: true,
   // macOS Notch HUD default ON (guarded to darwin at runtime; a no-op elsewhere).
   notchHud: true,
   notchWidth: 168,
@@ -2430,6 +2492,28 @@ export interface PresenceApi {
   onPeer(listener: (diff: PeerDiff) => void): () => void
 }
 
+/** Keyboard-shortcut plumbing the RENDERER cannot do for itself. */
+export interface ShortcutsApi {
+  /** Tell the shell that a shortcut recorder is armed (`true`) or released (`false`), so the
+   *  desktop's `before-input-event` intercepts stand down and the chord being recorded — ⌘W and
+   *  ⌘M among them — reaches the recorder instead of closing the user's selected nodes. A claimed
+   *  chord never reaches the page, so the recorder's own preventDefault cannot substitute for
+   *  this. Fire-and-forget. **The `false` leg is not optional**: the bit is global, so a recorder
+   *  that arms and never releases leaves those chords dead app-wide. Server Edition: a documented
+   *  no-op (a browser tab has no application menu to steal a chord back from, so nothing
+   *  intercepts). */
+  setRecording(active: boolean): void
+  /** Mirror whether an xterm currently holds keyboard focus, so the desktop's intercepts can stand
+   *  down under the `terminal-first` shortcut policy — `before-input-event` fires before any
+   *  renderer handler could answer, so main needs the answer in advance. Sent on CHANGE only.
+   *  Fire-and-forget, and **not optional**: the mirror is the only thing that makes the policy
+   *  reach the three main-intercepted chords. Read fail-safe on the far side (a missing or stale
+   *  mirror = not focused = intercepts on), so the failure mode of never sending is the app
+   *  behaving as it did before the policy existed. Server Edition: a documented no-op, like
+   *  `setRecording` — a browser tab has no application menu to steal a chord back from. */
+  setTerminalFocused(focused: boolean): void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -2471,6 +2555,7 @@ export interface NodeTerminalApi {
   handoff: HandoffApi
   pairing: PairingApi
   presence: PresenceApi
+  shortcuts: ShortcutsApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */
@@ -2563,6 +2648,26 @@ export interface NodeTerminalApi {
     message?: string
     result?: unknown
     error?: string
+  }): void
+  /** The `browser` verb resolve round-trip (S8 PR 7): main asks the renderer to resolve a source
+   *  node's owning project, control-capability and the LIVE per-project capability value. The
+   *  renderer answers over `sendBrowserControlResolveResult` and NEVER runs a CDP command. */
+  onBrowserControlResolve(
+    listener: (req: { requestId: string; sourceNodeId: string; browserNodeId?: string }) => void
+  ): () => void
+  /** Answer a browser-control resolve. `ok:false` carries a named refusal; `ok:true` carries the
+   *  facts main turns into its own (owner + capability + CDP-gate) decision. `sourceTitle`/
+   *  `browserTitle` are for the cookie-read trace only (PR 9) — never a security input. */
+  sendBrowserControlResolveResult(payload: {
+    requestId: string
+    ok: boolean
+    refusal?: string
+    projectId?: string
+    projectCwd?: string
+    sourceControlCapable?: boolean
+    capabilityOn?: boolean
+    sourceTitle?: string
+    browserTitle?: string
   }): void
   /** Agent messaging (the `send`/`reply` control verbs): run one delivery in main, where the
    *  scope check, the per-project switch, flow control and the pane probes all live. The reply is

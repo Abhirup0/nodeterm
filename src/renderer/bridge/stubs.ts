@@ -194,7 +194,13 @@ export function buildStubApi(): Omit<
     browser: {
       register: noop,
       unregister: noop,
-      onBrowserNewWindow: noopUnsub
+      onBrowserNewWindow: noopUnsub,
+      // Browser control does not exist off the desktop shell (no <webview>, no CDP), so there is no
+      // lease to push and nothing to stop — the chip simply never appears.
+      onLeaseChanged: noopUnsub,
+      stop: noop,
+      stopAll: noop,
+      stopProject: noop
     },
     updates: {
       onAvailable: noopUnsub,
@@ -347,6 +353,18 @@ export function buildStubApi(): Omit<
       listDevices: U('pairing.listDevices'),
       revokeDevice: U('pairing.revokeDevice')
     },
+    shortcuts: {
+      // Deliberate no-op (not a gap): the recording bit exists to stand the DESKTOP's
+      // `before-input-event` intercepts down, and a browser tab has no application menu to steal
+      // ⌘W/⌘M/⌘0 back from — nothing intercepts here, so there is nothing to suspend. The
+      // recorder's own preventDefault/stopPropagation is the whole path in this shell.
+      setRecording: noop,
+      // Deliberate no-op for the same reason, one step further: the mirror exists so the DESKTOP's
+      // intercepts can stand down under `terminal-first`, and there are no intercepts here to
+      // stand down. The policy itself still works in the browser — it is enforced by the
+      // renderer's own dispatcher (`keyDispatchContextFor`), which reads focus directly.
+      setTerminalFocused: noop
+    },
     onMarkdownToggle: noopUnsub,
     onCloseNode: noopUnsub,
     // Deliberate no-op (not a gap): a browser tab has no application menu to steal ⌘0, so the
@@ -401,6 +419,10 @@ export function buildStubApi(): Omit<
     }),
     onAgentControl: noopUnsub,
     sendAgentControlResult: noop,
+    // Browser control is desktop-only (no <webview>, no CDP on the Server Edition / relay), so the
+    // resolve round-trip is inert here — the verb is refused by name before it reaches a handler.
+    onBrowserControlResolve: noopUnsub,
+    sendBrowserControlResolveResult: noop,
     // Messaging never runs in the browser: `onAgentControl` above is inert here, so no dispatch
     // can ever reach this. It answers the honest terminal refusal all the same, so a stray call
     // can never look like it delivered.

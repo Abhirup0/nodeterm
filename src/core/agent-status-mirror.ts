@@ -710,7 +710,9 @@ export interface NodeStateChange {
    *  nobody heard from a `working` node for `WORKING_STALE_MS`, so it is presumed gone (see
    *  shared/agents/stale.ts). Like `interrupted`, it must never be celebrated as a completion. */
   stale?: boolean
-  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than finishing.
+  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than
+   *  finishing — or a session boundary (SessionStart/SessionEnd) reset the node while it was
+   *  still `working`, which is the same story: the run stopped without producing anything.
    *  Consumers that celebrate a completion (notification, the notch HUD's "finished, unseen"
    *  highlight) skip it — nothing was accomplished, so there is nothing to go and read. */
   interrupted?: boolean

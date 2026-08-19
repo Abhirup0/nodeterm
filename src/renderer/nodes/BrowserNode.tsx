@@ -2,6 +2,7 @@ import { Handle, NodeResizer, Position, useReactFlow, type NodeProps } from '@xy
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import type { CanvasNode } from '../state/workspace'
 import { BrowserSurface } from './BrowserSurface'
+import { BrowserDrivingIndicator } from './BrowserDrivingChip'
 
 /**
  * A navigable Chromium browser node: node chrome (frame/header/resize/close) wrapping the shared
@@ -35,6 +36,10 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
         <span className="term-node__title-text" title={(data.url as string) || ''}>
           {(data.title as string) || 'Browser'}
         </span>
+        {/* The driving chip — present the whole time an agent holds a control lease on this node,
+            with the one obvious Stop. Renders nothing otherwise (and, until PR 7 ships the verb that
+            drives a lease, in every case today). */}
+        <BrowserDrivingIndicator nodeId={id} />
         <span className="term-node__spacer" />
         <button className="term-node__close" title="Close" onClick={() => deleteElements({ nodes: [{ id }] })}>
           ×
@@ -45,6 +50,7 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
         <BrowserSurface
           nodeId={id}
           url={(data.url as string) ?? ''}
+          partition={data.partition as string | undefined}
           onUrlChange={(u) => updateNodeData(id, { url: u })}
           onTitleChange={(t) => updateNodeData(id, { title: t })}
         />

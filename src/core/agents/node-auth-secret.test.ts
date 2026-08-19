@@ -68,6 +68,12 @@ describe('node-auth secret behind CorePlatform', () => {
     const atRest = fs.readFileSync(file, 'utf8')
     // The raw secret's base64 must not appear on disk — only the sealed form.
     expect(atRest.includes(first.toString('base64'))).toBe(false)
+    // And no SIBLING file may carry it either: the sealed json is the only thing written, so a
+    // plaintext fallback (the mutation Property 6 forbids) has nowhere to hide. Scan every file.
+    expect(fs.readdirSync(dir)).toEqual(['node-auth-key.json'])
+    for (const name of fs.readdirSync(dir)) {
+      expect(fs.readFileSync(path.join(dir, name), 'utf8').includes(first.toString('base64'))).toBe(false)
+    }
     const parsed = JSON.parse(atRest)
     expect(parsed.version).toBe(1)
     expect(typeof parsed.secretKeyEnc).toBe('string')
@@ -105,6 +111,19 @@ describe('node-auth secret behind CorePlatform', () => {
     fs.writeFileSync(path.join(dir, 'node-auth-key.bin'), Buffer.alloc(10), { mode: 0o600 })
     initPlatform(fakePlatform({ userDataDir: dir }))
     await expect(loadOrCreateNodeAuthSecret()).rejects.toThrow(/invalid|malformed/i)
+  })
+
+  it('Desktop: fails closed on a malformed sealed key instead of rotating ownership', async () => {
+    // A present-but-corrupt node-auth-key.json must THROW, never silently mint a fresh secret: the
+    // same key signs the codex thread→node ownership records, so rotating it would orphan every
+    // bound thread on the machine (Property 6). The corrupt file is left exactly as found.
+    const file = path.join(dir, 'node-auth-key.json')
+    fs.writeFileSync(file, '{ this is not json', { mode: 0o600 })
+    initPlatform(fakePlatform({ userDataDir: dir, sealSecret: xor, unsealSecret: xor }))
+    await expect(loadOrCreateNodeAuthSecret()).rejects.toThrow(/malformed|invalid/i)
+    // Not rotated: the bytes on disk are untouched, and no raw .bin fallback was written.
+    expect(fs.readFileSync(file, 'utf8')).toBe('{ this is not json')
+    expect(fs.existsSync(path.join(dir, 'node-auth-key.bin'))).toBe(false)
   })
 
   it('reject-then-retry: a rejected load clears the single-flight cache so a later healthy call succeeds', async () => {

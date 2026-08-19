@@ -7,6 +7,7 @@ import { reportsOwnCopy } from '@shared/agents/config'
 import type { AgentId } from '@shared/agents/config'
 import { readsClaudeTranscript } from '../../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../../lib/projectJump'
+import { terminalShortcutPolicy } from '../../lib/keybindingOverrides'
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
@@ -192,9 +193,12 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // Ctrl+Shift+C would fall through to the pty as \x03/SIGINT); plain Ctrl+C is left alone.
     // MIRROR TerminalNode: Cmd/Ctrl+1-9 (jump to the Nth project) is swallowed here, before xterm
     // turns Ctrl+2..Ctrl+8 into control bytes — but only when the app owns the key (desktop shell,
-    // digit addressing an open project), which `liveProjectJumpTarget` decides for both surfaces.
+    // digit addressing an open project, AND app-first: under terminal-first the digit belongs to
+    // the PTY), which `liveProjectJumpTarget` + the policy decide for both surfaces.
     term.attachCustomKeyEventHandler((e) => {
-      const action = terminalKeyAction(e, term.hasSelection(), liveProjectJumpTarget(e) !== null)
+      const ownsProjectJump =
+        terminalShortcutPolicy() !== 'terminal-first' && liveProjectJumpTarget(e) !== null
+      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump)
       if (action === 'pass') return true
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())

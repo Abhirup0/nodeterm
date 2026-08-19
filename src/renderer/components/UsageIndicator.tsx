@@ -34,7 +34,7 @@ const USAGE_HOVER_CLOSE_MS = 220
  * beside it; its color stays keyed to the TRUE remaining percentage via `severityColor`, so
  * severity red/yellow/green never flips meaning when the mode does.
  */
-function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remaining' }) {
+function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remaining' | 'tokens' }) {
   const left = 100 - limit.usedPercent
   const fill = barFillPercent(limit.usedPercent, mode)
   return (
@@ -110,7 +110,7 @@ function AccountUsageBlock({
   label: string
   email?: string
   u: ClaudeUsage | null
-  mode: 'used' | 'remaining'
+  mode: 'used' | 'remaining' | 'tokens'
   isDefault?: boolean
   onUse?: () => void
 }) {
@@ -146,7 +146,7 @@ function RemoteUsageBlock({
   onUse
 }: {
   row: RemoteAccountUsage
-  mode: 'used' | 'remaining'
+  mode: 'used' | 'remaining' | 'tokens'
   isDefault?: boolean
   onUse?: () => void
 }) {
@@ -186,7 +186,7 @@ function labelFor(provider: string): string {
   return providerLabel(provider, agentLabel)
 }
 
-function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remaining' }) {
+function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remaining' | 'tokens' }) {
   if (u.status === 'unavailable') return null
   const label = labelFor(u.provider)
   return (

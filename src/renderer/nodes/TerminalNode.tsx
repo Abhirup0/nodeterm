@@ -166,11 +166,16 @@ import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
-import { hintLabel } from '@shared/platform-utils'
+import { chipFor, effectiveBindings, terminalShortcutPolicy } from '../lib/keybindingOverrides'
+import { matchesShortcut } from '@shared/shortcut'
+import { isMacPlatform } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
 import { connectHostAttachment } from '../lib/sshAttachments'
+
+/** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
+const isMac = isMacPlatform()
 
 /** How long a remote terminal waits for its project's ControlMaster before giving up and showing
  *  the offline overlay. Sized for the SLOW-but-fine case (a cold app load whose connect is still
@@ -2365,9 +2370,14 @@ export function TerminalNode({
     // ESC+CR (`SHIFT_ENTER_SEQ`) — agent CLIs read that as "insert newline" (see terminal-config.ts).
     // Cmd/Ctrl+1-9 (jump to the Nth project) must be swallowed before xterm turns Ctrl+2..Ctrl+8
     // into control bytes — but ONLY when the app owns the key: desktop shell, digit addressing an
-    // open project. `liveProjectJumpTarget` is the same decision Canvas's handler makes.
+    // open project, AND app-first. Under terminal-first the user reserved every chord for the
+    // shell, so the digit must reach the PTY: this handler runs inside xterm, ahead of the window
+    // dispatcher that honors the policy for every other chord, so it owes the check itself.
+    // `liveProjectJumpTarget` is the same decision Canvas's handler makes.
     term.attachCustomKeyEventHandler((e) => {
-      const action = terminalKeyAction(e, term.hasSelection(), liveProjectJumpTarget(e) !== null)
+      const ownsProjectJump =
+        terminalShortcutPolicy() !== 'terminal-first' && liveProjectJumpTarget(e) !== null
+      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump)
       if (action === 'pass') return true
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
@@ -4117,7 +4127,7 @@ export function TerminalNode({
   // needed (the Electron renderer has no native find UI), unlike Cmd+M.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'f' && hoveredRef.current) {
+      if (hoveredRef.current && effectiveBindings('terminal.find').some((s) => matchesShortcut(e, s, isMac))) {
         e.preventDefault()
         setSearchOpen((v) => !v)
       }
@@ -4149,6 +4159,10 @@ export function TerminalNode({
     status?.state !== 'working' &&
     status?.state !== 'waiting' &&
     status?.state !== 'blocked'
+
+  // Whatever the markdown toggle is bound to; '' when the user unbound it, in which case the
+  // markdown view's hint names the action instead of promising a chord that never fires.
+  const mdChip = chipFor('node.toggleMarkdown')
 
   return (
     <>
@@ -4632,7 +4646,7 @@ export function TerminalNode({
             <div className="term-md nodrag nowheel">
               <div className="term-md__bar">
                 <span>Markdown</span>
-                <span className="term-md__hint">{hintLabel('⌘M to exit')}</span>
+                <span className="term-md__hint">{mdChip ? `${mdChip} to exit` : 'Exit'}</span>
               </div>
               <div className="term-md__content" dangerouslySetInnerHTML={{ __html: mdHtml }} />
             </div>

@@ -12,6 +12,7 @@ import { BoardLogPanel } from './BoardLogPanel'
 import { CardMetaBar } from './CardMetaBar'
 import { ModalTerminal } from './ModalTerminal'
 import { BrowserSurface } from '../../nodes/BrowserSurface'
+import { BrowserDrivingIndicator } from '../../nodes/BrowserDrivingChip'
 import { NoteMarkdown } from '../NoteMarkdown'
 import { relativeTime } from '../../lib/relativeTime'
 
@@ -145,6 +146,11 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             </span>
           )}
           <span className="kanban-modal__column">{columnTitle ?? 'Ungrouped'}</span>
+          {/* The driving chip, so a user watching a browser card THROUGH the modal is not
+              driving-blind. The lease is keyed by node id (not by webview object), so this shows
+              when the node is being driven even though the drive lands on the CANVAS webview, not
+              this modal's — which is what the user needs to know (Task 6.3). */}
+          {isBrowser && <BrowserDrivingIndicator nodeId={session.id} />}
           {isTerminal && (
             <>
               {/* Same context-window pill + popover as the node header (null until usage data). */}
@@ -270,6 +276,7 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
                     key={session.id}
                     nodeId={session.id}
                     url={session.url ?? ''}
+                    partition={session.partition}
                     onUrlChange={(u) => onBrowserNav({ url: u })}
                     onTitleChange={(t) => onBrowserNav({ title: t })}
                   />

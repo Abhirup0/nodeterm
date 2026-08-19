@@ -51,6 +51,14 @@ const ROWS = {
   browserSaver: {
     title: 'Browser memory saver',
     keywords: ['browser', 'memory', 'saver', 'ram', 'webview', 'discard', 'page', 'web']
+  },
+  keepAwake: {
+    title: 'Keep awake while agents work',
+    keywords: ['sleep', 'awake', 'power', 'battery', 'suspend', 'run']
+  },
+  confirmQuit: {
+    title: 'Confirm before quitting',
+    keywords: ['quit', 'exit', 'close', 'confirm', 'dialog', 'ask']
   }
 }
 const ENTRIES = Object.values(ROWS)
@@ -265,6 +273,32 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.browserMemorySaver}
               onChange={(v) => update({ browserMemorySaver: v })}
               ariaLabel="Browser memory saver"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.keepAwake}>
+        <FieldRow
+          label="Keep awake while agents work"
+          description="Holds off idle sleep while a local agent is running. A closed lid still sleeps the machine."
+          control={
+            <Switch
+              checked={settings.keepAwakeWhileAgentsWork}
+              onChange={(v) => update({ keepAwakeWhileAgentsWork: v })}
+              ariaLabel="Keep awake while agents work"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.confirmQuit}>
+        <FieldRow
+          label="Confirm before quitting"
+          description="Ask before the app quits (⌘Q / Ctrl+Q or the title-bar close). Terminal sessions survive a quit either way."
+          control={
+            <Switch
+              checked={settings.confirmBeforeQuit}
+              onChange={(v) => update({ confirmBeforeQuit: v })}
+              ariaLabel="Confirm before quitting"
             />
           }
         />

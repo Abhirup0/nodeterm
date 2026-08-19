@@ -322,7 +322,15 @@ const api: NodeTerminalApi = {
       const handler = (_e: unknown, ev: { url: string; sourceNodeId: string }) => listener(ev)
       ipcRenderer.on(IPC.browserNewWindow, handler)
       return () => ipcRenderer.removeListener(IPC.browserNewWindow, handler)
-    }
+    },
+    onLeaseChanged: (listener) => {
+      const handler = (_e: unknown, push: Parameters<typeof listener>[0]) => listener(push)
+      ipcRenderer.on(IPC.browserLeaseChanged, handler)
+      return () => ipcRenderer.removeListener(IPC.browserLeaseChanged, handler)
+    },
+    stop: (nodeId: string) => ipcRenderer.send(IPC.browserStop, nodeId),
+    stopAll: () => ipcRenderer.send(IPC.browserStopAll),
+    stopProject: (projectId: string) => ipcRenderer.send(IPC.browserStopProject, projectId)
   },
   files: {
     quickOpen: (cwd: string) => ipcRenderer.invoke(IPC.filesQuickOpen, cwd),
@@ -585,6 +593,17 @@ const api: NodeTerminalApi = {
   },
   // Per-node subscriptions (each terminal/editor listens) — multiplexed so they don't pile up
   // ipcRenderer listeners and trip the MaxListeners warning.
+  shortcuts: {
+    // Fire-and-forget: nothing waits on the answer. Main clears the bit itself on the three ways
+    // this page can stop existing — window closed, renderer died, main-frame navigation (⌘R) —
+    // but those are a backstop for a page that VANISHED, not a general safety net: an ordinary
+    // disarm that never sends leaves the shortcuts suppressed until one of them happens.
+    setRecording: (active: boolean) => ipcRenderer.send(IPC.uiShortcutRecording, active),
+    // The terminal-focus mirror, same fire-and-forget shape and the same fail-safe reading on the
+    // far side: main starts at "not focused" and the three page-death resets return it there, so a
+    // report that never arrives costs the terminal-first policy, not the app's shortcuts.
+    setTerminalFocused: (focused: boolean) => ipcRenderer.send(IPC.uiTerminalFocus, focused)
+  },
   onMarkdownToggle: subscribe(IPC.appToggleMarkdown),
   onCloseNode: subscribe(IPC.appCloseNode),
   onZoomActualSize: subscribe(IPC.appZoomActualSize),
@@ -642,6 +661,15 @@ const api: NodeTerminalApi = {
     return () => ipcRenderer.removeListener(IPC.agentControl, handler)
   },
   sendAgentControlResult: (payload) => ipcRenderer.send(IPC.agentControlResult, payload),
+  // The `browser` verb resolve round-trip (S8 PR 7): main asks the renderer which project owns the
+  // source, whether it is control-capable, and whether the capability is on right now — the renderer
+  // NEVER runs a CDP command.
+  onBrowserControlResolve: (listener) => {
+    const handler = (_e: unknown, req: unknown) => listener(req as never)
+    ipcRenderer.on(IPC.browserControlResolve, handler)
+    return () => ipcRenderer.removeListener(IPC.browserControlResolve, handler)
+  },
+  sendBrowserControlResolveResult: (payload) => ipcRenderer.send(IPC.browserControlResolveResult, payload),
   agentMessage: {
     deliver: (req) => ipcRenderer.invoke(IPC.agentMessageDeliver, req)
   }
