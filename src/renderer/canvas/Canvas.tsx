@@ -112,6 +112,7 @@ import {
   IconUnlock
 } from '../components/icons'
 import type { SettingsSectionId } from '../components/settings/nav'
+import { projectSectionId } from '../components/settings/project-settings-targets'
 // Overlay surfaces (settings, source control, explorer, kanban, onboarding, dictation, …) are
 // code-split: they render behind a flag and must not sit in the startup chunk. See lazyPanels.
 import {
@@ -836,6 +837,15 @@ export function Canvas() {
   const [welcomeOpen, setWelcomeOpen] = useState(false)
   // Optional deep-link target when opening settings (e.g. RemotePicker → the SSH section).
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
+  // Bumped ONLY by a deep link, so SettingsPage re-targets (and clears its search box) even when
+  // the requested section is the one it is already showing. Plain opens leave it alone.
+  const [settingsNonce, setSettingsNonce] = useState(0)
+  // Tab caret menu / sidebar right-click → this project's own pane in Settings.
+  const openProjectSettings = useCallback((id: string) => {
+    setSettingsSection(projectSectionId(id))
+    setSettingsNonce((n) => n + 1)
+    setSettingsOpen(true)
+  }, [])
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   // Debug log panel (issue #78). Settings' "Open" button fires the event (the dialog can't
@@ -8779,6 +8789,11 @@ export function Canvas() {
             }
           },
           { label: 'Set folder…', icon: <IconProject />, onClick: () => setProjectFolder(projectId) },
+          {
+            label: 'Project settings…',
+            icon: <IconGear />,
+            onClick: () => openProjectSettings(projectId)
+          },
           { type: 'separator' },
           { type: 'colors', onPick: (color) => setProjectColor(projectId, color) },
           { type: 'separator' },
@@ -8791,7 +8806,15 @@ export function Canvas() {
         ]
       })
     },
-    [activeProjectId, switchProject, renameProject, setProjectFolder, setProjectColor, closeProject]
+    [
+      activeProjectId,
+      switchProject,
+      renameProject,
+      setProjectFolder,
+      setProjectColor,
+      closeProject,
+      openProjectSettings
+    ]
   )
 
   // Reopen a previously closed project and make it active — the active-project effect reloads its
@@ -9174,6 +9197,7 @@ export function Canvas() {
         onRemoteAccess={() => setRemoteDialogOpen(true)}
         onSetDefaultAccount={setProjectDefaultAccount}
         onSetDefaultPermissionMode={setProjectDefaultPermissionMode}
+        onOpenProjectSettings={openProjectSettings}
       />
 
       <div className="top-banners">
@@ -9673,7 +9697,11 @@ export function Canvas() {
       )}
 
       {settingsOpen && (
-        <SettingsPage onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+        <SettingsPage
+          onClose={() => setSettingsOpen(false)}
+          initialSection={settingsSection}
+          retargetNonce={settingsNonce}
+        />
       )}
 
       {scOpen && (

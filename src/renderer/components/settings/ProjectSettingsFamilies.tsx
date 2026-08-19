@@ -8,8 +8,10 @@ import type {
 } from '@shared/project-settings'
 import { Input } from '@renderer/ui/Input'
 import { Switch } from '@renderer/ui/Switch'
+import { useSettingsSearch } from './context'
 import { FieldRow } from './FieldRow'
 import { formatEnvLines, formatListLines, parseEnvLines, parseListLines } from './project-settings-env'
+import { matchesQuery, type SettingsSearchEntry } from './search'
 
 /**
  * The four per-family editors (setup / agents / worktree / terminal) that hang off
@@ -111,6 +113,36 @@ const FAMILY_CONFIG: Record<ProjectSettingsFamily, FamilyConfig> = {
 }
 
 const FAMILIES = Object.keys(FAMILY_CONFIG) as ProjectSettingsFamily[]
+
+/**
+ * Search metadata, derived from the config above so a field can never exist without one. Static
+ * (no project name in the keywords): a query naming the PROJECT is handled one level up, by the
+ * pane's `forceVisible` — see ProjectSettingsSection.
+ *
+ * Each family field yields ONE entry covering both of its rows (shared + "this machine"): the two
+ * are the same setting, and hiding the local override while its shared twin shows would read as
+ * the override having been lost.
+ */
+function fieldEntry(family: ProjectSettingsFamily, f: FieldConfig): SettingsSearchEntry {
+  return {
+    title: f.label,
+    description: f.description,
+    keywords: [family, FAMILY_CONFIG[family].title, f.key, 'project', 'this machine', 'override']
+  }
+}
+
+function ignoreSharedEntry(family: ProjectSettingsFamily): SettingsSearchEntry {
+  return {
+    title: `Ignore shared ${FAMILY_CONFIG[family].title.toLowerCase()} settings`,
+    keywords: [family, 'ignore', 'shared', 'override', 'this machine']
+  }
+}
+
+/** Every family row's search entry, for the pane's `searchEntries`. */
+export const FAMILY_SEARCH_ENTRIES: SettingsSearchEntry[] = FAMILIES.flatMap((family) => [
+  ...FAMILY_CONFIG[family].fields.map((f) => fieldEntry(family, f)),
+  ignoreSharedEntry(family)
+])
 
 /** Text a non-env, non-list field shows in its box: the raw string, or '' when unset. */
 function textOf(kind: FieldKind, raw: unknown): string {
@@ -337,10 +369,18 @@ function FamilySection({
   saveLocal: (
     update: ProjectLocalSettings | undefined | ((current: ProjectLocalSettings | undefined) => ProjectLocalSettings | undefined)
   ) => Promise<boolean>
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const config = FAMILY_CONFIG[family]
   const sharedDisabled = conflict || !ready
   const localDisabled = !ready
+  // Row-level search filtering. Done here rather than with `SearchableRow` wrappers because every
+  // field renders TWICE (shared + "this machine") from the same list — filtering the list keeps
+  // the two copies in step by construction. An entirely unmatched family drops out, heading and
+  // "This machine" disclosure included, so the search never leaves an empty shell behind.
+  const query = useSettingsSearch()
+  const fields = config.fields.filter((f) => matchesQuery(query, fieldEntry(family, f)))
+  const showIgnoreShared = matchesQuery(query, ignoreSharedEntry(family))
+  if (fields.length === 0 && !showIgnoreShared) return null
 
   // Guarded here too, not just via the `disabled` attribute below: a disabled control blocks real
   // user interaction, but nothing stops a caller (or a test) from dispatching events on it
@@ -456,22 +496,24 @@ function FamilySection({
   return (
     <div className="space-y-3 border-t border-border pt-4">
       <h3 className="text-[13px] font-semibold text-text">{config.title}</h3>
-      <div className="space-y-2.5">{config.fields.map(renderShared)}</div>
+      <div className="space-y-2.5">{fields.map(renderShared)}</div>
       <details>
         <summary className="cursor-pointer text-[13px] text-muted">This machine</summary>
         <div className="mt-3 space-y-2.5">
           <p className="text-[12px] leading-relaxed text-muted">
             Overrides that apply only on this machine. Never written to the shared file.
           </p>
-          {config.fields.map(renderLocal)}
-          <SwitchField
-            label={`Ignore shared ${config.title.toLowerCase()} settings`}
-            description="Never use the git-shared values for this family on this machine, even where this machine sets none of its own."
-            ariaLabel={`Ignore shared ${family} settings on this machine`}
-            checked={ignoreShared}
-            disabled={localDisabled}
-            onCommit={commitIgnoreShared}
-          />
+          {fields.map(renderLocal)}
+          {showIgnoreShared && (
+            <SwitchField
+              label={`Ignore shared ${config.title.toLowerCase()} settings`}
+              description="Never use the git-shared values for this family on this machine, even where this machine sets none of its own."
+              ariaLabel={`Ignore shared ${family} settings on this machine`}
+              checked={ignoreShared}
+              disabled={localDisabled}
+              onCommit={commitIgnoreShared}
+            />
+          )}
         </div>
       </details>
     </div>

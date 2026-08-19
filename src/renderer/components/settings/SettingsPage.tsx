@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useEntitlement } from '../../state/entitlement'
 import { useProjects } from '../../state/projects'
 import { SettingsSearchContext } from './context'
 import { SettingsSidebar } from './SettingsSidebar'
-import { FIRST_SECTION_ID, projectsSettingsGroup, type SettingsSectionId } from './nav'
+import { projectsSettingsGroup, type SettingsSectionId } from './nav'
 import { projectSectionId } from './project-settings-targets'
+import { useSettingsTarget } from './useSettingsTarget'
 import { ProjectSettingsSection } from './sections/ProjectSettingsSection'
 import { TerminalSection } from './sections/TerminalSection'
 import { ShellSection } from './sections/ShellSection'
@@ -36,15 +37,20 @@ const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 export function SettingsPage({
   onClose,
-  initialSection
+  initialSection,
+  retargetNonce
 }: {
   onClose: () => void
   /** Section to open on; lets callers deep-link (e.g. "Add SSH server…" → the SSH section). */
   initialSection?: SettingsSectionId
+  /** Bumped by a caller that deep-links to a section, so a repeat of the SAME `initialSection`
+   *  still re-targets (and clears the search box). Plain opens — the gear, ⌘, , the native menu —
+   *  leave it alone: they must not throw away a query or a section the user chose in the dialog. */
+  retargetNonce?: number
 }): React.JSX.Element {
   const hydrate = useEntitlement((s) => s.hydrate)
-  const [active, setActive] = useState<SettingsSectionId>(initialSection ?? FIRST_SECTION_ID)
-  const [query, setQuery] = useState('')
+  // Which section is shown and what is typed in the search box, plus the deep-link retarget rule.
+  const { active, setActive, query, setQuery } = useSettingsTarget(initialSection, retargetNonce)
 
   // ONE list feeds both the nav rows and the panes below, so a "Projects" row can never point at a
   // section that is not rendered (or vice versa). Memoized: `projects.filter(...)` inside a zustand
@@ -61,11 +67,6 @@ export function SettingsPage({
   useEffect(() => {
     void hydrate()
   }, [hydrate])
-
-  // Re-target when a caller opens settings to a specific section.
-  useEffect(() => {
-    if (initialSection) setActive(initialSection)
-  }, [initialSection])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

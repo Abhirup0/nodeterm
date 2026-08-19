@@ -19,9 +19,9 @@ import {
   systemAccountDisplay
 } from '../../../state/workspace'
 import { FieldRow } from '../FieldRow'
-import { ProjectFamilyEditors } from '../ProjectSettingsFamilies'
+import { FAMILY_SEARCH_ENTRIES, ProjectFamilyEditors } from '../ProjectSettingsFamilies'
 import { SearchableRow } from '../SearchableRow'
-import { SettingsSection } from '../SettingsSection'
+import { SettingsSection, sectionVisible } from '../SettingsSection'
 import { useSettingsSearch } from '../context'
 import { projectSectionId } from '../project-settings-targets'
 import { matchesQuery, type SettingsSearchEntry } from '../search'
@@ -41,23 +41,26 @@ function persistIdentityEdit(): void {
   markWorkspaceDirty()
 }
 
-function rowsFor(name: string): Record<string, SettingsSearchEntry> {
-  // The project's own name rides every row's keywords: searching a project by name has to surface
-  // its controls, not just the section header.
-  return {
-    name: { title: 'Project name', keywords: ['rename', 'project', 'title', name] },
-    folder: { title: 'Folder', keywords: ['cwd', 'path', 'directory', 'ssh', 'server', name] },
-    color: { title: 'Color', keywords: ['accent', 'swatch', 'tab', 'monogram', name] },
-    permission: {
-      title: 'Default permission mode',
-      keywords: ['claude', 'plan', 'accept edits', 'bypass', 'approval', name]
-    },
-    account: {
-      title: 'Default Claude account',
-      keywords: ['account', 'login', 'claude', 'system', name]
-    }
+/**
+ * Static search metadata for the identity/defaults rows (the ShellSection pattern). Deliberately
+ * WITHOUT the project's name: a name query is handled by `forceVisible` below, which opens the
+ * whole pane rather than filtering it down to whichever rows happened to mention the name.
+ */
+const ROWS = {
+  name: { title: 'Project name', keywords: ['rename', 'project', 'title'] },
+  folder: { title: 'Folder', keywords: ['cwd', 'path', 'directory', 'ssh', 'server'] },
+  color: { title: 'Color', keywords: ['accent', 'swatch', 'tab', 'monogram'] },
+  permission: {
+    title: 'Default permission mode',
+    keywords: ['claude', 'plan', 'accept edits', 'bypass', 'approval']
+  },
+  account: {
+    title: 'Default Claude account',
+    keywords: ['account', 'login', 'claude', 'system']
   }
-}
+} satisfies Record<string, SettingsSearchEntry>
+
+const IDENTITY_ENTRIES: SettingsSearchEntry[] = Object.values(ROWS)
 
 /** Where this project's terminals run: a local folder, or `user@host:/remote/path` for SSH. */
 function projectTarget(project: Project): string {
@@ -82,31 +85,51 @@ export function ProjectSettingsSection({
 }): React.JSX.Element | null {
   const project = useProjects((s) => s.projects.find((p) => p.id === projectId))
   const query = useSettingsSearch()
-  const rows = useMemo(() => rowsFor(project?.name ?? ''), [project?.name])
-  const entries = useMemo(() => Object.values(rows), [rows])
+  const name = project?.name ?? ''
+  // The pane's own name is a search entry in its own right (so a name query reaches the gate at
+  // all) AND the trigger for `forceVisible` (so the pane then renders whole).
+  const entries = useMemo(
+    () => [...IDENTITY_ENTRIES, ...FAMILY_SEARCH_ENTRIES, { title: name, keywords: [name] }],
+    [name]
+  )
+  const forceVisible = matchesQuery(query, { title: name })
   if (!project) return null
-  const visible = query.trim() !== '' ? entries.some((e) => matchesQuery(query, e)) : isActive
-  if (!visible) return null
+  // Same predicate `SettingsSection` uses, evaluated one level earlier — see `sectionVisible`.
+  if (!sectionVisible(query, isActive, entries, forceVisible)) return null
   // A relay tab is a live connection to ANOTHER machine's project, and an unavailable project's
   // files cannot be read at all. Both get an explanation and zero editors: `projectSettings.*`
   // here would read and write THIS machine's store, so an editor would silently edit the wrong
   // project (or nothing).
   if (project.remote || project.unavailable) {
-    return <ExplanatoryProjectSection project={project} isActive={isActive} entries={entries} />
+    return (
+      <ExplanatoryProjectSection
+        project={project}
+        isActive={isActive}
+        entries={entries}
+        forceVisible={forceVisible}
+      />
+    )
   }
   return (
-    <EditableProjectSection project={project} isActive={isActive} entries={entries} rows={rows} />
+    <EditableProjectSection
+      project={project}
+      isActive={isActive}
+      entries={entries}
+      forceVisible={forceVisible}
+    />
   )
 }
 
 function ExplanatoryProjectSection({
   project,
   isActive,
-  entries
+  entries,
+  forceVisible
 }: {
   project: Project
   isActive: boolean
   entries: SettingsSearchEntry[]
+  forceVisible: boolean
 }): React.JSX.Element {
   return (
     <SettingsSection
@@ -114,6 +137,7 @@ function ExplanatoryProjectSection({
       title={project.name}
       isActive={isActive}
       searchEntries={entries}
+      forceVisible={forceVisible}
     >
       <p className="text-[13px] leading-relaxed text-muted">
         {project.remote
@@ -128,12 +152,12 @@ function EditableProjectSection({
   project,
   isActive,
   entries,
-  rows
+  forceVisible
 }: {
   project: Project
   isActive: boolean
   entries: SettingsSearchEntry[]
-  rows: Record<string, SettingsSearchEntry>
+  forceVisible: boolean
 }): React.JSX.Element {
   const settings = useProjectSettings(project.id)
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
@@ -171,6 +195,7 @@ function EditableProjectSection({
       description={`Settings for this project only. Name, color and defaults live in ${project.ssh ? 'the project file on the server' : '.nodeterm/project.json'}, which is shared with anyone who has the repo.`}
       isActive={isActive}
       searchEntries={entries}
+      forceVisible={forceVisible}
     >
       {conflict ? (
         <div
@@ -184,7 +209,7 @@ function EditableProjectSection({
               file it is about is being ignored, even before Task 4's editors exist. */}
         </div>
       ) : null}
-      <SearchableRow {...rows.name}>
+      <SearchableRow {...ROWS.name}>
         <FieldRow
           label="Project name"
           description="Shown on the tab and in the project switcher."
@@ -205,7 +230,7 @@ function EditableProjectSection({
           }
         />
       </SearchableRow>
-      <SearchableRow {...rows.folder}>
+      <SearchableRow {...ROWS.folder}>
         <FieldRow
           label={project.ssh ? 'Server folder' : 'Folder'}
           description="Where this project's terminals start. Change it from the project tab's menu."
@@ -216,7 +241,7 @@ function EditableProjectSection({
           }
         />
       </SearchableRow>
-      <SearchableRow {...rows.color}>
+      <SearchableRow {...ROWS.color}>
         <FieldRow
           label="Color"
           description="Accent for this project's tab and monogram."
@@ -244,7 +269,7 @@ function EditableProjectSection({
           }
         />
       </SearchableRow>
-      <SearchableRow {...rows.permission}>
+      <SearchableRow {...ROWS.permission}>
         <FieldRow
           label="Default permission mode"
           description="Start-up permission mode for new Claude terminal sessions in this project. Saved in the shared project file, so it travels to everyone who clones the repo."
@@ -275,7 +300,7 @@ function EditableProjectSection({
           }
         />
       </SearchableRow>
-      <SearchableRow {...rows.account}>
+      <SearchableRow {...ROWS.account}>
         <FieldRow
           label="Default Claude account"
           description="Account new Claude and chat nodes in this project use."

@@ -39,6 +39,9 @@ interface TabBarProps {
   onSetDefaultAccount: (id: string, accountId: string | undefined) => void
   /** Set (or clear, with undefined = use the global setting) the project's default permission mode. */
   onSetDefaultPermissionMode: (id: string, mode: AgentPermissionMode | undefined) => void
+  /** Deep-link to this project's own pane in Settings — everything this menu can change plus the
+   *  shared/machine-local settings families, which have no other entry point. */
+  onOpenProjectSettings: (id: string) => void
 }
 
 /**
@@ -73,7 +76,8 @@ export function TabBar({
   onCloseProject,
   onRemoteAccess,
   onSetDefaultAccount,
-  onSetDefaultPermissionMode
+  onSetDefaultPermissionMode,
+  onOpenProjectSettings
 }: TabBarProps) {
   // Select the raw array and filter in a memo, a `.filter()` inside the selector returns a
   // fresh array every store snapshot, which re-rendered the TabBar on EVERY projects change.
@@ -504,6 +508,14 @@ export function TabBar({
                 ))}
               </div>
             )}
+            <button
+              onClick={() => {
+                onOpenProjectSettings(menuProject.id)
+                closeMenu()
+              }}
+            >
+              Project settings…
+            </button>
             <button
               onClick={() => {
                 onCloseProject(menuProject.id)

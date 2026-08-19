@@ -320,6 +320,67 @@ describe('ProjectSettingsSection', () => {
     await blur(env)
     expect(writeShared).toHaveBeenCalledWith('p1', { agents: { env: { A: '1', B: '2' } } })
   })
+
+  // --- Task 5: search integration ------------------------------------------------------------
+
+  const pane = (): HTMLElement | null => host.querySelector('[data-settings-section="project-p1"]')
+
+  it('renders the WHOLE pane, rows and families included, when the query is the project name', async () => {
+    // Searching a project by NAME is navigation: it names the pane, not a field inside it, so
+    // every row renders instead of the pane collapsing to the (zero) rows that match "Alpha".
+    await mountSection(project(), { isActive: false, query: 'Alpha' })
+    expect(pane()).not.toBeNull()
+    expect(nameInput()).not.toBeNull()
+    expect(host.querySelector('#project-permission-mode-p1')).not.toBeNull()
+    expect(host.querySelector('#project-terminal-shell-p1')).not.toBeNull()
+    expect(host.querySelector('#project-setup-setupScript-p1')).not.toBeNull()
+    expect(host.querySelector('#project-worktree-basePath-local-p1')).not.toBeNull()
+  })
+
+  it('filters to the matching identity row on a field-term query', async () => {
+    await mountSection(project(), { isActive: false, query: 'approval' })
+    expect(pane()).not.toBeNull()
+    expect(host.querySelector('#project-permission-mode-p1')).not.toBeNull()
+    expect(host.querySelector('#project-name-p1')).toBeNull()
+    expect(host.querySelector('#project-terminal-shell-p1')).toBeNull()
+  })
+
+  it('filters to the matching family on a family-term query', async () => {
+    await mountSection(project(), { isActive: false, query: 'worktree' })
+    expect(pane()).not.toBeNull()
+    expect(host.querySelector('#project-worktree-basePath-p1')).not.toBeNull()
+    expect(host.querySelector('#project-terminal-shell-p1')).toBeNull()
+    expect(host.querySelector('#project-name-p1')).toBeNull()
+  })
+
+  it('renders nothing (and reads nothing) for a query matching neither the name nor any row', async () => {
+    await mountSection(project(), { isActive: false, query: 'zzzznomatch' })
+    expect(host.textContent).toBe('')
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it('keeps the two visibility gates in agreement: no pane is ever mounted without being shown', async () => {
+    // The outer gate in ProjectSettingsSection duplicates SettingsSection's predicate (so an
+    // invisible SSH pane never mounts the reading hook). If the two ever disagree, one of these
+    // two symptoms appears: a read fired for a pane that renders nothing (outer open, inner shut),
+    // or a nav row pointing at a pane that renders nothing.
+    for (const [query, isActive] of [
+      ['', true],
+      ['', false],
+      ['Alpha', false],
+      ['approval', false],
+      ['worktree', false],
+      ['zzzznomatch', true]
+    ] as [string, boolean][]) {
+      read.mockClear()
+      await mountSection(project(), { isActive, query })
+      const shown = pane() !== null
+      expect({ query, mounted: read.mock.calls.length > 0 }).toEqual({ query, mounted: shown })
+      act(() => root.unmount())
+    }
+    // afterEach unmounts once more; give it a live root.
+    await mountSection()
+  })
 })
 
 describe('useProjectSettings', () => {
