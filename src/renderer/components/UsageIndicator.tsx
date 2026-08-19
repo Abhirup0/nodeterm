@@ -4,7 +4,14 @@ import { AGENT_CONFIG } from '@shared/agents/config'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
-import { accountRowAction, scopeFromKey, scopeUsage, usageScopeKey } from '../lib/usageScope'
+import {
+  accountRowAction,
+  dedupeProviderRows,
+  providerRowKey,
+  scopeFromKey,
+  scopeUsage,
+  usageScopeKey
+} from '../lib/usageScope'
 import {
   barFillPercent,
   formatResetCountdown,
@@ -543,8 +550,11 @@ export function UsageIndicator({
               No usage from this host yet — it is read once the project connects.
             </div>
           )}
-          {visibleProviders.map((p) => (
-            <ProviderBlock key={p.provider} u={p} mode={percentMode} />
+          {/* U8 (owed from PR 7): Codex emits one row per account, all `provider: 'codex'`.
+              Key on provider+accountId so each account renders distinctly, and reduce true
+              duplicates (two settings entries → the same underlying account) to one row. */}
+          {dedupeProviderRows(visibleProviders).map((p) => (
+            <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
           ))}
         </div>
       )}
