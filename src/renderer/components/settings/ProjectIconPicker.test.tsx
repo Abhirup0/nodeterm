@@ -160,4 +160,73 @@ describe('ProjectIconPicker', () => {
     await click(host.querySelector('button[data-project-color="#32d74b"]'))
     expect(onColor).toHaveBeenCalledWith('#32d74b')
   })
+
+  // --- Task 5: Avatar tab + lazy refresh + anti-clobber ---
+
+  const useAvatar = (
+    projectAvatar: ReturnType<typeof vi.fn>
+  ): void => {
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal.githubIssues = { projectAvatar }
+  }
+
+  it('enables the Avatar tab when the project resolves a GitHub avatar and commits it on click', async () => {
+    const projectAvatar = vi.fn(async () => ({ dataUrl: 'data:image/png;base64,AV==' }))
+    useAvatar(projectAvatar)
+    await mount()
+    await flush()
+    expect(projectAvatar).toHaveBeenCalledWith('p1')
+    const avatarTab = tab('Avatar')
+    expect(avatarTab.disabled).toBe(false)
+    await click(avatarTab)
+    await click(
+      [...host.querySelectorAll('button')].find((b) => b.textContent === 'Use GitHub avatar')!
+    )
+    await flush()
+    expect(onIcon).toHaveBeenCalledWith({
+      type: 'image',
+      src: 'data:image/png;base64,AV==',
+      source: 'github'
+    })
+  })
+
+  it('keeps an already-set github icon when the resolve returns null (anti-clobber)', async () => {
+    const projectAvatar = vi.fn(async () => null)
+    useAvatar(projectAvatar)
+    await mount({ type: 'image', src: 'data:image/png;base64,OLD=', source: 'github' })
+    await flush()
+    expect(projectAvatar).toHaveBeenCalledWith('p1')
+    expect(onIcon).not.toHaveBeenCalled()
+  })
+
+  it('refreshes a stored github icon on open when the resolved src changed', async () => {
+    const projectAvatar = vi.fn(async () => ({ dataUrl: 'data:image/png;base64,NEW=' }))
+    useAvatar(projectAvatar)
+    await mount({ type: 'image', src: 'data:image/png;base64,OLD=', source: 'github' })
+    await flush()
+    expect(onIcon).toHaveBeenCalledWith({
+      type: 'image',
+      src: 'data:image/png;base64,NEW=',
+      source: 'github'
+    })
+  })
+
+  it('hides (disables) the Avatar tab for a project with no GitHub origin', async () => {
+    const projectAvatar = vi.fn(async () => null)
+    useAvatar(projectAvatar)
+    await mount()
+    await flush()
+    expect(tab('Avatar').disabled).toBe(true)
+  })
+
+  it('probes once per open, not again on re-render', async () => {
+    const projectAvatar = vi.fn(async () => ({ dataUrl: 'data:image/png;base64,AV==' }))
+    useAvatar(projectAvatar)
+    await mount()
+    await flush()
+    expect(projectAvatar).toHaveBeenCalledTimes(1)
+    // Force a re-render via internal tab state; the probe must NOT fire again.
+    await click(tab('Upload'))
+    await flush()
+    expect(projectAvatar).toHaveBeenCalledTimes(1)
+  })
 })

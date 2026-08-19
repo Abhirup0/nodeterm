@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   LUCIDE_ICON_IDS,
   sanitizeProjectIcon,
@@ -33,13 +33,6 @@ export interface ProjectIconPickerProps {
 
 type Tab = 'avatar' | 'emoji' | 'lucide' | 'upload'
 
-const TABS: { id: Tab; label: string; disabled?: boolean }[] = [
-  { id: 'avatar', label: 'Avatar', disabled: true },
-  { id: 'emoji', label: 'Emoji' },
-  { id: 'lucide', label: 'Lucide' },
-  { id: 'upload', label: 'Upload' }
-]
-
 export function ProjectIconPicker({
   projectId,
   name,
@@ -54,8 +47,72 @@ export function ProjectIconPicker({
   // moment the picker mounts, defeating the whole lazy split).
   const [tab, setTab] = useState<Tab>('lucide')
   const [uploadError, setUploadError] = useState<string | undefined>(undefined)
+  // Whether this project resolves a GitHub avatar (origin + auth) — the Avatar tab shows only then.
+  const [avatarAvailable, setAvatarAvailable] = useState(false)
+  const [avatarError, setAvatarError] = useState<string | undefined>(undefined)
 
   const commit = (raw: ProjectIcon): void => onIcon(sanitizeProjectIcon(raw))
+
+  // Latest icon/onIcon read from the open-time probe without making them effect deps (which would
+  // re-fire the probe on every icon edit).
+  const iconRef = useRef(icon)
+  iconRef.current = icon
+  const onIconRef = useRef(onIcon)
+  onIconRef.current = onIcon
+
+  const fetchAvatar = async (): Promise<{ dataUrl: string } | null> => {
+    try {
+      return (await window.nodeTerminal?.githubIssues?.projectAvatar(projectId)) ?? null
+    } catch {
+      return null
+    }
+  }
+
+  // Lazy refresh, once per open (per project): probe the GitHub avatar. A non-null result means the
+  // origin resolves → reveal the Avatar tab; if the stored icon is a github avatar whose bytes have
+  // drifted, quietly re-commit the fresh src. ANTI-CLOBBER: a null/failed resolve touches nothing —
+  // it must never blank an already-set github icon, and a no-origin project simply keeps the tab
+  // hidden. Fires only here (mount / projectId change) — never on a timer or on every render.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const res = await fetchAvatar()
+      if (cancelled || !res) return
+      setAvatarAvailable(true)
+      const cur = iconRef.current
+      if (cur?.type === 'image' && cur.source === 'github' && cur.src !== res.dataUrl) {
+        onIconRef.current(sanitizeProjectIcon({ type: 'image', src: res.dataUrl, source: 'github' }))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId])
+
+  const onUseGithubAvatar = async (): Promise<void> => {
+    setAvatarError(undefined)
+    const res = await fetchAvatar()
+    if (!res) {
+      // Anti-clobber: leave the stored icon untouched on a failed resolve.
+      setAvatarError('Could not fetch the GitHub avatar right now. Try again in a moment.')
+      return
+    }
+    setAvatarAvailable(true)
+    commit({ type: 'image', src: res.dataUrl, source: 'github' })
+  }
+
+  const hasGithubIcon = icon?.type === 'image' && icon.source === 'github'
+  // Show the Avatar tab when the origin resolves, or when the project already wears a github avatar
+  // (so a transient resolve failure never strands the user without the tab).
+  const showAvatar = avatarAvailable || hasGithubIcon
+
+  const TABS: { id: Tab; label: string; disabled?: boolean }[] = [
+    { id: 'avatar', label: 'Avatar', disabled: !showAvatar },
+    { id: 'emoji', label: 'Emoji' },
+    { id: 'lucide', label: 'Lucide' },
+    { id: 'upload', label: 'Upload' }
+  ]
 
   const onUpload = async (): Promise<void> => {
     setUploadError(undefined)
@@ -134,9 +191,24 @@ export function ProjectIconPicker({
       {/* Panel */}
       <div className="rounded-xl border border-white/10 p-2" role="tabpanel">
         {tab === 'avatar' ? (
-          <p className="px-1 py-3 text-[13px] text-muted">
-            Avatars are coming soon — pick an emoji, a glyph, or upload an image for now.
-          </p>
+          <div className="flex flex-col gap-2 px-1 py-2">
+            <button
+              type="button"
+              className="w-fit rounded-lg border border-white/15 px-3 py-1.5 text-[13px] text-text transition-colors hover:bg-white/10"
+              onClick={() => void onUseGithubAvatar()}
+            >
+              Use GitHub avatar
+            </button>
+            <p className="text-[12px] leading-relaxed text-muted">
+              Uses the avatar of the GitHub owner this project&apos;s remote points to, shared with
+              the repo like the name and colour. It refreshes each time you open this panel.
+            </p>
+            {avatarError ? (
+              <p role="alert" className="text-[12px] text-[color:var(--warn)]">
+                {avatarError}
+              </p>
+            ) : null}
+          </div>
         ) : null}
 
         {tab === 'emoji' ? (
