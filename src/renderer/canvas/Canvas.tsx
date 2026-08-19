@@ -319,7 +319,7 @@ import { useSshServers } from '../state/sshServers'
 import { useSshConn } from '../state/sshConn'
 import { useSystemAccount } from '../state/systemAccount'
 import { useEntitlement } from '../state/entitlement'
-import type { SshServer, SshConnection } from '@shared/ssh'
+import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type {
   CanvasNodeState,
@@ -385,7 +385,6 @@ import {
   flowToNodeStates,
   addSelectionToGroup,
   groupSelectedNodes,
-  NODE_COLORS,
   nodeStatesToFlow,
   reorderGroupWithinParent,
   reorderNodeBefore,
@@ -397,6 +396,7 @@ import {
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
+import { toKanbanSession } from './toKanbanSession'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -582,58 +582,6 @@ const minimapNodeColor = (n: Node): string =>
  *  reads as `not-resumable`. */
 const restartAgentIdOf = (n: Node | undefined): AgentId | undefined =>
   !n || n.type !== 'terminal' ? undefined : createdAgentId(n.data)
-
-/** One canvas node as a board card, or null when this kind is not a card at all (a group frame, an
- *  editor, a diff). The board derives its cards from the canvas live, so this is the single
- *  definition of that mapping — the card list and the board-log's `cardTitle` lookup must agree on
- *  what a node is called, or a title change would log as a card appearing and disappearing. */
-function toKanbanSession(n: CanvasNode): KanbanSession | null {
-  if (n.type === 'browser') {
-    return {
-      id: n.id,
-      title: (n.data.title as string) || 'Browser',
-      color: (n.data.color as string) ?? NODE_COLORS[0],
-      kind: 'browser',
-      url: n.data.url as string | undefined,
-      partition: n.data.partition as string | undefined,
-      spawn: {}
-    }
-  }
-  if (n.type === 'sticky') {
-    const text = ((n.data.text as string) ?? '').trim()
-    return {
-      id: n.id,
-      // A note has no title of its own — its first line is the card label. Bodies are markdown
-      // now, so a leading heading marker is presentation, not part of the label.
-      title: text.split('\n')[0].replace(/^#{1,6}\s+/, '').slice(0, 80) || 'Note',
-      color: (n.data.color as string) ?? NODE_COLORS[2],
-      kind: 'sticky',
-      text,
-      textUpdatedAt: n.data.textUpdatedAt as number | undefined,
-      textUpdatedBy: n.data.textUpdatedBy as string | undefined,
-      // Sticky cards never open a live terminal — the modal reads no spawn info.
-      spawn: {}
-    }
-  }
-  if (n.type !== 'terminal') return null
-  return {
-    id: n.id,
-    title: (n.data.title as string) ?? '',
-    color: (n.data.color as string) ?? NODE_COLORS[0],
-    kind: 'terminal',
-    agentId: n.data.agentId as string | undefined,
-    // What the card modal's co-attach terminal needs to join THIS node's session the same way the
-    // canvas TerminalNode does.
-    spawn: {
-      shell: n.data.shell as string | undefined,
-      cwd: n.data.cwd as string | undefined,
-      agentId: n.data.agentId as string | undefined,
-      accountId: n.data.accountId as string | undefined,
-      ssh: n.data.ssh as SshConnection | undefined,
-      sshRemoteTmux: !!n.data.sshRemoteTmux
-    }
-  }
-}
 
 /** Stable empty card list, so the closed board's memo never churns array identity. */
 const NO_KANBAN_SESSIONS: KanbanSession[] = []
