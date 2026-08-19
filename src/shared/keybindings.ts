@@ -49,6 +49,7 @@ export type CommandId =
   | 'canvas.redo'
   | 'canvas.deleteSelection'
   | 'canvas.fitAll'
+  | 'canvas.tidy'
   | 'canvas.groupSelection'
   | 'node.newTerminal'
   | 'node.newAgent'
@@ -94,6 +95,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     allowBareKey: true },
   { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
     defaultBindings: both() },
+  { id: 'canvas.tidy', title: 'Tidy canvas', group: 'Canvas', scope: 'canvas',
+    // arrangeAllNodes self-guards (kanban open, <2 top-level nodes), same as the ⌘K/menu entries.
+    defaultBindings: both('Cmd+Shift+A') },
   { id: 'canvas.groupSelection', title: 'Group selection', group: 'Canvas', scope: 'canvas',
     defaultBindings: both() },
 
@@ -260,6 +264,38 @@ export function findKeybindingConflicts(
   return conflicts
 }
 
+/** Commands the MAIN process intercepts via before-input-event. A remap of one of these is
+ *  swallowed app-wide before any renderer surface sees the key, so the Settings UI must check
+ *  its candidate against EVERY command — the per-bucket conflict detector cannot see this. */
+export const MAIN_INTERCEPTED_COMMAND_IDS: readonly CommandId[] = [
+  'node.close',
+  'node.toggleMarkdown'
+]
+
+/** Cross-bucket shadowing check for a candidate binding of a main-intercepted command:
+ *  every OTHER command whose effective bindings share the candidate's platform identity.
+ *  Empty for non-intercepted commands (their collisions are the ordinary bucket check). */
+export function findMainInterceptShadowing(
+  id: CommandId,
+  candidate: string,
+  overrides: KeybindingOverrides,
+  isMac: boolean
+): CommandId[] {
+  if (!MAIN_INTERCEPTED_COMMAND_IDS.includes(id)) return []
+  const target = bindingIdentity(candidate, isMac)
+  const hits: CommandId[] = []
+  for (const def of COMMAND_DEFINITIONS) {
+    if (def.id === id) continue
+    for (const binding of getEffectiveBindings(def.id, overrides, isMac)) {
+      if (bindingIdentity(binding, isMac) === target) {
+        hits.push(def.id)
+        break
+      }
+    }
+  }
+  return hits
+}
+
 /** Validate a raw `settings.keybindings` value (hand-editable JSON) into a safe override map.
  *  Loops until conflict-free so one bad edit cannot leave ambiguous dispatch. This is the
  *  SETTINGS-LOAD path: it applies what survives and warns about what it dropped. It is not the
@@ -353,6 +389,14 @@ export function resolveCommandForKeyEvent(
     // scm commands dispatch from their own focused composer (local onKeyDown), never from
     // the window listener — resolving them here would fire Commit with no composer focused.
     if (def.scope === 'scm') continue
+    // speech.dictation dispatches from its own dedicated listeners (the keyed gesture and the
+    // hold-mode effect, both reading `dictationBinding()` — the registry override; the legacy
+    // settings.speech.shortcut field is only its downgrade mirror), never from here — its
+    // row here is display-only, for ShortcutsPanel and the Settings section. A hand-edited KEYED
+    // override would otherwise RESOLVE, find no handler, and spend the chord: the dispatcher's
+    // claim protocol stops a resolved command from reaching the trailing gestures, so
+    // `{"speech.dictation": ["Cmd+0"]}` would silently kill zoom-to-100%.
+    if (def.id === 'speech.dictation') continue
     if (ctx.typing && !def.allowWhileTyping) continue
     if (ctx.terminal && !(def.scope === 'terminal' || def.allowInTerminal)) continue
     if (!ctx.terminal && def.scope === 'terminal') continue

@@ -1589,14 +1589,49 @@ disappearing" rather than as an occasional cull. The `vm_stat` reader is what ma
 again; the grace window was never the thing that was wrong.
 
 
+## Keybindings (registry, overrides, dispatch)
+
+Every user-facing chord is a registry command, and the whole engine is **one module**:
+`src/shared/keybindings.ts` holds the command registry, per-command validation
+(`normalizeBindingForCommand`), effective-binding resolution, conflict detection, override
+sanitization and the pure event→command resolver. **Do not split it** — main, the renderer and the
+Server Edition bridge all import it, and a second copy of any of those five is how the dispatcher,
+the Settings section and ShortcutsPanel start disagreeing about what a chord means.
+
+- **Overrides live in `settings.keybindings`** (hand-editable JSON): an absent id = the registry
+  default, `[]` = **disabled**, a list = exactly those chords. It is **sanitized at READ**
+  (`sanitizeKeybindingOverrides` → `renderer/lib/keybindingOverrides.ts`, memoized on the raw
+  object's identity), which is what makes a hand-edited file safe; the Settings section refuses a
+  bad candidate BEFORE saving (`commitCandidate`) so the user learns which chord was refused
+  instead of watching it vanish on the next launch. The write path is raw and the gates read the
+  sanitized map, so a dropped hand-edit is invisible in the UI but still on disk until a UI write
+  or Reset replaces the map.
+- **Dispatch has exactly two owners.** The renderer's is ONE window `keydown` listener in
+  `Canvas.tsx`, on the **bubble** phase — the Settings recorder's `stopPropagation` on an armed
+  capture depends on that, and moving it to capture would let a recorded chord fire the command it
+  is being bound to. The main process's is `src/main/keydown-intercept.ts`, a **closed allowlist**
+  of chords it must steal back from the application menu before the page ever sees them.
+- **Invariants**
+  - **Never read `settings.speech.shortcut`.** The dictation chord is `dictationBinding()` (the
+    first effective `speech.dictation` binding); the legacy field is a **downgrade mirror only**,
+    written by `setKeybindingOverride` so an older build still finds the user's chord.
+  - **`isHoldChord('')` is TRUE** (an all-false parse has a null key), and `''` is what a DISABLED
+    dictation binding reads as — so every caller owes an explicit `=== ''` check first. Without it
+    a disabled binding arms a modifier-less hold chord that fires on any keydown.
+  - **`MAIN_INTERCEPTED_COMMAND_IDS` must mirror the registry-backed commands `keydown-intercept.ts`
+    actually resolves** (`keydown-intercept.test.ts` pins it). The Settings UI's app-wide shadow
+    warning reads that list and cannot derive it — main is not importable from the renderer. Note
+    what the pin cannot cover: a HARDCODED intercept (the `Digit0` branch) has no command id, so it
+    swallows its chord app-wide with the recorder reporting no conflict.
+
 ## Canvas interaction & panels (`Canvas.tsx` is the hub)
 
 - **Context menus** (`components/ContextMenu.tsx`, portal, icons from `components/icons.tsx`):
   pane right-click = add nodes at cursor (terminal / Claude / sticky / open file) + select
   all + fit + **Tidy canvas** (`arrangeAllNodes` — packs every top-level node, including group
   frames as rigid units, into a non-overlapping grid via `arrangeNodes`, sorted by current
-  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas" and bound
-  to ⌘/Ctrl+Shift+A; both
+  (y, x) so the pack roughly preserves reading order; mirrored in ⌘K as "Tidy canvas" and in the
+  keybinding registry as `canvas.tidy` (default ⌘/Ctrl+Shift+A, remappable); both
   hidden below 2 top-level nodes, where it could only be a visual no-op that still writes
   `project.json`) + restart-idle-agents (the bulk in-place agent restart, mirrored in ⌘K; both
   hidden when the canvas holds no restartable agent node, where they could only report "0

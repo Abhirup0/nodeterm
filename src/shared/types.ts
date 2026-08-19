@@ -2,6 +2,7 @@
 
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from './worktree'
 import type { CloneProgress } from './clone-url'
+import type { KeybindingOverrides } from './keybindings'
 import type { NormalizedAgentEvent } from './agents/normalize'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId, PromptInjectionMode } from './agents/config'
 import type { AgentMessageDeliverRequest, AgentMessageReply } from './agents/agent-messaging'
@@ -1122,9 +1123,11 @@ export interface Settings {
   /** Ids of terminal node header buttons the user has hidden; empty = everything visible. Gated by
    *  HIDEABLE_HEADER_BUTTONS the same way. */
   hiddenHeaderButtons: string[]
-  /** Whether usage percentages render as consumed ("32% used") or remaining ("68% left").
-   *  'remaining' is the historical default; users coming from other tools expect 'used'. */
-  usagePercentMode: 'used' | 'remaining'
+  /** Whether usage percentages render as consumed ("32% used"), remaining ("68% left"), or raw
+   *  token counts ("48k/200k tokens" — context-window surfaces only; provider quota surfaces
+   *  have no token counts and fall back to 'used' display). 'remaining' is the historical
+   *  default; users coming from other tools expect 'used'. */
+  usagePercentMode: 'used' | 'remaining' | 'tokens'
   /** Which agent the ⌘⇧C shortcut / quick-add launches. Always a launchable builtin. */
   defaultAgent: AgentId
   /** The permission mode Claude TERMINAL (CLI) sessions START in — passed as `--permission-mode`
@@ -1194,9 +1197,14 @@ export interface Settings {
   notchHoverExpand: boolean
   /** Dictation (desktop/server). Written as a whole object by the renderer. */
   speech: SpeechSettings
+  /** Keyboard-shortcut overrides by command id (see shared/keybindings.ts). Absent id = the
+   *  command's default bindings; `[]` = disabled. Hand-editable; invalid or conflicting
+   *  entries are dropped with a console warning at read time (sanitizeKeybindingOverrides).
+   *  Optional and deliberately not in DEFAULT_SETTINGS: absent simply means "no overrides". */
+  keybindings?: KeybindingOverrides
   /** Per-node hook identity enforcement (src/core/agents/node-identity-policy.ts).
    *
-   *  The ONLY optional key in this interface, and deliberately so: it is a TRI-state, and the two
+   *  One of the two optional keys in this interface, and deliberately so: it is a TRI-state, and the two
    *  non-default states are opposite escape hatches. Absent (the default — it is not in
    *  DEFAULT_SETTINGS) follows `NODE_IDENTITY_STRICT_AFTER`, so the rollout has one schedule for
    *  everybody. `true` opts in to strict enforcement before that date. `false` keeps the warning
@@ -2461,6 +2469,19 @@ export interface PresenceApi {
   onPeer(listener: (diff: PeerDiff) => void): () => void
 }
 
+/** Keyboard-shortcut plumbing the RENDERER cannot do for itself. */
+export interface ShortcutsApi {
+  /** Tell the shell that a shortcut recorder is armed (`true`) or released (`false`), so the
+   *  desktop's `before-input-event` intercepts stand down and the chord being recorded — ⌘W and
+   *  ⌘M among them — reaches the recorder instead of closing the user's selected nodes. A claimed
+   *  chord never reaches the page, so the recorder's own preventDefault cannot substitute for
+   *  this. Fire-and-forget. **The `false` leg is not optional**: the bit is global, so a recorder
+   *  that arms and never releases leaves those chords dead app-wide. Server Edition: a documented
+   *  no-op (a browser tab has no application menu to steal a chord back from, so nothing
+   *  intercepts). */
+  setRecording(active: boolean): void
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -2502,6 +2523,7 @@ export interface NodeTerminalApi {
   handoff: HandoffApi
   pairing: PairingApi
   presence: PresenceApi
+  shortcuts: ShortcutsApi
   /** Fires when the user presses Cmd/Ctrl+M (toggle markdown view). Returns unsubscribe. */
   onMarkdownToggle(listener: () => void): () => void
   /** Fires when the user presses Cmd/Ctrl+W (close selected node). Returns unsubscribe. */

@@ -8,7 +8,9 @@ import {
   bindingIdentity,
   findKeybindingConflicts,
   sanitizeKeybindingOverrides,
-  resolveCommandForKeyEvent
+  resolveCommandForKeyEvent,
+  MAIN_INTERCEPTED_COMMAND_IDS,
+  findMainInterceptShadowing
 } from './keybindings'
 import { parseShortcut } from './shortcut'
 import type { ShortcutKeyEvent } from './shortcut'
@@ -81,6 +83,8 @@ describe('registry invariants', () => {
         darwin: ['Delete', 'Backspace'], other: ['Delete', 'Backspace'], allowBareKey: true },
       { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
         darwin: [], other: [] },
+      { id: 'canvas.tidy', title: 'Tidy canvas', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+Shift+A'], other: ['Cmd+Shift+A'] },
       { id: 'canvas.groupSelection', title: 'Group selection', group: 'Canvas', scope: 'canvas',
         darwin: [], other: [] },
       { id: 'node.newTerminal', title: 'New terminal node', group: 'Nodes', scope: 'canvas',
@@ -367,6 +371,15 @@ describe('resolveCommandForKeyEvent', () => {
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'Enter' }), ctx(), {}, true))
       .toBeNull()
   })
+  it('never resolves speech.dictation — even a hand-edited KEYED override', () => {
+    // The registry row is display-only; dictation dispatches from its own listeners reading
+    // settings.speech.shortcut, so nothing here would ever handle it. Without the resolver skip
+    // this override RESOLVES, finds no handler, and the chord is spent — the trailing gestures
+    // (zoom / projectJump / copy) never see it, so a `Cmd+0` override kills zoom-to-100%.
+    // Passed straight in, bypassing sanitize: this is exactly the hand-edited settings.json case.
+    const o = { 'speech.dictation': ['Cmd+0'] }
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: '0' }), ctx(), o, true)).toBeNull()
+  })
   it('terminal focus admits terminal scope over a canvas command sharing the chord', () => {
     // Cmd+F sits on terminal.find; a canvas-scope override claims the same chord. The
     // terminal-focus gate drops canvas.fitAll before its bindings are ever read — this
@@ -399,5 +412,32 @@ describe('resolveCommandForKeyEvent', () => {
     // Deliberately unsanitized colliding override — the resolver must order the tie deterministically.
     const o = { 'canvas.redo': ['Cmd+Z'] }
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'z' }), ctx(), o, true)).toBe('canvas.undo')
+  })
+})
+
+describe('findMainInterceptShadowing', () => {
+  it('flags a main-intercepted remap that shadows another bucket', () => {
+    expect(findMainInterceptShadowing('node.close', 'Cmd+F', {}, true)).toEqual(['terminal.find'])
+    expect(findMainInterceptShadowing('node.close', 'Cmd+Enter', {}, true)).toEqual(['scm.commit'])
+  })
+  it('same-bucket collisions are the sanitizer/conflict path, still reported here', () => {
+    expect(findMainInterceptShadowing('node.toggleMarkdown', 'Cmd+K', {}, true)).toEqual([
+      'app.commandPalette'
+    ])
+  })
+  it('empty for a clean chord, for non-intercepted commands, and never self-reports', () => {
+    expect(findMainInterceptShadowing('node.close', 'Cmd+Alt+F9', {}, true)).toEqual([])
+    expect(findMainInterceptShadowing('canvas.undo', 'Cmd+F', {}, true)).toEqual([])
+    expect(findMainInterceptShadowing('node.close', 'Cmd+W', {}, true)).toEqual([])
+  })
+  it('respects overrides and cross-spelling identities', () => {
+    const o = { 'terminal.find': ['Cmd+Alt+F9'] }
+    expect(findMainInterceptShadowing('node.close', 'Cmd+F', o, true)).toEqual([])
+    expect(findMainInterceptShadowing('node.close', 'Ctrl+K', {}, false)).toEqual([
+      'app.commandPalette'
+    ])
+  })
+  it('names exactly the two main-intercepted commands', () => {
+    expect(MAIN_INTERCEPTED_COMMAND_IDS).toEqual(['node.close', 'node.toggleMarkdown'])
   })
 })
