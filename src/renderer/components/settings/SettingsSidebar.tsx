@@ -1,26 +1,35 @@
+import { useMemo } from 'react'
 import { cn } from '@renderer/ui/cn'
 import { Input } from '@renderer/ui/Input'
-import { visibleSettingsGroups, type SettingsSectionId } from './nav'
-
-const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
-const GROUPS = visibleSettingsGroups(isMac)
+import { visibleSettingsGroups, type SettingsGroup, type SettingsSectionId } from './nav'
 import { matchesQuery } from './search'
 import { SectionIcon } from './SettingsIcons'
+
+const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
 export function SettingsSidebar({
   activeSectionId,
   query,
   onSelect,
   onQueryChange,
-  onClose
+  onClose,
+  extraGroups
 }: {
   activeSectionId: SettingsSectionId
   query: string
   onSelect: (id: SettingsSectionId) => void
   onQueryChange: (q: string) => void
   onClose: () => void
+  /** Groups appended after the static nav — e.g. the render-time "Projects" group, which the
+   *  caller builds from live project state (kept out of the sidebar so it needs no store
+   *  subscription of its own). */
+  extraGroups?: SettingsGroup[]
 }): React.JSX.Element {
   const hasQuery = query.trim() !== ''
+  const GROUPS = useMemo(
+    () => [...visibleSettingsGroups(isMac), ...(extraGroups ?? [])],
+    [extraGroups]
+  )
   return (
     <aside className="flex w-[256px] shrink-0 flex-col border-r border-border bg-panel">
       <div

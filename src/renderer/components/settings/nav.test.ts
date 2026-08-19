@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { SETTINGS_GROUPS, allSectionIds, FIRST_SECTION_ID, visibleSettingsGroups } from './nav'
+import { SETTINGS_GROUPS, allSectionIds, FIRST_SECTION_ID, visibleSettingsGroups, projectsSettingsGroup } from './nav'
 
 describe('SETTINGS_GROUPS', () => {
   it('lists exactly 24 sections with no duplicates', () => {
@@ -17,5 +17,13 @@ describe('SETTINGS_GROUPS', () => {
     expect(visibleSettingsGroups(true)).toEqual(SETTINGS_GROUPS)
     // No group is left empty by the filter.
     expect(visibleSettingsGroups(false).every((g) => g.sections.length > 0)).toBe(true)
+  })
+})
+
+describe('projectsSettingsGroup', () => {
+  it('derives one row per project and returns null when empty', () => {
+    const g = projectsSettingsGroup([{ id: 'p1', name: 'Alpha', color: '#fff' }])
+    expect(g?.sections).toEqual([{ id: 'project-p1', title: 'Alpha' }])
+    expect(projectsSettingsGroup([])).toBeNull()
   })
 })
