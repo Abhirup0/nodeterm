@@ -186,6 +186,77 @@ describe('ProjectSettingsSection', () => {
     expect(host.textContent).toContain('Alpha')
     expect(read).toHaveBeenCalledWith('p1')
   })
+
+  // --- Task 4: family editors --------------------------------------------------------------
+
+  const typeIntoTextarea = async (el: HTMLTextAreaElement, value: string): Promise<void> => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+      setter.call(el, value)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+
+  const click = async (el: HTMLElement): Promise<void> => {
+    await act(async () => {
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+  }
+
+  it('commits a local override row via saveLocal, carrying only that family/field', async () => {
+    await mountSection()
+    const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    await typeInto(local, '/bin/zsh')
+    await blur(local)
+    expect(updateLocal).toHaveBeenCalledWith('p1', { terminal: { shell: '/bin/zsh' } })
+  })
+
+  it('toggles a family ignoreShared Switch via saveLocal, merged with any existing local doc', async () => {
+    await mountSection()
+    const toggle = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Ignore shared setup settings on this machine"]'
+    )!
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    await click(toggle)
+    expect(updateLocal).toHaveBeenCalledWith('p1', { ignoreShared: { setup: true } })
+  })
+
+  it('flips the shared row\'s provenance note to "Overridden on this machine" when a local value wins', async () => {
+    read = vi.fn(async () => ({
+      shared: { version: 1, rev: 1, savedAt: 't', terminal: { shell: '/bin/bash' } },
+      local: { terminal: { shell: '/bin/zsh' } }
+    }))
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
+    await mountSection()
+    expect(host.textContent).toContain('Overridden on this machine')
+    expect(host.textContent).toContain('Active')
+    const shared = host.querySelector<HTMLInputElement>('#project-terminal-shell-p1')!
+    const local = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    expect(shared.value).toBe('/bin/bash')
+    expect(local.value).toBe('/bin/zsh')
+  })
+
+  it('surfaces a rejected env line in the warn note as the draft is typed', async () => {
+    await mountSection()
+    const env = host.querySelector<HTMLTextAreaElement>('#project-agents-env-p1')!
+    await typeIntoTextarea(env, 'bad key=1')
+    expect(host.textContent).toContain('bad key=1')
+    expect(host.textContent).toContain('Ignored')
+  })
+
+  it('does not disable the local editor or ignoreShared switch while the shared file is conflicted', async () => {
+    read = vi.fn(async () => ({ shared: null, local: undefined, conflict: true }) as ProjectSettingsSnapshot)
+    ;(window as unknown as { nodeTerminal: any }).nodeTerminal.projectSettings.read = read
+    await mountSection()
+    const sharedShell = host.querySelector<HTMLInputElement>('#project-terminal-shell-p1')!
+    const localShell = host.querySelector<HTMLInputElement>('#project-terminal-shell-local-p1')!
+    const toggle = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Ignore shared setup settings on this machine"]'
+    )!
+    expect(sharedShell.disabled).toBe(true)
+    expect(localShell.disabled).toBe(false)
+    expect(toggle.disabled).toBe(false)
+  })
 })
 
 describe('useProjectSettings', () => {

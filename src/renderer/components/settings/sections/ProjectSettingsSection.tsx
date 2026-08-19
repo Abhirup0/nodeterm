@@ -19,6 +19,7 @@ import {
   systemAccountDisplay
 } from '../../../state/workspace'
 import { FieldRow } from '../FieldRow'
+import { ProjectFamilyEditors } from '../ProjectSettingsFamilies'
 import { SearchableRow } from '../SearchableRow'
 import { SettingsSection } from '../SettingsSection'
 import { useSettingsSearch } from '../context'
@@ -308,9 +309,14 @@ function EditableProjectSection({
           }
         />
       </SearchableRow>
-      {/* Task 4 hangs the per-family editors (setup / worktree / agents / terminal) here; they take
-          `settings.resolved`, `settings.saveShared`, `settings.saveLocal`, and `conflict` as their
-          disabled flag — the hook needs no change to grow them. */}
+      <ProjectFamilyEditors
+        projectId={project.id}
+        snapshot={snapshot}
+        resolved={settings.resolved}
+        conflict={conflict}
+        saveShared={settings.saveShared}
+        saveLocal={settings.saveLocal}
+      />
     </SettingsSection>
   )
 }
