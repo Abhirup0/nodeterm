@@ -11,6 +11,7 @@ import { cn } from '@renderer/ui/cn'
 import { useProjects } from '../../../state/projects'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
+import { markWorkspaceDirty } from '../../../state/workspaceDirty'
 import {
   NODE_COLORS,
   accountsForProject,
@@ -26,17 +27,17 @@ import { matchesQuery, type SettingsSearchEntry } from '../search'
 import { useProjectSettings } from '../useProjectSettings'
 
 /**
- * Saves the whole workspace after an identity/defaults edit — the SAME route Canvas takes after
- * `renameProject` / `setProjectColor` / `setProjectDefault*` (Canvas.tsx `persist`): the store
- * setters are pure state, and nothing else pushes them to `.nodeterm/project.json`.
+ * Persists an identity/defaults edit. The store setters (`renameProject`, `setProjectColor`,
+ * `setProjectDefault*`) are pure state — nothing else pushes them to `.nodeterm/project.json`.
  *
- * Canvas's `persist` first commits its live React Flow nodes into the store; this cannot (React
- * Flow is Canvas-owned) and must not need to — the canvas is not being edited while the Settings
- * page is up, and its own 800ms autosave has already committed anything that was. What we write is
- * the store's current truth for every project, exactly like every other save.
+ * `markWorkspaceDirty()` is the seam built for exactly this (state/workspaceDirty.ts; NodeLabels.tsx
+ * is the precedent): it rings Canvas's own `markDirty`, so the write inherits the canvas commit,
+ * the 800ms debounce, AND the conflict gate — while an external-change bar is up, autosave is
+ * suspended on purpose, and calling `workspace.save` directly from here would write straight past
+ * it. Debounced is right for these edits too: Canvas debounces node edits the same way.
  */
-async function persistWorkspace(): Promise<void> {
-  await window.nodeTerminal.workspace.save(useProjects.getState().toWorkspace())
+function persistIdentityEdit(): void {
+  markWorkspaceDirty()
 }
 
 function rowsFor(name: string): Record<string, SettingsSearchEntry> {
@@ -159,7 +160,7 @@ function EditableProjectSection({
       return
     }
     useProjects.getState().renameProject(project.id, next)
-    void persistWorkspace()
+    persistIdentityEdit()
   }
 
   return (
@@ -234,7 +235,7 @@ function EditableProjectSection({
                   )}
                   onClick={() => {
                     useProjects.getState().setProjectColor(project.id, c)
-                    void persistWorkspace()
+                    persistIdentityEdit()
                   }}
                 />
               ))}
@@ -260,7 +261,7 @@ function EditableProjectSection({
                     project.id,
                     v === '' ? undefined : (v as AgentPermissionMode)
                   )
-                void persistWorkspace()
+                persistIdentityEdit()
               }}
             >
               <option value="">Use global ({PERMISSION_MODE_LABELS[globalMode]})</option>
@@ -287,7 +288,7 @@ function EditableProjectSection({
               onChange={(e) => {
                 const v = e.target.value
                 useProjects.getState().setProjectDefaultAccount(project.id, v === '' ? undefined : v)
-                void persistWorkspace()
+                persistIdentityEdit()
               }}
             >
               <option value="">{systemLabel}</option>

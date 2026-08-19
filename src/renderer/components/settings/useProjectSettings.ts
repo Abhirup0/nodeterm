@@ -77,24 +77,37 @@ const EMPTY_FAMILIES = (): ResolvedProjectSettings => resolveProjectSettings(und
 export function useProjectSettings(projectId: string): ProjectSettingsHook {
   const [snapshot, setSnapshot] = useState<ProjectSettingsSnapshot | null | 'loading'>('loading')
   const [nonce, setNonce] = useState(0)
+  /** Counts successful writes, so a read can tell whether it started before or after the last one. */
+  const writeSeqRef = useRef(0)
 
-  // The merge base for `saveShared` must be the LATEST snapshot, without making the saver identity
+  // The merge base for `saveShared` must be the LATEST document, without making the saver identity
   // change on every read (a blur handler holding last render's saver would then merge into a stale
   // document and silently revert a sibling field).
   const snapshotRef = useRef<ProjectSettingsSnapshot | null | 'loading'>(snapshot)
   snapshotRef.current = snapshot
 
+  // The document we last WROTE, which outranks the snapshot until the re-read replaces it. Without
+  // it, two blurs in a row (shell, then theme) both merge into the pre-first-save document — and
+  // because every write is a WHOLE-document write, the second one silently drops the first. The
+  // re-read is asynchronous; the user's next blur is not going to wait for it. Tagged with the
+  // project id so a pane switch can never merge one project's edit into another's file.
+  const pendingRef = useRef<{ projectId: string; doc: ProjectSettingsDoc } | null>(null)
+
   useEffect(() => {
     let alive = true
     setSnapshot('loading')
-    void window.nodeTerminal.projectSettings.read(projectId).then(
-      (s) => {
-        if (alive) setSnapshot(s)
-      },
-      () => {
-        if (alive) setSnapshot(null)
-      }
-    )
+    // A read only supersedes the pending doc if no write happened while it was in flight;
+    // otherwise what we just wrote is still the newer truth. Belt-and-braces: the effect's own
+    // cancellation below already drops a read issued before the write in every path the test
+    // harness can produce — this closes the remaining window, where the write's `reload()`
+    // re-render has not been processed yet when the older read answers.
+    const seqAtStart = writeSeqRef.current
+    const settle = (next: ProjectSettingsSnapshot | null): void => {
+      if (!alive) return
+      if (writeSeqRef.current === seqAtStart) pendingRef.current = null
+      setSnapshot(next)
+    }
+    void window.nodeTerminal.projectSettings.read(projectId).then(settle, () => settle(null))
     return () => {
       alive = false
     }
@@ -104,14 +117,22 @@ export function useProjectSettings(projectId: string): ProjectSettingsHook {
 
   const saveShared = useCallback(
     async (doc: ProjectSettingsDoc): Promise<boolean> => {
+      const pending = pendingRef.current
       const snap = snapshotRef.current
-      const current = snap && snap !== 'loading' ? docOf(snap.shared) : {}
-      const ok = await window.nodeTerminal.projectSettings.writeShared(
-        projectId,
-        mergeSharedDoc(current, doc)
-      )
-      if (ok) reload()
-      return ok
+      const current =
+        pending?.projectId === projectId
+          ? pending.doc
+          : snap && snap !== 'loading'
+            ? docOf(snap.shared)
+            : {}
+      const next = mergeSharedDoc(current, doc)
+      const ok = await window.nodeTerminal.projectSettings.writeShared(projectId, next)
+      if (!ok) return false
+      // Advance the merge base NOW, not when the re-read lands: the next blur may arrive first.
+      writeSeqRef.current += 1
+      pendingRef.current = { projectId, doc: next }
+      reload()
+      return true
     },
     [projectId, reload]
   )

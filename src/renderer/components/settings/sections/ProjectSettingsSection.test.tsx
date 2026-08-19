@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Project } from '@shared/types'
 import type { ProjectSettingsSnapshot } from '@shared/project-settings'
 import { useProjects } from '../../../state/projects'
+import { registerWorkspaceDirty } from '../../../state/workspaceDirty'
 import { SettingsSearchContext } from '../context'
 import { ProjectSettingsSection } from './ProjectSettingsSection'
 import { useProjectSettings, type ProjectSettingsHook } from '../useProjectSettings'
@@ -31,7 +32,9 @@ describe('ProjectSettingsSection', () => {
   let read: ReturnType<typeof vi.fn>
   let writeShared: ReturnType<typeof vi.fn>
   let updateLocal: ReturnType<typeof vi.fn>
-  let save: ReturnType<typeof vi.fn>
+  /** Canvas's `markDirty`, registered through the same seam the app uses. */
+  let dirty: ReturnType<typeof vi.fn<() => void>>
+  let unregisterDirty: () => void
 
   const mount = async (node: React.JSX.Element, query = ''): Promise<void> => {
     root = createRoot(host)
@@ -71,16 +74,18 @@ describe('ProjectSettingsSection', () => {
     read = vi.fn(async () => EMPTY_SNAPSHOT)
     writeShared = vi.fn(async () => true)
     updateLocal = vi.fn(async () => true)
-    save = vi.fn(async () => undefined)
+    dirty = vi.fn<() => void>()
+    unregisterDirty = registerWorkspaceDirty(dirty)
     ;(window as unknown as { nodeTerminal: any }).nodeTerminal = {
       projectSettings: { read, writeShared, updateLocal },
-      workspace: { save }
+      workspace: { save: vi.fn() }
     }
   })
 
   afterEach(() => {
     act(() => root.unmount())
     host.remove()
+    unregisterDirty()
     useProjects.setState({ projects: [], activeProjectId: '' })
   })
 
@@ -99,16 +104,17 @@ describe('ProjectSettingsSection', () => {
     expect(host.textContent).toContain('enes@box:/srv/app')
   })
 
-  it('renames the project on BLUR only, then saves the workspace', async () => {
+  it('renames the project on BLUR only, then rings the workspace-save seam', async () => {
     await mountSection()
     await typeInto(nameInput(), 'Beta')
     // Still un-renamed while typing: each save is a disk write, so the commit waits for blur.
     expect(useProjects.getState().getProject('p1')?.name).toBe('Alpha')
-    expect(save).not.toHaveBeenCalled()
+    expect(dirty).not.toHaveBeenCalled()
     await blur(nameInput())
     expect(useProjects.getState().getProject('p1')?.name).toBe('Beta')
-    expect(save).toHaveBeenCalledTimes(1)
-    expect(save.mock.calls[0][0].projects[0].name).toBe('Beta')
+    // The seam (state/workspaceDirty) rings Canvas's markDirty, so the write inherits the canvas
+    // commit and the conflict gate; a raw workspace.save from here would bypass both.
+    expect(dirty).toHaveBeenCalledTimes(1)
   })
 
   it('ignores a blank rename instead of writing an unnamed project', async () => {
@@ -116,7 +122,7 @@ describe('ProjectSettingsSection', () => {
     await typeInto(nameInput(), '   ')
     await blur(nameInput())
     expect(useProjects.getState().getProject('p1')?.name).toBe('Alpha')
-    expect(save).not.toHaveBeenCalled()
+    expect(dirty).not.toHaveBeenCalled()
   })
 
   it('picks a color and persists it', async () => {
@@ -126,7 +132,7 @@ describe('ProjectSettingsSection', () => {
       swatch.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect(useProjects.getState().getProject('p1')?.color).toBe('#32d74b')
-    expect(save).toHaveBeenCalledTimes(1)
+    expect(dirty).toHaveBeenCalledTimes(1)
   })
 
   it('sets the default permission mode and clears it back to the global default', async () => {
@@ -144,7 +150,7 @@ describe('ProjectSettingsSection', () => {
       select.dispatchEvent(new Event('change', { bubbles: true }))
     })
     expect(useProjects.getState().getProject('p1')?.defaultPermissionMode).toBeUndefined()
-    expect(save).toHaveBeenCalledTimes(2)
+    expect(dirty).toHaveBeenCalledTimes(2)
   })
 
   it('shows the conflict banner when the shared file is git-conflicted', async () => {
@@ -258,6 +264,34 @@ describe('useProjectSettings', () => {
     expect(writeShared).toHaveBeenCalledTimes(1)
     expect(writeShared).toHaveBeenCalledWith('p1', { terminal: { shell: '/bin/fish', theme: 'dark' } })
     expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps a save that is still being re-read as the merge base for the next one', async () => {
+    // Blur A saves the shell; blur B arrives BEFORE A's re-read lands. Merging into the pre-A
+    // document would make B's whole-document write silently delete A's shell.
+    const first: ProjectSettingsSnapshot = {
+      shared: { version: 1, rev: 1, savedAt: 't', terminal: { shell: '/bin/bash' } },
+      local: undefined
+    }
+    let gate: (v: ProjectSettingsSnapshot) => void = () => {}
+    read.mockResolvedValueOnce(first).mockReturnValue(
+      new Promise<ProjectSettingsSnapshot>((r) => (gate = r))
+    )
+    await mount()
+    await act(async () => {
+      await hook.saveShared({ terminal: { shell: '/bin/fish' } })
+    })
+    expect(hook.snapshot).toBe('loading') // the re-read is gated open
+    await act(async () => {
+      await hook.saveShared({ setup: { waitForSetup: true } })
+    })
+    expect(writeShared).toHaveBeenLastCalledWith('p1', {
+      terminal: { shell: '/bin/fish' },
+      setup: { waitForSetup: true }
+    })
+    await act(async () => {
+      gate(first)
+    })
   })
 
   it('drops a field cleared to undefined, and the family with it', async () => {
