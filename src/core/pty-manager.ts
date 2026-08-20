@@ -72,7 +72,19 @@ import { machOArch, archMismatch } from './macho-arch'
 import { writeScrollback, readScrollback, deleteScrollback } from './scrollback-store'
 import { claudeConfigDirFor } from './claude-config-dir'
 import { findExecutableSync, findInPathString, resolveShellPath, shellPathNow } from './exec-path'
-import { AUTH_ENV_STRIP, accountTmuxEnvArgs, remoteAccountConfigDirAbs } from './claude-accounts-core'
+import {
+  AUTH_ENV_STRIP,
+  accountTmuxEnvArgs,
+  isReservedSpawnEnvKey,
+  remoteAccountConfigDirAbs
+} from './claude-accounts-core'
+import {
+  AUTH_ENV_STRIP as CODEX_AUTH_ENV_STRIP,
+  codexSessionEnv,
+  isCodexScopeRefusal,
+  needsCodexAccountScope,
+  resolveCodexSessionScope
+} from './codex-accounts-core'
 import { NODE_ID_MAX, isSafeNodeId } from './remote-safety'
 import { presenceHub } from './presence/hub'
 import {
@@ -115,6 +127,7 @@ import {
   SessionHostProtocolCompatibilityError
 } from './session-host-backend'
 import type { SessionHostPty } from './session-host-pty'
+import type { ProjectSpawnOverrides, ProjectSpawnOverridesReader } from './project-spawn-overrides'
 
 // How often we snapshot a live tmux session's scrollback to disk, so a machine reboot (which
 // kills the tmux server) can still replay recent output on cold restart. A final snapshot also
@@ -146,6 +159,17 @@ const execFileAsync = promisify(execFile)
  * scrollback over a distant host is legitimately slow. The point is a ceiling, not a deadline.
  */
 const PROC_TIMEOUT_MS = 15_000
+
+/**
+ * How long a spawn may wait on the project's settings before it goes ahead WITHOUT them.
+ *
+ * The reader is cheap on the local leg (an in-process store read), but the SSH leg's
+ * `readProjectSettings` reconciles the host's `settings.json` over the ControlMaster — the same
+ * half-dead-socket hazard that wedged `pty:create` once already (see PROC_TIMEOUT_MS). A terminal
+ * must never hang on a settings read, and the failure direction is the same one everything else
+ * here takes: no overrides, spawn anyway.
+ */
+const PROJECT_OVERRIDES_TIMEOUT_MS = 2_000
 
 /**
  * Shorter for the probes an interactive spawn WAITS ON. `hasRemoteSession` only decides warm vs
@@ -838,8 +862,25 @@ export class PtyManager {
   private tmuxPath: string | null = null
   private confPath = ''
   private getSettings: () => Settings = () => DEFAULT_SETTINGS
+
+  /**
+   * Is this account id one of the managed CODEX accounts? Asked instead of guessing from the id's
+   * shape: `codexAccounts` and `claudeAccounts` share an id alphabet, so only the list can tell
+   * them apart (issue #345). Reads LIVE settings, so an account added after init is seen.
+   */
+  private isCodexAccount(accountId: string): boolean {
+    return this.getSettings().codexAccounts.some((a) => a.id === accountId)
+  }
   /** Literal model-gateway key loaded by the shell's secret service during startup. */
   private getModelGatewaySecret: () => string | null = () => null
+  /**
+   * What the OWNING project contributes to a session's env + shell, or null when it contributes
+   * nothing. Injected (not constructed) for the same reason `getSettings` is: core cannot see the
+   * workspace store or the trust store, and both shells wire the SAME core factory
+   * (`makeProjectSpawnOverrides`). Unset ⇒ the feature is simply absent — every spawn behaves
+   * exactly as it did before it existed.
+   */
+  private readProjectSpawnOverrides: ProjectSpawnOverridesReader | null = null
   /** ONE shared snapshot interval for all persisted sessions — a per-session interval spawned
    *  one tmux/ssh capture subprocess per session per tick, forever, even for idle terminals. */
   private snapshotTimer: ReturnType<typeof setInterval> | null = null
@@ -1414,6 +1455,48 @@ export class PtyManager {
     primePtyCeiling()
   }
 
+  /**
+   * Wire the project settings → spawn overrides reader (SDD: project-settings consumption, Task 4).
+   *
+   * A SEPARATE setter rather than a third `init` argument: the Server Edition constructs its
+   * workspace/trust stores AFTER `ptyManager.init(...)`, so an init parameter could only ever be
+   * wired on one of the two shells.
+   */
+  setProjectSpawnOverrides(read: ProjectSpawnOverridesReader | null): void {
+    this.readProjectSpawnOverrides = read
+  }
+
+  /**
+   * The project's contribution to THIS spawn — bounded and fail-open on every path.
+   *
+   *  - no reader wired, or no `ownerProjectId` (the pane is UNPROVEN — see PtyCreateOptions) ⇒ no
+   *    overrides, and the reader is not even asked,
+   *  - a reader that rejects ⇒ no overrides,
+   *  - a reader that HANGS ⇒ no overrides after PROJECT_OVERRIDES_TIMEOUT_MS. The read still
+   *    settles on its own afterwards (nothing is cancelled); this spawn just stops waiting.
+   */
+  private async projectSpawnOverrides(
+    options: PtyCreateOptions
+  ): Promise<ProjectSpawnOverrides | null> {
+    const read = this.readProjectSpawnOverrides
+    if (!read || !options.ownerProjectId) return null
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        read(options.ownerProjectId),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), PROJECT_OVERRIDES_TIMEOUT_MS)
+          // Never hold the process open for a settings read nobody is waiting on any more.
+          timer.unref?.()
+        })
+      ])
+    } catch {
+      return null
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   /** Probe tmux and write/push the generated config. Idempotent and safe to re-run: a later
    *  successful probe (the banner's install command finishing, or init()'s post-PATH-probe re-run
    *  finding a tmux only the login shell knew about) brings tmux up for NEW sessions without an
@@ -1970,6 +2053,20 @@ export class PtyManager {
     if (options.requireRemote && !(options.sshRemote && options.persistKey && findSsh())) {
       return { sessionId: '', fresh: false, unavailable: 'ssh' }
     }
+    // FAIL-CLOSED Codex account scope (S6 §5 property 4 / Decision 2, the carried PR-1 obligation).
+    // A LOCAL Codex spawn that EXPLICITLY selected a managed account whose home is missing REFUSES
+    // here — it must never fall through and spawn against the SYSTEM `~/.codex` (silently acting as
+    // the wrong login is a worse failure for an explicit switch than for a first spawn). This is
+    // deliberately STRICTER than the Claude account path below, which falls back with a warning
+    // chip. `resolveCodexSessionScope` returns `{ unavailable: 'codex-account' }` for exactly that
+    // case; we map it straight through to a real refusal and spawn NOTHING. The system account (no
+    // id) always resolves. Remote (ssh) Codex sessions carry their account env via tmux `-e`.
+    if (needsCodexAccountScope(options.agentId, options.accountId, (id) => this.isCodexAccount(id)) && !options.sshRemote) {
+      const scope = resolveCodexSessionScope(platform().userDataDir, options.accountId)
+      if (isCodexScopeRefusal(scope)) {
+        return { sessionId: '', fresh: false, unavailable: 'codex-account' }
+      }
+    }
     // A tmux-backed session is "fresh" (cold start) when no live session exists to reattach to
     // — i.e. first open, or after a machine reboot killed the tmux server. Plain (non-tmux)
     // sessions are always fresh: they have no cross-restart continuity. The renderer uses this
@@ -2009,7 +2106,24 @@ export class PtyManager {
     if (hasSharedIdentity((options.agentId ?? 'claude') as AgentId) && !options.sshRemote) {
       installCodexLauncher()
     }
-    const sessionId = this.spawnSession(options, clientId, undefined, warmWindowsBackend)
+    // Resolved HERE rather than inside `spawnSession` because that function is synchronous and two
+    // of its three callers (`createDetached`/`attachDetached`, the relay host's attach path) are
+    // synchronous public API.
+    //
+    // Those two are NOT merely attaches — `attachDetached` goes through `tmux new-session -A`, which
+    // CREATES when the host's session died (that is exactly what `sessionExists` is asked ahead of,
+    // and what `fresh` reports). What makes them override-less is narrower and true either way: the
+    // relay host passes only `{cols, rows}` (host-service.ts), so those spawns carry no
+    // `ownerProjectId` — and no cwd, agent, account or hook env either. A mirrored client that
+    // lands on a re-created session gets the same bare login shell it got before this feature.
+    const projectOverrides = await this.projectSpawnOverrides(options)
+    const sessionId = this.spawnSession(
+      options,
+      clientId,
+      undefined,
+      warmWindowsBackend,
+      projectOverrides
+    )
     const spawned = this.sessions.get(sessionId)
     // PANE OWNERSHIP (agent messaging, PR #237 fix round 2): record the OWNING project of a pane
     // this process just GENUINELY spawned. Gated on `fresh` — an attach/co-attach to a session
@@ -2301,7 +2415,10 @@ export class PtyManager {
     clientId: ClientId | null,
     sinks: DetachedSinks | undefined,
     /** A persistent generation proven before profile/cwd resolution; attach-only, never create. */
-    warmWindowsBackend?: 'session-host' | 'tmux'
+    warmWindowsBackend?: 'session-host' | 'tmux',
+    /** What the OWNING project contributes (see `projectSpawnOverrides`) — already resolved,
+     *  because this function is synchronous. Null on every path with no proven project owner. */
+    overrides?: ProjectSpawnOverrides | null
   ): string {
     // PRE-FLIGHT — refuse before node-pty is touched, not after it fails.
     //
@@ -2479,6 +2596,21 @@ export class PtyManager {
       for (const k of AUTH_ENV_STRIP) delete env[k]
     }
 
+    // Managed/system Codex account scope (S6 §2.1). A LOCAL Codex session runs under an EXPLICIT
+    // CODEX_HOME + NODETERM_CODEX_ACCOUNT_ID: a managed id points at that account's private home
+    // (its own auth.json + thread DB); the SYSTEM account (no id) is written EXPLICITLY so it
+    // overwrites any managed scope a parent tmux server leaked in, rather than silently acting as
+    // the wrong login. The missing-explicit-account case already refused in spawnNew (fail-closed,
+    // property 4), so `codexSessionEnv` here never resolves an explicit id to the system home. Also
+    // strip env vars that would shadow the account's OAuth login with API-key auth. Remote (ssh)
+    // Codex sessions get this via the remote tmux `-e` list, not the local ssh client env.
+    if (needsCodexAccountScope(options.agentId, options.accountId, (id) => this.isCodexAccount(id)) && !options.sshRemote) {
+      const codexScope = codexSessionEnv(platform().userDataDir, options.accountId)
+      env.CODEX_HOME = codexScope.CODEX_HOME
+      env.NODETERM_CODEX_ACCOUNT_ID = codexScope.NODETERM_CODEX_ACCOUNT_ID
+      for (const k of CODEX_AUTH_ENV_STRIP) delete env[k]
+    }
+
     // Shared model gateway: resolve through the node's BASE harness in one shared mapping, then
     // apply it before custom-agent env. That precedence is intentional: an inheriting custom agent
     // benefits from the one-click gateway by default, but env values it explicitly declares still
@@ -2498,6 +2630,29 @@ export class PtyManager {
       : {}
     if (!options.sshRemote) {
       for (const [k, v] of Object.entries(gatewayEnv)) env[k] = v
+    }
+
+    // The OWNING project's env (`.nodeterm/settings.json`, local overlay + TRUSTED shared half —
+    // the gate is in `makeProjectSpawnOverrides`, never here). Placed between the gateway and the
+    // custom agent on purpose: a project may point its terminals at its own tooling, and a
+    // per-agent config the user wrote for THIS agent still beats it on a key collision.
+    //
+    // LITERAL values only: no `${env:VAR}` expansion. That is a custom-agent feature and a
+    // settings.json is git-shared hostile input — expanding it would turn an approved-looking
+    // literal into a read of this machine's process environment. The keys/values are already
+    // bounded and identifier-shaped by the settings sanitizer.
+    // RESERVED KEYS are dropped here, before either leg reads `projectEnv` — one filter, applied
+    // once, so the local merge below and the ssh `remoteEnvPairs` join further down cannot drift
+    // apart. Consent is not the gate for these: it proves a human saw the pairs, not that they
+    // understood a git-shared file was out-ranking the auth-strip / account / hook layers that
+    // exist to control exactly those names. See `isReservedSpawnEnvKey`.
+    const projectEnv = overrides?.env
+      ? Object.fromEntries(
+          Object.entries(overrides.env).filter(([k]) => !isReservedSpawnEnvKey(k))
+        )
+      : undefined
+    if (!options.sshRemote && projectEnv) {
+      for (const [k, v] of Object.entries(projectEnv)) env[k] = v
     }
 
     // Custom-agent env: merged LAST so it wins over hook + account + PATH/LANG env (required for
@@ -2536,7 +2691,16 @@ export class PtyManager {
     // mutation, or the user), so an unsafe value degrades to `undefined` = the default shell —
     // never to execution. @shared/node-exec keeps foreign values out of `options.shell` in the
     // first place; this is the second layer.
-    const reqShell = safeSessionProgram(options.shell)
+    //
+    // PRECEDENCE: the NODE's own `options.shell` wins outright — it is the exec-trusted value
+    // @shared/node-exec already vouched for, and a node that names its program means it. Only when
+    // it names none does the owning project's shell apply (local overlay, or a shared value the
+    // trust gate admitted). `??` deliberately reads the node's value BEFORE validation, so an
+    // unsafe node shell degrades to the default shell rather than silently falling through to the
+    // project's — the caller asked for a specific program and did not get the project's instead.
+    // Validation covers both sources: a project settings.json is git-shared (and on an SSH project
+    // it lives on the remote HOST), i.e. exactly the foreign provenance this check exists for.
+    const reqShell = safeSessionProgram(options.shell ?? overrides?.shell)
     const program = reqShell === 'ssh' ? findSsh() ?? 'ssh' : reqShell
     const programArgs = options.shellArgs ?? []
     // One resolver for BOTH direct node-pty and the persistent session-host backend, so the two
@@ -2620,7 +2784,9 @@ export class PtyManager {
       // and the remote conf's `update-environment` copies the names into the session env. Gated on
       // the validated remote $HOME and on a wired uploader — absent either, the vars are simply
       // not delivered and the agent fails loudly in its pane (fail-open, never a fallback to argv).
-      const remoteEnvPairs: Record<string, string> = { ...gatewayEnv }
+      // The project's env joins that same 0600 file — same reason, same ordering as the local leg
+      // (gateway, then project, then the custom agent's own values on top).
+      const remoteEnvPairs: Record<string, string> = { ...gatewayEnv, ...(projectEnv ?? {}) }
       for (const kv of remoteCustomEnv.args) {
         const eq = kv.indexOf('=')
         if (eq > 0) remoteEnvPairs[kv.slice(0, eq)] = kv.slice(eq + 1)
@@ -2723,7 +2889,10 @@ export class PtyManager {
       // client's argv — world-readable in /proc/<pid>/cmdline on a multi-user host, the exact
       // PR #195 leak class. Custom-agent env keys OUTSIDE the baked gateway list still need the
       // option appended at runtime on a shared server (the conf assignment cannot know them):
-      this.ensureUpdateEnvKeys(Object.keys(customEnvMerged))
+      // The project's keys need the same treatment for the same reason: their VALUES are in this
+      // tmux client's process env (merged above) and must reach the session without ever appearing
+      // on the long-lived client's argv.
+      this.ensureUpdateEnvKeys([...Object.keys(customEnvMerged), ...Object.keys(projectEnv ?? {})])
       const attachFlags = tmuxAttachFlags(!!sinks)
       args = [
         '-L',

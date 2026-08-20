@@ -15,8 +15,12 @@ import {
   worktreeFromCreate,
   worktreeFromEntry,
   worktreeRemoveMessage,
+  effectiveWorktreeBaseRef,
+  effectiveWorktreeTemplate,
   DEFAULT_BASE_REF,
-  type WorktreeEntry
+  DEFAULT_WORKTREE_PATH_TEMPLATE,
+  type WorktreeEntry,
+  type ProjectWorktreeDefaults
 } from './worktree'
 import { filterWorktrees } from './worktree'
 
@@ -442,5 +446,69 @@ describe('filterWorktrees', () => {
   it('returns every entry for a blank query and none for a miss', () => {
     expect(filterWorktrees(entries, '  ')).toBe(entries)
     expect(filterWorktrees(entries, 'not-here')).toEqual([])
+  })
+})
+
+// Pure worktree-creation resolver: what baseRef and path TEMPLATE a new worktree should default to,
+// given a project's own settings. Neither function does IO or validates a path — computeWorktreePath
+// (the caller) already refuses a shallow-rooted result, so a hostile basePath is left to fall back
+// exactly as it does today; see the `computeWorktreePath` case below.
+describe('effectiveWorktreeBaseRef', () => {
+  const entries = [entry('/repo', 'trunk'), entry('/wt/x', 'feature/x')]
+
+  it('a project baseRef wins over the repo-derived default', () => {
+    const project: ProjectWorktreeDefaults = { baseRef: 'release' }
+    expect(effectiveWorktreeBaseRef(project, entries)).toBe('release')
+  })
+
+  it('falls back to resolveBaseRef(entries) when the project has no baseRef', () => {
+    expect(effectiveWorktreeBaseRef(undefined, entries)).toBe('trunk')
+    expect(effectiveWorktreeBaseRef({}, entries)).toBe('trunk')
+  })
+
+  it('treats a whitespace-only project baseRef as unset', () => {
+    expect(effectiveWorktreeBaseRef({ baseRef: '   ' }, entries)).toBe('trunk')
+  })
+
+  it('falls all the way to DEFAULT_BASE_REF when neither the project nor the repo says', () => {
+    expect(effectiveWorktreeBaseRef(undefined, [])).toBe(DEFAULT_BASE_REF)
+  })
+})
+
+describe('effectiveWorktreeTemplate', () => {
+  it('a set project basePath becomes `<basePath>/${branch}`', () => {
+    expect(effectiveWorktreeTemplate({ basePath: '/srv/worktrees' }, undefined)).toBe(
+      '/srv/worktrees/${branch}'
+    )
+  })
+
+  it('joins with exactly one slash even when basePath has a trailing slash', () => {
+    expect(effectiveWorktreeTemplate({ basePath: '/srv/worktrees/' }, undefined)).toBe(
+      '/srv/worktrees/${branch}'
+    )
+  })
+
+  it('a whitespace-only basePath is ignored, falling through to the global template', () => {
+    expect(effectiveWorktreeTemplate({ basePath: '   ' }, './worktrees')).toBe('./worktrees')
+  })
+
+  it('falls back to the trimmed global template when there is no project basePath', () => {
+    expect(effectiveWorktreeTemplate(undefined, '  ./worktrees  ')).toBe('./worktrees')
+    expect(effectiveWorktreeTemplate({}, './worktrees')).toBe('./worktrees')
+  })
+
+  it('falls back to DEFAULT_WORKTREE_PATH_TEMPLATE when neither project basePath nor global template is set', () => {
+    expect(effectiveWorktreeTemplate(undefined, undefined)).toBe(DEFAULT_WORKTREE_PATH_TEMPLATE)
+    expect(effectiveWorktreeTemplate({}, '   ')).toBe(DEFAULT_WORKTREE_PATH_TEMPLATE)
+  })
+
+  // The function itself does no path resolution or validation — it only builds a template string.
+  // A hostile basePath like '/' must still end up refused, but that refusal happens DOWNSTREAM in
+  // computeWorktreePath (via resolvePathFromRepo's shallow-root guard), not here. Prove the chain
+  // actually holds by feeding the synthesized template through computeWorktreePath.
+  it('a rooted basePath produces a template that computeWorktreePath later refuses', () => {
+    const template = effectiveWorktreeTemplate({ basePath: '/' }, undefined)
+    expect(template).toBe('/${branch}')
+    expect(computeWorktreePath('/src/repo', 'topic/a', template)).toBe('')
   })
 })

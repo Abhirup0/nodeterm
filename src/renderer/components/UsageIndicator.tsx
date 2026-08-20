@@ -4,7 +4,14 @@ import { AGENT_CONFIG } from '@shared/agents/config'
 import { useSettings } from '../state/settings'
 import { useProjects } from '../state/projects'
 import { useSshConn } from '../state/sshConn'
-import { accountRowAction, scopeFromKey, scopeUsage, usageScopeKey } from '../lib/usageScope'
+import {
+  accountRowAction,
+  dedupeProviderRows,
+  providerRowKey,
+  scopeFromKey,
+  scopeUsage,
+  usageScopeKey
+} from '../lib/usageScope'
 import {
   barFillPercent,
   formatResetCountdown,
@@ -34,7 +41,7 @@ const USAGE_HOVER_CLOSE_MS = 220
  * beside it; its color stays keyed to the TRUE remaining percentage via `severityColor`, so
  * severity red/yellow/green never flips meaning when the mode does.
  */
-function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remaining' }) {
+function LimitRow({ limit, mode }: { limit: UsageLimit; mode: 'used' | 'remaining' | 'tokens' }) {
   const left = 100 - limit.usedPercent
   const fill = barFillPercent(limit.usedPercent, mode)
   return (
@@ -110,7 +117,7 @@ function AccountUsageBlock({
   label: string
   email?: string
   u: ClaudeUsage | null
-  mode: 'used' | 'remaining'
+  mode: 'used' | 'remaining' | 'tokens'
   isDefault?: boolean
   onUse?: () => void
 }) {
@@ -146,7 +153,7 @@ function RemoteUsageBlock({
   onUse
 }: {
   row: RemoteAccountUsage
-  mode: 'used' | 'remaining'
+  mode: 'used' | 'remaining' | 'tokens'
   isDefault?: boolean
   onUse?: () => void
 }) {
@@ -186,7 +193,7 @@ function labelFor(provider: string): string {
   return providerLabel(provider, agentLabel)
 }
 
-function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remaining' }) {
+function ProviderBlock({ u, mode }: { u: ProviderUsage; mode: 'used' | 'remaining' | 'tokens' }) {
   if (u.status === 'unavailable') return null
   const label = labelFor(u.provider)
   return (
@@ -543,8 +550,11 @@ export function UsageIndicator({
               No usage from this host yet — it is read once the project connects.
             </div>
           )}
-          {visibleProviders.map((p) => (
-            <ProviderBlock key={p.provider} u={p} mode={percentMode} />
+          {/* U8 (owed from PR 7): Codex emits one row per account, all `provider: 'codex'`.
+              Key on provider+accountId so each account renders distinctly, and reduce true
+              duplicates (two settings entries → the same underlying account) to one row. */}
+          {dedupeProviderRows(visibleProviders).map((p) => (
+            <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
           ))}
         </div>
       )}

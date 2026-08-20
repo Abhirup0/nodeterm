@@ -1,0 +1,47 @@
+name: Windows package smoke
+
+# Manual-only packaging smoke test for the Windows target (groundwork from #276 / #300 stack):
+# proves that `electron-builder --win` produces an NSIS installer + zip from a clean checkout on
+# windows-latest, whose runner image already ships the Visual Studio Build Tools + Python that
+# node-pty/smart-whisper compilation needs.
+#
+# BUILD ONLY — this workflow must NEVER publish. `dist:win` passes `--publish never`, nothing
+# here uploads to the update feed or creates a release, and the produced installer is unsigned.
+# Windows is not a shippable target until the session-host phase merges; release wiring (signing,
+# latest.yml on nodeterm.dev/updates, a release.yml job) is a deliberate follow-up.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # postinstall patches node-pty and rebuilds node-pty + smart-whisper against Electron's
+      # ABI — the same install the quality-windows CI job already proves green on this image.
+      - name: Install dependencies
+        run: npm ci
+
+      # make-icon (build/icon.png + build/icon.ico) + electron-vite build + electron-builder
+      # --win --x64 --publish never. Unsigned by design: no signing secrets are exposed here.
+      - name: Package (NSIS installer + zip, never published)
+        run: npm run dist:win
+
+      # The artifact names are the contract: a silent target/artifactName regression should
+      # fail here, not on a release day.
+      - name: Verify expected artifacts
+        shell: bash
+        run: |
+          ls -la dist
+          version=$(node -p "require('./package.json').version")
+          test -f "dist/nodeterm-Setup-${version}.exe" || { echo "::error::NSIS installer missing"; exit 1; }
+          ls dist/nodeterm-*-win.zip >/dev/null 2>&1 || { echo "::error::win zip missing"; exit 1; }

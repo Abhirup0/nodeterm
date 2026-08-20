@@ -70,6 +70,15 @@ interface AgentNodesState {
   /** Remove all subagents spawned by a given parent node (turn/session ended, or node closed). */
   clearForParent(parentNodeId: string): void
   /**
+   * Drop every dragged position/size/expanded override for a parent's subagent cards, snapping
+   * them back to the default packed grid (`offsetFrom`'s fallback in Canvas) at base dims — an
+   * expanded card kept at its larger size would still overlap its grid neighbors. Loop cards are
+   * excluded — there is only ever one per parent, so there is nothing to pack. If this is ever
+   * extended to loop cards, route through `saveLoopOverrides` too, or a cleared `loop-*` entry
+   * would resurrect from its localStorage mirror on reload.
+   */
+  tidyFanout(parentNodeId: string): void
+  /**
    * Drop the loop card's UI overrides (position/size/expanded) for a parent. Separate from
    * clearForParent on purpose: a loop/cron card outlives turns, so the per-turn fan-out
    * clear must not reset where the user dragged it — this runs only when the loop ends.
@@ -192,6 +201,21 @@ export const useAgentNodes = create<AgentNodesState>((set) => ({
       // come back pre-selected.
       const selectedId = s.selectedId && ids.includes(s.selectedId) ? null : s.selectedId
       return { byId, activityById, positions, sizes, expanded, selectedId }
+    }),
+
+  tidyFanout: (parentNodeId) =>
+    set((s) => {
+      const ids = Object.keys(s.byId).filter((id) => s.byId[id].parentNodeId === parentNodeId)
+      if (!ids.length) return s
+      const positions = { ...s.positions }
+      const sizes = { ...s.sizes }
+      const expanded = { ...s.expanded }
+      for (const id of ids) {
+        delete positions[id]
+        delete sizes[id]
+        delete expanded[id]
+      }
+      return { positions, sizes, expanded }
     }),
 
   clearLoop: (parentNodeId) =>

@@ -190,6 +190,10 @@ export interface GitHubIssuesApi {
   createMissingLabels(projectId: string): Promise<CreateMappedLabelsResult>
   clearCache(projectId: string): Promise<void>
   onChanged(projectId: string, listener: (changedIssueNumbers: number[]) => void): () => void
+  /** Resolve the project's GitHub org/user avatar (owner derived host-side from the project's own
+   *  origin — never a caller-supplied slug). Null when the project has no GitHub origin or the
+   *  avatar cannot be fetched. */
+  projectAvatar(projectId: string): Promise<{ dataUrl: string } | null>
 }
 
 export interface GitHubControlApi {

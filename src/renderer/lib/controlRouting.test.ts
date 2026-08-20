@@ -4,7 +4,9 @@ import {
   needsLiveCanvas,
   sourceIsControlCapable,
   storedNodeListing,
-  type ControlProject
+  answerBrowserResolve,
+  type ControlProject,
+  type BrowserResolveProject
 } from './controlRouting'
 
 const P = (
@@ -88,6 +90,16 @@ describe('needsLiveCanvas', () => {
     // projects store (`applyNodeMutation`), not the live canvas.
     expect(needsLiveCanvas('sticky')).toBe(false)
   })
+
+  it('is false for open-project — registering a project must never travel the camera (issue #338)', () => {
+    // The G5 argument one more time: routing is by SOURCE, and open-project's headline caller is
+    // a background orchestrator registering repos one after another — travelling would yank the
+    // human's view to the CALLER's project on every call. The verb acts on the projects STORE
+    // (registerProject, non-activating by construction), so no live canvas is needed at either
+    // end; this membership and Canvas.tsx's early-exit dispatch are the same decision stated once
+    // each (spec §2.3, P6).
+    expect(needsLiveCanvas('open-project')).toBe(false)
+  })
 })
 
 describe('sourceIsControlCapable', () => {
@@ -104,6 +116,84 @@ describe('sourceIsControlCapable', () => {
 
   it('rejects an agent that never gets NODETERM_CANVAS_CONTROL', () => {
     expect(sourceIsControlCapable('cursor')).toBe(false)
+  })
+})
+
+describe('the `browser` verb needs the LIVE canvas', () => {
+  it('needsLiveCanvas(browser) is true — the node lives in a specific project canvas, like open-browser', () => {
+    // It drives a real <webview> that only exists on the live canvas; it is NOT store-answerable.
+    expect(needsLiveCanvas('browser')).toBe(true)
+    expect(needsLiveCanvas('open-browser')).toBe(true)
+    // Contrast with the store-answered verbs.
+    expect(needsLiveCanvas('list')).toBe(false)
+    expect(needsLiveCanvas('send')).toBe(false)
+  })
+})
+
+describe('answerBrowserResolve — the renderer answers ONLY what it alone knows', () => {
+  const proj = (over: Partial<BrowserResolveProject> = {}): BrowserResolveProject => ({
+    id: 'proj-1',
+    cwd: '/home/u/p',
+    nodes: [{ id: 'claude-1', agentId: 'claude' }],
+    ...over
+  })
+
+  it('a missing project or an off-canvas source is a named, non-CDP refusal', () => {
+    expect(answerBrowserResolve(undefined, 'claude-1')).toEqual({
+      ok: false,
+      refusal: 'source node is not on an open canvas'
+    })
+    expect(answerBrowserResolve(proj(), 'ghost-9')).toEqual({
+      ok: false,
+      refusal: 'source node is not on an open canvas'
+    })
+  })
+
+  it('reports project, cwd, source-capability and the LIVE per-project capability value', () => {
+    // Switch on in the file AND kept on this machine ⇒ granted.
+    const granted = proj({ agentBrowserControl: true, capabilityAck: { agentBrowserControl: 'kept' } })
+    expect(answerBrowserResolve(granted, 'claude-1')).toEqual({
+      ok: true,
+      projectId: 'proj-1',
+      projectCwd: '/home/u/p',
+      sourceControlCapable: true,
+      capabilityOn: true,
+      sourceTitle: '',
+      browserTitle: ''
+    })
+  })
+
+  it('reports the source and browser node titles for the cookie trace (PR 9)', () => {
+    const granted = proj({
+      agentBrowserControl: true,
+      capabilityAck: { agentBrowserControl: 'kept' },
+      nodes: [
+        { id: 'claude-1', agentId: 'claude', title: 'Research agent' },
+        { id: 'browser-3', title: 'GitHub' }
+      ]
+    })
+    expect(answerBrowserResolve(granted, 'claude-1', 'browser-3')).toMatchObject({
+      ok: true,
+      sourceTitle: 'Research agent',
+      browserTitle: 'GitHub'
+    })
+    // An unknown browser node is an empty string (main falls back to the id), never a throw.
+    expect(answerBrowserResolve(granted, 'claude-1', 'browser-nope')).toMatchObject({ browserTitle: '' })
+  })
+
+  it('a switch that is ON in the file but only PENDING (never kept) is not on — a pending notice is a refusal', () => {
+    const pending = proj({ agentBrowserControl: true })
+    expect(answerBrowserResolve(pending, 'claude-1')).toMatchObject({ ok: true, capabilityOn: false })
+  })
+
+  it('a DECLINED switch is off even when the file says true (C1: the hostile clone must not grant)', () => {
+    const declined = proj({ agentBrowserControl: true, capabilityAck: { agentBrowserControl: 'declined' } })
+    expect(answerBrowserResolve(declined, 'claude-1')).toMatchObject({ ok: true, capabilityOn: false })
+  })
+
+  it('a non-control-capable source is reported as such (main turns it into the refusal)', () => {
+    const p = proj({ nodes: [{ id: 'x-1', agentId: 'cursor' }], agentBrowserControl: true, capabilityAck: { agentBrowserControl: 'kept' } })
+    expect(answerBrowserResolve(p, 'x-1')).toMatchObject({ ok: true, sourceControlCapable: false })
   })
 })
 

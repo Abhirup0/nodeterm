@@ -43,6 +43,9 @@ export interface KanbanSession {
   textUpdatedBy?: string
   /** Browser node URL (kind 'browser' only) — shown on the card, opened in the modal webview. */
   url?: string
+  /** Browser node session partition (kind 'browser' only) — threaded to the modal webview so it
+   *  shares the canvas node's jar (`browser-partition-parity.test.tsx`). Absent = default session. */
+  partition?: string
   /** The subset of the node's `data` the card modal's co-attach terminal needs to spawn/join the
    *  same session (kind 'terminal' only; sticky passes `{}`). */
   spawn: ModalSpawn

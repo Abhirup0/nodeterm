@@ -9,7 +9,9 @@ import { useSession } from '../session/session'
 import { promptDialog } from './promptDialog'
 import { ancestorDirs, createTargetDir, newEntryPath, parentDir } from '../lib/explorerCreate'
 import { canRevealLocally, downloadRoute, triggerBrowserDownload } from '../lib/download'
+import { explorerOverlayClickCloses } from '../lib/explorerPin'
 import { isBrowserRuntime } from '../bridge/runtime'
+import { IconPin } from './icons'
 
 export interface ExplorerPanelProps {
   onClose: () => void
@@ -19,6 +21,12 @@ export interface ExplorerPanelProps {
   /** File to reveal (expand ancestors + select + scroll). `path` is relative to the active project
    *  cwd; `nonce` increments per request so revealing the same file twice still re-fires. */
   reveal?: { path: string; nonce: number } | null
+  /**
+   * Docked: no scrim close, pointer-events pass through to the canvas. Default false so an
+   * omitted prop stays the historical overlay. Toggle lives here; persistence lives in Canvas.
+   */
+  pinned?: boolean
+  onTogglePin?: () => void
 }
 
 type ContextFn = (x: number, y: number, path: string, isDir: boolean, ignored?: boolean) => void
@@ -219,7 +227,13 @@ function TreeEntry({
  * NOTE (relay): a relay session's Explorer is still rooted at the local project's `cwd` — the host's
  * root cwd isn't known client-side. A relay tab reaches the host fs through its bridged session api
  * (the same seam TerminalNode/EditorNode use), not a separate per-connection fs client. */
-export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProps) {
+export function ExplorerPanel({
+  onClose,
+  onOpenFile,
+  reveal,
+  pinned = false,
+  onTogglePin
+}: ExplorerPanelProps) {
   const project = useProjects((s) => s.projects.find((p) => p.id === s.activeProjectId))
   // SSH projects browse the REMOTE filesystem: root at the project's `remoteCwd` and list over the
   // ControlMaster via `sshFs`. Local (and relay) projects keep the local fs rooted at `cwd`.
@@ -444,15 +458,36 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
   )
 
   return createPortal(
-    <div className="drawer-overlay" onClick={onClose}>
-      <aside className="drawer" onClick={(e) => e.stopPropagation()}>
+    <div
+      className={pinned ? 'drawer-overlay drawer-overlay--pinned' : 'drawer-overlay'}
+      // Pinned: no handler, so a CSS miss still cannot dismiss the docked tree. The overlay
+      // also has pointer-events:none (styles.css) — without that it would steal canvas clicks
+      // even with a no-op handler. Both halves are load-bearing.
+      onClick={explorerOverlayClickCloses(pinned) ? onClose : undefined}
+    >
+      <aside
+        className={pinned ? 'drawer drawer--pinned' : 'drawer'}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="drawer__head">
           <h2>{project?.name || 'Explorer'}</h2>
           <div className="ex-head-actions">
-            <button title="Refresh" onClick={() => setVersion((v) => v + 1)}>
+            <button type="button" title="Refresh" aria-label="Refresh" onClick={() => setVersion((v) => v + 1)}>
               ↻
             </button>
-            <button className="drawer__close" onClick={onClose}>
+            {onTogglePin && (
+              <button
+                type="button"
+                className={pinned ? 'is-on' : ''}
+                title={pinned ? 'Unpin' : 'Pin'}
+                aria-label={pinned ? 'Unpin' : 'Pin'}
+                aria-pressed={pinned}
+                onClick={onTogglePin}
+              >
+                <IconPin />
+              </button>
+            )}
+            <button type="button" className="drawer__close" title="Close" aria-label="Close" onClick={onClose}>
               ×
             </button>
           </div>
@@ -528,8 +563,10 @@ export function ExplorerPanel({ onClose, onOpenFile, reveal }: ExplorerPanelProp
         createPortal(
           <>
             {/* stopPropagation everywhere (same as ContextMenu): this portal's React parent is the
-                drawer OVERLAY (not the aside), so a bubbled click lands on the overlay's
-                onClick={onClose} and closes the whole Explorer along with the menu. */}
+                drawer OVERLAY (not the aside), so a bubbled click on the unpinned modal lands on
+                the overlay's onClick={onClose} and closes the whole Explorer along with the menu.
+                A pinned overlay has no close handler, but the stop is still what keeps the
+                click off the canvas. */}
             <div
               className="tab-backdrop"
               style={{ zIndex: 78 }}

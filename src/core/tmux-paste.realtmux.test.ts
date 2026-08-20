@@ -21,7 +21,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import {
   localPasteDelivery,
@@ -31,6 +30,7 @@ import {
   type PasteDelivery
 } from './tmux-naming'
 import { remotePasteDelivery } from './remote-ssh/control-master'
+import { makeTmuxTmpdir } from './tmux-test-socket'
 
 const ESC = '\x1b'
 const START = `${ESC}[200~`
@@ -77,7 +77,7 @@ function tryTmux(args: string[], input?: string): void {
 
 beforeAll(() => {
   if (!TMUX) return
-  work = fs.mkdtempSync(path.join(os.tmpdir(), 'ntpb-'))
+  work = makeTmuxTmpdir('ntpb-', SOCKET)
   binDir = path.join(work, 'bin')
   fs.mkdirSync(binDir)
   // The SSH path's shim. `remoteTmuxPasteArgs` hard-codes `-L nodeterm-rmt`, which on a real host
