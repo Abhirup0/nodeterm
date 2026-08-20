@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { watch, type FSWatcher } from 'fs'
+import { renameAtomicSync } from './fs-atomic'
 import { BOARD_LOG_TEXT_MAX, type BoardLogEntry } from '@shared/types'
 
 // Re-exported so callers of this module (and its tests) can reach the cap alongside buildLine.
@@ -145,7 +146,7 @@ export class BoardLogStore {
    * Move the log aside when this append would take it past `MAX_BOARD_LOG_BYTES`.
    *
    * Rotates BEFORE the write, so the bound holds for the file as it exists on disk rather than one
-   * entry late. `renameSync` over an existing `.1` replaces it — one generation, deliberately: two
+   * entry late. The rename over an existing `.1` replaces it — one generation, deliberately: two
    * would double the worst case for a file that lives inside the user's repository.
    *
    * Never throws: a log that cannot be rotated must still be APPENDED to (the caller's `try` then
@@ -156,7 +157,7 @@ export class BoardLogStore {
     try {
       const size = fs.statSync(file).size
       if (size + incoming <= MAX_BOARD_LOG_BYTES) return
-      fs.renameSync(file, `${file}.1`)
+      renameAtomicSync(file, `${file}.1`)
     } catch {
       // No file yet (the common case), or an unstattable/unrenamable one — append regardless.
     }

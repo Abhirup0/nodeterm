@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs'
 import { randomUUID } from 'node:crypto'
 import path from 'path'
+import { renameAtomic, writeFileAtomic } from './fs-atomic'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
@@ -63,35 +64,27 @@ interface LoadedEntry {
   file?: ProjectFileV1
 }
 
-let tmpSeq = 0
 export async function writeAtomic(filePath: string, content: string): Promise<void> {
-  // Unique per write: writers that bypass each other's queue (a second app instance, the SSH
+  // Unique temp per write: writers that bypass each other's queue (a second app instance, the SSH
   // poll's index write) must never share a tmp file — interleaved writes into one shared tmp
-  // published spliced JSON under the atomic rename.
-  const tmp = `${filePath}.${process.pid}.${++tmpSeq}.tmp`
-  try {
-    await fs.writeFile(tmp, content, 'utf-8')
-    await fs.rename(tmp, filePath)
-  } catch (e) {
-    // A unique name never self-heals the way the old fixed one did (the next save just reused
-    // it), so a failed write removes its own temp — project.json temps live in the USER'S repo,
-    // where litter is visible. The error still propagates; per-file callers swallow it by design.
-    await fs.rm(tmp, { force: true }).catch(() => {})
-    throw e
-  }
+  // published spliced JSON under the atomic rename. writeFileAtomic also removes its own temp on
+  // failure (project.json temps live in the USER'S repo, where litter is visible) and retries the
+  // rename over Windows sharing violations. The error still propagates; per-file callers swallow
+  // it by design.
+  await writeFileAtomic(filePath, content)
 }
 
 /** Remove tmp litter next to `target` left by writers that died mid-write: the legacy fixed
- *  `<file>.tmp` name and any `<file>.<pid>.<seq>.tmp` from another (dead) pid. Our own pid's
- *  temps are in-flight writes and stay. Same family rule as provider-cookie's sweep. */
+ *  `<file>.tmp` name and any `<file>.<pid>.<seq>[.<uuid>].tmp` from another (dead) pid. Our own
+ *  pid's temps are in-flight writes and stay. Same family rule as provider-cookie's sweep. */
 async function sweepStaleTmp(target: string): Promise<void> {
   try {
     const dir = path.dirname(target)
     const base = path.basename(target)
     for (const entry of await fs.readdir(dir)) {
       if (!entry.startsWith(base) || !entry.endsWith('.tmp')) continue
-      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>'
-      const owner = /^\.(\d+)\.\d+$/.exec(middle)?.[1]
+      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>[.<uuid>]'
+      const owner = /^\.(\d+)\.\d+(?:\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?$/.exec(middle)?.[1]
       if (middle === '' || (owner && owner !== String(process.pid))) {
         await fs.rm(path.join(dir, entry), { force: true }).catch(() => undefined)
       }
@@ -223,7 +216,7 @@ export class WorkspaceStore {
       if (sideline) {
         const backup = `${path.basename(this.indexPath)}.corrupt-${Date.now()}`
         try {
-          await fs.rename(this.indexPath, path.join(platform().userDataDir, backup))
+          await renameAtomic(this.indexPath, path.join(platform().userDataDir, backup))
           // Only AFTER the rename succeeded: the note promises a backup exists.
           this.noteCorruptIndex(backup)
         } catch { /* best effort — never destroy data */ }
@@ -750,7 +743,7 @@ export class WorkspaceStore {
     } catch { /* not JSON — sideline below */ }
     if (sideline) {
       try {
-        await fs.rename(file, `${file}.corrupt-${Date.now()}`)
+        await renameAtomic(file, `${file}.corrupt-${Date.now()}`)
       } catch { /* best effort — never destroy data */ }
     }
     return null

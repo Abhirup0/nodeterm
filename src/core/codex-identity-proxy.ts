@@ -33,12 +33,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
 import path from 'path'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { renameAtomicSync } from './fs-atomic'
 import { platform } from './platform'
 import { ACCOUNT_ID_RE, isSafeAccountId } from '../shared/codex-account'
 
@@ -402,7 +402,7 @@ export function writeCodexThreadIdentity(
         mode: 0o600
       }
     )
-    renameSync(tmp, file)
+    renameAtomicSync(tmp, file)
     renamed = true
   } finally {
     if (!renamed) {

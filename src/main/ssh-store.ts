@@ -2,6 +2,7 @@ import { promises as fs, readFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { app, ipcMain } from 'electron'
+import { writeFileAtomic } from '../core/fs-atomic'
 import { IPC } from '../shared/ipc'
 import { parseSshConfig, type ParsedSshHost, type SshServer } from '../shared/ssh'
 
@@ -12,7 +13,7 @@ import { parseSshConfig, type ParsedSshHost, type SshServer } from '../shared/ss
 export class SshStore {
   private cache: SshServer[] = []
   private readonly path: string
-  /** Serializes flushes so concurrent un-awaited saves can't race on the shared temp file. */
+  /** Serializes flushes so concurrent un-awaited saves publish in order. */
   private writeChain: Promise<void> = Promise.resolve()
 
   constructor(filePath?: string) {
@@ -45,17 +46,16 @@ export class SshStore {
   }
 
   private flush(): Promise<void> {
-    // Snapshot the cache now; chain after any in-flight write so the shared temp
-    // file is never written/renamed by two flushes at once.
+    // Snapshot the cache now; chain after any in-flight write so flushes from this
+    // instance publish in order, oldest first.
     const snapshot = JSON.stringify(this.cache, null, 2)
-    const tmp = `${this.path}.tmp`
     this.writeChain = this.writeChain
       .catch(() => {})
       .then(async () => {
         // 0o600: this holds the user's SSH host inventory (hosts/users/identity-file paths) —
-        // owner read/write only, not world-readable.
-        await fs.writeFile(tmp, snapshot, { encoding: 'utf-8', mode: 0o600 })
-        await fs.rename(tmp, this.path)
+        // owner read/write only, not world-readable. writeFileAtomic gives each flush its own
+        // temp name and retries the rename over transient Windows sharing violations.
+        await writeFileAtomic(this.path, snapshot, { mode: 0o600 })
       })
     return this.writeChain
   }

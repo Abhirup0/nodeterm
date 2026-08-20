@@ -48,12 +48,12 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
+import { renameAtomicSync, tempNameFor } from '../core/fs-atomic'
 import { createServer, request } from 'http'
 import { homedir } from 'os'
 import path from 'path'
@@ -647,7 +647,7 @@ async function bind(route: Route, threadId: string, name?: string): Promise<bool
     return notifyElectron(route, threadId, name)
   }
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
-  const tmp = `${file}.${process.pid}.tmp`
+  const tmp = tempNameFor(file)
   const quarantined: Array<{ source: string; quarantine: string }> = []
   const mappings = path.join(root, 'codex-thread-nodes')
   try {
@@ -676,16 +676,16 @@ async function bind(route: Route, threadId: string, name?: string): Promise<bool
             path.basename(other.file) === threadId)
         ) {
           const quarantine = `${other.file}.transfer-${process.pid}-${Date.now()}-${quarantined.length}`
-          renameSync(other.file, quarantine)
+          renameAtomicSync(other.file, quarantine)
           quarantined.push({ source: other.file, quarantine })
         }
       }
     }
-    renameSync(tmp, file)
+    renameAtomicSync(tmp, file)
   } catch {
     for (const item of quarantined.reverse()) {
       try {
-        renameSync(item.quarantine, item.source)
+        renameAtomicSync(item.quarantine, item.source)
       } catch {}
     }
     try {
@@ -1543,18 +1543,26 @@ function serve(): void {
     server.off('error', onListenError)
     const addr = server.address()
     if (!addr || typeof addr === 'string') process.exit(1)
-    const tmp = `${statePath}.${process.pid}.tmp`
-    writeFileSync(
-      tmp,
-      JSON.stringify({
-        version: VERSION,
-        pid: process.pid,
-        port: addr.port,
-        token
-      }),
-      { mode: 0o600 }
-    )
-    renameSync(tmp, statePath)
+    const tmp = tempNameFor(statePath)
+    try {
+      writeFileSync(
+        tmp,
+        JSON.stringify({
+          version: VERSION,
+          pid: process.pid,
+          port: addr.port,
+          token
+        }),
+        { mode: 0o600 }
+      )
+      renameAtomicSync(tmp, statePath)
+    } catch (e) {
+      // A unique temp never self-heals the way the old fixed name did; remove it on failure.
+      try {
+        unlinkSync(tmp)
+      } catch {}
+      throw e
+    }
     releaseLock()
   })
 }

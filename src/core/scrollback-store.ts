@@ -1,6 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
+import { renameAtomic, tempNameFor } from './fs-atomic'
 import { platform } from './platform'
 
 // On a machine reboot the tmux server dies, so the live scrollback is lost. We persist a
@@ -37,17 +38,16 @@ function trailing(data: string): Buffer {
 // All async (fs.promises): snapshots fire per session on a 15s timer and in bursts when many
 // nodes detach at once (project switch / quit) — sync writes here blocked the main event loop,
 // which stalls PTY streaming and all IPC.
-let writeSeq = 0
 export async function writeScrollback(persistKey: string, data: string): Promise<void> {
   if (!data) return
   const file = snapshotPath(persistKey)
   // Unique tmp per call: overlapping writes for the same key (timer tick + detach snapshot)
   // must not interleave into one tmp file and rename a torn write into place.
-  const tmp = `${file}.${++writeSeq}.tmp`
+  const tmp = tempNameFor(file)
   try {
     await fs.promises.mkdir(dir(), { recursive: true })
     await fs.promises.writeFile(tmp, trailing(data))
-    await fs.promises.rename(tmp, file)
+    await renameAtomic(tmp, file)
   } catch {
     // best-effort: a failed snapshot just means no cold-restore replay for this node
     await fs.promises.rm(tmp, { force: true }).catch(() => {})
