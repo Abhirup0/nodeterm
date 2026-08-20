@@ -191,6 +191,22 @@ describe('ProjectIconPicker', () => {
     expect(onColor).toHaveBeenCalledWith('#32d74b')
   })
 
+  const headerSubtitle = (): string =>
+    host.querySelector('[aria-label="Current icon"]')!.parentElement!.querySelector(
+      '[title]'
+    )!.textContent ?? ''
+
+  it('shows a human source label under the header for the current icon', async () => {
+    await mount({ type: 'lucide', name: 'folder-git' })
+    // Prettified: "folder-git" → "Folder Git glyph".
+    expect(headerSubtitle()).toBe('Folder Git glyph')
+  })
+
+  it('labels a missing icon as the default monogram', async () => {
+    await mount()
+    expect(headerSubtitle()).toContain('Default')
+  })
+
   // --- Task 5: Avatar tab + lazy refresh + anti-clobber ---
 
   const useAvatar = (
