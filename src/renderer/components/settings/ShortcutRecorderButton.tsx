@@ -41,6 +41,7 @@ import { COMMANDS_BY_ID, normalizeBindingForCommand, type CommandId } from '@sha
 import { isMacPlatform } from '@shared/platform-utils'
 import { recordingKeydown, recordingKeyup, type RecordingState } from './shortcutRecording'
 import { IconRecordKey } from './ShortcutRowIcons'
+import { Tooltip } from '../Tooltip'
 
 const isMac = isMacPlatform()
 
@@ -50,13 +51,18 @@ export function ShortcutRecorderButton({
   onCommit,
   appearance = 'button',
   label,
-  idleIcon
+  idleIcon,
+  tooltip
 }: {
   commandId: CommandId
   idleLabel: string
   onCommit: (combo: string) => void
   appearance?: 'button' | 'icon'
   label?: string
+  /** Hover-tooltip text for the IDLE `appearance="icon"` button (the app's custom Tooltip, not
+   *  the OS-delayed native one). The icon is the whole visible label, so this is where "replace"
+   *  vs "add another" gets said. Omitted ⇒ the accessible label. */
+  tooltip?: string
   /** The glyph the IDLE `appearance="icon"` button shows — presentational only, and it changes
    *  nothing else about the recorder. It exists because a row can carry two recorders (Record and
    *  Add) side by side in one label-less cluster, where the icon IS the label and two identical
@@ -141,8 +147,7 @@ export function ShortcutRecorderButton({
         // the browser's native button chrome (border + fill + padding) renders around the glyph.
         'flex size-6 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-muted hover:bg-fill-weak hover:text-text focus-visible:text-text'
       : 'min-w-[120px] cursor-pointer rounded-md border border-border bg-panel-header px-3 py-1.5 text-[13px] font-medium text-text outline-none hover:bg-[rgba(255,255,255,0.06)]'
-  const isIdleIcon = appearance === 'icon' && !capturing
-  return (
+  const btn = (
     <button
       type="button"
       // Observability only — no dispatcher reads it (see the header). Keeps the armed state
@@ -157,10 +162,9 @@ export function ShortcutRecorderButton({
       // and it must survive arming. Dropping it on capture (as this did) left a screen-reader
       // user with a button whose name flipped to the hint text mid-interaction, i.e. no way to
       // tell which command is being recorded for. The 'button' appearance keeps its own text and
-      // is deliberately untouched. `title` stays idle-only: the armed pill already says
-      // "Press keys…" on screen, and a hover tooltip over a live capture is noise.
+      // is deliberately untouched. There is no native `title`: the icon appearance carries the
+      // app's custom Tooltip below instead, and two tooltips for one hover is noise.
       aria-label={appearance === 'icon' ? effectiveLabel : undefined}
-      title={isIdleIcon ? effectiveLabel : undefined}
     >
       {capturing ? (
         <>
@@ -173,5 +177,14 @@ export function ShortcutRecorderButton({
         idleLabel
       )}
     </button>
+  )
+  // Only the icon appearance gets the custom tooltip — the 'button' appearance has visible text,
+  // and wrapping it would change its markup. `appearance` is fixed per instance, so the wrapper
+  // never appears/disappears mid-capture (that would remount the armed button and kill capture).
+  if (appearance !== 'icon') return btn
+  return (
+    <Tooltip label={capturing ? 'Press the new shortcut · Esc cancels' : (tooltip ?? effectiveLabel)}>
+      {btn}
+    </Tooltip>
   )
 }
