@@ -17,6 +17,7 @@ build/icon.png
 
 # concurrent-session worktrees / local agent state
 .claude/
+.worktrees/
 
 # backend lives in its own repo
 /nodebaseserver/
