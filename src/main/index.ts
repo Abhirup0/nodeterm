@@ -18,16 +18,14 @@ import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { BrowserControlLedger } from './browser-control-ledger'
 import {
-  grant as grantProjectTo,
+  recordOpenProjectGrant,
   isGranted as projectGrantedTo,
   atCap as projectGrantsAtCap,
   clearCaller as clearProjectGrants,
   gateProjectTarget,
-  validateOpenProjectCwd,
+  gateOpenProject,
   PROJECT_TARGETABLE_VERBS,
-  OPEN_PROJECT_LOCAL_ONLY,
-  OPEN_PROJECT_GRANT_CAP,
-  OPEN_PROJECT_CALLER_UNRESOLVED
+  OPEN_PROJECT_GRANT_CAP
 } from './project-grants'
 import { BrowserLeaseManager, BrowserSession } from './browser-lease'
 import { CdpEventBus, type Sendable } from './browser-actions'
@@ -3064,20 +3062,24 @@ app.whenReady().then(async () => {
     if (verb === 'open-project') {
       const refuse = (error: string) => ({ ok: false, error, message: error })
       if (!verified) return refuse(OPEN_PROJECT_CONTROL_REFUSAL)
+      // The rules themselves are the PURE gateOpenProject (project-grants.ts) — caller-unresolved
+      // fail-closed, SSH-caller local-only, cap-before-consent, cwd resolved once — proven
+      // red-capable branch by branch in project-grants.test.ts. This wrapper only feeds it main's
+      // own stores and returns its refusals unforwarded.
       const callerProjectId = projectIdOfNode(nodeId)
-      if (!callerProjectId) return refuse(OPEN_PROJECT_CALLER_UNRESOLVED)
-      if (workspaceStore.projectMetaFor(callerProjectId)?.ssh) {
-        // B5: local-only v1 — an SSH-project agent's --cwd would be a host path.
-        return refuse(OPEN_PROJECT_LOCAL_ONLY)
-      }
-      // Refuse the cap BEFORE the renderer would show a dialog (PR 2): a grant that cannot be
-      // recorded must not be consented to first.
-      if (projectGrantsAtCap(nodeId)) return refuse(OPEN_PROJECT_GRANT_CAP)
-      const cwd = validateOpenProjectCwd(args.cwd ?? '', (p) => statSync(p))
-      if ('error' in cwd) return refuse(cwd.error)
+      const gate = gateOpenProject({
+        callerProjectId,
+        callerIsSsh: callerProjectId
+          ? workspaceStore.projectMetaFor(callerProjectId)?.ssh
+          : undefined,
+        atCap: projectGrantsAtCap(nodeId),
+        rawCwd: args.cwd ?? '',
+        statFn: (p) => statSync(p)
+      })
+      if ('refuse' in gate) return refuse(gate.refuse)
       // The RESOLVED path — never the raw argument — is what the renderer (PR 2's dialog, the
       // dedupe, the store) sees. Single resolution, in main, right here.
-      args = { ...args, cwd: cwd.resolved }
+      args = { ...args, cwd: gate.resolvedCwd }
     } else if (PROJECT_TARGETABLE_VERBS.has(verb) && args.project !== undefined) {
       // Open verbs carrying `--project`: own-or-granted only (spec §3, P2), decided against
       // main's own store + ledger. Anything else is refused without forwarding.
@@ -3136,10 +3138,20 @@ app.whenReady().then(async () => {
     // carries a non-empty projectId. Inert until PR 2: today the renderer's `default:` case
     // answers `unknown verb: open-project` with ok: false, so nothing is ever recorded — but the
     // record path ships fail-closed and finished, not stubbed.
-    if (verb === 'open-project' && verified && result.ok) {
-      const opened = result.result as { projectId?: unknown } | undefined
-      if (typeof opened?.projectId === 'string' && opened.projectId) {
-        grantProjectTo(nodeId, opened.projectId)
+    if (verb === 'open-project') {
+      // The whole decision (verified && ok && string projectId → grant; cap race detection) is
+      // the PURE recordOpenProjectGrant — proven branch by branch in project-grants.test.ts.
+      // 'cap' = the pre-forward atCap() check passed but a concurrent open-project from the same
+      // caller filled the last slot while this one was in flight (PR #362 review, M1): the
+      // caller must NOT hear ok while holding no targeting right, so the named refusal replaces
+      // the success reply. Nothing is lost — open-project is idempotent (B1), so a re-run once
+      // grants have cleared returns the same project id and records the grant.
+      if (recordOpenProjectGrant(nodeId, result, verified) === 'cap') {
+        console.warn(
+          `[project-grants] grant cap raced for caller ${nodeId}: open-project succeeded but ` +
+            'the grant was not recorded; replying open-project-grant-cap'
+        )
+        return { ok: false, error: OPEN_PROJECT_GRANT_CAP, message: OPEN_PROJECT_GRANT_CAP }
       }
     }
     return result

@@ -20,12 +20,17 @@ import {
   clearCaller,
   clearAll,
   gateProjectTarget,
+  gateOpenProject,
+  recordOpenProjectGrant,
   validateOpenProjectCwd,
   PROJECT_TARGETABLE_VERBS,
   PROJECT_TARGETING_REFUSAL,
   PROJECT_TARGET_REFUSED,
   PROJECT_TARGET_SSH_UNSUPPORTED,
-  OPEN_PROJECT_CWD_INVALID
+  OPEN_PROJECT_CWD_INVALID,
+  OPEN_PROJECT_LOCAL_ONLY,
+  OPEN_PROJECT_CALLER_UNRESOLVED,
+  OPEN_PROJECT_GRANT_CAP
 } from './project-grants'
 
 beforeEach(() => clearAll())
@@ -139,11 +144,41 @@ describe('gateProjectTarget (spec §3/§5) — every branch, fail closed', () =>
     ).toBe('allow')
   })
 
-  it('refuses an SSH target that is not the caller own project — even a (impossible) granted one', () => {
-    // Grants are only ever minted by local open-project, so a granted SSH id cannot exist; the
-    // SSH check running BEFORE the granted check is the belt for that invariant.
+  it('allows OWN even when the meta lookup misses — own-before-unknown (review M2)', () => {
+    // callerProjectId and the target meta derive from the same index scan, but if a rename
+    // mid-debounce ever staggered the two read paths, a legitimate `--project <own-id>` must not
+    // be spuriously refused as unknown. Still fail-closed: the id IS the caller's own project by
+    // main's own caller resolution.
+    expect(
+      gateProjectTarget({ ...base, targetProjectId: 'proj-own', targetIsSsh: undefined })
+    ).toBe('allow')
+  })
+
+  it('refuses every stranger id with byte-identical text — no existence OR kind oracle (review I3)', () => {
+    // unknown, real-local-ungranted and real-SSH-ungranted must be indistinguishable to a caller
+    // with no relationship to the id. Byte-for-byte, not toEqual: the property is that the WIRE
+    // BYTES leak nothing.
+    const refuseOf = (r: ReturnType<typeof gateProjectTarget>): string =>
+      r === 'allow' ? '' : r.refuse
+    const unknown = refuseOf(gateProjectTarget({ ...base, targetIsSsh: undefined }))
+    const localUngranted = refuseOf(gateProjectTarget({ ...base, targetIsSsh: false }))
+    const sshUngranted = refuseOf(gateProjectTarget({ ...base, targetIsSsh: true }))
+    expect(unknown).toBe(PROJECT_TARGET_REFUSED)
+    expect(Buffer.from(localUngranted).equals(Buffer.from(unknown))).toBe(true)
+    expect(Buffer.from(sshUngranted).equals(Buffer.from(unknown))).toBe(true)
+  })
+
+  it('the SSH belt refuses a granted SSH id — and only a grant holder ever sees that wording', () => {
+    // Grants are only ever minted by local open-project, so a granted SSH id cannot exist; if
+    // that invariant ever breaks, the target is refused, not opened. The kind-naming wording is
+    // harmless here — a grant holder was handed the id by open-project — and is reachable ONLY
+    // through the granted branch (the stranger case above gets PROJECT_TARGET_REFUSED).
     const r = gateProjectTarget({ ...base, targetIsSsh: true, granted: true })
     expect(r).toEqual({ refuse: PROJECT_TARGET_SSH_UNSUPPORTED })
+    // A granted id whose project has since vanished still fails closed as a stranger.
+    expect(gateProjectTarget({ ...base, targetIsSsh: undefined, granted: true })).toEqual({
+      refuse: PROJECT_TARGET_REFUSED
+    })
   })
 
   it('allows a granted target and refuses an ungranted one with the named sentence', () => {
@@ -205,6 +240,98 @@ describe('validateOpenProjectCwd (P7) — resolved once, statted once, fails clo
   })
 })
 
+describe('gateOpenProject — every pre-forward branch, behaviorally red-capable (review I1/I2)', () => {
+  const dirStat = { isDirectory: () => true }
+  const base = {
+    callerProjectId: 'proj-own' as string | undefined,
+    callerIsSsh: false as boolean | undefined,
+    atCap: false,
+    rawCwd: '/tmp/repo',
+    statFn: () => dirStat
+  }
+
+  it('refuses an unresolvable caller with the transient named error, before anything else', () => {
+    // A node inside the save debounce is not in any persisted project yet: fail closed (GC 10),
+    // worded transient because it genuinely is. No stat runs — the request goes nowhere.
+    let stats = 0
+    const r = gateOpenProject({
+      ...base,
+      callerProjectId: undefined,
+      // Even a hostile combination (SSH + cap) must not change which refusal fires first.
+      callerIsSsh: true,
+      atCap: true,
+      statFn: () => ((stats++, dirStat))
+    })
+    expect(r).toEqual({ refuse: OPEN_PROJECT_CALLER_UNRESOLVED })
+    expect(stats).toBe(0)
+  })
+
+  it('refuses an SSH-project caller with open-project-local-only (B5)', () => {
+    expect(gateOpenProject({ ...base, callerIsSsh: true })).toEqual({
+      refuse: OPEN_PROJECT_LOCAL_ONLY
+    })
+  })
+
+  it('refuses at the grant cap BEFORE the cwd is ever touched (no consent could follow)', () => {
+    let stats = 0
+    const r = gateOpenProject({ ...base, atCap: true, statFn: () => ((stats++, dirStat)) })
+    expect(r).toEqual({ refuse: OPEN_PROJECT_GRANT_CAP })
+    expect(stats).toBe(0)
+  })
+
+  it('composes with the real ledger cap and the real cwd rules', () => {
+    for (let i = 0; i < GRANT_CAP; i++) grant('caller-a', `proj-${i}`)
+    expect(gateOpenProject({ ...base, atCap: atCap('caller-a') })).toEqual({
+      refuse: OPEN_PROJECT_GRANT_CAP
+    })
+    expect(gateOpenProject({ ...base, atCap: atCap('caller-b'), rawCwd: 'not/absolute' })).toEqual(
+      { refuse: OPEN_PROJECT_CWD_INVALID }
+    )
+  })
+
+  it('passes a clean request through with the RESOLVED cwd (P7)', () => {
+    const statted: string[] = []
+    const r = gateOpenProject({
+      ...base,
+      rawCwd: '/tmp/a/../repo/',
+      statFn: (p) => ((statted.push(p), dirStat))
+    })
+    expect(r).toEqual({ resolvedCwd: path.resolve('/tmp/a/../repo/') })
+    expect(statted).toEqual([path.resolve('/tmp/a/../repo/')])
+  })
+})
+
+describe('recordOpenProjectGrant — the record decision, behaviorally (P2 record-side + review M1)', () => {
+  const okReply = { ok: true, result: { projectId: 'proj-new' } }
+
+  it('records ONLY under verified && ok && non-empty string projectId — the open-browser pattern', () => {
+    // The four fail-closed legs first: none of these may mint anything.
+    expect(recordOpenProjectGrant('caller-a', okReply, false)).toBe('not-applicable')
+    expect(recordOpenProjectGrant('caller-a', { ok: false, result: { projectId: 'proj-new' } }, true)).toBe('not-applicable')
+    expect(recordOpenProjectGrant('caller-a', { ok: true, result: {} }, true)).toBe('not-applicable')
+    expect(recordOpenProjectGrant('caller-a', { ok: true, result: { projectId: '' } }, true)).toBe('not-applicable')
+    expect(recordOpenProjectGrant('caller-a', { ok: true, result: { projectId: 42 } }, true)).toBe('not-applicable')
+    expect(isGranted('caller-a', 'proj-new')).toBe(false)
+    // The one leg that mints — and only for THIS caller.
+    expect(recordOpenProjectGrant('caller-a', okReply, true)).toBe('recorded')
+    expect(isGranted('caller-a', 'proj-new')).toBe(true)
+    expect(isGranted('caller-b', 'proj-new')).toBe(false)
+  })
+
+  it("answers 'cap' when a concurrent open-project filled the last slot — nothing recorded", () => {
+    // The M1 race: both requests passed the pre-forward atCap() check; the loser's grant() call
+    // is the first place the collision is visible, and the wrapper turns 'cap' into the named
+    // refusal instead of relaying ok (a caller must never hear ok while holding no right).
+    for (let i = 0; i < GRANT_CAP; i++) grant('caller-a', `proj-${i}`)
+    expect(recordOpenProjectGrant('caller-a', okReply, true)).toBe('cap')
+    expect(isGranted('caller-a', 'proj-new')).toBe(false)
+    // An id already granted re-records fine at the cap (idempotent, no new slot).
+    expect(
+      recordOpenProjectGrant('caller-a', { ok: true, result: { projectId: 'proj-0' } }, true)
+    ).toBe('recorded')
+  })
+})
+
 describe('main wiring (structural) — the wrapper records, consumes and clears correctly', () => {
   // Structural in the control-destructive.test.ts sense and for the same reason: the wiring lives
   // inside index.ts's setControlHandler wrapper and whenReady closure, which have no unit seam,
@@ -213,14 +340,36 @@ describe('main wiring (structural) — the wrapper records, consumes and clears 
   // the real functions.
   const src = fs.readFileSync(path.join(__dirname, 'index.ts'), 'utf8')
 
-  it('records a grant ONLY under verified && result.ok with a string projectId (the open-browser pattern)', () => {
-    const at = src.indexOf("verb === 'open-project' && verified && result.ok")
-    expect(at).toBeGreaterThan(-1)
-    const block = src.slice(at, at + 400)
-    expect(block).toContain("typeof opened?.projectId === 'string'")
-    expect(block).toContain('grantProjectTo(nodeId, opened.projectId)')
-    // No other call site mints a grant: the record path is the wrapper's, once.
-    expect(src.match(/grantProjectTo\(/g)?.length).toBe(1)
+  it('the record path is the pure recordOpenProjectGrant, called once, with the cap race surfaced', () => {
+    // The record RULES (verified && ok && string projectId; per-caller; 'cap' on the race) are
+    // proven behaviorally above against the real function. Here: the wrapper routes the reply
+    // through that function exactly once, with main's own verdict, and a 'cap' answer replaces
+    // the success reply with the named refusal (review M1 — no ok without a recorded right).
+    expect(src.match(/recordOpenProjectGrant\(/g)?.length).toBe(1)
+    expect(src).toMatch(
+      /if \(recordOpenProjectGrant\(nodeId, result, verified\) === 'cap'\) \{/
+    )
+    const at = src.indexOf("recordOpenProjectGrant(nodeId, result, verified) === 'cap'")
+    const block = src.slice(at, src.indexOf('return result', at))
+    expect(block).toContain('error: OPEN_PROJECT_GRANT_CAP')
+    // No raw grant() call sneaks around the pure decision anywhere in main's entry.
+    expect(src).not.toMatch(/\bgrantProjectTo\(|[^A-Za-z]grant\(nodeId/)
+  })
+
+  it('every open-project is routed through the pure gateOpenProject before forwarding (I1/I2)', () => {
+    // The branches themselves (caller-unresolved, SSH caller, cap, cwd) are proven behaviorally
+    // above; this pins that the wrapper cannot bypass them — the gate call sits inside the
+    // open-project arm, its refusal returns unforwarded, and its resolved cwd is what forwards.
+    const arm = src.indexOf("if (verb === 'open-project') {")
+    expect(arm).toBeGreaterThan(-1)
+    const block = src.slice(arm, src.indexOf('} else if (PROJECT_TARGETABLE_VERBS', arm))
+    expect(block).toContain('gateOpenProject({')
+    expect(block).toContain("if ('refuse' in gate) return refuse(gate.refuse)")
+    expect(block).toContain('args = { ...args, cwd: gate.resolvedCwd }')
+    // Its inputs come from main's own stores, never the request.
+    expect(block).toMatch(/callerProjectId: projectIdOfNode\(nodeId\)|callerProjectId,/)
+    expect(block).toContain('workspaceStore.projectMetaFor(callerProjectId)?.ssh')
+    expect(block).toContain('atCap: projectGrantsAtCap(nodeId)')
   })
 
   it('consumes the ledger per-CALLER and gates before forwarding to the renderer', () => {
@@ -245,9 +394,10 @@ describe('main wiring (structural) — the wrapper records, consumes and clears 
   })
 
   it('open-project resolves + replaces the cwd in MAIN before forwarding (P7)', () => {
-    const at = src.indexOf('validateOpenProjectCwd(args.cwd')
+    // The resolution itself lives in gateOpenProject → validateOpenProjectCwd (proven above);
+    // here: the raw caller cwd enters the gate and only the gate's resolved form is forwarded.
+    const at = src.indexOf('rawCwd: args.cwd')
     expect(at).toBeGreaterThan(-1)
-    // The resolved form replaces the raw argument in the forwarded args.
-    expect(src.slice(at, at + 400)).toContain('args = { ...args, cwd: cwd.resolved }')
+    expect(src.slice(at, at + 400)).toContain('args = { ...args, cwd: gate.resolvedCwd }')
   })
 })

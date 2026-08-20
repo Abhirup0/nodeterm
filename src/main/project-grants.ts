@@ -73,14 +73,22 @@ export const PROJECT_TARGETABLE_VERBS: ReadonlySet<string> = new Set([
 export const PROJECT_TARGETING_REFUSAL = 'Project targeting refused.'
 
 /** The named refusal for an id that is neither the caller's own project nor granted. Also the
- *  answer for an id main's store does not know: refusing unknown ids with the SAME sentence keeps
- *  this from becoming a project-existence oracle. */
+ *  answer for an id main's store does not know, AND for an ungranted id that happens to name an
+ *  SSH project: every id the caller has no relationship to refuses with these SAME BYTES, so the
+ *  gate is neither a project-existence oracle nor a project-KIND oracle (PR #362 review, I3 —
+ *  the earlier distinct SSH wording let a verified caller learn "this id is a real SSH project"
+ *  with no grant). */
 export const PROJECT_TARGET_REFUSED =
   'project-target-refused: you may only target your own project or a project id open-project ' +
   'returned to you in this session'
 
-/** Targeting an SSH project (other than the caller's own, which takes the legacy live path) is
- *  not v1 (spec B5/§6): the nodes would need host-side materialization this feature defers. */
+/** Targeting an SSH project is not v1 (spec B5/§6): the nodes would need host-side
+ *  materialization this feature defers. Shown ONLY to a caller that already holds a GRANT for
+ *  the id (where disclosing the project's kind is harmless — the caller was handed the id by
+ *  open-project). A caller with no relationship to an SSH id gets PROJECT_TARGET_REFUSED like
+ *  every other stranger, see above. Today this constant is pure belt: grants are only minted by
+ *  local open-project, so a granted SSH id cannot exist — but if that invariant ever breaks,
+ *  the target must still be refused, not opened. */
 export const PROJECT_TARGET_SSH_UNSUPPORTED =
   'project-target-ssh-unsupported: opening sessions into an SSH project is not supported — do not retry'
 
@@ -113,10 +121,19 @@ export type ProjectTargetGate = 'allow' | { refuse: string }
  * `granted` from this module's ledger. Nothing is read off the request except the target id
  * being judged.
  *
- * Branch order is load-bearing: unknown-target refuses before the own-project allow (a project
- * main cannot resolve is not provably anyone's own), and the SSH refusal runs before the granted
- * allow (grants are only minted by local open-project, so a granted SSH id cannot exist — this is
- * the belt for that invariant).
+ * Branch order is load-bearing:
+ *  - the OWN-project allow runs before the unknown-target refusal (PR #362 review, M2): both
+ *    `callerProjectId` and the target meta derive from the same index scan, but if a rename
+ *    mid-debounce ever let `persistedCanvases` resolve the caller one tick before
+ *    `projectMetaFor` finds the entry, the caller's legitimate `--project <own-id>` must not be
+ *    spuriously refused as unknown. Allowing OWN on the caller-resolution alone is still
+ *    fail-closed — the id equals the caller's own project in main's own store;
+ *  - every id the caller has NO relationship to (unknown, local-ungranted, SSH-ungranted)
+ *    refuses with the byte-identical PROJECT_TARGET_REFUSED (review I3 — no kind oracle);
+ *  - the SSH refusal sits INSIDE the granted allow as pure belt: a granted SSH id cannot exist
+ *    (grants are only minted by local open-project), but if that invariant ever breaks the
+ *    target is refused, not opened — and only there is the kind-naming wording harmless, because
+ *    a grant holder was handed the id by open-project.
  */
 export function gateProjectTarget(input: {
   verified: boolean
@@ -130,11 +147,65 @@ export function gateProjectTarget(input: {
   if (!PROJECT_TARGETABLE_VERBS.has(verb)) return 'allow'
   if (targetProjectId === undefined) return 'allow'
   if (verified !== true) return { refuse: PROJECT_TARGETING_REFUSAL }
-  if (targetIsSsh === undefined) return { refuse: PROJECT_TARGET_REFUSED }
   if (callerProjectId !== undefined && targetProjectId === callerProjectId) return 'allow'
-  if (targetIsSsh) return { refuse: PROJECT_TARGET_SSH_UNSUPPORTED }
-  if (granted) return 'allow'
+  if (granted && targetIsSsh !== undefined) {
+    if (targetIsSsh) return { refuse: PROJECT_TARGET_SSH_UNSUPPORTED }
+    return 'allow'
+  }
   return { refuse: PROJECT_TARGET_REFUSED }
+}
+
+/**
+ * The whole record-side decision for a finished `open-project` request (spec §3 "recorded", made
+ * pure in the PR #362 fix round so the cap race — review M1 — is behaviorally testable).
+ * `'recorded'` = the grant now exists; `'not-applicable'` = the reply mints nothing (not ok, not
+ * verified, or no usable projectId — all fail closed); `'cap'` = the reply LOOKED grantable but a
+ * concurrent open-project from the same caller filled the last slot while this one was in flight
+ * (the pre-forward `atCap` check passed for both). On `'cap'` the wrapper must NOT relay the
+ * success reply — the caller would hear ok while holding no targeting right — it answers
+ * OPEN_PROJECT_GRANT_CAP instead; nothing is lost, because open-project is idempotent (B1) and a
+ * re-run after grants clear returns the same id and records the grant.
+ */
+export function recordOpenProjectGrant(
+  callerNodeId: string,
+  reply: { ok: boolean; result?: unknown },
+  verified: boolean
+): 'recorded' | 'not-applicable' | 'cap' {
+  if (verified !== true || reply.ok !== true) return 'not-applicable'
+  const projectId = (reply.result as { projectId?: unknown } | undefined)?.projectId
+  if (typeof projectId !== 'string' || !projectId) return 'not-applicable'
+  return grant(callerNodeId, projectId) === 'cap' ? 'cap' : 'recorded'
+}
+
+/**
+ * The whole main-side pre-forward gate for an `open-project` request (issue #338 Task 1.4, made
+ * pure in the PR #362 fix round — review I1/I2 proved the SSH-caller and unresolved-caller
+ * branches had no red-capable coverage while they lived inline in index.ts's wrapper). The
+ * wrapper resolves the inputs from main's own stores (caller project by node membership in
+ * `persistedCanvases`, SSH-ness via `projectMetaFor`, the cap from this module's ledger) and
+ * routes EVERY open-project through here; a `refuse` answer is returned to the caller without
+ * anything being forwarded to the renderer, so no dialog can be shown (PR 2) and no grant can be
+ * minted for a request that failed these rules.
+ *
+ * Branch order: caller-unresolved (fail closed per GC 10 — a node inside the save debounce, the
+ * one transient refusal here) → SSH caller (B5 local-only) → cap (refused BEFORE any consent
+ * could be collected) → cwd validation (P7, resolved once). Identity is NOT re-checked here: the
+ * hook-server's `requiresVerified` refuses an unverified open-project before any handler, and
+ * the wrapper keeps its own belt in front of this call.
+ */
+export function gateOpenProject(input: {
+  callerProjectId: string | undefined
+  callerIsSsh: boolean | undefined
+  atCap: boolean
+  rawCwd: string
+  statFn: (p: string) => { isDirectory(): boolean }
+}): { resolvedCwd: string } | { refuse: string } {
+  if (input.callerProjectId === undefined) return { refuse: OPEN_PROJECT_CALLER_UNRESOLVED }
+  if (input.callerIsSsh) return { refuse: OPEN_PROJECT_LOCAL_ONLY }
+  if (input.atCap) return { refuse: OPEN_PROJECT_GRANT_CAP }
+  const cwd = validateOpenProjectCwd(input.rawCwd, input.statFn)
+  if ('error' in cwd) return { refuse: cwd.error }
+  return { resolvedCwd: cwd.resolved }
 }
 
 /**
