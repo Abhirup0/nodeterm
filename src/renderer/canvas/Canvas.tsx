@@ -247,6 +247,14 @@ const sshDisconnect = (scopeId: string): Promise<unknown> =>
   window.nodeTerminal.sshProject.disconnect(scopeId)
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
+import {
+  explorerIsOpen,
+  nextExplorerPin,
+  nextExplorerShow,
+  readExplorerPinned,
+  writeExplorerPinned,
+  type ExplorerShowAction
+} from '../lib/explorerPin'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
@@ -877,7 +885,26 @@ export function Canvas() {
       .then((v) => setAppVersion(v))
       .catch(() => {})
   }, [])
-  const [explorerOpen, setExplorerOpen] = useState(false)
+  // Explorer visibility: pin is a persisted preference (default off — it is a modal today;
+  // flipping the default would dock it on every existing user's next launch). `dismissed` is
+  // the transient × hide and does NOT clear the pin, matching the sessions sidebar. `open`
+  // is the unpinned (modal) flag. See `lib/explorerPin.ts`.
+  const [explorer, setExplorer] = useState(() => ({
+    pinned: readExplorerPinned(),
+    dismissed: false,
+    open: false
+  }))
+  const explorerOpen = explorerIsOpen(explorer)
+  const showExplorer = useCallback((action: ExplorerShowAction) => {
+    setExplorer((s) => ({ ...s, ...nextExplorerShow(s, action) }))
+  }, [])
+  const toggleExplorerPin = useCallback(() => {
+    setExplorer((s) => {
+      const next = nextExplorerPin(s)
+      writeExplorerPinned(next.pinned)
+      return next
+    })
+  }, [])
   // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
   // distinct so revealing the same file twice still re-fires the Explorer effect.
   const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null)
@@ -3371,9 +3398,9 @@ export function Canvas() {
   /** Reveal a file in the Explorer drawer: open the drawer and hand it the (relative) path.
    *  Each call bumps a nonce so revealing the same file twice still re-fires the effect. */
   const revealProjectFile = useCallback((relPath: string) => {
-    setExplorerOpen(true)
+    showExplorer('reveal')
     setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
-  }, [])
+  }, [showExplorer])
 
   // Cmd+click file links inside terminal output (TerminalNode dispatches these — it has no
   // direct line to the canvas). Files open as editor nodes; directories reveal in Explorer.
@@ -5337,7 +5364,15 @@ export function Canvas() {
   // agent's native transcript to a handoff file (main) and open a target node that reads it
   // and continues. The source node stays. Mirrors branchClaude's placement.
   const transferConversation = useCallback(
-    async (sourceNodeId: string, targetAgentId: AgentId, at?: { x: number; y: number }) => {
+    async (
+      sourceNodeId: string,
+      targetAgentId: AgentId,
+      at?: { x: number; y: number },
+      /** A model chosen from the Transfer submenu's nested model list. Applied to the NEW node's
+       *  launch (`--model <value>`) when the target is MODEL_SWITCH_CAPABLE; silently dropped
+       *  otherwise (the target's own default model). Persisted as `data.agentModel`. */
+      model?: string
+    ) => {
       const source = nodesRef.current.find((n) => n.id === sourceNodeId) as CanvasNode | undefined
       if (!source) return
       const sourceAgentId = source.data.agentId
@@ -5398,7 +5433,9 @@ export function Canvas() {
         activePermissionMode(targetAgentId),
         // The transfer target lands in the active project's canvas, so that project's launch
         // command applies to it — the same project `projectSsh` was just resolved from.
-        activeProjectId
+        activeProjectId,
+        // A model picked from the Transfer submenu (only offered for switch-capable targets).
+        model
       )
       node.selected = true
       const placed = placeSpawned(node, at ?? besideNode(source))
@@ -5712,7 +5749,7 @@ export function Canvas() {
         useViewMode.getState().toggle(id)
         return true
       },
-      'panel.explorer': () => { setExplorerOpen((v) => !v); return true },
+      'panel.explorer': () => { showExplorer('toggle'); return true },
       'panel.sourceControl': () => { setScOpen((v) => !v); return true },
       'panel.sessions': () => { toggleSessionsPin(); return true },
       'canvas.undo': () => { undo(); return true },
@@ -5928,7 +5965,9 @@ export function Canvas() {
             sourceAgentId: agentIdOf(ids[0]),
             sessionId: useAgentStatus.getState().byId[ids[0]]?.sessionId,
             disabledAgents: useSettings.getState().settings.disabledAgents,
-            customAgents: useSettings.getState().settings.customAgents
+            customAgents: useSettings.getState().settings.customAgents,
+            gatewayModels,
+            relaySession: session.source === 'relay'
           }, transferConversation)
         : []),
       ...(isHidden('collapse', hidden)
@@ -8760,62 +8799,70 @@ export function Canvas() {
     (e: React.MouseEvent, projectId: string, id: string) => {
       e.preventDefault()
       e.stopPropagation()
-      setMenu({
-        x: e.clientX,
-        y: e.clientY,
-        items: [
-          { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
-          {
-            label: 'Rename',
-            icon: <IconEditor />,
-            onClick: () => {
-              void promptDialog({ message: 'Rename session' }).then((t) => {
-                if (t && t.trim()) renameSession(projectId, id, t.trim())
-              })
-            }
-          },
-          {
-            label: 'Duplicate',
-            icon: <IconDuplicate />,
-            onClick: () => {
-              if (projectId === activeProjectId) duplicateNodes([id])
-              else {
-                useProjects.getState().duplicateNode(projectId, id)
-                void writeDisk()
-              }
-            }
-          },
-          // Transfer conversation to another agent — the SAME submenu the canvas node right-click
-          // has. Only valid for the ACTIVE project's canvas: transferConversation reads the source
-          // node out of `nodesRef.current` (the live React Flow nodes), which only holds the active
-          // project. For a non-active project the block is empty (no submenu appears), matching the
-          // Duplicate guard's active-project branch.
-          ...(projectId === activeProjectId
-            ? transferConversationItems(id, undefined, {
-                sourceAgentId: agentIdOf(id),
-                sessionId: useAgentStatus.getState().byId[id]?.sessionId,
-                disabledAgents: useSettings.getState().settings.disabledAgents,
-                customAgents: useSettings.getState().settings.customAgents
-              }, transferConversation)
-            : []),
-          {
-            label: 'Close',
-            icon: <IconTrash />,
-            danger: true,
-            onClick: () => closeSession(projectId, id)
+      // Session-list-specific rows that have no canvas analogue: Go to (focus) and Rename (the
+      // sidebar's prompt-dialog rename). These stay on top for every project.
+      const head: MenuItem[] = [
+        { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
+        {
+          label: 'Rename',
+          icon: <IconEditor />,
+          onClick: () => {
+            void promptDialog({ message: 'Rename session' }).then((t) => {
+              if (t && t.trim()) renameSession(projectId, id, t.trim())
+            })
           }
-        ]
-      })
+        }
+      ]
+      // For the ACTIVE project, reuse the SAME single-node menu the canvas right-click builds —
+      // full parity (Color, Group, Duplicate, Branch, Collapse, Markdown view, Refresh terminal,
+      // Restart agent, Restart agent and shell, Reopen session as, Switch model, Transfer with its
+      // nested model submenus) so the two surfaces can't drift. `selectionItems` reads the live
+      // node from `nodesRef.current` (active-project only), which is exactly why this is gated.
+      // `at` is undefined: the row has no flow position, so spawned nodes (Duplicate/Branch/
+      // Transfer) place beside the source — the same as the row's existing Transfer behavior.
+      //
+      // The canvas menu ends in a destructive "Delete" (deleteNodes). The session row's analogue
+      // is non-destructive "Close" (closeSession — hides the tab, keeps the tmux session), so the
+      // trailing Delete is swapped for Close rather than offered beside it.
+      const body: MenuItem[] =
+        projectId === activeProjectId
+          ? (() => {
+              const full = selectionItems([id])
+              // Drop the canvas menu's trailing "Delete" (destructive deleteNodes) and any
+              // separator left dangling before it, then append the session row's non-destructive
+              // "Close". Found by label rather than fixed index so this stays correct if the canvas
+              // menu's tail changes — Delete is the only 'Delete'-labelled row.
+              const withoutDelete = full.filter((it) => !('label' in it && it.label === 'Delete'))
+              return [
+                ...tidySeparators(withoutDelete),
+                { type: 'separator' },
+                { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+              ]
+            })()
+          : [
+              // Non-active project: the shared rows read the active canvas's live nodes + per-node
+              // registered closures, which don't exist here. Keep the narrow set that works for any
+              // project (Duplicate defers to the store; the rest are list-level).
+              {
+                label: 'Duplicate',
+                icon: <IconDuplicate />,
+                onClick: () => {
+                  useProjects.getState().duplicateNode(projectId, id)
+                  void writeDisk()
+                }
+              },
+              { type: 'separator' },
+              { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+            ]
+      setMenu({ x: e.clientX, y: e.clientY, items: [...head, ...body] })
     },
     [
       activeProjectId,
       focusNodeById,
       renameSession,
-      duplicateNodes,
       closeSession,
       writeDisk,
-      agentIdOf,
-      transferConversation
+      selectionItems
     ]
   )
 
@@ -10038,7 +10085,7 @@ export function Canvas() {
           <span className="cluster-search__icon">⌕</span>
           {paletteChip && <span className="kbd">{paletteChip}</span>}
         </button>
-        <button title={commandTooltip('Explorer', 'panel.explorer')} onClick={() => setExplorerOpen(true)}>
+        <button title={commandTooltip('Explorer', 'panel.explorer')} onClick={() => showExplorer('toggle')}>
           <IconExplorer />
         </button>
         <button title={commandTooltip('Source Control', 'panel.sourceControl')} onClick={() => setScOpen(true)}>
@@ -10412,9 +10459,11 @@ export function Canvas() {
 
       {explorerOpen && (
         <ExplorerPanel
-          onClose={() => setExplorerOpen(false)}
+          onClose={() => showExplorer('close')}
           onOpenFile={(path, isSsh) => openFile(path, undefined, isSsh)}
           reveal={reveal}
+          pinned={explorer.pinned}
+          onTogglePin={toggleExplorerPin}
         />
       )}
 

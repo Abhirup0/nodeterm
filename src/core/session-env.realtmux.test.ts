@@ -13,12 +13,18 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
 import fs from 'fs'
-import os from 'os'
 import path from 'path'
 import { tmuxConf } from './pty-manager'
 import { sessionEnvFileContent } from './remote-ssh/session-env'
+import { makeTmuxTmpdir } from './tmux-test-socket'
 
-/** A private socket — never the live-session sockets. */
+/**
+ * A private socket — never the live-session sockets, and never the SHARED `/tmp/tmux-<uid>/`
+ * either. `kill-server` does not unlink the socket file, so a per-pid name in the shared dir left
+ * one dead entry behind per run: 14 stale `nt-envtest-*` sockets had accumulated on one dev
+ * machine. `TMUX_TMPDIR` points at this file's own temp dir, so `afterAll`'s `rm -rf` takes the
+ * socket with it — the discipline the other two realtmux suites already had.
+ */
 const SOCKET = `nt-envtest-${process.pid}`
 
 let tmp: string
@@ -26,8 +32,10 @@ let conf: string
 let tmuxOk = false
 
 function tmux(args: string[], env?: Record<string, string>): string {
+  // TMUX_TMPDIR last: a caller's `env` chooses what the CLIENT carries, never which server it
+  // reaches. Two sockets in one file would be two tmux servers and a test that proves nothing.
   return execFileSync('tmux', ['-L', SOCKET, ...args], {
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...env, TMUX_TMPDIR: tmp },
     stdio: ['ignore', 'pipe', 'pipe']
   }).toString()
 }
@@ -39,7 +47,7 @@ beforeAll(() => {
   } catch {
     return // no tmux on this host — every test below self-skips
   }
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-envtest-'))
+  tmp = makeTmuxTmpdir('ntenv-', SOCKET)
   conf = path.join(tmp, 'tmux.conf')
   fs.writeFileSync(conf, tmuxConf(2000))
 })
@@ -92,7 +100,7 @@ describe('update-environment delivery (the argv-free gateway path)', () => {
     execFileSync(
       'tmux',
       ['-L', SOCKET, 'new-session', '-d', '-s', 'plain', `echo "TOKEN=[$ANTHROPIC_AUTH_TOKEN]" > ${out}`],
-      { env, stdio: ['ignore', 'pipe', 'pipe'] }
+      { env: { ...env, TMUX_TMPDIR: tmp }, stdio: ['ignore', 'pipe', 'pipe'] }
     )
     expect(await waitFor(out)).toBe('TOKEN=[]\n')
   })
@@ -113,7 +121,10 @@ describe('the remote prologue, run through a real /bin/sh', () => {
     execFileSync(
       '/bin/sh',
       ['-c', `${prologue} tmux -L ${SOCKET} new-session -d -s remote 'echo "TOKEN=[$ANTHROPIC_AUTH_TOKEN]" > ${out}'`],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
+      // TMUX_TMPDIR has to reach the tmux INSIDE this shell too. Without it the prologue tests
+      // start a second server for the same socket NAME on the shared dir, which afterAll's
+      // kill-server (aimed at the private one) then leaves running with its socket on disk.
+      { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, TMUX_TMPDIR: tmp } }
     )
     expect(await waitFor(out)).toBe("TOKEN=[vk-remote'; echo pwned]\n")
     // Sourced and GONE: nothing at rest on the host after the launch.
@@ -129,7 +140,7 @@ describe('the remote prologue, run through a real /bin/sh', () => {
     execFileSync(
       '/bin/sh',
       ['-c', `${prologue} tmux -L ${SOCKET} new-session -d -s ghost 'echo "TOKEN=[$ANTHROPIC_AUTH_TOKEN]" > ${out}'`],
-      { stdio: ['ignore', 'pipe', 'pipe'], env: (() => { const e = { ...process.env }; delete e.ANTHROPIC_AUTH_TOKEN; return e })() }
+      { stdio: ['ignore', 'pipe', 'pipe'], env: (() => { const e: NodeJS.ProcessEnv = { ...process.env, TMUX_TMPDIR: tmp }; delete e.ANTHROPIC_AUTH_TOKEN; return e })() }
     )
     // 6 × 50ms wait budget, then the session still launched — without the env.
     expect(Date.now() - t0).toBeGreaterThanOrEqual(250)

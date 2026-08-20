@@ -3641,6 +3641,7 @@ body,
 /* Overlays/menus that can overlap the macOS title-bar strip must opt out of window-drag,
    otherwise clicks on their top controls (×, ↻, …) drag the window instead. */
 .drawer-overlay,
+.drawer--pinned,
 .palette-overlay,
 .sc-overlay,
 .confirm-overlay,
@@ -3667,6 +3668,32 @@ body,
 
 .drawer.scm {
   width: 460px;
+}
+
+/* Pinned explorer: no scrim, clicks pass through to the canvas. The drawer is a floating
+   card on the right — same shape as the sessions sidebar on the left — so the controls
+   cluster (top: 54px, right: 14px, 34px tall) stays reachable. z 26 sits with that cluster
+   above the kanban board (25) and below the tab bar (30) / dialogs (55+). pointer-events
+   on the overlay is load-bearing: a transparent overlay that still captures would freeze
+   the canvas even with the click-to-close handler removed. */
+.drawer-overlay--pinned {
+  background: transparent;
+  pointer-events: none;
+  z-index: 26;
+}
+.drawer-overlay--pinned .drawer--pinned {
+  pointer-events: auto;
+  position: absolute;
+  top: 96px; /* 54 (cluster) + 34 (buttons) + 8 (gap) — must sit BELOW the cluster */
+  right: 14px;
+  bottom: 14px;
+  height: auto;
+  max-height: none;
+  width: 320px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, calc(0.45 * var(--shadow-k)));
 }
 
 .drawer__head {
@@ -4272,6 +4299,14 @@ body,
 
 .ex-head-actions button:hover {
   color: var(--text);
+}
+
+.ex-head-actions button.is-on {
+  color: var(--accent);
+}
+
+.ex-head-actions button svg {
+  display: block;
 }
 
 .ex-body {
