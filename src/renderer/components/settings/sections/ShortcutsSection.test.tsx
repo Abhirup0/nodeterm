@@ -239,6 +239,34 @@ describe('ShortcutsSection rows', () => {
     }
   })
 
+  // The icon glyphs cannot say that Record REPLACES while Add appends — the hover tooltip is
+  // where that difference is spelled out. It is the app's custom Tooltip (350ms), not the native
+  // `title` (whose ~1.5s OS delay read as "no tooltip at all" on device).
+  it('explains the icon controls with the custom tooltip, not a native title', () => {
+    vi.useFakeTimers()
+    try {
+      render()
+      click(button('canvas.undo', 'Disable Undo')!)
+      const controls = [
+        button('app.commandPalette', 'Record Command palette')!,
+        button('app.commandPalette', 'Add a shortcut to Command palette')!,
+        button('app.commandPalette', 'Disable Command palette')!,
+        button('canvas.undo', 'Reset Undo')!
+      ]
+      for (const el of controls) expect(el.getAttribute('title')).toBeNull()
+      const add = controls[1]
+      act(() => {
+        add.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      })
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(document.body.textContent).toContain('Add another shortcut')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // Record and Add sit side by side in the same hover-revealed cluster with no text, so two
   // identical keycaps would leave the pair unreadable — the icon is the whole label.
   it('gives Add a different glyph than Record', () => {
