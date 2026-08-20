@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { isHoldChord, shortcutKeyParts } from '@shared/shortcut'
+import type { CommandId } from '@shared/keybindings'
 import { isBrowserRuntime } from '../bridge/runtime'
+import { commandKeys, dictationBinding } from '../lib/keybindingOverrides'
 import { useSettings } from '../state/settings'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
@@ -16,31 +18,61 @@ interface Row {
   label: string
 }
 
-/** Everything but "Dictate" is fixed; that row's keys/label depend on `settings.speech.shortcut`
- *  (a modifier-only chord is hold-to-talk — no trailing key badge, so the label spells that out),
- *  so the sections are built at render time instead of module scope. */
-function buildSections(dictationKeys: string[], dictationLabel: string): { title: string; rows: Row[] }[] {
+/** Registry rows derive their keys from the effective binding, so a remap in settings.json
+ *  shows up here without touching this file — and a command the user unbound (or that ships
+ *  unassigned) drops off the panel instead of advertising a chord that no longer fires.
+ *  That promise holds because every row's KEYBOARD path also reads the registry, which is
+ *  what makes the panel and the key agree — `terminal.find` included, whose match in
+ *  TerminalNode now reads `effectiveBindings('terminal.find')` instead of a hardcoded
+ *  Cmd/Ctrl+F. Gesture/mouse rows stay literal: they are not commands and the registry knows
+ *  nothing about them. "Dictate" is a registry row too now — its chord comes from
+ *  `dictationBinding()` (the first effective `speech.dictation` binding), with the legacy
+ *  `settings.speech.shortcut` field kept only as a downgrade mirror — so it follows a remap and
+ *  DROPS off the panel when the user unbinds it, exactly like every `cmd()` row above. It keeps
+ *  its own builder because it is the one row whose LABEL depends on the chord's shape: a
+ *  modifier-only chord is hold-to-talk, which "Dictate (hold)" spells out. */
+function buildSections(dictationChord: string): { title: string; rows: Row[] }[] {
+  const cmd = (id: CommandId, label: string): Row[] => {
+    const keys = commandKeys(id)
+    return keys.length ? [{ keys, label }] : []
+  }
+  const dictate = (): Row[] =>
+    dictationChord === ''
+      ? []
+      : [
+          {
+            keys: shortcutKeyParts(dictationChord, isMac),
+            label: isHoldChord(dictationChord) ? 'Dictate (hold)' : 'Dictate'
+          }
+        ]
   return [
     {
       title: 'General',
       rows: [
-        { keys: ['⌘', 'K'], label: 'Command palette' },
-        { keys: ['⌘', ','], label: 'Settings' },
-        { keys: ['⌘', '/'], label: 'This shortcuts panel' },
+        ...cmd('app.commandPalette', 'Command palette'),
+        ...cmd('app.settings', 'Settings'),
+        ...cmd('app.shortcutsPanel', 'This shortcuts panel'),
+        ...cmd('panel.explorer', 'Explorer'),
+        // `panel.sourceControl` used to be listed here AND in the Source Control section below —
+        // one command, two rows, both showing the same chord. The section row ("Open Source
+        // Control") is the one that belongs, so the General duplicate is gone.
+        ...cmd('view.kanbanToggle', 'Kanban board'),
+        ...cmd('panel.sessions', 'Pin the sessions sidebar'),
         // Desktop only: browsers own Cmd/Ctrl+1-9 for tab switching and a page cannot take it
         // back, so listing it in the Server Edition would promise a shortcut that never fires.
         ...(isBrowserRuntime() ? [] : [{ keys: ['⌘', '1-9'], label: 'Jump to project' }]),
-        { keys: dictationKeys, label: dictationLabel },
-        { keys: ['⌘', 'Z'], label: 'Undo' },
-        { keys: ['⌘', '⇧', 'Z'], label: 'Redo' }
+        ...dictate(),
+        ...cmd('canvas.undo', 'Undo'),
+        ...cmd('canvas.redo', 'Redo')
       ]
     },
     {
       title: 'Canvas',
       rows: [
-        { keys: ['⌘', 'T'], label: 'New terminal' },
-        { keys: ['⌘', '⇧', 'C'], label: 'New Claude Code' },
-        { keys: ['⌘', 'W'], label: 'Close selected node' },
+        ...cmd('node.newTerminal', 'New terminal'),
+        ...cmd('node.newAgent', 'New Claude Code'),
+        ...cmd('node.close', 'Close selected node'),
+        ...cmd('canvas.deleteSelection', 'Delete selection'),
         { keys: ['Right-click'], label: 'Actions menu (empty space or node)' },
         { keys: ['Left-drag'], label: 'Box-select (touch to select)' },
         { keys: ['Middle / Right-drag'], label: 'Pan the canvas' },
@@ -52,7 +84,8 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
         // where a browser insists on handling it too it means the same thing we do ("actual size")
         // instead of fighting us. Shift+1 is nobody else's key on any surface.
         { keys: ['⌘', '0'], label: 'Zoom to 100%' },
-        { keys: ['⇧', '1'], label: 'Fit view' }
+        { keys: ['⇧', '1'], label: 'Fit view' },
+        ...cmd('canvas.tidy', 'Tidy canvas')
       ]
     },
     {
@@ -60,7 +93,8 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
       rows: [
         { keys: ['Hover ~0.6s'], label: 'Enter the terminal (type/select)' },
         { keys: ['Quick drag'], label: 'Move the terminal (before it focuses)' },
-        { keys: ['⌘', 'M'], label: 'Toggle markdown view' },
+        ...cmd('node.toggleMarkdown', 'Toggle markdown view'),
+        ...cmd('terminal.find', 'Find in terminal'),
         { keys: ['⌘', 'C'], label: 'Copy selection (markdown view)' },
         { keys: ['✦'], label: 'Name the terminal with AI' }
       ]
@@ -68,8 +102,8 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
     {
       title: 'Source Control',
       rows: [
-        { keys: ['⌘', '⇧', 'G'], label: 'Open Source Control' },
-        { keys: ['⌘', '↵'], label: 'Commit the staged changes' }
+        ...cmd('panel.sourceControl', 'Open Source Control'),
+        ...cmd('scm.commit', 'Commit the staged changes')
       ]
     }
   ]
@@ -77,11 +111,15 @@ function buildSections(dictationKeys: string[], dictationLabel: string): { title
 
 /** Keyboard shortcuts reference; shown on first launch and via ⌘/ or the ? button. */
 export function ShortcutsPanel({ onClose }: ShortcutsPanelProps) {
-  const speechShortcut = useSettings((s) => s.settings.speech.shortcut)
-  const SECTIONS = buildSections(
-    shortcutKeyParts(speechShortcut, isMac),
-    isHoldChord(speechShortcut) ? 'Dictate (hold)' : 'Dictate'
-  )
+  // A string selector, so an unrelated settings write cannot re-render the panel.
+  const dictationChord = useSettings(() => dictationBinding())
+  // Every OTHER row reads the registry through a plain `commandKeys()` call, which is not a
+  // subscription — so a panel left open while a chord is remapped (Settings in another window,
+  // or an outside edit to settings.json the store watcher picks up) kept showing the old key
+  // unless the remap happened to be dictation's. Subscribing to the overrides object itself is
+  // what makes the whole panel re-render; the value is unused on purpose.
+  useSettings((s) => s.settings.keybindings)
+  const SECTIONS = buildSections(dictationChord)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

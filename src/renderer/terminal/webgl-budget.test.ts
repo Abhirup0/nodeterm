@@ -8,7 +8,10 @@ import {
   setWebglBudget,
   setWebglEnabled,
   setWebglGesture,
+  setWebglZoom,
   WEBGL_ACQUIRE_DEBOUNCE_MS,
+  WEBGL_CRISP_ABOVE_ZOOM,
+  WEBGL_GPU_RESUME_BELOW_ZOOM,
   WEBGL_DRAIN_MS,
   WEBGL_SWAPS_PER_DRAIN,
   WEBGL_BUDGET,
@@ -351,6 +354,89 @@ describe('webgl-budget coordinator', () => {
     expect(getWebglBudget()).toBe(20)
     __resetWebglBudgetForTests()
     expect(getWebglBudget()).toBe(WEBGL_BUDGET)
+  })
+
+  describe('crisp gate (GPU text is a magnified bitmap when zoomed in)', () => {
+    /** Zoom past the threshold and let the rest-time drain run. */
+    const zoomTo = (zoom: number): void => {
+      setWebglZoom(zoom)
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 10)
+    }
+
+    it('crossing above the threshold gives every context back — including VISIBLE holders', () => {
+      const a = fakeClient('a')
+      const b = fakeClient('b')
+      grant(a)
+      grant(b)
+      expect(a.rec.held && b.rec.held).toBe(true)
+      zoomTo(WEBGL_CRISP_ABOVE_ZOOM + 0.01)
+      // The visible-holder exemption every other release path honours is deliberately waived
+      // here: the terminal the user zoomed into is exactly the one that must go crisp.
+      expect(a.rec.held).toBe(false)
+      expect(b.rec.held).toBe(false)
+    })
+
+    it('blocks grants while zoomed in, and re-grants visible clients on the way back', () => {
+      const a = fakeClient('a')
+      zoomTo(WEBGL_CRISP_ABOVE_ZOOM + 0.01)
+      grant(a)
+      expect(a.rec.acquires).toBe(0)
+      zoomTo(WEBGL_GPU_RESUME_BELOW_ZOOM - 0.01)
+      expect(a.rec.held).toBe(true)
+    })
+
+    it('hysteresis: hovering between the two thresholds never churns a context', () => {
+      const a = fakeClient('a')
+      grant(a)
+      zoomTo(WEBGL_CRISP_ABOVE_ZOOM + 0.01)
+      expect(a.rec.releases).toBe(1)
+      // Back into the band, but not under the resume threshold: still crisp, no re-grant…
+      zoomTo(WEBGL_CRISP_ABOVE_ZOOM - 0.05)
+      expect(a.rec.acquires).toBe(1)
+      // …and back up again costs nothing either.
+      zoomTo(WEBGL_CRISP_ABOVE_ZOOM + 0.05)
+      expect(a.rec.releases).toBe(1)
+    })
+
+    it('swaps NOTHING mid-gesture, then trickles once the canvas is at rest', () => {
+      const clients = ['a', 'b', 'c'].map((id) => fakeClient(id))
+      clients.forEach(grant)
+      setWebglGesture(true)
+      setWebglZoom(WEBGL_CRISP_ABOVE_ZOOM + 0.01)
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 5)
+      expect(clients.every((c) => c.rec.held)).toBe(true) // a zoom gesture is still running
+      setWebglGesture(false)
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 5)
+      expect(clients.every((c) => !c.rec.held)).toBe(true)
+    })
+
+    it('a dip below the threshold before the drain runs keeps the context warm', () => {
+      const a = fakeClient('a')
+      grant(a)
+      setWebglGesture(true) // parks the release
+      setWebglZoom(WEBGL_CRISP_ABOVE_ZOOM + 0.01)
+      setWebglZoom(WEBGL_GPU_RESUME_BELOW_ZOOM - 0.01) // zoomed back out before rest
+      setWebglGesture(false)
+      vi.advanceTimersByTime(WEBGL_DRAIN_MS * 5)
+      expect(a.rec.releases).toBe(0)
+      expect(a.rec.acquires).toBe(1)
+    })
+
+    it('the way back respects the master switch: disabled stays DOM-only', () => {
+      const a = fakeClient('a')
+      grant(a)
+      zoomTo(WEBGL_CRISP_ABOVE_ZOOM + 0.01)
+      setWebglEnabled(false)
+      zoomTo(WEBGL_GPU_RESUME_BELOW_ZOOM - 0.01)
+      expect(a.rec.acquires).toBe(1)
+    })
+
+    it('ignores non-finite zoom values', () => {
+      const a = fakeClient('a')
+      grant(a)
+      zoomTo(Number.NaN)
+      expect(a.rec.held).toBe(true)
+    })
   })
 
   describe('gesture latch (no swaps mid-gesture, staggered drain at rest)', () => {

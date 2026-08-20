@@ -53,6 +53,21 @@ describe('registerBoardLogHandlers — routing', () => {
     expect(await read(f, 'p1')).toEqual({ entries: [], unsupported: true })
   })
 
+  it('returns an in-process append that writes THROUGH the same router (no IPC round-trip) — Task 9.2', async () => {
+    const f = fakePlatform()
+    const handlers = registerBoardLogHandlers(f, routerFor({ kind: 'local', cwd: dir }))
+    // The main-side caller (the cookie trace) appends without going through the renderer.
+    expect(await handlers.append('p1', entry({ id: 'trace', kind: 'event', text: undefined }))).toBe(true)
+    const res = await read(f, 'p1')
+    expect(res.entries.map((e) => e.id)).toContain('trace')
+  })
+
+  it('the in-process append reports false on an unsupported project (fail-closed feeds the cookie gate)', async () => {
+    const f = fakePlatform()
+    const handlers = registerBoardLogHandlers(f, routerFor({ kind: 'unsupported' }))
+    expect(await handlers.append('p1', entry())).toBe(false)
+  })
+
   it('remote: routes through the injected exec (append + tail)', async () => {
     const store: string[] = []
     const exec: RemoteLogExec = {

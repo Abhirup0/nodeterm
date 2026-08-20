@@ -7,6 +7,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { parseEndpointEnv } from '../hook-endpoint-parse'
 
 export const PLUGIN_MARKER = '// nodeterm managed plugin — do not edit (reinstalled at app launch)'
 
@@ -52,6 +53,12 @@ export function buildOpencodePlugin(): string {
 import fs from 'node:fs'
 import http from 'node:http'
 
+// The SAME quote-aware parser every TS consumer of the endpoint file uses, embedded verbatim
+// (this plugin runs standalone under Bun/node — it cannot import from the app). Values are
+// posixQuote'd since #351; a quote-blind read would present a token wrapped in literal quotes,
+// which the hook server's constant-time bearer check rejects on every POST.
+const parseEndpointEnv = ${parseEndpointEnv.toString()}
+
 export const NodetermStatus = async () => {
   const nodeId = process.env.NODETERM_NODE_ID
   if (!nodeId) return {}
@@ -66,14 +73,13 @@ export const NodetermStatus = async () => {
     try {
       const file = process.env.NODETERM_HOOK_ENDPOINT
       if (file) {
-        for (const line of fs.readFileSync(file, 'utf8').split('\\n')) {
-          const m = line.match(/^NODETERM_HOOK_(PORT|SOCK|TOKEN|VERSION)=(.*)$/)
-          if (m) conf[m[1].toLowerCase()] = m[2]
-          // The v2 endpoint line: where this instance keeps per-node tokens. It has its own
-          // prefix, so it needs its own match rather than a widened NODETERM_HOOK_ group.
-          const d = line.match(/^NODETERM_NODE_TOKEN_DIR=(.*)$/)
-          if (d) conf.tokenDir = d[1]
-        }
+        const env = parseEndpointEnv(fs.readFileSync(file, 'utf8'))
+        if ('NODETERM_HOOK_PORT' in env) conf.port = env.NODETERM_HOOK_PORT
+        if ('NODETERM_HOOK_SOCK' in env) conf.sock = env.NODETERM_HOOK_SOCK
+        if ('NODETERM_HOOK_TOKEN' in env) conf.token = env.NODETERM_HOOK_TOKEN
+        if ('NODETERM_HOOK_VERSION' in env) conf.version = env.NODETERM_HOOK_VERSION
+        // The v2 endpoint line: where this instance keeps per-node tokens.
+        if ('NODETERM_NODE_TOKEN_DIR' in env) conf.tokenDir = env.NODETERM_NODE_TOKEN_DIR
       }
     } catch {}
     return conf

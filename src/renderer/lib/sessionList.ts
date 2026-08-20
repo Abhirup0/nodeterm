@@ -3,6 +3,7 @@ import type { AgentId } from '@shared/agents/config'
 import type { NodeKind } from '@shared/types'
 import { hasUsage } from '@shared/agents/config'
 import type { SshConnection } from '@shared/ssh'
+import type { ProjectIcon } from '@shared/project-icon'
 import { relativeTime } from './relativeTime'
 
 export interface SessionNodeInput {
@@ -21,6 +22,9 @@ export interface ProjectInput {
   id: string
   name: string
   color: string
+  /** Optional custom project icon — carried onto flattened/grouped rows (see `SessionRowVM` and
+   *  `SessionGroup`) so the sidebar can show it instead of the plain color monogram. */
+  icon?: ProjectIcon
   cwd?: string
   nodes: SessionNodeInput[]
 }
@@ -237,6 +241,7 @@ export interface SessionRowVM {
   projectId?: string
   projectName?: string
   projectColor?: string
+  projectIcon?: ProjectIcon
 }
 
 /** A canvas group frame, the sessions directly inside it, and the frames nested inside it. */
@@ -265,6 +270,7 @@ export interface SessionGroup {
   projectId: string
   projectName: string
   projectColor: string
+  projectIcon?: ProjectIcon
   cwd?: string
   isActive: boolean
   /** Canvas group frames in this project, each with its member sessions. */
@@ -276,7 +282,7 @@ export interface SessionGroup {
 function toRow(
   n: SessionNodeInput,
   status: AgentNodeStatus | undefined,
-  project?: Pick<ProjectInput, 'id' | 'name' | 'color'>
+  project?: Pick<ProjectInput, 'id' | 'name' | 'color' | 'icon'>
 ): SessionRowVM {
   // Workflow state and read state are deliberately independent. `done` means the agent finished a
   // turn and is waiting for a new user prompt; `unread` only controls notification/read affordances.
@@ -305,7 +311,8 @@ function toRow(
     // Only populated in status mode (flattened across projects); absent in project mode.
     projectId: project?.id,
     projectName: project?.name,
-    projectColor: project?.color
+    projectColor: project?.color,
+    projectIcon: project?.icon
   }
 }
 
@@ -383,6 +390,7 @@ export function buildSessionList(
       projectId: p.id,
       projectName: p.name,
       projectColor: p.color,
+      projectIcon: p.icon,
       cwd: p.cwd,
       isActive,
       groups: buckets,

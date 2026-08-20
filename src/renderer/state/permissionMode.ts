@@ -95,9 +95,20 @@ function autoSupportedFor(project: Project | undefined): boolean {
  * (createProject) — importing the projects store from workspace.ts would close that cycle.
  */
 export function activePermissionMode(agentId: AgentId = 'claude'): AgentPermissionMode {
-  const { settings } = useSettings.getState()
   const { getProject, activeProjectId } = useProjects.getState()
-  const project = getProject(activeProjectId)
+  return projectPermissionMode(getProject(activeProjectId), agentId)
+}
+
+/**
+ * The same resolution for an EXPLICIT project — the `--project`-targeted opens (issue #338) need
+ * the TARGET project's override + gate, not the active one's: a node opened into another project
+ * must start with that project's permission mode (spec §2.2 defaults), never the caller's.
+ */
+export function projectPermissionMode(
+  project: Project | undefined,
+  agentId: AgentId = 'claude'
+): AgentPermissionMode {
+  const { settings } = useSettings.getState()
   const mode = resolvePermissionMode(project, settings)
   // The version gate is CLAUDE-specific BY CONSTRUCTION: it exists because Claude Code < 2.1.71
   // exits 1 on `--permission-mode auto`, and it is fed by a `claude --version` probe (local, or the

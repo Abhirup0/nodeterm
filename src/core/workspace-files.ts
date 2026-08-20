@@ -9,6 +9,25 @@ import {
 } from '../shared/node-exec'
 import type { BridgeLink, CanvasNodeState, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
+import { loadedAgentBrowserPartition } from '../shared/browser-partition'
+import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
+
+/**
+ * Drop a browser node's persisted `partition` unless it is exactly the jar THIS project (its
+ * machine-local id) would mint. `project.json` is hostile input and `partition` is copied straight
+ * to `<webview partition>`, so a foreign/cloned/unsafe stored value is jar forgery; it falls back to
+ * the un-owned default session. Non-browser nodes and un-partitioned browser nodes are untouched.
+ * See `loadedAgentBrowserPartition`. Pure and side-effect free (only clones the nodes it changes).
+ */
+function sanitizeBrowserPartitions(nodes: CanvasNodeState[], projectId: string): CanvasNodeState[] {
+  return nodes.map((n) => {
+    if (n.kind !== 'browser' || n.partition === undefined) return n
+    const safe = loadedAgentBrowserPartition(n.partition, projectId)
+    if (safe === n.partition) return n
+    const { partition: _dropped, ...rest } = n
+    return safe === undefined ? rest : { ...rest, partition: safe }
+  })
+}
 
 export const PROJECT_DIR = '.nodeterm'
 export const PROJECT_FILE = 'project.json'
@@ -42,6 +61,9 @@ export interface ProjectFileV1 {
   id?: string
   name: string
   color: string
+  /** Sanitized on the way in (`fileToProject`) and only ever emitted when valid (`projectToFile`) —
+   *  see `sanitizeProjectIcon`. An off/invalid icon adds no bytes to the committed file. */
+  icon?: ProjectIcon
   /**
    * NOT a camera any more — a SUGGESTED one, derived from where the canvas's own nodes sit
    * (`framingViewport`).
@@ -120,6 +142,20 @@ export interface IndexEntryV3 {
    *  live in this same machine-local file already. */
   localExec?: LocalNodeExecMap
   /**
+   * MACHINE-LOCAL settings overlay for this entry — the half of the project settings that is NOT
+   * git-shared (`.nodeterm/settings.json` is the shared half). Same rule as `localExec`: it lives in
+   * userData because a shell, a launch command or an env var this user chose for THIS checkout is
+   * not something a repo may carry — and, read the other way, a repo may not put values here.
+   * Re-sanitized on every load (`sanitizeProjectLocalSettings`): workspace.json is hand-editable,
+   * so what comes back out of it is input, not state we wrote.
+   */
+  localSettings?: import('../shared/project-settings').ProjectLocalSettings
+  /** The last shared settings.json seen for an SSH entry — the settings twin of `cache`, used while
+   *  the server is unreachable. Never set for a local/inline entry (their shared doc is one disk
+   *  read away). Validated on load by re-parsing it, exactly like a file read off the remote host:
+   *  what sits in workspace.json is no more trusted than what sits on the server. */
+  settingsCache?: import('../shared/project-settings').ProjectSettingsFileV1
+  /**
    * The one-time exec migration has run for this entry: its project file has been searched once for
    * the exec values it carried from BEFORE the trust boundary existed (a jump host's `ProxyCommand`
    * put there by `createSshTerminalNode`), and they were hoisted into `localExec` above.
@@ -187,6 +223,7 @@ export function projectToFile(
   // (`shell`, `ssh.extraArgs`) never leave this machine in it — they ride the machine-local index
   // entry instead (`localNodeExec` / `IndexEntryV3.localExec`). See @shared/node-exec.
   const nodes = stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
+  const icon = sanitizeProjectIcon(p.icon)
   return {
     version: 1,
     rev,
@@ -196,6 +233,7 @@ export function projectToFile(
     color: p.color,
     viewport: framingViewport(nodes),
     nodes,
+    ...(icon ? { icon } : {}),
     ...(p.bridges ? { bridges: p.bridges } : {}),
     ...(p.ropes ? { ropes: p.ropes } : {}),
     ...(p.defaultPermissionMode ? { defaultPermissionMode: p.defaultPermissionMode } : {}),
@@ -250,14 +288,23 @@ export function fileToProject(
   }
 ): Project {
   const defaultAccountId = base.defaultAccountId ?? f.defaultAccountId
+  const icon = sanitizeProjectIcon(f.icon)
   return {
     id: base.id,
     name: f.name,
     color: f.color,
+    ...(icon ? { icon } : {}),
     viewport: base.viewport ?? f.viewport ?? framingViewport(f.nodes),
     // applyLocalNodeExec DROPS whatever the file carried in the exec fields (it is not ours) and
-    // re-attaches only what this machine typed. See @shared/node-exec.
-    nodes: applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
+    // re-attaches only what this machine typed. See @shared/node-exec. `sanitizeBrowserPartitions`
+    // is the same "the file is hostile input" treatment for a browser node's session jar: a stored
+    // `partition` survives only when it is exactly the one THIS project (base.id, machine-local)
+    // would mint — a foreign/cloned/unsafe one drops to un-owned default session. See
+    // loadedAgentBrowserPartition; without it a cloned project.json forges another project's jar.
+    nodes: sanitizeBrowserPartitions(
+      applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
+      base.id
+    ),
     ...(f.bridges ? { bridges: f.bridges } : {}),
     ...(f.ropes ? { ropes: f.ropes } : {}),
     ...(defaultAccountId ? { defaultAccountId } : {}),
