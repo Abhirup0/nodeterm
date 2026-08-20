@@ -151,6 +151,7 @@ import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
+import { ResumeCard } from '../components/ResumeCard'
 import { TmuxBanner } from '../components/TmuxBanner'
 import { PtyPressureBanner } from '../components/PtyPressureBanner'
 import { ShortcutCaptureBanner } from '../components/ShortcutCaptureBanner'
@@ -581,6 +582,14 @@ const LAUNCH_RETRY_MS = 400
 // first, and the active-project effect hydrates React Flow ASYNCHRONOUSLY — so the handler waits
 // for the node to appear instead of reading an empty canvas one tick too early. Bounded well under
 // the CLI's 120s timeout: a canvas that never arrives becomes a plain "not on an open canvas".
+/**
+ * Which projects have already shown their resume card THIS APP RUN. Module-level so it survives
+ * Canvas re-renders and project switches, and IN-MEMORY on purpose: persisting it would leave one
+ * localStorage entry per project forever, while forgetting on reload is exactly what "the resume
+ * card comes back next launch" means (docs/superpowers/specs/2026-08-20-breadcrumb-trail-design.md).
+ */
+const resumeCardShown = new Set<string>()
+
 const CONTROL_TRAVEL_TIMEOUT_MS = 8000
 const CONTROL_TRAVEL_POLL_MS = 60
 async function waitForCanvasNode(
@@ -1143,6 +1152,14 @@ export function Canvas() {
   // re-render happens to notice. Its own counter rather than bumpHist's: the two stacks are
   // separate facts (node-array history vs camera history) and move at different times.
   const [, bumpNav] = useState(0)
+  /**
+   * The project whose resume card is currently up, or null for "no card". A SNAPSHOT of the project
+   * as it was at activation (the card offers where you left off, so its rows must not re-shuffle
+   * under the user as new breadcrumbs are recorded), and holding the project itself rather than a
+   * boolean keeps Canvas off a `useProjects` subscription for the active project object — that
+   * object is rebuilt on every node serialization and would re-render the whole canvas per edit.
+   */
+  const [resumeProject, setResumeProject] = useState<Project | null>(null)
   const {
     setViewport,
     getViewport,
@@ -1972,6 +1989,17 @@ export function Canvas() {
       // without phone access on, the serialize itself is the waste (main would drop the payload).
       if (useSettings.getState().settings.phoneAccessEnabled) {
         window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
+      }
+      // Offer the resume card once per project per app run. "Once" is only spent on a card that
+      // could actually render: a project whose breadcrumbs ALL point at nodes deleted since must
+      // not burn its one-shot slot on an empty card the user never saw.
+      const liveIds = new Set(flow.map((n) => n.id))
+      const hasLiveStop = (project.breadcrumbs ?? []).some((b) => liveIds.has(b.nodeId))
+      if (!resumeCardShown.has(project.id) && hasLiveStop) {
+        resumeCardShown.add(project.id)
+        setResumeProject(project)
+      } else {
+        setResumeProject(null)
       }
       // Consume a cross-project focus request (notification click on a background node).
       const pending = pendingFocusRef.current
@@ -10409,6 +10437,25 @@ export function Canvas() {
               popover row is a second, better-placed entrance to the same action (issue #142). */}
           <UsageIndicator overBoard={kanbanOpen} onSetDefaultAccount={setProjectDefaultAccount} />
 </div>
+
+        {/* Canvas-mounted, deliberately NOT in the .top-banners column: this is about THIS canvas,
+            not an app-wide message. Opening a row records a new breadcrumb through goToNode — which
+            is correct, it is a deliberate landing like any other. */}
+        {resumeProject && (
+          <ResumeCard
+            // Keyed by project: switching from a project whose card was DISMISSED straight to one
+            // that qualifies never passes through null, so without a key React would reuse the
+            // instance and the new project's card would inherit the old one's dismissal.
+            key={resumeProject.id}
+            project={resumeProject}
+            nodes={nodesRef.current}
+            onOpen={(nodeId) => {
+              const node = nodesRef.current.find((n) => n.id === nodeId)
+              if (node) goToNode(node)
+              setResumeProject(null)
+            }}
+          />
+        )}
 
         <PresenceNamePrompt />
 
