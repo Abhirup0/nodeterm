@@ -112,7 +112,7 @@ describe('send/reply require `verified` — and controlPolicy is NOT the decider
     // from day one — there is no upgrade population to protect.
     hookServer.clearNodeAuthSecretForTests()
     try {
-      for (const verb of ['send', 'reply'] as const) {
+      for (const verb of ['send', 'reply', 'open-project'] as const) {
         const res = await post(verb, 'n-src')
         expect(res.status, verb).toBe(403)
       }
@@ -137,14 +137,31 @@ describe('where the verbs sit in the routing tables', () => {
     }
   })
 
-  it('the verified-only set is exactly the messaging verbs plus sticky', () => {
+  it('the verified-only set is exactly the messaging verbs plus sticky plus open-project', () => {
     // Pins that nothing ELSE ever drifts in: adding a SHIPPED verb here would strand its legacy
     // population with no hatch, which is the one thing this set must never be casually grown by.
     // `notify` (folded in from #98, Task 5.2) is a messaging verb like the other two — it writes
     // into another agent's pane — so it takes the same gate. `sticky` (issue #144) is here
     // because its "↻ <agent> · when" stamp replaces the confirm dialog, and a byline any
     // bearer-holder could forge would be worse than no byline; it shipped verified-only from
-    // day one, so no legacy population is stranded.
-    expect([...requiresVerified].sort()).toEqual(['notify', 'reply', 'send', 'sticky'])
+    // day one, so no legacy population is stranded. `open-project` (issue #338) is here because
+    // the grant ledger binds targeting rights to the verified caller identity — a grant minted
+    // for a forgeable caller would authorize whoever forged it; new verb, so fail-closed from
+    // day one strands nobody.
+    expect([...requiresVerified].sort()).toEqual([
+      'notify',
+      'open-project',
+      'reply',
+      'send',
+      'sticky'
+    ])
+  })
+
+  it('the open-project refusal is its own flat sentence, not the messaging one', () => {
+    // "Agent messaging refused." answering a project open would be a diagnosis-delaying lie —
+    // the same argument that gave sticky its own sentence. Same posture: one sentence, no
+    // token/restart advice.
+    expect(verifiedRefusalFor('open-project')).toBe('Project open refused.')
+    expect(verifiedRefusalFor('open-project')).not.toBe(MESSAGING_CONTROL_REFUSAL)
   })
 })

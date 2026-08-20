@@ -1145,6 +1145,26 @@ export class WorkspaceStore {
   }
 
   /**
+   * Does this project exist on THIS machine, and is it SSH? The `--project` targeting gate
+   * (issue #338, src/main/project-grants.ts) asks main's own store — never the request — before
+   * any targeted open is forwarded. Same three-entry-kind scan and same id semantics as
+   * `persistedCanvases` (inline keyed by `e.project.id`, ssh/local refs by `e.id`), because the
+   * projectId a grant names there must resolve to the same project here. `undefined` = unknown
+   * to this store (deleted, invented, another machine's) — the gate fails closed on it.
+   */
+  projectMetaFor(projectId: string): { ssh: boolean } | undefined {
+    if (!projectId) return undefined
+    for (const e of this.index?.entries ?? []) {
+      if (e.project) {
+        if (e.project.id === projectId) return { ssh: !!e.project.ssh }
+        continue
+      }
+      if (e.id === projectId) return { ssh: !!e.ssh }
+    }
+    return undefined
+  }
+
+  /**
    * The capability view of one project, for `projectCapabilityGrantedFor`: the STRICT capability
    * flags from the shared file (`readProjectCapabilities` — literal `true`, known keys only) plus
    * this machine's recorded answers from the INDEX ENTRY. Same three-entry-kind scan and same id

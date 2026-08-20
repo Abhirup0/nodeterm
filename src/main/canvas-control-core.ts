@@ -120,6 +120,7 @@ export type ControlVerb =
   | 'notify'
   | 'sticky'
   | 'browser'
+  | 'open-project'
 
 export interface ControlCommand {
   verb: ControlVerb
@@ -155,7 +156,12 @@ const VERBS: ControlVerb[] = [
   'reply',
   'notify',
   'sticky',
-  'browser'
+  'browser',
+  // Issue #338 PR 1: registered in the model (parse + gates + the grant ledger run in main), but
+  // INERT until PR 2 adds the renderer dispatch case — today the renderer's `default:` answers
+  // `unknown verb: open-project`. Deliberately undocumented in the skill/instructions bodies until
+  // PR 2 makes it do something (spec §8: docs land in the same PR that makes the verb reachable).
+  'open-project'
 ]
 
 /**
@@ -226,6 +232,11 @@ export function parseControlRequest(
   // enforced in hook-server before it ever reaches a handler) and refused by name on the Server
   // Edition (control-unsupported-on-this-edition), where there is no webview to drive.
   if (v === 'browser' && !args.node) return { error: 'browser: --node <id> is required' }
+  // `open-project` requires a cwd; everything else about the argument (absolute, exists, is a
+  // directory, resolved once) is validated in MAIN by `validateOpenProjectCwd`
+  // (src/main/project-grants.ts) — the caller's path is hostile input and this presence check is
+  // only the polite half.
+  if (v === 'open-project' && !args.cwd) return { error: 'open-project requires --cwd <abs-path>' }
   return { verb: v, args }
 }
 
