@@ -62,6 +62,7 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { ShortcutRecorderButton } from '../ShortcutRecorderButton'
 import { IconDisableSlash, IconPlusSmall, IconResetArrow } from '../ShortcutRowIcons'
+import { Tooltip } from '../../Tooltip'
 import { Input } from '@renderer/ui/Input'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { useSettingsSearch } from '../context'
@@ -527,11 +528,15 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
             {/* Hidden until the row is hovered so a 21-row list reads as chords, not as a wall of
                 buttons — `focus-within` is the keyboard user's door to the same controls. */}
             <div className="flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/row:opacity-100">
+              {/* Tooltips say what the glyphs cannot: Record REPLACES the current shortcut,
+                  Add records ANOTHER one beside it. Native `title` is not used here — it takes
+                  the OS's ~1.5s delay and reads as no tooltip at all. */}
               <ShortcutRecorderButton
                 commandId={def.id}
                 appearance="icon"
                 idleLabel={bound ? 'Record' : 'Record shortcut'}
                 label={bound ? `Record ${def.title}` : `Record shortcut for ${def.title}`}
+                tooltip={bound ? 'Replace shortcut' : 'Record a shortcut'}
                 onCommit={(combo) => apply(def.id, combo, 'replace')}
               />
               {bound && !single ? (
@@ -540,6 +545,7 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
                   appearance="icon"
                   idleLabel="Add"
                   label={`Add a shortcut to ${def.title}`}
+                  tooltip="Add another shortcut"
                   // Record sits immediately to its left in the same label-less cluster; the
                   // glyph is the only thing telling the two apart.
                   idleIcon={<IconPlusSmall />}
@@ -547,26 +553,28 @@ export function ShortcutsSection({ isActive }: { isActive: boolean }): React.JSX
                 />
               ) : null}
               {bound ? (
-                <button
-                  type="button"
-                  className={ICON_BUTTON}
-                  aria-label={`Disable ${def.title}`}
-                  title={`Disable ${def.title}`}
-                  onClick={() => write(def.id, [])}
-                >
-                  <IconDisableSlash />
-                </button>
+                <Tooltip label="Disable shortcut">
+                  <button
+                    type="button"
+                    className={ICON_BUTTON}
+                    aria-label={`Disable ${def.title}`}
+                    onClick={() => write(def.id, [])}
+                  >
+                    <IconDisableSlash />
+                  </button>
+                </Tooltip>
               ) : null}
               {status.modified ? (
-                <button
-                  type="button"
-                  className={ICON_BUTTON}
-                  aria-label={`Reset ${def.title}`}
-                  title={`Reset ${def.title}`}
-                  onClick={() => write(def.id, null)}
-                >
-                  <IconResetArrow />
-                </button>
+                <Tooltip label="Reset to default">
+                  <button
+                    type="button"
+                    className={ICON_BUTTON}
+                    aria-label={`Reset ${def.title}`}
+                    onClick={() => write(def.id, null)}
+                  >
+                    <IconResetArrow />
+                  </button>
+                </Tooltip>
               ) : null}
             </div>
           </div>
