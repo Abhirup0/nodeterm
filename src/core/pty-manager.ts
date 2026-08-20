@@ -706,6 +706,15 @@ export class PtyManager {
   private tmuxPath: string | null = null
   private confPath = ''
   private getSettings: () => Settings = () => DEFAULT_SETTINGS
+
+  /**
+   * Is this account id one of the managed CODEX accounts? Asked instead of guessing from the id's
+   * shape: `codexAccounts` and `claudeAccounts` share an id alphabet, so only the list can tell
+   * them apart (issue #345). Reads LIVE settings, so an account added after init is seen.
+   */
+  private isCodexAccount(accountId: string): boolean {
+    return this.getSettings().codexAccounts.some((a) => a.id === accountId)
+  }
   /** Literal model-gateway key loaded by the shell's secret service during startup. */
   private getModelGatewaySecret: () => string | null = () => null
   /**
@@ -1795,7 +1804,7 @@ export class PtyManager {
     // chip. `resolveCodexSessionScope` returns `{ unavailable: 'codex-account' }` for exactly that
     // case; we map it straight through to a real refusal and spawn NOTHING. The system account (no
     // id) always resolves. Remote (ssh) Codex sessions carry their account env via tmux `-e`.
-    if (needsCodexAccountScope(options.agentId, options.accountId) && !options.sshRemote) {
+    if (needsCodexAccountScope(options.agentId, options.accountId, (id) => this.isCodexAccount(id)) && !options.sshRemote) {
       const scope = resolveCodexSessionScope(platform().userDataDir, options.accountId)
       if (isCodexScopeRefusal(scope)) {
         return { sessionId: '', fresh: false, unavailable: 'codex-account' }
@@ -2209,7 +2218,7 @@ export class PtyManager {
     // property 4), so `codexSessionEnv` here never resolves an explicit id to the system home. Also
     // strip env vars that would shadow the account's OAuth login with API-key auth. Remote (ssh)
     // Codex sessions get this via the remote tmux `-e` list, not the local ssh client env.
-    if (needsCodexAccountScope(options.agentId, options.accountId) && !options.sshRemote) {
+    if (needsCodexAccountScope(options.agentId, options.accountId, (id) => this.isCodexAccount(id)) && !options.sshRemote) {
       const codexScope = codexSessionEnv(platform().userDataDir, options.accountId)
       env.CODEX_HOME = codexScope.CODEX_HOME
       env.NODETERM_CODEX_ACCOUNT_ID = codexScope.NODETERM_CODEX_ACCOUNT_ID

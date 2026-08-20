@@ -145,11 +145,18 @@ describe('per-session Codex env', () => {
     ])
   })
 
-  it('scopes Codex agents and managed-id login terminals, nothing else', () => {
-    expect(needsCodexAccountScope('codex')).toBe(true)
-    expect(needsCodexAccountScope(undefined, 'account-a')).toBe(true)
-    expect(needsCodexAccountScope(undefined, undefined)).toBe(false)
-    expect(needsCodexAccountScope('bash')).toBe(false)
+  it('scopes Codex agents and managed-CODEX-id login terminals, nothing else', () => {
+    const isCodex = (id: string): boolean => id === 'codex-a'
+    // A Codex agent always needs a scope — system account included, so the id may be absent.
+    expect(needsCodexAccountScope('codex', undefined, isCodex)).toBe(true)
+    // The agent-less `codex login` terminal: no agent, but a managed CODEX id.
+    expect(needsCodexAccountScope(undefined, 'codex-a', isCodex)).toBe(true)
+    // …and the `claude /login` terminal right beside it must NOT be caught (#345): same shape,
+    // an id from the OTHER list. Answering by id shape instead of by list is what broke it.
+    expect(needsCodexAccountScope(undefined, 'claude-a', isCodex)).toBe(false)
+    expect(needsCodexAccountScope('claude', 'claude-a', isCodex)).toBe(false)
+    expect(needsCodexAccountScope(undefined, undefined, isCodex)).toBe(false)
+    expect(needsCodexAccountScope('bash', undefined, isCodex)).toBe(false)
   })
 })
 

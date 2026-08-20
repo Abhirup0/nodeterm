@@ -5,6 +5,7 @@ import {
   arrangeNodes,
   commonParentId,
   createAccountLoginNode,
+  createCodexAccountLoginNode,
   createAgentNode,
   createDinoNode,
   fitGroupToChildren,
@@ -704,6 +705,22 @@ describe('createAccountLoginNode', () => {
     expect(node.data.title).toBe('Claude login')
     expect(node.data.accountId).toBe('acct-1')
     expect(node.data.initialCommand).toBe('claude /login')
+  })
+})
+
+describe('createCodexAccountLoginNode', () => {
+  it('produces a terminal node that logs the given Codex account in', () => {
+    const node = createCodexAccountLoginNode('acct-2', 0)
+    expect(node.type).toBe('terminal')
+    expect(node.data.title).toBe('Codex login')
+    expect(node.data.accountId).toBe('acct-2')
+    expect(node.data.initialCommand).toBe('codex login')
+  })
+
+  it('carries NO agentId — the agent-less shape is what the Codex scope gate keys on', () => {
+    // With an agentId of 'codex' this would be an agent node and take the agent paths; the login
+    // terminal is scoped purely because its account id is a managed CODEX one (see #345/#346).
+    expect(createCodexAccountLoginNode('acct-2', 0).data.agentId).toBeUndefined()
   })
 })
 
