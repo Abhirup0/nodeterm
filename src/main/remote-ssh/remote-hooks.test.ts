@@ -15,6 +15,8 @@ function harness(
     responses?: Record<string, string>
     /** Command substring whose run REJECTS — the fail-open proof for one remote step. */
     failOn?: string
+    /** Command substring whose runner result is non-zero (the runner itself still resolves). */
+    failCodeOn?: string
   } = {}
 ) {
   // One record per ssh child command. `args` is what the runner was handed; `cmd` is the joined
@@ -26,6 +28,7 @@ function harness(
     const joined = args.join(' ')
     calls.push({ args, stdin, cmd: joined })
     if (opts.failOn && joined.includes(opts.failOn)) throw new Error(`fake ssh failed: ${opts.failOn}`)
+    if (opts.failCodeOn && joined.includes(opts.failCodeOn)) return { code: 1, stdout: '' }
     for (const [needle, stdout] of Object.entries(opts.responses ?? {})) {
       if (joined.includes(needle)) return { code: 0, stdout }
     }
@@ -51,8 +54,17 @@ describe('RemoteHooks.setup', () => {
     const joined = calls.map((c) => c.args.join(' '))
     // reverse forward binds the ABSOLUTE remote socket (no unexpanded ~).
     expect(joined.some((j) => j.includes('-O forward') && j.includes('/home/u/.nodeterm/hook-p1.sock:127.0.0.1:51234'))).toBe(true)
-    // endpoint file written to the absolute PER-PROJECT path, with the absolute sock + token.
-    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/hook-endpoint-p1.env'`))).toBe(true)
+    // Endpoint bearer goes to a private, invocation-owned temp and is then published atomically.
+    const endpointWrite = calls.find((c) => (c.stdin ?? '').includes("NODETERM_HOOK_TOKEN='tok'"))
+    const endpointTemp = endpointWrite?.cmd.match(
+      /cat > ('\/home\/u\/\.nodeterm\/\.nodeterm-[0-9a-f-]{36}\.tmp')/
+    )?.[1]
+    expect(endpointTemp).toBeTruthy()
+    expect(endpointWrite?.cmd).toContain(`chmod 600 -- ${endpointTemp}`)
+    expect(endpointWrite?.cmd).toContain(
+      `mv -f -- ${endpointTemp} '/home/u/.nodeterm/hook-endpoint-p1.env'`
+    )
+    expect(endpointWrite?.cmd).toContain(`rm -f -- ${endpointTemp}`)
     expect(
       calls.some(
         (c) =>
@@ -164,6 +176,18 @@ describe('RemoteHooks.setup', () => {
     expect(calls.map((c) => c.args.join(' ')).some((j) => j.includes('hook-endpoint-p1.env'))).toBe(false)
   })
 
+  it('does not advertise an endpoint whose atomic credential publish returns non-zero', async () => {
+    const { rh, calls } = harness({ failCodeOn: 'hook-endpoint-p1.env' })
+    const res = await rh.setup('p1', conn, '/s.sock', {
+      port: 51234,
+      token: 'tok',
+      version: '1'
+    })
+    expect(res).toBeNull()
+    // A resolved failure is still failure; hook configs must not point sessions at stale bytes.
+    expect(calls.some((c) => c.cmd.includes('/agent-hooks/'))).toBe(false)
+  })
+
   it('a failed -O forward bind is retried, never trusted', async () => {
     const calls: { args: string[] }[] = []
     let forwards = 0
@@ -190,7 +214,11 @@ describe('RemoteHooks.setup', () => {
     expect(b?.endpointPath).toBe('/home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env')
     // the browse writes ITS OWN endpoint file, never the real project's.
     const joined = calls.map((c) => c.args.join(' '))
-    expect(joined.some((j) => j.includes(`cat > '/home/u/.nodeterm/hook-endpoint-ssh-browse-xyz.env'`))).toBe(true)
+    expect(
+      joined.some(
+        (j) => j.includes('cat > ') && j.includes("hook-endpoint-ssh-browse-xyz.env'")
+      )
+    ).toBe(true)
     expect(joined.some((j) => j.includes('hook-endpoint-proj.env'))).toBe(false)
   })
 })
@@ -221,7 +249,11 @@ describe('RemoteHooks.setup — a hostile remote $HOME', () => {
     expect(res?.endpointPath).toBe('/Users/Enes K/.nodeterm/hook-endpoint-p1.env')
     const joined = runs.map((r) => r.cmd)
     expect(joined.some((j) => j.includes(`mkdir -p '/Users/Enes K/.nodeterm'`))).toBe(true)
-    expect(joined.some((j) => j.includes(`cat > '/Users/Enes K/.nodeterm/hook-endpoint-p1.env'`))).toBe(true)
+    expect(
+      joined.some(
+        (j) => j.includes('cat > ') && j.includes("/Users/Enes K/.nodeterm/hook-endpoint-p1.env'")
+      )
+    ).toBe(true)
     expect(joined.some((j) => j.includes(`cat > '/Users/Enes K/.claude/settings.json'`))).toBe(true)
     // No path derived from $HOME survives UNQUOTED in any remote SHELL LINE (the last argv element
     // of an ssh child is the command the remote shell parses; the `-R` forward spec is an ssh
@@ -678,10 +710,18 @@ describe('RemoteHooks.writeNodeTokens', () => {
       }
     const writes = calls.filter((c) => c.cmd.includes('cat >'))
     expect(writes).toHaveLength(2)
-    // tmp + rename, the local writer's shape: `cat >` truncates, so writing straight at the file
-    // leaves an EMPTY token behind when the host is out of quota or disk.
-    expect(writes[0].cmd).toContain("cat > '/home/u/.nodeterm/node-tokens/.node-1.tmp'")
-    expect(writes[0].cmd).toContain("mv -f '/home/u/.nodeterm/node-tokens/.node-1.tmp' '/home/u/.nodeterm/node-tokens/node-1'")
+    // Unique tmp + rename: `cat >` truncates, so writing straight at the file leaves an EMPTY
+    // credential behind when the host is out of quota or disk. The same owned temp is chmodded,
+    // published and cleaned without ever carrying the token in argv.
+    const temp = writes[0].cmd.match(
+      /cat > ('\/home\/u\/\.nodeterm\/node-tokens\/\.nodeterm-[0-9a-f-]{36}\.tmp')/
+    )?.[1]
+    expect(temp).toBeTruthy()
+    expect(writes[0].cmd).toContain(`chmod 600 -- ${temp}`)
+    expect(writes[0].cmd).toContain(
+      `mv -f -- ${temp} '/home/u/.nodeterm/node-tokens/node-1'`
+    )
+    expect(writes[0].cmd).toContain(`rm -f -- ${temp}`)
     // ...and the token is on stdin, newline-terminated (the client reads it with `head -n 1`).
     expect(writes[0].stdin).toBe(`${mint('node-1')}\n`)
     expect(writes.at(-1)?.stdin).toBe(`${mint('node-2')}\n`)
@@ -694,6 +734,24 @@ describe('RemoteHooks.writeNodeTokens', () => {
     expect(mkdir?.cmd).toContain('umask 077')
     expect(mkdir?.cmd).toContain("'/home/u/.nodeterm/node-tokens'")
     for (const w of calls.filter((c) => c.cmd.includes('cat >'))) expect(w.cmd).toContain('umask 077')
+  })
+
+  it('gives concurrent writers of the same credential separate owned temps', async () => {
+    const { rh, calls } = tokenHarness()
+    await Promise.all([
+      rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint),
+      rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['node-1'], mint)
+    ])
+    const temps = calls
+      .filter((call) => call.cmd.includes('cat >'))
+      .map((call) =>
+        call.cmd.match(
+          /cat > ('\/home\/u\/\.nodeterm\/node-tokens\/\.nodeterm-[0-9a-f-]{36}\.tmp')/
+        )?.[1]
+      )
+    expect(temps).toHaveLength(2)
+    expect(temps.every(Boolean)).toBe(true)
+    expect(temps[0]).not.toBe(temps[1])
   })
 
   it('fails open when the host refuses (exit 1) — the connect is never at risk', async () => {
@@ -801,8 +859,8 @@ describe('RemoteHooks.writeNodeTokens', () => {
     const refusing = (id: string): string => (id === 'Node-1' ? '' : mint(id))
     await rh.writeNodeTokens(conn, '/s.sock', '/home/u', ['Node-1', 'node-2'], refusing)
     expect(calls.some((c) => c.cmd.includes("rm -f '/home/u/.nodeterm/node-tokens/Node-1'"))).toBe(true)
-    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/.Node-1.tmp'"))).toBe(false)
-    expect(calls.some((c) => c.cmd.includes("cat > '/home/u/.nodeterm/node-tokens/.node-2.tmp'"))).toBe(true)
+    expect(calls.some((c) => /cat > .*node-tokens\/Node-1\./.test(c.cmd))).toBe(false)
+    expect(calls.some((c) => /cat > .*node-tokens\/\.nodeterm-[0-9a-f-]{36}\.tmp/.test(c.cmd))).toBe(true)
   })
 })
 

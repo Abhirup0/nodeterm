@@ -640,7 +640,9 @@ export interface TmuxStatus {
   installCommand: string | null
   /** Button caption for installCommand (e.g. "Install Homebrew + tmux" when brew must come first). */
   installLabel: string | null
-  platform: string
+  /** `process.platform` of the core that owns the sessions/filesystem. `null` means the read
+   *  failed; callers must not substitute the browser's platform for a server or relay core. */
+  platform: string | null
 }
 
 /**

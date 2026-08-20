@@ -84,7 +84,26 @@ because they make ownership cleanup and diagnostics possible, but they are not g
 two containers can both be PID 1, worker isolates share a PID with independent module counters,
 and an OS can reuse a PID while crash litter remains. `Date.now()` does **not** make a name unique
 either — two bridge calls, shutdown flushes, or WS clients can enter a save inside one millisecond.
-The guard deliberately rejects pid-plus-clock and pid-plus-counter names.
+The guard deliberately rejects pid-plus-clock and pid-plus-counter names. Remote-shell writes use
+the equivalent property with a locally minted random UUID; the remote host never has to
+interpolate a nonce.
+
+The same rule applies to SSH and scp staging even though those writes do not call `fs.writeFile`.
+`remoteAtomicWrite` mints a bounded `.nodeterm-<uuid>.tmp` sibling before quoting both complete
+remote paths, so spaces, apostrophes, literal POSIX backslashes and `~/` expansion keep their
+meanings. The bounded leaf is independent of the target: appending `.uuid.tmp` to a valid
+`NAME_MAX` filename would exceed the directory's component limit. It preserves the `cat`/`mv`
+status while removing exactly that invocation's temp. Uploads likewise use UUID directories rather
+than a timestamp plus a per-manager counter, and failed uploads remove only their own directory.
+Downloads and media-cache fetches stage through hidden UUID `.part` paths beside the target; the
+bounded name avoids lengthening an already maximum-length filename. Ordinary downloads also
+reserve the final candidate with an exclusive lock, so two app processes cannot both observe
+`report.pdf` as absent and overwrite each other after transferring. Candidate checks use `lstat`:
+a dangling symlink is an occupied directory entry, not evidence that the name is free. Atomic
+remote stdin sites use
+the same helper for filesystem writes, tmux.conf, the credential-bearing hook endpoint and node
+tokens, agent status, and pending answers. Generated hook scripts/config merges still have direct
+writes and are not covered by this atomicity claim.
 
 "Only one instance exists" and "the write queue serializes this" are true within one process and
 silent about a second — and a second is not hypothetical: the Server Edition takes a `--data-dir`,
@@ -131,5 +150,5 @@ reports clean, which is the same class of silent failure as the bug.
 | Surface | Status |
 |---|---|
 | **Desktop** (Electron) | Covered. Windows is the platform this exists for; on macOS/Linux the retry is inert and behaviour is unchanged. |
-| **Server Edition** | Covered for core stores — the helper is in `src/core`, so both shells get it. Its usual host is Linux, where the retry is inert, but a Windows-hosted server gets the same protection. |
-| **Mobile companion** | No client change; it holds no local stores of its own. |
+| **Server Edition** | Covered for core stores — the helper is in `src/core`, so both shells get it. Its usual host is Linux, where the retry is inert, but a Windows-hosted server gets the same protection. The ControlMaster/scp manager is desktop-only. |
+| **Mobile companion** | No client change. It holds no local stores of its own, but the agent-status mirror it reads from an SSH host now arrives through the unique remote temp path. The transport shape is unchanged. |
