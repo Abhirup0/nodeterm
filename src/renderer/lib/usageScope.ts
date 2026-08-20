@@ -140,3 +140,43 @@ export function scopeUsage(input: ScopeInput): ScopedUsage {
     pillLimits: leading?.usage.limits ?? []
   }
 }
+
+/**
+ * The React key for a provider usage row. `runProviders` emits ONE row per Codex account (the
+ * system fetcher with no `accountId`, plus one per managed account), all carrying
+ * `provider: 'codex'` — so keying on `provider` alone collides every Codex account onto one key
+ * (U8, owed from PR 7). Keying on `provider` + `accountId` keeps each account's row distinct.
+ */
+export function providerRowKey(row: Pick<ProviderUsage, 'provider' | 'accountId'>): string {
+  return `${row.provider}:${row.accountId ?? 'system'}`
+}
+
+/**
+ * Collapse provider usage rows that share a `provider`+`accountId` key (U8 keyed reduce). Two
+ * settings entries that resolve to the same underlying account would otherwise print twice; a
+ * genuine per-account row keeps its own key and survives. Insertion order is preserved, and the
+ * MORE INFORMATIVE duplicate wins — a row with limits, or a non-`fetching` status, beats an empty
+ * placeholder — so a resolved reading is never dropped in favour of an in-flight one.
+ */
+export function dedupeProviderRows(rows: readonly ProviderUsage[]): ProviderUsage[] {
+  const order: string[] = []
+  const byKey = new Map<string, ProviderUsage>()
+  for (const row of rows) {
+    const key = providerRowKey(row)
+    const existing = byKey.get(key)
+    if (!existing) {
+      order.push(key)
+      byKey.set(key, row)
+      continue
+    }
+    if (moreInformative(row, existing)) byKey.set(key, row)
+  }
+  return order.map((key) => byKey.get(key)!)
+}
+
+/** True when `candidate` carries strictly more usable information than `current`. */
+function moreInformative(candidate: ProviderUsage, current: ProviderUsage): boolean {
+  const rank = (r: ProviderUsage): number =>
+    r.limits.length > 0 ? 2 : r.status === 'fetching' ? 0 : 1
+  return rank(candidate) > rank(current)
+}

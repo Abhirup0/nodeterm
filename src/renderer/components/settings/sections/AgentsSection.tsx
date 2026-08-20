@@ -31,7 +31,7 @@ import {
   unsupportedModesNote
 } from '@shared/agents/approval-mode'
 import { AgentIcon } from '../../../lib/agentIcons'
-import { hintLabel } from '@shared/platform-utils'
+import { chipFor } from '../../../lib/keybindingOverrides'
 import { NODE_IDENTITY_STRICT_DATE } from '@shared/node-identity'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
@@ -274,11 +274,16 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
           .join(' ')
       : undefined
 
+  // Whatever "new agent node" is bound to; '' when unbound, and the sentence drops the chord.
+  const agentChip = chipFor('node.newAgent')
+
   return (
     <SettingsSection
       id="agents"
       title="Agents"
-      description={hintLabel('Enable or disable agents in the Add menus, and pick the default (⌘⇧C).')}
+      description={agentChip
+        ? `Enable or disable agents in the Add menus, and pick the default (${agentChip}).`
+        : 'Enable or disable agents in the Add menus, and pick the default.'}
       isActive={isActive}
       searchEntries={ENTRIES}
     >
@@ -393,7 +398,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
       <SearchableRow {...ROWS.nodeIdentity}>
         <FieldRow
           label="Require verified node identity for canvas control"
-          description={`Commands that open, write to or close nodes — and that read a linked node's context — must present the identity NodeTerm issued to the node they say they came from. Automatic starts refusing the ones that can't from ${NODE_IDENTITY_STRICT_DATE}; until then they still run and the reply tells you to restart that node. Set this to "Not required" if an upgrade left a running session unable to drive the canvas: it restores the behaviour from before this feature, past ${NODE_IDENTITY_STRICT_DATE} as well. An identity that is actually forged is refused whatever you pick here.`}
+          description={`Commands that open, write to or close nodes — and that read a linked node's context — must present the identity NodeTerm issued to the node they say they came from. Automatic starts refusing the ones that can't from ${NODE_IDENTITY_STRICT_DATE}; until then they still run and the reply tells you to restart that node. Set this to "Not required" if an upgrade left a running session unable to drive the canvas: it restores the behaviour from before this feature, past ${NODE_IDENTITY_STRICT_DATE} as well. Browser control is the one exception — it always requires verified identity and this setting never releases it. An identity that is actually forged is refused whatever you pick here.`}
           control={
             <Select
               aria-label="Require verified node identity"

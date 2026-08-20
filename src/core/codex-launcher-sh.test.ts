@@ -8,6 +8,7 @@
 // remote-claude-usage.test.ts.
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { execFile } from 'node:child_process'
+import { request as httpRequest } from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -35,8 +36,8 @@ let dir = ''
 let launcher = ''
 let binDir = ''
 let argvLog = ''
-let started: Array<{ nodeId: string; cwd: string }> = []
-let bound: Array<{ nodeId: string; threadId: string }> = []
+let started: Array<{ nodeId: string; cwd: string; accountId?: string }> = []
+let bound: Array<{ nodeId: string; threadId: string; accountId?: string }> = []
 let fallbacks: Array<{ nodeId: string; reason?: string }> = []
 let startAnswer: (() => string) | null = null
 let startDelayMs = 0
@@ -64,14 +65,14 @@ beforeAll(async () => {
   fs.writeFileSync(launcher, buildCodexLauncherScript('true'), { mode: 0o755 })
   await hookServer.start()
   hookServer.setNodeAuthSecret(SECRET)
-  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd }) => {
-    started.push({ nodeId, cwd })
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, accountId }) => {
+    started.push({ nodeId, cwd, accountId })
     if (startDelayMs) await new Promise((r) => setTimeout(r, startDelayMs))
     if (!startAnswer) throw new Error('start refused')
     return startAnswer()
   })
-  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId }) => {
-    bound.push({ nodeId, threadId })
+  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, accountId }) => {
+    bound.push({ nodeId, threadId, accountId })
     if (!bindAnswer) throw new Error('bind refused')
     bindAnswer()
   })
@@ -138,6 +139,40 @@ function codexArgv(): string[] {
   return fs.readFileSync(argvLog, 'utf8').split('\n').slice(0, -1)
 }
 
+/**
+ * POST a codex-thread request DIRECTLY, bypassing the launcher's own account-id validation, to
+ * exercise the SERVER's gate. Both bearer headers are presented so the request is authenticated and
+ * only the account-id check can reject it.
+ */
+function postCodexThread(
+  verb: 'start' | 'bind',
+  fields: Record<string, string>
+): Promise<number> {
+  const body = new URLSearchParams(fields).toString()
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port: hookServer.getPort(),
+        method: 'POST',
+        path: `/codex-thread/${verb}`,
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'content-length': Buffer.byteLength(body),
+          'x-nodeterm-hook-token': hookServer.getToken(),
+          'x-nodeterm-node-token': nodeAuthToken(SECRET, 'node-1')
+        }
+      },
+      (res) => {
+        res.resume()
+        res.on('end', () => resolve(res.statusCode ?? 0))
+      }
+    )
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
 describe('generated Codex launcher', () => {
   it('is valid POSIX sh', async () => {
     await expect(run('/bin/sh', ['-n', launcher])).resolves.toBeTruthy()
@@ -148,6 +183,59 @@ describe('generated Codex launcher', () => {
     expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir) }])
     expect(codexArgv()).toEqual(['--remote unix:// resume thread-abc'])
     expect(fallbacks).toEqual([])
+  })
+
+  // #350 (the confused deputy): the shared app-server is a PERSISTENT DAEMON started by the FIRST
+  // codex node to launch, and reused by every later node. If the launcher starts it while THIS
+  // node's per-pane NODETERM_NODE_ID is in the environment, the daemon — and every tool shell it
+  // later spawns for EVERY node — inherits that one node's id. The thread→node resolver only
+  // recovers the right node when the tool shell has NO NODETERM_NODE_ID (its guard is
+  // `[ -z "$NODETERM_NODE_ID" ]`), so a leaked value silently collapses every codex node's identity
+  // onto the daemon-starting node: Project B's codex then lists Project A's links and routes to A.
+  // The daemon MUST therefore be started with the per-pane vars scrubbed. NODETERM_CODEX_ACCOUNT_ID
+  // is the ONE exception — one daemon serves one account, and the resolver reads it to pick scope.
+  it('starts the shared app-server daemon WITHOUT this node\'s per-pane NODETERM_NODE_ID (#350)', async () => {
+    const envDump = path.join(dir, 'daemon-env.txt')
+    const dumpScript = path.join(dir, 'dump-daemon-env.sh')
+    fs.writeFileSync(
+      dumpScript,
+      `#!/bin/sh\n` +
+        `printf 'NID=[%s]\\nACC=[%s]\\nHOOK=[%s]\\n' ` +
+        `"\${NODETERM_NODE_ID-}" "\${NODETERM_CODEX_ACCOUNT_ID-}" "\${NODETERM_HOOK_ENDPOINT-}" ` +
+        `> ${JSON.stringify(envDump)}\n`,
+      { mode: 0o755 }
+    )
+    const script2 = path.join(dir, 'nodeterm-codex-envdump')
+    fs.writeFileSync(script2, buildCodexLauncherScript(JSON.stringify(dumpScript)), { mode: 0o755 })
+
+    await callLauncher([], { NODETERM_CODEX_ACCOUNT_ID: 'acct-A' }, script2)
+
+    const dumped = fs.readFileSync(envDump, 'utf8')
+    // The per-pane node id is scrubbed for the daemon (else its tool shells all report node-1).
+    expect(dumped).toContain('NID=[]')
+    // …and the per-pane hook endpoint too — a tool shell recovers it per-thread from the record.
+    expect(dumped).toContain('HOOK=[]')
+    // The account scope is deliberately preserved: the resolver needs it to pick the record scope.
+    expect(dumped).toContain('ACC=[acct-A]')
+  })
+
+  // The #351 interplay, pinned: a failed endpoint preflight (#351's unquoted-path sourcing bug,
+  // an unreadable file, an app restart) must NEVER reach the daemon start. This is what makes #350
+  // and #351 INDEPENDENT bugs rather than a chain — the daemon-env leak above requires the shared
+  // path to have proceeded, and a #351-style failure falls back to plain codex BEFORE that line.
+  it('a failed endpoint preflight never starts the daemon (#351 cannot feed #350)', async () => {
+    const envDump = path.join(dir, 'daemon-env-endpointfail.txt')
+    const dumpScript = path.join(dir, 'dump-daemon-env-endpointfail.sh')
+    fs.writeFileSync(dumpScript, `#!/bin/sh\n: > ${JSON.stringify(envDump)}\n`, { mode: 0o755 })
+    const script2 = path.join(dir, 'nodeterm-codex-endpointfail')
+    fs.writeFileSync(script2, buildCodexLauncherScript(JSON.stringify(dumpScript)), { mode: 0o755 })
+
+    await callLauncher(['do', 'work'], { NODETERM_HOOK_ENDPOINT: '/nonexistent/hook-endpoint.env' }, script2)
+
+    // Plain codex with the args intact, and the daemon start command was never invoked.
+    expect(codexArgv()).toEqual(['do work'])
+    expect(fs.existsSync(envDump)).toBe(false)
+    expect(fallbacks.map((f) => f.reason)).toContain('hook-endpoint-unavailable')
   })
 
   it('keeps the caller arguments after the thread it resolved', async () => {
@@ -162,6 +250,53 @@ describe('generated Codex launcher', () => {
     expect(bound).toEqual([{ nodeId: 'node-1', threadId: 'thread-xyz' }])
     expect(started).toEqual([])
     expect(codexArgv()).toEqual(['--remote unix:// resume thread-xyz'])
+  })
+
+  // S6: the account scope travels in the POST body, never on argv (Constraint 6), so the record is
+  // filed under the right account. An empty id (the system account) reaches the handler as undefined.
+  it('threads the managed account id through start (in the body, not on argv)', async () => {
+    await callLauncher([], { NODETERM_CODEX_ACCOUNT_ID: 'acct-A' })
+    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), accountId: 'acct-A' }])
+    // The account id is NOT on the codex command line.
+    expect(codexArgv().join(' ')).not.toContain('acct-A')
+  })
+
+  it('threads the managed account id through a resume bind too', async () => {
+    await callLauncher(['resume', 'thread-xyz'], { NODETERM_CODEX_ACCOUNT_ID: 'acct-A' })
+    expect(bound).toEqual([{ nodeId: 'node-1', threadId: 'thread-xyz', accountId: 'acct-A' }])
+    expect(codexArgv().join(' ')).not.toContain('acct-A')
+  })
+
+  it('an account id that could escape the mapping directory → plain codex, never an unbound bind', async () => {
+    await callLauncher(['do', 'work'], { NODETERM_CODEX_ACCOUNT_ID: '../evil' })
+    // No thread was started or bound under the hostile scope; codex ran plain with the args intact.
+    expect(started).toEqual([])
+    expect(bound).toEqual([])
+    expect(codexArgv()).toEqual(['do work'])
+    expect(fallbacks.map((f) => f.reason)).toContain('codex-account-invalid')
+  })
+
+  // The SERVER's own gate, independent of the launcher: a hostile account id posted directly is
+  // refused at 400 BEFORE the start handler runs — so `startCodexThread` never creates a thread the
+  // record write would then orphan. (Mutation: drop the isSafeAccountId gate ⇒ 200 + a started row.)
+  it('the server refuses a hostile account id at 400 before starting a thread', async () => {
+    const status = await postCodexThread('start', {
+      nodeId: 'node-1',
+      cwd: fs.realpathSync(dir),
+      accountId: '../evil'
+    })
+    expect(status).toBe(400)
+    expect(started).toEqual([]) // the handler never ran ⇒ no orphaned thread
+  })
+
+  it('the server accepts a safe managed account id on a direct post', async () => {
+    const status = await postCodexThread('start', {
+      nodeId: 'node-1',
+      cwd: fs.realpathSync(dir),
+      accountId: 'acct-A'
+    })
+    expect(status).toBe(200)
+    expect(started).toEqual([{ nodeId: 'node-1', cwd: fs.realpathSync(dir), accountId: 'acct-A' }])
   })
 })
 

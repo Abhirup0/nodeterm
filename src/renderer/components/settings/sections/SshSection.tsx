@@ -108,7 +108,7 @@ export function SshSection({ isActive }: { isActive: boolean }): React.JSX.Eleme
     <SettingsSection
       id="ssh"
       title="Remote (SSH)"
-      description="Saved SSH servers appear under “New remote”, and can host nodes on a local canvas. Opening remote terminals over SSH is free."
+      description="Saved SSH servers appear under “New remote”, and can host nodes on a local canvas. Each also becomes a machine in Accounts, where its own isolated Codex logins live. Opening remote terminals over SSH is free."
       isActive={isActive}
       searchEntries={ENTRIES}
     >

@@ -1,9 +1,23 @@
-import { describe, it, expect } from 'vitest'
-import { mapCodexWindow, mapCodexLimits, readCodexAuth, codexHome } from './codex-usage'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import {
+  mapCodexWindow,
+  mapCodexLimits,
+  readCodexAuth,
+  codexHome,
+  fetchCodexUsage
+} from './codex-usage'
 import { primaryLimit, limitShortLabel } from '../../shared/usage-limits'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+
+// The app-server tier spawns the real `codex` binary; force it to decline instantly so the
+// identity-stamping tests below are hermetic (they exercise the backend + unavailable paths only).
+vi.mock('child_process', () => ({
+  spawn: () => {
+    throw new Error('app-server disabled in test')
+  }
+}))
 
 /**
  * The ChatGPT backend's `wham/usage` rate_limit block, matching Codex's own
@@ -144,6 +158,60 @@ describe('readCodexAuth', () => {
     await expect(readCodexAuth(dir)).resolves.toEqual({ accessToken: null, accountId: null })
     fs.writeFileSync(path.join(dir, 'auth.json'), 'not json')
     await expect(readCodexAuth(dir)).resolves.toEqual({ accessToken: null, accountId: null })
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('fetchCodexUsage account identity', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function authHome(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-id-'))
+    fs.writeFileSync(
+      path.join(dir, 'auth.json'),
+      JSON.stringify({ tokens: { access_token: 'tok', account_id: 'chatgpt-xyz' } })
+    )
+    return dir
+  }
+
+  it('stamps the account identity on the backend (ok) row', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ plan_type: 'pro', rate_limit: BACKEND_RATE_LIMIT })
+      }))
+    )
+    const dir = authHome()
+    const row = await fetchCodexUsage(dir, { id: 'acc-1', label: 'Work', email: 'work@example.com' })
+    expect(row.status).toBe('ok')
+    // The row read from THIS account's home is attributed to THIS account, never left un-owned.
+    expect(row.accountId).toBe('acc-1')
+    expect(row.account).toBe('work@example.com')
+    expect(row.limits.length).toBeGreaterThan(0)
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('stamps the account identity even on the unavailable row (no auth, both tiers decline)', async () => {
+    // No auth.json ⇒ the backend tier returns null without a request; the app-server tier is
+    // stubbed to throw ⇒ 'unavailable'. The empty row must still fail closed to THIS account.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-noauth-'))
+    const row = await fetchCodexUsage(dir, { id: 'acc-2', label: 'Personal', email: 'me@example.com' })
+    expect(row.status).toBe('unavailable')
+    expect(row.limits).toEqual([])
+    expect(row.accountId).toBe('acc-2')
+    expect(row.account).toBe('me@example.com')
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('leaves the system row un-owned when no identity is given', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-sys-'))
+    const row = await fetchCodexUsage(dir)
+    expect(row.status).toBe('unavailable')
+    expect(row.accountId).toBeUndefined()
+    expect(row.account).toBeNull()
     fs.rmSync(dir, { recursive: true, force: true })
   })
 })

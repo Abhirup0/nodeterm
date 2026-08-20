@@ -1,11 +1,26 @@
 import { useEffect, useState } from 'react'
 import type { ClaudeAccount } from '@shared/types'
+import type { CodexAccount } from '@shared/codex-account'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
+import { useSystemCodexAccount } from '../../../state/systemCodexAccount'
 import { isAccountLoginNode } from '../../../state/workspace'
 import { useProjects } from '../../../state/projects'
 import { useSshConn } from '../../../state/sshConn'
+import { useSshServers } from '../../../state/sshServers'
+import {
+  applyResolvedCodexAccounts,
+  discoverResolvedCodexAccounts
+} from '../../../state/codexAccountReconcile'
+import {
+  codexRemoteTargets,
+  groupCodexAccountsByMachine,
+  strayCodexAccounts
+} from '../../../lib/codexMachineGroups'
+import { presentAccount } from '../../../lib/accountPresentation'
+import { codexAccountSelectable } from '../../../canvas/codex-account-switch'
+import { AccountIdentityPills } from '../../AccountIdentityPills'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
@@ -16,9 +31,49 @@ const ROWS = {
   accounts: {
     title: 'Claude accounts',
     keywords: ['account', 'claude', 'login', 'isolated', 'multi', 'email']
+  },
+  codex: {
+    title: 'Codex accounts',
+    keywords: ['account', 'codex', 'openai', 'login', 'isolated', 'multi', 'email', 'machine', 'ssh']
   }
 }
 const ENTRIES = Object.values(ROWS)
+
+/** One machine's card in the accounts UI: a connectivity dot, the machine label, a Local/SSH pill,
+ *  and (for a remote machine) its `user@host` subtitle. Children are the provider account rows. */
+function MachinePanel({
+  label,
+  remote,
+  hostKey,
+  connected,
+  children
+}: {
+  label: string
+  remote: boolean
+  hostKey?: string
+  connected?: boolean
+  children: React.ReactNode
+}): React.JSX.Element {
+  return (
+    <div className="space-y-3 rounded-md border border-border p-3">
+      <div className="flex items-center gap-2">
+        <span
+          className={`inline-block h-2 w-2 rounded-full ${
+            !remote || connected ? 'bg-[color:var(--ok,#30d158)]' : 'bg-[color:var(--muted-2)]'
+          }`}
+          aria-hidden
+          title={!remote ? 'This machine' : connected ? 'Connected' : 'Not connected'}
+        />
+        <span className="text-[13px] font-medium text-text">{label}</span>
+        <span className="rounded-full bg-fill-weak px-2 py-0.5 text-[11px] font-medium text-muted">
+          {remote ? 'SSH' : 'Local'}
+        </span>
+        {remote && hostKey ? <span className="text-[12px] text-muted">{hostKey}</span> : null}
+      </div>
+      {children}
+    </div>
+  )
+}
 
 /** `addingOn` sentinel for the local button — a host key can never be this. */
 const LOCAL_TARGET = ''
@@ -38,6 +93,12 @@ function AddingLabel({ where }: { where: string }): React.JSX.Element {
 function applyAccounts(fn: (accs: ClaudeAccount[]) => ClaudeAccount[]): void {
   const s = useSettings.getState()
   s.update({ claudeAccounts: fn(s.settings.claudeAccounts) })
+}
+
+/** The same fresh-read/transform for the Codex account list. */
+function applyCodexAccounts(fn: (accs: CodexAccount[]) => CodexAccount[]): void {
+  const s = useSettings.getState()
+  s.update({ codexAccounts: fn(s.settings.codexAccounts) })
 }
 
 /** Counts nodes bound to an account across every project's SERIALIZED nodes. The active
@@ -93,6 +154,190 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const connectedProjectIdForHost = (host?: string): string | undefined => {
     const id = projectIdForHost(host)
     return id && sshByProject[id] ? id : undefined
+  }
+
+  // ── Codex accounts (machine-grouped) ─────────────────────────────────────────────────────────
+  const codexAccounts = useSettings((s) => s.settings.codexAccounts)
+  const sshServers = useSshServers((s) => s.servers)
+  const systemCodexEmail = useSystemCodexAccount((s) => s.email)
+  const remoteSystemCodexEmails = useSystemCodexAccount((s) => s.remoteEmails)
+  useEffect(() => useSystemCodexAccount.getState().ensure(), [])
+  useEffect(() => {
+    void useSshServers.getState().hydrate?.()
+  }, [])
+  const [pendingRemoveCodex, setPendingRemoveCodex] = useState<CodexAccount | null>(null)
+  const [addingCodex, setAddingCodex] = useState(false)
+
+  // The reachable machines: this Mac first, then every saved SSH server unioned with the active
+  // project's own server (deduped by host key). Accounts partition onto them by `host`.
+  const remoteTargets = codexRemoteTargets(sshServers, activeProject?.ssh?.server)
+  const codexGroups = groupCodexAccountsByMachine(codexAccounts, remoteTargets)
+  const codexStrays = strayCodexAccounts(codexAccounts, remoteTargets)
+
+  // Discover the system Codex identity of every CONNECTED remote target, once per host. A host with
+  // no live connection is skipped (and never fabricated — its panel simply shows no system email).
+  useEffect(() => {
+    if (!isActive) return
+    for (const [host] of remoteTargets) {
+      const projectId = connectedProjectIdForHost(host)
+      if (projectId) useSystemCodexAccount.getState().ensureRemote(host, projectId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, remoteTargets.map(([h]) => h).join('|'), sshByProject])
+
+  // Reconcile LOCAL pending Codex accounts against their now-authenticated homes. Remote accounts
+  // are intentionally NOT probed here: `codexAccounts.identity` reads the LOCAL managed home, so
+  // resolving a remote account against it would read the wrong machine. Their reconcile arrives
+  // with the host relay (a follow-up); until then a remote row stays pending, not misattributed.
+  useEffect(() => {
+    if (!isActive) return
+    let cancelled = false
+    let timer: number | undefined
+    const reconcile = async (): Promise<void> => {
+      const localPending = useSettings
+        .getState()
+        .settings.codexAccounts.filter((account) => account.pending && !account.host)
+      if (localPending.length === 0) return
+      const resolved = await discoverResolvedCodexAccounts(localPending, (id) =>
+        window.nodeTerminal.codexAccounts.identity(id)
+      )
+      if (cancelled) return
+      if (resolved.length > 0) {
+        applyCodexAccounts((accs) => applyResolvedCodexAccounts(accs, resolved))
+      }
+      const stillPending = useSettings
+        .getState()
+        .settings.codexAccounts.some((account) => account.pending && !account.host)
+      if (!cancelled && stillPending) timer = window.setTimeout(() => void reconcile(), 2000)
+    }
+    void reconcile()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [isActive, codexAccounts])
+
+  const setCodexLabel = (id: string, label: string): void =>
+    applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
+
+  // Add a LOCAL managed Codex account and open its device-login node. Remote Codex account creation
+  // is fail-closed here: the base `codexAccounts.add()` mints on THIS Mac, so offering it under a
+  // remote machine would silently create a local account — the remote leg lands with the host relay.
+  const onAddCodexAccount = async (): Promise<void> => {
+    if (addingCodex) return
+    setAddingCodex(true)
+    try {
+      const added = await window.nodeTerminal.codexAccounts.add()
+      const account: CodexAccount = { id: added.id, label: 'New Codex account', pending: true }
+      applyCodexAccounts((accs) => [...accs, account])
+      window.dispatchEvent(
+        new CustomEvent('nodeterm:add-codex-account-login', { detail: { accountId: added.id } })
+      )
+      const captured = await window.nodeTerminal.codexAccounts.waitLogin(added.id)
+      if (captured) {
+        applyCodexAccounts((accs) =>
+          applyResolvedCodexAccounts(accs, [{ id: added.id, email: captured.email }])
+        )
+      }
+    } finally {
+      setAddingCodex(false)
+    }
+  }
+
+  const confirmRemoveCodex = async (account: CodexAccount): Promise<void> => {
+    setPendingRemoveCodex(null)
+    if (account.pending) await window.nodeTerminal.codexAccounts.cancelWaitLogin(account.id)
+    // A remote account's home lives on its host; the base remove() acts locally only, so a remote
+    // account is dropped from settings without a local fs op it does not own (fail-closed — it never
+    // deletes the wrong machine's home).
+    if (!account.host) await window.nodeTerminal.codexAccounts.remove(account.id)
+    applyCodexAccounts((accs) => accs.filter((a) => a.id !== account.id))
+    useProjects.setState((s) => ({
+      projects: s.projects.map((p) => ({
+        ...p,
+        nodes: p.nodes.map((n) => (n.accountId === account.id ? { ...n, accountId: undefined } : n))
+      }))
+    }))
+  }
+
+  // The presented account for a row, resolving the friendly machine label from saved servers.
+  const presentCodex = (account: CodexAccount) => {
+    const server = account.host
+      ? sshServers.find((entry) => sshHostKey(entry) === account.host)
+      : undefined
+    return presentAccount({
+      label: account.label,
+      email: account.email,
+      host: account.host,
+      machineLabel: server?.label
+    })
+  }
+
+  /** A machine's managed-account rows + the system row header. `remoteHost` set ⇒ that host. */
+  const codexRowsFor = (
+    accounts: readonly CodexAccount[],
+    remoteHost?: string
+  ): React.JSX.Element => {
+    const systemEmail = remoteHost ? (remoteSystemCodexEmails[remoteHost] ?? null) : systemCodexEmail
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-2">
+          <AccountIdentityPills
+            account={presentAccount({
+              label: null,
+              email: systemEmail,
+              host: remoteHost,
+              machineLabel: remoteHost
+                ? sshServers.find((s) => sshHostKey(s) === remoteHost)?.label
+                : undefined
+            })}
+          />
+        </div>
+        {accounts.map((account) => {
+          // The SAME fail-closed gate the create/switch UI uses (§5 Property 4): an account that is
+          // unsafe, missing, or a remote account with no live connection is not operable. Driving
+          // the row's warning state through it (rather than an ad-hoc host check) makes
+          // `codexAccountSelectable` a real reader and keeps one definition of "operable".
+          const selectable = codexAccountSelectable(account.id, codexAccounts, (host) =>
+            connectedProjectIdForHost(host)
+          )
+          const blockedReason = selectable.ok
+            ? undefined
+            : selectable.reason === 'no-connection'
+              ? `Connect to ${account.host} to use this account`
+              : 'This account is unavailable'
+          return (
+            <div
+              key={account.id}
+              className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-2"
+              title={blockedReason}
+            >
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <Input
+                  className="w-48"
+                  placeholder="Codex account label"
+                  value={account.label}
+                  onChange={(e) => setCodexLabel(account.id, e.target.value)}
+                />
+                <AccountIdentityPills account={presentCodex(account)} warning={!selectable.ok} />
+                {account.pending ? (
+                  <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
+                    pending
+                  </span>
+                ) : null}
+              </div>
+              <Button
+                variant="ghost"
+                aria-label="Remove Codex account"
+                onClick={() => setPendingRemoveCodex(account)}
+              >
+                ×
+              </Button>
+            </div>
+          )
+        })}
+      </div>
+    )
   }
 
   // Open a login terminal for an account and wait (up to ~5 min) for the CLI to write its
@@ -383,12 +628,76 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
         </div>
       </SearchableRow>
 
+      {/* Codex accounts, grouped by machine. Each managed Codex login has its own CODEX_HOME and
+          credentials; a node keeps its account for life. Machine provenance (Local / SSH · host)
+          is shown as a pill; the credential-storage kind is deliberately not surfaced. */}
+      <SearchableRow {...ROWS.codex}>
+        <div className="space-y-4">
+          {codexGroups.map((group) => (
+            <MachinePanel
+              key={group.host || 'local'}
+              label={group.remote ? (group.server?.label ?? group.host) : 'This Mac'}
+              remote={group.remote}
+              hostKey={group.host || undefined}
+              connected={group.remote ? !!connectedProjectIdForHost(group.host) : true}
+            >
+              {codexRowsFor(group.accounts, group.remote ? group.host : undefined)}
+              {!group.remote ? (
+                <div className="space-y-2">
+                  <Button variant="primary" disabled={addingCodex} onClick={() => void onAddCodexAccount()}>
+                    {addingCodex ? (
+                      <span className="inline-flex items-center gap-2">
+                        <span className="ui-spinner" aria-hidden />
+                        Setting up on this Mac…
+                      </span>
+                    ) : (
+                      'Add Codex account'
+                    )}
+                  </Button>
+                </div>
+              ) : (
+                <p className="text-[12px] leading-relaxed text-muted">
+                  Codex accounts on this machine are managed from its own NodeTerm. Accounts already
+                  created here are shown above.
+                </p>
+              )}
+            </MachinePanel>
+          ))}
+
+          {codexStrays.length > 0 ? (
+            <div className="space-y-2 rounded-md border border-[color:var(--warn)]/40 p-3">
+              <p className="text-[12px] font-medium text-[color:var(--warn)]">
+                Accounts on machines you no longer have saved
+              </p>
+              {codexRowsFor(codexStrays)}
+            </div>
+          ) : null}
+
+          <p className="text-[12px] leading-relaxed text-muted">
+            Codex accounts are isolated logins, grouped by the machine their credentials live on.
+            New Codex nodes pick an account from the add menus; each node keeps its account for life.
+          </p>
+        </div>
+      </SearchableRow>
+
       {pendingRemove ? (
         <ConfirmDialog
           message={removeMessage(pendingRemove)}
           confirmLabel="Remove"
           onConfirm={() => void confirmRemove(pendingRemove)}
           onCancel={() => setPendingRemove(null)}
+        />
+      ) : null}
+      {pendingRemoveCodex ? (
+        <ConfirmDialog
+          message={`Remove Codex account "${pendingRemoveCodex.label}"?${
+            pendingRemoveCodex.host
+              ? ' It is dropped from this NodeTerm; its credentials on the host are untouched.'
+              : ' Its logged-in credentials and its Codex home will be deleted.'
+          }`}
+          confirmLabel="Remove"
+          onConfirm={() => void confirmRemoveCodex(pendingRemoveCodex)}
+          onCancel={() => setPendingRemoveCodex(null)}
         />
       ) : null}
     </SettingsSection>

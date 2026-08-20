@@ -156,8 +156,9 @@ describe('buildManagedScript', () => {
     // under /bin/sh in core/codex-thread-identity-sh.test.ts.)
     it('is present in every agent script when an identity root is known', () => {
       for (const agent of ['claude', 'codex', 'gemini', 'grok', 'opencode']) {
+        // The account-scoped resolver bakes the (quoted) record root in and scans scopes below it.
         expect(buildManagedScript(agent, '/data/codex-thread-nodes')).toContain(
-          "nt_codex_map='/data/codex-thread-nodes'/\"$CODEX_THREAD_ID\""
+          "nt_codex_root='/data/codex-thread-nodes'"
         )
       }
     })

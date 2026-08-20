@@ -2,7 +2,7 @@ import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
-import { existsSync, statSync } from 'fs'
+import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
 import { homedir, hostname } from 'os'
 import { randomUUID } from 'crypto'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, powerMonitor, safeStorage, shell, systemPreferences, webContents } from 'electron'
@@ -14,8 +14,19 @@ import { IPC } from '../shared/ipc'
 const logBuffer = new LogBuffer()
 installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
+import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { BrowserControlLedger } from './browser-control-ledger'
+import {
+  recordOpenProjectGrant,
+  isGranted as projectGrantedTo,
+  atCap as projectGrantsAtCap,
+  clearCaller as clearProjectGrants,
+  gateProjectTarget,
+  gateOpenProject,
+  PROJECT_TARGETABLE_VERBS,
+  OPEN_PROJECT_GRANT_CAP
+} from './project-grants'
 import { BrowserLeaseManager, BrowserSession } from './browser-lease'
 import { CdpEventBus, type Sendable } from './browser-actions'
 import { RefTable } from './browser-refs'
@@ -63,6 +74,18 @@ import { registerAgentEnvIpc } from '../core/agent-env-ipc'
 import { presenceHub } from '../core/presence/hub'
 import { SshStore } from './ssh-store'
 import { GitService } from '../core/git-service'
+import { ProjectTrustStore } from '../core/project-trust-store'
+import { ProjectSetupService } from '../core/project-setup-service'
+import {
+  makeProjectTrustRequester,
+  registerProjectSetupHandlers,
+  type ProjectSetupHandlerDeps
+} from '../core/project-setup-handlers'
+import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
+import { registerWorktreeSharedPathsHandlers } from '../core/worktree-shared-paths-handlers'
+import { makeProjectSpawnOverrides } from '../core/project-spawn-overrides'
+import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
+import { makeSshSetupRunner } from './remote-ssh/ssh-setup-runner'
 import { registerGitHubIntegration } from '../core/github/integration'
 import { runGitHubCliCommand } from '../core/github/credentials'
 import {
@@ -78,7 +101,7 @@ import {
 import { generateCommitMessage, generateGroupName, generateTerminalName } from '../core/commit-message'
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
-import { hookServer } from '../core/agents/hook-server'
+import { hookServer, OPEN_PROJECT_CONTROL_REFUSAL } from '../core/agents/hook-server'
 import { askpassServer, ensureAskpassScript } from './remote-ssh/ssh-askpass'
 import { appSshAgent } from './remote-ssh/ssh-agent'
 import {
@@ -88,7 +111,23 @@ import {
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
 import { setMainWindow, getMainWindow, sendToMain, closeAction, createCrashReloadPolicy } from './main-window'
-import { installKeydownIntercepts } from './keydown-intercept'
+import {
+  MENU_ITEM_ID_CLOSE,
+  MENU_ITEM_ID_KANBAN,
+  MENU_ITEM_ID_MINIMIZE,
+  MENU_ITEM_ID_SETTINGS,
+  installKeydownIntercepts,
+  menuItemIdsToSuspend,
+  menuStandsDown,
+  navigationClearsRecording,
+  policyStandsDown,
+  resolveInterceptBindings,
+  type KeydownInterceptBindings
+} from './keydown-intercept'
+import {
+  normalizeTerminalShortcutPolicy,
+  type TerminalShortcutPolicy
+} from '../shared/keybindings'
 import {
   initNotchHud,
   applyNotchHudSettings,
@@ -183,6 +222,7 @@ import { WhisperModelStore } from '../core/speech/whisper-models'
 import { SpeechService } from '../core/speech/speech-service'
 import { registerSpeechIpc } from '../core/speech/register-ipc'
 import { initClaudeAccounts } from './claude-accounts'
+import { initCodexAccounts } from './codex-accounts'
 import { claudeCliCaps, registerClaudeCliIpc, type ClaudeCliCaps } from '../core/claude-cli'
 import { refreshCodexIdentityCaps, registerCodexIdentityIpc } from '../core/codex-identity-caps'
 import {
@@ -191,6 +231,8 @@ import {
   writeCodexThreadIdentity
 } from '../core/codex-identity-proxy'
 import { codexThreadExists, startCodexThread } from '../core/codex-session-name'
+import { codexUsageAccounts } from '../core/codex-accounts-core'
+import { codexHomeFor } from '../core/codex-config-dir'
 import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
 import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
 import { claudeConfigDirFor } from '../core/claude-config-dir'
@@ -276,6 +318,82 @@ function isSafeExternalUrl(url: unknown): url is string {
 }
 
 const settingsStore = new SettingsStore()
+// ⌘M / ⌘W are registry commands (`node.toggleMarkdown` / `node.close`), so what the window
+// intercepts follows the user's settings. Resolved LAZILY (first keystroke, long after
+// `settingsStore.init()` in `whenReady`) rather than at module load, where `get()` would still be
+// DEFAULT_SETTINGS and every override would be missed until the next save; recomputed on
+// `onChange`, which fires after a successful save. Never per keystroke — sanitize is real work.
+const interceptIsMac = process.platform === 'darwin'
+let interceptBindings: KeydownInterceptBindings | null = null
+const currentInterceptBindings = (): KeydownInterceptBindings =>
+  (interceptBindings ??= resolveInterceptBindings(settingsStore.get().keybindings, interceptIsMac))
+// The user's terminal-shortcut policy, memoized on exactly the same terms and for exactly the same
+// reason as `interceptBindings` above: lazily on first keystroke (module load is before
+// `settingsStore.init()`, where every stored value still reads as DEFAULT_SETTINGS), recomputed on
+// `onChange`, never per keystroke. Normalized through the shared helper so an unknown value from a
+// hand-edited settings.json reads as the default `app-first` — i.e. as "keep intercepting", which
+// is the direction that leaves the app working.
+// FIRST-READ STALENESS IS BENIGN, and the ordering is what makes it so: `settingsStore.init()` runs
+// in `whenReady` well before `createWindow` → `buildAppMenu`, whose trailing `syncMenuForStandDown`
+// is the earliest possible read of this memo — so the value it latches is already the user's saved
+// policy, never DEFAULT_SETTINGS, and every later change arrives on `onChange`. The memo can
+// therefore only ever hold what settings.json says.
+let interceptPolicy: TerminalShortcutPolicy | null = null
+const currentInterceptPolicy = (): TerminalShortcutPolicy =>
+  (interceptPolicy ??= normalizeTerminalShortcutPolicy(settingsStore.get().terminalShortcutPolicy))
+settingsStore.onChange((s) => {
+  interceptBindings = resolveInterceptBindings(s.keybindings, interceptIsMac)
+  interceptPolicy = normalizeTerminalShortcutPolicy(s.terminalShortcutPolicy)
+  // A policy flip changes the stood-down answer with no focus event behind it, so the menu leg
+  // owes a sync here too. (`buildAppMenu` re-runs on this same hook and syncs at its end, so this
+  // is belt-and-braces for the ordering between the two `onChange` subscribers — cheap, and not
+  // something to leave to subscriber registration order.)
+  syncMenuForStandDown()
+})
+// TWO bits the RENDERER owns and main only mirrors. Both are module-level `let`s read through a
+// closure, exactly like `interceptBindings` above: the window is created later and can be recreated
+// (macOS dock reopen), so nothing may capture a value.
+//
+// 1. `shortcutRecording` — Settings' shortcut recorder is armed: stand every intercept down so the
+//    chord the user presses reaches the recorder. Without it, recording ⌘W CLOSES THE SELECTED
+//    NODES — a claimed chord never reaches the page, so the recorder's own preventDefault cannot
+//    save it. It ALSO drives the menu leg (`menuStandsDown` → `syncMenuForStandDown`, called from
+//    this bit's IPC receiver), which is what lets a menu-owned chord — ⌘M, ⌘⇧B, ⌘,, off-mac
+//    Ctrl+W — reach the recorder instead of the item that owns it.
+// 2. `terminalFocused` — an xterm holds keyboard focus, which under the `terminal-first` policy
+//    means the intercepts stand down so the terminal gets the chord. `before-input-event` fires
+//    before any renderer handler could answer, so the answer has to be sitting here in advance;
+//    `renderer/lib/terminalFocusMirror.ts` keeps it current and change-deduped.
+//
+// FAIL-SAFE DIRECTION, and it is the same one for both: every uncertainty resolves to `false`
+// (intercepts ON — the app as it behaved before either feature). The alternative is ⌘W/⌘M/⌘0
+// silently handed back to the application MENU app-wide, with no component left alive to release
+// the bit. So EVERY way the page that set one can stop existing owes a clear, and `createWindow`
+// wires three — window `closed`, `render-process-gone`, and a main-frame navigation (⌘R). That is
+// three known paths, not a proof of exhaustiveness: a fourth would show up as "⌘W stopped working
+// after I did X", so add its reset beside the others rather than assuming this list is closed.
+// The two bits are cleared TOGETHER, by one function called at all three sites, because they die
+// for the same reason (the page is gone) and a reset that remembered only one of them would be
+// invisible until a user hit the policy path.
+//
+// ONE RULE FOR A FOURTH RESET, and it is specific to `terminalFocused`: only clear it where the
+// renderer's DOCUMENT is ending. The mirror is change-deduped and never re-asserts — it holds its
+// own `last` and reports only on a change — so clearing main's bit under a page that is still
+// alive and still focused on its terminal strands the two out of sync (`last === true` there,
+// `false` here) with no event that will ever reconcile them, and the policy is dead until the user
+// happens to click away and back. The three below are safe precisely because each one means that
+// page, and its mirror, are gone. `shortcutRecording` has no such constraint (the recorder
+// re-arms), so do not reason about the two bits interchangeably.
+let shortcutRecording = false
+let terminalFocused = false
+const clearRendererKeyState = (): void => {
+  shortcutRecording = false
+  terminalFocused = false
+  // The menu leg follows the same state, so it must follow it here too — otherwise a crash or a
+  // reload while stood down would leave Window ▸ Minimize disabled with nothing left to re-enable
+  // it, i.e. ⌘M dead app-wide. Safe before any window exists: it no-ops without a menu.
+  syncMenuForStandDown()
+}
 const sshStore = new SshStore()
 const ptyManager = new PtyManager()
 // Dictation: local whisper.cpp models live under userData, one dir per install (same convention
@@ -308,6 +426,29 @@ wirePeerRegistry({
 // Set once the app window is ready; used by the quit hooks to tear down SSH-project masters and
 // (via the closures below) to resolve a live SSH project's ControlMaster for remote workspace IO.
 let sshProjectManager: ReturnType<typeof initSshProject> | undefined
+
+// The standalone Codex relay bundle (`out/main/codex-relay.js`, built by scripts/build-codex-relay.mjs
+// after electron-vite build), uploaded to a Linux host for managed Codex accounts. Read once, beside
+// the main entry so the same `__dirname` resolves in dev and inside a packaged asar. Single-fd read
+// (open→fstat→read the SAME descriptor) — no stat-then-read on the path. Empty string on any miss so
+// the SSH manager degrades to "no managed Codex runtime" instead of throwing.
+let codexRelayBundleCache: string | undefined
+async function loadCodexRelayBundle(): Promise<string> {
+  if (codexRelayBundleCache !== undefined) return codexRelayBundleCache
+  try {
+    const fd = openSync(join(__dirname, 'codex-relay.js'), 'r')
+    try {
+      // fstat the OPEN descriptor (not the path) and read the SAME fd — a regular-file check with no
+      // stat-then-read window. A non-regular entry (fifo/dir/device) is treated as "no bundle".
+      codexRelayBundleCache = fstatSync(fd).isFile() ? readFileSync(fd, 'utf8') : ''
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    codexRelayBundleCache = ''
+  }
+  return codexRelayBundleCache
+}
 // Remote SSH IO for the workspace store: mirrors each SSH project's <remoteCwd>/.nodeterm/project.json
 // over that project's live master. Resolves the ref lazily — the manager is created after the window
 // is ready — and fails open (no-op) while the project is disconnected.
@@ -339,6 +480,69 @@ workspaceStore.onPersist = () => {
   refreshNodeTokens()
 }
 const gitService = new GitService()
+
+// Project setup/archive runner (SDD: 2026-08-19-project-settings-trust). The trust store is keyed
+// by LOCATION, never project id (hostile-project-json), so one instance covers every project.
+// `readSettings` reuses WorkspaceStore's own resolution instead of re-reading disk. `ProjectSetupService`
+// already matches `ProjectSetupHandlerService`'s shape, so it is passed straight through — the
+// TRUST boundary (deriving rootPath/ssh/projectName from THIS machine's own index by projectId,
+// never the renderer, and re-validating `worktreePath` against the project's actual git worktrees)
+// lives centrally in `registerProjectSetupHandlers` itself (project-setup-handlers.ts), shared with
+// the Server Edition below instead of re-implemented per shell.
+const projectTrustStore = new ProjectTrustStore()
+const projectSetupService = new ProjectSetupService({
+  trust: projectTrustStore,
+  readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+  runLocal: makeLocalSetupRunner(),
+  // The ssh leg streams over the project's LIVE ControlMaster, resolved lazily (the manager is
+  // created only once the window is ready) on the FULL endpoint — host+user+port+remoteCwd, not the
+  // cwd alone: the default remoteCwd is `~`, and one `user@host` can be several machines on
+  // different ports. A project with no matching live connection resolves to null and the runner
+  // reports that as a failed run rather than dialing a fresh connection. Server Edition has no
+  // ssh-project manager at all, so it wires `runLocal` only and an ssh target there stays
+  // `{status:'skipped', reason:'unavailable'}`.
+  runSsh: makeSshSetupRunner((endpoint) => sshProjectManager?.refForEndpoint(endpoint) ?? null),
+  // The trust prompt goes to THIS window only — never `platform().broadcast`, which also fans out
+  // to every relay peer (a paired phone, another desktop). Broadcasting it would hand a guest the
+  // shared script bodies (the exact bytes being approved) and put the host's own trust dialog on
+  // their screen. Same main-window-only push the ssh passphrase prompt uses; with the window closed
+  // (macOS) the prompt is simply not delivered and the run rides out its expiry as `unanswered`,
+  // which is the fail-closed direction.
+  sendConsent: (channel, payload) => sendToMain(channel, payload)
+})
+const projectSetupDeps: ProjectSetupHandlerDeps = {
+  projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+  worktreeList: (repoPath) => gitService.worktreeList(repoPath)
+}
+registerProjectSetupHandlers(corePlatform, projectSetupService, projectSetupDeps)
+// `worktree:materialize-shared` — same sibling-registrar shape and the SAME trust boundary as the
+// setup runner (rootPath/ssh derived from THIS process's index by projectId, `worktreePath`
+// re-validated against the project's actual git worktrees); the sharedPaths LIST is read here by
+// projectId, never taken off the wire. Reuses the very `projectTargetInfo`/`worktreeList` the setup
+// deps already carry, plus the store's own settings resolution.
+registerWorktreeSharedPathsHandlers(corePlatform, {
+  readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+  targetInfo: projectSetupDeps.projectTargetInfo,
+  worktreeList: projectSetupDeps.worktreeList
+})
+// `project-settings:launch-info` — a sibling registrar (not a widening of
+// WorkspaceStore.registerIpc()) sharing the trust store constructed above.
+registerProjectLaunchInfoHandlers(corePlatform, workspaceStore, projectTrustStore)
+// The SAME settings + trust pieces, aimed at the SPAWN (consumption Task 4): a session opened for a
+// project gets that project's env and terminal program, with the shared half admitted only by the
+// trust verdict `launch-info` reports from. `requestTrust` reuses the very requester the
+// `projectSetupRequestTrust` channel uses, so a spawn that refuses a shared value raises exactly the
+// dialog the renderer's own ask would — single-flighted inside `ensureFamilyTrusted`, so five nodes
+// launching at once raise one. Wired here (not in `ptyManager.init`) so both shells can call it
+// wherever their stores happen to be constructed.
+ptyManager.setProjectSpawnOverrides(
+  makeProjectSpawnOverrides({
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    targetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+    trust: projectTrustStore,
+    requestTrust: makeProjectTrustRequester(projectSetupService, projectSetupDeps)
+  })
+)
 
 // Markers delimiting the `projects.list` relay blob. The iOS client splits on these exact
 // strings to recover [workspace.json | newline-joined tmux session names | agent-status.json],
@@ -381,6 +585,41 @@ let activeRemote: { cwd: string; ref: GitRemoteRef } | null = null
 // macOS close→dock-reopen cycle and silently swallows every send.
 // True from the first before-quit on: lets window close-events through (see hide-on-close).
 let quitting = false
+
+// Confirm-before-quit gate. Set once the user has answered "Quit" in the dialog below, or when
+// a quit is app-initiated rather than user-initiated (auto-update restart) and should not be
+// interrupted by a prompt for a decision already made. `pending` dedupes concurrent triggers
+// (shortcut + menu + window-close firing in the same tick) into a single dialog.
+let quitConfirmed = false
+let skipQuitConfirmation = false
+let quitConfirmationPending = false
+
+/** Resolves true once quitting may proceed. Shows a native confirm dialog (all platforms) on
+ * first call; a Quit answer is remembered so the re-issued app.quit() below is not re-prompted.
+ * Read at ASK TIME, not captured: the Settings toggle must apply to the very next ⌘Q. */
+function confirmQuit(parentWin: BrowserWindow | null): Promise<boolean> {
+  if (!settingsStore.get().confirmBeforeQuit) return Promise.resolve(true)
+  if (quitConfirmed || skipQuitConfirmation) return Promise.resolve(true)
+  if (quitConfirmationPending) return Promise.resolve(false)
+  quitConfirmationPending = true
+  const opts = {
+    type: 'question' as const,
+    buttons: ['Cancel', 'Quit'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'Quit nodeterm?',
+    message: 'Quit nodeterm?',
+    detail: 'Terminal sessions keep running in the background and will still be here next time you open nodeterm.'
+  }
+  const p =
+    parentWin && !parentWin.isDestroyed() ? dialog.showMessageBox(parentWin, opts) : dialog.showMessageBox(opts)
+  return p.then(({ response }) => {
+    quitConfirmationPending = false
+    const confirmed = response === 1
+    if (confirmed) quitConfirmed = true
+    return confirmed
+  })
+}
 
 // Keep-awake tracker (created in whenReady next to the notch HUD, disposed in before-quit).
 let keepAwake: KeepAwakeTracker | undefined
@@ -447,7 +686,13 @@ function buildAppMenu(win: BrowserWindow): void {
   const send = (channel: string): void => {
     if (!win.isDestroyed()) win.webContents.send(channel)
   }
+  // ONE object, placed into BOTH templates below (mac's app menu, off-mac's own `Settings` menu),
+  // so `MENU_ITEM_ID_SETTINGS` resolves on every platform — which is why `menuItemIdsToSuspend`
+  // lists it unconditionally. ⌘, is an ordinary registry command (`app.settings`), not an
+  // intercepted chord: the menu just takes it above the page, and disabling this item under the
+  // stand-down is the only way it can reach a focused terminal.
   const settingsItem: Electron.MenuItemConstructorOptions = {
+    id: MENU_ITEM_ID_SETTINGS,
     label: isMac ? 'Settings…' : 'Settings',
     accelerator: 'CmdOrCtrl+,',
     click: () => send(IPC.appOpenSettings)
@@ -461,6 +706,12 @@ function buildAppMenu(win: BrowserWindow): void {
     // so a reload only re-hydrates the canvas from the workspace store — it never drops a session
     // (same path the crash-reload policy uses). No interceptor claims ⌘R, so the accelerator is
     // honest (unlike ⌘0, which `installKeydownIntercepts` owns for zoom-to-100%).
+    //
+    // These two carry NO id and are the NAMED EXCEPTION to the stand-down (see
+    // `menuItemIdsToSuspend`): ⌘R / ⌘⇧R keep working over a focused terminal under terminal-first,
+    // because a renderer wedged badly enough to stop dispatching keys is exactly when the user
+    // needs the lever — and the reload is also what resets `terminalFocused` / `shortcutRecording`
+    // in main. Do not "complete" the suspend list with them.
     { role: 'reload' },
     { role: 'forceReload' },
     { role: 'toggleDevTools' },
@@ -480,6 +731,11 @@ function buildAppMenu(win: BrowserWindow): void {
       click: () => send(IPC.appFitView)
     },
     {
+      // `viewSubmenu` goes into BOTH templates, so this id resolves on every platform (the same
+      // reason `menuItemIdsToSuspend` lists it unconditionally). ⌘⇧B is a registry command
+      // (`view.kanbanToggle`) the menu happens to own above the page; suspending the item is what
+      // lets a terminal-first user's ⌘⇧B reach the shell like every other chord.
+      id: MENU_ITEM_ID_KANBAN,
       label: 'Toggle Kanban Board',
       accelerator: 'CmdOrCtrl+Shift+B',
       click: () => send(IPC.appToggleKanban)
@@ -523,7 +779,17 @@ function buildAppMenu(win: BrowserWindow): void {
         { label: 'View', submenu: viewSubmenu },
         {
           label: 'Window',
-          submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+          // `id` on minimize: `syncMenuForStandDown` disables it while EITHER stand-down is in
+          // effect — a terminal focused under terminal-first, or an armed shortcut recorder — so
+          // ⌘M falls through to the terminal, or to the recorder, instead of minimizing the
+          // window. mac has no `{role:'close'}` here at all — which is why the intercept is ⌘W's
+          // only handler on mac.
+          submenu: [
+            { role: 'minimize', id: MENU_ITEM_ID_MINIMIZE },
+            { role: 'zoom' },
+            { type: 'separator' },
+            { role: 'front' }
+          ]
         }
       ]
     : [
@@ -543,9 +809,90 @@ function buildAppMenu(win: BrowserWindow): void {
         },
         { label: 'View', submenu: viewSubmenu },
         { label: 'Settings', submenu: [settingsItem] },
-        { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }] }
+        // Both ids matter off-mac: `{role:'close'}` owns Ctrl+W here, which is readline's kill-word
+        // in a terminal — a stand-down that left it enabled would CLOSE the window on a keystroke
+        // a terminal-first user meant for their shell.
+        {
+          label: 'Window',
+          submenu: [
+            { role: 'minimize', id: MENU_ITEM_ID_MINIMIZE },
+            { role: 'close', id: MENU_ITEM_ID_CLOSE }
+          ]
+        }
       ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+  // A REBUILD resets every item to `enabled: true`, and this function runs on every settings
+  // change — so without this line, a terminal-first user with a terminal focused would have ⌘M
+  // silently start minimizing again the moment they toggled any unrelated setting. The sync is
+  // idempotent and cheap; it belongs at the end of every path that installs a menu, not only at
+  // the paths where the stand-down state changes.
+  syncMenuForStandDown()
+}
+
+/**
+ * Enable/disable the menu items whose ACCELERATORS would otherwise beat a stand-down.
+ *
+ * **Two stand-downs share this leg**, composed by `menuStandsDown(shortcutRecording, policy,
+ * terminalFocused)`: the terminal-first policy (below) and an armed Settings shortcut RECORDER.
+ * The recorder needs it for the same structural reason and a different destination — a menu
+ * accelerator is handled above the page, so while it was armed ⌘M minimized the window, ⌘⇧B opened
+ * the kanban board behind the dialog and ⌘, re-opened Settings, none of them recordable. With the
+ * items suspended those chords reach the recorder. **Reload is still not among them** (see below),
+ * so ⌘R / ⌘⇧R remain unrecordable by design. The two INTERCEPT thunks stay independent parameters
+ * on `installKeydownIntercepts`; only this single `enabled` boolean ORs them.
+ *
+ * `installKeydownIntercepts` standing down means only that main stops calling `preventDefault` —
+ * the key then reaches the page, and if the page ignores it, the MENU, which is handled above the
+ * page either way. So under `terminal-first` with a terminal focused, ⌘M would still hit
+ * `{role:'minimize'}` and (Windows/Linux) Ctrl+W would still hit `{role:'close'}` — the latter
+ * closing the window on what a terminal user means as readline's kill-word, i.e. strictly worse
+ * than not having the policy at all. Disabling the item suppresses its accelerator, so the chord
+ * falls through: page → the renderer's dispatcher (terminal context under terminal-first, where
+ * nothing matches) → xterm → the PTY. That is what makes "everything reaches the shell" true for
+ * ⌘M and Ctrl+W too, not just for ⌘0 and mac's ⌘W.
+ *
+ * The list is `menuItemIdsToSuspend` and it also carries **Toggle Kanban Board (⌘⇧B)** and
+ * **Settings (⌘,)** on every platform. Those two are not intercepted chords at all — they are
+ * ordinary registry commands the menu simply takes above the page, which is why the dispatcher
+ * never sees them and could not stand them down itself. **Reload (⌘R / ⌘⇧R) is the named
+ * exception** and stays live while stood down; see `menuItemIdsToSuspend`'s comment for why.
+ *
+ * Called from every place the composed answer can change — the `ui:terminal-focus` receiver, the
+ * `ui:shortcut-recording` receiver (the recorder arms and disarms once per chord the user records),
+ * the policy recompute in `settingsStore.onChange`, `clearRendererKeyState` (which clears BOTH
+ * bits), and the end of `buildAppMenu` (a rebuild resets `enabled`). NEVER per keystroke: this is a
+ * menu mutation, and `before-input-event` is the one path in the app where work is measured in
+ * keystrokes.
+ *
+ * FAIL-SAFE: a missing menu, or an item id that no longer resolves, does nothing at all. That
+ * leaves the pre-feature behaviour (menu enabled, intercepts deciding), which is the direction
+ * where the app still works — the cost is that a silent id drift is invisible, which is why both
+ * sides of the lookup use the same exported constants rather than string literals.
+ *
+ * KNOWN COST, deliberate: while either stand-down holds, every suspended item — Window ▸ Minimize,
+ * View ▸ Toggle Kanban Board, Settings, and off-mac Window ▸ Close — is greyed out to the MOUSE as
+ * well. They re-enable the moment focus leaves the terminal, or the recorder disarms (and the
+ * traffic-light button is unaffected), so this is a visible but self-healing trade. The alternative
+ * — rebuilding the whole menu without those accelerators on every focus change — costs a menu
+ * rebuild per click between the canvas and a terminal, and closes any menu the user has open. For
+ * the recorder the trade is smaller still: the greyed items sit behind a modal dialog the user
+ * opened to record a chord, and the alternative was four chords they could not bind at all.
+ *
+ * UNTESTED, and here is why: this is Electron menu mutation reached through the module-level
+ * `Menu` singleton inside `src/main/index.ts`, which no test imports (the same gap the intercept
+ * WIRING has — see `keydown-intercept.ts`'s header on why the decision lives in a pure module).
+ * The testable parts were extracted: `menuStandsDown` (the composed state) over `policyStandsDown`
+ * (the policy half) and `menuItemIdsToSuspend` (the list, including the mac/non-mac asymmetry), all
+ * pinned in `keydown-intercept.test.ts`.
+ */
+function syncMenuForStandDown(): void {
+  const menu = Menu.getApplicationMenu()
+  if (!menu) return
+  const enabled = !menuStandsDown(shortcutRecording, currentInterceptPolicy(), terminalFocused)
+  for (const id of menuItemIdsToSuspend(interceptIsMac)) {
+    const item = menu.getMenuItemById(id)
+    if (item) item.enabled = enabled
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -606,6 +953,11 @@ function createWindow(): BrowserWindow {
     // client to co-attach to that node would inherit a frozen terminal. The tmux sessions
     // themselves keep running, exactly as they do on quit (killAll).
     ptyManager.dropClient(presenceId)
+    // The window that armed the recorder — or reported a focused terminal — is gone, so nothing
+    // can ever release either bit. Leaving one set would suppress ⌘W/⌘M/⌘0 for the NEXT window too
+    // (the flags outlive the window; a dock reopen builds a fresh one). Same shape as the
+    // dropClient above: state this window owned, released where its departure is observed.
+    clearRendererKeyState()
   })
   // A crashed/killed renderer is the same story, minus the window: drop its subscriptions so the
   // reloaded renderer reattaches to live sessions instead of inheriting the dead one's state.
@@ -616,6 +968,10 @@ function createWindow(): BrowserWindow {
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
+    // A dead renderer sends no disarm and no focus-lost report. The reloaded page mounts no
+    // recorder and no terminal, so without this the user would come back to an app where ⌘W does
+    // nothing at all (recording) or minimizes the window (stood down).
+    clearRendererKeyState()
     if (quitting || win.isDestroyed()) return
     const action = crashReload(details.reason, Date.now())
     if (action === 'reload') {
@@ -652,24 +1008,60 @@ function createWindow(): BrowserWindow {
   let leavingFullScreen = false
   win.on('close', (e) => {
     const action = closeAction(process.platform, quitting, win.isFullScreen())
-    if (action === 'default') return
-    e.preventDefault()
     if (action === 'hide') {
+      e.preventDefault()
       win.hide()
-    } else if (!leavingFullScreen) {
-      leavingFullScreen = true
-      win.once('leave-full-screen', () => {
-        leavingFullScreen = false
-        if (!win.isDestroyed() && !quitting) win.hide()
+      return
+    }
+    if (action === 'leave-fullscreen-then-hide') {
+      e.preventDefault()
+      if (!leavingFullScreen) {
+        leavingFullScreen = true
+        win.once('leave-full-screen', () => {
+          leavingFullScreen = false
+          if (!win.isDestroyed() && !quitting) win.hide()
+        })
+        win.setFullScreen(false)
+      }
+      return
+    }
+    // action === 'default': the window is really closing. On Windows/Linux the native title-bar
+    // × reaches this directly (no app.quit() first), so the confirm gate must sit here too, not
+    // only in before-quit — otherwise the window (and with it the only place to show a dialog)
+    // would already be gone by the time we asked.
+    if (!quitConfirmed && !skipQuitConfirmation) {
+      e.preventDefault()
+      void confirmQuit(win).then((ok) => {
+        if (ok) app.quit()
       })
-      win.setFullScreen(false)
     }
   })
 
   // Steal ⌘M / ⌘W / ⌘0 back from Electron's default application menu (minimize / close /
   // resetZoom) and forward each to the renderer instead. The decision — and, importantly, what it
-  // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test.
-  installKeydownIntercepts(win)
+  // must REFUSE — is in `keydown-intercept.ts`, where it can be pressed by a test. The first two
+  // are the user's effective `node.toggleMarkdown` / `node.close` bindings (⌘0 is not remappable).
+  // The two suspensions are separate thunks on purpose (see `installKeydownIntercepts`): the
+  // recorder suspends ALWAYS, the policy only while the mirror says a terminal has focus. Both are
+  // read per keystroke — the settings memo and the mirror both change under a live window.
+  installKeydownIntercepts(
+    win,
+    currentInterceptBindings,
+    interceptIsMac,
+    () => shortcutRecording,
+    () => policyStandsDown(currentInterceptPolicy(), terminalFocused)
+  )
+
+  // The THIRD way the page that armed a recorder (or reported terminal focus) can go away: a
+  // reload. The View menu above restores `{role:'reload'}` / `{role:'forceReload'}`, and ⌘R/⌘⇧R are
+  // accelerators — handled above the page, so the recorder cannot preventDefault its way out of
+  // one, and a same-process reload fires neither `closed` nor `render-process-gone`.
+  // `navigationClearsRecording` is the (tested) filter: a same-document navigation is the SAME page
+  // with the recorder still armed and the terminal still focused, and a subframe is not this page
+  // at all.
+  win.webContents.on('did-start-navigation', (details) => {
+    if (navigationClearsRecording(details)) clearRendererKeyState()
+  })
 
   // Open external links in the system browser — only safe schemes (no file://, no custom
   // protocol handlers). Reachable from remotely-fetched announcement URLs and rendered
@@ -895,6 +1287,37 @@ app.whenReady().then(async () => {
 
   ipcMain.on(IPC.appCloseWindow, () => BrowserWindow.getFocusedWindow()?.close())
 
+  // Settings' shortcut recorder arming/disarming. Guarded on the sender being the live main window
+  // (the same `getMainWindow()?.webContents.id !== event.sender.id` test `registerElectronGitHubControl`
+  // uses): a <webview> guest — a browser node showing an arbitrary page — is a webContents in this
+  // process too, and this bit disables the app's own keyboard shortcuts. Resolved at call time, not
+  // captured, because the window can be closed and recreated on macOS.
+  ipcMain.on(IPC.uiShortcutRecording, (event, active: boolean) => {
+    if (getMainWindow()?.webContents.id !== event.sender.id) return
+    shortcutRecording = active === true
+    // The menu leg follows recording too (`menuStandsDown`), so an arm/disarm owes a sync — that is
+    // what lets ⌘M, ⌘⇧B, ⌘, and off-mac Ctrl+W reach the recorder instead of the menu item that
+    // owns them. A recorder arms and disarms once per chord the user records, which is the right
+    // cadence for a menu mutation; NEVER per keystroke (same rule as the focus mirror below). It
+    // must be INSIDE the guard for the same reason as there: a rejected sender must not move the
+    // menu either.
+    syncMenuForStandDown()
+  })
+
+  // The terminal-focus mirror, under the SAME sender guard and for a sharper version of the same
+  // reason: a <webview> guest is a webContents in this process, and this bit decides whether the
+  // window claims ⌘W/⌘M/⌘0 at all — an arbitrary page in a browser node could otherwise hand
+  // itself the window's shortcuts by claiming a terminal is focused. `focused === true` so a
+  // malformed payload reads as NOT focused, the fail-safe direction (intercepts on).
+  ipcMain.on(IPC.uiTerminalFocus, (event, focused: boolean) => {
+    if (getMainWindow()?.webContents.id !== event.sender.id) return
+    terminalFocused = focused === true
+    // The mirror is change-deduped, so this fires only on a real focus transition — the right
+    // cadence for a menu mutation, and the reason the sync is here rather than on the keystroke
+    // path. It must be INSIDE the guard: a rejected sender must not move the menu either.
+    syncMenuForStandDown()
+  })
+
   // Bring the window forward after a file is dropped into a terminal. On macOS a drag-drop from
   // another app does NOT activate the destination app, so without this the drag-source keeps OS
   // keyboard focus and the user types into the wrong application. `getMainWindow()` (not the
@@ -1048,6 +1471,12 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.shellOpenExternal, (_e, url: string) => {
     if (isSafeExternalUrl(url)) void shell.openExternal(url)
   })
+
+  // Project-icon upload: open a file dialog and re-encode the pick to a bounded PNG data URL, main
+  // side (never trust a user file straight onto Project.icon — see project-icon-upload.ts).
+  ipcMain.handle(IPC.shellPickProjectIcon, (e) =>
+    pickProjectIcon(BrowserWindow.fromWebContents(e.sender))
+  )
 
   // The Explorer/Editor fs surface: ONE registrar (core/fs-handlers.ts) shared by this shell and
   // the Server Edition, over the same pure core/fs-ops — so local, browser and peer filesystem
@@ -1246,12 +1675,12 @@ app.whenReady().then(async () => {
   // workspace that no longer holds it) is free to be re-claimed; one whose owner is still there is
   // not, and the launcher then falls back rather than putting two clients on one conversation.
   const codexNodeIsLive = (nodeId: string): boolean => !!workspaceStore.getNode(nodeId)
-  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint }) => {
+  hookServer.setCodexThreadStartHandler(async ({ nodeId, cwd, hookEndpoint, accountId }) => {
     const threadId = await startCodexThread(cwd)
-    writeCodexThreadIdentity(threadId, nodeId, hookEndpoint)
+    writeCodexThreadIdentity(threadId, nodeId, hookEndpoint, undefined, accountId)
     return threadId
   })
-  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint }) => {
+  hookServer.setCodexThreadBindHandler(async ({ nodeId, threadId, hookEndpoint, accountId }) => {
     // Ask the app-server whether this conversation exists BEFORE recording that a node owns it.
     // The id reaching us is whatever the node persisted — it can be stale, or from a session that
     // ran under plain codex and the shared server has never heard of. Binding it anyway writes a
@@ -1260,7 +1689,7 @@ app.whenReady().then(async () => {
     if (!(await codexThreadExists(threadId))) {
       throw new Error('Codex thread is unknown to the shared app-server')
     }
-    bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive)
+    bindCodexThreadIdentity(threadId, nodeId, hookEndpoint, codexNodeIsLive, undefined, accountId)
   })
   // SSH_ASKPASS relay (ssh-project.ts): lets the ControlMaster, which has no tty, route a
   // passphrase-protected identity file's prompt back through the app instead of failing auth.
@@ -1281,8 +1710,11 @@ app.whenReady().then(async () => {
   if (NT_MULTI && process.platform === 'darwin') app.dock?.setBadge('TEST')
   // Flip `quitting` before quitAndInstall so the window's close-event actually closes (not hides);
   // quitAndInstall closes all windows then calls app.quit(), which our hide-on-close would block.
+  // Also skip the confirm dialog — this is a restart-to-update the user already asked for via the
+  // "Restart to update" card, not an exit, and a modal here would just block the install.
   initUpdater(() => {
     quitting = true
+    skipQuitConfirmation = true
   })
   // Mirror live agent status to <userData>/agent-status.json for the external mobile host agent.
   initAgentStatusMirror()
@@ -2494,6 +2926,12 @@ app.whenReady().then(async () => {
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) =>
     pushBrowserLeases(revokeBrowserByOwner(nodeId, browserRevocation))
   )
+  // The caller's PROJECT GRANTS die with its node too (issue #338, spec P3) — same teardown
+  // anchor, same reasoning as the browser leases above: a grant is consent given to a running
+  // session, and a recycle mints a fresh identity that must re-earn its targeting rights via
+  // open-project. App restart clears the whole in-memory ledger by construction.
+  corePlatform.on(IPC.ptyDestroy, (nodeId: string) => clearProjectGrants(nodeId))
+  corePlatform.on(IPC.ptyRecycle, (nodeId: string) => clearProjectGrants(nodeId))
   // App quit: detach every debugger lease. A second `before-quit` listener alongside the module-
   // level flush one (both fire); scoped here so it can reach `browserRevocation`. No push — the
   // window is going away. LIFECYCLE, so no tombstone (the in-memory ledger is gone on quit anyway).
@@ -2606,11 +3044,56 @@ app.whenReady().then(async () => {
       ? { ok: true, message: result.message }
       : { ok: false, error: result.message, message: result.message }
   }
+  // The caller's OWNING project, by node membership in main's own persisted store — the same
+  // source `resolveDeliveryScope` trusts. `undefined` = not in any saved project (a brand-new
+  // node inside the save debounce, or an id main never saved): the project gates fail closed.
+  const projectIdOfNode = (id: string): string | undefined =>
+    workspaceStore.persistedCanvases().find((c) => c.nodes.some((n) => n.id === id))?.id
   hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
     // `browser` is answered in MAIN and never forwarded to the renderer's agent-control dispatch:
     // the debugger handle and the CDP allowlist are main-side, and the renderer is the more
     // attackable half. Every other verb still round-trips to the renderer below.
     if (verb === 'browser') return handleBrowserVerb(nodeId, args, verified)
+    // ── `open-project` + `--project` targeting, gated in MAIN before anything is forwarded
+    // (issue #338 PR 1). The renderer never sees an invalid cwd or an unauthorized `--project`.
+    // The verb itself is verified-only at the hook-server route (requiresVerified) — by the time
+    // an open-project reaches this wrapper, `verified` is true; the gates below are main's own
+    // belt plus everything identity cannot answer (SSH caller, cwd validity, the grant cap).
+    if (verb === 'open-project') {
+      const refuse = (error: string) => ({ ok: false, error, message: error })
+      if (!verified) return refuse(OPEN_PROJECT_CONTROL_REFUSAL)
+      // The rules themselves are the PURE gateOpenProject (project-grants.ts) — caller-unresolved
+      // fail-closed, SSH-caller local-only, cap-before-consent, cwd resolved once — proven
+      // red-capable branch by branch in project-grants.test.ts. This wrapper only feeds it main's
+      // own stores and returns its refusals unforwarded.
+      const callerProjectId = projectIdOfNode(nodeId)
+      const gate = gateOpenProject({
+        callerProjectId,
+        callerIsSsh: callerProjectId
+          ? workspaceStore.projectMetaFor(callerProjectId)?.ssh
+          : undefined,
+        atCap: projectGrantsAtCap(nodeId),
+        rawCwd: args.cwd ?? '',
+        statFn: (p) => statSync(p)
+      })
+      if ('refuse' in gate) return refuse(gate.refuse)
+      // The RESOLVED path — never the raw argument — is what the renderer (PR 2's dialog, the
+      // dedupe, the store) sees. Single resolution, in main, right here.
+      args = { ...args, cwd: gate.resolvedCwd }
+    } else if (PROJECT_TARGETABLE_VERBS.has(verb) && args.project !== undefined) {
+      // Open verbs carrying `--project`: own-or-granted only (spec §3, P2), decided against
+      // main's own store + ledger. Anything else is refused without forwarding.
+      const meta = workspaceStore.projectMetaFor(args.project)
+      const gate = gateProjectTarget({
+        verified,
+        verb,
+        targetProjectId: args.project,
+        callerProjectId: projectIdOfNode(nodeId),
+        targetIsSsh: meta?.ssh,
+        granted: projectGrantedTo(nodeId, args.project)
+      })
+      if (gate !== 'allow') return { ok: false, error: gate.refuse, message: gate.refuse }
+    }
     const target = getMainWindow()
     if (!target) return { ok: false, error: 'window unavailable' }
     const requestId = randomUUID()
@@ -2647,6 +3130,28 @@ app.whenReady().then(async () => {
         // A claim carries no live lease (a verb sets that in PR 7), so this does not light the chip;
         // it keeps the renderer's view consistent from the moment ownership exists.
         pushBrowserLeases()
+      }
+    }
+    // Record a project grant the moment an open-project succeeds — the open-browser ledger
+    // pattern above, same conditions: ONLY when the caller's identity verdict for THIS request
+    // was `verified` (main's own verdict, never anything off the wire) AND the renderer's reply
+    // carries a non-empty projectId. Inert until PR 2: today the renderer's `default:` case
+    // answers `unknown verb: open-project` with ok: false, so nothing is ever recorded — but the
+    // record path ships fail-closed and finished, not stubbed.
+    if (verb === 'open-project') {
+      // The whole decision (verified && ok && string projectId → grant; cap race detection) is
+      // the PURE recordOpenProjectGrant — proven branch by branch in project-grants.test.ts.
+      // 'cap' = the pre-forward atCap() check passed but a concurrent open-project from the same
+      // caller filled the last slot while this one was in flight (PR #362 review, M1): the
+      // caller must NOT hear ok while holding no targeting right, so the named refusal replaces
+      // the success reply. Nothing is lost — open-project is idempotent (B1), so a re-run once
+      // grants have cleared returns the same project id and records the grant.
+      if (recordOpenProjectGrant(nodeId, result, verified) === 'cap') {
+        console.warn(
+          `[project-grants] grant cap raced for caller ${nodeId}: open-project succeeded but ` +
+            'the grant was not recorded; replying open-project-grant-cap'
+        )
+        return { ok: false, error: OPEN_PROJECT_GRANT_CAP, message: OPEN_PROJECT_GRANT_CAP }
       }
     }
     return result
@@ -2686,8 +3191,22 @@ app.whenReady().then(async () => {
   // drop it (filterMirrorForNodes) — a host answers only for its own local credentials.
   const localClaudeAccountIds = (): string[] =>
     (settingsStore.get().claudeAccounts ?? []).filter((a) => !a.host && !a.pending).map((a) => a.id)
+  // Local managed Codex accounts, each paired with the isolated home its auth.json lives in, for
+  // the per-account usage fan-out (S6 §4.3). Remote (`host`) accounts have no local home; pending
+  // ones have no auth yet — both are excluded, exactly like the Claude list above.
+  const localCodexAccounts = (): Array<{
+    id: string
+    home: string
+    label: string
+    email?: string | null
+  }> =>
+    codexUsageAccounts(
+      (settingsStore.get().codexAccounts ?? []).filter((a) => !a.host && !a.pending),
+      codexHomeFor
+    )
   const usageService = initClaudeUsage(win, {
     localAccounts: localClaudeAccountIds,
+    codexAccounts: localCodexAccounts,
     onCacheUpdate: () => {
       void flushAgentStatusMirror()
     },
@@ -2728,6 +3247,11 @@ app.whenReady().then(async () => {
   // Lazy getter: sshProjectManager is created just below, so a remote account op (which only runs
   // after the user has connected an SSH project) always sees the live manager.
   initClaudeAccounts(() => sshProjectManager)
+  // Machine-scoped managed Codex accounts (S6). Its synchronous boot migration of legacy long
+  // CODEX_HOMEs runs here, before the renderer restores its PTYs — an already-persisted managed
+  // Codex node must see its migrated (SUN_LEN-safe) home on its very first spawn. Same lazy SSH
+  // getter for the local→SSH transfer source leg.
+  initCodexAccounts(() => sshProjectManager)
   // The jailed core bridge both phone hosts serve: typed git verbs against the real GitService
   // (cwd-jailed to the shared canvas roots inside the handlers) and phone node registration
   // through the workspace store (written as an outside edit, so the watcher broadcasts it and
@@ -2887,7 +3411,14 @@ app.whenReady().then(async () => {
       }).catch(() => {
         // best-effort: a failed resync leaves the stale sweep as the backstop, exactly as today
       })
-    }
+    },
+    // The standalone relay bundle uploaded to a Linux host for managed Codex accounts (S6 PR 6).
+    // Only executable code is ever uploaded — never a credential (Property 1). Reading it is
+    // single-fd (openSync→fstatSync→readFileSync(fd)) so there is no stat-then-read TOCTOU on the
+    // path, and the result is cached (the artifact never changes within an app run). A missing
+    // artifact resolves to '' — `installRemoteCodexRuntime` treats an empty bundle as "no runtime"
+    // and never fails a plain SSH connect over it.
+    loadCodexRelayBundle
   )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,
@@ -3024,6 +3555,16 @@ app.on('window-all-closed', () => {
 // the quit just long enough for them to land, capped so a hung tmux can never block quit.
 let quitFlushed = false
 app.on('before-quit', (e) => {
+  // Menu Quit / Cmd+Q / Ctrl+Q reach here directly (no window-close event first), so the confirm
+  // gate is repeated here for that path. quitConfirmed short-circuits this on the re-issued
+  // app.quit() below once the user has answered, and on the win.close() gate's own re-issue.
+  if (!quitConfirmed && !skipQuitConfirmation) {
+    e.preventDefault()
+    void confirmQuit(getMainWindow() as unknown as BrowserWindow | null).then((ok) => {
+      if (ok) app.quit()
+    })
+    return
+  }
   quitting = true // from here on, window close-events must NOT be turned into hide
   destroyNotchHud()
   // Electron releases power assertions at exit anyway; disposing keeps the hold/release log
@@ -3032,6 +3573,11 @@ app.on('before-quit', (e) => {
   keepAwake?.dispose()
   keepAwake = undefined
   workspaceWatcher.dispose()
+  // A setup/archive run is a DETACHED process group (setsid, so cancel can SIGKILL the tree), which
+  // means quitting without this leaves `npm ci` churning with no app left to report to — and the
+  // hook/pty teardown below would never touch it. Idempotent, so the second before-quit pass (the
+  // deferred app.quit()) costs nothing.
+  projectSetupService.disposeAll()
   if (quitFlushed) {
     // Second pass (the deferred app.quit() below): the flush had its chance — drop the masters.
     sshProjectManager?.disconnectAll()
