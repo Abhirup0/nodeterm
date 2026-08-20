@@ -228,6 +228,24 @@ describe('parseControlRequest', () => {
     expect(body).toMatch(/starts? with `--`/)
   })
 
+  // Issue #367: the shim's transport-failure sentences and the docs that explain them are held
+  // together by constants — re-typing either side in prose is how the guidance and the generated
+  // script drift. The runtime behaviour itself is proven against real /bin/sh in
+  // canvas-control-shim.test.ts; this pins the TEACHING of it into both agent-facing bodies.
+  it('both agent-facing texts carry the codex-sandbox transport guidance (issue #367)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // Names both exact errors the agent can see: the generic sentence and the sandbox one.
+      expect(body).toContain(CONTROL_UNREACHABLE_MSG.replace(/\.$/, ''))
+      expect(body).toContain(CODEX_SANDBOX_BLOCKED_LINE)
+      // The one action that works everywhere, and the never-do.
+      expect(body.toLowerCase()).toContain('escalated permissions')
+      expect(body).toMatch(/never relink, reinstall or restart nodeterm/)
+      // The macOS permanent remedy, named exactly as codex's config reads it.
+      expect(body).toContain('network.allow_unix_sockets')
+      expect(body).toContain('~/.codex/config.toml')
+    }
+  })
+
   it('the shim embeds the sandbox hint and its call sites in both failure tails', () => {
     // The fragment (one definition)...
     expect(CONTROL_SHIM_SCRIPT).toContain('nt_codex_sandbox_hint() {')

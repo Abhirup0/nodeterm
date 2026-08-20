@@ -3,6 +3,7 @@
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
 import { HOOK_CURL_HEADERS_SH } from '../core/agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_HINT_SH } from '../core/agents/hook-sandbox-hint-sh'
+import { codexSandboxGuidanceLines } from '../core/context-link-core'
 import { AGENT_CONFIG, AGENT_HOOK_TARGETS, BUILTIN_AGENT_IDS } from '@shared/agents/config'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from '../core/agents/agent-message-flow'
@@ -363,6 +364,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     ...browserGuidanceLines(),
     '',
+    ...codexSandboxGuidanceLines(CONTROL_UNREACHABLE_MSG),
+    '',
     'Orchestration ("Build with Nodeterm orchestration"): first decide what is genuinely',
     'independent — for every "and then", ask whether the next step READS the previous step\'s',
     'output. If not, they are separate stations, open them all at once; if it does, open the',
@@ -680,6 +683,8 @@ Notes:
 - \`board\` and \`assign\` act on the CURRENTLY OPEN project's board — the same one you see when you
   toggle the kanban view. They need no confirmation.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.
+
+${codexSandboxGuidanceLines(CONTROL_UNREACHABLE_MSG).join('\n')}
 
 To orchestrate a team: decide the roles + a concrete starting prompt for each, then one
 \`spawn-team\` call (or \`open-claude\` per role followed by \`group\` + \`arrange\`).
