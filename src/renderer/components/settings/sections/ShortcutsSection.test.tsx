@@ -219,6 +219,26 @@ describe('ShortcutsSection rows', () => {
     expect(armed.getAttribute('aria-label')).toBe('Record Command palette')
   })
 
+  // The repo ships no Tailwind preflight, so a bare <button> keeps the browser's native chrome
+  // (border + fill + padding) — which turned every icon control into a chunky empty keycap on
+  // the first real render. The reset classes are load-bearing, not cosmetic.
+  it('strips native button chrome from every icon control', () => {
+    render()
+    // Reset only exists on an overridden row — create one first.
+    click(button('canvas.undo', 'Disable Undo')!)
+    const controls = [
+      button('app.commandPalette', 'Record Command palette')!,
+      button('app.commandPalette', 'Add a shortcut to Command palette')!,
+      button('app.commandPalette', 'Disable Command palette')!,
+      button('canvas.undo', 'Reset Undo')!
+    ]
+    for (const el of controls) {
+      expect(el.className).toContain('border-0')
+      expect(el.className).toContain('bg-transparent')
+      expect(el.className).toContain('p-0')
+    }
+  })
+
   // Record and Add sit side by side in the same hover-revealed cluster with no text, so two
   // identical keycaps would leave the pair unreadable — the icon is the whole label.
   it('gives Add a different glyph than Record', () => {

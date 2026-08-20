@@ -127,9 +127,11 @@ const RAIL_ROW: SettingsSearchEntry = {
   keywords: ['filter', 'search', 'modified', 'unassigned', 'disabled']
 }
 
-/** The row's per-command controls: 16px glyph in a 24px hit target, color from the parent. */
+/** The row's per-command controls: 16px glyph in a 24px hit target, color from the parent.
+ *  The repo ships no Tailwind preflight, so `border-0 bg-transparent p-0` must be explicit —
+ *  without them the browser's native button chrome (border + fill + padding) renders. */
 const ICON_BUTTON =
-  'flex size-6 items-center justify-center rounded-md text-muted hover:bg-fill-weak hover:text-text focus-visible:text-text'
+  'flex size-6 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-muted hover:bg-fill-weak hover:text-text focus-visible:text-text'
 /** Shared pill geometry — the accent/neutral fill is appended per badge. */
 const BADGE = 'rounded-full px-2 py-0.5 text-[11px] font-medium'
 
