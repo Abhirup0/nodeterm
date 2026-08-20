@@ -8,6 +8,7 @@ import {
   CONTROL_SHIM_SCRIPT
 } from './canvas-control-core'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
+import { PROJECT_TARGETABLE_VERBS } from './project-grants'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
@@ -442,5 +443,58 @@ describe('the messaging verbs parse', () => {
       error: 'notify does not accept --text'
     })
     expect(isDestructiveVerb('notify')).toBe(false)
+  })
+})
+
+describe('open-project + --project docs land with the dispatch (issue #338, spec §8)', () => {
+  const bodies: [string, string][] = [
+    ['skill', buildCanvasSkillBody('/x/shim.sh')],
+    ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
+  ]
+
+  it('both bodies document open-project: idempotent, confirmed (a denial is final), local-only, the returned id, no tab focus', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('open-project --cwd')
+      expect(body, name).toMatch(/[Ii]dempotent/)
+      // The confirm may be denied, and a denial is terminal — never advice to retry it.
+      expect(body, name).toMatch(/denial is final/)
+      // Local-only (B5) and no focus (B4), stated to the agent as facts.
+      expect(body, name).toMatch(/refused from an SSH project/)
+      expect(body, name).toMatch(/never\s+focuses/)
+      expect(body, name).toContain('projectId')
+    }
+  })
+
+  it('every --project-targetable verb line documents the flag — walked off the REAL set', () => {
+    // The drift alarm walks PROJECT_TARGETABLE_VERBS (src/main/project-grants.ts) rather than a
+    // re-typed list: a fourth verb joining the set without its doc line goes red here, and a doc
+    // line dropping the flag goes red too.
+    for (const [name, body] of bodies) {
+      for (const verb of PROJECT_TARGETABLE_VERBS) {
+        const line = body.split('\n').find((l) => l.includes(`\`${verb} `))
+        expect(line, `${name}: a doc line for ${verb}`).toBeTruthy()
+        expect(line, `${name}: ${verb} documents --project`).toContain('--project')
+      }
+    }
+  })
+
+  it('both bodies state the own-or-returned-id rule as fact, the cold-open contract, and the flag exclusion', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('any other id is refused')
+      // The cold-open sentence: a session opened into a non-active project starts when the user
+      // next views it — and the agent is told not to poll for that.
+      expect(body, name).toMatch(/starts when the user next views/)
+      expect(body, name).toMatch(/do not poll/)
+      expect(body, name).toMatch(/`--group`\/`--after` cannot\s+be combined with `--project`/)
+    }
+  })
+
+  it('the orchestration recipe gains the multi-repo pattern', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('one project per repository')
+      expect(body, name).toContain('open-project --cwd <repo>')
+      // v1 has no cross-project links; the workaround is named.
+      expect(body, name).toMatch(/reader agent inside that project/)
+    }
   })
 })
