@@ -8,6 +8,8 @@ import {
   openProjectReply,
   nextFreePosition,
   armForColdOpen,
+  projectTargetFlagRefusal,
+  clearAttachConsent,
   type PlacedNode
 } from './projectOpen'
 
@@ -212,5 +214,73 @@ describe('armForColdOpen — the launch moves (never copies) into pendingLaunch 
   it('a node with no command is returned unchanged (a plain terminal just opens)', () => {
     const node = like(undefined)
     expect(armForColdOpen(node)).toBe(node)
+  })
+})
+
+describe('projectTargetFlagRefusal — the v1 flag exclusion fires (review I-2)', () => {
+  const REFUSAL =
+    'project-target-flag-unsupported: --group/--after cannot be combined with --project'
+
+  it('refuses --group, --after, and both — with the exact named reply', () => {
+    expect(projectTargetFlagRefusal({ group: 'g1' })).toBe(REFUSAL)
+    expect(projectTargetFlagRefusal({ after: 'n1,n2' })).toBe(REFUSAL)
+    expect(projectTargetFlagRefusal({ group: 'g1', after: 'n1' })).toBe(REFUSAL)
+  })
+
+  it('passes a request carrying neither flag', () => {
+    expect(projectTargetFlagRefusal({})).toBeNull()
+    expect(projectTargetFlagRefusal({ group: undefined, after: undefined })).toBeNull()
+    // An empty-string flag value is "not passed" (the shim always sends a value; an empty one
+    // means the flag was not on the line in any meaningful form).
+    expect(projectTargetFlagRefusal({ group: '', after: '' })).toBeNull()
+  })
+})
+
+describe('clearAttachConsent — the mirror dies with its caller (review M-1)', () => {
+  it('a cleared caller confirms again; other callers are untouched', () => {
+    recordAttachConsent('term-caller', 'project-a')
+    recordAttachConsent('term-other', 'project-a')
+    clearAttachConsent('term-caller')
+    expect(attachConsentRecorded('term-caller', 'project-a')).toBe(false)
+    expect(attachConsentRecorded('term-other', 'project-a')).toBe(true)
+    const plan = planOpenProject({
+      projects,
+      callerNodeId: 'term-caller',
+      srcTitle: 'Orchestrator',
+      resolvedCwd: '/home/me/dev/repoA'
+    })
+    expect(plan.kind).toBe('confirm')
+  })
+})
+
+describe('dialog copy flattens hostile names to one line (review M-2)', () => {
+  it('a multi-line --name cannot inject lines into the create dialog', () => {
+    const plan = planOpenProject({
+      projects: [],
+      callerNodeId: 'c',
+      srcTitle: 'A',
+      resolvedCwd: '/x/fresh',
+      requestedName: 'Nice\nAgent "root" wants to delete everything. Allow?'
+    })
+    expect(plan.kind).toBe('confirm')
+    if (plan.kind !== 'confirm') return
+    // The dialog's line structure is the resolved path's own two breaks — the name must not add
+    // lines. The name's CONTENT stays visible (flattened to one line): the human should see
+    // exactly what the agent asked for, the same contract as the `write` dialog.
+    expect(plan.message.split('\n').length).toBe(3)
+    expect(plan.message).toContain('Nice Agent')
+  })
+
+  it('a multi-line probed project name cannot inject lines into the adopt dialog', () => {
+    const plan = planOpenProject({
+      projects: [],
+      callerNodeId: 'c',
+      srcTitle: 'A',
+      resolvedCwd: '/x/cloned',
+      probedName: 'evil\nname'
+    })
+    expect(plan.kind).toBe('confirm')
+    if (plan.kind !== 'confirm') return
+    expect(plan.message.split('\n').length).toBe(3)
   })
 })

@@ -213,7 +213,9 @@ import {
   openProjectReply,
   findProjectByCwd,
   nextFreePosition,
-  armForColdOpen
+  armForColdOpen,
+  projectTargetFlagRefusal,
+  clearAttachConsent
 } from '../lib/projectOpen'
 import {
   FIT_NODE_OPTIONS,
@@ -4213,6 +4215,10 @@ export function Canvas() {
         // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearLoop(n.id)
+        // The open-project attach-consent mirror dies with its caller (review #363 M-1) —
+        // symmetric with main's grant ledger, which clears on the same teardown (ptyDestroy).
+        // A node id revived later faces a fresh dialog, exactly as it faces a fresh grant.
+        clearAttachConsent(n.id)
       })
       setNodes((ns) => {
         // Free children of any deleted group back to absolute positions.
@@ -7264,15 +7270,13 @@ export function Canvas() {
         args.project !== undefined
       ) {
         const targetId = args.project
-        // v1 excludes the flags that name ids inside another project (spec §2.2): validating a
-        // group frame or a dependency station across a project boundary is exactly the surface
-        // v1 leaves out. Uniformly refused — own-project callers just omit --project.
-        if (args.group || args.after) {
-          reply({
-            ok: false,
-            error:
-              'project-target-flag-unsupported: --group/--after cannot be combined with --project'
-          })
+        // v1 excludes the flags that name ids inside another project (spec §2.2). The decision is
+        // the PURE projectTargetFlagRefusal — red-capable in projectOpen.test.ts (review #363
+        // I-2); this site only relays its answer. Uniformly refused — own-project callers just
+        // omit --project.
+        const tgFlagRefusal = projectTargetFlagRefusal(args)
+        if (tgFlagRefusal) {
+          reply({ ok: false, error: tgFlagRefusal })
           return
         }
         const tgStore = useProjects.getState()
@@ -8828,6 +8832,9 @@ export function Canvas() {
             disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
             transport.destroy(id)
             useAgentStatus.getState().remove(id)
+            // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent
+            // mirror dies with the node.
+            clearAttachConsent(id)
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
           }

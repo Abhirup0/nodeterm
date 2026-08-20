@@ -110,7 +110,10 @@ describe('the --project targeted-opens block (source pins)', () => {
       })
     )
     for (const refusal of [
-      'project-target-flag-unsupported',
+      // The flag exclusion is decided by the pure projectTargetFlagRefusal (its logic is
+      // red-capable in projectOpen.test.ts — review #363 I-2); here we pin its CALL SITE's
+      // position, like the inline refusals below.
+      'projectTargetFlagRefusal(args)',
       'project-target-refused',
       'project-target-ssh-unsupported',
       'source node is not a control-capable agent'
@@ -119,6 +122,16 @@ describe('the --project targeted-opens block (source pins)', () => {
       expect(at, refusal).toBeGreaterThan(-1)
       expect(at, `${refusal} after a write`).toBeLessThan(firstWrite)
     }
+  })
+
+  it('the flag-exclusion guard FIRES on a truthy refusal — polarity pinned (review #363 I-2)', () => {
+    // The helper's decision logic is behaviorally tested; what only the source can show is that
+    // the dispatch honors the answer with the right polarity. `if (!tgFlagRefusal)` — the
+    // guard-inversion mutation that survived the original suite — no longer matches this.
+    const body = targetedOpensBody()
+    expect(body).toMatch(
+      /const tgFlagRefusal = projectTargetFlagRefusal\(args\)\s+if \(tgFlagRefusal\) \{\s+reply\(\{ ok: false, error: tgFlagRefusal \}\)\s+return/
+    )
   })
 
   it('the store path arms through armForColdOpen — the launch survives serialization', () => {

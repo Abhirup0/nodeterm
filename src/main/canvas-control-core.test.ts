@@ -498,3 +498,39 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
     }
   })
 })
+
+describe('the --project clause tells the truth about travel (review #363 I-1 + M-3)', () => {
+  const bodies: [string, string][] = [
+    ['skill', buildCanvasSkillBody('/x/shim.sh')],
+    ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
+  ]
+
+  it('no-travel is promised ONLY for a returned id; own id is documented as flag-omitted (travel included)', () => {
+    for (const [name, body] of bodies) {
+      // The clause slice: from the `--project` flag doc to the open-project entry that follows
+      // it in both bodies — anchored, so a caveat cannot drift into another paragraph (the
+      // recipe) and still count (M-3).
+      const start = body.indexOf('`--project <id>`')
+      const end = body.indexOf('open-project --cwd')
+      expect(start, `${name}: clause start`).toBeGreaterThan(-1)
+      expect(end, `${name}: clause before the open-project entry`).toBeGreaterThan(start)
+      const clause = body.slice(start, end)
+      // Own id ≡ the flag omitted, view switch included — the REAL behavior (Canvas.tsx's
+      // own-id leg falls through to the legacy path, travel included; pinned in
+      // control-open-project.source.test.ts). The doc must say the same, not more.
+      expect(clause, name).toMatch(/behaves exactly as if the flag\s+were omitted/)
+      expect(clause, name).toMatch(/view switch\s+included/)
+      // The no-travel promise exists only attached to the RETURNED id…
+      expect(clause, name).toMatch(
+        /returned to YOU\s+in this session, which never switches the\s+user'?s view/
+      )
+      // …and the old universal phrasing ("without switching the user's view", said of the whole
+      // flag) is gone from the body entirely.
+      expect(body, name).not.toMatch(/without switching/)
+      // M-3: the do-not-poll caveat and the refusal rule live in the clause ITSELF — dropping
+      // them here while the recipe's copy survives is red.
+      expect(clause, name).toMatch(/do not poll/)
+      expect(clause, name).toContain('any other id is refused')
+    }
+  })
+})

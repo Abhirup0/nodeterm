@@ -293,10 +293,11 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  their work when it wakes — use it for "B needs what A produced" instead of polling. Only',
     `  status-reporting agent nodes (${statusAgents}, or custom agents based on them) may be waited on; a plain terminal never`,
     '  reports finishing, so waiting on one is refused. `--project <id>` opens the node(s) in another',
-    '  project instead of yours: it accepts your OWN project id, or an id `open-project` returned to',
-    '  YOU in this session — any other id is refused. A session opened into a non-active project',
-    '  starts when the user next views that project — do not poll for it. `--group`/`--after` cannot',
-    '  be combined with `--project`.',
+    '  project instead of yours. It accepts exactly two things — any other id is refused: your OWN',
+    '  project id, which behaves exactly as if the flag were omitted (a normal open, view switch',
+    '  included); or an id `open-project` returned to YOU in this session, which never switches the',
+    '  user\'s view. A session opened into a non-active project starts when the user next views that',
+    '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
     '- `open-project --cwd </abs/path> [--name N] [--color C]` — register (or find) the project for a',
     '  local directory; the reply carries `{ projectId, name, cwd, created }`. Idempotent: the same',
     '  cwd always returns the same project, never a duplicate. Creating/adding asks the user to',
@@ -558,9 +559,10 @@ Verbs:
   plain terminal never reports finishing and the node would hang forever. Note the semantics:
   "idle" is the end of a station's TURN, not proof its whole job is done — right for a station
   given one self-contained prompt, wrong if you expect a long conversation first.
-  \`--project <id>\` opens the node(s) in ANOTHER project instead of yours, without switching the
-  user's view. It accepts exactly two things: your OWN project id, or an id \`open-project\`
-  returned to YOU in this session — any other id is refused. Defaults inside the target are the
+  \`--project <id>\` opens the node(s) in another project instead of yours. It accepts exactly
+  two things — any other id is refused: your OWN project id, which behaves exactly as if the flag
+  were omitted (a normal open, view switch included); or an id \`open-project\` returned to YOU
+  in this session, which never switches the user's view. Defaults inside the target are the
   TARGET project's (its cwd, its default account and permission mode). A session opened into a
   non-active project starts when the user next views that project — do not poll for it; the reply
   says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
@@ -727,8 +729,9 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
 When the workstreams live in DIFFERENT repositories, give each repo its own project instead of
 piling every session onto your canvas: \`open-project --cwd <repo>\` (the user confirms once;
 idempotent thereafter), then \`open-agent --agent claude --project <returned id> --prompt
-"<task>"\` — one repo at a time. Neither verb moves the user's view, and a session opened into a
-non-active project starts when the user next views that project — do not poll for it. v1 has no
+"<task>"\` — one repo at a time. With a RETURNED id neither verb moves the user's view, and a
+session opened into a non-active project starts when the user next views that project — do not
+poll for it. v1 has no
 cross-project links: read a repo's results by opening a reader agent inside that project and
 linking within it.
 `

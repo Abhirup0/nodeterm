@@ -2,6 +2,7 @@
 // (issue #338, spec §2.1/§2.2). Canvas.tsx's dispatch only wires these — the dialog, the store
 // calls and the reply — so every decision that does not need React is unit-testable here, the
 // same reasoning as controlRouting.ts / pendingLaunch.ts.
+import { oneLine } from '@shared/one-line'
 
 /** The little these helpers need to know about a project. */
 export interface ProjectForOpen {
@@ -49,8 +50,29 @@ export function recordAttachConsent(callerNodeId: string, projectId: string): vo
   attachAsked.set(callerNodeId, set)
 }
 
+/** Caller-node teardown: the mirror dies with the node it asked for — the same lifetime as
+ *  main's grant ledger (`clearCaller` on pty destroy/recycle), so a node id revived after a
+ *  deletion faces a fresh dialog, exactly as it faces a fresh grant (review #363 M-1). */
+export function clearAttachConsent(callerNodeId: string): void {
+  attachAsked.delete(callerNodeId)
+}
+
 export function clearAttachConsentForTests(): void {
   attachAsked.clear()
+}
+
+/**
+ * The v1 flag exclusion for `--project` (spec §2.2): `--group` and `--after` both name ids that
+ * live INSIDE a project, and validating them across a project boundary is exactly the surface v1
+ * excludes. Returns the named refusal, or null when neither flag is present. Pure so the guard
+ * is red-capable (review #363 I-2) — the dispatch only relays the answer; an empty-string value
+ * counts as "not passed" (the shim always sends a value for a bare flag).
+ */
+export function projectTargetFlagRefusal(args: { group?: string; after?: string }): string | null {
+  if (args.group || args.after) {
+    return 'project-target-flag-unsupported: --group/--after cannot be combined with --project'
+  }
+  return null
 }
 
 export type OpenProjectPlan =
@@ -91,7 +113,12 @@ export function planOpenProject(input: {
     return {
       kind: 'confirm',
       confirmKind: 'attach',
-      message: `Agent "${srcTitle}" wants to open sessions in project "${existing.name}". Allow?`,
+      // `oneLine` on every interpolated name (review #363 M-2): a project/probe/--name string is
+      // caller- or repo-supplied, and a newline in it would let it inject lines into the consent
+      // dialog. The resolved path's own line breaks are the dialog's structure; nothing else adds
+      // lines. (The stored name stays the raw create-only string, like the human addProject path
+      // — this flattening is dialog copy only.)
+      message: `Agent "${srcTitle}" wants to open sessions in project "${oneLine(existing.name)}". Allow?`,
       confirmLabel: 'Allow',
       project: existing
     }
@@ -102,13 +129,14 @@ export function planOpenProject(input: {
       confirmKind: 'adopt',
       message:
         `Agent "${srcTitle}" wants to add the existing project at\n${resolvedCwd}\n` +
-        `to your workspace ("${probedName}"). Add it?`,
+        `to your workspace ("${oneLine(probedName)}"). Add it?`,
       confirmLabel: 'Add project'
     }
   }
-  const name =
+  const name = oneLine(
     (requestedName ?? '').trim() ||
-    (normalizeProjectCwd(resolvedCwd).split('/').filter(Boolean).pop() || 'Project')
+      (normalizeProjectCwd(resolvedCwd).split('/').filter(Boolean).pop() || 'Project')
+  )
   return {
     kind: 'confirm',
     confirmKind: 'create',
