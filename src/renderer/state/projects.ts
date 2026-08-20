@@ -4,6 +4,7 @@ import type {
   BridgeLink,
   CanvasMutation,
   CanvasNodeState,
+  NavStop,
   Project,
   ProjectKanban,
   Viewport,
@@ -90,6 +91,9 @@ interface ProjectsState {
   setDinoHighScore(id: string, score: number): void
   /** Replaces the project's kanban board (the UI computes the next board via lib/kanban). */
   setProjectKanban(id: string, kanban: ProjectKanban): void
+  /** Replaces the project's breadcrumb (navigation history) list wholesale — the UI computes the
+   *  next list via lib/breadcrumbs and hands it over whole, same convention as setProjectKanban. */
+  setProjectBreadcrumbs(id: string, breadcrumbs: NavStop[]): void
   /** Writes the serialized canvas (nodes + viewport + bridge links + control ropes) back into a project. */
   commitCanvas(
     id: string,
@@ -391,6 +395,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
   setProjectKanban(id, kanban) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? { ...p, kanban } : p))
+    }))
+  },
+
+  setProjectBreadcrumbs(id, breadcrumbs) {
+    set((s) => ({
+      projects: s.projects.map((p) => (p.id === id ? { ...p, breadcrumbs } : p))
     }))
   },
 

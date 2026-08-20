@@ -214,6 +214,11 @@ import {
   viewportForRect,
   type FocusableNode
 } from '../lib/nodeFocus'
+import {
+  recordBreadcrumb,
+  type BreadcrumbState,
+  type BreadcrumbTarget
+} from '../lib/breadcrumbs'
 import { planSessionKill } from '../lib/sessionKill'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
@@ -1112,6 +1117,11 @@ export function Canvas() {
   const pastRef = useRef<CanvasNode[][]>([])
   const futureRef = useRef<CanvasNode[][]>([])
   const committedRef = useRef<CanvasNode[]>([])
+  // Camera navigation history — a SEPARATE stack from pastRef/futureRef (those replay node-array
+  // state; this replays camera position only). NOT persisted itself: only navRef.current.list
+  // rides IndexEntryV3.breadcrumbs; the cursor resets to the tip on every project activation
+  // (see the active-project effect below), same as pastRef/futureRef resetting there.
+  const navRef = useRef<BreadcrumbState>({ list: [], index: -1 })
   const draggingRef = useRef(false)
   // Canvas sync (emitting side) — see the publish effect below.
   const publisherRef = useRef<CanvasPublisher | null>(null)
@@ -1927,6 +1937,10 @@ export function Canvas() {
     pastRef.current = []
     futureRef.current = []
     bumpHist((v) => v + 1)
+    // Camera navigation history is per-project; reset the cursor to the tip on every activation
+    // (a project reactivated after being away starts "at the end" of its own trail).
+    const bc = project.breadcrumbs ?? []
+    navRef.current = { list: bc, index: bc.length - 1 }
     if (preserveViewportRef.current) {
       // In-place reload (external change / SSH reconcile): keep the user's current camera —
       // the file's viewport is where another machine last saved, not where this user looks.
@@ -5591,6 +5605,27 @@ export function Canvas() {
 
   const goToNode = useCallback(
     (node: Node) => {
+      // Record the landing FIRST, and unconditionally: this is the one funnel every deliberate
+      // node focus goes through (notification click, sessions sidebar, ⌘K jump, presence travel,
+      // minimap double-click), and recording is independent of which framing branch runs below —
+      // including the branch that deliberately leaves the camera where it is.
+      const activeId = useProjects.getState().activeProjectId
+      if (activeId) {
+        const target: BreadcrumbTarget = {
+          id: node.id,
+          kind: node.type as BreadcrumbTarget['kind'],
+          title: (node.data as { title?: string } | undefined)?.title ?? node.id,
+          agentId: (node.data as { agentId?: BreadcrumbTarget['agentId'] } | undefined)?.agentId
+        }
+        const status = useAgentStatus.getState().byId[node.id]
+        const next = recordBreadcrumb(navRef.current, target, status, Date.now())
+        // recordBreadcrumb returns the SAME object on a dedupe no-op, so identity is the skip test.
+        if (next !== navRef.current) {
+          navRef.current = next
+          useProjects.getState().setProjectBreadcrumbs(activeId, next.list)
+          markDirty()
+        }
+      }
       // Fit the node in view instead of centering at a fixed zoom — `zoom: max(current, 1)`
       // overshot large terminals (their body never fit the viewport). fitView sizes the zoom
       // to the node and resolves group-relative positions itself; the clamp keeps a small
@@ -5636,7 +5671,7 @@ export function Canvas() {
       // teleporting the user to the origin, which is the bug this branch exists for.
       if (viewport) void setViewport(viewport, { duration: 300 })
     },
-    [fitView, setViewport, getInternalNode]
+    [fitView, setViewport, getInternalNode, markDirty]
   )
 
   const onNodeDoubleClick = useCallback(
