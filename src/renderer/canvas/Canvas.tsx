@@ -5815,6 +5815,29 @@ export function Canvas() {
           )
         )
         return true
+      },
+      // Per-agent creates: the chord names the agent, so these bypass resolveNewNodeAgent (which
+      // answers "what does this project default to?") and open exactly what the row says.
+      'node.newAgent.claude': () => { addAgentNode('claude'); return true },
+      'node.newAgent.codex': () => { addAgentNode('codex'); return true },
+      'node.newAgent.gemini': () => { addAgentNode('gemini'); return true },
+      'node.newAgent.opencode': () => { addAgentNode('opencode'); return true },
+      'node.newAgent.grok': () => { addAgentNode('grok'); return true },
+      'node.newAgent.copilot': () => { addAgentNode('copilot'); return true },
+      'node.newSticky': () => { addSticky(); return true },
+      'node.newBrowser': () => { addBrowser(); return true },
+      // Opening the URL prompt IS claiming the chord — a cancelled prompt creates nothing, but the
+      // keystroke was consumed by us and must not fall through to the platform.
+      'node.newWebView': () => { void addWebView(); return true },
+      'node.newDino': () => { addDino(); return true },
+      'node.newFile': () => {
+        // Same gate the pane menu / ⌘K use for their "New file…" row: the file is created UNDER
+        // the project folder, so a cwd-less (inline) project has nowhere to put it. Refuse rather
+        // than open a prompt that could only fail — and refusing lets the chord fall through.
+        const project = useProjects.getState().getProject(activeProjectId ?? '')
+        if (!(project?.ssh?.remoteCwd ?? project?.cwd)) return false
+        void newProjectFile()
+        return true
       }
       // node.close / node.toggleMarkdown: main-process intercepted on desktop; deliberately
       // no renderer handler (the browser owns ⌘W in the Server Edition — see bridge/stubs.ts).
