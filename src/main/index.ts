@@ -17,6 +17,18 @@ import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { BrowserControlLedger } from './browser-control-ledger'
+import {
+  grant as grantProjectTo,
+  isGranted as projectGrantedTo,
+  atCap as projectGrantsAtCap,
+  clearCaller as clearProjectGrants,
+  gateProjectTarget,
+  validateOpenProjectCwd,
+  PROJECT_TARGETABLE_VERBS,
+  OPEN_PROJECT_LOCAL_ONLY,
+  OPEN_PROJECT_GRANT_CAP,
+  OPEN_PROJECT_CALLER_UNRESOLVED
+} from './project-grants'
 import { BrowserLeaseManager, BrowserSession } from './browser-lease'
 import { CdpEventBus, type Sendable } from './browser-actions'
 import { RefTable } from './browser-refs'
@@ -91,7 +103,7 @@ import {
 import { generateCommitMessage, generateGroupName, generateTerminalName } from '../core/commit-message'
 import { initUpdater } from './updater'
 import { fetchCheck } from '../core/check'
-import { hookServer } from '../core/agents/hook-server'
+import { hookServer, OPEN_PROJECT_CONTROL_REFUSAL } from '../core/agents/hook-server'
 import { askpassServer, ensureAskpassScript } from './remote-ssh/ssh-askpass'
 import { appSshAgent } from './remote-ssh/ssh-agent'
 import {
@@ -2916,6 +2928,12 @@ app.whenReady().then(async () => {
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) =>
     pushBrowserLeases(revokeBrowserByOwner(nodeId, browserRevocation))
   )
+  // The caller's PROJECT GRANTS die with its node too (issue #338, spec P3) — same teardown
+  // anchor, same reasoning as the browser leases above: a grant is consent given to a running
+  // session, and a recycle mints a fresh identity that must re-earn its targeting rights via
+  // open-project. App restart clears the whole in-memory ledger by construction.
+  corePlatform.on(IPC.ptyDestroy, (nodeId: string) => clearProjectGrants(nodeId))
+  corePlatform.on(IPC.ptyRecycle, (nodeId: string) => clearProjectGrants(nodeId))
   // App quit: detach every debugger lease. A second `before-quit` listener alongside the module-
   // level flush one (both fire); scoped here so it can reach `browserRevocation`. No push — the
   // window is going away. LIFECYCLE, so no tombstone (the in-memory ledger is gone on quit anyway).
@@ -3028,11 +3046,52 @@ app.whenReady().then(async () => {
       ? { ok: true, message: result.message }
       : { ok: false, error: result.message, message: result.message }
   }
+  // The caller's OWNING project, by node membership in main's own persisted store — the same
+  // source `resolveDeliveryScope` trusts. `undefined` = not in any saved project (a brand-new
+  // node inside the save debounce, or an id main never saved): the project gates fail closed.
+  const projectIdOfNode = (id: string): string | undefined =>
+    workspaceStore.persistedCanvases().find((c) => c.nodes.some((n) => n.id === id))?.id
   hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
     // `browser` is answered in MAIN and never forwarded to the renderer's agent-control dispatch:
     // the debugger handle and the CDP allowlist are main-side, and the renderer is the more
     // attackable half. Every other verb still round-trips to the renderer below.
     if (verb === 'browser') return handleBrowserVerb(nodeId, args, verified)
+    // ── `open-project` + `--project` targeting, gated in MAIN before anything is forwarded
+    // (issue #338 PR 1). The renderer never sees an invalid cwd or an unauthorized `--project`.
+    // The verb itself is verified-only at the hook-server route (requiresVerified) — by the time
+    // an open-project reaches this wrapper, `verified` is true; the gates below are main's own
+    // belt plus everything identity cannot answer (SSH caller, cwd validity, the grant cap).
+    if (verb === 'open-project') {
+      const refuse = (error: string) => ({ ok: false, error, message: error })
+      if (!verified) return refuse(OPEN_PROJECT_CONTROL_REFUSAL)
+      const callerProjectId = projectIdOfNode(nodeId)
+      if (!callerProjectId) return refuse(OPEN_PROJECT_CALLER_UNRESOLVED)
+      if (workspaceStore.projectMetaFor(callerProjectId)?.ssh) {
+        // B5: local-only v1 — an SSH-project agent's --cwd would be a host path.
+        return refuse(OPEN_PROJECT_LOCAL_ONLY)
+      }
+      // Refuse the cap BEFORE the renderer would show a dialog (PR 2): a grant that cannot be
+      // recorded must not be consented to first.
+      if (projectGrantsAtCap(nodeId)) return refuse(OPEN_PROJECT_GRANT_CAP)
+      const cwd = validateOpenProjectCwd(args.cwd ?? '', (p) => statSync(p))
+      if ('error' in cwd) return refuse(cwd.error)
+      // The RESOLVED path — never the raw argument — is what the renderer (PR 2's dialog, the
+      // dedupe, the store) sees. Single resolution, in main, right here.
+      args = { ...args, cwd: cwd.resolved }
+    } else if (PROJECT_TARGETABLE_VERBS.has(verb) && args.project !== undefined) {
+      // Open verbs carrying `--project`: own-or-granted only (spec §3, P2), decided against
+      // main's own store + ledger. Anything else is refused without forwarding.
+      const meta = workspaceStore.projectMetaFor(args.project)
+      const gate = gateProjectTarget({
+        verified,
+        verb,
+        targetProjectId: args.project,
+        callerProjectId: projectIdOfNode(nodeId),
+        targetIsSsh: meta?.ssh,
+        granted: projectGrantedTo(nodeId, args.project)
+      })
+      if (gate !== 'allow') return { ok: false, error: gate.refuse, message: gate.refuse }
+    }
     const target = getMainWindow()
     if (!target) return { ok: false, error: 'window unavailable' }
     const requestId = randomUUID()
@@ -3069,6 +3128,18 @@ app.whenReady().then(async () => {
         // A claim carries no live lease (a verb sets that in PR 7), so this does not light the chip;
         // it keeps the renderer's view consistent from the moment ownership exists.
         pushBrowserLeases()
+      }
+    }
+    // Record a project grant the moment an open-project succeeds — the open-browser ledger
+    // pattern above, same conditions: ONLY when the caller's identity verdict for THIS request
+    // was `verified` (main's own verdict, never anything off the wire) AND the renderer's reply
+    // carries a non-empty projectId. Inert until PR 2: today the renderer's `default:` case
+    // answers `unknown verb: open-project` with ok: false, so nothing is ever recorded — but the
+    // record path ships fail-closed and finished, not stubbed.
+    if (verb === 'open-project' && verified && result.ok) {
+      const opened = result.result as { projectId?: unknown } | undefined
+      if (typeof opened?.projectId === 'string' && opened.projectId) {
+        grantProjectTo(nodeId, opened.projectId)
       }
     }
     return result

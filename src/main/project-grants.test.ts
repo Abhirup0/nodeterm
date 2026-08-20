@@ -204,3 +204,50 @@ describe('validateOpenProjectCwd (P7) — resolved once, statted once, fails clo
     })
   })
 })
+
+describe('main wiring (structural) — the wrapper records, consumes and clears correctly', () => {
+  // Structural in the control-destructive.test.ts sense and for the same reason: the wiring lives
+  // inside index.ts's setControlHandler wrapper and whenReady closure, which have no unit seam,
+  // and the property pinned — WHEN a grant is recorded and WHEN it dies — is a property of the
+  // source. The behavioural halves (the ledger, the gate, the cwd rules) are proven above against
+  // the real functions.
+  const src = fs.readFileSync(path.join(__dirname, 'index.ts'), 'utf8')
+
+  it('records a grant ONLY under verified && result.ok with a string projectId (the open-browser pattern)', () => {
+    const at = src.indexOf("verb === 'open-project' && verified && result.ok")
+    expect(at).toBeGreaterThan(-1)
+    const block = src.slice(at, at + 400)
+    expect(block).toContain("typeof opened?.projectId === 'string'")
+    expect(block).toContain('grantProjectTo(nodeId, opened.projectId)')
+    // No other call site mints a grant: the record path is the wrapper's, once.
+    expect(src.match(/grantProjectTo\(/g)?.length).toBe(1)
+  })
+
+  it('consumes the ledger per-CALLER and gates before forwarding to the renderer', () => {
+    // The gate reads isGranted(nodeId, …) — the verified caller of THIS request — never a global
+    // or target-derived key, and it runs inside the wrapper before webContents.send.
+    expect(src).toMatch(/granted: projectGrantedTo\(nodeId, args\.project\)/)
+    const gateAt = src.indexOf('gateProjectTarget({')
+    const forwardAt = src.indexOf('target.webContents.send(IPC.agentControl', gateAt)
+    expect(gateAt).toBeGreaterThan(-1)
+    expect(forwardAt).toBeGreaterThan(gateAt)
+    // The target's SSH/existence meta comes from main's own store, never the request.
+    expect(src).toMatch(/workspaceStore\.projectMetaFor\(args\.project\)/)
+  })
+
+  it('clears a caller on BOTH pty teardown paths (destroy + recycle) — spec P3', () => {
+    expect(src).toMatch(
+      /corePlatform\.on\(IPC\.ptyDestroy, \(nodeId: string\) => clearProjectGrants\(nodeId\)\)/
+    )
+    expect(src).toMatch(
+      /corePlatform\.on\(IPC\.ptyRecycle, \(nodeId: string\) => clearProjectGrants\(nodeId\)\)/
+    )
+  })
+
+  it('open-project resolves + replaces the cwd in MAIN before forwarding (P7)', () => {
+    const at = src.indexOf('validateOpenProjectCwd(args.cwd')
+    expect(at).toBeGreaterThan(-1)
+    // The resolved form replaces the raw argument in the forwarded args.
+    expect(src.slice(at, at + 400)).toContain('args = { ...args, cwd: cwd.resolved }')
+  })
+})
