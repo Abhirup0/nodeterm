@@ -175,11 +175,22 @@ export interface HookEventMeta {
  * protect — the routes are new — which is the one place in the whole control surface where
  * fail-closed from day one costs nobody anything.
  *
+ * `open-project` (issue #338) is here for the same class of reason as `sticky`: the main-side
+ * grant ledger (src/main/project-grants.ts) mints per-caller targeting rights off a successful
+ * `open-project`, and a grant recorded for an unverifiable caller would authorize whoever can
+ * name that caller's node id. NEW verb, so fail-closed from day one strands nobody.
+ *
  * Consulted in the `/control/` route BEFORE `identityGate`'s decision is, so no future change to
  * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
  * of every hatch and is the test that fails if either half of this comment stops being true.
  */
-export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', 'notify', 'sticky'])
+export const requiresVerified: ReadonlySet<string> = new Set([
+  'send',
+  'reply',
+  'notify',
+  'sticky',
+  'open-project'
+])
 
 /**
  * The refusal for a messaging verb: one sentence, no diagnosis, no hint about tokens or restarts —
@@ -192,9 +203,15 @@ export const MESSAGING_CONTROL_REFUSAL = 'Agent messaging refused.'
  *  because "agent messaging refused" answering a note write is a diagnosis-delaying lie. */
 export const STICKY_CONTROL_REFUSAL = 'Sticky write refused.'
 
+/** Same posture again for `open-project` (issue #338): one sentence naming what was refused, no
+ *  diagnosis, no token or restart advice — a designed refusal, not a rollout accident. */
+export const OPEN_PROJECT_CONTROL_REFUSAL = 'Project open refused.'
+
 /** The verified-only refusal, worded for the verb that was refused. */
 export function verifiedRefusalFor(verb: string): string {
-  return verb === 'sticky' ? STICKY_CONTROL_REFUSAL : MESSAGING_CONTROL_REFUSAL
+  if (verb === 'sticky') return STICKY_CONTROL_REFUSAL
+  if (verb === 'open-project') return OPEN_PROJECT_CONTROL_REFUSAL
+  return MESSAGING_CONTROL_REFUSAL
 }
 
 class HookServer {
