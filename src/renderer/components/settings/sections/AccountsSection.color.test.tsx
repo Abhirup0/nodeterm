@@ -4,12 +4,18 @@ import { createRoot, type Root } from 'react-dom/client'
 import { act } from 'react'
 import { AccountsSection } from './AccountsSection'
 import { useSettings } from '../../../state/settings'
+import type { CodexAccount } from '@shared/codex-account'
 import { DEFAULT_SETTINGS, type ClaudeAccount } from '@shared/types'
 
 const account: ClaudeAccount = { id: 'a1', label: 'work', createdAt: 0 }
 
-function renderSection(accounts: ClaudeAccount[]): { host: HTMLElement; root: Root } {
-  useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeAccounts: accounts } })
+function renderSection(
+  accounts: ClaudeAccount[],
+  codexAccounts: CodexAccount[] = []
+): { host: HTMLElement; root: Root } {
+  useSettings.setState({
+    settings: { ...DEFAULT_SETTINGS, claudeAccounts: accounts, codexAccounts }
+  })
   const host = document.createElement('div')
   document.body.appendChild(host)
   const root = createRoot(host)
@@ -31,6 +37,9 @@ function swatch(host: HTMLElement, label: string, name: string): HTMLButtonEleme
 
 const colorOf = (id: string): string | undefined =>
   useSettings.getState().settings.claudeAccounts.find((a) => a.id === id)?.color
+
+const codexColorOf = (id: string): string | undefined =>
+  useSettings.getState().settings.codexAccounts.find((a) => a.id === id)?.color
 
 beforeEach(() => {
   document.body.innerHTML = ''
@@ -89,6 +98,39 @@ describe('AccountsSection — default node color', () => {
     })
     expect(colorOf('a1')).toBe('#0a84ff')
     expect(colorOf('a2')).toBe('#ff453a')
+    root.unmount()
+  })
+
+  // Codex accounts are managed the same way and bind to nodes through the same `data.accountId`,
+  // so they carry the same swatch group — a machine with two Codex logins is exactly the case the
+  // feature exists for. The rows render in their own machine panel, hence the separate lookup.
+  it('stores the picked color on a Codex account', () => {
+    const { host, root } = renderSection([], [{ id: 'c1', label: 'codex work' }])
+    act(() => {
+      swatch(host, 'codex work', '#32d74b').click()
+    })
+    expect(codexColorOf('c1')).toBe('#32d74b')
+    root.unmount()
+  })
+
+  it('clears a Codex account’s color back to the agent default', () => {
+    const { host, root } = renderSection([], [{ id: 'c1', label: 'codex work', color: '#32d74b' }])
+    act(() => {
+      swatch(host, 'codex work', 'Default').click()
+    })
+    expect(codexColorOf('c1')).toBeUndefined()
+    root.unmount()
+  })
+
+  // One list must never write through the other: the two are keyed independently and an id can
+  // legitimately appear in both.
+  it('colors a Codex account without touching a Claude account of the same id', () => {
+    const { host, root } = renderSection([{ ...account, id: 'x1' }], [{ id: 'x1', label: 'codex' }])
+    act(() => {
+      swatch(host, 'codex', '#32d74b').click()
+    })
+    expect(codexColorOf('x1')).toBe('#32d74b')
+    expect(colorOf('x1')).toBeUndefined()
     root.unmount()
   })
 })

@@ -1,12 +1,22 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { accountNodeColor, createAgentNode } from './workspace'
+import { accountNodeColor, agentAccountColor, createAgentNode } from './workspace'
 import { useSettings } from './settings'
 import { agentConfig } from '@shared/agents/config'
+import type { CodexAccount } from '@shared/codex-account'
 import { DEFAULT_SETTINGS, type ClaudeAccount } from '@shared/types'
 
-const withAccounts = (claudeAccounts: ClaudeAccount[]): void => {
-  useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeAccounts } })
+const withAccounts = (
+  claudeAccounts: ClaudeAccount[],
+  codexAccounts: CodexAccount[] = []
+): void => {
+  useSettings.setState({ settings: { ...DEFAULT_SETTINGS, claudeAccounts, codexAccounts } })
 }
+
+const codexAccount = (id: string, color?: string): CodexAccount => ({
+  id,
+  label: id,
+  ...(color ? { color } : {})
+})
 
 const account = (id: string, color?: string): ClaudeAccount => ({
   id,
@@ -54,6 +64,31 @@ describe('accountNodeColor', () => {
   })
 })
 
+describe('agentAccountColor', () => {
+  const claude = [account('a1', '#0a84ff')]
+  const codex = [codexAccount('a1', '#32d74b'), codexAccount('c2')]
+
+  it('answers from the Claude list for a claude node', () => {
+    expect(agentAccountColor('claude', 'a1', { claude, codex })).toBe('#0a84ff')
+  })
+
+  it('answers from the Codex list for a codex node', () => {
+    expect(agentAccountColor('codex', 'a1', { claude, codex })).toBe('#32d74b')
+  })
+
+  // Every other agent takes no managed account at all, so there is no list that could answer for
+  // it — and guessing one would paint a node from a stranger's row.
+  it('is undefined for an agent that takes no managed account', () => {
+    expect(agentAccountColor('gemini', 'a1', { claude, codex })).toBeUndefined()
+    expect(agentAccountColor(undefined, 'a1', { claude, codex })).toBeUndefined()
+  })
+
+  it('is undefined when the owning list has no color for that id', () => {
+    expect(agentAccountColor('codex', 'c2', { claude, codex })).toBeUndefined()
+    expect(agentAccountColor('codex', 'gone', { claude, codex })).toBeUndefined()
+  })
+})
+
 describe('createAgentNode — account default color', () => {
   it('opens a Claude node in its account’s color instead of the agent’s', () => {
     withAccounts([account('a1', '#0a84ff')])
@@ -73,14 +108,29 @@ describe('createAgentNode — account default color', () => {
     expect(node.data.color).toBe(AGENT_COLOR('claude'))
   })
 
-  // Codex nodes bind managed accounts too (S6), but a CodexAccount carries no `color` — and the two
-  // account lists are keyed independently, so a Codex id that happens to match a Claude one must
-  // NOT borrow its color. The binding itself still has to land, unchanged by this feature.
-  it('never colors a Codex node from the Claude account list, but still stamps its binding', () => {
-    withAccounts([account('a1', '#0a84ff')])
-    const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'a1')
+  it('opens a Codex node in its account’s color instead of the agent’s', () => {
+    withAccounts([], [codexAccount('c1', '#32d74b')])
+    const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'c1')
+    expect(node.data.color).toBe('#32d74b')
+    expect(node.data.accountId).toBe('c1')
+  })
+
+  // The two account lists are keyed INDEPENDENTLY — nothing stops a Codex account and a Claude
+  // account from sharing an id. Each node must read the list that owns its agent, or a colored
+  // Claude account silently repaints a Codex node it has nothing to do with.
+  it('reads the list that owns the agent when both hold the same account id', () => {
+    withAccounts([account('a1', '#0a84ff')], [codexAccount('a1', '#32d74b')])
+    const claude = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, 'a1')
+    const codex = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'a1')
+    expect(claude.data.color).toBe('#0a84ff')
+    expect(codex.data.color).toBe('#32d74b')
+  })
+
+  it('keeps the agent’s own color when the Codex account sets none', () => {
+    withAccounts([], [codexAccount('c1')])
+    const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'c1')
     expect(node.data.color).toBe(AGENT_COLOR('codex'))
-    expect(node.data.accountId).toBe('a1')
+    expect(node.data.accountId).toBe('c1')
   })
 
   it('never colors a node of an agent that takes no account at all', () => {

@@ -11,7 +11,7 @@ import type {
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
-import { accountNodeColor } from '@shared/agents/account-color'
+import { agentAccountColor } from '@shared/agents/account-color'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
@@ -25,7 +25,7 @@ import { useSettings } from './settings'
 // single implementation lives in src/shared and is shared with the relay host + the canvas-sync
 // reflector.
 export { applyCanvasMutation } from '@shared/canvas-mutations'
-export { accountNodeColor } from '@shared/agents/account-color'
+export { accountNodeColor, agentAccountColor } from '@shared/agents/account-color'
 import { sanitizeInboundNode } from '@shared/node-exec'
 
 /** Preset color palette — macOS system colors (dark mode). */
@@ -565,13 +565,15 @@ export function createAgentNode(
   const boundAccountId =
     accountId && (agentId === 'claude' || agentId === 'codex') ? accountId : undefined
   // A managed account's default node color (Settings → Accounts) replaces the agent's brand color,
-  // so a second login is recognizable on the canvas at a glance. Claude accounts only: a
-  // `CodexAccount` carries no `color` field, so the lookup is not even attempted for one — asking
-  // `claudeAccounts` about a Codex id would be a cross-list question with no right answer.
+  // so a second login of either builtin is recognizable on the canvas at a glance. `agentAccountColor`
+  // asks the list that OWNS this agent's accounts — the two are keyed independently, so a Claude
+  // account must never color a Codex node that happens to share its id.
+  const settings = useSettings.getState().settings
   const color =
-    (agentId === 'claude'
-      ? accountNodeColor(boundAccountId, useSettings.getState().settings.claudeAccounts)
-      : undefined) ?? agentColor
+    agentAccountColor(agentId, boundAccountId, {
+      claude: settings.claudeAccounts,
+      codex: settings.codexAccounts
+    }) ?? agentColor
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
   // Agents → Launch commands — see `agentLaunchOverride`) replaces the bare CLI in the assembled
   // command. Threaded into the shared assembler below as `launchCmdOverride` so fresh launch,

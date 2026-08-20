@@ -182,7 +182,7 @@ import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
-import { accountNodeColor } from '../shared/agents/account-color'
+import { agentAccountColor } from '../shared/agents/account-color'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
 import {
@@ -3270,8 +3270,13 @@ app.whenReady().then(async () => {
         node,
         new Date(),
         // Host-derived, exactly as on the canvas: the account's default color beats the agent's,
-        // so a phone-started session under a colored account is recognizable in the same way.
-        accountNodeColor(node.accountId, settingsStore.get().claudeAccounts ?? [])
+        // so a phone-started session under a colored account is recognizable in the same way. The
+        // agent decides WHICH account list answers (agentAccountColor) — the phone supplies both
+        // ids, and the two lists are keyed independently.
+        agentAccountColor(node.agentId, node.accountId, {
+          claude: settingsStore.get().claudeAccounts ?? [],
+          codex: settingsStore.get().codexAccounts ?? []
+        })
       ),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
