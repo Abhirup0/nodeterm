@@ -90,6 +90,16 @@ describe('needsLiveCanvas', () => {
     // projects store (`applyNodeMutation`), not the live canvas.
     expect(needsLiveCanvas('sticky')).toBe(false)
   })
+
+  it('is false for open-project — registering a project must never travel the camera (issue #338)', () => {
+    // The G5 argument one more time: routing is by SOURCE, and open-project's headline caller is
+    // a background orchestrator registering repos one after another — travelling would yank the
+    // human's view to the CALLER's project on every call. The verb acts on the projects STORE
+    // (registerProject, non-activating by construction), so no live canvas is needed at either
+    // end; this membership and Canvas.tsx's early-exit dispatch are the same decision stated once
+    // each (spec §2.3, P6).
+    expect(needsLiveCanvas('open-project')).toBe(false)
+  })
 })
 
 describe('sourceIsControlCapable', () => {

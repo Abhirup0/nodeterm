@@ -8,6 +8,7 @@ import {
   CONTROL_SHIM_SCRIPT
 } from './canvas-control-core'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
+import { PROJECT_TARGETABLE_VERBS } from './project-grants'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
@@ -36,13 +37,11 @@ describe('parseControlRequest', () => {
     })
   })
 
-  it('open-project is NOT in DESTRUCTIVE_VERBS yet — that membership lands with PR 2', () => {
-    // Deliberate PR slicing, not an oversight: `control-destructive.test.ts` structurally
-    // requires every member's `Canvas.tsx` case to read `isDestructiveVerb(verb)`, and the
-    // dispatch case for open-project only exists in PR 2 (Task 2.2). Adding the verb to the set
-    // now would trip the set↔dispatch drift alarm with no dispatch to agree with. This test goes
-    // red the moment PR 2 adds the membership, which is the reminder to delete it.
-    expect(isDestructiveVerb('open-project')).toBe(false)
+  it('open-project IS destructive — its create/adopt/first-attach dialog is confirm-gated (PR 2)', () => {
+    // PR 1 left a tripwire here asserting the opposite; PR 2 added the early-handled dispatch
+    // block that reads `isDestructiveVerb(verb)` before its `confirmBusy()` refusal, so the
+    // membership and the dispatch now exist together (control-destructive.test.ts is the alarm).
+    expect(isDestructiveVerb('open-project')).toBe(true)
   })
 
   it('requires a target for write/close', () => {
@@ -444,5 +443,94 @@ describe('the messaging verbs parse', () => {
       error: 'notify does not accept --text'
     })
     expect(isDestructiveVerb('notify')).toBe(false)
+  })
+})
+
+describe('open-project + --project docs land with the dispatch (issue #338, spec §8)', () => {
+  const bodies: [string, string][] = [
+    ['skill', buildCanvasSkillBody('/x/shim.sh')],
+    ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
+  ]
+
+  it('both bodies document open-project: idempotent, confirmed (a denial is final), local-only, the returned id, no tab focus', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('open-project --cwd')
+      expect(body, name).toMatch(/[Ii]dempotent/)
+      // The confirm may be denied, and a denial is terminal — never advice to retry it.
+      expect(body, name).toMatch(/denial is final/)
+      // Local-only (B5) and no focus (B4), stated to the agent as facts.
+      expect(body, name).toMatch(/refused from an SSH project/)
+      expect(body, name).toMatch(/never\s+focuses/)
+      expect(body, name).toContain('projectId')
+    }
+  })
+
+  it('every --project-targetable verb line documents the flag — walked off the REAL set', () => {
+    // The drift alarm walks PROJECT_TARGETABLE_VERBS (src/main/project-grants.ts) rather than a
+    // re-typed list: a fourth verb joining the set without its doc line goes red here, and a doc
+    // line dropping the flag goes red too.
+    for (const [name, body] of bodies) {
+      for (const verb of PROJECT_TARGETABLE_VERBS) {
+        const line = body.split('\n').find((l) => l.includes(`\`${verb} `))
+        expect(line, `${name}: a doc line for ${verb}`).toBeTruthy()
+        expect(line, `${name}: ${verb} documents --project`).toContain('--project')
+      }
+    }
+  })
+
+  it('both bodies state the own-or-returned-id rule as fact, the cold-open contract, and the flag exclusion', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('any other id is refused')
+      // The cold-open sentence: a session opened into a non-active project starts when the user
+      // next views it — and the agent is told not to poll for that.
+      expect(body, name).toMatch(/starts when the user next views/)
+      expect(body, name).toMatch(/do not poll/)
+      expect(body, name).toMatch(/`--group`\/`--after` cannot\s+be combined with `--project`/)
+    }
+  })
+
+  it('the orchestration recipe gains the multi-repo pattern', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('one project per repository')
+      expect(body, name).toContain('open-project --cwd <repo>')
+      // v1 has no cross-project links; the workaround is named.
+      expect(body, name).toMatch(/reader agent inside that project/)
+    }
+  })
+})
+
+describe('the --project clause tells the truth about travel (review #363 I-1 + M-3)', () => {
+  const bodies: [string, string][] = [
+    ['skill', buildCanvasSkillBody('/x/shim.sh')],
+    ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
+  ]
+
+  it('no-travel is promised ONLY for a returned id; own id is documented as flag-omitted (travel included)', () => {
+    for (const [name, body] of bodies) {
+      // The clause slice: from the `--project` flag doc to the open-project entry that follows
+      // it in both bodies — anchored, so a caveat cannot drift into another paragraph (the
+      // recipe) and still count (M-3).
+      const start = body.indexOf('`--project <id>`')
+      const end = body.indexOf('open-project --cwd')
+      expect(start, `${name}: clause start`).toBeGreaterThan(-1)
+      expect(end, `${name}: clause before the open-project entry`).toBeGreaterThan(start)
+      const clause = body.slice(start, end)
+      // Own id ≡ the flag omitted, view switch included — the REAL behavior (Canvas.tsx's
+      // own-id leg falls through to the legacy path, travel included; pinned in
+      // control-open-project.source.test.ts). The doc must say the same, not more.
+      expect(clause, name).toMatch(/behaves exactly as if the flag\s+were omitted/)
+      expect(clause, name).toMatch(/view switch\s+included/)
+      // The no-travel promise exists only attached to the RETURNED id…
+      expect(clause, name).toMatch(
+        /returned to YOU\s+in this session, which never switches the\s+user'?s view/
+      )
+      // …and the old universal phrasing ("without switching the user's view", said of the whole
+      // flag) is gone from the body entirely.
+      expect(body, name).not.toMatch(/without switching/)
+      // M-3: the do-not-poll caveat and the refusal rule live in the clause ITSELF — dropping
+      // them here while the recipe's copy survives is red.
+      expect(clause, name).toMatch(/do not poll/)
+      expect(clause, name).toContain('any other id is refused')
+    }
   })
 })
