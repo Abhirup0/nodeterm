@@ -36,13 +36,11 @@ describe('parseControlRequest', () => {
     })
   })
 
-  it('open-project is NOT in DESTRUCTIVE_VERBS yet — that membership lands with PR 2', () => {
-    // Deliberate PR slicing, not an oversight: `control-destructive.test.ts` structurally
-    // requires every member's `Canvas.tsx` case to read `isDestructiveVerb(verb)`, and the
-    // dispatch case for open-project only exists in PR 2 (Task 2.2). Adding the verb to the set
-    // now would trip the set↔dispatch drift alarm with no dispatch to agree with. This test goes
-    // red the moment PR 2 adds the membership, which is the reminder to delete it.
-    expect(isDestructiveVerb('open-project')).toBe(false)
+  it('open-project IS destructive — its create/adopt/first-attach dialog is confirm-gated (PR 2)', () => {
+    // PR 1 left a tripwire here asserting the opposite; PR 2 added the early-handled dispatch
+    // block that reads `isDestructiveVerb(verb)` before its `confirmBusy()` refusal, so the
+    // membership and the dispatch now exist together (control-destructive.test.ts is the alarm).
+    expect(isDestructiveVerb('open-project')).toBe(true)
   })
 
   it('requires a target for write/close', () => {

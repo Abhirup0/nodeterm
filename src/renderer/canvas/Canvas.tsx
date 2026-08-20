@@ -208,6 +208,13 @@ import {
 } from '../lib/controlRouting'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
 import {
+  planOpenProject,
+  recordAttachConsent,
+  openProjectReply,
+  findProjectByCwd,
+  nextFreePosition
+} from '../lib/projectOpen'
+import {
   FIT_NODE_OPTIONS,
   absolutePosition,
   isMeasured,
@@ -7156,6 +7163,93 @@ export function Canvas() {
         reply(delivered ?? { ok: false, error: 'delivery produced no reply' })
         return
       }
+
+      // ── `open-project` (issue #338 Task 2.2) — handled BEFORE the source-routing machinery ──
+      // A STORE_ANSWERED_VERBS member for the G5 reason (controlRouting.ts): routing is by
+      // SOURCE, and travelling would yank the human's view to the CALLER's project on every
+      // registration. Main already gated this request (gateOpenProject): the caller is verified,
+      // local, under the grant cap, and `args.cwd` is the RESOLVED path (P7) — the raw argument
+      // never reaches this process, so the dialog below can only ever show the resolved form
+      // (P5). The renderer's job: validate the source live-or-stored, decide the consent branch
+      // (planOpenProject — every grant passes a human decision exactly once, spec Q1), raise the
+      // dialog, apply the NON-ACTIVATING registerProject (P6 — no setActive/travel in any
+      // branch), and reply exactly once on confirm AND cancel (GC 12). The grant itself is
+      // recorded MAIN-side when this reply lands ok && verified (recordOpenProjectGrant) —
+      // nothing in this block authorizes anything.
+      if (verb === 'open-project') {
+        const resolvedCwd = args.cwd ?? ''
+        if (!resolvedCwd) {
+          reply({ ok: false, error: 'open-project requires --cwd' })
+          return
+        }
+        const opLive = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const opStored = useProjects
+          .getState()
+          .projects.flatMap((p) => p.nodes)
+          .find((n) => n.id === sourceNodeId)
+        if (!opLive && !opStored) {
+          reply({ ok: false, error: 'source node is not in any open project' })
+          return
+        }
+        if (!sourceIsControlCapable(opLive?.data.agentId ?? opStored?.agentId)) {
+          reply({ ok: false, error: 'source node is not a control-capable agent' })
+          return
+        }
+        const opTitle =
+          oneLine((opLive?.data.title as string) ?? opStored?.title ?? '') || sourceNodeId
+        // Apply one consent decision: register (create/adopt/idempotent hit) without activating,
+        // persist, remember the (caller, project) pair for dialog dedupe — authorization stays
+        // main-side — and reply with the id the caller can feed `--project`.
+        const opFinish = (adoptProbed?: Project) => {
+          const r = useProjects.getState().registerProject({
+            resolvedCwd,
+            name: args.name,
+            color: args.color,
+            ...(adoptProbed ? { probed: adoptProbed } : {})
+          })
+          recordAttachConsent(sourceNodeId, r.project.id)
+          void writeDisk()
+          reply({ ok: true, ...openProjectReply(r.project, r.created, r.adopted) })
+        }
+        // The probe only matters when no project owns this cwd yet (adopt-vs-create copy) — an
+        // idempotent hit must not pay a folder read.
+        const opProjects = useProjects.getState().projects
+        const opProbed = findProjectByCwd(opProjects, resolvedCwd)
+          ? null
+          : await api.workspace.probeFolder(resolvedCwd).catch(() => null)
+        const opPlan = planOpenProject({
+          projects: opProjects,
+          callerNodeId: sourceNodeId,
+          srcTitle: opTitle,
+          resolvedCwd,
+          probedName: opProbed?.name,
+          requestedName: args.name
+        })
+        if (opPlan.kind === 'silent') {
+          // This caller already passed a human decision for this project (Q1): idempotent, quiet.
+          opFinish()
+          return
+        }
+        // One confirm dialog at a time — the write/close rule, read off the shared set.
+        if (isDestructiveVerb(verb) && confirmBusy()) {
+          reply({ ok: false, error: 'a confirmation is already pending — try again' })
+          return
+        }
+        setConfirm({
+          message: opPlan.message,
+          confirmLabel: opPlan.confirmLabel,
+          requestedBy: opTitle,
+          onConfirm: () => {
+            setConfirm(null)
+            opFinish(
+              opPlan.confirmKind === 'adopt' && opProbed ? { ...opProbed, closed: false } : undefined
+            )
+          },
+          onCancel: () => reply({ ok: false, error: 'denied by user' })
+        })
+        return
+      }
+      // ── end of the early-handled (store-answered) verbs ─────────────────────────────────────
 
       // Which canvas answers? React Flow holds only the ACTIVE project's nodes, but every OTHER
       // project's tmux sessions keep running and are re-adopted on the next app start — so after a
