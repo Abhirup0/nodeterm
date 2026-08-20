@@ -185,6 +185,40 @@ describe('generated Codex launcher', () => {
     expect(fallbacks).toEqual([])
   })
 
+  // #350 (the confused deputy): the shared app-server is a PERSISTENT DAEMON started by the FIRST
+  // codex node to launch, and reused by every later node. If the launcher starts it while THIS
+  // node's per-pane NODETERM_NODE_ID is in the environment, the daemon — and every tool shell it
+  // later spawns for EVERY node — inherits that one node's id. The thread→node resolver only
+  // recovers the right node when the tool shell has NO NODETERM_NODE_ID (its guard is
+  // `[ -z "$NODETERM_NODE_ID" ]`), so a leaked value silently collapses every codex node's identity
+  // onto the daemon-starting node: Project B's codex then lists Project A's links and routes to A.
+  // The daemon MUST therefore be started with the per-pane vars scrubbed. NODETERM_CODEX_ACCOUNT_ID
+  // is the ONE exception — one daemon serves one account, and the resolver reads it to pick scope.
+  it('starts the shared app-server daemon WITHOUT this node\'s per-pane NODETERM_NODE_ID (#350)', async () => {
+    const envDump = path.join(dir, 'daemon-env.txt')
+    const dumpScript = path.join(dir, 'dump-daemon-env.sh')
+    fs.writeFileSync(
+      dumpScript,
+      `#!/bin/sh\n` +
+        `printf 'NID=[%s]\\nACC=[%s]\\nHOOK=[%s]\\n' ` +
+        `"\${NODETERM_NODE_ID-}" "\${NODETERM_CODEX_ACCOUNT_ID-}" "\${NODETERM_HOOK_ENDPOINT-}" ` +
+        `> ${JSON.stringify(envDump)}\n`,
+      { mode: 0o755 }
+    )
+    const script2 = path.join(dir, 'nodeterm-codex-envdump')
+    fs.writeFileSync(script2, buildCodexLauncherScript(JSON.stringify(dumpScript)), { mode: 0o755 })
+
+    await callLauncher([], { NODETERM_CODEX_ACCOUNT_ID: 'acct-A' }, script2)
+
+    const dumped = fs.readFileSync(envDump, 'utf8')
+    // The per-pane node id is scrubbed for the daemon (else its tool shells all report node-1).
+    expect(dumped).toContain('NID=[]')
+    // …and the per-pane hook endpoint too — a tool shell recovers it per-thread from the record.
+    expect(dumped).toContain('HOOK=[]')
+    // The account scope is deliberately preserved: the resolver needs it to pick the record scope.
+    expect(dumped).toContain('ACC=[acct-A]')
+  })
+
   it('keeps the caller arguments after the thread it resolved', async () => {
     await callLauncher(['--ask-for-approval', 'never', 'fix the bug'])
     expect(codexArgv()).toEqual([
