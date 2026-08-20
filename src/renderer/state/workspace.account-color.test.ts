@@ -73,10 +73,21 @@ describe('createAgentNode — account default color', () => {
     expect(node.data.color).toBe(AGENT_COLOR('claude'))
   })
 
-  it('never colors a non-Claude node — accounts are Claude-only, and so is their color', () => {
+  // Codex nodes bind managed accounts too (S6), but a CodexAccount carries no `color` — and the two
+  // account lists are keyed independently, so a Codex id that happens to match a Claude one must
+  // NOT borrow its color. The binding itself still has to land, unchanged by this feature.
+  it('never colors a Codex node from the Claude account list, but still stamps its binding', () => {
     withAccounts([account('a1', '#0a84ff')])
     const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'a1')
     expect(node.data.color).toBe(AGENT_COLOR('codex'))
+    expect(node.data.accountId).toBe('a1')
+  })
+
+  it('never colors a node of an agent that takes no account at all', () => {
+    withAccounts([account('a1', '#0a84ff')])
+    const node = createAgentNode('gemini', 0, undefined, undefined, undefined, undefined, 'a1')
+    expect(node.data.color).toBe(AGENT_COLOR('gemini'))
+    expect(node.data.accountId).toBeUndefined()
   })
 
   it('leaves an account-less node exactly where it was before the feature', () => {

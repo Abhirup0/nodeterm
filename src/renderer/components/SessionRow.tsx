@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { IconBellFilled, IconCircleCheck } from './icons'
+import { ProjectGlyph } from './ProjectGlyph'
 import type { SessionRowVM } from '../lib/sessionList'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSettings } from '../state/settings'
-import { contextFillColor, percentNumber, percentText } from '../lib/usageFormat'
+import { contextFillColor, contextPillText, percentText } from '../lib/usageFormat'
 
 export interface SessionRowProps {
   row: SessionRowVM
@@ -89,16 +90,18 @@ export function SessionRow({
         <div className="ss-row__titleline">
           {row.projectColor ? (
             // Status mode: rows are flattened across projects, so each row shows its project's
-            // monogram (colored circle with the project initial) instead of the plain color mark.
-            <span
+            // icon (or, absent one, the monogram — colored circle with the project initial)
+            // instead of the plain color mark.
+            <ProjectGlyph
+              icon={row.projectIcon}
+              color={row.projectColor}
+              name={row.projectName ?? ''}
+              variant="monogram"
               className="ss-mark ss-mark--project"
-              style={{ background: row.projectColor }}
               title={row.projectName}
-            >
-              {(row.projectName?.trim() || '?').charAt(0).toUpperCase()}
-            </span>
+            />
           ) : (
-            <span className="ss-mark" style={{ background: row.color }} />
+            <ProjectGlyph color={row.color} name="" variant="dot" className="ss-mark" />
           )}
           {editing ? (
             <input
@@ -137,7 +140,7 @@ export function SessionRow({
               title={`Context window — ${percentText(usage.usedPercent, percentMode)}`}
               style={{ background: contextFillColor(usage.usedPercent) }}
             >
-              {percentNumber(usage.usedPercent, percentMode)}%
+              {contextPillText(usage.usedTokens, usage.windowTokens, usage.usedPercent, percentMode)}
             </span>
           )}
           <button

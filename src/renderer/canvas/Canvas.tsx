@@ -64,6 +64,7 @@ import {
 import { terminalKey } from '../terminal/terminal-config'
 import {
   setWebglGesture,
+  setWebglZoom,
   releaseAllHiddenGrants,
   WEBGL_GESTURE_SETTLE_MS
 } from '../terminal/webgl-budget'
@@ -112,6 +113,7 @@ import {
   IconUnlock
 } from '../components/icons'
 import type { SettingsSectionId } from '../components/settings/nav'
+import { projectSectionId } from '../components/settings/project-settings-targets'
 // Overlay surfaces (settings, source control, explorer, kanban, onboarding, dictation, …) are
 // code-split: they render behind a flag and must not sit in the startup chunk. See lazyPanels.
 import {
@@ -152,9 +154,11 @@ import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { TmuxBanner } from '../components/TmuxBanner'
 import { PtyPressureBanner } from '../components/PtyPressureBanner'
+import { ShortcutCaptureBanner } from '../components/ShortcutCaptureBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CapabilityNotice } from '../components/CapabilityNotice'
+import { SetupConsentDialog } from '../components/SetupConsentDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
 import { peerApprovalView } from '@shared/remote/approval'
 import { promptDialog } from '../components/promptDialog'
@@ -173,6 +177,21 @@ import {
   zoomShortcutAllowed,
   zoomShortcutChord
 } from '../lib/zoomShortcut'
+import {
+  dispatchGlobalKeydown,
+  type GlobalKeyEvent,
+  type GlobalKeydownDeps
+} from '../lib/globalKeybindings'
+import { isTerminalTarget, type ContextElement } from '../lib/keyContext'
+import { installTerminalFocusMirror } from '../lib/terminalFocusMirror'
+import {
+  activeKeybindingOverrides,
+  chipFor,
+  commandTooltip,
+  dictationBinding,
+  noteTerminalCapture,
+  terminalShortcutPolicy
+} from '../lib/keybindingOverrides'
 import { UsageIndicator } from '../components/UsageIndicator'
 import { SystemResourcePill } from '../components/SystemResourcePill'
 import { PresenceLayer } from '../components/PresenceLayer'
@@ -183,9 +202,21 @@ import {
   routeControlSource,
   needsLiveCanvas,
   sourceIsControlCapable,
-  storedNodeListing
+  storedNodeListing,
+  answerBrowserResolve,
+  type BrowserResolveProject
 } from '../lib/controlRouting'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
+import {
+  planOpenProject,
+  recordAttachConsent,
+  openProjectReply,
+  findProjectByCwd,
+  nextFreePosition,
+  armForColdOpen,
+  projectTargetFlagRefusal,
+  clearAttachConsent
+} from '../lib/projectOpen'
 import {
   FIT_NODE_OPTIONS,
   absolutePosition,
@@ -217,6 +248,7 @@ import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
 import { isSafeQuickOpenRelPath } from '@shared/quick-open-filter'
+import { agentBrowserPartition } from '@shared/browser-partition'
 
 /** The real `sshProject.connect`, bound once. Passed into `connectHostAttachment` rather than
  *  reached for inside it, so that helper stays testable without an Electron preload. */
@@ -226,8 +258,17 @@ const sshDisconnect = (scopeId: string): Promise<unknown> =>
   window.nodeTerminal.sshProject.disconnect(scopeId)
 import { opensInEditor } from '../lib/openTarget'
 import { newEntryPath, parentDir } from '../lib/explorerCreate'
+import {
+  explorerIsOpen,
+  nextExplorerPin,
+  nextExplorerShow,
+  readExplorerPinned,
+  writeExplorerPinned,
+  type ExplorerShowAction
+} from '../lib/explorerPin'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useTeamAccessEvents } from '../state/teamAccess'
@@ -239,6 +280,8 @@ import {
   computeWorktreePath,
   resolveWorktreePath,
   displacedByWorktree,
+  effectiveWorktreeBaseRef,
+  effectiveWorktreeTemplate,
   isRemoteSessionNode,
   resolveBaseRef,
   sanitizeWorktreeBranch,
@@ -251,7 +294,6 @@ import {
 } from '@shared/worktree'
 import { normWorktreePath, type BoundGroup } from '@shared/worktree-reconcile'
 import { boundGroups, scmScopes, defaultScmScope, selectedScmGroupId } from '@shared/scm-scope'
-import { hintLabel } from '@shared/platform-utils'
 import {
   canvasImageFiles,
   canvasImageSink,
@@ -261,6 +303,12 @@ import {
   pastedFiles
 } from '../terminal/file-drop'
 import { useWorktrees } from '../state/worktrees'
+import { setupAckDecision, setupGateDone, useProjectSetup } from '../state/projectSetup'
+import {
+  ensureProjectLaunchInfo,
+  invalidateProjectLaunchInfo,
+  projectLaunchInfoNow
+} from '../state/projectLaunchInfo'
 import { activeSessionApi } from '../session/session'
 import {
   agentConfig,
@@ -301,15 +349,14 @@ import { pushSessionRename } from '../lib/sessionRename'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
-import { launchableDefaultAgent } from '../state/agentAvailability'
-import { activePermissionMode } from '../state/permissionMode'
+import { activePermissionMode, projectPermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
 import { useSshConn } from '../state/sshConn'
 import { useSystemAccount } from '../state/systemAccount'
 import { useEntitlement } from '../state/entitlement'
-import type { SshServer, SshConnection } from '@shared/ssh'
+import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type {
   CanvasNodeState,
@@ -355,6 +402,7 @@ import {
   commonParentId,
   fitGroupToChildren,
   createAccountLoginNode,
+  createCodexAccountLoginNode,
   isAccountLoginNode,
   systemAccountDisplay,
   createAgentNode,
@@ -375,18 +423,23 @@ import {
   flowToNodeStates,
   addSelectionToGroup,
   groupSelectedNodes,
-  NODE_COLORS,
   nodeStatesToFlow,
   reorderGroupWithinParent,
   reorderNodeBefore,
   reparentNode,
   selectedRootIds,
   resolveNewNodeAccount,
+  resolveNewNodeAgent,
   accountsForProject,
   sshAccountsHint,
   ungroupNodes,
   type CanvasNode
 } from '../state/workspace'
+import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
+import { resolveNewCodexNodeAccount, planCodexAccountSwitch } from './codex-account-ops'
+import type { CodexAccount } from '@shared/codex-account'
+import { useSystemCodexAccount } from '../state/systemCodexAccount'
+import { toKanbanSession } from './toKanbanSession'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -573,57 +626,6 @@ const minimapNodeColor = (n: Node): string =>
 const restartAgentIdOf = (n: Node | undefined): AgentId | undefined =>
   !n || n.type !== 'terminal' ? undefined : createdAgentId(n.data)
 
-/** One canvas node as a board card, or null when this kind is not a card at all (a group frame, an
- *  editor, a diff). The board derives its cards from the canvas live, so this is the single
- *  definition of that mapping — the card list and the board-log's `cardTitle` lookup must agree on
- *  what a node is called, or a title change would log as a card appearing and disappearing. */
-function toKanbanSession(n: CanvasNode): KanbanSession | null {
-  if (n.type === 'browser') {
-    return {
-      id: n.id,
-      title: (n.data.title as string) || 'Browser',
-      color: (n.data.color as string) ?? NODE_COLORS[0],
-      kind: 'browser',
-      url: n.data.url as string | undefined,
-      spawn: {}
-    }
-  }
-  if (n.type === 'sticky') {
-    const text = ((n.data.text as string) ?? '').trim()
-    return {
-      id: n.id,
-      // A note has no title of its own — its first line is the card label. Bodies are markdown
-      // now, so a leading heading marker is presentation, not part of the label.
-      title: text.split('\n')[0].replace(/^#{1,6}\s+/, '').slice(0, 80) || 'Note',
-      color: (n.data.color as string) ?? NODE_COLORS[2],
-      kind: 'sticky',
-      text,
-      textUpdatedAt: n.data.textUpdatedAt as number | undefined,
-      textUpdatedBy: n.data.textUpdatedBy as string | undefined,
-      // Sticky cards never open a live terminal — the modal reads no spawn info.
-      spawn: {}
-    }
-  }
-  if (n.type !== 'terminal') return null
-  return {
-    id: n.id,
-    title: (n.data.title as string) ?? '',
-    color: (n.data.color as string) ?? NODE_COLORS[0],
-    kind: 'terminal',
-    agentId: n.data.agentId as string | undefined,
-    // What the card modal's co-attach terminal needs to join THIS node's session the same way the
-    // canvas TerminalNode does.
-    spawn: {
-      shell: n.data.shell as string | undefined,
-      cwd: n.data.cwd as string | undefined,
-      agentId: n.data.agentId as string | undefined,
-      accountId: n.data.accountId as string | undefined,
-      ssh: n.data.ssh as SshConnection | undefined,
-      sshRemoteTmux: !!n.data.sshRemoteTmux
-    }
-  }
-}
-
 /** Stable empty card list, so the closed board's memo never churns array identity. */
 const NO_KANBAN_SESSIONS: KanbanSession[] = []
 
@@ -711,6 +713,15 @@ function StatusAwareMiniMap({ onNodeDoubleClick }: { onNodeDoubleClick: (node: N
       nodeClassName={nodeClassName}
     />
   )
+}
+
+/**
+ * `window.nodeTerminal` rather than the session `api`: the run store's `subscribeProject` listens on
+ * the LOCAL core's channel, so raising a run anywhere else would leave its events unheard — the chip
+ * would sit blank over a script that is really running.
+ */
+function setupApi(): typeof window.nodeTerminal.projectSetup {
+  return window.nodeTerminal.projectSetup
 }
 
 export function Canvas() {
@@ -831,6 +842,15 @@ export function Canvas() {
   const [welcomeOpen, setWelcomeOpen] = useState(false)
   // Optional deep-link target when opening settings (e.g. RemotePicker → the SSH section).
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | undefined>(undefined)
+  // Bumped ONLY by a deep link, so SettingsPage re-targets (and clears its search box) even when
+  // the requested section is the one it is already showing. Plain opens leave it alone.
+  const [settingsNonce, setSettingsNonce] = useState(0)
+  // Tab caret menu / sidebar right-click → this project's own pane in Settings.
+  const openProjectSettings = useCallback((id: string) => {
+    setSettingsSection(projectSectionId(id))
+    setSettingsNonce((n) => n + 1)
+    setSettingsOpen(true)
+  }, [])
   const [scOpen, setScOpen] = useState(false)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   // Debug log panel (issue #78). Settings' "Open" button fires the event (the dialog can't
@@ -877,7 +897,26 @@ export function Canvas() {
       .then((v) => setAppVersion(v))
       .catch(() => {})
   }, [])
-  const [explorerOpen, setExplorerOpen] = useState(false)
+  // Explorer visibility: pin is a persisted preference (default off — it is a modal today;
+  // flipping the default would dock it on every existing user's next launch). `dismissed` is
+  // the transient × hide and does NOT clear the pin, matching the sessions sidebar. `open`
+  // is the unpinned (modal) flag. See `lib/explorerPin.ts`.
+  const [explorer, setExplorer] = useState(() => ({
+    pinned: readExplorerPinned(),
+    dismissed: false,
+    open: false
+  }))
+  const explorerOpen = explorerIsOpen(explorer)
+  const showExplorer = useCallback((action: ExplorerShowAction) => {
+    setExplorer((s) => ({ ...s, ...nextExplorerShow(s, action) }))
+  }, [])
+  const toggleExplorerPin = useCallback(() => {
+    setExplorer((s) => {
+      const next = nextExplorerPin(s)
+      writeExplorerPinned(next.pinned)
+      return next
+    })
+  }, [])
   // Reveal-in-Explorer target (relative to the active project cwd). The nonce makes each reveal
   // distinct so revealing the same file twice still re-fires the Explorer effect.
   const [reveal, setReveal] = useState<{ path: string; nonce: number } | null>(null)
@@ -1150,6 +1189,15 @@ export function Canvas() {
   }, [getViewport, setViewport])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
+  // Project-level worktree defaults (basePath/baseRef) for the active project, read from the warmed
+  // launch-info cache. Fed to the "New worktree" dialog defaults below; the open-worktree verb reads
+  // its own project's entry separately. Absent (project never warmed, or it sets neither) → the
+  // `effectiveWorktree*` resolvers fall back to entries/global, i.e. today's exact behavior.
+  const activeWorktreePw = projectLaunchInfoNow(activeProjectId ?? '')?.resolved.worktree
+  const activeWorktreeDefaults = {
+    basePath: activeWorktreePw?.basePath?.value,
+    baseRef: activeWorktreePw?.baseRef?.value
+  }
   // Bumped by `requestReload()`; a dependency of the project-load effect so an in-place reload of
   // the ALREADY-active project actually re-runs it (see reloadActiveProject).
   const reloadNonce = useProjects((s) => s.reloadNonce)
@@ -1285,6 +1333,37 @@ export function Canvas() {
     }
     return sig
   })
+  // ---- the setup gate an armed node waits on ----
+  // The runs are launched from the worktree-lifecycle block far below; the gate itself lives up
+  // here, beside the launch effect that reads it.
+  //
+  // In-flight launches are counted in the STORE (`pendingByGroup`) rather than in a ref: the frame's
+  // chip reads the same fact to disable itself, and a per-group COUNTER is what makes two overlapping
+  // launches safe (see the store's note). It is runtime-only either way — after a restart neither a
+  // pending launch nor a wait-for-setup obligation survives, and `setupGateDone`'s "nothing on record
+  // and nothing pending" rule then releases a persisted arming rather than stranding it.
+  /** Groups whose acked setup run said `waitForSetup` — the ones that arm what is opened into them. */
+  const setupWaitGroupsRef = useRef<Set<string>>(new Set())
+  const setupDoneForGroup = useCallback((groupId: string): boolean => {
+    const s = useProjectSetup.getState()
+    return setupGateDone(s.runForGroup(groupId), s.pendingForGroup(groupId) > 0)
+  }, [])
+  // A signature over the setup-run state of every group an armed node is waiting on, so a run going
+  // `done` re-runs the launch effect — the same trick as `armedDepSig`. Subscribing to the whole
+  // store would re-render the canvas on every output chunk of every script.
+  const armedSetupSig = useProjectSetup((s) => {
+    let sig = ''
+    for (const n of nodesRef.current) {
+      const g = n.data.pendingLaunch?.awaitSetupGroup
+      if (!g) continue
+      const runKey = s.groupRunKey[g]
+      // The pending count is part of the signature: an ack that leaves no other trace (a `busy`
+      // one) still changes whether the gate is closed, and the effect has to be told.
+      sig += `${n.id}:${g}=${runKey === undefined ? '-' : (s.byRunKey[runKey]?.state ?? '')}`
+      sig += `+${s.pendingByGroup[g] ?? 0}|`
+    }
+    return sig
+  })
   // Bumped to re-run the launch effect after a refused delivery (see LAUNCH_RETRY_MS).
   const [launchRetry, setLaunchRetry] = useState(0)
   // Ids whose held launch has been handed to the pty. An id stays here FOREVER once delivery
@@ -1300,7 +1379,8 @@ export function Canvas() {
     const ready = launchesToFire(
       nodes as unknown as ArmedNode[],
       useAgentStatus.getState().byId,
-      live
+      live,
+      setupDoneForGroup
     ).filter((f) => !launchInFlight.current.has(f.id))
     for (const f of ready) {
       launchInFlight.current.add(f.id)
@@ -1324,8 +1404,8 @@ export function Canvas() {
         }
       })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/launchRetry are the triggers
-  }, [nodes, armedDepSig, launchRetry])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedSetupSig/launchRetry are the triggers
+  }, [nodes, armedDepSig, armedSetupSig, launchRetry])
 
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes), owned by
   // the agent-nodes store so the cards themselves can set it — see `selectable: false` below.
@@ -1356,7 +1436,7 @@ export function Canvas() {
       // lives here, in the render layer, and nowhere else.
       if (!st.loop || st.loop.dismissed) continue
       const parent = nodes.find((n) => n.id === pid)
-      if (!parent) continue
+      if (!parent || parent.data.hideFanout) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
       const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const lid = `loop-${pid}`
@@ -1405,7 +1485,7 @@ export function Canvas() {
     }
     for (const [pid, childIds] of Object.entries(byParent)) {
       const parent = nodes.find((n) => n.id === pid)
-      if (!parent) continue
+      if (!parent || parent.data.hideFanout) continue
       const ph = parent.measured?.height ?? (parent.height as number) ?? 400
       const accent = agentConfig((parent.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const COLS = 4
@@ -1512,8 +1592,14 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depEdgeSig IS the ref's signature
     [depEdgeSig]
   )
+  // Which browser nodes are being DRIVEN (Task 6.2) — for the rope highlight only. Membership comes
+  // from the ownership-backed lease store; a rope whose target is NOT here is never highlighted, so a
+  // hostile pre-declared rope (a cloned project.json can ship one) lights up nothing. Rendering-only:
+  // ownership is still decided in main, never from `controlEdges`.
+  const drivenLeaseEntries = useBrowserLease((s) => s.entries)
   const displayEdges = useMemo(() => {
     const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
+    const drivenTargets = drivingNodeIds(drivenLeaseEntries, Date.now())
     // ONE edge per pair. A node an agent opens gets both a rope (lineage) and a context bridge
     // (readable context), which drew two near-identical arrows between the same two nodes. The
     // rope keeps the pixels; the bridge still exists in data (it is what authorizes reading) and
@@ -1548,22 +1634,31 @@ export function Canvas() {
     const ropeCoversLink = new Set(
       linkEdges.filter((e) => hidden.has(e.id)).map((e) => pairKey(e.source, e.target))
     )
-    const ropes = controlEdges.map((e) =>
-      e.selected
-        ? {
-            ...e,
-            label: ropeCoversLink.has(pairKey(e.source, e.target))
-              ? '⇄ context · ⌫ to remove'
-              : '⌫ to remove',
-            labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
-            labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
-            labelBgPadding: [6, 3] as [number, number],
-            labelBgBorderRadius: 5,
-            style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
-          }
-        : e
-    )
+    const ropes = controlEdges.map((e) => {
+      if (e.selected)
+        return {
+          ...e,
+          label: ropeCoversLink.has(pairKey(e.source, e.target))
+            ? '⇄ context · ⌫ to remove'
+            : '⌫ to remove',
+          labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
+          labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+          labelBgPadding: [6, 3] as [number, number],
+          labelBgBorderRadius: 5,
+          style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
+        }
+      // Driven: the same clay the RUNNING badge uses, thicker and flowing — legible on a zoomed-out
+      // canvas where the header chip is unreadable. This is the whole point of highlighting the rope.
+      if (drivenTargets.has(e.target))
+        return {
+          ...e,
+          animated: true,
+          style: { ...e.style, stroke: '#d97757', strokeWidth: 2.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#d97757', width: 14, height: 14 }
+        }
+      return e
+    })
     // Waiting edges for armed nodes (`--after`): dep → dependent, dashed and animated while the
     // wait is on. Derived from node data rather than persisted — a pending dependency is a STATE
     // that ends when the launch fires, unlike the context bridge `--after` also draws, which is a
@@ -1574,7 +1669,7 @@ export function Canvas() {
         ? [...ephemeralEdges, ...ropes, ...depEdges]
         : []
     return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges])
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges, drivenLeaseEntries])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -1852,6 +1947,10 @@ export function Canvas() {
       setViewport(project.viewport)
       setZoomPct(Math.round(project.viewport.zoom * 100))
       setGroupLabelBoost(project.viewport.zoom)
+      // A project can load already zoomed IN past the crisp threshold (saved viewport) — seed the
+      // gate before the mount-time IntersectionObserver reports make every node request a context
+      // it would only have to give back.
+      setWebglZoom(project.viewport.zoom)
       // Seed the shared glyph camera from the same viewport: `onMove` only fires once the user
       // actually pans, so without this a project that loads scrolled away would draw its grids
       // against the previous project's camera until the first gesture.
@@ -2133,6 +2232,26 @@ export function Canvas() {
   useEffect(() => {
     setConflict(null)
   }, [activeProjectId])
+
+  // Warm the launch-info cache (`renderer/state/projectLaunchInfo.ts`) for whichever project just
+  // became active, so a launch on it reads a fresh `projectLaunchInfoNow` instead of null (fail
+  // open) the first time it asks. Fire-and-forget: `ensureProjectLaunchInfo` never rejects and is
+  // bounded on its own.
+  useEffect(() => {
+    if (!activeProjectId) return
+    void ensureProjectLaunchInfo(activeProjectId)
+  }, [activeProjectId])
+
+  // `project-trust:changed` (Task 2 emits it once a family is approved/revoked): drop the stale
+  // verdict and re-warm immediately, so a launch right after answering the consent dialog sees the
+  // new trust state instead of the pre-approval snapshot. Mount-once — the subscription itself is
+  // not per-project (the payload carries the id), unlike `projectSetup.onEvent`.
+  useEffect(() => {
+    return window.nodeTerminal.projectSettings.onTrustChanged(({ projectId }) => {
+      invalidateProjectLaunchInfo(projectId)
+      void ensureProjectLaunchInfo(projectId)
+    })
+  }, [])
 
   // Debounced auto-save for canvas edits. Suppressed while a conflict bar is up: the bar only ever
   // appears WHILE dirty, so without this gate the 800ms timer would fire and silently "keep mine"
@@ -2420,23 +2539,6 @@ export function Canvas() {
     bumpDirty() // a redo is an edit: same reasoning as undo
     bumpHist((v) => v + 1)
   }, [setNodes, bumpDirty])
-
-  // Cmd/Ctrl+Z = undo, Cmd/Ctrl+Shift+Z or Cmd/Ctrl+Y = redo (ignored while typing).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (isKanbanOpen(useProjects.getState().activeProjectId)) return
-      if (!(e.metaKey || e.ctrlKey)) return
-      const k = e.key.toLowerCase()
-      if (k !== 'z' && k !== 'y') return
-      const tag = (document.activeElement?.tagName || '').toLowerCase()
-      if (tag === 'input' || tag === 'textarea') return
-      e.preventDefault()
-      if (k === 'y' || (k === 'z' && e.shiftKey)) redo()
-      else undo()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [undo, redo])
 
   // ---- canvas interactions ----
 
@@ -3312,9 +3414,9 @@ export function Canvas() {
   /** Reveal a file in the Explorer drawer: open the drawer and hand it the (relative) path.
    *  Each call bumps a nonce so revealing the same file twice still re-fires the effect. */
   const revealProjectFile = useCallback((relPath: string) => {
-    setExplorerOpen(true)
+    showExplorer('reveal')
     setReveal((r) => ({ path: relPath, nonce: (r?.nonce ?? 0) + 1 }))
-  }, [])
+  }, [showExplorer])
 
   // Cmd+click file links inside terminal output (TerminalNode dispatches these — it has no
   // direct line to the canvas). Files open as editor nodes; directories reveal in Explorer.
@@ -3408,7 +3510,10 @@ export function Canvas() {
           prompt,
           undefined,
           account,
-          activePermissionMode()
+          activePermissionMode(),
+          // The owning project, for its own `.nodeterm/settings.json` launch command — the same
+          // project the account/cwd above are resolved from.
+          activeProjectId
         )
       ])
       markDirty()
@@ -3578,9 +3683,45 @@ export function Canvas() {
     // Resolves the ssh binding by host at fire time (reads stores directly), so no project dep.
   }, [setNodes, markDirty, viewCenter])
 
+  // The Codex sibling of the block above: Settings → Accounts "Add Codex account" dispatches
+  // 'nodeterm:add-codex-account-login' and then polls `codexAccounts.waitLogin` for the account
+  // home's auth.json. Nothing was listening, so no `codex login` ever ran and the poll waited out
+  // its timeout on a credential nothing was writing (issue #346). Local only: `codexAccounts.add()`
+  // mints on THIS machine, so there is no remote/host leg to resolve — the remote account
+  // lifecycle lands with the host relay.
+  useEffect(() => {
+    const onAddCodexAccountLogin = (ev: Event): void => {
+      const accountId = (ev as CustomEvent<{ accountId?: string }>).detail?.accountId
+      if (!accountId) return
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createCodexAccountLoginNode(accountId, ns.length, viewCenter()), selected: true }
+      ])
+      markDirty()
+      // Same reason as the Claude branch: the event fires from the full-screen Settings overlay,
+      // which would otherwise hide the login node the user has to interact with.
+      setSettingsOpen(false)
+    }
+    window.addEventListener('nodeterm:add-codex-account-login', onAddCodexAccountLogin)
+    return () =>
+      window.removeEventListener('nodeterm:add-codex-account-login', onAddCodexAccountLogin)
+  }, [setNodes, markDirty, viewCenter])
+
   // Resolve the system account's email once, so context menus (built via getState) can label
   // the "System account" entry with it.
   useEffect(() => useSystemAccount.getState().ensure(), [])
+
+  // The connected SSH project whose host owns a remote account, or undefined when no matching
+  // project is currently connected (live ControlMaster in useSshConn). The fail-closed Codex
+  // account gates (`codexAccountSelectable`) refuse a remote account without one, so it can never
+  // run against the LOCAL login. Mirrors AccountsSection's helper of the same name.
+  const connectedProjectIdForHost = useCallback((host?: string): string | undefined => {
+    if (!host) return undefined
+    const conn = useSshConn.getState().byProject
+    return useProjects
+      .getState()
+      .projects.find((p) => p.ssh && sshHostKey(p.ssh.server) === host && conn[p.id])?.id
+  }, [])
 
   const addAgentNode = useCallback(
     (
@@ -3592,13 +3733,37 @@ export function Canvas() {
     ) => {
       const project = useProjects.getState().getProject(activeProjectId)
       const cwd = cwdForNewNodeIn(groupId) ?? project?.cwd
-      // Funnel through resolveNewNodeAccount so the project default applies even without an
-      // explicit pick. The factory drops the account for non-claude agents.
-      const account = resolveNewNodeAccount(
-        accountId,
-        project,
-        useSettings.getState().settings.claudeAccounts
-      )
+      // Codex accounts (S6) resolve through their OWN fail-closed gate: an explicitly picked account
+      // that is missing/hostile/unconnected is REFUSED here rather than silently downgraded to the
+      // system login (Property 4). Claude keeps its project-default-aware resolver. The factory
+      // stamps the id only for the claude/codex builtins.
+      let account: string | undefined
+      if (agentId === 'codex') {
+        const decision = resolveNewCodexNodeAccount(
+          accountId,
+          useSettings.getState().settings.codexAccounts,
+          connectedProjectIdForHost
+        )
+        if (!decision.create) {
+          setNotice({
+            kind: 'error',
+            text:
+              decision.reason === 'no-connection'
+                ? 'That Codex account lives on a host that is not connected — connect its SSH project first.'
+                : 'That Codex account is no longer available. Nothing was created.'
+          })
+          return
+        }
+        account = decision.accountId
+      } else {
+        // Funnel through resolveNewNodeAccount so the project default applies even without an
+        // explicit pick. The factory drops the account for non-claude agents.
+        account = resolveNewNodeAccount(
+          accountId,
+          project,
+          useSettings.getState().settings.claudeAccounts
+        )
+      }
       setNodes((ns) => {
         const node = createAgentNode(
           agentId,
@@ -3608,13 +3773,24 @@ export function Canvas() {
           initialPrompt,
           project?.ssh,
           account,
-          activePermissionMode(agentId)
+          activePermissionMode(agentId),
+          // Same funnel as the account above: the active project owns the node, so its own
+          // `.nodeterm/settings.json` launch command layers over the global one.
+          activeProjectId
         )
         return [...ns, groupId ? parentInto(node, groupId) : node]
       })
       markDirty()
     },
-    [setNodes, markDirty, activeProjectId, emptyNodePos, cwdForNewNodeIn, parentInto]
+    [
+      setNodes,
+      markDirty,
+      activeProjectId,
+      emptyNodePos,
+      cwdForNewNodeIn,
+      parentInto,
+      connectedProjectIdForHost
+    ]
   )
 
   // "Spawn a team…" (issue #78): the dialog collects the task; this opens ONE conductor node
@@ -3628,7 +3804,13 @@ export function Canvas() {
       const at = spawnTeamDialog?.at
       setSpawnTeamDialog(null)
       addAgentNode(
-        useSettings.getState().settings.defaultAgent ?? 'claude',
+        // No explicit pick here — the conductor opens on whatever this project calls its default
+        // agent (`.nodeterm/settings.json` → agents.defaultAgentId), else the global one.
+        resolveNewNodeAgent(
+          undefined,
+          useProjects.getState().activeProjectId,
+          useSettings.getState().settings
+        ),
         at,
         undefined,
         undefined,
@@ -3658,36 +3840,9 @@ export function Canvas() {
     setRemotePicker(screenPos)
   }, [])
 
-  // ⌘T = new terminal, ⌘⇧C = new default agent, a KEYED dictation shortcut (e.g. "Cmd+Alt+D") =
-  // toggle dictation (ignored while typing in a field/terminal). A modifier-only shortcut (the
-  // new default, "Cmd+Alt") is hold-to-talk instead — matchesShortcut always returns false for
-  // that shape (its `key` is null), so this effect is naturally a no-op for it; see the
-  // dedicated hold-mode effect below, which is what fires in that case.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (isKanbanOpen(useProjects.getState().activeProjectId)) return
-      if (!(e.metaKey || e.ctrlKey)) return
-      const tag = (document.activeElement?.tagName || '').toLowerCase()
-      if (tag === 'input' || tag === 'textarea') return
-      if (matchesShortcut(e, useSettings.getState().settings.speech.shortcut, isMac)) {
-        e.preventDefault()
-        toggleDictation()
-        return
-      }
-      const k = e.key.toLowerCase()
-      if (k === 't' && !e.shiftKey) {
-        e.preventDefault()
-        addTerminal()
-      } else if (k === 'c' && e.shiftKey) {
-        e.preventDefault()
-        // launchableDefaultAgent, not the raw setting: a default naming a since-removed custom
-        // agent would otherwise type its bare `custom:<uuid>` id into the new node's shell.
-        addAgentNode(launchableDefaultAgent(useSettings.getState().settings))
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [addTerminal, addAgentNode, toggleDictation])
+  // The selector re-runs on every settings change and returns a STRING, so zustand's default
+  // equality keeps this from re-rendering the canvas unless the chord itself moved.
+  const dictationChord = useSettings(() => dictationBinding())
 
   // v3 hold-to-talk: active only while the configured dictation shortcut is a modifier-only
   // chord (isHoldChord — the new default, "Cmd+Alt"). Walkie-talkie semantics: the chord held
@@ -3705,8 +3860,15 @@ export function Canvas() {
   // already-armed chord are inert by construction: once armed, a repeat keydown of the same
   // modifier still satisfies chordHeld, so the "misfire" branch's condition is false and it's a
   // no-op. Window blur (app switch) cancels outright.
+  //
+  // The chord comes from the keybinding registry (`dictationBinding()` — the first effective
+  // `speech.dictation` binding), not from settings.speech.shortcut, so a remap in
+  // settings.json's `keybindings` block reaches hold mode too. The `=== ''` test in front of
+  // every isHoldChord call is LOAD-BEARING: `''` means the user DISABLED dictation, and
+  // `isHoldChord('')` is TRUE (an all-false parse has a null key), so without it a disabled
+  // binding would arm a modifier-less hold chord that fires on any keydown.
   useEffect(() => {
-    if (!isHoldChord(settings.speech.shortcut)) return
+    if (dictationChord === '' || !isHoldChord(dictationChord)) return
 
     let armed = false
     let heldSince = 0
@@ -3725,8 +3887,8 @@ export function Canvas() {
 
     const onKeyDown = (e: KeyboardEvent): void => {
       if (isKanbanOpen(useProjects.getState().activeProjectId)) return
-      const combo = useSettings.getState().settings.speech.shortcut
-      if (!isHoldChord(combo)) return
+      const combo = dictationBinding()
+      if (combo === '' || !isHoldChord(combo)) return
 
       if (!armed) {
         // Arm only on the keydown that completes the exact chord — not on every keydown while
@@ -3760,7 +3922,16 @@ export function Canvas() {
 
     const onKeyUp = (e: KeyboardEvent): void => {
       if (!armed) return
-      const combo = useSettings.getState().settings.speech.shortcut
+      const combo = dictationBinding()
+      // The binding moved mid-hold (disabled, or remapped to a keyed chord): this gesture has
+      // no owner any more, so cancel — the same thing the cleanup below does once the change
+      // reaches React a tick later. Without this the `''` case would READ AS STILL HELD
+      // (`chordHeld(e, '', isMac)` is true exactly when no modifier is down) and the recording
+      // would never stop.
+      if (combo === '' || !isHoldChord(combo)) {
+        cancel()
+        return
+      }
       // Still fully down (an unrelated key was released) — keep recording.
       if (chordHeld(e, combo, isMac)) return
       const heldMs = Date.now() - heldSince
@@ -3788,7 +3959,7 @@ export function Canvas() {
         setDictationOpen(false)
       }
     }
-  }, [settings.speech.shortcut])
+  }, [dictationChord])
 
   // "Connect to a host" from the Settings section / tab-menu dialog: they collect the pairing offer
   // and dispatch it here (a window event, so they need no Canvas reference), and this runs the SAME
@@ -3868,6 +4039,123 @@ export function Canvas() {
     [setNodes, markDirty, activeProjectId]
   )
 
+  // ---- project setup/archive scripts on the worktree lifecycle ----
+  //
+  // The event channel is per PROJECT and ref-counted in preload, so one subscription per project
+  // covers every worktree of it; the unsubscribes are held here and released on unmount.
+  const setupSubsRef = useRef<Map<string, () => void>>(new Map())
+  useEffect(
+    () => () => {
+      setupSubsRef.current.forEach((off) => off())
+      setupSubsRef.current.clear()
+    },
+    []
+  )
+  /** Subscribe BEFORE the run is raised — the head of a script's output must not be lost to the
+   *  gap between the ack and the first listener. Idempotent per project. */
+  const ensureSetupSubscription = useCallback((projectId: string): void => {
+    if (setupSubsRef.current.has(projectId)) return
+    setupSubsRef.current.set(projectId, useProjectSetup.getState().subscribeProject(projectId))
+  }, [])
+  /** Drop the SETUP half of the hold on every node armed for this group, leaving its `after` deps
+   *  (if any) to decide. The launch effect re-runs on the `nodes` change and fires what is now free. */
+  const releaseSetupArming = useCallback(
+    (groupId: string): void => {
+      if (!nodesRef.current.some((n) => n.data.pendingLaunch?.awaitSetupGroup === groupId)) return
+      setNodes((ns) =>
+        ns.map((n) => {
+          const p = n.data.pendingLaunch
+          if (p?.awaitSetupGroup !== groupId) return n
+          const { awaitSetupGroup: _released, ...rest } = p
+          return { ...n, data: { ...n.data, pendingLaunch: rest } }
+        })
+      )
+      markDirty()
+    },
+    [setNodes, markDirty]
+  )
+  /**
+   * Kick a worktree's `setup` script and hand the run to the group's chip. Asked UNCONDITIONALLY:
+   * the service answers `no-script` cheaply, and reading the project's settings here would put a
+   * file read (SSH: a network round-trip) on the hot path of creating a worktree.
+   *
+   * Fire-and-observe — nothing awaits the script. What the ack decides is only (a) which run the
+   * frame's chip reports, and (b) whether nodes opened into this group meanwhile hold their launch.
+   *
+   * Also the RE-RUN path: the frame's chip calls this again on a failed run, and the new ack
+   * re-attaches the group's lane, which is what releases nodes the failure left armed. (The settings
+   * panel's Run cannot do this — it runs at the project ROOT and attaches the PROJECT lane.)
+   */
+  const startWorktreeSetup = useCallback(
+    (groupId: string, worktreePath: string): void => {
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      ensureSetupSubscription(projectId)
+      // Pending BEFORE the invoke, and cleared on every ack path below. `run` resolves only once the
+      // consent dialog has been answered, so this window is human-length, not a round-trip: an
+      // agent that gets its `open-worktree` reply and immediately opens nodes into the group lands
+      // inside it, and those nodes must wait rather than launch into an unprepared checkout.
+      const store = useProjectSetup.getState()
+      store.markGroupPending(groupId)
+      void setupApi()
+        .run(projectId, 'setup', worktreePath)
+        .then((res) => {
+          store.clearGroupPending(groupId)
+          const decision = setupAckDecision(res)
+          if (decision.attach && res.status === 'started') store.attachGroup(groupId, res.runKey)
+          if (decision.hold === 'keep') return // `busy` — another launch owns this run; touch nothing.
+          if (decision.hold === 'wait') {
+            setupWaitGroupsRef.current.add(groupId)
+            return
+          }
+          setupWaitGroupsRef.current.delete(groupId)
+          // Nothing is going to prepare this checkout, or the project runs its script unblocked —
+          // so release whatever the in-flight window armed. Without this such a node would hold for
+          // a `done` that either is not coming or was never meant to gate it.
+          releaseSetupArming(groupId)
+        })
+        .catch(() => {
+          store.clearGroupPending(groupId)
+          // A rejected invoke says nothing about a launch that may be running for this group from
+          // another click — give up the hold only when nobody else is still working on it.
+          const s = useProjectSetup.getState()
+          if (s.pendingForGroup(groupId) > 0 || s.runForGroup(groupId)?.state === 'running') return
+          setupWaitGroupsRef.current.delete(groupId)
+          releaseSetupArming(groupId)
+        })
+    },
+    [ensureSetupSubscription, releaseSetupArming]
+  )
+  /**
+   * Kick the `archive` script for a worktree that is about to be unbound or removed.
+   *
+   * TRADEOFF, deliberate: this awaits the LAUNCH RESULT (`started`/`skipped`) and nothing more.
+   * Awaiting completion would let a hung archive script trap the user in a group they asked to close
+   * — the removal is their decision, not the script's.
+   *
+   * The cost is real and currently UNSURFACED: the script keeps running after the binding drops, so
+   * the frame that would have shown its chip is already gone, and a slow script can still be writing
+   * when a delete-from-disk removal pulls the directory out from under it. Its outcome — including
+   * that failure — is recorded in the run store but has nowhere on screen to appear. Giving archive
+   * runs an observable home belongs to the observability wave, not here; until then this is a
+   * fire-and-forget in practice, and the comment says so rather than promising a chip nobody sees.
+   */
+  const runWorktreeArchive = useCallback(
+    async (groupId: string, worktreePath: string): Promise<void> => {
+      const projectId = useProjects.getState().activeProjectId
+      if (!projectId) return
+      ensureSetupSubscription(projectId)
+      const res = await setupApi()
+        .run(projectId, 'archive', worktreePath)
+        .catch(() => null)
+      // The group is on its way out, so this attachment only serves the moment the chip is still
+      // on screen — and it must not be left pointing at the finished SETUP run while an archive
+      // script is live.
+      if (res?.status === 'started') useProjectSetup.getState().attachGroup(groupId, res.runKey)
+    },
+    [ensureSetupSubscription]
+  )
+
   /**
    * Everything a group owes the world when its worktree BINDING is dropped — minus the dropping
    * itself, which each caller does its own way (clear `data.worktree`, dissolve the frame, delete
@@ -3897,6 +4185,9 @@ export function Canvas() {
     async (groupId: string): Promise<void> => {
       const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
       if (!wt || isSshProject) return
+      // The project's `archive` script gets its chance BEFORE anything else — this is the one place
+      // every unbinding path passes through. Only the launch is awaited (see `runWorktreeArchive`).
+      await runWorktreeArchive(groupId, wt.path)
       if (!useWorktrees.getState().staleGroupIds.includes(groupId)) return
       resetDisplacedCwd(groupId, wt.path, false)
       // A failed prune must still let the binding go — dropping it is the user's ask, and a
@@ -3905,7 +4196,7 @@ export function Canvas() {
         .worktreeRemove(wt.repoPath, wt.path, false, true)
         .catch(() => {})
     },
-    [isSshProject, resetDisplacedCwd]
+    [isSshProject, resetDisplacedCwd, runWorktreeArchive]
   )
 
   // ---- multi-node actions (context menu) ----
@@ -3924,6 +4215,10 @@ export function Canvas() {
         // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearLoop(n.id)
+        // The open-project attach-consent mirror dies with its caller (review #363 M-1) —
+        // symmetric with main's grant ledger, which clears on the same teardown (ptyDestroy).
+        // A node id revived later faces a fresh dialog, exactly as it faces a fresh grant.
+        clearAttachConsent(n.id)
       })
       setNodes((ns) => {
         // Free children of any deleted group back to absolute positions.
@@ -3969,6 +4264,40 @@ export function Canvas() {
     [setNodes, markDirty, refreshWorktreeStore, releaseWorktreeBinding]
   )
 
+  /** `canvas.deleteSelection` (Delete / Backspace): confirm-then-delete the selected nodes, or —
+   *  with no node selected — drop the selected context link(s) / control rope(s). Returns whether
+   *  the chord was CLAIMED: an empty selection claims nothing, so the key falls through to the
+   *  platform exactly as the old handler's bare `return` left it. */
+  const deleteSelectionCommand = useCallback((): boolean => {
+    const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
+    if (!ids.length) {
+      const edgeIds = linkEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
+      const ropeIds = controlEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
+      if (!edgeIds.length && !ropeIds.length) return false
+      // A selected rope may be standing in for a hidden context bridge — drop both, or the
+      // pair stays linked with no edge left to click (see displayEdges).
+      const drop = new Set([
+        ...edgeIds,
+        ...linkIdsCoveredByRopes(ropeIds, controlEdgesRef.current, linkEdgesRef.current)
+      ])
+      if (drop.size) setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
+      if (ropeIds.length) {
+        const dropRopes = new Set(ropeIds)
+        setControlEdges((es) => es.filter((b) => !dropRopes.has(b.id)))
+      }
+      markDirty()
+      return true
+    }
+    setConfirm({
+      message: `Delete ${ids.length} ${ids.length > 1 ? 'nodes' : 'node'}? Open terminal sessions will end.`,
+      onConfirm: () => {
+        deleteNodes(ids)
+        setConfirm(null)
+      }
+    })
+    return true
+  }, [deleteNodes, setLinkEdges, setControlEdges, markDirty, setConfirm])
+
   // When an account is removed in Settings, patch the ACTIVE project's live nodes (the projects
   // store only holds the other projects' serialized copies). The account's login node is
   // permanently DELETED — left alive with its accountId cleared, a cold restart would respawn
@@ -4003,59 +4332,40 @@ export function Canvas() {
     return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
   }, [setNodes, markDirty, deleteNodes])
 
-  // Delete / Backspace asks for confirmation, then deletes the selected nodes.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (isKanbanOpen(useProjects.getState().activeProjectId)) return
-      if (e.key !== 'Delete' && e.key !== 'Backspace') return
-      const tag = (document.activeElement?.tagName || '').toLowerCase()
-      if (tag === 'input' || tag === 'textarea') return
-      const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
-      if (!ids.length) {
-        // No node selected → remove any selected context link(s) / control rope(s).
-        const edgeIds = linkEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
-        const ropeIds = controlEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
-        if (edgeIds.length || ropeIds.length) {
-          e.preventDefault()
-          // A selected rope may be standing in for a hidden context bridge — drop both, or the
-          // pair stays linked with no edge left to click (see displayEdges).
-          const drop = new Set([
-            ...edgeIds,
-            ...linkIdsCoveredByRopes(ropeIds, controlEdgesRef.current, linkEdgesRef.current)
-          ])
-          if (drop.size) {
-            setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
-          }
-          if (ropeIds.length) {
-            const dropRopes = new Set(ropeIds)
-            setControlEdges((es) => es.filter((b) => !dropRopes.has(b.id)))
-          }
-          markDirty()
-        }
-        return
-      }
-      e.preventDefault()
-      setConfirm({
-        message: `Delete ${ids.length} ${ids.length > 1 ? 'nodes' : 'node'}? Open terminal sessions will end.`,
-        onConfirm: () => {
-          deleteNodes(ids)
-          setConfirm(null)
-        }
-      })
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [deleteNodes, setLinkEdges, markDirty])
-
   // Cmd/Ctrl+W (forwarded from main) closes the selected node(s) immediately, like the
   // node's × button. With nothing selected it falls back to closing the window.
   useEffect(() => {
     return window.nodeTerminal.onCloseNode(() => {
+      // The two main-intercepted chords never reach the window dispatcher, so their capture
+      // notice has to be raised HERE, at the IPC receiver — asking the live focus, because the
+      // IPC carries no context. Notice only: nothing is consumed, and the close below runs
+      // exactly as it did before (`noteTerminalCapture` is silent under terminal-first, on a
+      // repeat, and outside a focused terminal).
       const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id)
-      if (ids.length) deleteNodes(ids)
-      else window.nodeTerminal.closeWindow()
+      // The notice sits INSIDE the branch that actually captured the key. With nothing selected
+      // ⌘W closes the WINDOW, and a notice raised there would burn this command's once-ever slot
+      // on a banner nobody can read — the window is going away in the same tick — leaving the user
+      // permanently unable to be told why ⌘W stops reaching their shell.
+      if (ids.length) {
+        if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+          noteTerminalCapture('node.close')
+        }
+        deleteNodes(ids)
+      } else window.nodeTerminal.closeWindow()
     })
   }, [deleteNodes])
+
+  // The second main-intercepted chord (⌘/Ctrl+M). Canvas does NOT own the markdown toggle —
+  // TerminalNode and EditorNode each subscribe for themselves — so this listener exists ONLY to
+  // raise the same notice, and must stay side-effect-free: it consumes nothing, prevents nothing,
+  // and the nodes' own subscriptions are untouched by it.
+  useEffect(() => {
+    return window.nodeTerminal.onMarkdownToggle(() => {
+      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+        noteTerminalCapture('node.toggleMarkdown')
+      }
+    })
+  }, [])
 
   // Native View menu → renderer. The menu item click sends IPC; these listeners fire the canvas
   // action. Snap-to-Grid flips the setting (the `autoAlignGrid` effect above runs the arrange on
@@ -4068,8 +4378,18 @@ export function Canvas() {
   useEffect(() => {
     return window.nodeTerminal.onFitView(() => fitAll())
   }, [fitAll])
+  // ⌘⇧B and ⌘, are the other two chords the dispatcher can never notice — not because main steals
+  // them (it does not; they are ordinary registry commands) but because the MENU owns their
+  // accelerators above the page under app-first, so the window keydown listener never runs and its
+  // notice half never fires. Like the two receivers above, the notice is raised HERE and asks the
+  // live focus, since the IPC carries no context. Notice ONLY: nothing is consumed, the toggle and
+  // the settings open run exactly as before, and `noteTerminalCapture` is silent under
+  // terminal-first, on a repeat, and outside a focused terminal.
   useEffect(() => {
     return window.nodeTerminal.onToggleKanban(() => {
+      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+        noteTerminalCapture('view.kanbanToggle')
+      }
       const id = useProjects.getState().activeProjectId
       if (id) useViewMode.getState().toggle(id)
     })
@@ -4078,6 +4398,9 @@ export function Canvas() {
   // Cmd+, keydown handler alone would leave the menu item inert — main forwards it as IPC.
   useEffect(() => {
     return window.nodeTerminal.onOpenSettings(() => {
+      if (isTerminalTarget(document.activeElement as unknown as ContextElement | null)) {
+        noteTerminalCapture('app.settings')
+      }
       setSettingsSection(undefined)
       setSettingsOpen(true)
     })
@@ -4196,11 +4519,26 @@ export function Canvas() {
       }
       markDirty()
       refreshWorktreeStore({ bind: { groupId, worktree: wt } })
+      // A fresh checkout is the moment the project's `setup` script exists for: this is the single
+      // shared post-create point (the dialog AND agent-control's open-worktree land here), so the
+      // trigger lives here rather than being repeated — and never diverging — at each caller.
+      //
+      // Materialize the project's `sharedPaths` (symlink node_modules/etc back to the repo root)
+      // BEFORE the setup script runs, so a setup `npm install` sees those links. Fire-and-forget re
+      // the bind (it never blocks the frame), but ORDERED before `startWorktreeSetup` — main reads
+      // the sharedPaths list itself by projectId and validates `wt.path`, so a `[]`/reject is safe.
+      void (async () => {
+        const projectId = useProjects.getState().activeProjectId
+        if (projectId) {
+          await window.nodeTerminal.worktree.materializeShared(projectId, wt.path).catch(() => {})
+        }
+        startWorktreeSetup(groupId, wt.path)
+      })()
       // The bound group's id (fresh one when created here) — nodesRef lags setNodes, so
       // callers that need the id (agent-control's open-worktree reply) take it from here.
       return groupId
     },
-    [setNodes, markDirty, viewCenter, refreshWorktreeStore]
+    [setNodes, markDirty, viewCenter, refreshWorktreeStore, startWorktreeSetup]
   )
 
   const createWorktreeAndGroup = useCallback(
@@ -4370,6 +4708,10 @@ export function Canvas() {
       setNotice({ kind: 'info', text: `Unbound ${wt.branch}. The worktree is still on disk.` })
       return
     }
+    // 0) The `archive` script's last chance — after step 1 the directory is gone. Only its LAUNCH is
+    //    awaited (see `runWorktreeArchive`), so a hung script cannot hold the removal hostage; the
+    //    unbind-only branch above gets the same call through `releaseWorktreeBinding`.
+    await runWorktreeArchive(t.groupId, wt.path)
     // 1) Remove the worktree FIRST; only delete the branch if the branch is ours (we created it).
     //    The sessions are killed after, not before: `worktreeRemove` can still REFUSE (a dangerous
     //    path, a locked worktree, EPERM), and killing every child terminal's tmux session up front
@@ -4415,7 +4757,14 @@ export function Canvas() {
     resetDisplacedCwd(t.groupId, wt.path, true)
     clearWorktreeBinding(t.groupId)
     setNotice({ kind: res.ok ? 'info' : 'error', text: res.message })
-  }, [removeTarget, deleteFromDisk, clearWorktreeBinding, resetDisplacedCwd, releaseWorktreeBinding])
+  }, [
+    removeTarget,
+    deleteFromDisk,
+    clearWorktreeBinding,
+    resetDisplacedCwd,
+    releaseWorktreeBinding,
+    runWorktreeArchive
+  ])
 
   // Confirmed merge. The push is passed explicitly: `worktreeMerge` never publishes on its own, so
   // what the dialog said is exactly what runs — and the result banner names the push either way.
@@ -4442,7 +4791,7 @@ export function Canvas() {
   // merge / remove teardown actions (Tasks 8 & 9) slot in as new cases. `unbind` forgets the
   // binding without touching disk; `merge` merges to base; `remove` opens the safety dialog.
   const onWorktreeAction = useCallback(
-    (groupId: string, action: 'merge' | 'remove' | 'unbind') => {
+    (groupId: string, action: 'merge' | 'remove' | 'unbind' | 'rerun-setup') => {
       // A binding can only predate the SSH gate (hand-edited project file, or a project that became
       // an SSH project), but it can still exist — and merge/remove would run against the LOCAL
       // filesystem for a project whose git and terminals live on the remote host. Refuse them, out
@@ -4498,11 +4847,27 @@ export function Canvas() {
             if (!res.ok && res.error) setNotice({ kind: 'error', text: res.error })
           })
           break
+        case 'rerun-setup': {
+          // The failed-setup chip. This is the ONLY re-run that can clear a worktree group's failed
+          // run and release the nodes it left armed: it runs at the WORKTREE path and its ack
+          // re-attaches THIS group's lane. The settings panel's Run does neither (project root,
+          // project lane), which is why the chip does not merely point at it.
+          const wt = nodesRef.current.find((n) => n.id === groupId)?.data.worktree
+          if (!wt) return
+          startWorktreeSetup(groupId, wt.path)
+          break
+        }
         default:
           break
       }
     },
-    [requestRemoveWorktree, clearWorktreeBinding, releaseWorktreeBinding, activeProjectId]
+    [
+      requestRemoveWorktree,
+      clearWorktreeBinding,
+      releaseWorktreeBinding,
+      activeProjectId,
+      startWorktreeSetup
+    ]
   )
 
   // Bridge the worktree-action handler to GroupNode (which React Flow instantiates itself).
@@ -4805,6 +5170,117 @@ export function Canvas() {
     )
   }, [setNodes, markDirty])
 
+  // S6 §3.5 — originate an owner-authorized Codex account SWITCH for a running node, then recycle
+  // its pane onto the target account. The renderer is NOT the security boundary: PR 5's three-phase
+  // handler is owner-authorized (only the WebContents that reserved may commit/finish) and refuses a
+  // missing/hostile id; here we fail closed BEFORE originating (planCodexAccountSwitch routes the
+  // target through codexAccountSelectable) and re-check `codexAccountSwitchStillEligible` before the
+  // recycle so a diverged/forked pane is never bound onto the switched account — the conversation id
+  // passed to switchThread is the node's own, so the switch RESUMES it, never forks.
+  const switchCodexAccountNode = useCallback(
+    async (nodeId: string, targetAccountId: string | undefined) => {
+      const codexApi = window.nodeTerminal.codexAccounts
+      const snapshot = (): {
+        agentId?: string
+        cwd?: string
+        accountId?: string
+        ssh?: boolean
+        sessionId?: string
+        state?: string
+      } => {
+        const n = nodesRef.current.find((x) => x.id === nodeId)
+        const st = useAgentStatus.getState().byId[nodeId]
+        return {
+          agentId: n?.data.agentId as string | undefined,
+          cwd: n?.data.cwd as string | undefined,
+          accountId: (n?.data.accountId as string | undefined) || undefined,
+          ssh: !!n?.data.ssh,
+          sessionId: restartSessionId(st?.sessionId, n?.data.agentSessionId),
+          state: st?.state
+        }
+      }
+      const decision = planCodexAccountSwitch(
+        snapshot(),
+        targetAccountId,
+        useSettings.getState().settings.codexAccounts,
+        connectedProjectIdForHost
+      )
+      if (!decision.ok) {
+        if (decision.reason === 'same-account') return // no-op: already on this account
+        setNotice({
+          kind: 'error',
+          text:
+            decision.reason === 'no-connection'
+              ? 'That Codex account lives on a host that is not connected — connect its SSH project first.'
+              : decision.reason === 'no-session'
+                ? 'This session has no resumable conversation id yet — nothing to switch.'
+                : 'That Codex account is no longer available. Nothing was changed.'
+        })
+        return
+      }
+      const { plan } = decision
+      let token: string | undefined
+      try {
+        const res = await codexApi.switchThread(
+          plan.sessionId,
+          plan.cwd,
+          plan.sourceAccountId,
+          plan.targetAccountId
+        )
+        token = res.rollbackToken
+        // A no-op or unreserved answer (no token) means main-side did not stage an exposure — done.
+        if (!token) return
+        // The fork took seconds — refuse to recycle unless the pane is STILL the exact idle
+        // conversation the user chose (Corvin's #112 recycle guard). Else roll the reservation back.
+        if (!codexAccountSwitchStillEligible(plan.expected, snapshot())) {
+          await codexApi.rollbackSwitch(token)
+          setNotice({
+            kind: 'error',
+            text: 'This session changed while the switch was preparing — nothing was changed.'
+          })
+          return
+        }
+        await codexApi.commitSwitch(token)
+        // Bind the node to the target account, THEN recycle its shell so codex relaunches under the
+        // target CODEX_HOME and `--resume <sessionId>` resumes the SAME conversation from it.
+        setNodes((ns) =>
+          ns.map((x) =>
+            x.id === nodeId && x.type === 'terminal'
+              ? { ...x, data: { ...x.data, accountId: plan.targetAccountId } }
+              : x
+          )
+        )
+        markDirty()
+        const fn = agentRestartFn(nodeId)
+        const outcome = fn ? await settleRestart(() => fn(undefined, undefined, true)) : 'not-eligible'
+        await codexApi.finishSwitch(token)
+        setNotice(
+          outcome === 'restarted'
+            ? { kind: 'info', text: 'Codex account switched — conversation resumed.' }
+            : {
+                kind: 'error',
+                text:
+                  'Codex account switched, but the pane could not be relaunched — restart the ' +
+                  'agent to resume on the new account.'
+              }
+        )
+      } catch {
+        if (token) {
+          try {
+            await codexApi.rollbackSwitch(token)
+          } catch {
+            // Best-effort rollback; the reservation also releases on its TTL / owner destruction.
+          }
+        }
+        setNotice({
+          kind: 'error',
+          text: 'The Codex account switch failed and was rolled back. Nothing was changed.'
+        })
+      }
+    },
+    [setNodes, markDirty, connectedProjectIdForHost]
+  )
+
   // Who the bulk restart would act on, right now: the ACTIVE project's canvas (nodesRef holds
   // exactly that). Read fresh at every call — agent state and session ids arrive asynchronously.
   const bulkRestartPlan = useCallback((): BulkRestartPlan => {
@@ -4909,7 +5385,9 @@ export function Canvas() {
         ...copy.data,
         // Built fresh here (never re-wrapping a persisted command), so it is flagged exactly once.
         initialCommand: withPermissionMode(
-          `${claudeLaunchCommand()} -r ${originalId}`,
+          // The branched copy stays in the project it was branched from, so it comes back through
+          // that project's wrapper exactly like the source node did.
+          `${claudeLaunchCommand(useProjects.getState().activeProjectId)} -r ${originalId}`,
           'claude',
           activePermissionMode()
         ),
@@ -4930,7 +5408,15 @@ export function Canvas() {
   // agent's native transcript to a handoff file (main) and open a target node that reads it
   // and continues. The source node stays. Mirrors branchClaude's placement.
   const transferConversation = useCallback(
-    async (sourceNodeId: string, targetAgentId: AgentId, at?: { x: number; y: number }) => {
+    async (
+      sourceNodeId: string,
+      targetAgentId: AgentId,
+      at?: { x: number; y: number },
+      /** A model chosen from the Transfer submenu's nested model list. Applied to the NEW node's
+       *  launch (`--model <value>`) when the target is MODEL_SWITCH_CAPABLE; silently dropped
+       *  otherwise (the target's own default model). Persisted as `data.agentModel`. */
+      model?: string
+    ) => {
       const source = nodesRef.current.find((n) => n.id === sourceNodeId) as CanvasNode | undefined
       if (!source) return
       const sourceAgentId = source.data.agentId
@@ -4988,7 +5474,12 @@ export function Canvas() {
         source.data.accountId,
         // The mode belongs to the node being OPENED, so it is gated on the TARGET agent — a
         // handoff into grok must not inherit claude's version gate.
-        activePermissionMode(targetAgentId)
+        activePermissionMode(targetAgentId),
+        // The transfer target lands in the active project's canvas, so that project's launch
+        // command applies to it — the same project `projectSsh` was just resolved from.
+        activeProjectId,
+        // A model picked from the Transfer submenu (only offered for switch-capable targets).
+        model
       )
       node.selected = true
       const placed = placeSpawned(node, at ?? besideNode(source))
@@ -5190,101 +5681,216 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
-  // Cmd/Ctrl+K toggles the command palette; Cmd/Ctrl+, opens settings.
+  // ---- global shortcuts ----
+  // The three trailing gestures below are registry-LESS chords (design D2: declared gestures,
+  // deliberately not remappable in this PR). The dispatcher hands them the RAW event with no
+  // context, so each keeps its OWN guards exactly as today's if-chain branch carried them.
+  // Zoom and project-jump are POSITIONAL chords (`e.code`, auto-repeat aware) — fields the
+  // dispatcher's structural `GlobalKeyEvent` does not model — and the only dispatch site is the
+  // window listener below, which always hands them a real KeyboardEvent.
+
+  // ⌘/Ctrl+0 = back to 100%, Shift+1 = fit everything. `liveZoomShortcutAction` is the whole
+  // decision (see `lib/zoomShortcut.ts`), including the typing refusal, and the ⌘0 desktop route
+  // below asks the same one, so the two paths can never disagree about when the chord is allowed
+  // to move the camera. A null answer means "leave the key alone" — no `preventDefault`, which is
+  // what keeps Shift+1 typing a `!` wherever the user is actually typing.
+  const zoomGesture = useCallback((raw: GlobalKeyEvent): boolean => {
+    const e = raw as KeyboardEvent
+    if (zoomShortcutChord(e) === null) return false
+    const action = liveZoomShortcutAction(e)
+    if (!action) return false
+    e.preventDefault()
+    if (action === 'zoom-100') zoomTo100()
+    else fitAll()
+    return true
+  }, [zoomTo100, fitAll])
+
+  // Cmd/Ctrl+1-9 jumps to the Nth project — but only when the app actually owns the key (desktop
+  // shell, and the digit addresses an open project). `liveProjectJumpTarget` is the same decision
+  // the terminals' swallow asks, so the two can't disagree; a null target leaves the key to
+  // whatever has focus. `switchProject` no-ops on the active id.
+  const projectJumpGesture = useCallback((raw: GlobalKeyEvent): boolean => {
+    const e = raw as KeyboardEvent
+    if (projectJumpDigit(e) === null) return false
+    const targetId = liveProjectJumpTarget(e)
+    if (!targetId) return false
+    e.preventDefault()
+    switchProject(targetId)
+    return true
+  }, [switchProject])
+
+  const copyGesture = useCallback((e: GlobalKeyEvent): boolean => {
+    if (!((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'c')) return false
+    // Native text selection wins (markdown, editor and terminal keep their normal copy path).
+    const tag = (document.activeElement?.tagName || '').toLowerCase()
+    if (
+      tag === 'input' ||
+      tag === 'textarea' ||
+      document.activeElement?.getAttribute('contenteditable') === 'true' ||
+      document.activeElement?.closest('.monaco-editor, .xterm')
+    )
+      return false
+    const sel = window.getSelection?.()?.toString()
+    if (sel) {
+      window.nodeTerminal.clipboard.writeText(sel)
+      // Claimed, but deliberately WITHOUT preventDefault — exactly as today: the native copy is
+      // let through as well.
+      return true
+    }
+    // Nothing selected as text: copy the selected file-backed nodes as FILE REFERENCES, so
+    // Finder (or any file-aware app) pastes the actual files.
+    //
+    // Gated to where it can actually succeed, because the failure path raises a banner that
+    // stays until dismissed — and before this feature the keystroke was a silent no-op, which
+    // is what every other machine must keep getting. `writeFilesToClipboard` is darwin-gated
+    // in main and the browser bridge stub answers false, so on a non-mac renderer (desktop OR
+    // Server Edition) this branch could only ever produce that banner, wearing macOS-specific
+    // copy on a Linux box. The board is an opaque overlay over the canvas, so a copy there
+    // would act on a selection the user cannot see (the canvas-only-shortcut discipline).
+    const projects = useProjects.getState()
+    if (!isMac || isKanbanOpen(projects.activeProjectId)) return false
+    const paths = selectedLocalFilePaths(nodesRef.current, {
+      projectIsRelay: !!projects.getProject(projects.activeProjectId ?? '')?.remote
+    })
+    if (!paths.length) return false
+    e.preventDefault()
+    void window.nodeTerminal.clipboard
+      .writeFiles(paths)
+      .then((copied) => {
+        setCopyError(
+          copied
+            ? null
+            : 'Copy failed — only existing local files can be copied from the macOS desktop app.'
+        )
+      })
+      .catch(() => setCopyError('Copy failed — the system clipboard is unavailable.'))
+    return true
+  }, [setCopyError])
+
+  // ONE window keydown for every registry command + the legacy gestures. The deps live in a
+  // ref refreshed each render so the listener is registered once; handlers return whether
+  // they claimed the chord (an unavailable surface falls through to the platform).
+  const globalKeyDeps = useRef<GlobalKeydownDeps | null>(null)
+  globalKeyDeps.current = {
+    activeElement: () => document.activeElement as unknown as ContextElement | null,
+    kanbanOpen: () => isKanbanOpen(useProjects.getState().activeProjectId),
+    overrides: activeKeybindingOverrides,
+    isMac,
+    // Read per keystroke (the deps object is rebuilt each render anyway, but the thunk is what
+    // the contract asks for): a policy change takes effect immediately, with no re-registration.
+    terminalFirst: () => terminalShortcutPolicy() === 'terminal-first',
+    // The notice half. `noteTerminalCapture` re-asks the policy and the once-per-command ledger
+    // itself, so this is a plain pass-through — the dispatcher decides that a capture HAPPENED,
+    // the lib decides whether it is worth saying.
+    onTerminalCapture: noteTerminalCapture,
+    handlers: {
+      'app.commandPalette': () => { setPaletteOpen((v) => !v); return true },
+      'app.settings': () => { setSettingsSection(undefined); setSettingsOpen(true); return true },
+      'app.shortcutsPanel': () => { setShortcutsOpen((v) => !v); return true },
+      'view.kanbanToggle': () => {
+        const id = useProjects.getState().activeProjectId
+        if (!id) return false
+        useViewMode.getState().toggle(id)
+        return true
+      },
+      'panel.explorer': () => { showExplorer('toggle'); return true },
+      'panel.sourceControl': () => { setScOpen((v) => !v); return true },
+      'panel.sessions': () => { toggleSessionsPin(); return true },
+      'canvas.undo': () => { undo(); return true },
+      'canvas.redo': () => { redo(); return true },
+      'canvas.fitAll': () => { fitAll(); return true },
+      'canvas.tidy': () => { arrangeAllNodes(); return true },
+      'canvas.deleteSelection': deleteSelectionCommand,
+      'node.newTerminal': () => { addTerminal(); return true },
+      'node.newAgent': () => {
+        // resolveNewNodeAgent, not the raw setting: this project's own default agent wins
+        // (`.nodeterm/settings.json` → agents.defaultAgentId), else the global one, and a default
+        // naming a since-removed custom agent is guarded so its bare `custom:<uuid>` id is never
+        // typed into the new node's shell (like launchableDefaultAgent).
+        addAgentNode(
+          resolveNewNodeAgent(
+            undefined,
+            useProjects.getState().activeProjectId,
+            useSettings.getState().settings
+          )
+        )
+        return true
+      },
+      // Per-agent creates: the chord names the agent, so these bypass resolveNewNodeAgent (which
+      // answers "what does this project default to?") and open exactly what the row says.
+      'node.newAgent.claude': () => { addAgentNode('claude'); return true },
+      'node.newAgent.codex': () => { addAgentNode('codex'); return true },
+      'node.newAgent.gemini': () => { addAgentNode('gemini'); return true },
+      'node.newAgent.opencode': () => { addAgentNode('opencode'); return true },
+      'node.newAgent.grok': () => { addAgentNode('grok'); return true },
+      'node.newAgent.copilot': () => { addAgentNode('copilot'); return true },
+      'node.newSticky': () => { addSticky(); return true },
+      'node.newBrowser': () => { addBrowser(); return true },
+      // Opening the URL prompt IS claiming the chord — a cancelled prompt creates nothing, but the
+      // keystroke was consumed by us and must not fall through to the platform.
+      'node.newWebView': () => { void addWebView(); return true },
+      'node.newDino': () => { addDino(); return true },
+      'node.newFile': () => {
+        // Same gate the pane menu / ⌘K use for their "New file…" row: the file is created UNDER
+        // the project folder, so a cwd-less (inline) project has nowhere to put it. Refuse rather
+        // than open a prompt that could only fail — and refusing lets the chord fall through.
+        const project = useProjects.getState().getProject(activeProjectId ?? '')
+        if (!(project?.ssh?.remoteCwd ?? project?.cwd)) return false
+        void newProjectFile()
+        return true
+      }
+      // node.close / node.toggleMarkdown: main-process intercepted on desktop; deliberately
+      // no renderer handler (the browser owns ⌘W in the Server Edition — see bridge/stubs.ts).
+      // terminal.* / scm.commit / speech.dictation: owned by their local listeners.
+    },
+    gestures: {
+      // A KEYED dictation shortcut (e.g. "Cmd+Alt+D") toggles dictation. The chord is the
+      // registry's first effective `speech.dictation` binding (`dictationBinding()`), so a
+      // remap lands here without touching this file. A modifier-only shortcut (the default,
+      // "Cmd+Alt") is hold-to-talk instead — matchesShortcut always returns false for that
+      // shape (its `key` is null), so this gesture is naturally a no-op for it; see the
+      // dedicated hold-mode effect above, which is what fires in that case. The DISABLED case
+      // (`''`) needs no guard for the same reason: an empty parse also has a null key.
+      // The dispatcher only offers it in plain app focus (not typing / terminal / kanban).
+      keyedDictation: (e) => {
+        if (!matchesShortcut(e, dictationBinding(), isMac)) return false
+        e.preventDefault()
+        toggleDictation()
+        return true
+      },
+      zoom: zoomGesture,
+      projectJump: projectJumpGesture,
+      copy: copyGesture
+    }
+  }
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault()
-        setPaletteOpen((v) => !v)
-      } else if ((e.metaKey || e.ctrlKey) && e.key === ',') {
-        e.preventDefault()
-        setSettingsSection(undefined)
-        setSettingsOpen(true)
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
-        e.preventDefault()
-        setExplorerOpen((v) => !v)
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'g') {
-        e.preventDefault()
-        setScOpen((v) => !v)
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'b') {
-        e.preventDefault()
-        const id = useProjects.getState().activeProjectId
-        if (id) useViewMode.getState().toggle(id)
-      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
-        e.preventDefault()
-        toggleSessionsPin()
-      } else if ((e.metaKey || e.ctrlKey) && e.key === '/') {
-        e.preventDefault()
-        setShortcutsOpen((v) => !v)
-      } else if (zoomShortcutChord(e) !== null) {
-        // ⌘/Ctrl+0 = back to 100%, Shift+1 = fit everything. `liveZoomShortcutAction` is the
-        // whole decision (see `lib/zoomShortcut.ts`), and the ⌘0 desktop route below asks the same
-        // one, so the two paths can never disagree about when the chord is allowed to move the
-        // camera. A null answer means "leave the key alone" — no `preventDefault`, which is what
-        // keeps Shift+1 typing a `!` wherever the user is actually typing.
-        const action = liveZoomShortcutAction(e)
-        if (action) {
-          e.preventDefault()
-          if (action === 'zoom-100') zoomTo100()
-          else fitAll()
-        }
-      } else if (projectJumpDigit(e) !== null) {
-        // Cmd/Ctrl+1-9 jumps to the Nth project — but only when the app actually owns the key
-        // (desktop shell, and the digit addresses an open project). `liveProjectJumpTarget`
-        // is the same decision the terminals' swallow asks, so the two can't disagree; a null
-        // target leaves the key to whatever has focus. `switchProject` no-ops on the active id.
-        const targetId = liveProjectJumpTarget(e)
-        if (targetId) {
-          e.preventDefault()
-          switchProject(targetId)
-        }
-      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'c') {
-        // Native text selection wins (markdown, editor and terminal keep their normal copy path).
-        const tag = (document.activeElement?.tagName || '').toLowerCase()
-        if (
-          tag === 'input' ||
-          tag === 'textarea' ||
-          document.activeElement?.getAttribute('contenteditable') === 'true' ||
-          document.activeElement?.closest('.monaco-editor, .xterm')
-        )
-          return
-        const sel = window.getSelection?.()?.toString()
-        if (sel) {
-          window.nodeTerminal.clipboard.writeText(sel)
-          return
-        }
-        // Nothing selected as text: copy the selected file-backed nodes as FILE REFERENCES, so
-        // Finder (or any file-aware app) pastes the actual files.
-        //
-        // Gated to where it can actually succeed, because the failure path raises a banner that
-        // stays until dismissed — and before this feature the keystroke was a silent no-op, which
-        // is what every other machine must keep getting. `writeFilesToClipboard` is darwin-gated
-        // in main and the browser bridge stub answers false, so on a non-mac renderer (desktop OR
-        // Server Edition) this branch could only ever produce that banner, wearing macOS-specific
-        // copy on a Linux box. The board is an opaque overlay over the canvas, so a copy there
-        // would act on a selection the user cannot see (the canvas-only-shortcut discipline).
-        const projects = useProjects.getState()
-        if (!isMac || isKanbanOpen(projects.activeProjectId)) return
-        const paths = selectedLocalFilePaths(nodesRef.current, {
-          projectIsRelay: !!projects.getProject(projects.activeProjectId ?? '')?.remote
-        })
-        if (!paths.length) return
-        e.preventDefault()
-        void window.nodeTerminal.clipboard
-          .writeFiles(paths)
-          .then((copied) => {
-            setCopyError(
-              copied
-                ? null
-                : 'Copy failed — only existing local files can be copied from the macOS desktop app.'
-            )
-          })
-          .catch(() => setCopyError('Copy failed — the system clipboard is unavailable.'))
-      }
+      const deps = globalKeyDeps.current
+      if (deps) dispatchGlobalKeydown(e, deps)
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [toggleSessionsPin, switchProject, fitAll, zoomTo100])
+  }, [])
+
+  // Mirror "an xterm has keyboard focus" to main, so the DESKTOP's `before-input-event` intercepts
+  // can stand down under the `terminal-first` policy: that intercept fires before any renderer
+  // handler could tell it, so the answer has to already be in main. The mirror is deliberately NOT
+  // gated on the policy — main composes `policy === 'terminal-first' && terminalFocused`, so a user
+  // who flips the setting with a terminal already focused gets the new behaviour on their very next
+  // keystroke, rather than after the next focus change. Under the shipped `app-first` default main's
+  // half is false regardless, so nothing about this app's shortcuts changes.
+  // The logic (change-dedup, the microtask-settled read, the window-blur leg and the re-check that
+  // catches a focused terminal being torn out of the DOM by a park / offscreen release / delete)
+  // lives in `lib/terminalFocusMirror.ts`, where it is pressed against a real DOM. Server Edition:
+  // the bridge stubs `setTerminalFocused` — there is no main-process intercept there to suspend.
+  useEffect(
+    () =>
+      installTerminalFocusMirror({
+        report: (focused) => window.nodeTerminal.shortcuts.setTerminalFocused(focused)
+      }),
+    []
+  )
 
   // ⌘/Ctrl+0 on the DESKTOP never reaches the keydown handler above: Electron's default View menu
   // binds the accelerator to `resetZoom`, and a menu accelerator is handled before the page sees
@@ -5321,8 +5927,22 @@ export function Canvas() {
     // Destructive/recovery rows (Delete, Restart agent, Branch/Transfer) are not hideable at all:
     // `isHidden` only answers for ids in its own inventory.
     const hidden = useSettings.getState().settings.hiddenNodeMenuItems
+    // Stop agent control — the node context-menu surface for Stop (Task 6.4). Shown only for a
+    // single browser node that is actually being driven; it revokes for real (main detaches the
+    // debugger + drops the ledger entry), not just hides the chip. Read fresh, like every other row.
+    const drivenHere =
+      ids.length === 1 && drivingNodeIds(useBrowserLease.getState().entries, Date.now()).has(ids[0])
     return tidySeparators([
       { type: 'label', label: ids.length > 1 ? `${ids.length} nodes` : '1 node' },
+      ...(drivenHere
+        ? ([
+            {
+              label: 'Stop agent control',
+              onClick: () => window.nodeTerminal.browser.stop(ids[0])
+            },
+            { type: 'separator' }
+          ] as MenuItem[])
+        : []),
       ...((): MenuItem[] => {
         // "Group …" wraps objects that share ONE container — existing frames are valid members
         // now that frames nest. A box-selection that caught a frame AND its children is
@@ -5412,7 +6032,9 @@ export function Canvas() {
             sourceAgentId: agentIdOf(ids[0]),
             sessionId: useAgentStatus.getState().byId[ids[0]]?.sessionId,
             disabledAgents: useSettings.getState().settings.disabledAgents,
-            customAgents: useSettings.getState().settings.customAgents
+            customAgents: useSettings.getState().settings.customAgents,
+            gatewayModels,
+            relaySession: session.source === 'relay'
           }, transferConversation)
         : []),
       ...(isHidden('collapse', hidden)
@@ -5572,6 +6194,57 @@ export function Canvas() {
                                 'Configure a URL and API key in Settings → Model gateway.'
                       }
                     ] as MenuItem[])
+                : []),
+              // Switch this running Codex node onto another machine-scoped account (S6 §3.5). Shown
+              // only for a Codex node with managed accounts on its machine. Each row is gated through
+              // `codexAccountSelectable`; the actual switch is owner-authorized MAIN-SIDE and resumes
+              // the SAME conversation id (`switchCodexAccountNode`) — the UI is not the boundary.
+              ...(sourceAgentId === 'codex'
+                ? (() => {
+                    const codexAll = useSettings.getState().settings.codexAccounts
+                    const hostKey = n?.data.ssh ? sshHostKey(n.data.ssh as SshServer) : undefined
+                    const onMachine = codexAll.filter(
+                      (a) => !a.pending && (hostKey ? a.host === hostKey : !a.host)
+                    )
+                    if (onMachine.length === 0) return []
+                    const currentAccountId = (n?.data.accountId as string | undefined) || undefined
+                    const systemCodexLabel = systemAccountDisplay(
+                      undefined,
+                      useSystemCodexAccount.getState().email
+                    )
+                    const row = (
+                      id: string | undefined,
+                      label: string
+                    ): MenuItem => {
+                      const isCurrent = (id || undefined) === currentAccountId
+                      const sel = codexAccountSelectable(id, onMachine, connectedProjectIdForHost)
+                      return {
+                        label: `${isCurrent ? '✓ ' : ''}${label}`,
+                        icon: <AgentIcon agentId="codex" />,
+                        disabled: !!why || isCurrent || !sel.ok,
+                        hint: isCurrent
+                          ? 'This node already runs on this account.'
+                          : !sel.ok
+                            ? sel.reason === 'no-connection'
+                              ? 'This account lives on a host that is not connected.'
+                              : 'This account is no longer available.'
+                            : (why ??
+                              'Moves this conversation to the account and resumes it there (same conversation).'),
+                        onClick: () => void switchCodexAccountNode(ids[0], id)
+                      }
+                    }
+                    return [
+                      {
+                        type: 'submenu',
+                        label: 'Switch Codex account',
+                        icon: <IconSwitch />,
+                        children: [
+                          row(undefined, systemCodexLabel),
+                          ...onMachine.map((a) => row(a.id, a.label))
+                        ]
+                      }
+                    ] as MenuItem[]
+                  })()
                 : [])
             ] as MenuItem[]
           })()
@@ -5592,6 +6265,8 @@ export function Canvas() {
     toggleMarkdown,
     reloadTerminals,
     restartAgentNode,
+    switchCodexAccountNode,
+    connectedProjectIdForHost,
     deleteNodes,
     gatewayModels,
     gatewayStatus,
@@ -5627,6 +6302,18 @@ export function Canvas() {
       // where this host's accounts come from — local accounts are correctly invisible here, and
       // a bare flat entry read as "multi-account is broken on SSH".
       const accountsHint = sshAccountsHint(project, accounts)
+      // Codex accounts (S6 §3.4): the accounts belonging to THIS project's machine — local accounts
+      // for a local project, this host's accounts for an SSH project — mirroring accountsForProject.
+      const codexHostKey = project?.ssh ? sshHostKey(project.ssh.server) : undefined
+      const codexAccountsHere = useSettings
+        .getState()
+        .settings.codexAccounts.filter(
+          (a) => !a.pending && (codexHostKey ? a.host === codexHostKey : !a.host)
+        )
+      const codexSystemLabel = systemAccountDisplay(
+        undefined,
+        useSystemCodexAccount.getState().email
+      )
       return [
         ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
           // Claude gets an account picker submenu when ≥1 account exists; System = project
@@ -5662,6 +6349,42 @@ export function Canvas() {
               ]
             }
           }
+          // Codex gets its own account picker submenu when ≥1 managed account lives on this
+          // project's machine (S6 §3.4). Every managed row is gated through `codexAccountSelectable`
+          // — a missing/hostile/unconnected account renders DISABLED, so the fail-closed refusal is
+          // enforced before the click, and again in `addAgentNode` (the UI is not the boundary).
+          if (aid === 'codex' && codexAccountsHere.length > 0) {
+            return {
+              type: 'submenu',
+              label: `New ${AGENT_CONFIG[aid].label}`,
+              icon: <AgentIcon agentId={aid} />,
+              children: [
+                {
+                  label: codexSystemLabel,
+                  icon: <AgentIcon agentId="codex" />,
+                  onClick: () => addAgentNode('codex', at, groupId)
+                },
+                ...codexAccountsHere.map((a): MenuItem => {
+                  const sel = codexAccountSelectable(
+                    a.id,
+                    codexAccountsHere,
+                    connectedProjectIdForHost
+                  )
+                  return {
+                    label: a.label,
+                    icon: <AgentIcon agentId="codex" />,
+                    disabled: !sel.ok,
+                    hint: sel.ok
+                      ? undefined
+                      : sel.reason === 'no-connection'
+                        ? 'This account lives on a host that is not connected — connect its SSH project first.'
+                        : 'This account is no longer available.',
+                    onClick: () => addAgentNode('codex', at, groupId, a.id)
+                  }
+                })
+              ]
+            }
+          }
           return {
             label: `New ${AGENT_CONFIG[aid].label}`,
             icon: <AgentIcon agentId={aid} />,
@@ -5680,7 +6403,7 @@ export function Canvas() {
           )
       ]
     },
-    [addAgentNode]
+    [addAgentNode, connectedProjectIdForHost]
   )
 
   const groupItems = useCallback(
@@ -6072,6 +6795,10 @@ export function Canvas() {
           zoomRafRef.current = null
           setZoomPct(Math.round(viewportRef.current.zoom * 100))
           setGroupLabelBoost(viewportRef.current.zoom)
+          // Feed the crisp gate (GPU text is a magnified bitmap past ~175%; the DOM renderer
+          // re-rasters and stays sharp). Idempotent + hysteresis inside, and the swaps it queues
+          // only run once the gesture settles — per-frame cost here is a float compare.
+          setWebglZoom(viewportRef.current.zoom)
         })
       }
     },
@@ -6159,7 +6886,9 @@ export function Canvas() {
                   project,
                   useSettings.getState().settings.claudeAccounts
                 ),
-                activePermissionMode(choice.agentId)
+                activePermissionMode(choice.agentId),
+                // Board-created nodes belong to the active project like any other.
+                activeProjectId
               )
       setNodes((ns) => [...ns, node])
       const board = project?.kanban ?? seedBoard
@@ -6277,10 +7006,22 @@ export function Canvas() {
         focusNodeById(boundNodeId)
         return
       }
-      // No live node — open a resume node in the active project, using the transcript's cwd.
-      const cmd = resumeCommand('claude', hit.sessionId, false, agentLaunchOverride('claude'))
+      // No live node — open a resume node in the active project, using the transcript's cwd. The
+      // resume line goes through that project's launch command, like every other launch it owns.
+      const activeId = useProjects.getState().activeProjectId
+      const cmd = resumeCommand('claude', hit.sessionId, false, agentLaunchOverride('claude', activeId))
       if (!cmd) return
-      const node = createAgentNode('claude', nodesRef.current.length, hit.cwd, viewCenter())
+      const node = createAgentNode(
+        'claude',
+        nodesRef.current.length,
+        hit.cwd,
+        viewCenter(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        activeId
+      )
       // The resume command replaces (never wraps) the factory's command, so it is flagged once.
       node.data = {
         ...node.data,
@@ -6346,6 +7087,29 @@ export function Canvas() {
       setNodes((ns) => [...ns, placed])
       setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${placed.id}`, sourceNodeId, placed.id, '#0a84ff')])
       markDirty()
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // The `browser` verb's resolve round-trip (S8 PR 7). Main intercepts `browser` and asks us the
+  // two-and-a-half things ONLY the renderer knows: which project owns the source node, whether that
+  // source is a control-capable agent, and whether the per-project browser-control capability is on
+  // RIGHT NOW (read live via projectCapabilityGrantedFor). We answer over the SAME source routing
+  // every verb uses — travelling to the owning project so its <webview> guest is live for main to
+  // drive — and we NEVER run a CDP command. Main makes the security decision (owner + capability +
+  // the CDP allowlist) and does the driving itself (browser-drive.ts / browser-actions.ts).
+  useEffect(() => {
+    return api.onBrowserControlResolve(({ requestId, sourceNodeId, browserNodeId }) => {
+      const { projects, activeProjectId } = useProjects.getState()
+      const route = routeControlSource(projects, activeProjectId, sourceNodeId)
+      // Bring the owning project's canvas up so main can find the live guest (needsLiveCanvas is true
+      // for `browser`). A closed/blocked/unknown owner just yields the refusal below.
+      if (route.kind === 'switch' || route.kind === 'reopen') travelToProjectRef.current(route.projectId)
+      const owner = projects.find((p) => p.nodes.some((n) => n.id === sourceNodeId))
+      // `browserNodeId` is passed so the answer can carry the browser node's title for the cookie
+      // trace; the security decision main makes never reads it.
+      const answer = answerBrowserResolve(owner as unknown as BrowserResolveProject | undefined, sourceNodeId, browserNodeId)
+      api.sendBrowserControlResolveResult({ requestId, ...answer })
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -6429,6 +7193,240 @@ export function Canvas() {
         reply(delivered ?? { ok: false, error: 'delivery produced no reply' })
         return
       }
+
+      // ── `open-project` (issue #338 Task 2.2) — handled BEFORE the source-routing machinery ──
+      // A STORE_ANSWERED_VERBS member for the G5 reason (controlRouting.ts): routing is by
+      // SOURCE, and travelling would yank the human's view to the CALLER's project on every
+      // registration. Main already gated this request (gateOpenProject): the caller is verified,
+      // local, under the grant cap, and `args.cwd` is the RESOLVED path (P7) — the raw argument
+      // never reaches this process, so the dialog below can only ever show the resolved form
+      // (P5). The renderer's job: validate the source live-or-stored, decide the consent branch
+      // (planOpenProject — every grant passes a human decision exactly once, spec Q1), raise the
+      // dialog, apply the NON-ACTIVATING registerProject (P6 — no setActive/travel in any
+      // branch), and reply exactly once on confirm AND cancel (GC 12). The grant itself is
+      // recorded MAIN-side when this reply lands ok && verified (recordOpenProjectGrant) —
+      // nothing in this block authorizes anything.
+      if (verb === 'open-project') {
+        const resolvedCwd = args.cwd ?? ''
+        if (!resolvedCwd) {
+          reply({ ok: false, error: 'open-project requires --cwd' })
+          return
+        }
+        const opLive = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const opStored = useProjects
+          .getState()
+          .projects.flatMap((p) => p.nodes)
+          .find((n) => n.id === sourceNodeId)
+        if (!opLive && !opStored) {
+          reply({ ok: false, error: 'source node is not in any open project' })
+          return
+        }
+        if (!sourceIsControlCapable(opLive?.data.agentId ?? opStored?.agentId)) {
+          reply({ ok: false, error: 'source node is not a control-capable agent' })
+          return
+        }
+        const opTitle =
+          oneLine((opLive?.data.title as string) ?? opStored?.title ?? '') || sourceNodeId
+        // Apply one consent decision: register (create/adopt/idempotent hit) without activating,
+        // persist, remember the (caller, project) pair for dialog dedupe — authorization stays
+        // main-side — and reply with the id the caller can feed `--project`.
+        const opFinish = (adoptProbed?: Project) => {
+          const r = useProjects.getState().registerProject({
+            resolvedCwd,
+            name: args.name,
+            color: args.color,
+            ...(adoptProbed ? { probed: adoptProbed } : {})
+          })
+          recordAttachConsent(sourceNodeId, r.project.id)
+          void writeDisk()
+          reply({ ok: true, ...openProjectReply(r.project, r.created, r.adopted) })
+        }
+        // The probe only matters when no project owns this cwd yet (adopt-vs-create copy) — an
+        // idempotent hit must not pay a folder read.
+        const opProjects = useProjects.getState().projects
+        const opProbed = findProjectByCwd(opProjects, resolvedCwd)
+          ? null
+          : await api.workspace.probeFolder(resolvedCwd).catch(() => null)
+        const opPlan = planOpenProject({
+          projects: opProjects,
+          callerNodeId: sourceNodeId,
+          srcTitle: opTitle,
+          resolvedCwd,
+          probedName: opProbed?.name,
+          requestedName: args.name
+        })
+        if (opPlan.kind === 'silent') {
+          // This caller already passed a human decision for this project (Q1): idempotent, quiet.
+          opFinish()
+          return
+        }
+        // One confirm dialog at a time — the write/close rule, read off the shared set.
+        if (isDestructiveVerb(verb) && confirmBusy()) {
+          reply({ ok: false, error: 'a confirmation is already pending — try again' })
+          return
+        }
+        setConfirm({
+          message: opPlan.message,
+          confirmLabel: opPlan.confirmLabel,
+          requestedBy: opTitle,
+          onConfirm: () => {
+            setConfirm(null)
+            opFinish(
+              opPlan.confirmKind === 'adopt' && opProbed ? { ...opProbed, closed: false } : undefined
+            )
+          },
+          onCancel: () => reply({ ok: false, error: 'denied by user' })
+        })
+        return
+      }
+
+      // ── `--project` targeted opens (issue #338 Task 2.3) — the three open verbs, early ──────
+      // Main's gateProjectTarget already enforced own-or-granted BEFORE forwarding (spec §3):
+      // the renderer never sees an unauthorized target — the checks below are belt, not the
+      // boundary. This block routes an AUTHORIZED target to the right DATA OWNER without
+      // travelling (B4): the live canvas owns the ACTIVE project (a store write there would be
+      // clobbered by the next commitCanvas), the projects store owns every other. A target equal
+      // to the caller's OWN project falls through to the legacy path unchanged — exactly as if
+      // the flag were omitted (B3a), travel included.
+      if (
+        (verb === 'open-terminal' || verb === 'open-claude' || verb === 'open-agent') &&
+        args.project !== undefined
+      ) {
+        const targetId = args.project
+        // v1 excludes the flags that name ids inside another project (spec §2.2). The decision is
+        // the PURE projectTargetFlagRefusal — red-capable in projectOpen.test.ts (review #363
+        // I-2); this site only relays its answer. Uniformly refused — own-project callers just
+        // omit --project.
+        const tgFlagRefusal = projectTargetFlagRefusal(args)
+        if (tgFlagRefusal) {
+          reply({ ok: false, error: tgFlagRefusal })
+          return
+        }
+        const tgStore = useProjects.getState()
+        const tgLiveSrc = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const tgStoredSrc = tgStore.projects
+          .flatMap((p) => p.nodes.map((n) => ({ node: n, projectId: p.id })))
+          .find((x) => x.node.id === sourceNodeId)
+        const callerProjectId = tgLiveSrc ? tgStore.activeProjectId : tgStoredSrc?.projectId
+        if (targetId !== callerProjectId) {
+          if (!tgLiveSrc && !tgStoredSrc) {
+            reply({ ok: false, error: 'source node is not in any open project' })
+            return
+          }
+          if (!sourceIsControlCapable(tgLiveSrc?.data.agentId ?? tgStoredSrc?.node.agentId)) {
+            reply({ ok: false, error: 'source node is not a control-capable agent' })
+            return
+          }
+          // Belt only — main already refused every stranger id with one byte-identical sentence
+          // (no existence oracle). This fires for a target main authorized that this renderer's
+          // store cannot see yet (mid-hydration), so it is worded transient.
+          const target = tgStore.getProject(targetId)
+          if (!target) {
+            reply({
+              ok: false,
+              error: 'project-target-refused: the target project is not available here — try again'
+            })
+            return
+          }
+          // Belt for the SSH invariant: a granted SSH id cannot exist (grants are minted only by
+          // local open-project) and main refuses ungranted ones — but if that ever breaks, the
+          // target is refused, not opened. A relay tab is another machine's project entirely.
+          if (target.ssh || target.remote) {
+            reply({
+              ok: false,
+              error:
+                'project-target-ssh-unsupported: opening sessions into an SSH project is not supported — do not retry'
+            })
+            return
+          }
+          const tgAgentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
+          const tgIsTerminal = verb === 'open-terminal'
+          const tgCount = Math.max(
+            1,
+            Math.min(tgIsTerminal ? 8 : 5, parseInt(args.count || '1', 10) || 1)
+          )
+          // Defaults come from the TARGET, never the caller (spec §2.2): cwd falls back to the
+          // target project's root; the account funnel runs with the TARGET project (an account
+          // must not silently cross a project boundary, so the source node's account is NOT
+          // consulted); permission mode and launch-command overrides are the target's too.
+          const tgCwd = args.cwd || target.cwd
+          const tgAccount = tgIsTerminal
+            ? undefined
+            : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
+          const tgMode = tgIsTerminal ? undefined : projectPermissionMode(target, tgAgentId)
+          const tgActive = target.id === tgStore.activeProjectId
+          // Placement: below the lowest existing node in the TARGET (placeBelow(src) is
+          // meaningless in a project that does not contain the source). The live canvas is the
+          // truthful node set for the active project, the serialized store for any other.
+          const tgPlacedNodes = tgActive ? nodesRef.current : target.nodes
+          const tgMade: CanvasNode[] = []
+          let tgBase = { x: 0, y: 0 }
+          const tgIndexBase = tgActive ? nodesRef.current.length : target.nodes.length
+          for (let i = 0; i < tgCount; i++) {
+            const node = tgIsTerminal
+              ? createTerminalNode(tgIndexBase + i, tgCwd, { x: 0, y: 0 }, args.cmd)
+              : createAgentNode(
+                  tgAgentId,
+                  tgIndexBase + i,
+                  tgCwd,
+                  { x: 0, y: 0 },
+                  args.prompt,
+                  undefined,
+                  tgAccount,
+                  tgMode,
+                  // The TARGET project: its `.nodeterm/settings.json` launch override applies to
+                  // what runs in it, not the caller's.
+                  target.id
+                )
+            const w = (node.width as number) ?? 640
+            const h = (node.height as number) ?? 440
+            if (i === 0) tgBase = nextFreePosition(tgPlacedNodes, { width: w, height: h })
+            node.position = { x: tgBase.x + i * (w + 60) - w / 2, y: tgBase.y - h / 2 }
+            tgMade.push(node)
+          }
+          const tgIds = tgMade.map((n) => n.id)
+          const tgWhat = tgIsTerminal ? 'terminal' : tgAgentId
+          // No ropes and no context-links in either branch: both are per-project arrays, and an
+          // edge to a node in another project has no representation (v1 — #284's linking half).
+          // The skill text names the workaround (open a reader agent inside the target project).
+          if (tgActive) {
+            // The human is looking at the target (the caller is a background orchestrator):
+            // live-canvas insertion, normal initialCommand — the session starts immediately.
+            setNodes((ns) => [...ns, ...tgMade])
+            markDirty()
+            reply({
+              ok: true,
+              message: `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')})`,
+              result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+            })
+            return
+          }
+          // The normal orchestration case: the target is NOT active, so its serialized store is
+          // the source of truth. The launch command MOVES into pendingLaunch (armForColdOpen —
+          // initialCommand is deliberately never serialized) and the node is upserted through
+          // the same store path sticky uses, then persisted. Cold-open contract: the session
+          // starts when that project's canvas is next shown (mount spawns the PTY, the
+          // armed-launch effect delivers with its retry loop — Task 2.0's measured round-trip).
+          for (const node of tgMade) {
+            tgStore.applyNodeMutation(target.id, {
+              op: 'upsert',
+              node: flowToNodeStates([armForColdOpen(node)])[0]
+            })
+          }
+          void writeDisk()
+          reply({
+            ok: true,
+            message:
+              `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')}) — ` +
+              'starts when that project is next viewed',
+            result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+          })
+          return
+        }
+        // targetId === the caller's own project: fall through to the legacy path unchanged
+        // (B3a — behaves exactly as if --project were omitted).
+      }
+      // ── end of the early-handled (store-answered) verbs ─────────────────────────────────────
 
       // Which canvas answers? React Flow holds only the ACTIVE project's nodes, but every OTHER
       // project's tmux sessions keep running and are re-adopted on the next app start — so after a
@@ -6703,9 +7701,27 @@ export function Canvas() {
       // `extraLive` names nodes being created in this same tick — `verify` arms its judge on
       // reviewers that are not on the canvas yet, and without this they would look DELETED,
       // which counts as satisfied, and the judge would fire before a single review existed.
-      const armAfter = (node: CanvasNode, after: string[], extraLive?: Iterable<string>): CanvasNode => {
+      // `intoGroup` adds the SECOND reason to hold a launch: the node is being opened into a
+      // worktree frame whose project setup script is still preparing the checkout (and said
+      // `waitForSetup`). Same mechanism, same escape hatch on the node — see `awaitSetupGroup`.
+      const armAfter = (
+        node: CanvasNode,
+        after: string[],
+        extraLive?: Iterable<string>,
+        intoGroup?: string | null
+      ): CanvasNode => {
         const command = node.data.initialCommand as string | undefined
-        if (!after.length || !command) return node
+        if (!command) return node
+        // A group counts while its launch is still PENDING (the ack — and with it `waitForSetup` —
+        // has not come back yet; holding is the safe side of that unknown, and a non-waiting ack
+        // releases these again) or while its acked run said `waitForSetup` and has not finished.
+        const holdsForSetup =
+          !!intoGroup &&
+          (useProjectSetup.getState().pendingForGroup(intoGroup) > 0 ||
+            setupWaitGroupsRef.current.has(intoGroup)) &&
+          !setupDoneForGroup(intoGroup)
+        const awaitSetupGroup = holdsForSetup ? intoGroup ?? undefined : undefined
+        if (!after.length && !awaitSetupGroup) return node
         // If the wait is ALREADY over, don't arm at all — leave the command as the node's
         // `initialCommand` so its own mount path delivers it through `writeWhenShellReady`
         // (which waits for the shell prompt and echo-verifies). Arming would instead hand
@@ -6717,10 +7733,14 @@ export function Canvas() {
           useAgentStatus.getState().byId,
           live
         )
-        if (!unmet.length) return node
+        if (!unmet.length && !awaitSetupGroup) return node
         return {
           ...node,
-          data: { ...node.data, initialCommand: undefined, pendingLaunch: { after, command } }
+          data: {
+            ...node.data,
+            initialCommand: undefined,
+            pendingLaunch: { after, command, ...(awaitSetupGroup ? { awaitSetupGroup } : {}) }
+          }
         }
       }
       // Open `count` nodes INTO a group frame: grow the frame FIRST (extent:'parent' would
@@ -6794,7 +7814,9 @@ export function Canvas() {
                   args.cmd,
                   sshFor(termCwd)
                 ),
-                after ?? []
+                after ?? [],
+                undefined,
+                intoGroupId
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -6843,9 +7865,14 @@ export function Canvas() {
                   args.prompt,
                   sshFor(agentCwd),
                   account,
-                  activePermissionMode(agentId)
+                  activePermissionMode(agentId),
+                  // Same project the account funnel above resolves from: the canvas the verb runs
+                  // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
+                  projStore.activeProjectId
                 ),
-                after ?? []
+                after ?? [],
+                undefined,
+                intoGroupId
               )
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
@@ -6947,8 +7974,22 @@ export function Canvas() {
               reply({ ok: false, error: 'open-browser requires a valid http(s) --url' })
               return
             }
-            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow()))
-            reply({ ok: true, message: `opened browser ${id}`, result: { id } })
+            // An agent-opened browser gets its OWN per-project session jar — never the default
+            // session the user's own browsing lives in (Probe A: a partition-less <webview> shares
+            // session.defaultSession). The project id becomes a persisted storage key, so it must
+            // pass isSafeNodeId; agentBrowserPartition returns null when it does not, and we refuse
+            // the open rather than fall back to the shared jar (fail-closed).
+            const partition = agentBrowserPartition(ctlProject?.id ?? '')
+            if (!partition) {
+              reply({ ok: false, error: "open-browser: this project's id cannot be used as a browser session key" })
+              return
+            }
+            const id = addAndConnect(createBrowserNode(nodesRef.current.length, browserUrl, placeBelow(), partition))
+            // Return the project id + partition so main can record ownership in its in-memory
+            // ledger (browser-control-ledger.ts). Main gates the claim on its OWN `verified` verdict
+            // and keys it to the verified caller — these fields are descriptive (release-by-project,
+            // the indicator), never the authorization boundary.
+            reply({ ok: true, message: `opened browser ${id}`, result: { id, projectId: ctlProject?.id, partition } })
             return
           }
           case 'group': {
@@ -7172,7 +8213,8 @@ export function Canvas() {
                 }),
                 sshFor(targetCwd),
                 vAccount,
-                vMode
+                vMode,
+                vStore.activeProjectId
               )
               return armAfter(
                 { ...node, data: { ...node.data, title: `Verify: ${lens}`, titleAuto: false } },
@@ -7196,7 +8238,8 @@ export function Canvas() {
                       }),
                       sshFor(targetCwd),
                       vAccount,
-                      vMode
+                      vMode,
+                      vStore.activeProjectId
                     )
                     return { ...j, data: { ...j.data, title: 'Verify: verdict', titleAuto: false } }
                   })(),
@@ -7284,7 +8327,8 @@ export function Canvas() {
                 r.prompt,
                 sshFor(srcCwd),
                 teamAccount,
-                activePermissionMode(memberAgent)
+                activePermissionMode(memberAgent),
+                teamStore.activeProjectId
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })
@@ -7356,14 +8400,22 @@ export function Canvas() {
               }
               bindGroupId = g.id
             }
-            const baseRef = args.base?.trim() || resolveBaseRef(entries)
+            // Project-level worktree defaults (basePath/baseRef) from the warmed launch-info cache,
+            // same as the "New worktree" dialog. Fail-open: no cached entry → `effectiveWorktree*`
+            // reduce to entries/global exactly as before. An explicit `--base` still wins.
+            const pw = projectLaunchInfoNow(project?.id ?? '')?.resolved.worktree
+            const projectDefaults = { basePath: pw?.basePath?.value, baseRef: pw?.baseRef?.value }
+            const baseRef = args.base?.trim() || effectiveWorktreeBaseRef(projectDefaults, entries)
             // Resolve from this session's repo root, so a relay tab still produces a path on the
             // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
               explicitPath: args.path,
               repoRoot,
               branch,
-              template: useSettings.getState().settings.worktreePathTemplate
+              template: effectiveWorktreeTemplate(
+                projectDefaults,
+                useSettings.getState().settings.worktreePathTemplate
+              )
             })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
@@ -7803,6 +8855,9 @@ export function Canvas() {
             disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
             transport.destroy(id)
             useAgentStatus.getState().remove(id)
+            // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent
+            // mirror dies with the node.
+            clearAttachConsent(id)
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
           }
@@ -8052,62 +9107,70 @@ export function Canvas() {
     (e: React.MouseEvent, projectId: string, id: string) => {
       e.preventDefault()
       e.stopPropagation()
-      setMenu({
-        x: e.clientX,
-        y: e.clientY,
-        items: [
-          { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
-          {
-            label: 'Rename',
-            icon: <IconEditor />,
-            onClick: () => {
-              void promptDialog({ message: 'Rename session' }).then((t) => {
-                if (t && t.trim()) renameSession(projectId, id, t.trim())
-              })
-            }
-          },
-          {
-            label: 'Duplicate',
-            icon: <IconDuplicate />,
-            onClick: () => {
-              if (projectId === activeProjectId) duplicateNodes([id])
-              else {
-                useProjects.getState().duplicateNode(projectId, id)
-                void writeDisk()
-              }
-            }
-          },
-          // Transfer conversation to another agent — the SAME submenu the canvas node right-click
-          // has. Only valid for the ACTIVE project's canvas: transferConversation reads the source
-          // node out of `nodesRef.current` (the live React Flow nodes), which only holds the active
-          // project. For a non-active project the block is empty (no submenu appears), matching the
-          // Duplicate guard's active-project branch.
-          ...(projectId === activeProjectId
-            ? transferConversationItems(id, undefined, {
-                sourceAgentId: agentIdOf(id),
-                sessionId: useAgentStatus.getState().byId[id]?.sessionId,
-                disabledAgents: useSettings.getState().settings.disabledAgents,
-                customAgents: useSettings.getState().settings.customAgents
-              }, transferConversation)
-            : []),
-          {
-            label: 'Close',
-            icon: <IconTrash />,
-            danger: true,
-            onClick: () => closeSession(projectId, id)
+      // Session-list-specific rows that have no canvas analogue: Go to (focus) and Rename (the
+      // sidebar's prompt-dialog rename). These stay on top for every project.
+      const head: MenuItem[] = [
+        { label: 'Go to', icon: <IconJump />, onClick: () => focusNodeById(id) },
+        {
+          label: 'Rename',
+          icon: <IconEditor />,
+          onClick: () => {
+            void promptDialog({ message: 'Rename session' }).then((t) => {
+              if (t && t.trim()) renameSession(projectId, id, t.trim())
+            })
           }
-        ]
-      })
+        }
+      ]
+      // For the ACTIVE project, reuse the SAME single-node menu the canvas right-click builds —
+      // full parity (Color, Group, Duplicate, Branch, Collapse, Markdown view, Refresh terminal,
+      // Restart agent, Restart agent and shell, Reopen session as, Switch model, Transfer with its
+      // nested model submenus) so the two surfaces can't drift. `selectionItems` reads the live
+      // node from `nodesRef.current` (active-project only), which is exactly why this is gated.
+      // `at` is undefined: the row has no flow position, so spawned nodes (Duplicate/Branch/
+      // Transfer) place beside the source — the same as the row's existing Transfer behavior.
+      //
+      // The canvas menu ends in a destructive "Delete" (deleteNodes). The session row's analogue
+      // is non-destructive "Close" (closeSession — hides the tab, keeps the tmux session), so the
+      // trailing Delete is swapped for Close rather than offered beside it.
+      const body: MenuItem[] =
+        projectId === activeProjectId
+          ? (() => {
+              const full = selectionItems([id])
+              // Drop the canvas menu's trailing "Delete" (destructive deleteNodes) and any
+              // separator left dangling before it, then append the session row's non-destructive
+              // "Close". Found by label rather than fixed index so this stays correct if the canvas
+              // menu's tail changes — Delete is the only 'Delete'-labelled row.
+              const withoutDelete = full.filter((it) => !('label' in it && it.label === 'Delete'))
+              return [
+                ...tidySeparators(withoutDelete),
+                { type: 'separator' },
+                { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+              ]
+            })()
+          : [
+              // Non-active project: the shared rows read the active canvas's live nodes + per-node
+              // registered closures, which don't exist here. Keep the narrow set that works for any
+              // project (Duplicate defers to the store; the rest are list-level).
+              {
+                label: 'Duplicate',
+                icon: <IconDuplicate />,
+                onClick: () => {
+                  useProjects.getState().duplicateNode(projectId, id)
+                  void writeDisk()
+                }
+              },
+              { type: 'separator' },
+              { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+            ]
+      setMenu({ x: e.clientX, y: e.clientY, items: [...head, ...body] })
     },
     [
       activeProjectId,
       focusNodeById,
       renameSession,
-      duplicateNodes,
       closeSession,
       writeDisk,
-      agentIdOf,
-      transferConversation
+      selectionItems
     ]
   )
 
@@ -8708,6 +9771,11 @@ export function Canvas() {
             }
           },
           { label: 'Set folder…', icon: <IconProject />, onClick: () => setProjectFolder(projectId) },
+          {
+            label: 'Project settings…',
+            icon: <IconGear />,
+            onClick: () => openProjectSettings(projectId)
+          },
           { type: 'separator' },
           { type: 'colors', onPick: (color) => setProjectColor(projectId, color) },
           { type: 'separator' },
@@ -8720,7 +9788,15 @@ export function Canvas() {
         ]
       })
     },
-    [activeProjectId, switchProject, renameProject, setProjectFolder, setProjectColor, closeProject]
+    [
+      activeProjectId,
+      switchProject,
+      renameProject,
+      setProjectFolder,
+      setProjectColor,
+      closeProject,
+      openProjectSettings
+    ]
   )
 
   // Reopen a previously closed project and make it active — the active-project effect reloads its
@@ -9040,7 +10116,7 @@ export function Canvas() {
       cmds.push({
         id: 'toggle-kanban',
         label: kb ? 'Canvas view' : 'Kanban view',
-        hint: '⌘⇧B',
+        hint: chipFor('view.kanbanToggle') || undefined,
         section: 'View',
         icon: kb ? <IconCanvasView /> : <IconKanban />,
         run: () => useViewMode.getState().toggle(kanbanId)
@@ -9090,6 +10166,11 @@ export function Canvas() {
     [paletteOpen, buildCommands, nodes]
   )
 
+  // The palette's chord appears as a bare chip in two places (the cluster's search button and the
+  // empty-canvas hint). Empty means the user unbound it: the chip is dropped rather than rendered
+  // as an empty <kbd>, and the hint's sentence loses that clause with it.
+  const paletteChip = chipFor('app.commandPalette')
+
   return (
     <div className="canvas-root">
       <TabBar
@@ -9103,6 +10184,7 @@ export function Canvas() {
         onRemoteAccess={() => setRemoteDialogOpen(true)}
         onSetDefaultAccount={setProjectDefaultAccount}
         onSetDefaultPermissionMode={setProjectDefaultPermissionMode}
+        onOpenProjectSettings={openProjectSettings}
       />
 
       <div className="top-banners">
@@ -9111,6 +10193,14 @@ export function Canvas() {
         {/* This MACHINE is running out of pty devices — subscribes for itself; a failed
             "Fix automatically…" lands in the same notice strip as every other async op. */}
         <PtyPressureBanner onError={(text) => setNotice({ kind: 'error', text })} />
+        {/* App-first just took a chord from a focused terminal, once per command ever —
+            subscribes for itself; only the route into Settings is Canvas's to give. */}
+        <ShortcutCaptureBanner
+          onOpenShortcuts={() => {
+            setSettingsSection('shortcuts')
+            setSettingsOpen(true)
+          }}
+        />
         {migrationNote && (
           <div className="announce-banner announce-banner--info">
             <span className="announce-banner__dot" />
@@ -9283,7 +10373,7 @@ export function Canvas() {
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
       >
-        <button title={hintLabel('Sessions (⌘⇧L)')} onClick={onSessionsIconClick}>
+        <button title={commandTooltip('Sessions', 'panel.sessions')} onClick={onSessionsIconClick}>
           <IconSessions />
         </button>
       </div>
@@ -9301,12 +10391,12 @@ export function Canvas() {
           onClick={() => setPaletteOpen(true)}
         >
           <span className="cluster-search__icon">⌕</span>
-          <span className="kbd">{hintLabel('⌘K')}</span>
+          {paletteChip && <span className="kbd">{paletteChip}</span>}
         </button>
-        <button title={hintLabel('Explorer (⌘⇧E)')} onClick={() => setExplorerOpen(true)}>
+        <button title={commandTooltip('Explorer', 'panel.explorer')} onClick={() => showExplorer('toggle')}>
           <IconExplorer />
         </button>
-        <button title={hintLabel('Source Control (⌘⇧G)')} onClick={() => setScOpen(true)}>
+        <button title={commandTooltip('Source Control', 'panel.sourceControl')} onClick={() => setScOpen(true)}>
           <IconBranch />
         </button>
         <button
@@ -9319,7 +10409,7 @@ export function Canvas() {
           <IconPhone />
         </button>
         <button
-          title={hintLabel('Settings (⌘,)')}
+          title={commandTooltip('Settings', 'app.settings')}
           onClick={() => {
             setSettingsSection(undefined)
             setSettingsOpen(true)
@@ -9336,7 +10426,7 @@ export function Canvas() {
               x: Math.max(8, r.right - 220),
               y: r.bottom + 6,
               items: [
-                { label: 'Keyboard shortcuts', hint: hintLabel('⌘/'), onClick: () => setShortcutsOpen(true) },
+                { label: 'Keyboard shortcuts', hint: chipFor('app.shortcutsPanel') || undefined, onClick: () => setShortcutsOpen(true) },
                 { label: 'Report a bug…', onClick: () => setBugReportOpen(true) },
                 {
                   label: 'Documentation',
@@ -9368,7 +10458,7 @@ export function Canvas() {
           <div className="empty-canvas-hint" aria-hidden>
             <div>Right-click to add a terminal or agent</div>
             <div>
-              <span className="kbd">{hintLabel('⌘K')}</span> command palette · <span className="kbd">+</span> in the dock below
+              {paletteChip && <><span className="kbd">{paletteChip}</span> command palette · </>}<span className="kbd">+</span> in the dock below
             </div>
           </div>
         )}
@@ -9524,7 +10614,13 @@ export function Canvas() {
             }}
             onCloneRepo={cloneRepo}
             onConnectSsh={() => setSshDialogOpen(true)}
-            closedProjects={closedProjects.map((p) => ({ id: p.id, name: p.name, cwd: p.cwd }))}
+            closedProjects={closedProjects.map((p) => ({
+              id: p.id,
+              name: p.name,
+              cwd: p.cwd,
+              color: p.color,
+              icon: p.icon
+            }))}
             onReopen={reopenProject}
             onDeleteClosed={deleteProject}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
@@ -9602,7 +10698,11 @@ export function Canvas() {
       )}
 
       {settingsOpen && (
-        <SettingsPage onClose={() => setSettingsOpen(false)} initialSection={settingsSection} />
+        <SettingsPage
+          onClose={() => setSettingsOpen(false)}
+          initialSection={settingsSection}
+          retargetNonce={settingsNonce}
+        />
       )}
 
       {scOpen && (
@@ -9667,9 +10767,11 @@ export function Canvas() {
 
       {explorerOpen && (
         <ExplorerPanel
-          onClose={() => setExplorerOpen(false)}
+          onClose={() => showExplorer('close')}
           onOpenFile={(path, isSsh) => openFile(path, undefined, isSsh)}
           reveal={reveal}
+          pinned={explorer.pinned}
+          onTogglePin={toggleExplorerPin}
         />
       )}
 
@@ -9705,6 +10807,12 @@ export function Canvas() {
           every active-project change (the project-load path), is click-only, and records its
           answer machine-locally — see components/CapabilityNotice.tsx and its test. */}
       <CapabilityNotice />
+
+      {/* The trust gate for a git-shared setup/archive script, mounted ONCE for the whole app on
+          the same layer as the clone notice: main raises it (a manual run, or a worktree's setup)
+          and it must be answerable wherever the user is, not only while a settings pane happens to
+          be open — see components/SetupConsentDialog.tsx. */}
+      <SetupConsentDialog />
 
       {confirm && (
         <ConfirmDialog
@@ -9777,13 +10885,13 @@ export function Canvas() {
           intent={worktreeDialog.groupId ? 'bind' : 'create'}
           repoPath={worktreeRepoRoot ?? ''}
           existing={worktreeOrphans.filter((e) => !boundWorktreePaths.has(normWorktreePath(e.path)))}
-          defaultBaseRef={resolveBaseRef(worktreeEntries)}
+          defaultBaseRef={effectiveWorktreeBaseRef(activeWorktreeDefaults, worktreeEntries)}
           branches={worktreeBranches}
           defaultPath={(repoPath, branch) =>
             computeWorktreePath(
               repoPath,
               branch,
-              settings.worktreePathTemplate
+              effectiveWorktreeTemplate(activeWorktreeDefaults, settings.worktreePathTemplate)
             )
           }
           busy={worktreeBusy}

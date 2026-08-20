@@ -32,6 +32,36 @@ async function boundedBytes(response: Response): Promise<Uint8Array | null> {
   return bytes
 }
 
+/** The SSRF-hardened URL→dataURL core, shared by issue-user avatars and project org avatars.
+ *  Locked to avatars.githubusercontent.com over https, no credentials in the URL, redirect:'manual',
+ *  a MIME allowlist, and the 128 KB `boundedBytes` cap. Returns null on any rejection — never throws.
+ *  This is `GitHubAvatarFetcher.fetchOne` minus the per-user cache; do NOT fork the guard. */
+export async function fetchAvatarDataUrl(
+  url: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<{ dataUrl: string; bytes: number } | null> {
+  let parsed: URL
+  try { parsed = new URL(url) } catch { return null }
+  if (parsed.protocol !== 'https:' || parsed.hostname !== 'avatars.githubusercontent.com' ||
+      parsed.username || parsed.password) return null
+  let response: Response
+  try {
+    // 10s cap so a hung avatar host can't leave the fetch pending; abort → rejected fetch → null.
+    response = await fetchImpl(parsed, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+  } catch {
+    return null
+  }
+  if (!response.ok || response.status >= 300) return null
+  const mime = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
+  if (!mime || !MIME.has(mime)) return null
+  const bytes = await boundedBytes(response)
+  if (!bytes) return null
+  return {
+    dataUrl: `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`,
+    bytes: bytes.byteLength
+  }
+}
+
 export class GitHubAvatarFetcher {
   private readonly fetcher: typeof fetch
   private readonly cache = new Map<number, CacheEntry>()
@@ -71,25 +101,10 @@ export class GitHubAvatarFetcher {
   private async fetchOne(user: GitHubIssueUser): Promise<CacheEntry | null> {
     let url: URL
     try { url = new URL(user.avatarUrl) } catch { return null }
-    if (url.protocol !== 'https:' || url.hostname !== 'avatars.githubusercontent.com' ||
-        url.username || url.password) return null
     url.searchParams.set('size', '64')
-    let response: Response
-    try {
-      response = await this.fetcher(url, { method: 'GET', redirect: 'manual' })
-    } catch {
-      return null
-    }
-    if (!response.ok || response.status >= 300) return null
-    const mime = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
-    if (!mime || !MIME.has(mime)) return null
-    const bytes = await boundedBytes(response)
-    if (!bytes) return null
-    const entry = {
-      dataUrl: `data:${mime};base64,${Buffer.from(bytes).toString('base64')}`,
-      bytes: bytes.byteLength,
-      expiresAt: this.now() + this.ttl
-    }
+    const loaded = await fetchAvatarDataUrl(url.toString(), this.fetcher)
+    if (!loaded) return null
+    const entry = { ...loaded, expiresAt: this.now() + this.ttl }
     this.cache.set(user.id, entry)
     if (this.cache.size > 500) this.cache.delete(this.cache.keys().next().value!)
     return entry

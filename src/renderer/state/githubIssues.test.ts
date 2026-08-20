@@ -25,6 +25,7 @@ function api(): GitHubIssuesApi {
     moveIssue: vi.fn(async () => ({ status: 'configuration-changed' as const })),
     createMissingLabels: vi.fn(async () => ({ status: 'confirmed' as const, created: [], remaining: [] })),
     clearCache: vi.fn(async () => {}),
+    projectAvatar: vi.fn(async () => null),
     onChanged: vi.fn(() => () => {})
   }
 }

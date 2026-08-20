@@ -11,7 +11,8 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "electron-vite build && npm run build:codex-relay",
+    "build:codex-relay": "node scripts/build-codex-relay.mjs",
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
@@ -19,12 +20,14 @@
     "test:unit": "vitest run test/remote",
     "rebuild": "node scripts/patch-node-pty.mjs && electron-rebuild -f -w node-pty,smart-whisper",
     "server:build": "esbuild src/server/main.ts --bundle --platform=node --format=cjs --outfile=out/server/main.cjs --external:node-pty --external:ws --external:smart-whisper --tsconfig=tsconfig.node.json",
+    "host:build": "esbuild src/session-host/host.ts --bundle --platform=node --format=cjs --outfile=out/session-host/host.cjs --external:node-pty --tsconfig=tsconfig.node.json",
     "server:start": "node out/server/main.cjs",
     "server:dev": "npm run build && npm run server:build && node out/server/main.cjs",
     "make-icon": "node scripts/make-icon.mjs",
     "make-social": "node scripts/make-social.mjs",
-    "dist": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 -c.mac.identity=null -c.mac.notarize=false",
-    "dist:linux": "npm run make-icon && electron-vite build && electron-builder --linux",
+    "dist": "npm run make-icon && electron-vite build && electron-builder --mac --arm64 --publish never -c.mac.identity=null -c.mac.notarize=false -c.extraMetadata.nodeTermUpdates=disabled",
+    "dist:linux": "npm run make-icon && electron-vite build && electron-builder --linux --publish never -c.extraMetadata.nodeTermUpdates=disabled",
+    "dist:win": "npm run make-icon && electron-vite build && electron-builder --win --x64 --publish never -c.extraMetadata.nodeTermUpdates=disabled",
     "release": "npm run make-icon && electron-vite build && sh -c 'electron-builder --mac --arm64 --x64 --publish never; s=$?; npm run rebuild; exit $s'",
     "postinstall": "node scripts/patch-node-pty.mjs && electron-rebuild -f -w node-pty,smart-whisper"
   },
@@ -41,7 +44,9 @@
     ],
     "asarUnpack": [
       "**/node_modules/node-pty/**",
-      "**/node_modules/smart-whisper/**"
+      "**/node_modules/smart-whisper/**",
+      "**/node_modules/sharp/**",
+      "**/node_modules/@img/**"
     ],
     "extraResources": [
       {
@@ -106,20 +111,47 @@
         }
       ]
     },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
+      "oneClick": true,
+      "perMachine": false
+    },
     "publish": {
       "provider": "generic",
       "url": "https://nodeterm.dev/updates"
     }
   },
   "dependencies": {
+    "@xterm/addon-serialize": "^0.14.0",
     "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/headless": "^6.0.0",
     "dompurify": "^3.4.13",
     "electron-updater": "^6.8.9",
+    "emoji-picker-react": "^4.19.1",
+    "lucide-react": "^0.545.0",
     "marked": "^12.0.2",
     "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
     "qrcode": "^1.5.4",
+    "sharp": "^0.35.3",
     "smart-whisper": "^0.8.1",
     "tweetnacl": "^1.0.3",
     "ws": "^8.21.0",
@@ -138,15 +170,14 @@
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-webgl": "0.18.0",
     "@xterm/xterm": "^5.5.0",
-    "@xyflow/react": "^12.11.2",
-    "electron": "^42.8.1",
+    "@xyflow/react": "^12.11.3",
+    "electron": "^42.9.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "esbuild": "^0.28.2",
     "jsdom": "^30.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "sharp": "^0.35.3",
     "tailwindcss": "^4.3.1",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",

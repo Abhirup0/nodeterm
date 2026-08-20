@@ -11,8 +11,13 @@ export default defineConfig({
       // .tsx too: component tests (jsdom via a per-file pragma; everything else stays node).
       'src/renderer/**/*.test.{ts,tsx}',
       'src/server/**/*.test.ts',
+      'src/session-host/**/*.test.ts',
       'test/server/**/*.test.ts',
       'test/remote/**/*.test.ts',
+      // Cross-layer acceptance chains (e.g. renderer store + main's pure gates in one flow):
+      // production layering forbids these imports inside src/, so the chain lives here, like
+      // test/server's cross-layer boots.
+      'test/acceptance/**/*.test.ts',
       // Opt-in end-to-end tests against a real sshd in Docker. They self-skip unless
       // NODETERM_SSH_DOCKER is set, so a machine without Docker still runs a green suite.
       'test/ssh-docker/**/*.test.ts'

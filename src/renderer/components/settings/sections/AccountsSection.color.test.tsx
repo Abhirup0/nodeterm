@@ -34,8 +34,13 @@ const colorOf = (id: string): string | undefined =>
 
 beforeEach(() => {
   document.body.innerHTML = ''
+  // The section also mounts the Codex-accounts panel, which hydrates the SSH server list and the
+  // system Codex identity on mount — stubbed so those effects resolve instead of throwing on an
+  // absent bridge member (the throw takes the whole section down with it, colors included).
   ;(window as unknown as { nodeTerminal: unknown }).nodeTerminal = {
-    usage: { fetch: async () => null }
+    usage: { fetch: async () => null },
+    ssh: { list: async () => [] },
+    codexAccounts: { systemIdentity: async () => null, identity: async () => null }
   }
 })
 

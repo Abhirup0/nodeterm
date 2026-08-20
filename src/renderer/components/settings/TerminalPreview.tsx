@@ -48,6 +48,9 @@ export function TerminalPreview(): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
 
+  // No project id, deliberately: this preview exists to show the GLOBAL appearance settings sitting
+  // right beside it. Scoping it to the active project would repaint the picture with that project's
+  // override, so the row the user is dragging would appear to do nothing.
   const visual = useXtermVisualSettings()
 
   useEffect(() => {

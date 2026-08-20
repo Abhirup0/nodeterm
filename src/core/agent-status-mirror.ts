@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import { writeFileAtomic } from './fs-atomic'
 import { platform } from './platform'
 import type { AgentId } from '@shared/agents/config'
 import type { AgentState, NormalizedAgentEvent } from '@shared/agents/normalize'
@@ -635,7 +636,6 @@ const STALE_SWEEP_MS = 60_000
 let sweepTimer: ReturnType<typeof setInterval> | null = null
 let targetFile: string | null = null
 let writeTimer: NodeJS.Timeout | null = null
-let writeSeq = 0
 const flushListeners = new Set<(doc: MirrorFile) => void>()
 // Supplies the host-level settings block, consulted fresh on every flush (so a mid-session
 // permission-mode / account change is picked up without re-wiring). Null = no block written.
@@ -710,7 +710,9 @@ export interface NodeStateChange {
    *  nobody heard from a `working` node for `WORKING_STALE_MS`, so it is presumed gone (see
    *  shared/agents/stale.ts). Like `interrupted`, it must never be celebrated as a completion. */
   stale?: boolean
-  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than finishing.
+  /** done only: the turn ended because the user interrupted it (Esc/Ctrl-C) rather than
+   *  finishing — or a session boundary (SessionStart/SessionEnd) reset the node while it was
+   *  still `working`, which is the same story: the run stopped without producing anything.
    *  Consumers that celebrate a completion (notification, the notch HUD's "finished, unseen"
    *  highlight) skip it — nothing was accomplished, so there is nothing to go and read. */
   interrupted?: boolean
@@ -1770,12 +1772,10 @@ export async function flush(): Promise<void> {
       // A listener must never break the local write (or its sibling listeners).
     }
   }
-  const tmp = `${file}.${process.pid}.${++writeSeq}.tmp`
   try {
-    await fs.promises.writeFile(tmp, JSON.stringify(doc), { mode: 0o600 })
-    await fs.promises.rename(tmp, file)
+    await writeFileAtomic(file, JSON.stringify(doc), { mode: 0o600 })
   } catch {
-    await fs.promises.rm(tmp, { force: true }).catch(() => {})
+    // best-effort: listeners already got the doc; a failed local write cleans up its own temp
   }
 }
 

@@ -88,6 +88,34 @@ describe('preload sshProject passphrase wiring', () => {
     expect(h.invoke).toHaveBeenCalledWith(IPC.sessionMemory, { projectId: 'p2', remote: false })
   })
 
+  // The recorder's release leg is a `false`, and main reads it as `active === true`. A preload
+  // that dropped the argument, or sent on the wrong channel, would leave ⌘W/⌘M/⌘0 suppressed
+  // app-wide after Settings closed — with every other test in the tree still green.
+  it('shortcuts.setRecording sends both edges on its own channel', () => {
+    api.shortcuts.setRecording(true)
+    expect(h.send).toHaveBeenCalledWith(IPC.uiShortcutRecording, true)
+    api.shortcuts.setRecording(false)
+    expect(h.send).toHaveBeenCalledWith(IPC.uiShortcutRecording, false)
+  })
+
+  // Same story for the focus mirror, and its OWN channel matters: main keeps the two bits apart
+  // (one suspends always, the other only under `terminal-first`), so a preload that folded the
+  // mirror onto the recording channel would disable ⌘W/⌘M/⌘0 for every user the moment they
+  // clicked into a terminal — with the whole suite still green.
+  it('shortcuts.setTerminalFocused sends both edges on its own channel', () => {
+    const before = h.send.mock.calls.length
+    api.shortcuts.setTerminalFocused(true)
+    api.shortcuts.setTerminalFocused(false)
+    // The whole call list, not two `toHaveBeenCalledWith`s: what must be true is that the mirror
+    // touched the terminal-focus channel and NOTHING else — folding it onto `ui:shortcut-recording`
+    // would disable ⌘W/⌘M/⌘0 for every user the moment they clicked into a terminal, and a
+    // per-call assertion would stay green through exactly that.
+    expect(h.send.mock.calls.slice(before)).toEqual([
+      [IPC.uiTerminalFocus, true],
+      [IPC.uiTerminalFocus, false]
+    ])
+  })
+
   it('onPassphraseDismiss subscribes the dismiss channel and forwards the requestId', () => {
     const got: { requestId: string }[] = []
     const off = api.sshProject.onPassphraseDismiss((e) => got.push(e))

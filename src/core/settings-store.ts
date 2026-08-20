@@ -1,5 +1,6 @@
-import { promises as fs, readFileSync } from "fs";
+import { readFileSync } from "fs";
 import path from "path";
+import { writeFileAtomic } from "./fs-atomic";
 import { IPC } from "../shared/ipc";
 import { platform } from "./platform";
 import { DEFAULT_SETTINGS, type Settings } from "../shared/types";
@@ -19,6 +20,31 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
     ...DEFAULT_SETTINGS.modelGateway,
     ...saved?.modelGateway,
   };
+  // One-shot dictation migration: a customized legacy `speech.shortcut` becomes the
+  // `speech.dictation` override that every consumer now reads (renderer lib `dictationBinding()`).
+  // Once the key exists — user-set, seeded, or explicitly disabled (`[]`) — it is the truth and
+  // this never runs again; the legacy field lives on only as a downgrade mirror (the renderer
+  // write path keeps it in sync so an older build still finds the user's chord).
+  // A shortcut EQUAL to the default seeds nothing: the override would only restate what the
+  // registry already says, and would then pin that chord against any future default change.
+  // **The seeded value survives the read path.** `speech.dictation` has its OWN conflict bucket
+  // (`conflictBucket` in shared/keybindings.ts), so it can never be a participant in a
+  // cross-command collision, and the READ path's sanitizer (`sanitizeKeybindingOverrides`) has
+  // nothing to strip — neither the seed nor the user's own override on the same chord. (It used
+  // not to: both were deleted on load, and dictation silently fell back to the registry default.)
+  // What a shared chord costs is PRECEDENCE, not the binding: dictation's own keyed listener
+  // claims it first in plain app focus, and the other command still gets it everywhere dictation
+  // does not listen — terminal focus, say. That is exactly the pre-migration behavior of a legacy
+  // `speech.shortcut` that happened to match an app chord, which is what this seed must preserve.
+  if (
+    merged.speech.shortcut !== DEFAULT_SETTINGS.speech.shortcut &&
+    !(merged.keybindings && "speech.dictation" in merged.keybindings)
+  ) {
+    merged.keybindings = {
+      ...(merged.keybindings ?? {}),
+      "speech.dictation": [merged.speech.shortcut],
+    };
+  }
   // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
   // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch
@@ -34,11 +60,6 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
     merged.terminalGpuRendering = "auto";
   return merged;
 }
-
-/** Paired with `process.pid` in the temp name below: the counter makes a name unique WITHIN this
- *  process, the pid makes it unique ACROSS processes (it restarts at 0 in every new one). Same
- *  scheme as agent-status-mirror's local write. */
-let writeSeq = 0;
 
 /**
  * Stores user settings in settings.json. Keeps a synchronous cache so the PtyManager
@@ -104,30 +125,16 @@ export class SettingsStore {
     // (src/renderer/state/settings.ts); on the Server Edition every WS frame is dispatched
     // concurrently (src/server/ws.ts), so even one browser tab can have two saves in the air.
     // With a shared name, one writer's rename publishes the other's half-written bytes, or moves
-    // the file out from under it entirely. The pid covers the other direction: two
-    // `nodeterm-server --data-dir X` processes share the dir with no lock, and their counters
-    // both start at 0.
-    const tmp = `${this.filePath}.${process.pid}.${++writeSeq}.tmp`;
-    try {
-      // 0600 at open(2), before any bytes land, and the rename carries it onto settings.json.
-      // Two reasons: the temp name is predictable (`<file>.<pid>.<seq>.tmp`), so a same-uid
-      // process could pre-create it as a symlink for this write to follow; and every other
-      // writer in this family already creates owner-only — this one was the outlier, which is
-      // exactly what CodeQL's js/insecure-temporary-file was pointing at.
-      await fs.writeFile(tmp, JSON.stringify(this.cache, null, 2), {
-        encoding: "utf-8",
-        mode: 0o600,
-      });
-      await fs.rename(tmp, this.filePath);
-    } catch (e) {
-      // A unique name never self-heals the way the fixed one did (the next save just reused it),
-      // so a failed write has to remove its own temp. The error still propagates, so a failed
-      // save stays a failed save — and the listeners below still only run on success. There is
-      // deliberately no sweep of orphans from killed processes as provider-cookie does: an
-      // orphaned settings temp is config litter, not a live credential.
-      await fs.rm(tmp, { force: true }).catch(() => {});
-      throw e;
-    }
+    // the file out from under it entirely. writeFileAtomic covers all of it: a per-call unique
+    // temp, 0600 at open(2) before any bytes land (the rename carries it onto settings.json —
+    // CodeQL's js/insecure-temporary-file flagged the old default-mode outlier here), a rename
+    // that retries Windows sharing violations, and temp cleanup on failure. The error still
+    // propagates, so a failed save stays a failed save — and the listeners below still only run
+    // on success. There is deliberately no sweep of orphans from killed processes as
+    // provider-cookie does: an orphaned settings temp is config litter, not a live credential.
+    await writeFileAtomic(this.filePath, JSON.stringify(this.cache, null, 2), {
+      mode: 0o600,
+    });
     for (const cb of this.listeners) {
       try {
         cb(this.cache);

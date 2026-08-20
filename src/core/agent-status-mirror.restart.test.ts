@@ -18,6 +18,7 @@ import {
   _resetForTest,
   _inboxSnapshot,
   _snapshot,
+  workingNodes,
   type InboxEvent
 } from './agent-status-mirror'
 
@@ -126,5 +127,19 @@ describe('agent-status mirror — restart survival of the done dedup', () => {
     expect(() => initAgentStatusMirror(file)).not.toThrow()
     expect(Object.keys(_snapshot())).toHaveLength(0)
     expect(_inboxSnapshot().events).toHaveLength(0)
+  })
+
+  it('workingNodes() sees a restored working entry (keep-awake reseeds from it at boot)', async () => {
+    // The restore deliberately fires NO edges, so an edge-driven consumer starts blind; the
+    // tmux-backed run it describes is still going. workingNodes() is the seam that lets the
+    // main shell reseed keep-awake — without it an app relaunch mid-run drops the assertion
+    // until the next turn boundary.
+    initAgentStatusMirror(file)
+    recordAgentEvent(ev({ state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId: 'n2', state: 'done' }))
+
+    await restart()
+
+    expect(workingNodes().map((w) => w.nodeId)).toEqual(['n1'])
   })
 })
