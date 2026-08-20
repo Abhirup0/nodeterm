@@ -56,8 +56,9 @@ describe('RemoteHooks.setup', () => {
     expect(
       calls.some(
         (c) =>
-          (c.stdin ?? '').includes('NODETERM_HOOK_TOKEN=tok') &&
-          (c.stdin ?? '').includes('NODETERM_HOOK_SOCK=/home/u/.nodeterm/hook-p1.sock')
+          // Values are single-quoted (issue #351) so a spaced remote path sources cleanly.
+          (c.stdin ?? '').includes("NODETERM_HOOK_TOKEN='tok'") &&
+          (c.stdin ?? '').includes("NODETERM_HOOK_SOCK='/home/u/.nodeterm/hook-p1.sock'")
       )
     ).toBe(true)
     // managed script written to the absolute path + config merged with the guarded command.

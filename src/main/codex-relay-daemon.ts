@@ -64,6 +64,7 @@ import {
   isSafeAccountId,
   planCodexRolloutExposure
 } from '../core/codex-accounts-core'
+import { parseEndpointEnv } from '../core/agents/hook-endpoint-parse'
 
 // Protocol v6 adds a node-scoped capability to every Electron identity request. It also merges
 // account-isolated catalogs and resumes a selected foreign rollout by path in
@@ -722,7 +723,18 @@ function indexedName(socketPath: string, threadId?: string): string | undefined 
   }
 }
 
-function hookEndpointOptions(
+/**
+ * Read + parse the local endpoint env file for `hookRequest`/`hookJsonRequest`. Values are
+ * `posixQuote`d since #351, so this must go through the shared quote-aware parser — a naive
+ * first-`=` split keeps the quotes, making the port NaN and the sock non-absolute, and every
+ * authorize/observed/catalog call then dies "endpoint unavailable". Exported for tests.
+ */
+export function readHookEndpointEnv(file: string): Record<string, string> {
+  return parseEndpointEnv(readFileSync(file, 'utf8'))
+}
+
+/** Exported for tests. */
+export function hookEndpointOptions(
   env: Record<string, string>,
   pathname: string
 ): { socketPath: string; path: string } | { hostname: string; port: number; path: string } | null {
@@ -741,15 +753,7 @@ function hookRequest(
   return new Promise((resolve, reject) => {
     let env: Record<string, string>
     try {
-      env = Object.fromEntries(
-        readFileSync(route.hookEndpoint, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .map((l) => {
-            const i = l.indexOf('=')
-            return i > 0 ? [l.slice(0, i), l.slice(i + 1)] : ['', '']
-          })
-      )
+      env = readHookEndpointEnv(route.hookEndpoint)
     } catch (error) {
       reject(error)
       return
@@ -787,15 +791,7 @@ function hookJsonRequest<T>(route: Route, pathname: string): Promise<T> {
   return new Promise((resolve, reject) => {
     let env: Record<string, string>
     try {
-      env = Object.fromEntries(
-        readFileSync(route.hookEndpoint, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .map((line) => {
-            const separator = line.indexOf('=')
-            return separator > 0 ? [line.slice(0, separator), line.slice(separator + 1)] : ['', '']
-          })
-      )
+      env = readHookEndpointEnv(route.hookEndpoint)
     } catch (error) {
       reject(error)
       return

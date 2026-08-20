@@ -22,6 +22,7 @@ import {
   STRICT_CONTROL_VERBS,
   type IdentityDecision
 } from './node-identity-policy'
+import { posixQuote } from '../../shared/ssh'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -911,14 +912,19 @@ class HookServer {
       mkdirSync(path.dirname(p), { recursive: true })
       writeFileSync(
         p,
-        `NODETERM_HOOK_PORT=${this.port}\n` +
-          `NODETERM_HOOK_TOKEN=${this.token}\n` +
-          `NODETERM_HOOK_VERSION=${NODETERM_HOOK_PROTOCOL_VERSION}\n` +
+        // Every value is `posixQuote`d: the managed script SOURCES this file (`. "$file"`) under
+        // /bin/sh, so an unquoted space or shell metachar in a path or token would break the source
+        // (issue #351: macOS userDataDir lives under "Application Support" — the space made sh try
+        // to run the tail of the path, exit 127, and the hook fell back to plain mode for EVERY
+        // macOS user). Quoting all four keeps the file a valid POSIX assignment list regardless.
+        `NODETERM_HOOK_PORT=${posixQuote(String(this.port))}\n` +
+          `NODETERM_HOOK_TOKEN=${posixQuote(this.token)}\n` +
+          `NODETERM_HOOK_VERSION=${posixQuote(NODETERM_HOOK_PROTOCOL_VERSION)}\n` +
           // Where clients read their PER-NODE capability from, keyed by $NODETERM_NODE_ID.
           // Advertised (not compiled in) so a failover that sources ANOTHER instance's endpoint
           // file also picks up THAT instance's token dir: it then finds a token that instance can
           // verify, or none — never a mismatched one.
-          `NODETERM_NODE_TOKEN_DIR=${nodeTokenDir()}\n`,
+          `NODETERM_NODE_TOKEN_DIR=${posixQuote(nodeTokenDir())}\n`,
         // 0o600: this file holds the bearer token — owner read/write only so another local user
         // can't read it and forge hook events.
         { encoding: 'utf8', mode: 0o600 }
