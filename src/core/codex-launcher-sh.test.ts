@@ -219,6 +219,25 @@ describe('generated Codex launcher', () => {
     expect(dumped).toContain('ACC=[acct-A]')
   })
 
+  // The #351 interplay, pinned: a failed endpoint preflight (#351's unquoted-path sourcing bug,
+  // an unreadable file, an app restart) must NEVER reach the daemon start. This is what makes #350
+  // and #351 INDEPENDENT bugs rather than a chain — the daemon-env leak above requires the shared
+  // path to have proceeded, and a #351-style failure falls back to plain codex BEFORE that line.
+  it('a failed endpoint preflight never starts the daemon (#351 cannot feed #350)', async () => {
+    const envDump = path.join(dir, 'daemon-env-endpointfail.txt')
+    const dumpScript = path.join(dir, 'dump-daemon-env-endpointfail.sh')
+    fs.writeFileSync(dumpScript, `#!/bin/sh\n: > ${JSON.stringify(envDump)}\n`, { mode: 0o755 })
+    const script2 = path.join(dir, 'nodeterm-codex-endpointfail')
+    fs.writeFileSync(script2, buildCodexLauncherScript(JSON.stringify(dumpScript)), { mode: 0o755 })
+
+    await callLauncher(['do', 'work'], { NODETERM_HOOK_ENDPOINT: '/nonexistent/hook-endpoint.env' }, script2)
+
+    // Plain codex with the args intact, and the daemon start command was never invoked.
+    expect(codexArgv()).toEqual(['do work'])
+    expect(fs.existsSync(envDump)).toBe(false)
+    expect(fallbacks.map((f) => f.reason)).toContain('hook-endpoint-unavailable')
+  })
+
   it('keeps the caller arguments after the thread it resolved', async () => {
     await callLauncher(['--ask-for-approval', 'never', 'fix the bug'])
     expect(codexArgv()).toEqual([
