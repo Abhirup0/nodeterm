@@ -5,10 +5,11 @@ import {
   PERMISSION_MODE_LABELS,
   type AgentPermissionMode
 } from '@shared/agents/config'
+import type { ProjectIcon } from '@shared/project-icon'
 import { Input } from '@renderer/ui/Input'
 import { Select } from '@renderer/ui/Select'
-import { cn } from '@renderer/ui/cn'
 import { useProjects } from '../../../state/projects'
+import { useAppTheme } from '../../../state/useAppTheme'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
 import { markWorkspaceDirty } from '../../../state/workspaceDirty'
@@ -21,6 +22,7 @@ import {
 import { FieldRow } from '../FieldRow'
 import { FAMILY_SEARCH_ENTRIES, ProjectFamilyEditors } from '../ProjectSettingsFamilies'
 import { SearchableRow } from '../SearchableRow'
+import { ProjectIconPicker } from '../ProjectIconPicker'
 import { SettingsSection, sectionVisible } from '../SettingsSection'
 import { useSettingsSearch } from '../context'
 import { projectSectionId } from '../project-settings-targets'
@@ -49,7 +51,13 @@ function persistIdentityEdit(): void {
 const ROWS = {
   name: { title: 'Project name', keywords: ['rename', 'project', 'title'] },
   folder: { title: 'Folder', keywords: ['cwd', 'path', 'directory', 'ssh', 'server'] },
-  color: { title: 'Color', keywords: ['accent', 'swatch', 'tab', 'monogram'] },
+  color: {
+    title: 'Icon & color',
+    keywords: [
+      'accent', 'swatch', 'tab', 'monogram', 'color',
+      'icon', 'emoji', 'glyph', 'lucide', 'avatar', 'image', 'logo', 'upload'
+    ]
+  },
   permission: {
     title: 'Default permission mode',
     keywords: ['claude', 'plan', 'accept edits', 'bypass', 'approval']
@@ -160,6 +168,7 @@ function EditableProjectSection({
   forceVisible: boolean
 }): React.JSX.Element {
   const settings = useProjectSettings(project.id)
+  const appTheme = useAppTheme()
   const claudeAccounts = useSettings((s) => s.settings.claudeAccounts)
   const globalMode = useSettings((s) => s.settings.claudePermissionMode)
   const systemLabelSetting = useSettings((s) => s.settings.systemAccountLabel)
@@ -243,29 +252,29 @@ function EditableProjectSection({
       </SearchableRow>
       <SearchableRow {...ROWS.color}>
         <FieldRow
-          label="Color"
-          description="Accent for this project's tab and monogram."
+          label="Icon & color"
+          description="How this project shows on its tab and in the switcher: a custom icon (emoji, glyph, or image) plus an accent colour. Both live in the shared project file, so they travel to everyone who clones the repo."
           control={
-            <div className="flex items-center gap-1.5">
-              {NODE_COLORS.map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  data-project-color={c}
-                  aria-label={`Color ${c}`}
-                  aria-pressed={project.color === c}
-                  style={{ background: c }}
-                  className={cn(
-                    'size-5 rounded-full border-0 outline-none transition-transform hover:scale-110',
-                    project.color === c && 'ring-2 ring-white/80 ring-offset-2 ring-offset-transparent'
-                  )}
-                  onClick={() => {
-                    useProjects.getState().setProjectColor(project.id, c)
-                    persistIdentityEdit()
-                  }}
-                />
-              ))}
-            </div>
+            <ProjectIconPicker
+              projectId={project.id}
+              name={project.name}
+              icon={project.icon}
+              color={project.color}
+              colors={NODE_COLORS}
+              dark={appTheme === 'dark'}
+              // Only the section the user is actually viewing probes the (uncached, live) GitHub
+              // avatar. During a settings SEARCH many sections are VISIBLE-but-not-active — gating
+              // on `active` keeps a keyword like "avatar" from firing one live API call per project.
+              active={isActive}
+              onIcon={(icon: ProjectIcon | undefined) => {
+                useProjects.getState().setProjectIcon(project.id, icon)
+                persistIdentityEdit()
+              }}
+              onColor={(c: string) => {
+                useProjects.getState().setProjectColor(project.id, c)
+                persistIdentityEdit()
+              }}
+            />
           }
         />
       </SearchableRow>

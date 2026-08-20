@@ -14,6 +14,7 @@ import { IPC } from '../shared/ipc'
 const logBuffer = new LogBuffer()
 installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
+import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
 import { BrowserControlLedger } from './browser-control-ledger'
 import { BrowserLeaseManager, BrowserSession } from './browser-lease'
@@ -1460,6 +1461,12 @@ app.whenReady().then(async () => {
   ipcMain.on(IPC.shellOpenExternal, (_e, url: string) => {
     if (isSafeExternalUrl(url)) void shell.openExternal(url)
   })
+
+  // Project-icon upload: open a file dialog and re-encode the pick to a bounded PNG data URL, main
+  // side (never trust a user file straight onto Project.icon — see project-icon-upload.ts).
+  ipcMain.handle(IPC.shellPickProjectIcon, (e) =>
+    pickProjectIcon(BrowserWindow.fromWebContents(e.sender))
+  )
 
   // The Explorer/Editor fs surface: ONE registrar (core/fs-handlers.ts) shared by this shell and
   // the Server Edition, over the same pure core/fs-ops — so local, browser and peer filesystem

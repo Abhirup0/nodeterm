@@ -138,6 +138,27 @@ describe('ProjectSettingsSection', () => {
     expect(dirty).toHaveBeenCalledTimes(1)
   })
 
+  it('picks a lucide icon and persists it (Task 4 icon picker)', async () => {
+    await mountSection()
+    const btn = host.querySelector<HTMLButtonElement>('[data-lucide-id="rocket"]')!
+    await act(async () => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(useProjects.getState().getProject('p1')?.icon).toEqual({ type: 'lucide', name: 'rocket' })
+    expect(dirty).toHaveBeenCalledTimes(1)
+  })
+
+  it('resets a set icon back to undefined via the picker Reset', async () => {
+    await mountSection(project({ icon: { type: 'emoji', emoji: '🚀' } }))
+    const reset = host.querySelector<HTMLButtonElement>('[aria-label="Remove icon"]')!
+    expect(reset.disabled).toBe(false)
+    await act(async () => {
+      reset.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(useProjects.getState().getProject('p1')?.icon).toBeUndefined()
+    expect(dirty).toHaveBeenCalledTimes(1)
+  })
+
   it('sets the default permission mode and clears it back to the global default', async () => {
     await mountSection()
     const select = host.querySelector<HTMLSelectElement>('#project-permission-mode-p1')!

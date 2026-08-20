@@ -210,6 +210,7 @@ const api: NodeTerminalApi = {
     moveIssue: (request) => ipcRenderer.invoke(IPC.githubIssuesMove, request),
     createMissingLabels: (projectId) => ipcRenderer.invoke(IPC.githubIssuesCreateLabels, projectId),
     clearCache: (projectId) => ipcRenderer.invoke(IPC.githubIssuesClearCache, projectId),
+    projectAvatar: (projectId) => ipcRenderer.invoke(IPC.githubProjectAvatar, projectId),
     onChanged: (projectId, listener) => {
       const channel = IPC.githubIssuesChanged(projectId)
       const handler = (_event: unknown, changed: number[]) => listener(changed)
@@ -353,7 +354,8 @@ const api: NodeTerminalApi = {
   shell: {
     reveal: (path: string) => ipcRenderer.send(IPC.shellReveal, path),
     openPath: (path: string) => ipcRenderer.send(IPC.shellOpenPath, path),
-    openExternal: (url: string) => ipcRenderer.send(IPC.shellOpenExternal, url)
+    openExternal: (url: string) => ipcRenderer.send(IPC.shellOpenExternal, url),
+    pickProjectIcon: () => ipcRenderer.invoke(IPC.shellPickProjectIcon)
   },
   fs: {
     list: (dirPath: string) => ipcRenderer.invoke(IPC.fsList, dirPath),

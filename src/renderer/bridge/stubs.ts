@@ -180,7 +180,10 @@ export function buildStubApi(): Omit<
       // The one browser-native member: open the URL in a new tab.
       openExternal: (url: string): void => {
         window.open(url, '_blank', 'noopener')
-      }
+      },
+      // Picking + re-encoding an icon needs the main process (native dialog + sharp); a browser
+      // client has neither, so this degrades to "cancelled" rather than opening anything.
+      pickProjectIcon: async () => null
     },
     media: {
       allow: U('media.allow'),
