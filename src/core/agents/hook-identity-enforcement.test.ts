@@ -361,7 +361,10 @@ describe('the latch is memory, not state', () => {
     const walk = (root: string): string[] =>
       readdirSync(root).flatMap((entry) => {
         const full = join(root, entry)
-        return statSync(full).isDirectory() ? walk(full) : [full]
+        const st = statSync(full)
+        // Regular files only: the hook server's own unix socket (issue #367) lives under the data
+        // dir too, and a socket is not readable state — opening it is ENXIO, not evidence.
+        return st.isDirectory() ? walk(full) : st.isFile() ? [full] : []
       })
     for (const file of walk(dir)) {
       // A persisted latch is a node that one filesystem accident can brick forever. Nothing on
