@@ -18,6 +18,7 @@ import {
   type StatusSection
 } from '../lib/sessionList'
 import { SessionRow } from './SessionRow'
+import { ProjectGlyph } from './ProjectGlyph'
 import { IconBellFilled, IconCircleCheck, IconPin } from './icons'
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
@@ -598,9 +599,13 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
                 >
                   {isCollapsed ? '▶' : '▼'}
                 </button>
-                <span className="ss-group__monogram" style={{ background: g.projectColor }}>
-                  {(g.projectName.trim() || '?').charAt(0).toUpperCase()}
-                </span>
+                <ProjectGlyph
+                  icon={g.projectIcon}
+                  color={g.projectColor}
+                  name={g.projectName}
+                  variant="monogram"
+                  className="ss-group__monogram"
+                />
                 <span className="ss-group__name">{g.projectName}</span>
                 {branches[g.projectId] && (
                   <span className="ss-group__branch">⎇ {branches[g.projectId]}</span>

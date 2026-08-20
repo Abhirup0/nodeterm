@@ -69,7 +69,7 @@ export function SettingsPage({
 
   const extraGroups = useMemo(() => {
     const group = projectsSettingsGroup(
-      openProjects.map((p) => ({ id: p.id, name: p.name, color: p.color }))
+      openProjects.map((p) => ({ id: p.id, name: p.name, color: p.color, icon: p.icon }))
     )
     return group ? [group] : []
   }, [openProjects])

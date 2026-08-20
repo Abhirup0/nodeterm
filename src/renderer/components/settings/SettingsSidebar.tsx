@@ -4,6 +4,7 @@ import { Input } from '@renderer/ui/Input'
 import { visibleSettingsGroups, type SettingsGroup, type SettingsSectionId } from './nav'
 import { matchesQuery } from './search'
 import { SectionIcon } from './SettingsIcons'
+import { ProjectGlyph } from '../ProjectGlyph'
 
 const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
 
@@ -105,7 +106,21 @@ export function SettingsSidebar({
                       isActive ? 'text-text' : 'text-muted-2 group-hover:text-muted'
                     )}
                   >
-                    <SectionIcon id={s.id} />
+                    {s.color ? (
+                      // A project section — the row's own color/icon (see nav.ts'
+                      // `projectsSettingsGroup`), instead of the generic folder glyph every
+                      // project section used to share.
+                      <ProjectGlyph
+                        icon={s.icon}
+                        color={s.color}
+                        name={s.title}
+                        variant="monogram"
+                        size={16}
+                        className="flex size-4 items-center justify-center rounded-[3px] text-[9px] font-semibold uppercase text-white"
+                      />
+                    ) : (
+                      <SectionIcon id={s.id} />
+                    )}
                   </span>
                   <span className="truncate">{s.title}</span>
                 </button>

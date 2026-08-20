@@ -10306,7 +10306,13 @@ export function Canvas() {
             }}
             onCloneRepo={cloneRepo}
             onConnectSsh={() => setSshDialogOpen(true)}
-            closedProjects={closedProjects.map((p) => ({ id: p.id, name: p.name, cwd: p.cwd }))}
+            closedProjects={closedProjects.map((p) => ({
+              id: p.id,
+              name: p.name,
+              cwd: p.cwd,
+              color: p.color,
+              icon: p.icon
+            }))}
             onReopen={reopenProject}
             onDeleteClosed={deleteProject}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}

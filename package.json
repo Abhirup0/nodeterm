@@ -42,7 +42,9 @@
     ],
     "asarUnpack": [
       "**/node_modules/node-pty/**",
-      "**/node_modules/smart-whisper/**"
+      "**/node_modules/smart-whisper/**",
+      "**/node_modules/sharp/**",
+      "**/node_modules/@img/**"
     ],
     "extraResources": [
       {
@@ -117,10 +119,13 @@
     "@xterm/addon-web-links": "^0.11.0",
     "dompurify": "^3.4.13",
     "electron-updater": "^6.8.9",
+    "emoji-picker-react": "^4.19.1",
+    "lucide-react": "^0.545.0",
     "marked": "^12.0.2",
     "monaco-editor": "^0.52.2",
     "node-pty": "^1.0.0",
     "qrcode": "^1.5.4",
+    "sharp": "^0.35.3",
     "smart-whisper": "^0.8.1",
     "tweetnacl": "^1.0.3",
     "ws": "^8.21.0",
@@ -147,7 +152,6 @@
     "jsdom": "^30.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "sharp": "^0.35.3",
     "tailwindcss": "^4.3.1",
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
