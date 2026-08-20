@@ -46,4 +46,12 @@ describe('endpoint file sources cleanly under real /bin/sh with a spaced path', 
     // (2) and the path must arrive with its space intact, byte for byte.
     expect(r.stdout).toBe(nodeTokenDir())
   })
+
+  it('the shared TS parser reads the REAL writer output identically to sh', async () => {
+    const { parseEndpointEnv } = await import('./hook-endpoint-parse')
+    const env = parseEndpointEnv(fs.readFileSync(hookServer.endpointFilePath(), 'utf8'))
+    expect(env.NODETERM_NODE_TOKEN_DIR).toBe(nodeTokenDir())
+    expect(env.NODETERM_HOOK_TOKEN).toBe(hookServer.getToken())
+    expect(Number(env.NODETERM_HOOK_PORT)).toBe(hookServer.getPort())
+  })
 })
