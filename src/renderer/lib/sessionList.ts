@@ -34,7 +34,7 @@ export type StatusKind = 'working' | 'attention' | 'done' | 'unknown'
 /** Sessions sidebar top-level grouping mode. */
 export type SidebarGrouping = 'project' | 'status'
 
-const STATE_LABEL: Record<StatusKind, string> = {
+export const STATE_LABEL: Record<StatusKind, string> = {
   working: 'Running',
   attention: 'Waiting for your response',
   done: 'Done',
