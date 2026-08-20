@@ -42,10 +42,13 @@ export const PROJECT_CAPABILITY_COPY: Record<ProjectCapability, ProjectCapabilit
     label: 'Let agents drive browser nodes they open',
     description:
       'Agents in this project can navigate, read, click and type in browser nodes THEY opened — ' +
-      'never in browser nodes you opened. Any page an agent reads can try to steer it: a page can ' +
-      'contain instructions, and the same agent can navigate anywhere and type anywhere. Nodes an ' +
-      'agent opens use their own logged-out session, separate from your own browsing. A badge on ' +
-      'the node shows when one is being driven, with a Stop button.',
+      'never in browser nodes you opened, and never in your own browsing (an agent’s nodes use a ' +
+      'separate session jar). Any page an agent reads can try to steer it: reading a page puts its ' +
+      'text straight into the agent’s context, and that same agent can navigate anywhere, type ' +
+      'anywhere and read the jar’s cookies. That is untrusted content, whatever the agent has ' +
+      'logged the jar into, and a path back out — all in one switch. Reading is shaped to reveal ' +
+      'less per call, but nothing here closes that channel. Cookie reads are traced and there is no ' +
+      'cookie-write; a badge on the node shows when one is being driven, with a Stop button.',
     cloneWarning:
       'This setting is saved in the project file (.nodeterm/project.json), so if you commit it, ' +
       'everyone who clones the repo gets it too.'

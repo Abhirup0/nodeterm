@@ -2,7 +2,7 @@
 // quoting slip here does not break "codex identity recovery" — it breaks every agent's hooks on
 // every machine. It is also the one place where a data file's contents become environment
 // variables, which is why the negative cases below matter as much as the positive one.
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -34,6 +34,18 @@ afterAll(() => fs.rmSync(dir, { recursive: true, force: true }))
 
 function record(threadId: string, body: string): void {
   fs.writeFileSync(path.join(root, threadId), body)
+}
+
+/** Write a managed-scope record under `<root>/<accountId>/<threadId>`. */
+function scopedRecord(accountId: string, threadId: string, body: string): void {
+  fs.mkdirSync(path.join(root, accountId), { recursive: true })
+  fs.writeFileSync(path.join(root, accountId, threadId), body)
+}
+
+/** A well-formed record body for a scope (empty account = system, no accountId line = legacy). */
+function body(nodeId: string, accountId?: string): string {
+  const acct = accountId === undefined ? '' : `accountId=${accountId}\n`
+  return `${acct}nodeId=${nodeId}\nendpoint=${dir}/hook-endpoint.env\nsignature=x\n`
 }
 
 async function resolve(env: Record<string, string>): Promise<string> {
@@ -78,5 +90,73 @@ describe('codex thread identity prelude', () => {
     expect(await resolve({ CODEX_THREAD_ID: 'thread-bad-ep' })).toBe('||')
     record('thread-bad-ep2', 'nodeId=node-7\nendpoint=/etc/$(id)\n')
     expect(await resolve({ CODEX_THREAD_ID: 'thread-bad-ep2' })).toBe('||')
+  })
+})
+
+// ── S6 PR 2: the account-scoped sh resolver, proven under real /bin/sh (Property 8, Constraint 8) ──
+describe('codex thread identity prelude — account scoping', () => {
+  // The subdir layout differs per test; clear the record store before each so scopes never bleed.
+  beforeEach(() => {
+    fs.rmSync(root, { recursive: true, force: true })
+    fs.mkdirSync(root, { recursive: true })
+  })
+
+  it('binds the one matching managed scope when the daemon carries that account id', async () => {
+    scopedRecord('acct-A', 'thr-1', body('node-A', 'acct-A'))
+    expect(
+      await resolve({ CODEX_THREAD_ID: 'thr-1', NODETERM_CODEX_ACCOUNT_ID: 'acct-A' })
+    ).toBe(`node-A|${dir}/hook-endpoint.env|1`)
+  })
+
+  it('binds the single candidate across scopes when no account id is present (system record)', async () => {
+    record('thr-1', body('node-sys')) // bare-root legacy/system record, no account line
+    expect(await resolve({ CODEX_THREAD_ID: 'thr-1' })).toBe(`node-sys|${dir}/hook-endpoint.env|1`)
+  })
+
+  it('binds the single candidate across scopes when no account id is present (one managed record)', async () => {
+    scopedRecord('acct-A', 'thr-1', body('node-A', 'acct-A'))
+    expect(await resolve({ CODEX_THREAD_ID: 'thr-1' })).toBe(`node-A|${dir}/hook-endpoint.env|1`)
+  })
+
+  it('fails closed: two scopes hold the same thread id and no account env clears the map', async () => {
+    scopedRecord('acct-A', 'thr-1', body('node-A', 'acct-A'))
+    scopedRecord('acct-B', 'thr-1', body('node-B', 'acct-B'))
+    // MUTATION TARGET: bind on the first match (drop `-eq 1`) ⇒ this exports node-A and reddens.
+    expect(await resolve({ CODEX_THREAD_ID: 'thr-1' })).toBe('||')
+  })
+
+  it('fails closed: a system record and a managed record collide with no account env', async () => {
+    record('thr-1', body('node-sys'))
+    scopedRecord('acct-A', 'thr-1', body('node-A', 'acct-A'))
+    expect(await resolve({ CODEX_THREAD_ID: 'thr-1' })).toBe('||')
+  })
+
+  it('clears the map when the record account line disagrees with its directory scope', async () => {
+    // A record physically under acct-B but whose own line still claims acct-A: not honoured as B.
+    scopedRecord('acct-B', 'thr-1', body('node-A', 'acct-A'))
+    expect(
+      await resolve({ CODEX_THREAD_ID: 'thr-1', NODETERM_CODEX_ACCOUNT_ID: 'acct-B' })
+    ).toBe('||')
+    // And the unscoped scan skips it too (the scope check fails), so nothing binds.
+    expect(await resolve({ CODEX_THREAD_ID: 'thr-1' })).toBe('||')
+  })
+
+  it('reads only the named account, not a same-thread record in another scope', async () => {
+    scopedRecord('acct-A', 'thr-1', body('node-A', 'acct-A'))
+    scopedRecord('acct-B', 'thr-1', body('node-B', 'acct-B'))
+    // With the account id pinned, the scan never touches the other account — no ambiguity, binds B.
+    expect(
+      await resolve({ CODEX_THREAD_ID: 'thr-1', NODETERM_CODEX_ACCOUNT_ID: 'acct-B' })
+    ).toBe(`node-B|${dir}/hook-endpoint.env|1`)
+  })
+
+  it('resolves nothing for a daemon account id that could escape the mapping directory', async () => {
+    scopedRecord('acct-A', 'thr-1', body('node-A', 'acct-A'))
+    expect(
+      await resolve({ CODEX_THREAD_ID: 'thr-1', NODETERM_CODEX_ACCOUNT_ID: '../acct-A' })
+    ).toBe('||')
+    expect(
+      await resolve({ CODEX_THREAD_ID: 'thr-1', NODETERM_CODEX_ACCOUNT_ID: 'system' })
+    ).toBe('||')
   })
 })

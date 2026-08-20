@@ -11,6 +11,22 @@ export interface GroupWorktree {
   createdByApp: boolean
 }
 
+/** One entry's outcome from materializing a project's `sharedPaths` into a worktree
+ *  (core/worktree-shared-paths.ts). Lives here in `shared` so the renderer's `WorktreeApi` type can
+ *  name it without importing core; core's module re-exports it for its own callers/tests. */
+export interface SharedPathResult {
+  path: string
+  status:
+    | 'linked'
+    | 'skipped-missing-source'
+    | 'skipped-exists'
+    | 'skipped-reserved'
+    | 'skipped-unsafe'
+    | 'error'
+  /** Present only for `error` (or a noteworthy skip): a short human-readable reason. */
+  note?: string
+}
+
 export interface WorktreeEntry {
   path: string
   branch: string | null
@@ -186,6 +202,43 @@ export const DEFAULT_BASE_REF = 'main'
  */
 export function resolveBaseRef(entries: WorktreeEntry[]): string {
   return entries[0]?.branch?.trim() || DEFAULT_BASE_REF
+}
+
+/** The worktree-related fields a project can override — see `effectiveWorktreeBaseRef` /
+ *  `effectiveWorktreeTemplate`. Both optional: an unset or whitespace-only value defers below it. */
+export interface ProjectWorktreeDefaults {
+  basePath?: string
+  baseRef?: string
+}
+
+/**
+ * The baseRef a NEW worktree should default to: a project override wins, else the repo's own
+ * default branch (`resolveBaseRef`, which falls back to `DEFAULT_BASE_REF`). Pure — no IO.
+ */
+export function effectiveWorktreeBaseRef(
+  project: ProjectWorktreeDefaults | undefined,
+  entries: WorktreeEntry[]
+): string {
+  return project?.baseRef?.trim() || resolveBaseRef(entries)
+}
+
+/**
+ * The path TEMPLATE a new worktree's location should expand from — fed straight into
+ * `computeWorktreePath`. A project `basePath` becomes `<basePath>/${branch}` (exactly one slash
+ * between the two); otherwise the given global template, or `DEFAULT_WORKTREE_PATH_TEMPLATE`.
+ *
+ * Deliberately does NOT resolve or validate `basePath` — `computeWorktreePath`'s
+ * `resolvePathFromRepo` already refuses a template that resolves to (or under) the filesystem root,
+ * so a hostile `basePath` such as `'/'` synthesizes `/${branch}`, which that downstream guard
+ * refuses (returns `''`), and creation falls back exactly as it does today. Pure — no IO.
+ */
+export function effectiveWorktreeTemplate(
+  project: ProjectWorktreeDefaults | undefined,
+  globalTemplate: string | undefined
+): string {
+  const basePath = project?.basePath?.trim()
+  if (basePath) return `${basePath.replace(/\/+$/, '')}/\${branch}`
+  return globalTemplate?.trim() || DEFAULT_WORKTREE_PATH_TEMPLATE
 }
 
 /**

@@ -42,7 +42,7 @@ interface HudPush {
   notchCenterX: number
   hasNotch: boolean
   hoverExpand: boolean
-  percentMode?: 'used' | 'remaining'
+  percentMode?: 'used' | 'remaining' | 'tokens'
 }
 interface HudApi {
   onRows(cb: (push: HudPush) => void): () => void
@@ -80,7 +80,7 @@ let notchWidthPx = 168
 // Hover-to-expand (settings.notchHoverExpand). Off = the capsule only expands on click.
 let hoverExpand = true
 // settings.usagePercentMode — the same number/label the other context surfaces render (issue #78).
-let percentMode: 'used' | 'remaining' = 'remaining'
+let percentMode: 'used' | 'remaining' | 'tokens' = 'remaining'
 // Which subagent disclosures the user has opened (by nodeId), preserved across re-renders.
 const openSubs = new Set<string>()
 // The user clicked "+N more" — draw every pushed row instead of the first HUD_ROW_CAP. Reset when
@@ -452,7 +452,7 @@ function applyGeometry(push: HudPush): void {
   }
   if (typeof push.notchCenterX === 'number') rs.setProperty('--notch-center-x', `${push.notchCenterX}px`)
   if (typeof push.hoverExpand === 'boolean') hoverExpand = push.hoverExpand
-  if (push.percentMode === 'used' || push.percentMode === 'remaining') percentMode = push.percentMode
+  if (push.percentMode === 'used' || push.percentMode === 'remaining' || push.percentMode === 'tokens') percentMode = push.percentMode
   // No physical notch → draw a standalone floating pill instead of fusing to y=0.
   document.documentElement.classList.toggle('notchless', push.hasNotch === false)
 }
