@@ -64,6 +64,7 @@ import {
 import { terminalKey } from '../terminal/terminal-config'
 import {
   setWebglGesture,
+  setWebglZoom,
   releaseAllHiddenGrants,
   WEBGL_GESTURE_SETTLE_MS
 } from '../terminal/webgl-budget'
@@ -1852,6 +1853,10 @@ export function Canvas() {
       setViewport(project.viewport)
       setZoomPct(Math.round(project.viewport.zoom * 100))
       setGroupLabelBoost(project.viewport.zoom)
+      // A project can load already zoomed IN past the crisp threshold (saved viewport) — seed the
+      // gate before the mount-time IntersectionObserver reports make every node request a context
+      // it would only have to give back.
+      setWebglZoom(project.viewport.zoom)
       // Seed the shared glyph camera from the same viewport: `onMove` only fires once the user
       // actually pans, so without this a project that loads scrolled away would draw its grids
       // against the previous project's camera until the first gesture.
@@ -6072,6 +6077,10 @@ export function Canvas() {
           zoomRafRef.current = null
           setZoomPct(Math.round(viewportRef.current.zoom * 100))
           setGroupLabelBoost(viewportRef.current.zoom)
+          // Feed the crisp gate (GPU text is a magnified bitmap past ~175%; the DOM renderer
+          // re-rasters and stays sharp). Idempotent + hysteresis inside, and the swaps it queues
+          // only run once the gesture settles — per-frame cost here is a float compare.
+          setWebglZoom(viewportRef.current.zoom)
         })
       }
     },
