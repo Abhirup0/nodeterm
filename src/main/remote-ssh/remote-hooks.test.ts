@@ -55,7 +55,7 @@ describe('RemoteHooks.setup', () => {
     // reverse forward binds the ABSOLUTE remote socket (no unexpanded ~).
     expect(joined.some((j) => j.includes('-O forward') && j.includes('/home/u/.nodeterm/hook-p1.sock:127.0.0.1:51234'))).toBe(true)
     // Endpoint bearer goes to a private, invocation-owned temp and is then published atomically.
-    const endpointWrite = calls.find((c) => (c.stdin ?? '').includes('NODETERM_HOOK_TOKEN=tok'))
+    const endpointWrite = calls.find((c) => (c.stdin ?? '').includes("NODETERM_HOOK_TOKEN='tok'"))
     const endpointTemp = endpointWrite?.cmd.match(
       /cat > ('\/home\/u\/\.nodeterm\/\.nodeterm-[0-9a-f-]{36}\.tmp')/
     )?.[1]
@@ -68,8 +68,9 @@ describe('RemoteHooks.setup', () => {
     expect(
       calls.some(
         (c) =>
-          (c.stdin ?? '').includes('NODETERM_HOOK_TOKEN=tok') &&
-          (c.stdin ?? '').includes('NODETERM_HOOK_SOCK=/home/u/.nodeterm/hook-p1.sock')
+          // Values are single-quoted (issue #351) so a spaced remote path sources cleanly.
+          (c.stdin ?? '').includes("NODETERM_HOOK_TOKEN='tok'") &&
+          (c.stdin ?? '').includes("NODETERM_HOOK_SOCK='/home/u/.nodeterm/hook-p1.sock'")
       )
     ).toBe(true)
     // managed script written to the absolute path + config merged with the guarded command.

@@ -10,6 +10,7 @@ import type { NodeTokenVerdict } from './node-auth-token'
 import { nodeTokenDir } from './node-token-files'
 import { isForeignKidToken, isSafeNodeId, verifyNodeToken } from './node-auth-token'
 import { isSafeThreadId } from '../codex-identity-proxy'
+import { isSafeAccountId } from '../../shared/codex-account'
 import {
   controlPolicy,
   CONTEXT_LINK_POLICY_VERB,
@@ -21,6 +22,7 @@ import {
   STRICT_CONTROL_VERBS,
   type IdentityDecision
 } from './node-identity-policy'
+import { posixQuote } from '../../shared/ssh'
 
 // v2 advertises NODETERM_NODE_TOKEN_DIR so clients read their per-node capability from a file
 // rather than receiving it in argv. Nothing consumes the posted version server-side, so the bump
@@ -173,11 +175,22 @@ export interface HookEventMeta {
  * protect — the routes are new — which is the one place in the whole control surface where
  * fail-closed from day one costs nobody anything.
  *
+ * `open-project` (issue #338) is here for the same class of reason as `sticky`: the main-side
+ * grant ledger (src/main/project-grants.ts) mints per-caller targeting rights off a successful
+ * `open-project`, and a grant recorded for an unverifiable caller would authorize whoever can
+ * name that caller's node id. NEW verb, so fail-closed from day one strands nobody.
+ *
  * Consulted in the `/control/` route BEFORE `identityGate`'s decision is, so no future change to
  * the policy table can widen it; `messaging-verified-only.test.ts` drives the route on both sides
  * of every hatch and is the test that fails if either half of this comment stops being true.
  */
-export const requiresVerified: ReadonlySet<string> = new Set(['send', 'reply', 'notify', 'sticky'])
+export const requiresVerified: ReadonlySet<string> = new Set([
+  'send',
+  'reply',
+  'notify',
+  'sticky',
+  'open-project'
+])
 
 /**
  * The refusal for a messaging verb: one sentence, no diagnosis, no hint about tokens or restarts —
@@ -190,9 +203,15 @@ export const MESSAGING_CONTROL_REFUSAL = 'Agent messaging refused.'
  *  because "agent messaging refused" answering a note write is a diagnosis-delaying lie. */
 export const STICKY_CONTROL_REFUSAL = 'Sticky write refused.'
 
+/** Same posture again for `open-project` (issue #338): one sentence naming what was refused, no
+ *  diagnosis, no token or restart advice — a designed refusal, not a rollout accident. */
+export const OPEN_PROJECT_CONTROL_REFUSAL = 'Project open refused.'
+
 /** The verified-only refusal, worded for the verb that was refused. */
 export function verifiedRefusalFor(verb: string): string {
-  return verb === 'sticky' ? STICKY_CONTROL_REFUSAL : MESSAGING_CONTROL_REFUSAL
+  if (verb === 'sticky') return STICKY_CONTROL_REFUSAL
+  if (verb === 'open-project') return OPEN_PROJECT_CONTROL_REFUSAL
+  return MESSAGING_CONTROL_REFUSAL
 }
 
 class HookServer {
@@ -217,7 +236,17 @@ class HookServer {
   /** Node ids the materialiser refuses to mint for (see `markNodeIdentityUnmintable`). */
   private unmintableNodes = new Set<string>()
   private controlHandler:
-    | ((cmd: { verb: string; nodeId: string; args: Record<string, string> }) => Promise<{
+    | ((cmd: {
+        verb: string
+        nodeId: string
+        args: Record<string, string>
+        // The caller's IDENTITY verdict for THIS request, decided at the gate above and passed on
+        // rather than re-derived in main. `true` only when the caller presented a per-node token
+        // this instance minted for this node id. The browser ownership ledger (PR 4 Task 4.3)
+        // claims a node ONLY when this is true — a `legacy`/warned caller opens a browser but owns
+        // nothing, so it can drive nothing. `browser-ownership-source.test.ts` guards the source.
+        verified: boolean
+      }) => Promise<{
         ok: boolean
         message?: string
         result?: unknown
@@ -235,10 +264,20 @@ class HookServer {
    * `nodeTokenVerified`.
    */
   private codexThreadStartHandler:
-    | ((req: { nodeId: string; cwd: string; hookEndpoint: string }) => Promise<string>)
+    | ((req: {
+        nodeId: string
+        cwd: string
+        hookEndpoint: string
+        accountId?: string
+      }) => Promise<string>)
     | null = null
   private codexThreadBindHandler:
-    | ((req: { nodeId: string; threadId: string; hookEndpoint: string }) => Promise<void>)
+    | ((req: {
+        nodeId: string
+        threadId: string
+        hookEndpoint: string
+        accountId?: string
+      }) => Promise<void>)
     | null = null
   private codexIdentityListener: ((e: CodexIdentityEvent) => void) | null = null
   private endpointPath = ''
@@ -536,7 +575,7 @@ class HookServer {
             return
           }
           const result = this.controlHandler
-            ? await this.controlHandler({ verb, nodeId, args })
+            ? await this.controlHandler({ verb, nodeId, args, verified: verdict === 'verified' })
             : { ok: false, error: 'control unavailable' }
           // Which note, not whether: an unmintable node warned with the restart line is sent round
           // the same loop the refusal path already knows better than to send it round.
@@ -818,6 +857,17 @@ class HookServer {
       res.end()
       return
     }
+    // The account scope for this thread's ownership record (S6). Absent ⇒ system account. A
+    // non-empty id that is not a safe account id is refused BEFORE it reaches the record store,
+    // where it would become a directory component (Supply-chain guard, Constraint 7). Both routes
+    // share the same normalisation so a managed thread is never mis-filed under `system`.
+    const rawAccountId = form.accountId ?? ''
+    if (rawAccountId !== '' && !isSafeAccountId(rawAccountId)) {
+      res.writeHead(400)
+      res.end()
+      return
+    }
+    const accountId = rawAccountId || undefined
     if (verb === 'start') {
       const cwd = form.cwd ?? ''
       if (!path.isAbsolute(cwd)) {
@@ -830,7 +880,8 @@ class HookServer {
         const threadId = await this.codexThreadStartHandler({
           nodeId,
           cwd,
-          hookEndpoint: this.endpointFilePath()
+          hookEndpoint: this.endpointFilePath(),
+          accountId
         })
         // Same predicate the record store gates on, so a thread id the store would refuse can
         // never be handed back to a launcher that will then `resume` it.
@@ -858,7 +909,8 @@ class HookServer {
       await this.codexThreadBindHandler({
         nodeId,
         threadId,
-        hookEndpoint: this.endpointFilePath()
+        hookEndpoint: this.endpointFilePath(),
+        accountId
       })
       this.codexIdentityListener?.({ nodeId, mode: 'shared' })
       res.writeHead(204)
@@ -877,14 +929,19 @@ class HookServer {
       mkdirSync(path.dirname(p), { recursive: true })
       writeFileSync(
         p,
-        `NODETERM_HOOK_PORT=${this.port}\n` +
-          `NODETERM_HOOK_TOKEN=${this.token}\n` +
-          `NODETERM_HOOK_VERSION=${NODETERM_HOOK_PROTOCOL_VERSION}\n` +
+        // Every value is `posixQuote`d: the managed script SOURCES this file (`. "$file"`) under
+        // /bin/sh, so an unquoted space or shell metachar in a path or token would break the source
+        // (issue #351: macOS userDataDir lives under "Application Support" — the space made sh try
+        // to run the tail of the path, exit 127, and the hook fell back to plain mode for EVERY
+        // macOS user). Quoting all four keeps the file a valid POSIX assignment list regardless.
+        `NODETERM_HOOK_PORT=${posixQuote(String(this.port))}\n` +
+          `NODETERM_HOOK_TOKEN=${posixQuote(this.token)}\n` +
+          `NODETERM_HOOK_VERSION=${posixQuote(NODETERM_HOOK_PROTOCOL_VERSION)}\n` +
           // Where clients read their PER-NODE capability from, keyed by $NODETERM_NODE_ID.
           // Advertised (not compiled in) so a failover that sources ANOTHER instance's endpoint
           // file also picks up THAT instance's token dir: it then finds a token that instance can
           // verify, or none — never a mismatched one.
-          `NODETERM_NODE_TOKEN_DIR=${nodeTokenDir()}\n`,
+          `NODETERM_NODE_TOKEN_DIR=${posixQuote(nodeTokenDir())}\n`,
         // 0o600: this file holds the bearer token — owner read/write only so another local user
         // can't read it and forge hook events.
         { encoding: 'utf8', mode: 0o600 }

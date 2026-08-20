@@ -33,21 +33,43 @@ function caseBody(verb: string): string {
   return end === -1 ? rest : rest.slice(0, end)
 }
 
+/**
+ * The body of an EARLY-HANDLED verb's block — `open-project` is dispatched before the
+ * source-routing machinery (a STORE_ANSWERED_VERBS member, spec §2.3), so it has no `case` label.
+ * Delimited by its `if (verb === '<verb>')` guard and the next section-comment rule (`// ──`),
+ * the same way the switch slice above is delimited by the next case label.
+ */
+function earlyBody(verb: string): string {
+  const start = src.indexOf(`if (verb === '${verb}')`)
+  if (start === -1) return ''
+  const rest = src.slice(start)
+  const end = rest.indexOf('// ──', 10)
+  return end === -1 ? rest : rest.slice(0, end)
+}
+
+/** A verb's dispatch body wherever it lives: its switch case, or its early-handled block. */
+function dispatchBody(verb: string): string {
+  return caseBody(verb) || earlyBody(verb)
+}
+
 describe('the confirm-gated set and the dispatch that reads it stay in agreement', () => {
   it('the dispatch imports the set rather than restating it', () => {
     expect(src).toMatch(/import \{[^}]*isDestructiveVerb[^}]*\} from '@shared\/control-verbs'/)
   })
 
-  for (const verb of ['write', 'close'] as const) {
+  for (const verb of ['write', 'close', 'open-project'] as const) {
     it(`${verb} reaches its confirm through isDestructiveVerb`, () => {
       expect(isDestructiveVerb(verb)).toBe(true)
-      const body = caseBody(verb)
+      const body = dispatchBody(verb)
       expect(body).not.toBe('')
       // The guard CALL, not a hardcoded truth: adding a verb to the set must change behaviour.
       expect(body).toMatch(/isDestructiveVerb\(verb\) && confirmBusy\(\)/)
       // …and no leftover bare gate beside it, which would make the set decorative again.
       expect(body).not.toMatch(/\bif \(confirmBusy\(\)\)/)
       expect(body).toContain('setConfirm({')
+      // Denial is honored on every confirm this set gates (spec P4): the cancel leg replies the
+      // shared refusal instead of hanging the CLI to its 120s timeout.
+      expect(body).toContain("'denied by user'")
     })
   }
 
@@ -61,6 +83,10 @@ describe('the confirm-gated set and the dispatch that reads it stay in agreement
     // is confirm-gated"; it is "no other case claims to be gated by this set".
     const labels = [...src.matchAll(/\n {10}case '([a-z-]+)': \{/g)].map((m) => m[1])
     const gated = labels.filter((v) => /isDestructiveVerb\(verb\)/.test(caseBody(v)))
+    // The early-handled block (`open-project`) is counted the same way, off its own slice.
+    for (const early of ['open-project']) {
+      if (/isDestructiveVerb\(verb\)/.test(earlyBody(early))) gated.push(early)
+    }
     expect(new Set(gated)).toEqual(new Set(DESTRUCTIVE_VERBS))
   })
 })

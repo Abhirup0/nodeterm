@@ -40,7 +40,7 @@ export interface HudPush {
   /** Expand the panel on hover (settings.notchHoverExpand); false = click-only. */
   hoverExpand: boolean
   /** settings.usagePercentMode — how a row's context percentage renders ("42% used" / "58% left"). */
-  percentMode: 'used' | 'remaining'
+  percentMode: 'used' | 'remaining' | 'tokens'
 }
 
 export interface HudApi {

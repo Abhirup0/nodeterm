@@ -106,8 +106,13 @@ export function mapCodexLimits(rateLimit: unknown): UsageLimit[] {
   ].filter((l): l is UsageLimit => l !== null)
 }
 
-function snapshot(limits: UsageLimit[], status: ProviderUsage['status']): ProviderUsage {
-  return { provider: 'codex', limits, account: null, updatedAt: Date.now(), status }
+function snapshot(
+  limits: UsageLimit[],
+  status: ProviderUsage['status'],
+  account: string | null = null,
+  accountId?: string
+): ProviderUsage {
+  return { provider: 'codex', limits, account, accountId, updatedAt: Date.now(), status }
 }
 
 /** Tier 1: the endpoint the Codex CLI itself reads. */
@@ -225,21 +230,35 @@ async function fetchViaAppServer(home: string): Promise<ProviderUsage | null> {
  *
  * Never rejects: an unreachable backend and a missing CLI are both "we don't know", and the
  * caller renders that as no data rather than an error the user can't act on.
+ *
+ * `identity` scopes the row to one managed account (S6 §4.3): its `id` is stamped as `accountId`
+ * on EVERY return path — including `unavailable` — so a row read from account A's home is always
+ * attributed to A and can never be mixed with, or mistaken for, another account or the un-owned
+ * system row. Absent ⇒ the system account: `account: null`, `accountId: undefined` (un-owned stays
+ * explicitly un-owned). The id is never used to build a path here — the caller already resolved
+ * `home` from it through the validated account-home builders — so no id validation is duplicated.
  */
-export async function fetchCodexUsage(home = codexHome()): Promise<ProviderUsage> {
+export async function fetchCodexUsage(
+  home = codexHome(),
+  identity?: { id?: string; label?: string | null; email?: string | null }
+): Promise<ProviderUsage> {
+  const account = identity?.email || identity?.label || null
+  const accountId = identity?.id
   try {
     const viaBackend = await fetchViaBackend(home)
-    if (viaBackend) return viaBackend
+    if (viaBackend) return { ...viaBackend, account, accountId }
   } catch {
     // fall through to the app-server tier
   }
   try {
     const viaAppServer = await fetchViaAppServer(home)
-    if (viaAppServer) return viaAppServer
+    if (viaAppServer) return { ...viaAppServer, account, accountId }
   } catch {
     // fall through to 'unavailable'
   }
   // Not signed in, no CLI, or both transports declined — nothing to show, same as Claude on
-  // API-key billing. 'unavailable' hides the provider rather than showing a broken row.
-  return snapshot([], 'unavailable')
+  // API-key billing. 'unavailable' hides the provider rather than showing a broken row. Still
+  // stamped with this account's identity so an empty read fails closed to THIS account, never to
+  // a fabricated one or another account's numbers.
+  return snapshot([], 'unavailable', account, accountId)
 }

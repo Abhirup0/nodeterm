@@ -169,13 +169,14 @@ export function UsageSection({ isActive }: { isActive: boolean }): React.JSX.Ele
       <SearchableRow {...ROWS.percentMode}>
         <FieldRow
           label="Usage percentages"
-          description="Whether provider limits show the percentage used or remaining."
+          description="Whether provider limits and context meters show percentage used, percentage remaining, or (context meters only) raw token counts. Provider limits have no token count and fall back to Used."
           control={
             <SegmentedPill
               value={settings.usagePercentMode}
               options={[
                 { value: 'used', label: 'Used' },
-                { value: 'remaining', label: 'Remaining' }
+                { value: 'remaining', label: 'Remaining' },
+                { value: 'tokens', label: 'Tokens' }
               ]}
               onChange={(v) => update({ usagePercentMode: v })}
               ariaLabel="Usage percentage display"

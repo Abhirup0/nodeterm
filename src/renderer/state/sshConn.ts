@@ -24,6 +24,16 @@ export interface SshConnInfo {
   /** The probed remote `claude --version` output (`null` = probe ran, claude not found). Feeds
    *  the tab menu's Auto hint; only present on a reused (already probed) connection. */
   remoteClaudeVersion?: string | null
+  /** Absolute remote path of the uploaded `nodeterm-codex` launcher (`chmod 700`). Present only
+   *  when `installRemoteCodexRuntime` found node+codex+curl and staged the runtime. Absent ⇒ this
+   *  host cannot host managed Codex accounts (the renderer keeps Codex nodes on the system login). */
+  codexLauncherPath?: string
+  /** Absolute remote path of the uploaded standalone relay bundle (`codex-relay.js`, `chmod 700`).
+   *  Only executable code is ever uploaded — never a credential (§2.1 / Property 1). */
+  codexRelayScriptPath?: string
+  /** Absolute remote path of the host's own Node (`readlink -f $(command -v node)`), the interpreter
+   *  the relay bundle and app-server run under. Absent ⇒ no managed Codex runtime on this host. */
+  codexRelayRuntimePath?: string
 }
 
 /**
@@ -85,6 +95,12 @@ interface SshConnState {
   getHookEndpointPath(projectId: string): string | undefined
   getTmuxConfPath(projectId: string): string | undefined
   getRemoteHome(projectId: string): string | undefined
+  /** The remote Codex runtime paths for a connection scope (launcher + relay bundle + node), or
+   *  all-undefined when the host has no managed Codex runtime (node/codex/curl missing, or the
+   *  scope isn't connected). Read where a Codex node's launch/import routes to the SSH host. */
+  getCodexRuntime(
+    projectId: string
+  ): Pick<SshConnInfo, 'codexLauncherPath' | 'codexRelayScriptPath' | 'codexRelayRuntimePath'>
   /**
    * Record how to reach an attachment scope. Call this BEFORE dialing, not after: a first connect
    * that FAILS is exactly the case the reconnect coordinator exists for, and it has nowhere else
@@ -159,6 +175,14 @@ export const useSshConn = create<SshConnState>((set, get) => ({
   },
   getRemoteHome(projectId) {
     return get().byProject[projectId]?.remoteHome
+  },
+  getCodexRuntime(projectId) {
+    const info = get().byProject[projectId]
+    return {
+      codexLauncherPath: info?.codexLauncherPath,
+      codexRelayScriptPath: info?.codexRelayScriptPath,
+      codexRelayRuntimePath: info?.codexRelayRuntimePath
+    }
   },
   registerAttachment(scopeId, attachment) {
     set((s) => ({ attachments: { ...s.attachments, [scopeId]: attachment } }))

@@ -5,6 +5,7 @@ import {
   arrangeNodes,
   commonParentId,
   createAccountLoginNode,
+  createCodexAccountLoginNode,
   createAgentNode,
   createDinoNode,
   fitGroupToChildren,
@@ -556,13 +557,39 @@ describe('accountId on Claude node factories', () => {
     const node = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, 'a1')
     expect(node.data.accountId).toBe('a1')
   })
-  it('does not stamp accountId onto a non-Claude agent node', () => {
+  it('stamps accountId onto a Codex agent node (S6 per-node account picker)', () => {
     const node = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'a1')
+    expect(node.data.accountId).toBe('a1')
+  })
+  it('does not stamp accountId onto a non-account agent node', () => {
+    // Accounts bind to the Claude/Codex builtins only — another agent never carries one.
+    const node = createAgentNode('gemini', 0, undefined, undefined, undefined, undefined, 'a1')
     expect(node.data.accountId).toBeUndefined()
   })
   it('omits accountId when none is given', () => {
     const node = createAgentNode('claude', 0)
     expect(node.data.accountId).toBeUndefined()
+  })
+})
+
+describe('model on agent node factory', () => {
+  it('stamps agentModel and threads --model into the launch command for a switch-capable agent', () => {
+    const node = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'claude-sonnet-5')
+    expect(node.data.agentModel).toBe('claude-sonnet-5')
+    expect(node.data.initialCommand).toContain('--model')
+    expect(node.data.initialCommand).toContain('claude-sonnet-5')
+  })
+  it('omits agentModel and the --model flag when no model is given', () => {
+    const node = createAgentNode('claude', 0)
+    expect(node.data.agentModel).toBeUndefined()
+    expect(node.data.initialCommand).not.toContain('--model')
+  })
+  it('drops the model (no --model) for a non-switch-capable agent', () => {
+    // gemini is not in MODEL_SWITCH_CAPABLE — withAgentModel no-ops, and agentModel is still stamped
+    // (it is harmless to persist; the point is the launch line carries no --model).
+    const node = createAgentNode('gemini', 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'gemini-2.5')
+    expect(node.data.agentModel).toBe('gemini-2.5')
+    expect(node.data.initialCommand).not.toContain('--model')
   })
 })
 
@@ -678,6 +705,22 @@ describe('createAccountLoginNode', () => {
     expect(node.data.title).toBe('Claude login')
     expect(node.data.accountId).toBe('acct-1')
     expect(node.data.initialCommand).toBe('claude /login')
+  })
+})
+
+describe('createCodexAccountLoginNode', () => {
+  it('produces a terminal node that logs the given Codex account in', () => {
+    const node = createCodexAccountLoginNode('acct-2', 0)
+    expect(node.type).toBe('terminal')
+    expect(node.data.title).toBe('Codex login')
+    expect(node.data.accountId).toBe('acct-2')
+    expect(node.data.initialCommand).toBe('codex login')
+  })
+
+  it('carries NO agentId — the agent-less shape is what the Codex scope gate keys on', () => {
+    // With an agentId of 'codex' this would be an agent node and take the agent paths; the login
+    // terminal is scoped purely because its account id is a managed CODEX one (see #345/#346).
+    expect(createCodexAccountLoginNode('acct-2', 0).data.agentId).toBeUndefined()
   })
 })
 

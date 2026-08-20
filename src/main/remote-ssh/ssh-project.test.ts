@@ -2604,3 +2604,230 @@ describe('SshProjectManager — per-node tokens on the host', () => {
     expect(run.mock.calls).toHaveLength(0)
   })
 })
+
+// ── Managed remote Codex accounts (S6 PR 6) ──────────────────────────────────────────────────
+// Every remote Codex op runs over the project's live ControlMaster with only executable code ever
+// uploaded (Property 1), fails closed when the account/connection cannot be proven (Property 4),
+// and lands a cross-machine import atomically without ever overwriting (Property 2 + 11). The fake
+// `run` records every command string so these can argv-spy the exact shell issued.
+const RELAY_BYTES = 'RELAY_BUNDLE_BYTES'
+const NODE = '/usr/bin/node'
+const CODEX = '/usr/bin/codex'
+
+/** A connected manager whose conn has a resolved remoteHome + installed Codex runtime paths, plus a
+ *  recorder of every `run`/`runScp` command. `handler` overrides specific commands per test. */
+async function makeCodexMgr(opts?: {
+  home?: string
+  handler?: (cmd: string, stdin?: string) => { code: number; stdout?: string } | undefined
+}) {
+  const home = opts?.home ?? '/home/u'
+  const runCalls: { cmd: string; stdin?: string }[] = []
+  const scpCalls: string[][] = []
+  const run = vi.fn(async (args: string[], stdin?: string) => {
+    const cmd = args.join(' ')
+    runCalls.push({ cmd, stdin })
+    if (cmd.includes('printf %s')) return { code: 0, stdout: home }
+    if (cmd.includes('readlink -f')) return { code: 0, stdout: `${NODE}\n${CODEX}\n/usr/bin/curl` }
+    const over = opts?.handler?.(cmd, stdin)
+    if (over) return { code: over.code, stdout: over.stdout ?? '' }
+    return { code: 0, stdout: '' }
+  })
+  const runScp = vi.fn(async (args: string[]) => {
+    scpCalls.push(args)
+    return { code: 0 }
+  })
+  const mgr = new SshProjectManager({
+    userDataDir: '/ud',
+    spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+    run,
+    runScp,
+    getHook: () => ({ port: 1, token: 't', version: '1' }),
+    codexRelaySource: async () => RELAY_BYTES,
+    onStatus: vi.fn()
+  })
+  const res = await mgr.connect('p1', conn, '/srv/repo')
+  return { mgr, run, runScp, runCalls, scpCalls, res, home }
+}
+
+describe('SshProjectManager — managed remote Codex runtime install (Task 6.1, Property 1)', () => {
+  it('uploads ONLY executable code — the relay bundle body + the launcher script — never a credential', async () => {
+    const { res, runCalls } = await makeCodexMgr()
+    // connect surfaced the runtime paths (node/codex/curl resolved, bundle uploaded).
+    expect(res.codexRelayRuntimePath).toBe(NODE)
+    expect(res.codexCliPath).toBe(CODEX)
+    expect(res.codexRelayScriptPath).toBe('/home/u/.nodeterm/bin/codex-relay.js')
+    expect(res.codexLauncherPath).toBe('/home/u/.nodeterm/bin/nodeterm-codex')
+    // The relay file is written with the injected bundle bytes on stdin, chmod 700, under bin/.
+    const relayWrite = runCalls.find((c) => c.cmd.includes('codex-relay.js') && c.cmd.includes('cat >'))
+    expect(relayWrite?.stdin).toBe(RELAY_BYTES)
+    expect(relayWrite?.cmd).toContain('chmod 700')
+    // The launcher body is the generated sh script (starts with a shebang), never a credential.
+    const launcherWrite = runCalls.find((c) => c.cmd.includes('nodeterm-codex') && c.cmd.includes('cat >'))
+    expect(launcherWrite?.stdin?.startsWith('#!')).toBe(true)
+    expect(launcherWrite?.cmd).toContain('chmod 700')
+    // No command line or stdin body carries a bearer/authorization secret (GC 6 — tokens go via the
+    // relay's env/header, never argv). auth.json is never uploaded.
+    for (const { cmd, stdin } of runCalls) {
+      expect(cmd).not.toMatch(/Authorization|Bearer|auth\.json.*cat|-H /)
+      if (stdin && stdin !== RELAY_BYTES && !stdin.startsWith('#!')) {
+        expect(stdin).not.toContain('auth.json')
+      }
+    }
+  })
+
+  it('installs no runtime (all paths undefined) when node/codex/curl do not all resolve', async () => {
+    // curl missing → probe returns 2 lines → runtime declines, but the connect still succeeds.
+    const run = vi.fn(async (args: string[]) => {
+      const cmd = args.join(' ')
+      if (cmd.includes('printf %s')) return { code: 0, stdout: '/home/u' }
+      if (cmd.includes('readlink -f')) return { code: 0, stdout: `${NODE}\n${CODEX}` } // no curl
+      return { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      codexRelaySource: async () => RELAY_BYTES,
+      onStatus: vi.fn()
+    })
+    const res = await mgr.connect('p1', conn, '/srv/repo')
+    expect(res.controlPath).toBeTruthy() // connect still succeeded
+    expect(res.codexRelayScriptPath).toBeUndefined()
+    expect(res.codexLauncherPath).toBeUndefined()
+  })
+
+  it('refuses to build any remote path from an UNSAFE remote home (newline injection — GC 7)', async () => {
+    // A $HOME carrying a newline would append a command; isSafeRemoteHome rejects it, so the runtime
+    // never installs and every account op refuses rather than run against a poisoned path.
+    const { mgr, res } = await makeCodexMgr({ home: '/home/u\nrm -rf /' })
+    expect(res.codexRelayScriptPath).toBeUndefined()
+    await expect(mgr.remoteCodexAccountAdd('p1', 'acc1')).rejects.toThrow(/safe SSH host home/)
+  })
+})
+
+describe('SshProjectManager — remote Codex account lifecycle (Task 6.1, Property 4)', () => {
+  it('a remote op on a DISCONNECTED project refuses and never runs against the local system account', async () => {
+    const { mgr, run } = await makeCodexMgr()
+    const before = run.mock.calls.length
+    await expect(mgr.remoteCodexAccountAdd('nope', 'acc1')).rejects.toThrow(/not connected/)
+    await expect(
+      mgr.remoteCodexImportThread('nope', 'acc1', 'threadid', 'sessions/a/b.jsonl', '/l/r.jsonl')
+    ).rejects.toThrow(/not connected/)
+    expect(run.mock.calls.length).toBe(before) // neither refusal issued any ssh
+  })
+
+  it('remoteCodexAccountIdentity returns null unless a specific account has a REAL non-symlink auth.json', async () => {
+    // auth gate FAILS (no real login) even though account-read WOULD return an email → still null.
+    const authFail = await makeCodexMgr({
+      handler: (cmd) => {
+        if (cmd.includes('test ! -L')) return { code: 1 } // auth.json missing or a symlink
+        if (cmd.includes('account-read')) return { code: 0, stdout: '{"email":"leak@example.com"}' }
+        return undefined
+      }
+    })
+    expect(await authFail.mgr.remoteCodexAccountIdentity('p1', 'acc1')).toBeNull()
+    // auth gate PASSES → the real email is read back.
+    const authOk = await makeCodexMgr({
+      handler: (cmd) => {
+        if (cmd.includes('test ! -L')) return { code: 0 }
+        if (cmd.includes('account-read')) return { code: 0, stdout: '{"email":"real@example.com"}' }
+        return undefined
+      }
+    })
+    expect(await authOk.mgr.remoteCodexAccountIdentity('p1', 'acc1')).toEqual({
+      email: 'real@example.com'
+    })
+  })
+
+  it('remoteCodexExposeThread surfaces the relay refusal for an ambiguous thread (Property 3)', async () => {
+    const cm = await makeCodexMgr({
+      handler: (cmd) => (cmd.includes('expose-thread') ? { code: 69 } : undefined)
+    })
+    const controlPath = cm.res.controlPath
+    await expect(
+      cm.mgr.remoteCodexExposeThread(controlPath, undefined, 'thread1', ['acc1'])
+    ).rejects.toThrow(/unavailable or ambiguous/)
+  })
+})
+
+describe('SshProjectManager — atomic remote import (Task 6.2, Property 2 + 11)', () => {
+  const REL = 'sessions/2026/08/19/rollout-x.jsonl'
+
+  it('validates the thread id and confines the rollout path to sessions/… (no traversal), no ssh on refusal', async () => {
+    const { mgr, run, runScp } = await makeCodexMgr()
+    const before = run.mock.calls.length
+    await expect(
+      mgr.remoteCodexImportThread('p1', undefined, 'bad id!', REL, '/l/r.jsonl')
+    ).rejects.toThrow(/Invalid Codex thread id/)
+    for (const bad of ['etc/passwd', 'sessions/../etc/x', 'sessions//x', '/abs/sessions/x']) {
+      await expect(
+        mgr.remoteCodexImportThread('p1', undefined, 'thread1', bad, '/l/r.jsonl')
+      ).rejects.toThrow(/Invalid Codex rollout path/)
+    }
+    expect(run.mock.calls.length).toBe(before)
+    expect(runScp.mock.calls.length).toBe(0)
+  })
+
+  it('no-ops (imported:false) and uploads NOTHING when the thread already exists on the target', async () => {
+    const { mgr, runScp } = await makeCodexMgr({
+      handler: (cmd) => (cmd.includes('thread-check') ? { code: 0 } : undefined) // already present
+    })
+    expect(await mgr.remoteCodexImportThread('p1', undefined, 'thread1', REL, '/l/r.jsonl')).toEqual({
+      imported: false
+    })
+    expect(runScp.mock.calls.length).toBe(0)
+  })
+
+  it('installs with an ATOMIC hardlink that never overwrites (ln, not mv) — fails closed on EEXIST', async () => {
+    let phase = 0
+    const cm = await makeCodexMgr({
+      handler: (cmd) => {
+        if (cmd.includes('thread-check')) return { code: phase++ === 0 ? 69 : 0 } // absent, then found
+        return undefined
+      }
+    })
+    const out = await cm.mgr.remoteCodexImportThread('p1', 'acc1', 'thread1', REL, '/l/r.jsonl')
+    expect(out).toEqual({ imported: true })
+    const install = cm.runCalls.find((c) => c.cmd.includes(' ln '))
+    expect(install).toBeTruthy()
+    // The land is an atomic hardlink of the staged .part onto the target — link(2) fails with
+    // EEXIST if the target already exists, so there is no check-then-act window (PR 3 discipline).
+    expect(install!.cmd).toMatch(/ln '[^']*\.part' '[^']*rollout-x\.jsonl'/)
+    // `mv` is NEVER used: POSIX `mv` silently overwrites, which is exactly the racy primitive this
+    // avoids. On the ln-failure branch it drops the staged file and exits non-zero (17).
+    expect(install!.cmd).not.toMatch(/\bmv\b/)
+    expect(install!.cmd).toMatch(/else rm -f '[^']*\.part'; exit 17; fi/)
+  })
+
+  it('refuses when the install hits an existing target (exit 17 surfaces as a refusal)', async () => {
+    const { mgr } = await makeCodexMgr({
+      handler: (cmd) => {
+        if (cmd.includes('thread-check')) return { code: 69 } // absent everywhere
+        if (cmd.includes('exit 17')) return { code: 17 } // target already exists on the host
+        return undefined
+      }
+    })
+    await expect(
+      mgr.remoteCodexImportThread('p1', 'acc1', 'thread1', REL, '/l/r.jsonl')
+    ).rejects.toThrow(/already exists or could not be installed/)
+  })
+
+  it('verify-before-recycle: rolls the staged file back and refuses when the far side cannot discover it', async () => {
+    const seen: string[] = []
+    const { mgr } = await makeCodexMgr({
+      handler: (cmd) => {
+        seen.push(cmd)
+        if (cmd.includes('thread-check')) return { code: 69 } // never discovered — before OR after install
+        if (cmd.includes('exit 17')) return { code: 0 } // install succeeds
+        return undefined
+      }
+    })
+    await expect(
+      mgr.remoteCodexImportThread('p1', 'acc1', 'thread1', REL, '/l/r.jsonl')
+    ).rejects.toThrow(/did not discover the imported conversation/)
+    // The rollback removed the freshly installed target — no half-landed state.
+    expect(seen.some((c) => /rm -f '[^']*rollout-x\.jsonl'/.test(c))).toBe(true)
+  })
+})

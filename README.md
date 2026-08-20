@@ -110,7 +110,7 @@ LAN**. The same canvas also runs self-hosted in any browser (Server Edition).
 
 ### Talk to your terminal
 
-Hold `⌘⇧D` and say it. On-device **Whisper** transcribes locally — review the text,
+Hold `⌘⌥` and say it. On-device **Whisper** transcribes locally — review the text,
 then **Send** (nothing auto-submits). Your voice never leaves the machine.
 
 </td>
@@ -132,7 +132,7 @@ GitHub Copilot / opencode / Grok / custom) · 📝 **Sticky note** (link to an a
   agent sessions (`claude --resume`). The macOS app **ships its own tmux**, so this works
   with nothing installed; a tmux already on your system is always used in preference to it,
   and terminals opened before an upgrade stay as they were until you refresh the node.
-- **Talk to your terminal** — on-device Whisper dictation (⌘⇧D): speak, review, send.
+- **Talk to your terminal** — on-device Whisper dictation (hold ⌘⌥): speak, review, send.
 - **Agent superpowers** — **context links** so agent nodes read each other's transcripts
   on demand; Claude-only **branch a conversation** and **managed accounts** for several
   logged-in Claude identities side by side; agents can drive the canvas (open nodes,
@@ -233,6 +233,8 @@ npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmu
 
 ## ⌨️ Keyboard shortcuts
 
+These are the defaults — every one of them is remappable in **Settings → Keyboard Shortcuts**.
+
 | Shortcut | Action |
 | --- | --- |
 | `⌘K` | Command palette |
@@ -241,7 +243,7 @@ npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmu
 | `⌘W` | Close the selected node |
 | `⌘Z` / `⌘⇧Z` | Undo / Redo |
 | `⌘M` | Toggle markdown view (terminal / editor) |
-| `⌘⇧D` | Dictate into the focused terminal |
+| Hold `⌘⌥` (`Ctrl+Alt`) | Dictate into the focused terminal |
 | `⌘⇧E` | File explorer |
 | `⌘,` | Settings · `⌘/` Shortcuts |
 | `Right-click` | Actions menu (empty space or node) |
