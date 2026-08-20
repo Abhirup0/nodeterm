@@ -26,6 +26,25 @@ describe('parseControlRequest', () => {
     expect(parseControlRequest('nuke', {})).toEqual({ error: 'Unknown verb: nuke' })
   })
 
+  it('open-project requires --cwd (issue #338, PR 1)', () => {
+    expect(parseControlRequest('open-project', {})).toEqual({
+      error: 'open-project requires --cwd <abs-path>'
+    })
+    expect(parseControlRequest('open-project', { cwd: '/tmp/repo' })).toEqual({
+      verb: 'open-project',
+      args: { cwd: '/tmp/repo' }
+    })
+  })
+
+  it('open-project is NOT in DESTRUCTIVE_VERBS yet — that membership lands with PR 2', () => {
+    // Deliberate PR slicing, not an oversight: `control-destructive.test.ts` structurally
+    // requires every member's `Canvas.tsx` case to read `isDestructiveVerb(verb)`, and the
+    // dispatch case for open-project only exists in PR 2 (Task 2.2). Adding the verb to the set
+    // now would trip the set↔dispatch drift alarm with no dispatch to agree with. This test goes
+    // red the moment PR 2 adds the membership, which is the reminder to delete it.
+    expect(isDestructiveVerb('open-project')).toBe(false)
+  })
+
   it('requires a target for write/close', () => {
     expect(parseControlRequest('close', {})).toEqual({ error: 'close requires --node <id>' })
     expect(parseControlRequest('write', { node: 'n1' })).toEqual({ error: 'write requires --text' })
