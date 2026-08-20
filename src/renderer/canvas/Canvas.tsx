@@ -212,7 +212,8 @@ import {
   recordAttachConsent,
   openProjectReply,
   findProjectByCwd,
-  nextFreePosition
+  nextFreePosition,
+  armForColdOpen
 } from '../lib/projectOpen'
 import {
   FIT_NODE_OPTIONS,
@@ -346,7 +347,7 @@ import { pushSessionRename } from '../lib/sessionRename'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
-import { activePermissionMode } from '../state/permissionMode'
+import { activePermissionMode, projectPermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
@@ -7248,6 +7249,155 @@ export function Canvas() {
           onCancel: () => reply({ ok: false, error: 'denied by user' })
         })
         return
+      }
+
+      // ── `--project` targeted opens (issue #338 Task 2.3) — the three open verbs, early ──────
+      // Main's gateProjectTarget already enforced own-or-granted BEFORE forwarding (spec §3):
+      // the renderer never sees an unauthorized target — the checks below are belt, not the
+      // boundary. This block routes an AUTHORIZED target to the right DATA OWNER without
+      // travelling (B4): the live canvas owns the ACTIVE project (a store write there would be
+      // clobbered by the next commitCanvas), the projects store owns every other. A target equal
+      // to the caller's OWN project falls through to the legacy path unchanged — exactly as if
+      // the flag were omitted (B3a), travel included.
+      if (
+        (verb === 'open-terminal' || verb === 'open-claude' || verb === 'open-agent') &&
+        args.project !== undefined
+      ) {
+        const targetId = args.project
+        // v1 excludes the flags that name ids inside another project (spec §2.2): validating a
+        // group frame or a dependency station across a project boundary is exactly the surface
+        // v1 leaves out. Uniformly refused — own-project callers just omit --project.
+        if (args.group || args.after) {
+          reply({
+            ok: false,
+            error:
+              'project-target-flag-unsupported: --group/--after cannot be combined with --project'
+          })
+          return
+        }
+        const tgStore = useProjects.getState()
+        const tgLiveSrc = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const tgStoredSrc = tgStore.projects
+          .flatMap((p) => p.nodes.map((n) => ({ node: n, projectId: p.id })))
+          .find((x) => x.node.id === sourceNodeId)
+        const callerProjectId = tgLiveSrc ? tgStore.activeProjectId : tgStoredSrc?.projectId
+        if (targetId !== callerProjectId) {
+          if (!tgLiveSrc && !tgStoredSrc) {
+            reply({ ok: false, error: 'source node is not in any open project' })
+            return
+          }
+          if (!sourceIsControlCapable(tgLiveSrc?.data.agentId ?? tgStoredSrc?.node.agentId)) {
+            reply({ ok: false, error: 'source node is not a control-capable agent' })
+            return
+          }
+          // Belt only — main already refused every stranger id with one byte-identical sentence
+          // (no existence oracle). This fires for a target main authorized that this renderer's
+          // store cannot see yet (mid-hydration), so it is worded transient.
+          const target = tgStore.getProject(targetId)
+          if (!target) {
+            reply({
+              ok: false,
+              error: 'project-target-refused: the target project is not available here — try again'
+            })
+            return
+          }
+          // Belt for the SSH invariant: a granted SSH id cannot exist (grants are minted only by
+          // local open-project) and main refuses ungranted ones — but if that ever breaks, the
+          // target is refused, not opened. A relay tab is another machine's project entirely.
+          if (target.ssh || target.remote) {
+            reply({
+              ok: false,
+              error:
+                'project-target-ssh-unsupported: opening sessions into an SSH project is not supported — do not retry'
+            })
+            return
+          }
+          const tgAgentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
+          const tgIsTerminal = verb === 'open-terminal'
+          const tgCount = Math.max(
+            1,
+            Math.min(tgIsTerminal ? 8 : 5, parseInt(args.count || '1', 10) || 1)
+          )
+          // Defaults come from the TARGET, never the caller (spec §2.2): cwd falls back to the
+          // target project's root; the account funnel runs with the TARGET project (an account
+          // must not silently cross a project boundary, so the source node's account is NOT
+          // consulted); permission mode and launch-command overrides are the target's too.
+          const tgCwd = args.cwd || target.cwd
+          const tgAccount = tgIsTerminal
+            ? undefined
+            : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
+          const tgMode = tgIsTerminal ? undefined : projectPermissionMode(target, tgAgentId)
+          const tgActive = target.id === tgStore.activeProjectId
+          // Placement: below the lowest existing node in the TARGET (placeBelow(src) is
+          // meaningless in a project that does not contain the source). The live canvas is the
+          // truthful node set for the active project, the serialized store for any other.
+          const tgPlacedNodes = tgActive ? nodesRef.current : target.nodes
+          const tgMade: CanvasNode[] = []
+          let tgBase = { x: 0, y: 0 }
+          const tgIndexBase = tgActive ? nodesRef.current.length : target.nodes.length
+          for (let i = 0; i < tgCount; i++) {
+            const node = tgIsTerminal
+              ? createTerminalNode(tgIndexBase + i, tgCwd, { x: 0, y: 0 }, args.cmd)
+              : createAgentNode(
+                  tgAgentId,
+                  tgIndexBase + i,
+                  tgCwd,
+                  { x: 0, y: 0 },
+                  args.prompt,
+                  undefined,
+                  tgAccount,
+                  tgMode,
+                  // The TARGET project: its `.nodeterm/settings.json` launch override applies to
+                  // what runs in it, not the caller's.
+                  target.id
+                )
+            const w = (node.width as number) ?? 640
+            const h = (node.height as number) ?? 440
+            if (i === 0) tgBase = nextFreePosition(tgPlacedNodes, { width: w, height: h })
+            node.position = { x: tgBase.x + i * (w + 60) - w / 2, y: tgBase.y - h / 2 }
+            tgMade.push(node)
+          }
+          const tgIds = tgMade.map((n) => n.id)
+          const tgWhat = tgIsTerminal ? 'terminal' : tgAgentId
+          // No ropes and no context-links in either branch: both are per-project arrays, and an
+          // edge to a node in another project has no representation (v1 — #284's linking half).
+          // The skill text names the workaround (open a reader agent inside the target project).
+          if (tgActive) {
+            // The human is looking at the target (the caller is a background orchestrator):
+            // live-canvas insertion, normal initialCommand — the session starts immediately.
+            setNodes((ns) => [...ns, ...tgMade])
+            markDirty()
+            reply({
+              ok: true,
+              message: `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')})`,
+              result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+            })
+            return
+          }
+          // The normal orchestration case: the target is NOT active, so its serialized store is
+          // the source of truth. The launch command MOVES into pendingLaunch (armForColdOpen —
+          // initialCommand is deliberately never serialized) and the node is upserted through
+          // the same store path sticky uses, then persisted. Cold-open contract: the session
+          // starts when that project's canvas is next shown (mount spawns the PTY, the
+          // armed-launch effect delivers with its retry loop — Task 2.0's measured round-trip).
+          for (const node of tgMade) {
+            tgStore.applyNodeMutation(target.id, {
+              op: 'upsert',
+              node: flowToNodeStates([armForColdOpen(node)])[0]
+            })
+          }
+          void writeDisk()
+          reply({
+            ok: true,
+            message:
+              `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')}) — ` +
+              'starts when that project is next viewed',
+            result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+          })
+          return
+        }
+        // targetId === the caller's own project: fall through to the legacy path unchanged
+        // (B3a — behaves exactly as if --project were omitted).
       }
       // ── end of the early-handled (store-answered) verbs ─────────────────────────────────────
 

@@ -141,6 +141,26 @@ export function openProjectReply(
   }
 }
 
+/**
+ * Re-arm a freshly-built node for a COLD open (spec §2.2): its composed launch command is MOVED —
+ * never copied — from `initialCommand` into `pendingLaunch: { after: [], command }`.
+ * `initialCommand` is deliberately never serialized (workspace.ts), while `pendingLaunch` is: a
+ * command left in `initialCommand` on the store path would be silently dropped by serialization
+ * and the node would never start; a copy left behind would double-deliver if that ever changed.
+ * An empty `after` is vacuously ready (`launchesToFire`), so the armed-launch effect fires it on
+ * the target project's first view — the cold-open contract.
+ */
+export function armForColdOpen<
+  T extends { data: { initialCommand?: string; pendingLaunch?: unknown } }
+>(node: T): T {
+  const command = node.data.initialCommand
+  if (!command) return node
+  return {
+    ...node,
+    data: { ...node.data, initialCommand: undefined, pendingLaunch: { after: [], command } }
+  }
+}
+
 /** A node as either the serialized store or the live canvas holds it — enough for placement. */
 export interface PlacedNode {
   id?: string

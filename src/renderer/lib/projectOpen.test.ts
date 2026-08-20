@@ -7,6 +7,7 @@ import {
   findProjectByCwd,
   openProjectReply,
   nextFreePosition,
+  armForColdOpen,
   type PlacedNode
 } from './projectOpen'
 
@@ -187,5 +188,29 @@ describe('nextFreePosition — placement into a project the caller is not on (sp
     const c = nextFreePosition([], { width: 640, height: 440 })
     expect(c.x).toBeGreaterThan(0)
     expect(c.y).toBeGreaterThan(0)
+  })
+})
+
+describe('armForColdOpen — the launch moves (never copies) into pendingLaunch (spec §2.2)', () => {
+  const like = (
+    initialCommand?: string
+  ): { id: string; data: { initialCommand?: string; pendingLaunch?: unknown; title: string } } => ({
+    id: 'term-x',
+    data: { initialCommand, title: 'T' }
+  })
+
+  it('moves initialCommand into pendingLaunch { after: [], command }', () => {
+    const armed = armForColdOpen(like('claude "go"'))
+    expect(armed.data.pendingLaunch).toEqual({ after: [], command: 'claude "go"' })
+    // MOVED, not copied: initialCommand is deliberately never serialized (workspace.ts), so a
+    // copy left behind is dead weight and a command left ONLY there is silently dropped — the
+    // node would never start. The serialization round-trip pin lives in
+    // workspace.cold-open.test.ts; this is the construction-site half.
+    expect(armed.data.initialCommand).toBeUndefined()
+  })
+
+  it('a node with no command is returned unchanged (a plain terminal just opens)', () => {
+    const node = like(undefined)
+    expect(armForColdOpen(node)).toBe(node)
   })
 })
