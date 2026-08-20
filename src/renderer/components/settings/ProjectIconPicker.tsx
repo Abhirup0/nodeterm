@@ -59,7 +59,14 @@ export function ProjectIconPicker({
   const [avatarAvailable, setAvatarAvailable] = useState(false)
   const [avatarError, setAvatarError] = useState<string | undefined>(undefined)
 
-  const commit = (raw: ProjectIcon): void => onIcon(sanitizeProjectIcon(raw))
+  // A choice is sanitized before it leaves — and if sanitize REJECTS it (undefined), we BAIL rather
+  // than emit undefined: an emit would clear+persist the icon, the opposite of a picker action.
+  // Reset stays the only explicit clear. (A sanitized picker value is always defined today, so this
+  // is a guard against a latent destructive edge, not a reachable path.)
+  const commit = (raw: ProjectIcon): void => {
+    const sanitized = sanitizeProjectIcon(raw)
+    if (sanitized) onIcon(sanitized)
+  }
 
   // Latest icon/onIcon read from the open-time probe without making them effect deps (which would
   // re-fire the probe on every icon edit).
@@ -93,7 +100,10 @@ export function ProjectIconPicker({
       setAvatarAvailable(true)
       const cur = iconRef.current
       if (cur?.type === 'image' && cur.source === 'github' && cur.src !== res.dataUrl) {
-        onIconRef.current(sanitizeProjectIcon({ type: 'image', src: res.dataUrl, source: 'github' }))
+        // Same no-op guard as `commit`: only re-commit if the fresh src survives sanitize; a reject
+        // must NOT blank the already-set github icon (that would be the opposite of anti-clobber).
+        const sanitized = sanitizeProjectIcon({ type: 'image', src: res.dataUrl, source: 'github' })
+        if (sanitized) onIconRef.current(sanitized)
       }
     })()
     return () => {

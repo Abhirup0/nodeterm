@@ -1,5 +1,4 @@
 import { promises as fsp } from 'node:fs'
-import sharp from 'sharp'
 import {
   dataUrlByteLength,
   PROJECT_ICON_MAX_BYTES,
@@ -18,6 +17,15 @@ import {
  * so main `require`s it from node_modules) and is listed in electron-builder `asarUnpack`, so its
  * platform binary sits unpacked beside the app. Both are required for this to work in a packaged
  * build — without them the require would fail and the upload would be dead.
+ *
+ * The import is LAZY (`await import('sharp')` inside the encode function, mirroring
+ * speech-service.ts's smart-whisper load) rather than a top-level `import sharp from 'sharp'`. A
+ * top-level import loads libvips at every boot — and this module is reached at main's module scope
+ * (index.ts imports `pickProjectIcon`), so a bad packaged `@img/*` layout / wrong-arch binary would
+ * throw during `require('sharp')` and kill the WHOLE main process at startup, not just this feature.
+ * Loading it inside the encode path — and mapping a load/encode failure to the existing `{ error }`
+ * result — degrades a broken sharp to "the upload button doesn't work" instead of "the app won't
+ * start".
  */
 
 /** The longest edge (px) a re-encoded icon is bounded to. Square box, `fit: 'inside'` preserves
@@ -36,6 +44,9 @@ export async function encodeProjectIconImage(
 ): Promise<{ dataUrl: string } | { error: string }> {
   let png: Buffer
   try {
+    // Lazy load: a missing/wrong-arch native binary throws HERE (caught below → { error }) rather
+    // than at main's boot, so a broken sharp layout degrades to a dead upload, not a dead app.
+    const sharp = (await import('sharp')).default
     png = await sharp(input)
       .resize(ICON_MAX_DIMENSION, ICON_MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
       .png()

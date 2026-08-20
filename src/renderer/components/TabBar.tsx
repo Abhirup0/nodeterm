@@ -307,7 +307,9 @@ export function TabBar({
                   color={active ? p.color : undefined}
                   name={p.name}
                   variant="dot"
-                  className="tab__dot"
+                  // With an icon set, the glyph needs a larger, tint-free box (--icon modifier);
+                  // without one it stays the plain 9px fallback dot, byte-identical to before.
+                  className={p.icon ? 'tab__dot tab__dot--icon' : 'tab__dot'}
                 />
                 {/* An SSH project looks identical to a local one once it is named, and the
                     difference matters: its terminals, git and file ops all run on another

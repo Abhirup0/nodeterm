@@ -10,15 +10,26 @@ import { ProjectIconPicker } from './ProjectIconPicker'
 // The heavy library is mocked with a factory that counts how many times it is EVALUATED. Because
 // EmojiPickerLazy imports it dynamically (React.lazy), the factory does not run until the Emoji tab
 // is actually rendered — which is exactly the laziness this pins.
-const H = vi.hoisted(() => ({ emojiLoads: 0 }))
+const H = vi.hoisted(() => ({ emojiLoads: 0, lastEmojiStyle: undefined as string | undefined }))
 vi.mock('emoji-picker-react', () => {
   H.emojiLoads++
   return {
-    default: ({ onEmojiClick }: { onEmojiClick?: (d: { emoji: string }) => void }) => (
-      <button data-testid="fake-emoji" onClick={() => onEmojiClick?.({ emoji: '🚀' })}>
-        pick
-      </button>
-    )
+    default: ({
+      onEmojiClick,
+      emojiStyle
+    }: {
+      onEmojiClick?: (d: { emoji: string }) => void
+      emojiStyle?: string
+    }) => {
+      // Record the style the wrapper passes: it MUST be 'native', or the picker renders emoji as
+      // <img src="https://cdn.jsdelivr.net/…"> which the renderer CSP blocks (broken grid).
+      H.lastEmojiStyle = emojiStyle
+      return (
+        <button data-testid="fake-emoji" onClick={() => onEmojiClick?.({ emoji: '🚀' })}>
+          pick
+        </button>
+      )
+    }
   }
 })
 
@@ -67,6 +78,7 @@ describe('ProjectIconPicker', () => {
 
   beforeEach(() => {
     H.emojiLoads = 0
+    H.lastEmojiStyle = undefined
     host = document.createElement('div')
     document.body.appendChild(host)
     onIcon = vi.fn()
@@ -102,6 +114,24 @@ describe('ProjectIconPicker', () => {
     expect(H.emojiLoads).toBe(1)
     await click(host.querySelector('[data-testid="fake-emoji"]'))
     expect(onIcon).toHaveBeenCalledWith({ type: 'emoji', emoji: '🚀' })
+  })
+
+  it('renders the emoji picker with the native style (CSP-safe, no CDN images)', async () => {
+    await mount()
+    await click(tab('Emoji'))
+    await flush()
+    expect(H.lastEmojiStyle).toBe('native')
+  })
+
+  it('does NOT clear the icon when a picked value fails sanitize (no-op, not a destructive emit)', async () => {
+    // An upload whose dataUrl is not a real data: URL sanitizes to undefined. The guard must BAIL
+    // (Reset is the only clear), not emit undefined — which would clear+persist the icon.
+    pickProjectIcon.mockResolvedValue({ dataUrl: 'not-a-data-url' })
+    await mount({ type: 'emoji', emoji: '🚀' })
+    await click(tab('Upload'))
+    await click([...host.querySelectorAll('button')].find((b) => b.textContent === 'Choose image…')!)
+    await flush()
+    expect(onIcon).not.toHaveBeenCalled()
   })
 
   it('re-encodes an uploaded image into an image icon via the main IPC', async () => {

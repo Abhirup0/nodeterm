@@ -312,6 +312,18 @@ body,
   background: rgba(var(--tint-rgb), 0.3);
 }
 
+/* When the project has a real icon (emoji / lucide / image) the glyph replaces the plain 9px
+   fallback dot: a larger box (an emoji is ~13px and would overflow 9px, and a lucide/image glyph
+   would be clipped) with NO baked-in tint background (that tint circle only belongs to the fallback
+   dot). Applied by TabBar only when `p.icon` is set; the plain `.tab__dot` fallback is untouched.
+   16px matches the other project-glyph surfaces; the exact px wants a live Mac look, so it's tunable. */
+.tab__dot--icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 0;
+  background: none;
+}
+
 /* Unread-completion count badge on a project tab. */
 .tab__badge {
   display: inline-flex;

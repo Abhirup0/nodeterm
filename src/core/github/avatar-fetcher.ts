@@ -46,7 +46,8 @@ export async function fetchAvatarDataUrl(
       parsed.username || parsed.password) return null
   let response: Response
   try {
-    response = await fetchImpl(parsed, { method: 'GET', redirect: 'manual' })
+    // 10s cap so a hung avatar host can't leave the fetch pending; abort → rejected fetch → null.
+    response = await fetchImpl(parsed, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(10_000) })
   } catch {
     return null
   }

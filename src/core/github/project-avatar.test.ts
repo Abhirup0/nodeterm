@@ -116,6 +116,18 @@ describe('resolveProjectAvatarDataUrl', () => {
     expect(dataUrl).toBeNull()
   })
 
+  it('bounds the users request with an abort signal (hung connection can never hang forever)', async () => {
+    let seenSignal: unknown
+    await resolveProjectAvatarDataUrl({
+      owner: 'acme',
+      fetchImpl: async (_url, init) => {
+        seenSignal = init?.signal
+        return userJson(AVATAR)
+      }
+    })
+    expect(seenSignal).toBeInstanceOf(AbortSignal)
+  })
+
   it('rejects an owner that would escape the users path', async () => {
     let called = false
     const dataUrl = await resolveProjectAvatarDataUrl({

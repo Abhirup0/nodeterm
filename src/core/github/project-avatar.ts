@@ -52,6 +52,9 @@ export async function resolveProjectAvatarDataUrl(deps: {
     const response = await fetchImpl(url, {
       method: 'GET',
       redirect: 'manual',
+      // A hung connection must not leave the probe pending for the section's lifetime: abort after
+      // 10s. The abort surfaces as a rejected fetch → caught below → null (the never-throw envelope).
+      signal: AbortSignal.timeout(10_000),
       headers: {
         accept: 'application/vnd.github+json',
         'x-github-api-version': API_VERSION,
