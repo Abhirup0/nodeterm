@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'fs'
 import { join, relative } from 'path'
 
-const ROOTS = ['core', 'main', 'server'].map((d) => join(__dirname, '..', d))
+const ROOTS = ['core', 'main', 'server', 'session-host'].map((d) => join(__dirname, '..', d))
 const SOURCE_ROOT = join(__dirname, '..')
 
 /** Guard comparisons use one separator regardless of the host running Vitest. */
@@ -51,7 +51,11 @@ function sources(dir: string, out: string[] = []): string[] {
  * did not get round to — an exemption that means "later" belongs in an issue, not here.
  */
 const RENAME_ALLOWED = new Map<string, string>([
-  ['core/fs-atomic.ts', 'the async/core helper; this is its one real rename']
+  ['core/fs-atomic.ts', 'the async/core helper; this is its one real rename'],
+  [
+    'session-host/state-file.ts',
+    'the standalone host cannot import core; this helper owns its bounded synchronous rename retry'
+  ]
 ])
 
 function isRenameAllowed(relativeFile: string): boolean {
@@ -203,8 +207,12 @@ describe('every store publishes through renameAtomic', () => {
     expect(normalizedSourcePath(String.raw`core\fs-atomic.ts`)).toBe('core/fs-atomic.ts')
     expect(isRenameAllowed('core/fs-atomic.ts')).toBe(true)
     expect(isRenameAllowed(String.raw`core\fs-atomic.ts`)).toBe(true)
+    expect(isRenameAllowed('session-host/state-file.ts')).toBe(true)
+    expect(isRenameAllowed(String.raw`session-host\state-file.ts`)).toBe(true)
     expect(isRenameAllowed('nested/core/fs-atomic.ts')).toBe(false)
+    expect(isRenameAllowed('nested/session-host/state-file.ts')).toBe(false)
     expect(isRenameAllowed('core/fs-atomic.ts.bak')).toBe(false)
+    expect(isRenameAllowed('session-host/state-file.ts.bak')).toBe(false)
     const scanned = new Set(files.map(sourceRelativePath))
     for (const allowed of RENAME_ALLOWED.keys()) expect(scanned.has(allowed)).toBe(true)
   })
@@ -471,7 +479,8 @@ function cryptoRandomUuidBindings(source: string): CryptoRandomUuidBindings {
  * containers can both be PID 1 with a fresh module counter, worker isolates share a PID with
  * separate counters, and an OS can reuse a PID while crash litter remains. */
 function isUniqueTempName(name: string, relativeFile: string, source: string): boolean {
-  const helperWithBehavioralUuidChut = relativeFile === 'core/fs-atomic.ts'
+  const helperWithBehavioralUuidChut =
+    relativeFile === 'core/fs-atomic.ts' || relativeFile === 'session-host/state-file.ts'
   const bindings = cryptoRandomUuidBindings(source)
   const interpolationBodies = [...name.matchAll(/\$\{([^}]*)\}/g)].map((match) =>
     match[1]

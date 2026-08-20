@@ -11,6 +11,7 @@ export default defineConfig({
       // .tsx too: component tests (jsdom via a per-file pragma; everything else stays node).
       'src/renderer/**/*.test.{ts,tsx}',
       'src/server/**/*.test.ts',
+      'src/session-host/**/*.test.ts',
       'test/server/**/*.test.ts',
       'test/remote/**/*.test.ts',
       // Cross-layer acceptance chains (e.g. renderer store + main's pure gates in one flow):

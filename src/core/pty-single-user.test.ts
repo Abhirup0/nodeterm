@@ -40,6 +40,14 @@ const spawnArgs: Array<{
   env: Record<string, string>
 }> = []
 
+// Pin the persistence backend: `sessionHostSupported()` only asks whether
+// out/session-host/host.cjs exists on disk, so whether this suite exercises the mocked
+// `node-pty` spawn below or a real session-host shim depended on whether anyone had run
+// `npm run build` (or `npm run host:build`). See src/core/__fixtures__/no-session-host.ts.
+vi.mock('./session-host-backend', async () =>
+  (await import('./__fixtures__/no-session-host')).noSessionHost()
+)
+
 vi.mock('node-pty', () => ({
   spawn: (
     file: string,
@@ -600,7 +608,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
   // must reach `endSession`, which is the half a `destroySession`-only test cannot see.
   it('honours everySocket off the wire, and only for a literal true', async () => {
     await tmuxManager()
-    await (fake.senderListeners[IPC.ptyDestroy](
+    await (fake.handlers[IPC.ptyDestroy](
       SOLO,
       'never-opened-here',
       true
@@ -610,7 +618,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
       'nodeterm-rmt'
     ])
     execCalls.length = 0
-    await (fake.senderListeners[IPC.ptyDestroy](
+    await (fake.handlers[IPC.ptyDestroy](
       SOLO,
       'never-opened-2',
       'yes' as unknown as boolean
@@ -628,7 +636,7 @@ describe('SINGLE-USER REGRESSION: co-attach must not change the solo path', () =
     await tmuxManager()
     const { sessionId } = await create(80, 24)
     fake.sent.length = 0
-    await (fake.senderListeners[IPC.ptyRecycle](SOLO, 'solo-1') as unknown as Promise<void>)
+    await (fake.handlers[IPC.ptyRecycle](SOLO, 'solo-1') as unknown as Promise<void>)
 
     const kills = tmuxCalls('kill-session')
     expect(kills).toHaveLength(1) // we hold the session; one socket, one kill
