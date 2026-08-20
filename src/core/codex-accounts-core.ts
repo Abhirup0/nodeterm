@@ -224,10 +224,25 @@ export function resolveCodexSessionScope(
 
 /**
  * Codex agents need an explicit system-or-managed scope; a plain login terminal needs it when it
- * carries a managed account id. Sharing this predicate keeps tmux and plain PTYs aligned.
+ * carries a managed CODEX account id. Sharing this predicate keeps tmux and plain PTYs aligned.
+ *
+ * `isCodexAccount` is REQUIRED, and deliberately has no default, because neither guess is safe.
+ * Managed Claude and Codex accounts are separate lists that share one id alphabet, so the id alone
+ * cannot say which provider it belongs to. Answering "yes" for any id — which this predicate used
+ * to do via `!!accountId` — sends every managed CLAUDE node into the fail-closed Codex gate, where
+ * it looks for a `~/.nodeterm/cx/<digest>` home that a Claude account never populates and REFUSES
+ * (issue #345: agent nodes and the `claude /login` terminal alike spawned nothing). Answering "no"
+ * by default would be worse in the other direction: the `codex login` terminal would spawn without
+ * a scope and write its credential into the user's SYSTEM `~/.codex`. So the caller must say.
  */
-export function needsCodexAccountScope(agentId?: string, accountId?: string): boolean {
-  return agentId === 'codex' || !!accountId
+export function needsCodexAccountScope(
+  agentId: string | undefined,
+  accountId: string | undefined,
+  isCodexAccount: (id: string) => boolean
+): boolean {
+  if (agentId === 'codex') return true
+  if (!accountId) return false
+  return isCodexAccount(accountId)
 }
 
 /**

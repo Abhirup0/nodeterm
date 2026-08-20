@@ -1245,7 +1245,17 @@ else, and its context links must keep classifying across restarts).
     **login node** that runs `claude /login` under the account dir. Main polls the dir's
     `.claude.json` (`LOGIN_POLL_MS` 2 s, up to `LOGIN_TIMEOUT_MS` 5 min) for `oauthAccount.email`;
     on capture the account flips out of `pending` with its email as the default label. Account
-    removal cancels any pending wait + `markDirty`.
+    removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
+    `createCodexAccountLoginNode` (`codex login`, title "Codex login") behind the
+    `nodeterm:add-codex-account-login` listener, with `codexAccounts.waitLogin` polling the managed
+    home's `auth.json`. Both flows mint an **agent-less terminal** carrying only `accountId`, and
+    that shape is why `needsCodexAccountScope` takes an `isCodexAccount` resolver rather than
+    reading `!!accountId`: the two account lists share an id alphabet, so the id alone cannot say
+    which provider it belongs to. Guessing "codex" refused every managed **Claude** node (#345);
+    guessing "not codex" would let `codex login` write into the system `~/.codex`. A dispatch with
+    no listener is a silent no-op, which is how the Codex half shipped inert (#346) — pinned now by
+    `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
+    never heard.
   - **Hook install** — the managed hook is merged into **each account dir's** `settings.json` at
     add-account **and** at app launch (local, shared `install-helper.ts`) / via
     `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status.

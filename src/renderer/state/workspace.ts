@@ -708,6 +708,33 @@ export function createAccountLoginNode(
 }
 
 /**
+ * Terminal node used to log a new managed CODEX account in — the sibling of
+ * `createAccountLoginNode`. The session runs under that account's `CODEX_HOME` (S6 §2.1 env
+ * injection, gated by `needsCodexAccountScope` asking whether the id is a managed Codex one), so
+ * `codex login` writes `auth.json` into the managed home rather than the user's system `~/.codex`.
+ * That file is exactly what `codexAccounts.waitLogin` polls for, so without this node the add flow
+ * waits on a credential nothing is writing (issue #346).
+ *
+ * A plain terminal (not an agent node), like the Claude one: no session-name tracking, and the
+ * agent-less shape is what keeps the node out of the Codex AGENT paths while still being scoped.
+ * Local only — `codexAccounts.add()` mints on THIS machine, so there is no ssh binding to pass.
+ */
+export function createCodexAccountLoginNode(
+  accountId: string,
+  index: number,
+  center?: { x: number; y: number }
+): CanvasNode {
+  const node = createTerminalNode(index, undefined, center)
+  node.data = {
+    ...node.data,
+    title: 'Codex login',
+    accountId,
+    initialCommand: 'codex login'
+  }
+  return node
+}
+
+/**
  * True when node data is (or started as) an account-login terminal (`claude /login`).
  * `initialCommand` is one-shot and never persisted, so the factory title is the only durable
  * signature — serialized copies match on title alone. Used to DESTROY the login node together

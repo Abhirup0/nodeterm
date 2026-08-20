@@ -391,6 +391,7 @@ import {
   commonParentId,
   fitGroupToChildren,
   createAccountLoginNode,
+  createCodexAccountLoginNode,
   isAccountLoginNode,
   systemAccountDisplay,
   createAgentNode,
@@ -3665,6 +3666,30 @@ export function Canvas() {
     window.addEventListener('nodeterm:add-account-login', onAddAccountLogin)
     return () => window.removeEventListener('nodeterm:add-account-login', onAddAccountLogin)
     // Resolves the ssh binding by host at fire time (reads stores directly), so no project dep.
+  }, [setNodes, markDirty, viewCenter])
+
+  // The Codex sibling of the block above: Settings → Accounts "Add Codex account" dispatches
+  // 'nodeterm:add-codex-account-login' and then polls `codexAccounts.waitLogin` for the account
+  // home's auth.json. Nothing was listening, so no `codex login` ever ran and the poll waited out
+  // its timeout on a credential nothing was writing (issue #346). Local only: `codexAccounts.add()`
+  // mints on THIS machine, so there is no remote/host leg to resolve — the remote account
+  // lifecycle lands with the host relay.
+  useEffect(() => {
+    const onAddCodexAccountLogin = (ev: Event): void => {
+      const accountId = (ev as CustomEvent<{ accountId?: string }>).detail?.accountId
+      if (!accountId) return
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createCodexAccountLoginNode(accountId, ns.length, viewCenter()), selected: true }
+      ])
+      markDirty()
+      // Same reason as the Claude branch: the event fires from the full-screen Settings overlay,
+      // which would otherwise hide the login node the user has to interact with.
+      setSettingsOpen(false)
+    }
+    window.addEventListener('nodeterm:add-codex-account-login', onAddCodexAccountLogin)
+    return () =>
+      window.removeEventListener('nodeterm:add-codex-account-login', onAddCodexAccountLogin)
   }, [setNodes, markDirty, viewCenter])
 
   // Resolve the system account's email once, so context menus (built via getState) can label
