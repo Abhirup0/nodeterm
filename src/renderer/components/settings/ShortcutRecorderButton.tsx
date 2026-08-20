@@ -137,7 +137,9 @@ export function ShortcutRecorderButton({
   const className = capturing
     ? 'min-w-[140px] rounded-md border border-accent bg-[color:var(--accent)]/10 px-3 py-1 text-[12px] text-text ring-1 ring-[color:var(--accent)]/40'
     : appearance === 'icon'
-      ? 'flex size-6 items-center justify-center rounded-md text-muted hover:bg-fill-weak hover:text-text focus-visible:text-text'
+      ? // No Tailwind preflight in this repo: `border-0 bg-transparent p-0` must be explicit or
+        // the browser's native button chrome (border + fill + padding) renders around the glyph.
+        'flex size-6 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-muted hover:bg-fill-weak hover:text-text focus-visible:text-text'
       : 'min-w-[120px] cursor-pointer rounded-md border border-border bg-panel-header px-3 py-1.5 text-[13px] font-medium text-text outline-none hover:bg-[rgba(255,255,255,0.06)]'
   const isIdleIcon = appearance === 'icon' && !capturing
   return (
