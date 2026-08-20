@@ -251,32 +251,39 @@ function EditableProjectSection({
         />
       </SearchableRow>
       <SearchableRow {...ROWS.color}>
-        <FieldRow
-          label="Icon & color"
-          description="How this project shows on its tab and in the switcher: a custom icon (emoji, glyph, or image) plus an accent colour. Both live in the shared project file, so they travel to everyone who clones the repo."
-          control={
-            <ProjectIconPicker
-              projectId={project.id}
-              name={project.name}
-              icon={project.icon}
-              color={project.color}
-              colors={NODE_COLORS}
-              dark={appTheme === 'dark'}
-              // Only the section the user is actually viewing probes the (uncached, live) GitHub
-              // avatar. During a settings SEARCH many sections are VISIBLE-but-not-active — gating
-              // on `active` keeps a keyword like "avatar" from firing one live API call per project.
-              active={isActive}
-              onIcon={(icon: ProjectIcon | undefined) => {
-                useProjects.getState().setProjectIcon(project.id, icon)
-                persistIdentityEdit()
-              }}
-              onColor={(c: string) => {
-                useProjects.getState().setProjectColor(project.id, c)
-                persistIdentityEdit()
-              }}
-            />
-          }
-        />
+        {/* Icon & colour is a full-width block, not a label-left/control-right FieldRow: the picker
+            (glyph preview, swatches, tabbed sources) needs the whole column, mirroring Orca's
+            RepositoryIconPicker layout. */}
+        <div className="flex flex-col gap-3">
+          <div className="min-w-0">
+            <span className="block text-sm font-medium text-text">Icon &amp; color</span>
+            <p className="mt-1 text-[13px] leading-relaxed text-muted">
+              How this project shows on its tab and in the switcher: a custom icon (emoji, glyph, or
+              image) plus an accent colour. Both live in the shared project file, so they travel to
+              everyone who clones the repo.
+            </p>
+          </div>
+          <ProjectIconPicker
+            projectId={project.id}
+            name={project.name}
+            icon={project.icon}
+            color={project.color}
+            colors={NODE_COLORS}
+            dark={appTheme === 'dark'}
+            // Only the section the user is actually viewing probes the (uncached, live) GitHub
+            // avatar. During a settings SEARCH many sections are VISIBLE-but-not-active — gating
+            // on `active` keeps a keyword like "avatar" from firing one live API call per project.
+            active={isActive}
+            onIcon={(icon: ProjectIcon | undefined) => {
+              useProjects.getState().setProjectIcon(project.id, icon)
+              persistIdentityEdit()
+            }}
+            onColor={(c: string) => {
+              useProjects.getState().setProjectColor(project.id, c)
+              persistIdentityEdit()
+            }}
+          />
+        </div>
       </SearchableRow>
       <SearchableRow {...ROWS.permission}>
         <FieldRow
