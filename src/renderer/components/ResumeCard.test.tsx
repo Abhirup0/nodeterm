@@ -95,6 +95,61 @@ describe('ResumeCard', () => {
     expect(rows()[2].textContent).toContain('terminal · A')
   })
 
+  it('offers a revisited node once, at its newest position', async () => {
+    // A breadcrumb list is a HISTORY: recordBreadcrumb appends the same node again once the dedupe
+    // window has passed, so an ordinary A → B → A round trip lists 'a' twice. Two rows for one
+    // place would spend a slot saying nothing new (and collide as React keys).
+    const breadcrumbs: NavStop[] = [
+      { nodeId: 'a', at: 1000, note: 'terminal · A' },
+      { nodeId: 'b', at: 2000, note: 'terminal · B' },
+      { nodeId: 'a', at: 3000, note: 'terminal · A again' },
+      { nodeId: 'c', at: 4000, note: 'terminal · C' }
+    ]
+    await renderCard(project(breadcrumbs), [{ id: 'a' }, { id: 'b' }, { id: 'c' }], () => {})
+    expect(rows()).toHaveLength(3)
+    expect(rows()[0].textContent).toContain('terminal · C')
+    // 'a' takes the newest occurrence's slot (ahead of 'b'), carrying that occurrence's note.
+    expect(rows()[1].textContent).toContain('terminal · A again')
+    expect(rows()[2].textContent).toContain('terminal · B')
+  })
+
+  it('fills all 3 slots from further back when a node is revisited', async () => {
+    // De-duping must not COST a row: the card still offers three distinct places when the trail
+    // holds them, even though its newest four entries only name three nodes.
+    const breadcrumbs: NavStop[] = [
+      { nodeId: 'a', at: 1000, note: 'terminal · A' },
+      { nodeId: 'b', at: 2000, note: 'terminal · B' },
+      { nodeId: 'c', at: 3000, note: 'terminal · C' },
+      { nodeId: 'b', at: 4000, note: 'terminal · B again' }
+    ]
+    await renderCard(project(breadcrumbs), [{ id: 'a' }, { id: 'b' }, { id: 'c' }], () => {})
+    expect(rows()).toHaveLength(3)
+    expect(rows()[0].textContent).toContain('terminal · B again')
+    expect(rows()[1].textContent).toContain('terminal · C')
+    expect(rows()[2].textContent).toContain('terminal · A')
+  })
+
+  it('does not warn about duplicate React keys when a node is revisited', async () => {
+    // The de-dupe is a behavior rule; the keys must be unique on their own terms. A console.error
+    // here is React's "Encountered two children with the same key" — the app console and this
+    // suite's output are both meant to be pristine.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await renderCard(
+        project([
+          { nodeId: 'a', at: 1000, note: 'terminal · A' },
+          { nodeId: 'a', at: 2000, note: 'terminal · A again' }
+        ]),
+        [{ id: 'a' }],
+        () => {}
+      )
+      expect(rows()).toHaveLength(1)
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('clicking a row calls onOpen with the node id', async () => {
     const onOpen = vi.fn<(id: string) => void>()
     await renderCard(

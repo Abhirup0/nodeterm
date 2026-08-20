@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import type { Project } from '@shared/types'
+import type { NavStop, Project } from '@shared/types'
 import { relativeTime } from '../lib/relativeTime'
 
 /** How many stops the card offers. Small on purpose: this is "where was I?", not the whole trail. */
@@ -22,20 +22,30 @@ interface ResumeCardProps {
  * the parent with a new `project` object, and without a local flag that would resurrect a card the
  * user just closed in the same activation.
  *
- * The rows are filtered BEFORE they are capped: slicing the raw tail first would show fewer than
- * `RESUME_CARD_COUNT` rows whenever the newest stops point at nodes that have since been deleted.
+ * The rows are filtered and de-duplicated BEFORE they are capped: slicing the raw tail first would
+ * show fewer than `RESUME_CARD_COUNT` rows whenever the newest stops point at nodes that have since
+ * been deleted, or at a node the trail already offers. A breadcrumb list is a HISTORY, not a set —
+ * `recordBreadcrumb` appends the same node again once `BREADCRUMB_DEDUPE_MS` has passed, so an
+ * ordinary A → B → A round trip (the exact pattern this feature exists for) puts A in the list
+ * twice. The card offers the last few DISTINCT places, newest occurrence of each: re-offering a
+ * place already on the card would spend one of three slots saying nothing new.
  */
 export function ResumeCard({ project, nodes, onOpen }: ResumeCardProps): JSX.Element | null {
   const [dismissed, setDismissed] = useState(false)
   const liveIds = useMemo(() => new Set(nodes.map((n) => n.id)), [nodes])
-  const rows = useMemo(
-    () =>
-      (project.breadcrumbs ?? [])
-        .filter((stop) => liveIds.has(stop.nodeId))
-        .slice(-RESUME_CARD_COUNT)
-        .reverse(),
-    [project.breadcrumbs, liveIds]
-  )
+  const rows = useMemo(() => {
+    const all = project.breadcrumbs ?? []
+    const picked: NavStop[] = []
+    const seen = new Set<string>()
+    // Newest first, so the occurrence kept for a revisited node is its most recent one.
+    for (let i = all.length - 1; i >= 0 && picked.length < RESUME_CARD_COUNT; i--) {
+      const stop = all[i]
+      if (!liveIds.has(stop.nodeId) || seen.has(stop.nodeId)) continue
+      seen.add(stop.nodeId)
+      picked.push(stop)
+    }
+    return picked
+  }, [project.breadcrumbs, liveIds])
 
   if (dismissed || rows.length === 0) return null
 
@@ -55,7 +65,9 @@ export function ResumeCard({ project, nodes, onOpen }: ResumeCardProps): JSX.Ele
       <div className="resume-card__rows">
         {rows.map((stop) => (
           <button
-            key={stop.nodeId}
+            // Keyed by OCCURRENCE (`at` is unique per stop), not by node: a node id is not unique
+            // in a history, and the de-dupe above is a behavior rule, not a key guarantee.
+            key={`${stop.nodeId}:${stop.at}`}
             className="resume-card__row"
             data-testid="resume-card-row"
             onClick={() => onOpen(stop.nodeId)}
