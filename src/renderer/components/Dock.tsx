@@ -17,6 +17,8 @@ interface DockProps {
   zoomPct: number
   canUndo: boolean
   canRedo: boolean
+  canGoBack: boolean
+  canGoForward: boolean
   onAddTerminal: () => void
   onAddSticky: () => void
   /** Opens the Spawn-a-team dialog (issue #78) — the conductor lands at the Dock's default spot. */
@@ -34,6 +36,8 @@ interface DockProps {
   onAddWorktree: () => void
   onUndo: () => void
   onRedo: () => void
+  onGoBack: () => void
+  onGoForward: () => void
   onSave: () => void
   onFitView: () => void
   onZoomIn: () => void
@@ -51,6 +55,8 @@ export function Dock({
   zoomPct,
   canUndo,
   canRedo,
+  canGoBack,
+  canGoForward,
   onAddTerminal,
   onAddSticky,
   onSpawnTeam,
@@ -65,6 +71,8 @@ export function Dock({
   onAddWorktree,
   onUndo,
   onRedo,
+  onGoBack,
+  onGoForward,
   onSave,
   onFitView,
   onZoomIn,
@@ -290,6 +298,22 @@ export function Dock({
         <button className="dock-btn" title={commandTooltip('Redo', 'canvas.redo')} disabled={!canRedo} onClick={onRedo}>
           <RedoIcon />
         </button>
+        <button
+          className="dock-btn"
+          title={commandTooltip('Go back', 'canvas.goBack')}
+          disabled={!canGoBack}
+          onClick={onGoBack}
+        >
+          <ArrowLeftIcon />
+        </button>
+        <button
+          className="dock-btn"
+          title={commandTooltip('Go forward', 'canvas.goForward')}
+          disabled={!canGoForward}
+          onClick={onGoForward}
+        >
+          <ArrowRightIcon />
+        </button>
 
         <span className="dock-sep" />
 
@@ -353,6 +377,20 @@ function RedoIcon() {
   return (
     <svg {...S}>
       <path d="M15 7l5 5-5 5M20 12H9a5 5 0 0 0 0 10h2" />
+    </svg>
+  )
+}
+function ArrowLeftIcon() {
+  return (
+    <svg {...S}>
+      <path d="M19 12H5M11 6l-6 6 6 6" />
+    </svg>
+  )
+}
+function ArrowRightIcon() {
+  return (
+    <svg {...S}>
+      <path d="M5 12h14M13 6l6 6-6 6" />
     </svg>
   )
 }

@@ -216,6 +216,7 @@ import {
 } from '../lib/nodeFocus'
 import {
   recordBreadcrumb,
+  stepBreadcrumb,
   type BreadcrumbState,
   type BreadcrumbTarget
 } from '../lib/breadcrumbs'
@@ -1136,6 +1137,12 @@ export function Canvas() {
    */
   const hasPeersRef = useRef(false)
   const [, bumpHist] = useState(0)
+  // Same trick as bumpHist, for the breadcrumb cursor: the Dock's back/forward buttons read
+  // navRef during render, and a ref mutation is invisible to React — so every write to
+  // navRef.current is followed by a bump, or the buttons stay disabled until some unrelated
+  // re-render happens to notice. Its own counter rather than bumpHist's: the two stacks are
+  // separate facts (node-array history vs camera history) and move at different times.
+  const [, bumpNav] = useState(0)
   const {
     setViewport,
     getViewport,
@@ -1941,6 +1948,7 @@ export function Canvas() {
     // (a project reactivated after being away starts "at the end" of its own trail).
     const bc = project.breadcrumbs ?? []
     navRef.current = { list: bc, index: bc.length - 1 }
+    bumpNav((v) => v + 1)
     if (preserveViewportRef.current) {
       // In-place reload (external change / SSH reconcile): keep the user's current camera —
       // the file's viewport is where another machine last saved, not where this user looks.
@@ -5622,6 +5630,7 @@ export function Canvas() {
         // recordBreadcrumb returns the SAME object on a dedupe no-op, so identity is the skip test.
         if (next !== navRef.current) {
           navRef.current = next
+          bumpNav((v) => v + 1)
           useProjects.getState().setProjectBreadcrumbs(activeId, next.list)
           markDirty()
         }
@@ -5673,6 +5682,56 @@ export function Canvas() {
     },
     [fitView, setViewport, getInternalNode, markDirty]
   )
+
+  /**
+   * Walks the breadcrumb cursor one stop and flies the camera there. Browser back/forward for the
+   * canvas: this is the ONE path that must NOT record a stop — calling goToNode would append the
+   * landing and turn every step into a new tip, so the framing block below is deliberately a copy
+   * of goToNode's (measured ⇒ fitView, unmeasured ⇒ frame from the persisted size, unknowable ⇒
+   * stand still) rather than a call into it. A shared `frameNode` helper is the obvious follow-up;
+   * it is not done here because goToNode's measured check carries reasoning (it reads React Flow's
+   * OWN store, not our node copy) that a hasty extraction is likely to lose.
+   *
+   * stepBreadcrumb skips stops whose node is gone, so a deleted node is walked THROUGH silently.
+   */
+  const stepAndFrame = useCallback(
+    (direction: 'back' | 'forward') => {
+      const activeId = useProjects.getState().activeProjectId
+      if (!activeId || isKanbanOpen(activeId)) return
+      const next = stepBreadcrumb(navRef.current, direction, (nodeId) =>
+        nodesRef.current.some((n) => n.id === nodeId)
+      )
+      if (!next) return
+      // Cursor only: it is machine-local and NOT persisted (only `list` rides the index entry),
+      // so a step writes no project state and marks nothing dirty — walking the camera back and
+      // forth must not queue a project.json write.
+      navRef.current = next
+      bumpNav((v) => v + 1)
+      const target = nodesRef.current.find((n) => n.id === next.list[next.index].nodeId)
+      if (!target) return
+      const internal = getInternalNode(target.id)
+      if (isMeasured(internal)) {
+        const wrap = flowWrapRef.current
+        const size = internal?.measured
+        const solved =
+          wrap && size?.width && size?.height ? solveFitPadding(wrap, size.width, size.height) : null
+        void fitView({
+          nodes: [{ id: target.id }],
+          duration: 300,
+          ...FIT_NODE_OPTIONS,
+          padding: solved ?? FIT_NODE_OPTIONS.padding
+        })
+        return
+      }
+      const rect = nodeFitRect(target as FocusableNode, nodesRef.current as FocusableNode[])
+      const wrap = flowWrapRef.current?.getBoundingClientRect()
+      const viewport = rect && wrap ? viewportForRect(rect, wrap.width, wrap.height) : null
+      if (viewport) void setViewport(viewport, { duration: 300 })
+    },
+    [fitView, setViewport, getInternalNode]
+  )
+  const goBack = useCallback(() => stepAndFrame('back'), [stepAndFrame])
+  const goForward = useCallback(() => stepAndFrame('forward'), [stepAndFrame])
 
   const onNodeDoubleClick = useCallback(
     (_e: React.MouseEvent, node: Node) => {
@@ -5814,6 +5873,8 @@ export function Canvas() {
       'panel.sessions': () => { toggleSessionsPin(); return true },
       'canvas.undo': () => { undo(); return true },
       'canvas.redo': () => { redo(); return true },
+      'canvas.goBack': () => { goBack(); return true },
+      'canvas.goForward': () => { goForward(); return true },
       'canvas.fitAll': () => { fitAll(); return true },
       'canvas.tidy': () => { arrangeAllNodes(); return true },
       'canvas.deleteSelection': deleteSelectionCommand,
@@ -10764,8 +10825,12 @@ export function Canvas() {
         zoomPct={zoomPct}
         canUndo={pastRef.current.length > 0}
         canRedo={futureRef.current.length > 0}
+        canGoBack={navRef.current.index > 0}
+        canGoForward={navRef.current.index < navRef.current.list.length - 1}
         onUndo={undo}
         onRedo={redo}
+        onGoBack={goBack}
+        onGoForward={goForward}
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
         onSpawnTeam={() => setSpawnTeamDialog({})}
