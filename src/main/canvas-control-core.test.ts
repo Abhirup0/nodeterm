@@ -5,8 +5,13 @@ import {
   mergeCanvasControlBlock,
   buildCanvasControlInstructions,
   buildCanvasSkillBody,
-  CONTROL_SHIM_SCRIPT
+  CONTROL_SHIM_SCRIPT,
+  CONTROL_UNREACHABLE_MSG
 } from './canvas-control-core'
+import {
+  CODEX_SANDBOX_BLOCKED_LINE,
+  CODEX_SANDBOX_RETRY_LINE
+} from '../core/agents/hook-sandbox-hint-sh'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { PROJECT_TARGETABLE_VERBS } from './project-grants'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
@@ -221,6 +226,17 @@ describe('parseControlRequest', () => {
     const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
     expect(body).toContain('--flag=value')
     expect(body).toMatch(/starts? with `--`/)
+  })
+
+  it('the shim embeds the sandbox hint and its call sites in both failure tails', () => {
+    // The fragment (one definition)...
+    expect(CONTROL_SHIM_SCRIPT).toContain('nt_codex_sandbox_hint() {')
+    expect(CONTROL_SHIM_SCRIPT).toContain(CODEX_SANDBOX_BLOCKED_LINE)
+    expect(CONTROL_SHIM_SCRIPT).toContain(CODEX_SANDBOX_RETRY_LINE)
+    // ...and the fallback shape: the genuine-unreachable sentence survives to the byte.
+    expect(CONTROL_SHIM_SCRIPT).toContain(
+      `nt_codex_sandbox_hint || echo "${CONTROL_UNREACHABLE_MSG}" >&2`
+    )
   })
 
   it('send/reply require --text (Task 5.4)', () => {

@@ -497,6 +497,106 @@ describe('canvas-control shim keeps credentials off curl\'s command line', () =>
   })
 })
 
+// Issue #367: Codex's command sandbox denies connect() for every address family (Linux seccomp;
+// macOS seatbelt deny-default), so curl dies with HTTP 000 while nodeterm is perfectly healthy —
+// and the old message ("control endpoint unreachable") sent agents off to relink/restart a server
+// that was never the problem. Codex exports CODEX_SANDBOX_NETWORK_DISABLED=1 into every sandboxed
+// command, so the shim can tell the two failures apart. Run against real /bin/sh with a genuinely
+// dead endpoint; `uname` is faked on PATH so the macOS-only remedy line is deterministic on any CI.
+describe('codex-sandbox self-diagnosis (issue #367)', () => {
+  let deadSock = ''
+  let unameDir = (os: 'Darwin' | 'Linux'): string => os // reassigned in beforeAll
+
+  beforeAll(() => {
+    deadSock = path.join(dir, 'nobody-listens.sock')
+    const bins: Record<string, string> = {}
+    unameDir = (osName) => {
+      if (!bins[osName]) {
+        const d = path.join(dir, `fake-uname-${osName.toLowerCase()}`)
+        fs.mkdirSync(d, { recursive: true })
+        fs.writeFileSync(path.join(d, 'uname'), `#!/bin/sh\necho ${osName}\n`, { mode: 0o755 })
+        bins[osName] = d
+      }
+      return bins[osName]
+    }
+  })
+
+  const sandboxEnv = (osName: 'Darwin' | 'Linux', extra: Record<string, string> = {}): Record<string, string> => ({
+    PATH: `${unameDir(osName)}:${process.env.PATH ?? ''}`,
+    NODETERM_HOOK_PORT: '',
+    NODETERM_HOOK_SOCK: deadSock,
+    CODEX_SANDBOX_NETWORK_DISABLED: '1',
+    ...extra
+  })
+
+  it('under the sandbox, a dead socket names the sandbox and the escalated retry — not "unreachable"', async () => {
+    await expect(callShim(['list'], sandboxEnv('Linux'))).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("Codex's sandbox blocked this connection to nodeterm")
+    })
+    await expect(callShim(['list'], sandboxEnv('Linux'))).rejects.toMatchObject({
+      stderr: expect.stringContaining('escalated permissions')
+    })
+    const err = await callShim(['list'], sandboxEnv('Linux')).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain('do not relink or restart it')
+    expect(err.stderr).not.toContain('Could not reach nodeterm')
+  })
+
+  it('on Darwin with a socket advertised, it also prints the config.toml allowlist remedy with the path', async () => {
+    const err = await callShim(['list'], sandboxEnv('Darwin')).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain(`network.allow_unix_sockets = ["${deadSock}"]`)
+    expect(err.stderr).toContain('~/.codex/config.toml')
+  })
+
+  it('on Linux the allowlist line is withheld — the Linux sandbox has no such allowlist', async () => {
+    const err = await callShim(['list'], sandboxEnv('Linux')).catch((e) => e as { stderr: string })
+    expect(err.stderr).not.toContain('network.allow_unix_sockets')
+  })
+
+  it('the same diagnosis fires on the TCP branch (a sandboxed curl to loopback dies identically)', async () => {
+    // A port with no listener: bind-then-close frees it, and nothing else grabs it mid-test.
+    const http = await import('node:http')
+    const probe = http.createServer()
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r))
+    const freePort = (probe.address() as { port: number }).port
+    await new Promise<void>((r) => probe.close(() => r()))
+    const err = await callShim(['list'], {
+      PATH: `${unameDir('Linux')}:${process.env.PATH ?? ''}`,
+      NODETERM_HOOK_PORT: String(freePort),
+      CODEX_SANDBOX_NETWORK_DISABLED: '1'
+    }).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain("Codex's sandbox blocked this connection to nodeterm")
+  })
+
+  // THE MUTATION GUARD for the env-var branch: without the variable, the same dead transport must
+  // keep the original sentence to the byte — dropping the branch turns the sandbox cases above
+  // red, and inverting it turns this one red.
+  it('without CODEX_SANDBOX_NETWORK_DISABLED the original genuine-unreachable message stands', async () => {
+    const err = await callShim(['list'], {
+      PATH: `${unameDir('Darwin')}:${process.env.PATH ?? ''}`,
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_SOCK: deadSock
+    }).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain('Could not reach nodeterm (control endpoint unreachable).')
+    expect(err.stderr).not.toContain("Codex's sandbox")
+  })
+
+  it('never fires on a genuine HTTP error — the server answered, so the transport is fine', async () => {
+    // `boom` reaches the real hook server (which answers 400 with a body): sandbox var set, but
+    // nt_code is a real status, not 000.
+    const err = await callShim(['boom'], { CODEX_SANDBOX_NETWORK_DISABLED: '1' }).catch(
+      (e) => e as { stderr: string }
+    )
+    expect(err.stderr).toContain('that verb exploded')
+    expect(err.stderr).not.toContain("Codex's sandbox")
+  })
+
+  it('a healthy endpoint stays healthy with the sandbox var set (the hint is failure-path only)', async () => {
+    const { stdout } = await callShim(['list'], { CODEX_SANDBOX_NETWORK_DISABLED: '1' })
+    expect(stdout.trim()).toBe('did list')
+  })
+})
+
 describe('parseControlBody', () => {
   it('reads the shim dialect: nodeId plus arg.<name> fields', () => {
     expect(

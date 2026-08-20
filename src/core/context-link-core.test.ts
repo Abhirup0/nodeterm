@@ -5,7 +5,9 @@ import {
   mergeInstructionsBlock,
   resolveLinkTranscript,
   setNodeTranscript,
-  transcriptPathOf
+  transcriptPathOf,
+  CONTEXT_SHIM_SCRIPT,
+  CONTEXT_UNREACHABLE_MSG
 } from './context-link-core'
 
 describe('buildLinkDoc', () => {
@@ -201,5 +203,11 @@ describe('buildLinkedContextInstructions', () => {
     expect(s).toContain('summary')
     expect(s).toContain('transcript')
     expect(s).toContain('terminal')
+  })
+
+  it('the shim embeds the sandbox hint, keeping the generic sentence for the non-sandbox case', () => {
+    expect(CONTEXT_SHIM_SCRIPT).toContain('nt_codex_sandbox_hint() {')
+    expect(CONTEXT_SHIM_SCRIPT).toContain('nt_codex_sandbox_hint && exit 1')
+    expect(CONTEXT_SHIM_SCRIPT).toContain(`echo "${CONTEXT_UNREACHABLE_MSG}" >&2`)
   })
 })

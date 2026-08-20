@@ -4,6 +4,11 @@
 import type { ContextLinkInfo } from '../shared/types'
 import { sessionName } from './tmux-naming'
 import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
+import { CODEX_SANDBOX_HINT_SH } from './agents/hook-sandbox-hint-sh'
+
+/** The shim's generic transport-failure sentence — exported so the agent-facing docs below can
+ *  quote it verbatim and the parity test holds the two ends together. */
+export const CONTEXT_UNREACHABLE_MSG = 'Could not read linked context (nodeterm unreachable).'
 
 // nodeId -> latest known transcript path, fed from the raw hook listener (see index.ts).
 const nodeTranscript = new Map<string, string>()
@@ -168,6 +173,8 @@ fi
 
 ${HOOK_CURL_HEADERS_SH}
 
+${CODEX_SANDBOX_HINT_SH}
+
 nt_verb="list"
 if [ $# -gt 0 ]; then nt_verb="$1"; shift; fi
 
@@ -215,7 +222,12 @@ if [ "$nt_code" = "200" ]; then
 fi
 cat "$nt_out" >&2 2>/dev/null
 rm -f "$nt_out"
-echo "Could not read linked context (nodeterm unreachable)." >&2
+# Empty / 000 = the TRANSPORT failed, not the server. Under a codex sandbox that is the sandbox's
+# own connect() denial (issue #367), and the generic sentence below would misdirect the agent.
+if [ -z "$nt_code" ] || [ "$nt_code" = "000" ]; then
+  nt_codex_sandbox_hint && exit 1
+fi
+echo "${CONTEXT_UNREACHABLE_MSG}" >&2
 exit 1
 `
 
