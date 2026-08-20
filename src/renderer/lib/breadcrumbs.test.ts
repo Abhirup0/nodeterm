@@ -15,22 +15,33 @@ describe('buildNote', () => {
       .toBe('sticky · Deploy notes')
   })
 
-  it('agent node with no live status falls back to the agent label', () => {
-    expect(buildNote(target({ agentId: 'claude' }), undefined)).toBe('Claude Code · Unknown')
+  it('agent node with no session and no title falls back to the agent label', () => {
+    expect(buildNote(target({ agentId: 'claude', title: '' }), undefined))
+      .toBe('Claude Code · Unknown')
+  })
+
+  it('agent node with no session names the NODE rather than the bare agent label', () => {
+    // The common case right after an app restart: `agentStatus.state` is transient, so neither a
+    // session name nor a live state exists — "Claude Code · Unknown" would name neither the node
+    // nor what was happening. The node's title auto-tracks the session name via `titleAuto`.
+    expect(buildNote(target({ agentId: 'claude', title: 'fix-auth-bug' }), undefined))
+      .toBe('fix-auth-bug · Unknown')
   })
 
   it('agent node with a live state uses the sessions-sidebar phrasing', () => {
     const status: AgentNodeStatus = { state: 'waiting', unread: false }
-    expect(buildNote(target({ agentId: 'claude' }), status)).toBe('Claude Code · Waiting for your response')
+    expect(buildNote(target({ agentId: 'claude', title: '' }), status))
+      .toBe('Claude Code · Waiting for your response')
   })
 
-  it('agent node with a session name prefers it over the agent label', () => {
+  it('agent node with a session name prefers it over the node title', () => {
     const status: AgentNodeStatus = { state: 'working', unread: false, session: 'fix-auth-bug' }
-    expect(buildNote(target({ agentId: 'claude' }), status)).toBe('fix-auth-bug · Running')
+    expect(buildNote(target({ agentId: 'claude', title: 'stale name' }), status))
+      .toBe('fix-auth-bug · Running')
   })
 
   it('custom agent id with no builtin config falls back to the raw id', () => {
-    expect(buildNote(target({ agentId: 'my-custom-agent' }), undefined))
+    expect(buildNote(target({ agentId: 'my-custom-agent', title: '' }), undefined))
       .toBe('my-custom-agent · Unknown')
   })
 

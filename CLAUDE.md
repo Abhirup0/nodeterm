@@ -1724,6 +1724,29 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   (`getInternalNode`), not our node object — `measured` reaches our state one render later (via
   `onNodesChange`), so our copy lies about nodes the store has long sized. Unknowable size ⇒ the
   camera **stands still**; never fall back to a bare `fitView` there, that IS the origin jump.
+- **Breadcrumb trail** (`renderer/lib/breadcrumbs.ts` — all the pure logic lives there) — every
+  deliberate `goToNode` landing records a `NavStop` ({nodeId, at, note}) for the ACTIVE project, and
+  **Cmd+[ / Cmd+]** (`canvas.goBack` / `canvas.goForward`, bound in `shared/keybindings.ts`) plus the
+  two Dock buttons walk that trail; on a project activation a once-per-app-run **`ResumeCard`** offers
+  the last few distinct stops ("resume where you left off"). Load-bearing facts:
+  - **The trail is MACHINE-LOCAL and rides `IndexEntryV3.breadcrumbs`, never `.nodeterm/project.json`** —
+    the same tier as `viewport` / `defaultAccountId` / `capabilityAck`, for the same reason: a repo must
+    not carry one person's camera history to everyone who clones it. `fileToProject` therefore ignores a
+    `breadcrumbs` field found in the shared file (a forgery), and `projectToFile` never writes one.
+  - **The cursor is not persisted either.** Only `list` rides the entry; `BreadcrumbState.index` is
+    renderer-only and resets to the tip on activation, so stepping back and forth writes NO project
+    state and marks nothing dirty — walking the camera must not queue a `project.json` write.
+  - **Cap 20** (`BREADCRUMB_CAP`, oldest dropped) and a **3 s dedupe** (`BREADCRUMB_DEDUPE_MS`, so a
+    re-triggered focus on the already-current node is a no-op — `recordBreadcrumb` returns the SAME
+    object, which is the caller's skip test). Recording past a back-step drops the forward tail, exactly
+    like a browser tab.
+  - **`stepBreadcrumb` skips stops whose node is gone** (never lands on a dead entry; no reachable stop
+    ⇒ `null` ⇒ the camera stands still), and `goToNode` **refuses to record ephemeral `subagent` / `loop`
+    nodes**: they are merged into the `<ReactFlow nodes>` prop but never persisted (cleared on the next
+    turn), so a breadcrumb for one is an id nothing can ever resolve, burning a slot forever.
+  - The `note` is a **snapshot** taken at record time (agent nodes reuse the sessions sidebar's own
+    `sessionStatusKind` + `STATE_LABEL` phrasing, preferring session name → node title → agent label), so
+    a later state change never retroactively rewrites history.
 - **Command palette** (`CommandPalette.tsx`): ⌘/Ctrl+K; `Canvas.buildCommands` (create,
   switch project, jump to node by title/tag, open file…).
 - **Explorer** (`ExplorerPanel.tsx`, 🗂 / ⌘⇧E): lazy file tree of the active project `cwd`

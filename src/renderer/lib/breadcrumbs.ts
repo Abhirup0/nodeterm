@@ -52,7 +52,11 @@ export function buildNote(target: BreadcrumbTarget, status: AgentNodeStatus | un
     // custom agent's id), and AGENT_CONFIG is only keyed by the builtin subset — indexing it
     // directly with a custom id fails to typecheck. agentConfig(id) exists for exactly this.
     const agentLabel = agentConfig(target.agentId)?.label ?? target.agentId
-    const name = status?.session || agentLabel
+    // The node's own title comes before the bare agent label: it auto-tracks the session name
+    // (`titleAuto`) and carries any manual rename, so an agent node with no live session AND no
+    // hook state (the norm right after an app restart — `agentStatus.state` is transient) still
+    // names the node instead of degrading to a generic "Claude Code · Unknown".
+    const name = status?.session || target.title || agentLabel
     const stateLabel = STATE_LABEL[sessionStatusKind(status?.state)]
     return `${name} · ${stateLabel}`
   }

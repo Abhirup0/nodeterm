@@ -5646,7 +5646,11 @@ export function Canvas() {
       // minimap double-click), and recording is independent of which framing branch runs below —
       // including the branch that deliberately leaves the camera where it is.
       const activeId = useProjects.getState().activeProjectId
-      if (activeId) {
+      // …with ONE exclusion: the ephemeral `subagent`/`loop` viz nodes. They are merged into the
+      // <ReactFlow nodes> prop but NEVER persisted — they are cleared on the next turn — and both
+      // double-click focus and the minimap's double-click land here. A breadcrumb for one is a
+      // permanently unresolvable id burning one of the 20 slots, so it is never recorded.
+      if (activeId && node.type !== 'subagent' && node.type !== 'loop') {
         const target: BreadcrumbTarget = {
           id: node.id,
           kind: node.type as BreadcrumbTarget['kind'],
