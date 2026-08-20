@@ -99,6 +99,25 @@ describe('the Server Edition refuses canvas control by name', () => {
     expect(text).toContain('do not retry')
   })
 
+  it('`open-project` is unreachable on this edition — the P8 pin for issue #338', async () => {
+    // No server code changed for #338 and none may need to: the SE registers this handler for
+    // ALL verbs, so open-project (and any --project-carrying open) answers the same permanent
+    // named refusal. Pinned by name so the contract cannot drift silently.
+    expect(await serverEditionControlHandler({ verb: 'open-project' })).toEqual({
+      ok: false,
+      error: CONTROL_UNSUPPORTED_ERROR,
+      message: controlUnsupportedMessage('open-project')
+    })
+    // And on the wire: open-project is verified-only at the route (requiresVerified runs before
+    // the handler on every edition), so a token is presented — the edition answer is what a
+    // caller that got PAST identity hears.
+    const res = await control('open-project', 'n-op', 'text/plain', nodeAuthToken(SECRET, 'n-op'))
+    expect(res.status).toBe(400)
+    const text = await res.text()
+    expect(text).toContain(CONTROL_UNSUPPORTED_ERROR)
+    expect(text).toContain('do not retry')
+  })
+
   it('an unverified `send` is refused on IDENTITY first, and that refusal does not invite a retry either', async () => {
     const res = await control('send', 'n-msg2')
     expect(res.status).toBe(403)
