@@ -54,7 +54,7 @@ describe('cold-open pin (a): pendingLaunch survives the store↔live round-trip'
     live.data.initialCommand = 'claude "do the thing"'
     const state = flowToNodeStates([live])[0]
     expect(state).not.toHaveProperty('initialCommand')
-    expect((state as Record<string, unknown>).initialCommand).toBeUndefined()
+    expect((state as unknown as Record<string, unknown>).initialCommand).toBeUndefined()
   })
 })
 
