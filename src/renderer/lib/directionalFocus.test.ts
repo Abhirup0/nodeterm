@@ -41,6 +41,14 @@ describe('nextNodeInDirection, on an aligned grid', () => {
     expect(nextNodeInDirection(grid, 'f', 'down')).toBeNull()
   })
 
+  it('a node in the same row wins however far away it is', () => {
+    // Pins the TIER split rather than the cost formula. `offRow` is much closer by any distance
+    // measure, penalty included, but it shares no band with the origin. Collapse the two tiers and
+    // this test is what fails.
+    const nodes = [node('origin', 0, 0), node('inRow', 5000, 0), node('offRow', 300, 400)]
+    expect(nextNodeInDirection(nodes, 'origin', 'right')).toBe('inRow')
+  })
+
   it('prefers the nearer node in the same row over a nearer one diagonally', () => {
     // `f` is two columns away in a's row; `d` is one row down and dead below. Right must still
     // reach `b`, and nothing about the diagonal tier may outrank an in-row neighbour.
@@ -116,6 +124,30 @@ describe('nextNodeInDirection, the shapes it must not trip on', () => {
     expect(nextNodeInDirection(nodes, 'origin', 'right')).toBeNull()
   })
 
+  it('a half-pixel step along the axis is not a move', () => {
+    // Pins AXIS_EPSILON. Centers 0.5px apart are the same column as far as the user is concerned,
+    // and a grid snap routinely leaves exactly that. With the epsilon at 0 this node answers.
+    const nodes = [node('origin', 0, 0), node('nudged', 0.5, 0)]
+    expect(nextNodeInDirection(nodes, 'origin', 'right')).toBeNull()
+  })
+
+  it('a half-broken position is skipped too, not just a wholly broken one', () => {
+    // Pins the non-finite guard, which the both-axes-NaN case above does NOT: there, `advance` is
+    // itself NaN and the `> AXIS_EPSILON` test already rejects it. Here the move is horizontal and
+    // only y is broken, so `advance` is finite and passes, while `perp` and the overlap test are
+    // NaN. Without the guard this node's cost is NaN, it becomes `best`, and `real` cannot displace
+    // it.
+    // Both candidates are OFF the origin's row, so they land in the same tier and the comparison
+    // reaches `cost`, which is where the NaN does its damage. With `real` in the origin's row the
+    // tier would separate them first and the guard would look unnecessary.
+    const nodes: DirectionalNode[] = [
+      node('origin', 0, 0),
+      { id: 'halfbroken', position: { x: 300, y: NaN }, width: 200, height: 100 },
+      node('real', 600, 400)
+    ]
+    expect(nextNodeInDirection(nodes, 'origin', 'right')).toBe('real')
+  })
+
   it('an origin that is not on this canvas answers null, never a guess', () => {
     expect(nextNodeInDirection(grid, 'gone', 'right')).toBeNull()
     expect(nextNodeInDirection([], 'a', 'right')).toBeNull()
@@ -133,7 +165,10 @@ describe('nextNodeInDirection, across coordinate spaces', () => {
   const framed: DirectionalNode[] = [
     node('frame', 4000, 0, { type: 'group', width: 1000, height: 500 }),
     { id: 'inside', position: { x: 24, y: 60 }, width: 200, height: 100, parentId: 'frame' },
-    node('outside', 0, 60)
+    // At x=1000 this node is to the RIGHT of `inside`'s raw position (24) and to the LEFT of its
+    // absolute one (4024). That disagreement is what makes the assertions below discriminate; with
+    // `outside` at x=0 both readings put `inside` on the right and the test proves nothing.
+    node('outside', 1000, 60)
   ]
 
   it('a grouped node is where it really sits, not where its raw position says', () => {
