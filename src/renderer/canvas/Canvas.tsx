@@ -346,6 +346,8 @@ import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNoteP
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
+import { useReopenHistory } from '../state/reopenHistory'
+import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
@@ -4201,8 +4203,22 @@ export function Canvas() {
 
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
-    (ids: string[]) => {
+    (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
+      if (opts?.record !== false) {
+        const snapshots = nodesRef.current
+          .filter((n) => set.has(n.id))
+          .map((n) => snapshotNode(n, nodesRef.current))
+          .filter((s): s is NonNullable<typeof s> => s !== null)
+        if (snapshots.length) {
+          useReopenHistory.getState().push({
+            kind: 'nodes',
+            projectId: useProjects.getState().activeProjectId ?? '',
+            closedAt: Date.now(),
+            nodes: snapshots
+          })
+        }
+      }
       nodesRef.current.forEach((n) => {
         if (!set.has(n.id)) return
         // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
@@ -4312,7 +4328,7 @@ export function Canvas() {
       const loginIds = nodesRef.current
         .filter((n) => n.data.accountId === accountId && isAccountLoginNode(n.data))
         .map((n) => n.id)
-      if (loginIds.length) deleteNodes(loginIds)
+      if (loginIds.length) deleteNodes(loginIds, { record: false })
       setNodes((ns) =>
         ns.some((n) => n.data.accountId === accountId)
           ? ns.map((n) =>
@@ -5681,6 +5697,66 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  /** `app.reopenLastClosed` (Cmd+Shift+T): pops the shared close-history stack and reopens a
+   *  project tab or recreates a deleted node batch — whichever was closed more recently.
+   *  Skips stale entries (already reopened another way, or the project was permanently
+   *  deleted since) and keeps walking back until it finds a usable one or the stack empties. */
+  const reopenLastClosedCommand = useCallback((): boolean => {
+    for (;;) {
+      const entry = useReopenHistory.getState().popNext()
+      if (!entry) return false
+
+      if (entry.kind === 'project') {
+        const project = useProjects.getState().projects.find((p) => p.id === entry.projectId)
+        if (project?.closed) {
+          useProjects.getState().reopenProject(entry.projectId)
+          return true
+        }
+        continue
+      }
+
+      const project = useProjects.getState().projects.find((p) => p.id === entry.projectId)
+      if (!project) continue
+
+      const isActive = project.id === useProjects.getState().activeProjectId
+      const accounts = useSettings.getState().settings.claudeAccounts
+      const liveIds = new Set(
+        (isActive ? nodesRef.current : project.nodes).map((n) => n.id)
+      )
+      const created = entry.nodes
+        .map((snap) =>
+          recreateNodeFromSnapshot(snap, {
+            liveNodeIds: liveIds,
+            project,
+            resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts),
+            permissionModeFor: (agentId) => activePermissionMode(agentId)
+          })
+        )
+        .filter((n): n is CanvasNode => n !== null)
+      // A snapshot that recreated to nothing (e.g. a kind this feature doesn't cover, or an
+      // editor whose filePath is somehow missing) leaves this entry with nothing to do — treat
+      // it as stale rather than switching/reopening a project for an empty result.
+      if (!created.length) continue
+
+      if (isActive) {
+        setNodes((ns) => [...ns, ...created])
+        markDirty()
+      } else {
+        // Not on screen: write straight into the project's SERIALIZED nodes (the store, not
+        // React Flow) — the same mechanism canvas-control uses to create a node in a
+        // non-active project (Canvas.tsx:6499, :6540). The switch/reopen below then loads
+        // them through the ordinary active-project effect; there is no live array to race.
+        for (const node of created) {
+          useProjects.getState().applyNodeMutation(project.id, { op: 'upsert', node: flowToNodeStates([node])[0] })
+        }
+        void writeDisk()
+        if (project.closed) useProjects.getState().reopenProject(project.id)
+        else switchProject(project.id)
+      }
+      return true
+    }
+  }, [switchProject, setNodes, markDirty, writeDisk])
+
   // ---- global shortcuts ----
   // The three trailing gestures below are registry-LESS chords (design D2: declared gestures,
   // deliberately not remappable in this PR). The dispatcher hands them the RAW event with no
@@ -5796,6 +5872,7 @@ export function Canvas() {
       'panel.explorer': () => { showExplorer('toggle'); return true },
       'panel.sourceControl': () => { setScOpen((v) => !v); return true },
       'panel.sessions': () => { toggleSessionsPin(); return true },
+      'app.reopenLastClosed': reopenLastClosedCommand,
       'canvas.undo': () => { undo(); return true },
       'canvas.redo': () => { redo(); return true },
       'canvas.fitAll': () => { fitAll(); return true },
@@ -9736,6 +9813,7 @@ export function Canvas() {
     (id: string) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
+      useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
       disposeRelayTabForProject(id)
       store.closeProject(id)
       void writeDisk()

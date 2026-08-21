@@ -126,3 +126,26 @@ describe('the end-session confirm describes both things it does', () => {
     }
   })
 })
+
+describe('reopen-last-closed records and dispatches through the shared history stack', () => {
+  it('records a project close before hiding it', () => {
+    expect(CANVAS_SRC).toContain('useReopenHistory.getState().push({ kind: \'project\'')
+  })
+
+  it('records a node-delete batch, opting the account-removal cleanup out', () => {
+    expect(CANVAS_SRC).toContain("kind: 'nodes'")
+    expect(CANVAS_SRC).toContain('deleteNodes(loginIds, { record: false })')
+  })
+
+  it('registers the command in the dispatch map', () => {
+    expect(CANVAS_SRC).toContain("'app.reopenLastClosed': reopenLastClosedCommand")
+  })
+
+  it('never live-inserts into a non-active project — routes through applyNodeMutation instead', () => {
+    // The bug this pins: a synchronous setNodes() right after switchProject()/reopenProject()
+    // races the active-project load effect and silently loses the recreated nodes.
+    expect(CANVAS_SRC).toContain(
+      "useProjects.getState().applyNodeMutation(project.id, { op: 'upsert', node: flowToNodeStates([node])[0] })"
+    )
+  })
+})
