@@ -241,6 +241,7 @@ These are the defaults — every one of them is remappable in **Settings → Key
 | `⌘T` / `⌘⇧C` | New terminal / New Claude Code |
 | `⌘⇧B` | Toggle the kanban board |
 | `⌘W` | Close the selected node |
+| `⌘←` `⌘→` `⌘↑` `⌘↓` | Focus the node left / right / above / below (`Ctrl+Shift+arrow` off macOS) |
 | `⌘Z` / `⌘⇧Z` | Undo / Redo |
 | `⌘M` | Toggle markdown view (terminal / editor) |
 | Hold `⌘⌥` (`Ctrl+Alt`) | Dictate into the focused terminal |
