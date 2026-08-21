@@ -212,7 +212,8 @@ body,
 .tabbar button,
 .tabbar input,
 .tab,
-.tabbar__tabs {
+.tabbar__tabs,
+.tabbar__projects {
   -webkit-app-region: no-drag;
 }
 
@@ -236,7 +237,16 @@ body,
   letter-spacing: 0.2px;
 }
 
-/* Tabs as a single rounded pill of segments */
+/* Tabs as a single rounded pill of segments. Lives in `.tabbar__projects` with the +
+   as a sibling — the + used to be the last child of this scroller, so enough tabs
+   hid it with no scrollbar to say it was still there (issue #375). */
+.tabbar__projects {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0; /* shrink the pill, never shove the + off the window */
+}
 .tabbar__tabs {
   display: flex;
   align-items: center;
@@ -247,6 +257,8 @@ body,
   border: 1px solid var(--border);
   border-radius: 17px;
   overflow-x: auto;
+  flex: 1;
+  min-width: 0;
   /* Scrollable but without the native scrollbar (foreign-looking in a title-bar tab strip);
      trackpad swipe / wheel still scroll, and the active tab is scrolled into view. */
   scrollbar-width: none;
@@ -400,6 +412,7 @@ body,
   align-items: center;
   justify-content: center;
   align-self: center;
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   background: transparent;

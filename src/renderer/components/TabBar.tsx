@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { useProjects } from '../state/projects'
 import { useViewMode, viewFor } from '../state/viewMode'
@@ -181,6 +181,21 @@ export function TabBar({
     setEditingId(null)
   }
 
+  // Drop-at-end: the strip's empty area AND the pinned + (which used to live inside the
+  // scroller, so a drop on it already meant "after the last tab").
+  const onEndZoneDragOver = (e: DragEvent) => {
+    if (!dragId) return
+    e.preventDefault()
+    if (dropId !== '') setDropId('')
+  }
+  const onEndZoneDrop = (e: DragEvent) => {
+    if (!dragId) return
+    e.preventDefault()
+    onReorder(dragId, null)
+    setDragId(null)
+    setDropId(null)
+  }
+
   // The strip scrolls without a visible scrollbar (see .tabbar__tabs), so keep it navigable:
   // a plain mouse wheel scrolls it horizontally, and the active tab is brought into view.
   const tabsRef = useRef<HTMLDivElement>(null)
@@ -227,6 +242,10 @@ export function TabBar({
           <span className="brand__name">nodeterm</span>
         </div>
 
+        {/* Projects group: the pill scrolls; the + is a SIBLING so it cannot scroll away
+            with the tabs (issue #375). min-width:0 on this wrapper is what lets the pill
+            shrink instead of pushing the + off the window. */}
+        <div className="tabbar__projects">
         <div
           className="tabbar__tabs"
           ref={tabsRef}
@@ -235,19 +254,8 @@ export function TabBar({
             // already produce deltaX). Nothing above the canvas scrolls vertically anyway.
             if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
           }}
-          // The strip itself is the "drop at the end" zone (per-tab handlers stopPropagation).
-          onDragOver={(e) => {
-            if (!dragId) return
-            e.preventDefault()
-            if (dropId !== '') setDropId('')
-          }}
-          onDrop={(e) => {
-            if (!dragId) return
-            e.preventDefault()
-            onReorder(dragId, null)
-            setDragId(null)
-            setDropId(null)
-          }}
+          onDragOver={onEndZoneDragOver}
+          onDrop={onEndZoneDrop}
         >
           {projects.map((p) => {
             const active = p.id === activeId
@@ -380,8 +388,16 @@ export function TabBar({
               </div>
             )
           })}
-
-          <button className="tab__add" title="New project" onClick={onOpenWelcome}>
+        </div>
+          <button
+            type="button"
+            className="tab__add"
+            title="New project"
+            aria-label="New project"
+            onClick={onOpenWelcome}
+            onDragOver={onEndZoneDragOver}
+            onDrop={onEndZoneDrop}
+          >
             +
           </button>
         </div>
