@@ -57,6 +57,24 @@ const MAX_SAFE_LOD = Math.floor(Math.log2(2 * GUTTER_PX))
  */
 const NEAR_ONE_ZOOM = 0.9
 
+/**
+ * Whether cell origins are snapped to whole device pixels — see the VERT comment, which is where
+ * the reasoning lives.
+ *
+ * A module-level switch rather than a uniform the caller owns, because the two candidate answers
+ * are being COMPARED on a device we cannot measure from here: `window.__glyphgridSnap(false)`
+ * turns it off live, so one session can A/B the same terminal instead of running two builds.
+ */
+let cellSnap = true
+
+export function setCellSnap(on: boolean): void {
+  cellSnap = on
+}
+
+export function cellSnapEnabled(): boolean {
+  return cellSnap
+}
+
 /** The atlas sampler's two filters for a zoom, as names rather than GL enums so the rule can be
  *  tested without a GL context. */
 export function atlasFilterChoice(zoom: number): {
@@ -85,6 +103,8 @@ uniform vec2 uView;       // viewport size (screen px)
 uniform vec2 uGridOrigin; // grid top-left (world px)
 uniform vec2 uCell;       // cell size (world px)
 uniform float uCols;
+uniform float uDpr;       // device pixels per screen px — the grid uCellSnap rounds to
+uniform float uCellSnap;  // 1 = snap each cell's origin to a whole device pixel, 0 = don't
 uniform vec2 uAtlasCell;   // glyph uv EXTENT (u1-u0, v1-v0) — the exact device cell
 uniform vec2 uAtlasStride; // glyph uv PITCH — the whole-texel slot spacing (>= uAtlasCell)
 uniform float uAtlasGutter; // GUTTER_PX / atlasSizePx — the ink-free margin inside the pitch cell
@@ -98,8 +118,29 @@ void main() {
                    (corner == 2 || corner == 3 || corner == 5) ? 1.0 : 0.0);
   float col = mod(float(gl_InstanceID), uCols);
   float row = floor(float(gl_InstanceID) / uCols);
-  vec2 world = uGridOrigin + (vec2(col, row) + unit) * uCell;
-  vec2 screen = world * uZoom + uPan;
+  // The cell's ORIGIN and the corner's offset from it, kept apart on purpose — the snap below
+  // applies to the origin alone.
+  vec2 origin = (uGridOrigin + vec2(col, row) * uCell) * uZoom + uPan;
+  vec2 span = uCell * uZoom;
+  // SUB-TEXEL PHASE, which is what "shared looks softer than GPU mode" measured down to. A cell is
+  // a fractional number of device pixels wide (15.65 at dpr 2 for the default font), so column k
+  // starts 0.65k device pixels past a pixel boundary — a different fraction in every column. The
+  // atlas is sampled across that fraction, so a filter with any width (LINEAR above zoom 1, LINEAR
+  // over level 0 just below it) averages two texels in proportions that vary per column, and every
+  // glyph picks up up to half a texel of blur it did not need. Measured against GPU-per-terminal at
+  // 2.1x on 2026-08-10: edge ramps 5.1 device px against an ideal 2.1, i.e. ~1 texel of pure phase.
+  //
+  // GPU mode has the same fractional cell and does NOT pay for it, which is the whole asymmetry:
+  // xterm rasterizes every glyph into ONE canvas at 1:1 and the compositor resamples that canvas
+  // once, with a SINGLE phase for the whole terminal. Our resample is per cell, so the phase is
+  // per cell too.
+  //
+  // Rounding the origin to a whole device pixel makes the phase 0 in every column, which turns
+  // zoom 1 into an exact 1:1 blit and any other zoom into a uniform stretch. The SPAN is left
+  // fractional deliberately: rounding it too would quantise the advance and make a monospace row
+  // visibly uneven, and it buys nothing — the phase lives entirely in the origin.
+  vec2 snapped = mix(origin, floor(origin * uDpr + 0.5) / uDpr, uCellSnap);
+  vec2 screen = snapped + unit * span;
   vec2 ndc = vec2(screen.x / uView.x * 2.0 - 1.0, 1.0 - screen.y / uView.y * 2.0);
   gl_Position = vec4(ndc, 0.0, 1.0);
   float slot = float(aCell.x);
@@ -742,6 +783,8 @@ export function createWebgl2GL(canvas: HTMLCanvasElement): GlyphGL | null {
       gl.uniform2f(u('uPan'), cam.x, cam.y)
       gl.uniform1f(u('uZoom'), cam.zoom)
       gl.uniform2f(u('uView'), view[0], view[1])
+      gl.uniform1f(u('uDpr'), dpr)
+      gl.uniform1f(u('uCellSnap'), cellSnap ? 1 : 0)
       gl.uniform1f(u('uAtlasCols'), atlasCols)
       gl.uniform2f(u('uAtlasCell'), atlasCellUv[0], atlasCellUv[1])
       gl.uniform2f(u('uAtlasStride'), atlasStrideUv[0], atlasStrideUv[1])
