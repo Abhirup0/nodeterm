@@ -197,9 +197,12 @@ export function initStandingHost(
     p.session.close()
   }
 
-  function findByApprovalId(id: string | undefined): Pooled | null {
-    if (!id) return null
-    for (const p of pool) if (p.approvalId === id) return p
+  // The peer's box key is STABLE across the phone's reconnect churn while the per-attach id
+  // dies with each socket, so an Approve clicked mid-retry still lands when matched by pub
+  // (issue #372's race note). The id stays as the exact-match fallback.
+  function findPending(msg: { id?: string; pub?: string }): Pooled | null {
+    if (msg.pub) for (const p of pool) if (p.approvalPub && p.approvalPub === msg.pub) return p
+    if (msg.id) for (const p of pool) if (p.approvalId && p.approvalId === msg.id) return p
     return null
   }
 
@@ -269,12 +272,19 @@ export function initStandingHost(
     pooled.approvalId = randomUUID()
     if (pooled.approvalTimer) clearTimeout(pooled.approvalTimer)
     pooled.approvalTimer = setTimeout(() => {
+      const expiredId = pooled.approvalId
       pooled.approvalPub = null
       pooled.approvalId = null
       pooled.approvalTimer = null
+      // Tell the renderer the prompt died — without this the dialog outlives the id and
+      // Approve becomes a silent no-op (issue #372).
+      send(IPC.remoteHostPeerPendingCleared, { id: expiredId, pub })
     }, 120_000)
     pooled.approvalTimer.unref?.()
-    send(IPC.remoteHostPeerPending, { sas: s.sas(), id: pooled.approvalId })
+    // `pub` rides along so the renderer can key the dialog on the STABLE device identity: a
+    // retry-churning phone re-raises this event with a fresh id but the same pub + SAS, and
+    // the open dialog just updates in place instead of flashing.
+    send(IPC.remoteHostPeerPending, { sas: s.sas(), id: pooled.approvalId, pub })
   }
 
   async function connectOne(): Promise<void> {
@@ -388,8 +398,8 @@ export function initStandingHost(
 
   // Host human approved / rejected a pending phone (by its pending id). Shared with the interactive
   // host; the id scoping means each acts only on its own pending session.
-  ipcMain.on(IPC.remoteHostApprove, (_e, msg: { id?: string } = {}) => {
-    const p = findByApprovalId(msg?.id)
+  ipcMain.on(IPC.remoteHostApprove, (_e, msg: { id?: string; pub?: string } = {}) => {
+    const p = findPending(msg ?? {})
     if (!p) return
     // Pin the DEVICE (its stable box key), whether or not its session is still live — the phone's
     // browse socket may have already closed. Prefer the live peer's key, else the remembered one.
@@ -404,8 +414,8 @@ export function initStandingHost(
     }
     p.session.approve()
   })
-  ipcMain.on(IPC.remoteHostReject, (_e, msg: { id?: string } = {}) => {
-    const p = findByApprovalId(msg?.id)
+  ipcMain.on(IPC.remoteHostReject, (_e, msg: { id?: string; pub?: string } = {}) => {
+    const p = findPending(msg ?? {})
     if (!p) return
     removeFromPool(p) // drop this rejected session
     ensurePool()
