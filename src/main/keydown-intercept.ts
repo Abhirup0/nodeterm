@@ -225,6 +225,26 @@ export function policyStandsDown(
 }
 
 /**
+ * PURE. The CLOSE leg's extra stand-down, applied REGARDLESS of the policy (issue #383): off-mac,
+ * `node.close`'s default chord is Ctrl+W — which is readline's kill-word in every shell — so a
+ * keystroke typed into a FOCUSED terminal must reach the pty, not close the node/window out from
+ * under the user (with no reopen affordance once the last window goes). The narrow shape is the
+ * point:
+ * - **mac is untouched**: ⌘W is not a shell key, and closing the focused terminal's node with it
+ *   is the behavior mac users expect.
+ * - **Only the close leg**: ⌘/Ctrl+M and ⌘/Ctrl+0 stay claimed under app-first exactly as before —
+ *   this is not a policy change, it is one chord whose terminal meaning outranks its app meaning.
+ * - **Only while a terminal has focus** (the same fail-safe mirror the policy leg reads: a dead
+ *   report resolves to "not focused" = close works).
+ * Closing while typing off-mac: click the node's ×, or focus away first. Both the intercept branch
+ * and the Window ▸ Close menu item (whose role owns the Ctrl+W accelerator above the page) consult
+ * THIS predicate — one definition, two consumers, per the house rule.
+ */
+export function closeStandsDownInTerminal(isMac: boolean, terminalFocused: boolean): boolean {
+  return !isMac && terminalFocused
+}
+
+/**
  * PURE. The MENU leg's composed stand-down state: `index.ts`'s `syncMenuForStandDown` disables
  * `menuItemIdsToSuspend` for exactly as long as this is true.
  *
@@ -404,12 +424,20 @@ export function installKeydownIntercepts(
   getBindings: () => KeydownInterceptBindings,
   isMac: boolean,
   isRecording: () => boolean,
-  isStoodDown: () => boolean
+  isStoodDown: () => boolean,
+  // The close leg's OWN stand-down (`closeStandsDownInTerminal` — off-mac + terminal focused,
+  // policy-independent). Defaults to "never" so every pre-#383 caller and test is byte-identical.
+  isCloseSuspended: () => boolean = () => false
 ): void {
   win.webContents.on('before-input-event', (event, input) => {
     if (isRecording() || isStoodDown()) return
     const decision = keydownIntercept(input, getBindings(), isMac)
     if (!decision) return
+    // Checked AFTER resolution and only for close: the chord must fall through UNTOUCHED (no
+    // preventDefault) so it reaches the page → xterm → the pty as readline's kill-word. The menu
+    // leg is suspended in the same states (syncMenuForStandDown), so nothing above the page takes
+    // it either.
+    if (decision.action === 'close-node' && isCloseSuspended()) return
     event.preventDefault()
     if (decision.action) win.webContents.send(keydownInterceptChannel(decision.action))
   })

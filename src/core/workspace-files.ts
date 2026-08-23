@@ -7,7 +7,7 @@ import {
   stripSharedNodeExec,
   type LocalNodeExecMap
 } from '../shared/node-exec'
-import type { BridgeLink, CanvasNodeState, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
+import type { BridgeLink, CanvasNodeState, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
 import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
@@ -131,6 +131,9 @@ export interface IndexEntryV3 {
    * entry, so a second worktree of the same repo (a second entry) notifies again, on purpose.
    */
   capabilityAck?: import('../shared/project-capability-consent').CapabilityAckMap
+  /** MACHINE-LOCAL camera navigation history for a ref'd project. Same rule as `viewport`: this
+   *  user's "where was I" is not something a repo shares. See NavStop. */
+  breadcrumbs?: NavStop[]
   cwd?: string
   ssh?: Project['ssh']
   cache?: ProjectFileV1
@@ -281,6 +284,8 @@ export function fileToProject(
     defaultAccountId?: string
     /** This machine's clone-notice acknowledgments for this entry (never from the file). */
     capabilityAck?: import('../shared/project-capability-consent').CapabilityAckMap
+    /** This machine's navigation history for this entry (never from the file). */
+    breadcrumbs?: NavStop[]
     /** This machine's own exec values for these nodes (from the local index entry). A file read
      *  WITHOUT them — an adopted/cloned folder, a probe — gets the safe defaults, never the file's
      *  own `shell`/`ssh.extraArgs`. */
@@ -319,7 +324,10 @@ export function fileToProject(
     ...(base.closed ? { closed: true } : {}),
     // Machine-local, from the index entry ONLY: a file field named `capabilityAck` is a forgery
     // attempt (the shared file cannot carry this machine's consent) and is simply never read.
-    ...(base.capabilityAck ? { capabilityAck: base.capabilityAck } : {})
+    ...(base.capabilityAck ? { capabilityAck: base.capabilityAck } : {}),
+    // Machine-local, from the index entry ONLY: a file field named `breadcrumbs` is a forgery
+    // attempt (the shared file cannot carry this machine's navigation history) and is never read.
+    ...(base.breadcrumbs?.length ? { breadcrumbs: base.breadcrumbs } : {})
   }
 }
 
@@ -408,7 +416,8 @@ export function splitWorkspace(
       ...(p.defaultAccountId ? { defaultAccountId: p.defaultAccountId } : {}),
       // The clone-notice acknowledgment rides the machine-local entry, never the shared file
       // (projectToFile does not emit it — pinned by project-capability-consent.test.ts).
-      ...(p.capabilityAck ? { capabilityAck: p.capabilityAck } : {})
+      ...(p.capabilityAck ? { capabilityAck: p.capabilityAck } : {}),
+      ...(p.breadcrumbs?.length ? { breadcrumbs: p.breadcrumbs } : {})
     }
     if (p.unavailable) {
       // Placeholder (folder missing / server unreachable at load): its nodes:[] is not real
