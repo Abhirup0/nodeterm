@@ -1,3 +1,5 @@
+import fs from 'fs'
+import path from 'path'
 import { describe, expect, it } from 'vitest'
 import { IPC } from '../shared/ipc'
 import { MAIN_INTERCEPTED_COMMAND_IDS } from '../shared/keybindings'
@@ -15,7 +17,8 @@ import {
   resolveInterceptBindings,
   type KeydownInterceptBindings,
   type KeydownInterceptInput,
-  type KeydownInterceptTarget
+  type KeydownInterceptTarget,
+  closeStandsDownInTerminal
 } from './keydown-intercept'
 
 /**
@@ -84,7 +87,8 @@ function install(
   getBindings: () => KeydownInterceptBindings,
   isMac: boolean,
   isRecording: () => boolean,
-  isStoodDown: () => boolean
+  isStoodDown: () => boolean,
+  isCloseSuspended?: () => boolean
 ): { fire: (over?: Partial<KeydownInterceptInput>) => void; prevented: string[]; sent: string[] } {
   let handler:
     | ((event: { preventDefault(): void }, input: KeydownInterceptInput) => void)
@@ -101,7 +105,7 @@ function install(
       }
     }
   }
-  installKeydownIntercepts(win, getBindings, isMac, isRecording, isStoodDown)
+  installKeydownIntercepts(win, getBindings, isMac, isRecording, isStoodDown, isCloseSuspended)
   if (!handler) throw new Error('installKeydownIntercepts registered no before-input-event listener')
   const fire = (over: Partial<KeydownInterceptInput> = {}): void => {
     const i = input(over)
@@ -617,5 +621,63 @@ describe('menuStandsDown', () => {
         expect(menuStandsDown(true, policy, focused)).toBe(true)
       }
     }
+  })
+})
+
+/**
+ * Issue #383: off-mac, `node.close`'s default chord is Ctrl+W — readline's kill-word in every
+ * shell — so while a terminal has FOCUS the close leg stands down REGARDLESS of the policy, and
+ * the keystroke falls through untouched to the page → xterm → the pty. mac's ⌘W is not a shell
+ * key and is deliberately unaffected.
+ */
+describe('the close leg stands down inside a terminal, off-mac only (#383)', () => {
+  it('closeStandsDownInTerminal truth table', () => {
+    expect(closeStandsDownInTerminal(false, true)).toBe(true) // off-mac + terminal focused
+    expect(closeStandsDownInTerminal(false, false)).toBe(false) // off-mac, no terminal
+    expect(closeStandsDownInTerminal(true, true)).toBe(false) // mac untouched
+    expect(closeStandsDownInTerminal(true, false)).toBe(false)
+  })
+
+  it('a suspended close chord falls through UNTOUCHED; the other intercepts keep firing', () => {
+    let terminalFocused = true
+    const offMacDefaults = resolveInterceptBindings({}, false)
+    const seam = install(
+      () => offMacDefaults,
+      false,
+      () => false,
+      () => false, // app-first: the policy leg does NOT stand down — this is the narrow close rule
+      () => closeStandsDownInTerminal(false, terminalFocused)
+    )
+    seam.fire({ control: true, key: 'w', code: 'KeyW' })
+    // No preventDefault and no send: the chord must reach the pty as readline's kill-word.
+    expect(seam.prevented).toEqual([])
+    expect(seam.sent).toEqual([])
+    // The OTHER claimed chords are untouched by the close-only rule.
+    seam.fire({ control: true, key: 'm', code: 'KeyM' })
+    expect(seam.sent).toEqual([IPC.appToggleMarkdown])
+    // Focus leaves the terminal → close works again.
+    terminalFocused = false
+    seam.fire({ control: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([IPC.appToggleMarkdown, IPC.appCloseNode])
+  })
+
+  it('the default 6th parameter is "never suspended" — pre-#383 callers are byte-identical', () => {
+    const offMacDefaults = resolveInterceptBindings({}, false)
+    const seam = install(() => offMacDefaults, false, () => false, () => false)
+    seam.fire({ control: true, key: 'w', code: 'KeyW' })
+    expect(seam.sent).toEqual([IPC.appCloseNode])
+  })
+
+  it('index.ts wires the predicate into BOTH consumers (intercept thunk + close menu item)', () => {
+    // The menu leg cannot be pressed from here (it lives against a real Menu in index.ts), so the
+    // wiring is pinned at source level — the same discipline as hook-verified-parity.
+    const src = fs.readFileSync(path.join(__dirname, 'index.ts'), 'utf8')
+    expect(src).toContain('() => closeStandsDownInTerminal(interceptIsMac, terminalFocused)')
+    const menuSync = src.slice(
+      src.indexOf('function syncMenuForStandDown'),
+      src.indexOf('function createWindow')
+    )
+    expect(menuSync).toContain('closeStandsDownInTerminal(interceptIsMac, terminalFocused)')
+    expect(menuSync).toContain('MENU_ITEM_ID_CLOSE')
   })
 })
