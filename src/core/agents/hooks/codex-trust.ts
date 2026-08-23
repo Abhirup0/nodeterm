@@ -5,8 +5,8 @@
  * Self-contained: only node fs/path/crypto. We port just the functions our
  * installer needs (trust hashing/keys, byte-preserving config.toml edits) and
  * deliberately drop the project-trust path (upsertProjectTrustLevel) — out
- * of scope. `escapeRegex` and the tiny atomic-rename fs helpers are inlined
- * (rather than pulling in unrelated modules).
+ * of scope. `escapeRegex` is inlined (rather than pulling in unrelated
+ * modules); the rename itself goes through core/fs-atomic.ts.
  */
 import {
   copyFileSync,
@@ -14,12 +14,12 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
 import { dirname, join } from 'path'
 import { createHash, randomUUID } from 'crypto'
+import { renameAtomicSync } from '../../fs-atomic'
 
 // Why: Codex 0.129+ gates each hook on a `trusted_hash` entry in
 // ~/.codex/config.toml under [hooks.state."<key>"]. Without it the hook is in
@@ -517,9 +517,9 @@ function skipTomlLiteralString(line: string, startIndex: number): number {
 
 // Why: atomic-rename + .bak rotation — a half-written config.toml can brick a
 // user's Codex install, so write to tmp and rename. Random-suffix tmp name
-// avoids cross-process races on rapid reinstalls.
-// NOTE: the Windows-retry copy/rename helpers are inlined as plain
-// copyFileSync/renameSync here — POSIX (macOS) is the target.
+// avoids cross-process races on rapid reinstalls. The rename goes through
+// renameAtomicSync (core/fs-atomic.ts) so a Windows sharing violation retries
+// instead of losing the write; the .bak copy stays a plain copyFileSync.
 export function writeConfigAtomically(configPath: string, contents: string): void {
   const dir = dirname(configPath)
   mkdirSync(dir, { recursive: true })
@@ -533,7 +533,7 @@ export function writeConfigAtomically(configPath: string, contents: string): voi
       // a plain copyFileSync is sufficient.)
       copyFileSync(configPath, `${configPath}.bak`)
     }
-    renameSync(tmpPath, configPath)
+    renameAtomicSync(tmpPath, configPath)
     renamed = true
   } finally {
     if (!renamed && existsSync(tmpPath)) {

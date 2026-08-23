@@ -120,6 +120,7 @@ export type ControlVerb =
   | 'notify'
   | 'sticky'
   | 'browser'
+  | 'open-project'
 
 export interface ControlCommand {
   verb: ControlVerb
@@ -155,7 +156,12 @@ const VERBS: ControlVerb[] = [
   'reply',
   'notify',
   'sticky',
-  'browser'
+  'browser',
+  // Issue #338 PR 1: registered in the model (parse + gates + the grant ledger run in main), but
+  // INERT until PR 2 adds the renderer dispatch case — today the renderer's `default:` answers
+  // `unknown verb: open-project`. Deliberately undocumented in the skill/instructions bodies until
+  // PR 2 makes it do something (spec §8: docs land in the same PR that makes the verb reachable).
+  'open-project'
 ]
 
 /**
@@ -226,6 +232,11 @@ export function parseControlRequest(
   // enforced in hook-server before it ever reaches a handler) and refused by name on the Server
   // Edition (control-unsupported-on-this-edition), where there is no webview to drive.
   if (v === 'browser' && !args.node) return { error: 'browser: --node <id> is required' }
+  // `open-project` requires a cwd; everything else about the argument (absolute, exists, is a
+  // directory, resolved once) is validated in MAIN by `validateOpenProjectCwd`
+  // (src/main/project-grants.ts) — the caller's path is hostile input and this presence check is
+  // only the polite half.
+  if (v === 'open-project' && !args.cwd) return { error: 'open-project requires --cwd <abs-path>' }
   return { verb: v, args }
 }
 
@@ -273,15 +284,26 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
-    '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>]` — open N plain terminals.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open`,
+    '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
+    '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
     '  their work when it wakes — use it for "B needs what A produced" instead of polling. Only',
     `  status-reporting agent nodes (${statusAgents}, or custom agents based on them) may be waited on; a plain terminal never`,
-    '  reports finishing, so waiting on one is refused.',
+    '  reports finishing, so waiting on one is refused. `--project <id>` opens the node(s) in another',
+    '  project instead of yours. It accepts exactly two things — any other id is refused: your OWN',
+    '  project id, which behaves exactly as if the flag were omitted (a normal open, view switch',
+    '  included); or an id `open-project` returned to YOU in this session, which never switches the',
+    '  user\'s view. A session opened into a non-active project starts when the user next views that',
+    '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
+    '- `open-project --cwd </abs/path> [--name N] [--color C]` — register (or find) the project for a',
+    '  local directory; the reply carries `{ projectId, name, cwd, created }`. Idempotent: the same',
+    '  cwd always returns the same project, never a duplicate. Creating/adding asks the user to',
+    '  confirm (your first open of an already-registered project asks once too) and may be denied —',
+    '  a denial is final, do not retry it. Local only (refused from an SSH project), and it never',
+    '  focuses the new project\'s tab. The returned id is what `--project` accepts.',
     '- `show-image <path>` / `show-video <path>` — open a media file as a node.',
     '- `show-web (--url U | --file P.html | --html "<...>")` — open a web viewer.',
     '- `open-browser --url U` — open a navigable browser node.',
@@ -353,7 +375,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'context link (the linked-context CLI — see the get-linked-context section in your global',
     'agent instructions) and reconcile the streams into ONE synthesis yourself; a station you',
     'never read is one you cannot vouch for. The user merges when a stream is done;',
-    '`close-worktree --group <id>` releases a finished station.'
+    '`close-worktree --group <id>` releases a finished station.',
+    '',
+    'Multi-repo orchestration: one project per repository — `open-project --cwd <repo>` (the user',
+    'confirms once), then `open-agent --agent claude --project <returned id> --prompt "…"` per repo,',
+    'one repo at a time. Sessions in a non-active project start when the user views that project —',
+    'do not poll for them. v1 has no cross-project links: read a repo\'s results by opening a',
+    'reader agent inside that project and linking within it.'
   ].join('\n')
 }
 
@@ -518,9 +546,9 @@ value is allowed anywhere on the line, not only at the end.
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
-- \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>]\` — open N plain terminals (default 1).
-- \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>]\` — open N sessions of any agent CLI.
+- \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
+- \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
@@ -531,6 +559,21 @@ Verbs:
   plain terminal never reports finishing and the node would hang forever. Note the semantics:
   "idle" is the end of a station's TURN, not proof its whole job is done — right for a station
   given one self-contained prompt, wrong if you expect a long conversation first.
+  \`--project <id>\` opens the node(s) in another project instead of yours. It accepts exactly
+  two things — any other id is refused: your OWN project id, which behaves exactly as if the flag
+  were omitted (a normal open, view switch included); or an id \`open-project\` returned to YOU
+  in this session, which never switches the user's view. Defaults inside the target are the
+  TARGET project's (its cwd, its default account and permission mode). A session opened into a
+  non-active project starts when the user next views that project — do not poll for it; the reply
+  says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
+- \`open-project --cwd </abs/path> [--name N] [--color C]\` — register (or find) the project for a
+  local directory; the reply carries \`{ projectId, name, cwd, created }\`. Idempotent: the same
+  cwd always returns the same project, never a duplicate — and \`--name\`/\`--color\` apply only
+  when the project is created (an existing project's name is never changed; the reply tells you
+  its real name). Creating/adding asks the user to confirm (your first open of an
+  already-registered project asks once too) and may be denied — a denial is final, do not retry
+  it. Local only (refused from an SSH project), and it never focuses the new project's tab: use
+  the returned id with \`--project\` to open sessions there.
 - \`show-image <path>\` — open an image file as a node.
 - \`show-video <path>\` — open a video file as a player node.
 - \`show-web (--url U | --file P.html | --html "<...>")\` — open a web viewer (live URL or local HTML you wrote).
@@ -680,5 +723,16 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
    your synthesis, and say which findings you accepted and which you dismissed and why.
 7. Hand back: the user merges from the group's chip (never merge for them); release a finished
    station with \`close-worktree --group <id>\` (unbind keeps the directory).
+
+## Multi-repo orchestration (one project per repository)
+
+When the workstreams live in DIFFERENT repositories, give each repo its own project instead of
+piling every session onto your canvas: \`open-project --cwd <repo>\` (the user confirms once;
+idempotent thereafter), then \`open-agent --agent claude --project <returned id> --prompt
+"<task>"\` — one repo at a time. With a RETURNED id neither verb moves the user's view, and a
+session opened into a non-active project starts when the user next views that project — do not
+poll for it. v1 has no
+cross-project links: read a repo's results by opening a reader agent inside that project and
+linking within it.
 `
 }

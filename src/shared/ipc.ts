@@ -12,6 +12,8 @@ export const IPC = {
    *  on every canvas, so co-viewers get the restart notice (`ptyRecycled`) instead of the
    *  permanent, un-respawnable `ptyClosed`. */
   ptyRecycle: 'pty:recycle',
+  /** Desktop-only awaited recycle path used after an explicit destructive-action confirmation. */
+  ptyRecycleConfirmed: 'pty:recycle-confirmed',
   ptyGenerateName: 'pty:generate-name',
   ptyGenerateGroupName: 'pty:generate-group-name',
   ptyCapture: 'pty:capture',

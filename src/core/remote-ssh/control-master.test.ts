@@ -390,11 +390,21 @@ describe('hook forwarding', () => {
     ])
     expect(remoteHookEnvArgs('/ep', 'n1', '1')).not.toContain('NODETERM_CANVAS_CONTROL=1')
   })
-  it('remoteEndpointFileContents writes SOCK/TOKEN/VERSION and the remote token dir', () => {
+  it('remoteEndpointFileContents writes SOCK/TOKEN/VERSION and the remote token dir, each quoted', () => {
     expect(remoteEndpointFileContents('/r.sock', 'tok', '2', '/home/u/.nodeterm/node-tokens')).toBe(
-      'NODETERM_HOOK_SOCK=/r.sock\nNODETERM_HOOK_TOKEN=tok\nNODETERM_HOOK_VERSION=2\n' +
-        'NODETERM_NODE_TOKEN_DIR=/home/u/.nodeterm/node-tokens\n'
+      "NODETERM_HOOK_SOCK='/r.sock'\nNODETERM_HOOK_TOKEN='tok'\nNODETERM_HOOK_VERSION='2'\n" +
+        "NODETERM_NODE_TOKEN_DIR='/home/u/.nodeterm/node-tokens'\n"
     )
+  })
+  it('remoteEndpointFileContents quotes a spaced remote path so /bin/sh sources it cleanly', () => {
+    const body = remoteEndpointFileContents(
+      '/home/u/App Support/hook.sock',
+      'tok',
+      '2',
+      '/home/u/App Support/node-tokens'
+    )
+    expect(body).toContain("NODETERM_HOOK_SOCK='/home/u/App Support/hook.sock'\n")
+    expect(body).toContain("NODETERM_NODE_TOKEN_DIR='/home/u/App Support/node-tokens'\n")
   })
 })
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Github, Image as ImageIcon, RotateCcw, Shapes, Smile } from 'lucide-react'
 import {
   LUCIDE_ICON_IDS,
   sanitizeProjectIcon,
@@ -14,6 +15,11 @@ import EmojiPickerLazy from './EmojiPickerLazy'
  * through `sanitizeProjectIcon` before it leaves — the same boundary the stored value crosses on
  * load — so the picker can only ever emit a value the rest of the app will accept, and Reset emits
  * `undefined` (back to the colour monogram).
+ *
+ * Visually this mirrors Orca's RepositoryIconPicker: a bordered glyph box beside a two-line
+ * label (name of the source + a Reset), rounded-square colour swatches, and underline (line) tabs
+ * that each carry a small lucide glyph. The markup is nodeterm's own design vocabulary (CSS-var
+ * tokens, `cn`), not shadcn primitives.
  *
  * The component is presentational: it owns only which tab is open and the upload error. Persistence
  * (setProjectIcon / setProjectColor + the workspace-dirty commit) lives in the caller via `onIcon`
@@ -39,6 +45,19 @@ export interface ProjectIconPickerProps {
 }
 
 type Tab = 'avatar' | 'emoji' | 'lucide' | 'upload'
+
+/** Human label for whatever the project currently wears — the header subtitle, à la Orca. */
+function currentIconLabel(icon: ProjectIcon | undefined): string {
+  if (!icon) return 'Default (colour monogram)'
+  if (icon.type === 'emoji') return `${icon.emoji} emoji`
+  if (icon.type === 'lucide') {
+    const pretty = icon.name.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+    return `${pretty} glyph`
+  }
+  if (icon.source === 'github') return 'GitHub avatar'
+  if (icon.source === 'favicon') return 'Website icon'
+  return 'Uploaded image'
+}
 
 export function ProjectIconPicker({
   projectId,
@@ -129,11 +148,11 @@ export function ProjectIconPicker({
   // (so a transient resolve failure never strands the user without the tab).
   const showAvatar = avatarAvailable || hasGithubIcon
 
-  const TABS: { id: Tab; label: string; disabled?: boolean }[] = [
-    { id: 'avatar', label: 'Avatar', disabled: !showAvatar },
-    { id: 'emoji', label: 'Emoji' },
-    { id: 'lucide', label: 'Lucide' },
-    { id: 'upload', label: 'Upload' }
+  const TABS: { id: Tab; label: string; icon: typeof Github; disabled?: boolean }[] = [
+    { id: 'avatar', label: 'Avatar', icon: Github, disabled: !showAvatar },
+    { id: 'emoji', label: 'Emoji', icon: Smile },
+    { id: 'lucide', label: 'Lucide', icon: Shapes },
+    { id: 'upload', label: 'Upload', icon: ImageIcon }
   ]
 
   const onUpload = async (): Promise<void> => {
@@ -148,18 +167,24 @@ export function ProjectIconPicker({
   }
 
   return (
-    <div className="flex flex-col gap-3" data-project-icon-picker={projectId}>
-      {/* Preview + Reset */}
+    <div className="flex w-full flex-col gap-4" data-project-icon-picker={projectId}>
+      {/* Header: glyph box + source label + Reset (Orca's identity row). */}
       <div className="flex items-center gap-3">
         <span
-          className="flex size-11 items-center justify-center overflow-hidden rounded-xl bg-black/10 text-[18px] font-semibold text-white"
+          className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/12 bg-white/5"
           aria-label="Current icon"
         >
-          <ProjectGlyph icon={icon} color={color} name={name} size={28} />
+          <ProjectGlyph icon={icon} color={color} name={name} size={26} />
         </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-semibold text-text">Icon</div>
+          <div className="mt-0.5 truncate text-[12px] text-muted" title={currentIconLabel(icon)}>
+            {currentIconLabel(icon)}
+          </div>
+        </div>
         <button
           type="button"
-          className="rounded-lg border border-white/15 px-2.5 py-1 text-[13px] text-muted transition-colors hover:text-text disabled:opacity-40"
+          className="flex items-center gap-1.5 rounded-lg border border-white/15 px-2.5 py-1 text-[13px] text-muted transition-colors hover:text-text disabled:opacity-40"
           onClick={() => {
             setUploadError(undefined)
             onIcon(undefined)
@@ -167,126 +192,147 @@ export function ProjectIconPicker({
           disabled={!icon}
           aria-label="Remove icon"
         >
+          <RotateCcw className="size-3.5" />
           Reset
         </button>
       </div>
 
-      {/* Colour swatches — the accent for this project's tab and monogram. */}
-      <div className="flex items-center gap-1.5" role="group" aria-label="Color">
-        {colors.map((c) => (
-          <button
-            key={c}
-            type="button"
-            data-project-color={c}
-            aria-label={`Color ${c}`}
-            aria-pressed={color === c}
-            style={{ background: c }}
-            className={cn(
-              'size-5 rounded-full border-0 outline-none transition-transform hover:scale-110',
-              color === c && 'ring-2 ring-white/80 ring-offset-2 ring-offset-transparent'
-            )}
-            onClick={() => onColor(c)}
-          />
-        ))}
+      {/* Colour swatches — the accent for this project's tab and monogram. Rounded squares (Orca). */}
+      <div className="flex flex-col gap-1.5">
+        <div className="text-[13px] font-semibold text-text">Color</div>
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Color">
+          {colors.map((c) => (
+            <button
+              key={c}
+              type="button"
+              data-project-color={c}
+              aria-label={`Color ${c}`}
+              aria-pressed={color === c}
+              style={{ background: c }}
+              className={cn(
+                'size-7 rounded-[6px] border-0 outline-none transition-transform',
+                color === c
+                  ? 'ring-2 ring-white/85 ring-offset-2 ring-offset-transparent'
+                  : 'hover:scale-110'
+              )}
+              onClick={() => onColor(c)}
+            />
+          ))}
+        </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-1" role="tablist" aria-label="Icon source">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.id}
-            disabled={t.disabled}
-            className={cn(
-              'rounded-lg px-2.5 py-1 text-[13px] transition-colors disabled:opacity-40',
-              tab === t.id ? 'bg-white/15 text-text' : 'text-muted hover:text-text'
-            )}
-            onClick={() => t.disabled || setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      {/* Tabs — underline (line) style with a per-source glyph. */}
+      <div className="flex flex-col gap-3">
+        <div
+          className="flex items-center gap-1 border-b border-white/10"
+          role="tablist"
+          aria-label="Icon source"
+        >
+          {TABS.map((t) => {
+            const Icon = t.icon
+            const selected = tab === t.id
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                disabled={t.disabled}
+                className={cn(
+                  'flex items-center gap-1.5 border-b-2 px-2.5 pb-1.5 text-[13px] transition-colors disabled:opacity-40',
+                  selected
+                    ? 'border-[color:var(--accent)] text-text'
+                    : 'border-transparent text-muted hover:text-text'
+                )}
+                onClick={() => t.disabled || setTab(t.id)}
+              >
+                <Icon className="size-3.5" />
+                {t.label}
+              </button>
+            )
+          })}
+        </div>
 
-      {/* Panel */}
-      <div className="rounded-xl border border-white/10 p-2" role="tabpanel">
-        {tab === 'avatar' ? (
-          <div className="flex flex-col gap-2 px-1 py-2">
-            <button
-              type="button"
-              className="w-fit rounded-lg border border-white/15 px-3 py-1.5 text-[13px] text-text transition-colors hover:bg-white/10"
-              onClick={() => void onUseGithubAvatar()}
-            >
-              Use GitHub avatar
-            </button>
-            <p className="text-[12px] leading-relaxed text-muted">
-              Uses the avatar of the GitHub owner this project&apos;s remote points to, shared with
-              the repo like the name and colour. It refreshes each time you open this panel.
-            </p>
-            {avatarError ? (
-              <p role="alert" className="text-[12px] text-[color:var(--warn)]">
-                {avatarError}
+        {/* Panel */}
+        <div role="tabpanel">
+          {tab === 'avatar' ? (
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-[color:var(--accent)] px-3 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
+                onClick={() => void onUseGithubAvatar()}
+              >
+                <Github className="size-4" />
+                Use GitHub avatar
+              </button>
+              <p className="text-[12px] leading-relaxed text-muted">
+                Uses the avatar of the GitHub owner this project&apos;s remote points to, shared with
+                the repo like the name and colour. It refreshes each time you open this panel.
               </p>
-            ) : null}
-          </div>
-        ) : null}
+              {avatarError ? (
+                <p role="alert" className="text-[12px] text-[color:var(--warn)]">
+                  {avatarError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
-        {tab === 'emoji' ? (
-          <EmojiPickerLazy dark={dark} onEmoji={(emoji) => commit({ type: 'emoji', emoji })} />
-        ) : null}
+          {tab === 'emoji' ? (
+            <EmojiPickerLazy dark={dark} onEmoji={(emoji) => commit({ type: 'emoji', emoji })} />
+          ) : null}
 
-        {tab === 'lucide' ? (
-          <div
-            className="grid gap-1"
-            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(2.25rem, 1fr))' }}
-          >
-            {LUCIDE_ICON_IDS.map((n) => {
-              const selected = icon?.type === 'lucide' && icon.name === n
-              return (
-                <button
-                  key={n}
-                  type="button"
-                  data-lucide-id={n}
-                  aria-label={n}
-                  aria-pressed={selected}
-                  title={n}
-                  className={cn(
-                    'flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:bg-white/10 hover:text-text',
-                    selected && 'bg-white/15 text-text'
-                  )}
-                  onClick={() => commit({ type: 'lucide', name: n })}
-                >
-                  <span className="flex size-5 items-center justify-center">
-                    <ProjectGlyph icon={{ type: 'lucide', name: n }} color={color} name={name} size={20} />
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        ) : null}
-
-        {tab === 'upload' ? (
-          <div className="flex flex-col gap-2 px-1 py-2">
-            <button
-              type="button"
-              className="w-fit rounded-lg border border-white/15 px-3 py-1.5 text-[13px] text-text transition-colors hover:bg-white/10"
-              onClick={() => void onUpload()}
+          {tab === 'lucide' ? (
+            <div
+              className="grid gap-1.5"
+              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(2.25rem, 1fr))' }}
             >
-              Choose image…
-            </button>
-            <p className="text-[12px] leading-relaxed text-muted">
-              The image is resized and re-encoded as a small PNG, then shared with the repo like the
-              name and colour.
-            </p>
-            {uploadError ? (
-              <p role="alert" className="text-[12px] text-[color:var(--warn)]">
-                {uploadError}
+              {LUCIDE_ICON_IDS.map((n) => {
+                const selected = icon?.type === 'lucide' && icon.name === n
+                return (
+                  <button
+                    key={n}
+                    type="button"
+                    data-lucide-id={n}
+                    aria-label={n}
+                    aria-pressed={selected}
+                    title={n}
+                    className={cn(
+                      'flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:bg-white/10 hover:text-text',
+                      selected && 'bg-white/15 text-text ring-1 ring-[color:var(--accent)]'
+                    )}
+                    onClick={() => commit({ type: 'lucide', name: n })}
+                  >
+                    <span className="flex size-5 items-center justify-center">
+                      <ProjectGlyph icon={{ type: 'lucide', name: n }} color={color} name={name} size={20} />
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
+
+          {tab === 'upload' ? (
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                className="flex w-fit items-center gap-2 rounded-lg border border-white/15 px-3 py-1.5 text-[13px] text-text transition-colors hover:bg-white/10"
+                onClick={() => void onUpload()}
+              >
+                <ImageIcon className="size-4" />
+                Choose image…
+              </button>
+              <p className="text-[12px] leading-relaxed text-muted">
+                The image is resized and re-encoded as a small PNG, then shared with the repo like the
+                name and colour.
               </p>
-            ) : null}
-          </div>
-        ) : null}
+              {uploadError ? (
+                <p role="alert" className="text-[12px] text-[color:var(--warn)]">
+                  {uploadError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )

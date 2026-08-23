@@ -27,6 +27,8 @@ import {
   readThreadAt,
   relayControlPost,
   relayThreadReservationKey,
+  hookEndpointOptions,
+  readHookEndpointEnv,
   relayThreadResponseError,
   resolveForeignThreadAt,
   retargetRelayResumeByPath,
@@ -35,6 +37,7 @@ import {
   tryReserveRelayThread,
   type RelayThreadRequest
 } from './codex-relay-daemon'
+import { posixQuote } from '../shared/ssh'
 
 async function fakeCodexServer(
   socketPath: string,
@@ -898,4 +901,78 @@ describe('relay self-spawn + token transport (probe U6, GC 6 argv-spy)', () => {
       rmSync(out, { force: true })
     }
   }, 30_000)
+})
+
+// The endpoint file's values are posixQuote'd since #351 (a spaced macOS path must source
+// cleanly under /bin/sh). The daemon's TS-side reader must UNQUOTE them, or
+// `Number("'54321'")` is NaN and `"'/sock'".startsWith('/')` is false — hookEndpointOptions
+// then returns null and every authorize/observed/catalog call dies "endpoint unavailable".
+describe('readHookEndpointEnv + hookEndpointOptions', () => {
+  const writeEndpoint = (dir: string, lines: string) => {
+    const f = path.join(dir, 'hook-endpoint.env')
+    writeFileSync(f, lines)
+    return f
+  }
+
+  it('parses the QUOTED (post-#351) file: TCP port', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nt-relay-ep-'))
+    try {
+      const f = writeEndpoint(
+        dir,
+        `NODETERM_HOOK_PORT=${posixQuote('54321')}\n` +
+          `NODETERM_HOOK_TOKEN=${posixQuote('tok-abc')}\n` +
+          `NODETERM_HOOK_VERSION=${posixQuote('2')}\n` +
+          `NODETERM_NODE_TOKEN_DIR=${posixQuote('/Users/x/Library/Application Support/node-terminal/node-tokens')}\n`
+      )
+      const env = readHookEndpointEnv(f)
+      expect(env.NODETERM_HOOK_TOKEN).toBe('tok-abc')
+      expect(env.NODETERM_NODE_TOKEN_DIR).toBe(
+        '/Users/x/Library/Application Support/node-terminal/node-tokens'
+      )
+      expect(hookEndpointOptions(env, '/codex-thread/authorize')).toEqual({
+        hostname: '127.0.0.1',
+        port: 54321,
+        path: '/codex-thread/authorize'
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('parses the QUOTED (post-#351) file: unix socket with a spaced path', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nt-relay-ep-'))
+    try {
+      const f = writeEndpoint(
+        dir,
+        `NODETERM_HOOK_SOCK=${posixQuote('/home/u/App Support/hook.sock')}\n` +
+          `NODETERM_HOOK_TOKEN=${posixQuote('tok-abc')}\n`
+      )
+      const env = readHookEndpointEnv(f)
+      expect(hookEndpointOptions(env, '/codex-thread/observed')).toEqual({
+        socketPath: '/home/u/App Support/hook.sock',
+        path: '/codex-thread/observed'
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('still parses a LEGACY unquoted file (pre-fix build; tmux sessions outlive the app)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'nt-relay-ep-'))
+    try {
+      const f = writeEndpoint(
+        dir,
+        'NODETERM_HOOK_PORT=54321\nNODETERM_HOOK_TOKEN=tok-abc\nNODETERM_NODE_TOKEN_DIR=/home/u/.nodeterm/node-tokens\n'
+      )
+      const env = readHookEndpointEnv(f)
+      expect(env.NODETERM_HOOK_TOKEN).toBe('tok-abc')
+      expect(hookEndpointOptions(env, '/x')).toEqual({
+        hostname: '127.0.0.1',
+        port: 54321,
+        path: '/x'
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

@@ -101,7 +101,24 @@ export function routeControlSource(
  * project's serialized nodes (`applyNodeMutation`, the same path peer mutations take) when that
  * project is not the active one; the live canvas handles it when it is.
  */
-const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set(['list', 'send', 'reply', 'sticky'])
+/*
+ * `open-project` (issue #338) is store-answered for the G5 reason in its sharpest form: its
+ * headline caller is a background orchestrator registering one repo after another, and routing is
+ * by SOURCE — a live requirement would yank the human's view to the CALLER's project on every
+ * registration (and clear its unread badge via `setActive` on the way). The verb acts on the
+ * projects STORE through the non-activating `registerProject`, and its consent dialog is
+ * app-global (`ConfirmState` overlays the window), so no live canvas is needed at either end.
+ * Canvas.tsx handles it BEFORE the source-routing machinery — this declaration and that
+ * early-exit are the same decision stated once each (spec §2.3, P6), pinned by
+ * `controlRouting.test.ts`.
+ */
+const STORE_ANSWERED_VERBS: ReadonlySet<string> = new Set([
+  'list',
+  'send',
+  'reply',
+  'sticky',
+  'open-project'
+])
 
 /**
  * Does this verb have to run against the LIVE canvas? Everything that creates, moves, writes to or

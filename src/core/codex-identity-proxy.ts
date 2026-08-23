@@ -33,12 +33,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
 import path from 'path'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { renameAtomicSync } from './fs-atomic'
 import { platform } from './platform'
 import { ACCOUNT_ID_RE, isSafeAccountId } from '../shared/codex-account'
 
@@ -402,7 +402,7 @@ export function writeCodexThreadIdentity(
         mode: 0o600
       }
     )
-    renameSync(tmp, file)
+    renameAtomicSync(tmp, file)
     renamed = true
   } finally {
     if (!renamed) {
@@ -602,7 +602,20 @@ nt_preflight() {
   # <CODEX_HOME>/packages/standalone/current/codex". Caps normally keeps that second case away from
   # here entirely, but the pane resolves CODEX_HOME from its OWN environment (§8.5) and an install
   # can be removed after boot, so the launcher still has to be able to say which it hit.
-  if ${appServerStartCommand}; then
+  #
+  # The app-server is a PERSISTENT DAEMON: the FIRST codex node to reach here starts it and every
+  # later node reuses it. Start it in a SUBSHELL with THIS node's per-pane NODETERM_* scrubbed, or
+  # the daemon — and every tool shell it later spawns for EVERY node — would inherit this one node's
+  # NODETERM_NODE_ID. The thread → node resolver (codex-thread-identity-sh.ts) only recovers the
+  # right node when a tool shell has NO NODETERM_NODE_ID; a leaked value makes its guard no-op and
+  # silently collapses every codex node's identity onto whichever node started the daemon, so
+  # Project B's codex lists Project A's links and routes to A (#350). NODETERM_CODEX_ACCOUNT_ID is
+  # the ONE var deliberately KEPT: one daemon serves one account, and the resolver reads it from the
+  # daemon's env to pick the record scope. The unset runs BEFORE the (test-injected) start command.
+  if ( unset NODETERM_NODE_ID NODETERM_HOOK_ENDPOINT NODETERM_HOOK_PORT NODETERM_HOOK_TOKEN \\
+    NODETERM_HOOK_SOCK NODETERM_AGENT_ID NODETERM_CANVAS_CONTROL NODETERM_NODE_TOKEN_DIR \\
+    NODETERM_PERM_WAIT_SECS
+    ${appServerStartCommand} ); then
     return 0
   fi
   if [ -x "\${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/codex" ]; then

@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { renameAtomic, tempNameFor } from '../core/fs-atomic'
 import type { GitHubSecretStore } from '../core/github/credentials'
 import type { SecretStore } from '../core/secret-store'
 import type { GitHubSecretAvailability } from '../shared/github-issues'
@@ -29,17 +30,10 @@ function validToken(token: string): boolean {
   return token.trim() === token && token.length > 0 && token.length <= 4096 && !/[\r\n\0]/.test(token)
 }
 
-/** Paired with `process.pid` in the temp name below: the counter makes a name unique WITHIN this
- *  process, the pid makes it unique ACROSS processes (it restarts at 0 in every new one — and
- *  `NT_MULTI=1` without `NT_USER_DATA` skips the single-instance lock while keeping the default
- *  userData dir, so two instances can share this file, see src/main/index.ts). Same scheme as
- *  agent-status-mirror's local write. */
-let writeSeq = 0
-
 /**
  * Remove temp files no writer in THIS process owns: the legacy fixed `<file>.tmp` (written by
- * builds before per-call names) and any `<file>.<pid>.<seq>.tmp` whose pid is not ours. Best
- * effort — a failure here must never break a save.
+ * builds before per-call names) and any `<file>.<pid>.<seq>[.<uuid>].tmp` whose pid is not ours.
+ * Best effort — a failure here must never break a save.
  *
  * The token file is not config: an orphan here is a live PAT at 0600 that nothing will ever
  * overwrite, because a unique name is never written twice. So it has to be collected rather than
@@ -55,8 +49,10 @@ async function sweepStaleTmp(target: string): Promise<void> {
     const base = path.basename(target)
     for (const entry of await fs.readdir(directory)) {
       if (!entry.startsWith(base) || !entry.endsWith('.tmp')) continue
-      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>'
-      const owner = /^\.(\d+)\.\d+$/.exec(middle)?.[1]
+      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>[.<uuid>]'
+      const owner =
+        /^\.(\d+)\.\d+(?:\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?$/
+          .exec(middle)?.[1]
       if (middle === '' || (owner && owner !== String(process.pid))) {
         await fs.rm(path.join(directory, entry), { force: true }).catch(() => undefined)
       }
@@ -74,11 +70,11 @@ async function atomicWrite(file: string, document: TokenDocument): Promise<void>
   // userDataDir (every process's counter starts at 0, hence the pid) and a crash between
   // tmp-write and rename. With a shared name one writer's rename publishes the other's
   // half-written PAT, or moves the file out from under it entirely and the loser's rename fails.
-  const temporary = `${file}.${process.pid}.${++writeSeq}.tmp`
+  const temporary = tempNameFor(file)
   try {
     await fs.writeFile(temporary, JSON.stringify(document), { encoding: 'utf-8', mode: 0o600 })
     await fs.chmod(temporary, 0o600)
-    await fs.rename(temporary, file)
+    await renameAtomic(temporary, file)
   } catch (error) {
     // A failed write MUST remove its own temp, because here a leaked temp IS a leaked PAT: a
     // unique name is never written again, so only this cleanup (or a later run's sweep above, once

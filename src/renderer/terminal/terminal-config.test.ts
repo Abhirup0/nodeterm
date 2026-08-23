@@ -528,6 +528,43 @@ describe('terminalKeyAction', () => {
     expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), false)).toBe('swallow')
   })
 
+  // `registryOwns` (decided by the caller via `terminalChordBubbles`): the window dispatcher will
+  // claim this chord, so xterm must neither process nor cancel it — 'bubble' = return false with
+  // NO preventDefault. Deliberately the LAST branch: chords with a local owner keep it.
+  it('bubbles a registry-owned keydown that nothing local owns', () => {
+    const arrow = { key: 'ArrowLeft', code: 'ArrowLeft', ctrlKey: true, shiftKey: true }
+    expect(terminalKeyAction(ev(arrow), false, false, true)).toBe('bubble')
+    // default false = byte-identical pre-feature behavior
+    expect(terminalKeyAction(ev(arrow), false)).toBe('pass')
+    expect(terminalKeyAction(ev(arrow), false, false, false)).toBe('pass')
+  })
+
+  it('never bubbles a chord a local owner already claims, and never on keyup', () => {
+    // copy chord (selection) beats bubble
+    expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), true, false, true)).toBe('copy')
+    // copy chord (no selection) still swallows — SIGINT must never reach the pty
+    expect(terminalKeyAction(ev({ ctrlKey: true, shiftKey: true }), false, false, true)).toBe(
+      'swallow'
+    )
+    // shift-enter keeps its remap
+    expect(
+      terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true }), false, false, true)
+    ).toBe('shift-enter')
+    // project-jump swallow wins over bubble
+    expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', metaKey: true }), false, true, true)).toBe(
+      'swallow'
+    )
+    // keyup never bubbles — the dispatcher only acts on keydown
+    expect(
+      terminalKeyAction(
+        ev({ key: 'ArrowLeft', code: 'ArrowLeft', ctrlKey: true, shiftKey: true, type: 'keyup' }),
+        false,
+        false,
+        true
+      )
+    ).toBe('pass')
+  })
+
   it('exports the ESC+CR sequence', () => {
     expect(SHIFT_ENTER_SEQ).toBe('\x1b\r')
   })

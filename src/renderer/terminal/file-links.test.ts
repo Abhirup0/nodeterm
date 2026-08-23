@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  makeDirListingLookup,
   matchFileTokens,
   matchUrlTokens,
   paragraphContaining,
@@ -56,6 +57,26 @@ describe('resolveFileToken', () => {
     expect(resolveFileToken('../x.ts', '~/proj/sub')).toBe('~/proj/x.ts')
     expect(resolveFileToken('../../../x.ts', '~/proj')).toBeNull() // .. may not pop the ~
     expect(resolveFileToken('/abs/x.ts', '~/proj')).toBe('/abs/x.ts') // absolutes unaffected
+  })
+})
+
+describe('POSIX existence lookup', () => {
+  it('keeps a backslash inside the filename and matches case-sensitively', async () => {
+    const listed: string[] = []
+    const lookup = makeDirListingLookup(async (dir) => {
+      listed.push(dir)
+      return [
+        { name: String.raw`name\part.ts`, dir: false },
+        { name: 'CASE.ts', dir: false }
+      ]
+    })
+
+    await expect(lookup(String.raw`/repo/name\part.ts`)).resolves.toEqual({
+      exists: true,
+      dir: false
+    })
+    await expect(lookup('/repo/case.ts')).resolves.toEqual({ exists: false, dir: false })
+    expect(listed).toEqual(['/repo'])
   })
 })
 

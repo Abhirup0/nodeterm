@@ -66,6 +66,26 @@ need it too, and wire it in the same change.
 
 ## House rules
 
+- **Anything path-shaped: Windows is a delivery target.** Most of this was written on
+  macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
+  `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use
+  `path.basename`/`join`/`sep`, publish files with `renameAtomic`, and write at least one test with
+  a real `C:\`-shaped input. Guards enforce some of this and will fail your PR. In the Server
+  Edition and relay tabs, the browser's OS is NOT the filesystem's OS: obtain the dialect from the
+  core that owns the files, and keep an unobserved host unknown rather than guessing. Conversely,
+  on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
+  unless the owning filesystem is known to be Windows.
+
+- **Never publish a file with a bare `fs.rename`.** Use `renameAtomic` or `writeFileAtomic` from
+  `src/core/fs-atomic.ts`. On Windows a rename fails with `EPERM` whenever anything has the
+  destination open — Defender scanning the file you just wrote, the search indexer, OneDrive — so
+  the plain version loses saves intermittently and only on other people's machines. A test scans
+  for this and will fail your PR; `docs/atomic-writes.md` explains why the retry is safe. Every
+  temp/part staging name must also be unique per call across processes and cleaned by its owner —
+  including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
+  see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
+  with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+
 These are the ones that come up in review most often. Each exists because its absence caused a real
 bug.
 

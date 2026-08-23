@@ -10,6 +10,7 @@ import { CLAUDE_HOOK_EVENTS, GEMINI_HOOK_EVENTS, GROK_HOOK_EVENTS } from '@share
 import { GROK_HOOK_FILE, isSafeRemoteGrokHome } from '../../core/agents/grok-paths'
 import { isSafeNodeId, isSafeRemoteHome } from '../../core/remote-safety'
 import { hookServer } from '../../core/agents/hook-server'
+import { remoteAtomicWrite } from '../remote-atomic-write'
 import { curlHeaderConfigLine } from '../../core/agents/hook-curl-config-sh'
 import { buildManagedScript } from '../../core/agents/hooks/managed-script'
 import {
@@ -180,12 +181,20 @@ export class RemoteHooks {
         return null
       }
       this.specs.set(projectId, { sock, port: hook.port })
-      // 2. remote endpoint file (0600 via umask) — written only after the tunnel proved live,
-      // so sessions are never pointed at a socket that answers nothing.
-      await this.r.run(
-        childArgs(conn, controlPath, `umask 077; cat > ${posixQuote(endpoint)}`),
+      // 2. Remote endpoint file — written only after the tunnel proved live, so sessions are
+      // never pointed at a socket that answers nothing. The file carries the hook bearer. A
+      // direct `cat > endpoint` both exposed partial bytes and preserved an old permissive mode;
+      // publish a new 0600 inode through an invocation-owned temp instead.
+      const endpointWrite = remoteAtomicWrite(endpoint, {
+        restrictPermissions: true,
+        chmod600: true,
+        makeParent: false
+      })
+      const endpointResult = await this.r.run(
+        childArgs(conn, controlPath, endpointWrite.command),
         remoteEndpointFileContents(sock, hook.token, hook.version, `${remoteDir}/node-tokens`)
       )
+      if (endpointResult.code !== 0) return null
       // 3. install the managed hook for each JSON agent (script + merged config).
       for (const t of AGENT_TARGETS) {
         const script = `${remoteDir}/agent-hooks/${t.agentId}.sh`
@@ -303,24 +312,24 @@ export class RemoteHooks {
       )
       if (mk.code !== 0) return // no dir ⇒ no files; the nodes stay `legacy`
       for (const { id, token } of writes) {
-        const file = posixQuote(`${dir}/${id}`)
+        const filePath = `${dir}/${id}`
         // TMP + RENAME, the same shape the local writer uses, and for a reason that is not
         // cosmetic: `cat > <file>` TRUNCATES before the write can fail, so a host that is out of
         // quota or disk left the node holding an EMPTY token file. An empty header reads as
         // `legacy`, and a node still latched at the desktop then takes a hard 403 on every
         // canvas-control call for the rest of the session. Writing beside the file and renaming
         // means a failure costs the node nothing it already had.
-        const tmp = posixQuote(`${dir}/.${id}.tmp`)
         let wrote = false
         try {
           // chmod on the TMP, so the mode is right before the name exists; `mv` within one dir is
           // a rename, which carries the tmp's 0600 over whatever the destination's mode was.
+          const write = remoteAtomicWrite(filePath, {
+            restrictPermissions: true,
+            chmod600: true,
+            makeParent: false
+          })
           const w = await this.r.run(
-            childArgs(
-              conn,
-              controlPath,
-              `umask 077; cat > ${tmp} && chmod 600 ${tmp} && mv -f ${tmp} ${file} || { rm -f ${tmp}; exit 1; }`
-            ),
+            childArgs(conn, controlPath, write.command),
             `${token}\n` // newline-terminated: the client reads it with `head -n 1`
           )
           // The runner RESOLVES on a non-zero exit — a failed write is a `code`, not a throw, and

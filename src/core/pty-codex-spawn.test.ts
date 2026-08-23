@@ -24,6 +24,13 @@ import { codexAccountHome } from './codex-accounts-core'
 
 const spawned: Array<{ file: string; args: string[]; env: Record<string, string> }> = []
 
+// This suite mocks node-pty and asserts the plain-shell spawn path. Pin off the session-host
+// backend so a built `out/session-host/host.cjs` on disk cannot flip create() onto the host
+// backend (where the mocked spawn is never called). See __fixtures__/no-session-host.ts.
+vi.mock('./session-host-backend', async () =>
+  (await import('./__fixtures__/no-session-host')).noSessionHost()
+)
+
 vi.mock('node-pty', () => ({
   spawn: (file: string, args: string[], options: { env: Record<string, string> }) => {
     spawned.push({ file, args, env: options?.env ?? {} })

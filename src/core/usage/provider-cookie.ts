@@ -16,6 +16,7 @@
 // still found.
 import { promises as fs } from 'fs'
 import path from 'path'
+import { renameAtomic, tempNameFor } from '../fs-atomic'
 import { platform } from '../platform'
 
 /** Owner read/write only. The whole reason these are separate files. */
@@ -44,16 +45,10 @@ export async function readProviderCookie(provider: CookieProvider): Promise<stri
   }
 }
 
-/** Paired with `process.pid` in the temp name: the counter makes a name unique WITHIN this process,
- *  the pid makes it unique ACROSS processes (it restarts at 0 in every new one — two
- *  `nodeterm-server --data-dir X` processes share the dir with no lock). Same scheme as
- *  agent-status-mirror's local write. */
-let writeSeq = 0
-
 /**
  * Remove temp files no writer in THIS process owns: the legacy fixed `<file>.tmp` (written by
- * builds before per-call names) and any `<file>.<pid>.<seq>.tmp` whose pid is not ours. Best
- * effort — a failure here must never break a save.
+ * builds before per-call names) and any `<file>.<pid>.<seq>[.<uuid>].tmp` whose pid is not ours.
+ * Best effort — a failure here must never break a save.
  *
  * Unlike settings.json, an orphan here is a live credential at 0600 that nothing will ever
  * overwrite, so it has to be collected rather than left. Temps bearing our own pid are untouchable:
@@ -69,8 +64,8 @@ async function sweepStaleTmp(target: string): Promise<void> {
     const base = path.basename(target)
     for (const entry of await fs.readdir(dir)) {
       if (!entry.startsWith(base) || !entry.endsWith('.tmp')) continue
-      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>'
-      const owner = /^\.(\d+)\.\d+$/.exec(middle)?.[1]
+      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>[.<uuid>]'
+      const owner = /^\.(\d+)\.\d+(?:\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?$/.exec(middle)?.[1]
       if (middle === '' || (owner && owner !== String(process.pid))) {
         await fs.rm(path.join(dir, entry), { force: true }).catch(() => undefined)
       }
@@ -112,10 +107,10 @@ async function writeCookieNow(provider: CookieProvider, cookie: string): Promise
     await fs.rm(target, { force: true })
     return
   }
-  const tmp = `${target}.${process.pid}.${++writeSeq}.tmp`
+  const tmp = tempNameFor(target)
   try {
     await fs.writeFile(tmp, JSON.stringify({ cookie }), { encoding: 'utf-8', mode: MODE })
-    await fs.rename(tmp, target)
+    await renameAtomic(tmp, target)
   } catch (e) {
     // A failed write MUST remove its own temp, because here a leaked temp IS a leaked cookie: a
     // unique name is never written again, so only this cleanup (or a later run's sweep above, once

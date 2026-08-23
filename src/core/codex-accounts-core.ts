@@ -15,10 +15,10 @@ import {
   mkdirSync,
   readdirSync,
   realpathSync,
-  renameSync,
   statSync,
   unlinkSync
 } from 'fs'
+import { renameAtomicSync } from './fs-atomic'
 import os from 'os'
 import path from 'path'
 import { ACCOUNT_ID_RE, isSafeAccountId } from '../shared/codex-account'
@@ -77,7 +77,7 @@ export function migrateLegacyCodexAccountHome(
   const target = codexAccountHome(userDataDir, accountId, shortRoot)
   if (legacy === target || !existsSync(legacy) || existsSync(target)) return target
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 })
-  renameSync(legacy, target)
+  renameAtomicSync(legacy, target)
   return target
 }
 

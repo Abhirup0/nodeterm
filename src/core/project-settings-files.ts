@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs'
 import path from 'path'
+import { renameAtomic } from './fs-atomic'
 import {
   parseProjectSettingsFile,
   sameProjectSettingsContent,
@@ -40,7 +41,7 @@ export async function readProjectSettingsFile(cwd: string): Promise<ProjectSetti
   if (parsed.status === 'conflict') return { status: 'conflict' } // left in place — user must resolve
   // invalid: sideline the only copy so a later write can't overwrite unrecoverable content.
   try {
-    await fs.rename(file, `${file}.corrupt-${Date.now()}`)
+    await renameAtomic(file, `${file}.corrupt-${Date.now()}`)
   } catch { /* best effort — never destroy data */ }
   return { status: 'invalid' }
 }
