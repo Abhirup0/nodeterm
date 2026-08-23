@@ -225,3 +225,37 @@ describe('setProjectColor', () => {
     expect(useProjects.getState().projects).toHaveLength(0)
   })
 })
+
+// Issue #318: the AgentsSection capability toggle (and the clone-notice answers) mutate the store
+// only — nothing scheduled a workspace save, so the choice was lost on restart unless an unrelated
+// canvas edit happened to dirty the workspace afterwards. The setters own the persist now, through
+// the same markWorkspaceDirty seam PR #317's identity edits use.
+describe('capability setters schedule a workspace save', () => {
+  it('setProjectCapability rings the workspace-dirty seam (on and off)', async () => {
+    const { registerWorkspaceDirty } = await import('./workspaceDirty')
+    const p = useProjects.getState().addProject('my-app', '/Users/me/dev/my-app')
+    let dirtied = 0
+    const unregister = registerWorkspaceDirty(() => dirtied++)
+    try {
+      useProjects.getState().setProjectCapability(p.id, 'agentMessaging', true)
+      expect(dirtied).toBe(1)
+      useProjects.getState().setProjectCapability(p.id, 'agentMessaging', false)
+      expect(dirtied).toBe(2)
+    } finally {
+      unregister()
+    }
+  })
+
+  it('recordProjectCapabilityAck rings it too (the notice answer must survive restart)', async () => {
+    const { registerWorkspaceDirty } = await import('./workspaceDirty')
+    const p = useProjects.getState().addProject('my-app', '/Users/me/dev/my-app')
+    let dirtied = 0
+    const unregister = registerWorkspaceDirty(() => dirtied++)
+    try {
+      useProjects.getState().recordProjectCapabilityAck(p.id, 'agentMessaging', 'kept')
+      expect(dirtied).toBe(1)
+    } finally {
+      unregister()
+    }
+  })
+})
