@@ -143,7 +143,7 @@ import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useProjects } from '../state/projects'
-import { useViewMode, viewFor } from '../state/viewMode'
+import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
@@ -172,7 +172,12 @@ import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
-import { chipFor, effectiveBindings, terminalShortcutPolicy } from '../lib/keybindingOverrides'
+import {
+  chipFor,
+  effectiveBindings,
+  terminalChordBubbles,
+  terminalShortcutPolicy
+} from '../lib/keybindingOverrides'
 import { matchesShortcut } from '@shared/shortcut'
 import { hintLabel, isWindowsPlatform, isMacPlatform } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
@@ -2533,8 +2538,18 @@ export function TerminalNode({
     term.attachCustomKeyEventHandler((e) => {
       const ownsProjectJump =
         terminalShortcutPolicy() !== 'terminal-first' && liveProjectJumpTarget(e) !== null
-      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump)
+      const registryOwns = terminalChordBubbles(
+        e,
+        isKanbanOpen(useProjects.getState().activeProjectId ?? '')
+      )
+      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump, registryOwns)
       if (action === 'pass') return true
+      // 'bubble': the window dispatcher owns this chord (an allowInTerminal registry command).
+      // Return false so xterm skips its own keymap — which would consume e.g. Ctrl+Shift+Arrow
+      // into a CSI write and cancel the event — and DO NOT preventDefault: the dispatcher bails
+      // on defaultPrevented events, so a prevented bubble would kill the very dispatch this
+      // exists to reach.
+      if (action === 'bubble') return false
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
       // Shift+Enter → ESC+CR so agent CLIs insert a newline instead of submitting
