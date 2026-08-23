@@ -223,9 +223,11 @@ class HookServer {
    * in the handler reads `remoteAddress`), so the socket is never an auth bypass. Two reasons it
    * exists: it lets a sandboxed macOS Codex regain hook connectivity via codex's
    * `network.allow_unix_sockets` allowlist (the TCP loopback can never be allowlisted), and it
-   * pays down #195's debt that ANY local user could reach the TCP port at all (the socket lives
-   * in a 0700 dir at 0600). The TCP listener STAYS: existing tmux panes hold pre-socket env, and
-   * the Linux codex sandbox blocks unix sockets anyway. Best-effort: if the socket cannot bind,
+   * gives local traffic a filesystem-permissioned path (0700 dir, 0600 socket) that a
+   * defense-in-depth follow-up to #195 can eventually make the ONLY door. It does not close #195
+   * on its own: the TCP listener STAYS (existing tmux panes hold pre-socket env, and the Linux
+   * codex sandbox blocks unix sockets anyway), so any local user can still reach the (bearer-gated)
+   * TCP port until that port is retired. Best-effort: if the socket cannot bind,
    * nothing advertises it and everything runs on TCP exactly as before.
    */
   private unixServer: Server | null = null
