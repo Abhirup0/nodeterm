@@ -656,7 +656,7 @@ export interface Project {
   ropes?: BridgeLink[]
   /** Camera navigation history — deliberate node landings, newest last. MACHINE-LOCAL: rides
    *  `IndexEntryV3.breadcrumbs`, never emitted into the shared project file (a repo must not carry
-   *  one person's wandering camera history). See docs/superpowers/specs/2026-08-20-breadcrumb-trail-design.md. */
+   *  one person's wandering camera history). */
   breadcrumbs?: NavStop[]
   /**
    * Closed projects are hidden from the tab bar but kept on disk with all their nodes (and their

@@ -45,7 +45,7 @@ describe('buildNote', () => {
       .toBe('my-custom-agent · Unknown')
   })
 
-  it('an unknown node kind degrades to a generic label rather than inventing one', () => {
+  it('a missing kind defaults to the terminal label', () => {
     expect(buildNote(target({ kind: undefined, title: 'Untitled' }), undefined))
       .toBe('terminal · Untitled')
   })

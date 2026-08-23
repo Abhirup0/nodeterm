@@ -600,7 +600,7 @@ const LAUNCH_RETRY_MS = 400
  * Which projects have already shown their resume card THIS APP RUN. Module-level so it survives
  * Canvas re-renders and project switches, and IN-MEMORY on purpose: persisting it would leave one
  * localStorage entry per project forever, while forgetting on reload is exactly what "the resume
- * card comes back next launch" means (docs/superpowers/specs/2026-08-20-breadcrumb-trail-design.md).
+ * card comes back next launch" means.
  */
 const resumeCardShown = new Set<string>()
 
@@ -2010,10 +2010,12 @@ export function Canvas() {
       }
       // Offer the resume card once per project per app run. "Once" is only spent on a card that
       // could actually render: a project whose breadcrumbs ALL point at nodes deleted since must
-      // not burn its one-shot slot on an empty card the user never saw.
+      // not burn its one-shot slot on an empty card the user never saw — and neither must a
+      // project that activates ON the kanban board, where the card (z 11) sits invisible under
+      // the opaque overlay (z 25). Same failure mode, same rule.
       const liveIds = new Set(flow.map((n) => n.id))
       const hasLiveStop = (project.breadcrumbs ?? []).some((b) => liveIds.has(b.nodeId))
-      if (!resumeCardShown.has(project.id) && hasLiveStop) {
+      if (!resumeCardShown.has(project.id) && hasLiveStop && !isKanbanOpen(project.id)) {
         resumeCardShown.add(project.id)
         setResumeProject(project)
       } else {
@@ -5661,6 +5663,60 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
+  /**
+   * The ONE framing implementation behind both deliberate focus (`goToNode`) and breadcrumb
+   * back/forward (`stepAndFrame`) — extracted so CLAUDE.md's "Go to node" invariant has a single
+   * copy to regress. Fit the node in view instead of centering at a fixed zoom — `zoom:
+   * max(current, 1)` overshot large terminals (their body never fit the viewport). fitView sizes
+   * the zoom to the node and resolves group-relative positions itself; the clamp keeps a small
+   * node from filling the whole screen and a huge one from being fit microscopic.
+   *
+   * …but ONLY once React Flow has MEASURED the node. Its fit set is filtered by `measured`
+   * (no width/height fallback in there), so an unmeasured node leaves the set EMPTY, the
+   * bounds collapse to {0,0,0,0} and the camera flies to the canvas ORIGIN at max zoom —
+   * empty canvas, node off-screen. That is precisely the state a node is in for the first
+   * tick after its project loads, i.e. on every CROSS-PROJECT focus (OS-notification click,
+   * sessions sidebar, ⌘K jump, presence travel): the load and the focus happen in the same
+   * tick, so measuring can lose the race and only a second attempt would work. In that
+   * window we frame the node ourselves from its persisted size — see lib/nodeFocus.
+   *
+   * The measured check must read React Flow's OWN store (`getInternalNode`), not our node
+   * object: `measured` only reaches our state one render later, when `onNodesChange` applies
+   * the dimensions change, so our copy says "unmeasured" for nodes the store has long sized.
+   *
+   * The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`:
+   * a flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which
+   * is what kept a big node (a group frame most of all) further away than it needed to be.
+   * The free-rect solver reclaims the space the chrome does not actually occupy, so the node
+   * is framed tighter without sliding underneath anything. Falls back to the flat ratio when
+   * there is nothing sensible to solve — the same ratio the unmeasured branch uses.
+   */
+  const frameNode = useCallback(
+    (node: Node) => {
+      const internal = getInternalNode(node.id)
+      if (isMeasured(internal)) {
+        const wrap = flowWrapRef.current
+        const size = internal?.measured
+        const solved =
+          wrap && size?.width && size?.height ? solveFitPadding(wrap, size.width, size.height) : null
+        void fitView({
+          nodes: [{ id: node.id }],
+          duration: 300,
+          ...FIT_NODE_OPTIONS,
+          padding: solved ?? FIT_NODE_OPTIONS.padding
+        })
+        return
+      }
+      const rect = nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
+      const wrap = flowWrapRef.current?.getBoundingClientRect()
+      const viewport = rect && wrap ? viewportForRect(rect, wrap.width, wrap.height) : null
+      // Size unknowable / no pane yet: leave the camera where it is. Standing still beats
+      // teleporting the user to the origin, which is the bug this branch exists for.
+      if (viewport) void setViewport(viewport, { duration: 300 })
+    },
+    [fitView, setViewport, getInternalNode]
+  )
+
   const goToNode = useCallback(
     (node: Node) => {
       // Record the landing FIRST, and unconditionally: this is the one funnel every deliberate
@@ -5689,62 +5745,16 @@ export function Canvas() {
           markDirty()
         }
       }
-      // Fit the node in view instead of centering at a fixed zoom — `zoom: max(current, 1)`
-      // overshot large terminals (their body never fit the viewport). fitView sizes the zoom
-      // to the node and resolves group-relative positions itself; the clamp keeps a small
-      // node from filling the whole screen and a huge one from being fit microscopic.
-      //
-      // …but ONLY once React Flow has MEASURED the node. Its fit set is filtered by `measured`
-      // (no width/height fallback in there), so an unmeasured node leaves the set EMPTY, the
-      // bounds collapse to {0,0,0,0} and the camera flies to the canvas ORIGIN at max zoom —
-      // empty canvas, node off-screen. That is precisely the state a node is in for the first
-      // tick after its project loads, i.e. on every CROSS-PROJECT focus (OS-notification click,
-      // sessions sidebar, ⌘K jump, presence travel): the load and the focus happen in the same
-      // tick, so measuring can lose the race and only a second attempt would work. In that
-      // window we frame the node ourselves from its persisted size — see lib/nodeFocus.
-      //
-      // The measured check must read React Flow's OWN store (`getInternalNode`), not our node
-      // object: `measured` only reaches our state one render later, when `onNodesChange` applies
-      // the dimensions change, so our copy says "unmeasured" for nodes the store has long sized.
-      //
-      // The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`:
-      // a flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which
-      // is what kept a big node (a group frame most of all) further away than it needed to be.
-      // The free-rect solver reclaims the space the chrome does not actually occupy, so the node
-      // is framed tighter without sliding underneath anything. Falls back to the flat ratio when
-      // there is nothing sensible to solve — the same ratio the unmeasured branch below uses.
-      const internal = getInternalNode(node.id)
-      if (isMeasured(internal)) {
-        const wrap = flowWrapRef.current
-        const size = internal?.measured
-        const solved =
-          wrap && size?.width && size?.height ? solveFitPadding(wrap, size.width, size.height) : null
-        void fitView({
-          nodes: [{ id: node.id }],
-          duration: 300,
-          ...FIT_NODE_OPTIONS,
-          padding: solved ?? FIT_NODE_OPTIONS.padding
-        })
-        return
-      }
-      const rect = nodeFitRect(node as FocusableNode, nodesRef.current as FocusableNode[])
-      const wrap = flowWrapRef.current?.getBoundingClientRect()
-      const viewport = rect && wrap ? viewportForRect(rect, wrap.width, wrap.height) : null
-      // Size unknowable / no pane yet: leave the camera where it is. Standing still beats
-      // teleporting the user to the origin, which is the bug this branch exists for.
-      if (viewport) void setViewport(viewport, { duration: 300 })
+      frameNode(node)
     },
-    [fitView, setViewport, getInternalNode, markDirty]
+    [frameNode, markDirty]
   )
 
   /**
    * Walks the breadcrumb cursor one stop and flies the camera there. Browser back/forward for the
    * canvas: this is the ONE path that must NOT record a stop — calling goToNode would append the
-   * landing and turn every step into a new tip, so the framing block below is deliberately a copy
-   * of goToNode's (measured ⇒ fitView, unmeasured ⇒ frame from the persisted size, unknowable ⇒
-   * stand still) rather than a call into it. A shared `frameNode` helper is the obvious follow-up;
-   * it is not done here because goToNode's measured check carries reasoning (it reads React Flow's
-   * OWN store, not our node copy) that a hasty extraction is likely to lose.
+   * landing and turn every step into a new tip — so it shares `frameNode` (the single framing
+   * implementation) and never goToNode itself.
    *
    * stepBreadcrumb skips stops whose node is gone, so a deleted node is walked THROUGH silently.
    */
@@ -5763,26 +5773,9 @@ export function Canvas() {
       bumpNav((v) => v + 1)
       const target = nodesRef.current.find((n) => n.id === next.list[next.index].nodeId)
       if (!target) return
-      const internal = getInternalNode(target.id)
-      if (isMeasured(internal)) {
-        const wrap = flowWrapRef.current
-        const size = internal?.measured
-        const solved =
-          wrap && size?.width && size?.height ? solveFitPadding(wrap, size.width, size.height) : null
-        void fitView({
-          nodes: [{ id: target.id }],
-          duration: 300,
-          ...FIT_NODE_OPTIONS,
-          padding: solved ?? FIT_NODE_OPTIONS.padding
-        })
-        return
-      }
-      const rect = nodeFitRect(target as FocusableNode, nodesRef.current as FocusableNode[])
-      const wrap = flowWrapRef.current?.getBoundingClientRect()
-      const viewport = rect && wrap ? viewportForRect(rect, wrap.width, wrap.height) : null
-      if (viewport) void setViewport(viewport, { duration: 300 })
+      frameNode(target)
     },
-    [fitView, setViewport, getInternalNode]
+    [frameNode]
   )
   const goBack = useCallback(() => stepAndFrame('back'), [stepAndFrame])
   const goForward = useCallback(() => stepAndFrame('forward'), [stepAndFrame])
@@ -11235,8 +11228,20 @@ export function Canvas() {
         zoomPct={zoomPct}
         canUndo={pastRef.current.length > 0}
         canRedo={futureRef.current.length > 0}
-        canGoBack={navRef.current.index > 0}
-        canGoForward={navRef.current.index < navRef.current.list.length - 1}
+        // Enabled state must agree with what a click will DO: stepBreadcrumb skips deleted stops
+        // and answers null when every stop in that direction is dead, so a raw index comparison
+        // renders an enabled arrow that does nothing. Cheap at the 20-entry cap, and it stays
+        // honest as nodes are deleted (Canvas re-renders on both bumpNav and nodes).
+        canGoBack={
+          !!stepBreadcrumb(navRef.current, 'back', (id) =>
+            nodesRef.current.some((n) => n.id === id)
+          )
+        }
+        canGoForward={
+          !!stepBreadcrumb(navRef.current, 'forward', (id) =>
+            nodesRef.current.some((n) => n.id === id)
+          )
+        }
         onUndo={undo}
         onRedo={redo}
         onGoBack={goBack}

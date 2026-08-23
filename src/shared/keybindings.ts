@@ -116,7 +116,9 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   // Camera history (breadcrumb trail), not node-array history: `[` / `]` are the literal keys
   // `e.key` reports, which is what the resolver compares against — `BracketLeft`/`BracketRight`
   // are `KeyboardEvent.code` values and would never match (shortcut.ts's KEY_ALIASES covers only
-  // Comma/Slash/Period, so brackets have no word-form spelling here).
+  // Comma/Slash/Period, so brackets have no word-form spelling here). Off-mac the binding is
+  // Ctrl+[, which terminals read as ESC — safe here because scope 'canvas' without
+  // allowWhileTyping means the resolver refuses it whenever a terminal or input has focus.
   { id: 'canvas.goBack', title: 'Go back', group: 'Canvas', scope: 'canvas',
     defaultBindings: both('Cmd+[') },
   { id: 'canvas.goForward', title: 'Go forward', group: 'Canvas', scope: 'canvas',

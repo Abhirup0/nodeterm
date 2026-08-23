@@ -126,3 +126,39 @@ describe('the end-session confirm describes both things it does', () => {
     }
   })
 })
+
+describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
+  // Same discipline as the dispatch-map pins above: Canvas has no render harness, and each of
+  // these rules failed silently once (or would) — a source read is the only net.
+
+  it('goToNode refuses to record the ephemeral subagent/loop viz nodes', () => {
+    // A breadcrumb for one is an id nothing can ever resolve (they are cleared on the next turn),
+    // permanently burning one of the 20 slots.
+    expect(CANVAS_SRC).toContain("node.type !== 'subagent' && node.type !== 'loop'")
+  })
+
+  it('stepAndFrame never records — it frames through the shared frameNode, not goToNode', () => {
+    const step = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const stepAndFrame = useCallback'),
+      CANVAS_SRC.indexOf('const goBack = useCallback')
+    )
+    expect(step.length).toBeGreaterThan(0)
+    // Recording inside a step would turn every back-step into a new tip.
+    expect(step).not.toContain('recordBreadcrumb')
+    expect(step).not.toContain('goToNode(')
+    // The single framing implementation — the "Go to node" origin-jump invariant has ONE copy.
+    expect(step).toContain('frameNode(target)')
+  })
+
+  it('there is exactly ONE framing implementation (frameNode) shared by focus and steps', () => {
+    // The measured-check-reads-the-store rule regresses through a second copy first.
+    expect(CANVAS_SRC.match(/isMeasured\(internal\)/g) ?? []).toHaveLength(1)
+  })
+
+  it('the resume card slot is spent only on a card that can render', () => {
+    // Once per app run, only with a live stop, and never under the opaque kanban overlay.
+    expect(CANVAS_SRC).toContain(
+      '!resumeCardShown.has(project.id) && hasLiveStop && !isKanbanOpen(project.id)'
+    )
+  })
+})

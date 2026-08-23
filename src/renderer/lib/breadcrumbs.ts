@@ -60,7 +60,10 @@ export function buildNote(target: BreadcrumbTarget, status: AgentNodeStatus | un
     const stateLabel = STATE_LABEL[sessionStatusKind(status?.state)]
     return `${name} · ${stateLabel}`
   }
-  const kindLabel = KIND_LABEL[target.kind ?? 'terminal'] ?? 'node'
+  // A missing kind defaults to 'terminal'; there is deliberately NO generic fallback beyond it —
+  // goToNode refuses the only kinds KIND_LABEL omits (subagent/loop), so a dead `?? 'node'` arm
+  // would just be an untestable claim.
+  const kindLabel = KIND_LABEL[target.kind ?? 'terminal']
   return `${kindLabel} · ${target.title}`
 }
 

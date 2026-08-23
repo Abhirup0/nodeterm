@@ -1763,8 +1763,9 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     not carry one person's camera history to everyone who clones it. `fileToProject` therefore ignores a
     `breadcrumbs` field found in the shared file (a forgery), and `projectToFile` never writes one.
   - **The cursor is not persisted either.** Only `list` rides the entry; `BreadcrumbState.index` is
-    renderer-only and resets to the tip on activation, so stepping back and forth writes NO project
-    state and marks nothing dirty — walking the camera must not queue a `project.json` write.
+    renderer-only and resets to the tip on activation. A step records no breadcrumb and rewrites no
+    `project.json` — the only persistence it triggers is the ordinary `onMove` viewport persist
+    (machine-local, same as any camera move; see the Zoom-chords bullet).
   - **Cap 20** (`BREADCRUMB_CAP`, oldest dropped) and a **3 s dedupe** (`BREADCRUMB_DEDUPE_MS`, so a
     re-triggered focus on the already-current node is a no-op — `recordBreadcrumb` returns the SAME
     object, which is the caller's skip test). Recording past a back-step drops the forward tail, exactly
@@ -1776,6 +1777,10 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   - The `note` is a **snapshot** taken at record time (agent nodes reuse the sessions sidebar's own
     `sessionStatusKind` + `STATE_LABEL` phrasing, preferring session name → node title → agent label), so
     a later state change never retroactively rewrites history.
+  - **Surfaces:** Server Edition works as-is (shared renderer code + `WorkspaceStore`, which both
+    shells boot — no new bridge member); mobile is N/A (no canvas, no camera); the kanban board is
+    likewise N/A, and a project that activates ON the board neither shows nor spends its
+    once-per-run resume card (it would sit invisible under the opaque overlay).
 - **Command palette** (`CommandPalette.tsx`): ⌘/Ctrl+K; `Canvas.buildCommands` (create,
   switch project, jump to node by title/tag, open file…).
 - **Explorer** (`ExplorerPanel.tsx`, 🗂 / ⌘⇧E): lazy file tree of the active project `cwd`
