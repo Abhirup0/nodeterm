@@ -5854,6 +5854,7 @@ export function Canvas() {
         useViewMode.getState().toggle(id)
         return true
       },
+      'view.focusMode': () => { toggleFocusMode(); return true },
       'panel.explorer': () => { showExplorer('toggle'); return true },
       'panel.sourceControl': () => { setScOpen((v) => !v); return true },
       'panel.sessions': () => { toggleSessionsPin(); return true },

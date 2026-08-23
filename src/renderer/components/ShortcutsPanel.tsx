@@ -77,7 +77,7 @@ function buildSections(dictationChord: string): { title: string; rows: Row[] }[]
         { keys: ['Left-drag'], label: 'Box-select (touch to select)' },
         { keys: ['Middle / Right-drag'], label: 'Pan the canvas' },
         { keys: ['Double-click'], label: 'Center & focus a node' },
-        { keys: ['⌘', '⇧', 'F'], label: 'Focus mode (selected node fills the window)' },
+        ...cmd('view.focusMode', 'Focus mode (selected node fills the window)'),
         { keys: ['⌘', 'wheel'], label: 'Zoom in / out' },
         // Advertised on BOTH surfaces, unlike "Jump to project" above. ⌘1-9 is dropped there
         // because the browser RESERVES it (tab switching, un-preventable) for something unrelated;
