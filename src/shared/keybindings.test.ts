@@ -73,6 +73,8 @@ describe('registry invariants', () => {
         darwin: ['Cmd+Slash'], other: ['Cmd+Slash'], allowInTerminal: true },
       { id: 'view.kanbanToggle', title: 'Toggle kanban board', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+B'], other: ['Cmd+Shift+B'], allowInTerminal: true },
+      { id: 'view.focusMode', title: 'Toggle focus mode', group: 'General', scope: 'canvas',
+        darwin: ['Cmd+Shift+F'], other: ['Cmd+Shift+F'], allowInTerminal: true },
       { id: 'panel.explorer', title: 'Toggle explorer panel', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+E'], other: ['Cmd+Shift+E'], allowInTerminal: true },
       { id: 'panel.sourceControl', title: 'Toggle source control panel', group: 'General',
