@@ -844,6 +844,35 @@ function installSnapToggle(engine: GlyphGridEngine): void {
   }
 }
 
+/**
+ * Exposes `window.__glyphgridFillAtlas()` → `{ capacity, resetsBefore, resetsAfter }`, which packs
+ * junk keys until the page overflows and the atlas resets.
+ *
+ * This exists because the only known trigger for issue #377 — a glyph going permanently invisible
+ * for one colour pair — is an atlas RESET, and on a real canvas a reset arrives after hours of use
+ * at an unpredictable moment. Waiting for it with the debug flag armed is the report nobody can
+ * schedule; this makes the reset happen on demand, so the recovery that follows it can be watched
+ * deliberately.
+ *
+ * It uses `glyphFor` and nothing else — no debug-only surface on the atlas — so what it exercises
+ * is exactly the production allocation path. The keys are private-use code points paired with a
+ * distinct foreground each, which is what makes them distinct keys rather than cache hits.
+ *
+ * NOT behind the debug flag, for the same reason as `__glyphgridSnap`: a repro that first needs a
+ * localStorage key and a relaunch is a repro the reporter runs once and abandons.
+ */
+function installAtlasFill(atlas: GlyphAtlas): void {
+  if (typeof window === 'undefined') return
+  ;(window as unknown as Record<string, unknown>).__glyphgridFillAtlas = (): unknown => {
+    const resetsBefore = atlas.resetCount
+    // One past capacity: the last request is the one that tips the page over.
+    for (let i = 0; i <= atlas.capacity; i++) {
+      atlas.glyphFor(0xe000 + (i % 0x1000), false, false, 0xff000000 + i, 0xff000000)
+    }
+    return { capacity: atlas.capacity, resetsBefore, resetsAfter: atlas.resetCount }
+  }
+}
+
 function installGlyphDump(atlas: GlyphAtlas, raster: { cellW: number; cellH: number }): void {
   if (!glyphDebugOn() || typeof window === 'undefined') return
   ;(window as unknown as Record<string, unknown>).__glyphgridDump = async (): Promise<unknown> => {
@@ -960,6 +989,7 @@ function createContext(cell: DeviceCell): LiveContext | null {
   if (!gl) return null
   const atlas = new GlyphAtlas(raster, ATLAS_PAGE_PX, glyphDebugTap())
   installGlyphDump(atlas, raster)
+  installAtlasFill(atlas)
   installBlankCellProbe()
   const engine = new GlyphGridEngine(gl, atlas)
   engine.setCamera(lastCamera)
