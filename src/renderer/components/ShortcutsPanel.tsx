@@ -63,7 +63,9 @@ function buildSections(dictationChord: string): { title: string; rows: Row[] }[]
         ...(isBrowserRuntime() ? [] : [{ keys: ['⌘', '1-9'], label: 'Jump to project' }]),
         ...dictate(),
         ...cmd('canvas.undo', 'Undo'),
-        ...cmd('canvas.redo', 'Redo')
+        ...cmd('canvas.redo', 'Redo'),
+        ...cmd('canvas.goBack', 'Go back'),
+        ...cmd('canvas.goForward', 'Go forward')
       ]
     },
     {
