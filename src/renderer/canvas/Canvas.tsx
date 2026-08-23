@@ -346,6 +346,9 @@ import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNoteP
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
+import { useReopenHistory } from '../state/reopenHistory'
+import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
+import { planReopen } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
@@ -4204,8 +4207,22 @@ export function Canvas() {
 
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
-    (ids: string[]) => {
+    (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
+      if (opts?.record !== false) {
+        const snapshots = nodesRef.current
+          .filter((n) => set.has(n.id))
+          .map((n) => snapshotNode(n, nodesRef.current))
+          .filter((s): s is NonNullable<typeof s> => s !== null)
+        if (snapshots.length) {
+          useReopenHistory.getState().push({
+            kind: 'nodes',
+            projectId: useProjects.getState().activeProjectId ?? '',
+            closedAt: Date.now(),
+            nodes: snapshots
+          })
+        }
+      }
       nodesRef.current.forEach((n) => {
         if (!set.has(n.id)) return
         // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
@@ -4315,7 +4332,7 @@ export function Canvas() {
       const loginIds = nodesRef.current
         .filter((n) => n.data.accountId === accountId && isAccountLoginNode(n.data))
         .map((n) => n.id)
-      if (loginIds.length) deleteNodes(loginIds)
+      if (loginIds.length) deleteNodes(loginIds, { record: false })
       setNodes((ns) =>
         ns.some((n) => n.data.accountId === accountId)
           ? ns.map((n) =>
@@ -5742,6 +5759,81 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
+  /** `app.reopenLastClosed` (Cmd+Shift+T): pops the shared close-history stack and reopens a
+   *  project tab or recreates a deleted node batch — whichever was closed more recently.
+   *  Skips stale entries (already reopened another way, or the project was permanently
+   *  deleted since) and keeps walking back until it finds a usable one or the stack empties.
+   *  The DECISION (which branch, staleness, active-vs-stored) is the pure `planReopen`
+   *  (`lib/reopenPlan.ts`, unit-tested there); this loop only pops the real stack and executes
+   *  whichever `ReopenPlan` comes back — the side-effecting parts that need live Canvas state. */
+  const reopenLastClosedCommand = useCallback((): boolean => {
+    for (;;) {
+      const entry = useReopenHistory.getState().popNext()
+      if (!entry) return false
+
+      const { projects, activeProjectId } = useProjects.getState()
+      const project = projects.find((p) => p.id === entry.projectId)
+      const accounts = useSettings.getState().settings.claudeAccounts
+      const plan = planReopen(
+        entry,
+        projects,
+        activeProjectId,
+        new Set(nodesRef.current.map((n) => n.id)),
+        (snap, liveIds) =>
+          recreateNodeFromSnapshot(snap, {
+            liveNodeIds: liveIds,
+            project,
+            resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts),
+            // The TARGET project's own permission mode, not the caller's active one — a node
+            // restored into project B must start under B's override, never A's.
+            permissionModeFor: (agentId) => projectPermissionMode(project, agentId)
+          })
+      )
+
+      switch (plan.action) {
+        case 'skip':
+          continue
+        case 'reopenProject':
+          // A project switch — commit the live canvas back to the store first, or whatever the
+          // user was looking at is silently lost (the same invariant every other project switch/
+          // add/delete in this file honors via commitActiveToStore()).
+          commitActiveToStore()
+          useProjects.getState().reopenProject(plan.projectId)
+          setWelcomeOpen(false)
+          void writeDisk()
+          return true
+        case 'insertActive':
+          setNodes((ns) => [...ns, ...plan.nodes])
+          markDirty()
+          return true
+        case 'insertStored':
+          // Not on screen: write straight into the project's SERIALIZED nodes (the store, not
+          // React Flow) — the same mechanism canvas-control uses to create a node in a
+          // non-active project (Canvas.tsx:6499, :6540). armForColdOpen is required here: a bare
+          // `flowToNodeStates` drops `initialCommand` (never serialized on purpose), so an agent
+          // node restored this way would never launch its command on the eventual cold open.
+          for (const node of plan.nodes) {
+            useProjects
+              .getState()
+              .applyNodeMutation(plan.projectId, {
+                op: 'upsert',
+                node: flowToNodeStates([armForColdOpen(node)])[0]
+              })
+          }
+          void writeDisk()
+          if (plan.reopenProjectAfter) {
+            commitActiveToStore()
+            useProjects.getState().reopenProject(plan.projectId)
+            setWelcomeOpen(false)
+            void writeDisk()
+          } else {
+            switchProject(plan.projectId)
+          }
+          return true
+      }
+    }
+  }, [switchProject, setNodes, markDirty, writeDisk, commitActiveToStore])
+
   // ---- global shortcuts ----
   // The three trailing gestures below are registry-LESS chords (design D2: declared gestures,
   // deliberately not remappable in this PR). The dispatcher hands them the RAW event with no
@@ -5858,6 +5950,7 @@ export function Canvas() {
       'panel.explorer': () => { showExplorer('toggle'); return true },
       'panel.sourceControl': () => { setScOpen((v) => !v); return true },
       'panel.sessions': () => { toggleSessionsPin(); return true },
+      'app.reopenLastClosed': reopenLastClosedCommand,
       'canvas.undo': () => { undo(); return true },
       'canvas.redo': () => { redo(); return true },
       'canvas.fitAll': () => { fitAll(); return true },
@@ -9803,6 +9896,7 @@ export function Canvas() {
     (id: string) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
+      useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
       disposeRelayTabForProject(id)
       store.closeProject(id)
       void writeDisk()
