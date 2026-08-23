@@ -360,6 +360,7 @@ export function buildStubApi(): Omit<
       sendCanvasState: noop,
       onApplyMutation: noopUnsub,
       onPeerPending: noopUnsub,
+      onPeerPendingCleared: noopUnsub,
       approve: (_id: string) => {},
       reject: (_id: string) => {},
       setPhoneAccess: noop
