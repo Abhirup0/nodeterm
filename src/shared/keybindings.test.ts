@@ -49,6 +49,13 @@ describe('registry invariants', () => {
     expect(COMMANDS_BY_ID.get('canvas.fitAll')?.defaultBindings.darwin).toEqual([])
   })
 
+  it('reopen-last-closed defaults to Cmd+Shift+T and works in a terminal', () => {
+    const def = COMMANDS_BY_ID.get('app.reopenLastClosed')
+    expect(def?.defaultBindings.darwin).toEqual(['Cmd+Shift+T'])
+    expect(def?.defaultBindings.other).toEqual(['Cmd+Shift+T'])
+    expect(def?.allowInTerminal).toBe(true)
+  })
+
   it('pins the WHOLE table — every row PR 2 will dispatch on, in source order', () => {
     // Source order is contractual (first match wins in the resolver), so the array order is
     // asserted too. A dropped flag — allowInTerminal above all — reds this test.
@@ -81,6 +88,8 @@ describe('registry invariants', () => {
         scope: 'app', darwin: ['Cmd+Shift+G'], other: ['Cmd+Shift+G'], allowInTerminal: true },
       { id: 'panel.sessions', title: 'Pin sessions sidebar', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+L'], other: ['Cmd+Shift+L'], allowInTerminal: true },
+      { id: 'app.reopenLastClosed', title: 'Reopen last closed', group: 'General', scope: 'app',
+        darwin: ['Cmd+Shift+T'], other: ['Cmd+Shift+T'], allowInTerminal: true },
       { id: 'canvas.undo', title: 'Undo', group: 'Canvas', scope: 'canvas',
         darwin: ['Cmd+Z'], other: ['Cmd+Z'] },
       { id: 'canvas.redo', title: 'Redo', group: 'Canvas', scope: 'canvas',
@@ -341,12 +350,12 @@ describe('findKeybindingConflicts', () => {
 
 describe('sanitizeKeybindingOverrides', () => {
   it('passes through a clean override map', () => {
-    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+T'] }, true)
-    expect(r).toEqual({ overrides: { 'node.newTerminal': ['Cmd+Shift+T'] }, warnings: [] })
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+Y'] }, true)
+    expect(r).toEqual({ overrides: { 'node.newTerminal': ['Cmd+Shift+Y'] }, warnings: [] })
   })
   it('canonicalizes spellings', () => {
-    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['shift+cmd+t'] }, true)
-    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['shift+cmd+y'] }, true)
+    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+Y'] })
   })
   it('drops unknown ids with a warning, keeps the rest', () => {
     const r = sanitizeKeybindingOverrides(
@@ -356,8 +365,8 @@ describe('sanitizeKeybindingOverrides', () => {
     expect(r.warnings.some((w) => w.includes('node.selfDestruct'))).toBe(true)
   })
   it('drops an invalid binding string but keeps valid siblings', () => {
-    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+T', 'T'] }, true)
-    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+Y', 'T'] }, true)
+    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+Y'] })
     expect(r.warnings.length).toBe(1)
   })
   it('a non-empty list that is entirely invalid falls back to defaults, not disabled', () => {

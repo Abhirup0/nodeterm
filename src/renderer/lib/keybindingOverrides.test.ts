@@ -22,9 +22,9 @@ describe('activeKeybindingOverrides', () => {
   })
   it('sanitizes and memoizes by reference, warning once per change', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    setKb({ 'node.newTerminal': ['Cmd+Shift+T'], 'bogus.command': ['Cmd+X'] })
+    setKb({ 'node.newTerminal': ['Cmd+Shift+Y'], 'bogus.command': ['Cmd+X'] })
     const first = activeKeybindingOverrides()
-    expect(first).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+    expect(first).toEqual({ 'node.newTerminal': ['Cmd+Shift+Y'] })
     expect(activeKeybindingOverrides()).toBe(first)
     expect(warn).toHaveBeenCalledTimes(1)
     warn.mockRestore()
