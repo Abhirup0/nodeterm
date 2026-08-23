@@ -75,6 +75,12 @@ function buildSections(dictationChord: string): { title: string; rows: Row[] }[]
         ...cmd('node.newAgent', 'New Claude Code'),
         ...cmd('node.close', 'Close selected node'),
         ...cmd('canvas.deleteSelection', 'Delete selection'),
+        // One row per direction rather than a single collapsed "⌘ ← → ↑ ↓": each is its own
+        // command, so a user who remapped or unbound only ⌘↑ must see exactly that.
+        ...cmd('node.focusLeft', 'Focus the node to the left'),
+        ...cmd('node.focusRight', 'Focus the node to the right'),
+        ...cmd('node.focusUp', 'Focus the node above'),
+        ...cmd('node.focusDown', 'Focus the node below'),
         { keys: ['Right-click'], label: 'Actions menu (empty space or node)' },
         { keys: ['Left-drag'], label: 'Box-select (touch to select)' },
         { keys: ['Middle / Right-drag'], label: 'Pan the canvas' },

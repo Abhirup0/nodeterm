@@ -72,6 +72,10 @@ export type CommandId =
   | 'node.newWebView'
   | 'node.newDino'
   | 'node.newFile'
+  | 'node.focusLeft'
+  | 'node.focusRight'
+  | 'node.focusUp'
+  | 'node.focusDown'
   | 'node.close'
   | 'node.toggleMarkdown'
   | 'terminal.find'
@@ -171,6 +175,30 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     defaultBindings: both() },
   { id: 'node.newFile', title: 'New file…', group: 'Nodes', scope: 'canvas',
     defaultBindings: both() },
+
+  // Directional focus, the multiplexer gesture (Ghostty goto_split, tmux select-pane -L). Two
+  // flags carry the whole point: scope 'canvas' because there is no geometry to walk on the
+  // board, and allowInTerminal because the hand that wants to move is already typing in a
+  // terminal — without it the gesture only works from the one place you don't need it.
+  //
+  // The non-mac default is NOT Ctrl+Arrow (what `both('Cmd+ArrowLeft')` would resolve to):
+  // Ctrl+Arrow is readline's word-jump, and allowInTerminal would steal it from every shell on
+  // Linux and Windows. Ctrl+Alt+Arrow is out for a different reason — the speech.dictation
+  // default is the modifier-only chord 'Cmd+Alt', which on those platforms is Ctrl+Alt held, so
+  // the hold listener would start recording on the way to an arrow. Ctrl+Shift+Arrow is what is
+  // left that no shell and no other command already owns.
+  { id: 'node.focusLeft', title: 'Focus node to the left', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowLeft'], other: ['Ctrl+Shift+ArrowLeft'] },
+    allowInTerminal: true },
+  { id: 'node.focusRight', title: 'Focus node to the right', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowRight'], other: ['Ctrl+Shift+ArrowRight'] },
+    allowInTerminal: true },
+  { id: 'node.focusUp', title: 'Focus node above', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowUp'], other: ['Ctrl+Shift+ArrowUp'] },
+    allowInTerminal: true },
+  { id: 'node.focusDown', title: 'Focus node below', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowDown'], other: ['Ctrl+Shift+ArrowDown'] },
+    allowInTerminal: true },
   // Main-process intercepted today (unconditional): keep firing everywhere.
   { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
     defaultBindings: both('Cmd+W'), allowInTerminal: true, allowWhileTyping: true },

@@ -150,6 +150,13 @@ import { modelsForAgent } from '@shared/agents/model-gateway'
 import { useModelGateway } from '../state/modelGateway'
 import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
+import {
+  FLOW_NODE_CLASS,
+  isFocusTarget,
+  nextNodeInDirection,
+  nodeNearestPoint,
+  type FocusDirection
+} from '../lib/directionalFocus'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
 import { ResumeCard } from '../components/ResumeCard'
@@ -6039,6 +6046,45 @@ export function Canvas() {
     return true
   }, [setCopyError])
 
+  /**
+   * ⌘←/→/↑/↓: hand the keyboard to the node in that direction — the multiplexer gesture
+   * (Ghostty's goto_split, tmux's select-pane -L) on a canvas. The mouse is why it earns its
+   * place: the wheel over a terminal belongs to that terminal's scrollback, so roaming a busy
+   * canvas otherwise means hunting for empty space to drag from first.
+   *
+   * The origin is the node the keyboard is actually IN, read off the focused element rather than
+   * off `selected`. Hover-dwell focus hands the keyboard to a terminal without selecting it, so a
+   * selection-only origin would walk from whichever node was last clicked — often not the one
+   * being typed in. Selection is the fallback for a canvas driven with no terminal focused.
+   */
+  const moveNodeFocus = useCallback(
+    (dir: FocusDirection): boolean => {
+      const nodes = nodesRef.current
+      const from =
+        document.activeElement?.closest(`.${FLOW_NODE_CLASS}`)?.getAttribute('data-id') ??
+        nodes.find((n) => n.selected && isFocusTarget(n))?.id ??
+        null
+      // Nothing focused, nothing selected: the first press ADOPTS the node nearest the view center
+      // instead of moving from it. Walking from an origin the user never chose lands somewhere
+      // arbitrary; adopting is the "you are here" a multiplexer's first move gives you for free.
+      if (!from) {
+        const center = viewCenter()
+        const seed = center ? nodeNearestPoint(nodes, center) : null
+        if (!seed) return false
+        focusNodeRef.current(seed)
+        return true
+      }
+      const next = nextNodeInDirection(nodes, from, dir)
+      if (next) focusNodeRef.current(next)
+      // Claimed even at the edge of the canvas, where there is nothing to move to. Declining
+      // would offer ⌘→ back to the focused terminal instead, and whatever it does there it is
+      // not "nothing" — a navigation key with nowhere to go should do nothing, not something
+      // else.
+      return true
+    },
+    [viewCenter]
+  )
+
   // ONE window keydown for every registry command + the legacy gestures. The deps live in a
   // ref refreshed each render so the listener is registered once; handlers return whether
   // they claimed the chord (an unavailable surface falls through to the platform).
@@ -6114,7 +6160,11 @@ export function Canvas() {
         if (!(project?.ssh?.remoteCwd ?? project?.cwd)) return false
         void newProjectFile()
         return true
-      }
+      },
+      'node.focusLeft': () => moveNodeFocus('left'),
+      'node.focusRight': () => moveNodeFocus('right'),
+      'node.focusUp': () => moveNodeFocus('up'),
+      'node.focusDown': () => moveNodeFocus('down')
       // node.close / node.toggleMarkdown: main-process intercepted on desktop; deliberately
       // no renderer handler (the browser owns ⌘W in the Server Edition — see bridge/stubs.ts).
       // terminal.* / scm.commit / speech.dictation: owned by their local listeners.
