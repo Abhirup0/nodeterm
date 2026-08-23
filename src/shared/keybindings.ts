@@ -43,11 +43,15 @@ export type CommandId =
   | 'app.settings'
   | 'app.shortcutsPanel'
   | 'view.kanbanToggle'
+  | 'view.focusMode'
   | 'panel.explorer'
   | 'panel.sourceControl'
   | 'panel.sessions'
+  | 'app.reopenLastClosed'
   | 'canvas.undo'
   | 'canvas.redo'
+  | 'canvas.goBack'
+  | 'canvas.goForward'
   | 'canvas.deleteSelection'
   | 'canvas.fitAll'
   | 'canvas.tidy'
@@ -68,6 +72,10 @@ export type CommandId =
   | 'node.newWebView'
   | 'node.newDino'
   | 'node.newFile'
+  | 'node.focusLeft'
+  | 'node.focusRight'
+  | 'node.focusUp'
+  | 'node.focusDown'
   | 'node.close'
   | 'node.toggleMarkdown'
   | 'terminal.find'
@@ -92,18 +100,36 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     defaultBindings: both('Cmd+Slash'), allowInTerminal: true },
   { id: 'view.kanbanToggle', title: 'Toggle kanban board', group: 'General', scope: 'app',
     defaultBindings: both('Cmd+Shift+B'), allowInTerminal: true },
+  // Focus mode fills the window with one node — most naturally invoked from INSIDE the terminal
+  // being enlarged, hence allowInTerminal. Scope stays 'canvas': over the kanban board or while
+  // typing in an input there is no node geometry for the toggle to act on (the pre-registry
+  // hardcoded chord fired in both places; the registry gating is the fix, not a regression).
+  { id: 'view.focusMode', title: 'Toggle focus mode', group: 'General', scope: 'canvas',
+    defaultBindings: both('Cmd+Shift+F'), allowInTerminal: true },
   { id: 'panel.explorer', title: 'Toggle explorer panel', group: 'General', scope: 'app',
     defaultBindings: both('Cmd+Shift+E'), allowInTerminal: true },
   { id: 'panel.sourceControl', title: 'Toggle source control panel', group: 'General', scope: 'app',
     defaultBindings: both('Cmd+Shift+G'), allowInTerminal: true },
   { id: 'panel.sessions', title: 'Pin sessions sidebar', group: 'General', scope: 'app',
     defaultBindings: both('Cmd+Shift+L'), allowInTerminal: true },
+  { id: 'app.reopenLastClosed', title: 'Reopen last closed', group: 'General', scope: 'app',
+    defaultBindings: both('Cmd+Shift+T'), allowInTerminal: true },
 
   // Canvas — inert while the kanban board is open (scope 'canvas'), blocked while typing.
   { id: 'canvas.undo', title: 'Undo', group: 'Canvas', scope: 'canvas',
     defaultBindings: both('Cmd+Z') },
   { id: 'canvas.redo', title: 'Redo', group: 'Canvas', scope: 'canvas',
     defaultBindings: { darwin: ['Cmd+Shift+Z'], other: ['Cmd+Shift+Z', 'Cmd+Y'] } },
+  // Camera history (breadcrumb trail), not node-array history: `[` / `]` are the literal keys
+  // `e.key` reports, which is what the resolver compares against — `BracketLeft`/`BracketRight`
+  // are `KeyboardEvent.code` values and would never match (shortcut.ts's KEY_ALIASES covers only
+  // Comma/Slash/Period, so brackets have no word-form spelling here). Off-mac the binding is
+  // Ctrl+[, which terminals read as ESC — safe here because scope 'canvas' without
+  // allowWhileTyping means the resolver refuses it whenever a terminal or input has focus.
+  { id: 'canvas.goBack', title: 'Go back', group: 'Canvas', scope: 'canvas',
+    defaultBindings: both('Cmd+[') },
+  { id: 'canvas.goForward', title: 'Go forward', group: 'Canvas', scope: 'canvas',
+    defaultBindings: both('Cmd+]') },
   { id: 'canvas.deleteSelection', title: 'Delete selection', group: 'Canvas', scope: 'canvas',
     // Mirrors the current platform-blind handler; the typing guard keeps Backspace safe.
     defaultBindings: both('Delete', 'Backspace'),
@@ -149,6 +175,30 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     defaultBindings: both() },
   { id: 'node.newFile', title: 'New file…', group: 'Nodes', scope: 'canvas',
     defaultBindings: both() },
+
+  // Directional focus, the multiplexer gesture (Ghostty goto_split, tmux select-pane -L). Two
+  // flags carry the whole point: scope 'canvas' because there is no geometry to walk on the
+  // board, and allowInTerminal because the hand that wants to move is already typing in a
+  // terminal — without it the gesture only works from the one place you don't need it.
+  //
+  // The non-mac default is NOT Ctrl+Arrow (what `both('Cmd+ArrowLeft')` would resolve to):
+  // Ctrl+Arrow is readline's word-jump, and allowInTerminal would steal it from every shell on
+  // Linux and Windows. Ctrl+Alt+Arrow is out for a different reason — the speech.dictation
+  // default is the modifier-only chord 'Cmd+Alt', which on those platforms is Ctrl+Alt held, so
+  // the hold listener would start recording on the way to an arrow. Ctrl+Shift+Arrow is what is
+  // left that no shell and no other command already owns.
+  { id: 'node.focusLeft', title: 'Focus node to the left', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowLeft'], other: ['Ctrl+Shift+ArrowLeft'] },
+    allowInTerminal: true },
+  { id: 'node.focusRight', title: 'Focus node to the right', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowRight'], other: ['Ctrl+Shift+ArrowRight'] },
+    allowInTerminal: true },
+  { id: 'node.focusUp', title: 'Focus node above', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowUp'], other: ['Ctrl+Shift+ArrowUp'] },
+    allowInTerminal: true },
+  { id: 'node.focusDown', title: 'Focus node below', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Cmd+ArrowDown'], other: ['Ctrl+Shift+ArrowDown'] },
+    allowInTerminal: true },
   // Main-process intercepted today (unconditional): keep firing everywhere.
   { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
     defaultBindings: both('Cmd+W'), allowInTerminal: true, allowWhileTyping: true },

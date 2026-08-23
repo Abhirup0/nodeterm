@@ -7,7 +7,7 @@ import { reportsOwnCopy } from '@shared/agents/config'
 import type { AgentId } from '@shared/agents/config'
 import { readsClaudeTranscript } from '../../lib/transcriptGates'
 import { liveProjectJumpTarget } from '../../lib/projectJump'
-import { terminalShortcutPolicy } from '../../lib/keybindingOverrides'
+import { terminalChordBubbles, terminalShortcutPolicy } from '../../lib/keybindingOverrides'
 import { FindBar } from '../FindBar'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useProjects } from '../../state/projects'
@@ -207,8 +207,16 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     term.attachCustomKeyEventHandler((e) => {
       const ownsProjectJump =
         terminalShortcutPolicy() !== 'terminal-first' && liveProjectJumpTarget(e) !== null
-      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump)
+      // MIRROR TerminalNode's registryOwns — but with `kanbanOpen: true` ALWAYS: the modal only
+      // exists over the board, where the resolver refuses canvas-scope commands (directional
+      // focus etc. mean nothing here), so those chords keep reaching the pty; app-scope
+      // allowInTerminal commands still bubble, matching what the dispatcher would claim.
+      const registryOwns = terminalChordBubbles(e, true)
+      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump, registryOwns)
       if (action === 'pass') return true
+      // 'bubble': hand the chord to the window dispatcher — no preventDefault (it bails on
+      // defaultPrevented), no xterm processing. See TerminalNode's twin comment.
+      if (action === 'bubble') return false
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
       else if (action === 'shift-enter' && sessionId) transport.write(sessionId, SHIFT_ENTER_SEQ)
