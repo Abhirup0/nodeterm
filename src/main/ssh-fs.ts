@@ -14,6 +14,7 @@ import {
   QUICK_OPEN_FILE_CAP
 } from '../shared/quick-open-filter'
 import type { DirEntry } from '../shared/types'
+import { remoteAtomicWrite } from './remote-atomic-write'
 
 export interface SshFsRef {
   conn: SshConnection
@@ -38,10 +39,9 @@ export function sshReadBinaryArgs(conn: SshConnection, cp: string, path: string)
 export function sshWriteArgs(conn: SshConnection, cp: string, path: string): string[] {
   // Atomic: `cat > file` truncates on open, so a connection dropped (or the ControlMaster killed
   // at app quit) mid-write leaves a half/empty file — fatal for .nodeterm/project.json. Stream to
-  // a sibling .tmp and mv into place; a write that dies leaves the target untouched.
-  const target = quoteRemotePath(path)
-  const tmp = quoteRemotePath(`${path}.tmp`)
-  return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(dirname(path))} && cat > ${tmp} && mv -f ${tmp} ${target}`)
+  // a unique sibling temp and mv into place; a write that dies leaves the target untouched.
+  // Per-call uniqueness is load-bearing: two app instances can write this remote path at once.
+  return childArgs(conn, cp, remoteAtomicWrite(path).command)
 }
 export function sshMkdirArgs(conn: SshConnection, cp: string, path: string): string[] {
   return childArgs(conn, cp, `mkdir -p ${quoteRemotePath(path)}`)

@@ -69,6 +69,25 @@ describe('save → load round trip (v3)', () => {
     expect(loaded.projects[1]).toMatchObject({ id: 'p2', name: 'inline' })
   })
 
+  // The breadcrumb trail is one person's camera history: it must survive a full app restart on THIS
+  // machine (index entry) and never reach the git-shared project file every teammate clones.
+  it('keeps a project\'s breadcrumbs machine-local: they survive a fresh store, the shared file never carries them', async () => {
+    const breadcrumbs = [
+      { nodeId: 'term-1', at: 1_700_000_000_000, note: 'looked at the pty' },
+      { nodeId: 'term-2', at: 1_700_000_060_000, note: '' }
+    ]
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot, breadcrumbs })]))
+
+    const fileRaw = await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')
+    expect(fileRaw).not.toContain('breadcrumbs')
+    expect(fileRaw).not.toContain('looked at the pty')
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].breadcrumbs).toEqual(breadcrumbs)
+
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].breadcrumbs).toEqual(breadcrumbs)
+  })
+
   it('does not rewrite (or bump rev of) an unchanged project file', async () => {
     const store = new WorkspaceStore()
     const w = ws([project({ cwd: projRoot })])
@@ -1762,5 +1781,38 @@ describe('the shared project file carries content, not machine identity', () => 
     warn.mockRestore()
     expect(await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')).toBe(bytes)
     expect(await fs.readFile(path.join(otherRoot, '.nodeterm/project.json'), 'utf-8')).toBe(bytes)
+  })
+})
+
+describe('projectMetaFor (issue #338 PR 1) — target exists / is SSH, from the store alone', () => {
+  // The --project targeting gate (src/main/project-grants.ts) learns "does this project exist,
+  // and is it SSH" from main's OWN store — never from anything the caller sent. Same three
+  // entry kinds as persistedCanvases: inline (e.project), ssh (e.ssh), local ref (e.cwd).
+  it('answers for all three entry kinds and undefined for an unknown id', async () => {
+    const store = new WorkspaceStore()
+    const local = project({ id: 'p-local', cwd: projRoot })
+    const inline = project({ id: 'p-inline', cwd: undefined })
+    const ssh = project({
+      id: 'p-ssh',
+      cwd: undefined,
+      ssh: { server: { host: 'h', user: 'u' }, remoteCwd: '/srv/app' }
+    })
+    await store.save(ws([local, inline, ssh]))
+
+    expect(store.projectMetaFor('p-local')).toEqual({ ssh: false })
+    expect(store.projectMetaFor('p-inline')).toEqual({ ssh: false })
+    expect(store.projectMetaFor('p-ssh')).toEqual({ ssh: true })
+    // Fail closed: an id the store does not know (deleted, invented, another machine's) has no
+    // meta at all — the gate refuses on undefined.
+    expect(store.projectMetaFor('p-gone')).toBeUndefined()
+    expect(store.projectMetaFor('')).toBeUndefined()
+  })
+
+  it('a deleted project stops answering after the save that removed it', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ id: 'p-a', cwd: projRoot }), project({ id: 'p-b', cwd: undefined })]))
+    expect(store.projectMetaFor('p-b')).toEqual({ ssh: false })
+    await store.save(ws([project({ id: 'p-a', cwd: projRoot })]))
+    expect(store.projectMetaFor('p-b')).toBeUndefined()
   })
 })

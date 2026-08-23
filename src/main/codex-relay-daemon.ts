@@ -48,12 +48,12 @@ import {
   openSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync
 } from 'fs'
+import { renameAtomicSync, tempNameFor } from '../core/fs-atomic'
 import { createServer, request } from 'http'
 import { homedir } from 'os'
 import path from 'path'
@@ -64,6 +64,7 @@ import {
   isSafeAccountId,
   planCodexRolloutExposure
 } from '../core/codex-accounts-core'
+import { parseEndpointEnv } from '../core/agents/hook-endpoint-parse'
 
 // Protocol v6 adds a node-scoped capability to every Electron identity request. It also merges
 // account-isolated catalogs and resumes a selected foreign rollout by path in
@@ -646,7 +647,7 @@ async function bind(route: Route, threadId: string, name?: string): Promise<bool
     return notifyElectron(route, threadId, name)
   }
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
-  const tmp = `${file}.${process.pid}.tmp`
+  const tmp = tempNameFor(file)
   const quarantined: Array<{ source: string; quarantine: string }> = []
   const mappings = path.join(root, 'codex-thread-nodes')
   try {
@@ -675,16 +676,16 @@ async function bind(route: Route, threadId: string, name?: string): Promise<bool
             path.basename(other.file) === threadId)
         ) {
           const quarantine = `${other.file}.transfer-${process.pid}-${Date.now()}-${quarantined.length}`
-          renameSync(other.file, quarantine)
+          renameAtomicSync(other.file, quarantine)
           quarantined.push({ source: other.file, quarantine })
         }
       }
     }
-    renameSync(tmp, file)
+    renameAtomicSync(tmp, file)
   } catch {
     for (const item of quarantined.reverse()) {
       try {
-        renameSync(item.quarantine, item.source)
+        renameAtomicSync(item.quarantine, item.source)
       } catch {}
     }
     try {
@@ -722,7 +723,18 @@ function indexedName(socketPath: string, threadId?: string): string | undefined 
   }
 }
 
-function hookEndpointOptions(
+/**
+ * Read + parse the local endpoint env file for `hookRequest`/`hookJsonRequest`. Values are
+ * `posixQuote`d since #351, so this must go through the shared quote-aware parser — a naive
+ * first-`=` split keeps the quotes, making the port NaN and the sock non-absolute, and every
+ * authorize/observed/catalog call then dies "endpoint unavailable". Exported for tests.
+ */
+export function readHookEndpointEnv(file: string): Record<string, string> {
+  return parseEndpointEnv(readFileSync(file, 'utf8'))
+}
+
+/** Exported for tests. */
+export function hookEndpointOptions(
   env: Record<string, string>,
   pathname: string
 ): { socketPath: string; path: string } | { hostname: string; port: number; path: string } | null {
@@ -741,15 +753,7 @@ function hookRequest(
   return new Promise((resolve, reject) => {
     let env: Record<string, string>
     try {
-      env = Object.fromEntries(
-        readFileSync(route.hookEndpoint, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .map((l) => {
-            const i = l.indexOf('=')
-            return i > 0 ? [l.slice(0, i), l.slice(i + 1)] : ['', '']
-          })
-      )
+      env = readHookEndpointEnv(route.hookEndpoint)
     } catch (error) {
       reject(error)
       return
@@ -787,15 +791,7 @@ function hookJsonRequest<T>(route: Route, pathname: string): Promise<T> {
   return new Promise((resolve, reject) => {
     let env: Record<string, string>
     try {
-      env = Object.fromEntries(
-        readFileSync(route.hookEndpoint, 'utf8')
-          .split('\n')
-          .filter(Boolean)
-          .map((line) => {
-            const separator = line.indexOf('=')
-            return separator > 0 ? [line.slice(0, separator), line.slice(separator + 1)] : ['', '']
-          })
-      )
+      env = readHookEndpointEnv(route.hookEndpoint)
     } catch (error) {
       reject(error)
       return
@@ -1547,18 +1543,26 @@ function serve(): void {
     server.off('error', onListenError)
     const addr = server.address()
     if (!addr || typeof addr === 'string') process.exit(1)
-    const tmp = `${statePath}.${process.pid}.tmp`
-    writeFileSync(
-      tmp,
-      JSON.stringify({
-        version: VERSION,
-        pid: process.pid,
-        port: addr.port,
-        token
-      }),
-      { mode: 0o600 }
-    )
-    renameSync(tmp, statePath)
+    const tmp = tempNameFor(statePath)
+    try {
+      writeFileSync(
+        tmp,
+        JSON.stringify({
+          version: VERSION,
+          pid: process.pid,
+          port: addr.port,
+          token
+        }),
+        { mode: 0o600 }
+      )
+      renameAtomicSync(tmp, statePath)
+    } catch (e) {
+      // A unique temp never self-heals the way the old fixed name did; remove it on failure.
+      try {
+        unlinkSync(tmp)
+      } catch {}
+      throw e
+    }
     releaseLock()
   })
 }

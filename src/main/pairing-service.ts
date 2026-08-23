@@ -35,6 +35,7 @@ import {
   type RelayPairingBlock
 } from './pairing-core'
 import type { DeviceRevokeResult, DeviceRevokeServerOutcome, Settings } from '../shared/types'
+import { renameAtomic, tempNameFor } from '../core/fs-atomic'
 import { publicKeyToB64, deriveSharedKey, encrypt, decrypt, type KeyPair } from './remote/e2ee'
 import { hostIdFromPublicKeyB64 } from './remote/relay-id'
 import { getDeviceId } from '../core/device-id'
@@ -250,15 +251,11 @@ async function readAgentJson(): Promise<Record<string, unknown>> {
   }
 }
 
-/** Paired with `process.pid` in the temp names below: the counter makes a name unique WITHIN this
- *  process, the pid makes it unique ACROSS processes (it restarts at 0 in every new one). Same
- *  scheme as agent-status-mirror's local write (src/core/agent-status-mirror.ts). */
-let writeSeq = 0
-
 /**
  * Remove agent.json temps no writer in THIS process owns: the legacy fixed `agent.json.tmp`
- * (written by builds from before per-call names) and any `agent.json.<pid>.<seq>.tmp` whose pid is
- * not ours. Best effort — a failure here must never break (or skip) the write that follows.
+ * (written by builds from before per-call names) and any `agent.json.<pid>.<seq>[.<uuid>].tmp`
+ * whose pid is not ours. Best effort — a failure here must never break (or skip) the write that
+ * follows.
  *
  * agent.json is not config: every device entry carries the `agentToken` bearer the phone presents
  * on the host-agent WebSocket, so an orphan is a live credential at 0600 that nothing will ever
@@ -274,8 +271,10 @@ async function sweepStaleAgentTmp(): Promise<void> {
     const base = path.basename(AGENT_JSON_PATH)
     for (const entry of await fs.readdir(AGENT_DIR)) {
       if (!entry.startsWith(base) || !entry.endsWith('.tmp')) continue
-      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>'
-      const owner = /^\.(\d+)\.\d+$/.exec(middle)?.[1]
+      const middle = entry.slice(base.length, -'.tmp'.length) // '' or '.<pid>.<seq>[.<uuid>]'
+      const owner =
+        /^\.(\d+)\.\d+(?:\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})?$/
+          .exec(middle)?.[1]
       if (middle === '' || (owner && owner !== String(process.pid))) {
         await fs.rm(path.join(AGENT_DIR, entry), { force: true }).catch(() => undefined)
       }
@@ -390,20 +389,19 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
    * Lives INSIDE the factory, below `serialize`, so no code path outside this closure can reach
    * it unchained — the same by-construction guarantee as GitHubControlStore's private write().
    * Overlapping entry points (the pairing POST, renderer revokes) are ordered by the chain; the
-   * per-call temp name covers the writers the chain cannot see — the host agent is a separate
-   * PROCESS writing this same ~/.nodeterm (`writeSeq` stays module-level so a second service
-   * instance in THIS process keeps counting instead of restarting into colliding names), and a
-   * crash between tmp-write and rename.
+   * per-call temp name (`tempNameFor`: pid + module counter + UUID) covers the writers the chain
+   * cannot see — the host agent is a separate PROCESS writing this same ~/.nodeterm, a second
+   * service instance in THIS process, and a crash between tmp-write and rename.
    */
   async function writeAgentJson(obj: Record<string, unknown>): Promise<void> {
     await fs.mkdir(AGENT_DIR, { recursive: true, mode: 0o700 })
     await fs.chmod(AGENT_DIR, 0o700).catch(() => {})
     await sweepStaleAgentTmp()
-    const tmp = `${AGENT_JSON_PATH}.${process.pid}.${++writeSeq}.tmp`
+    const tmp = tempNameFor(AGENT_JSON_PATH)
     try {
       await fs.writeFile(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 })
       await fs.chmod(tmp, 0o600).catch(() => {})
-      await fs.rename(tmp, AGENT_JSON_PATH)
+      await renameAtomic(tmp, AGENT_JSON_PATH)
     } catch (e) {
       // A unique name never self-heals the way the fixed one did (the next write just reused it),
       // and here a leaked temp IS a leaked credential: only this cleanup — or a later run's sweep,
@@ -438,11 +436,11 @@ export function createPairingService(relayDeps?: PairingRelayDeps): PairingServi
     }
     const next = filterAuthorizedKeys(content, deviceId)
     if (next === content) return
-    const tmp = `${AUTH_KEYS_PATH}.${process.pid}.${++writeSeq}.tmp`
+    const tmp = tempNameFor(AUTH_KEYS_PATH)
     try {
       await fs.writeFile(tmp, next, { mode: 0o600 })
       await fs.chmod(tmp, 0o600).catch(() => {})
-      await fs.rename(tmp, AUTH_KEYS_PATH)
+      await renameAtomic(tmp, AUTH_KEYS_PATH)
     } catch (e) {
       // A unique name never self-heals the way the fixed one did (the next write just reused it),
       // so a failed write has to remove its own temp — otherwise every failed revoke leaves

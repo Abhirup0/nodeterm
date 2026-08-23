@@ -64,6 +64,7 @@ import {
 import { terminalKey } from '../terminal/terminal-config'
 import {
   setWebglGesture,
+  setWebglZoom,
   releaseAllHiddenGrants,
   WEBGL_GESTURE_SETTLE_MS
 } from '../terminal/webgl-budget'
@@ -149,8 +150,16 @@ import { modelsForAgent } from '@shared/agents/model-gateway'
 import { useModelGateway } from '../state/modelGateway'
 import { viewportAtZoom1 } from '../lib/zoomReset'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
+import {
+  FLOW_NODE_CLASS,
+  isFocusTarget,
+  nextNodeInDirection,
+  nodeNearestPoint,
+  type FocusDirection
+} from '../lib/directionalFocus'
 import { UpdateCard } from '../components/UpdateCard'
 import { AnnouncementBanner } from '../components/AnnouncementBanner'
+import { ResumeCard } from '../components/ResumeCard'
 import { TmuxBanner } from '../components/TmuxBanner'
 import { PtyPressureBanner } from '../components/PtyPressureBanner'
 import { ShortcutCaptureBanner } from '../components/ShortcutCaptureBanner'
@@ -207,6 +216,16 @@ import {
 } from '../lib/controlRouting'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
 import {
+  planOpenProject,
+  recordAttachConsent,
+  openProjectReply,
+  findProjectByCwd,
+  nextFreePosition,
+  armForColdOpen,
+  projectTargetFlagRefusal,
+  clearAttachConsent
+} from '../lib/projectOpen'
+import {
   FIT_NODE_OPTIONS,
   absolutePosition,
   isMeasured,
@@ -214,6 +233,12 @@ import {
   viewportForRect,
   type FocusableNode
 } from '../lib/nodeFocus'
+import {
+  recordBreadcrumb,
+  stepBreadcrumb,
+  type BreadcrumbState,
+  type BreadcrumbTarget
+} from '../lib/breadcrumbs'
 import { planSessionKill } from '../lib/sessionKill'
 import { RemoteAccessDialog } from '../components/RemoteAccessDialog'
 import { SshProjectDialog } from '../components/SshProjectDialog'
@@ -335,10 +360,13 @@ import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNoteP
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
+import { useReopenHistory } from '../state/reopenHistory'
+import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
+import { planReopen } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
-import { activePermissionMode } from '../state/permissionMode'
+import { activePermissionMode, projectPermissionMode } from '../state/permissionMode'
 import { useContextWindow } from '../state/contextWindow'
 import { useSessionNaming } from '../state/sessionNaming'
 import { useSshServers } from '../state/sshServers'
@@ -365,6 +393,8 @@ import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
 import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
+import { useFocusNode, FOCUS_SURFACE_ID } from '../state/focusNode'
+import { focusTargetId } from '../lib/focusTarget'
 import {
   createCanvasPublisher,
   isEphemeralNodeId,
@@ -514,6 +544,7 @@ interface PendingPeerState {
  */
 const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
 const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
+const FOCUS_NO_TARGET_NOTICE = 'Select a terminal or agent node to focus.'
 
 // The webview's file loader renders off the LOCAL disk and has no remote counterpart, so a host
 // path from a remote agent could only resolve to a same-named local file — or nothing. Refuse and
@@ -575,6 +606,14 @@ const LAUNCH_RETRY_MS = 400
 // first, and the active-project effect hydrates React Flow ASYNCHRONOUSLY — so the handler waits
 // for the node to appear instead of reading an empty canvas one tick too early. Bounded well under
 // the CLI's 120s timeout: a canvas that never arrives becomes a plain "not on an open canvas".
+/**
+ * Which projects have already shown their resume card THIS APP RUN. Module-level so it survives
+ * Canvas re-renders and project switches, and IN-MEMORY on purpose: persisting it would leave one
+ * localStorage entry per project forever, while forgetting on reload is exactly what "the resume
+ * card comes back next launch" means.
+ */
+const resumeCardShown = new Set<string>()
+
 const CONTROL_TRAVEL_TIMEOUT_MS = 8000
 const CONTROL_TRAVEL_POLL_MS = 60
 async function waitForCanvasNode(
@@ -1112,6 +1151,11 @@ export function Canvas() {
   const pastRef = useRef<CanvasNode[][]>([])
   const futureRef = useRef<CanvasNode[][]>([])
   const committedRef = useRef<CanvasNode[]>([])
+  // Camera navigation history — a SEPARATE stack from pastRef/futureRef (those replay node-array
+  // state; this replays camera position only). NOT persisted itself: only navRef.current.list
+  // rides IndexEntryV3.breadcrumbs; the cursor resets to the tip on every project activation
+  // (see the active-project effect below), same as pastRef/futureRef resetting there.
+  const navRef = useRef<BreadcrumbState>({ list: [], index: -1 })
   const draggingRef = useRef(false)
   // Canvas sync (emitting side) — see the publish effect below.
   const publisherRef = useRef<CanvasPublisher | null>(null)
@@ -1126,6 +1170,20 @@ export function Canvas() {
    */
   const hasPeersRef = useRef(false)
   const [, bumpHist] = useState(0)
+  // Same trick as bumpHist, for the breadcrumb cursor: the Dock's back/forward buttons read
+  // navRef during render, and a ref mutation is invisible to React — so every write to
+  // navRef.current is followed by a bump, or the buttons stay disabled until some unrelated
+  // re-render happens to notice. Its own counter rather than bumpHist's: the two stacks are
+  // separate facts (node-array history vs camera history) and move at different times.
+  const [, bumpNav] = useState(0)
+  /**
+   * The project whose resume card is currently up, or null for "no card". A SNAPSHOT of the project
+   * as it was at activation (the card offers where you left off, so its rows must not re-shuffle
+   * under the user as new breadcrumbs are recorded), and holding the project itself rather than a
+   * boolean keeps Canvas off a `useProjects` subscription for the active project object — that
+   * object is rebuilt on every node serialization and would re-render the whole canvas per edit.
+   */
+  const [resumeProject, setResumeProject] = useState<Project | null>(null)
   const {
     setViewport,
     getViewport,
@@ -1927,6 +1985,11 @@ export function Canvas() {
     pastRef.current = []
     futureRef.current = []
     bumpHist((v) => v + 1)
+    // Camera navigation history is per-project; reset the cursor to the tip on every activation
+    // (a project reactivated after being away starts "at the end" of its own trail).
+    const bc = project.breadcrumbs ?? []
+    navRef.current = { list: bc, index: bc.length - 1 }
+    bumpNav((v) => v + 1)
     if (preserveViewportRef.current) {
       // In-place reload (external change / SSH reconcile): keep the user's current camera —
       // the file's viewport is where another machine last saved, not where this user looks.
@@ -1936,6 +1999,10 @@ export function Canvas() {
       setViewport(project.viewport)
       setZoomPct(Math.round(project.viewport.zoom * 100))
       setGroupLabelBoost(project.viewport.zoom)
+      // A project can load already zoomed IN past the crisp threshold (saved viewport) — seed the
+      // gate before the mount-time IntersectionObserver reports make every node request a context
+      // it would only have to give back.
+      setWebglZoom(project.viewport.zoom)
       // Seed the shared glyph camera from the same viewport: `onMove` only fires once the user
       // actually pans, so without this a project that loads scrolled away would draw its grids
       // against the previous project's camera until the first gesture.
@@ -1950,6 +2017,19 @@ export function Canvas() {
       // without phone access on, the serialize itself is the waste (main would drop the payload).
       if (useSettings.getState().settings.phoneAccessEnabled) {
         window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
+      }
+      // Offer the resume card once per project per app run. "Once" is only spent on a card that
+      // could actually render: a project whose breadcrumbs ALL point at nodes deleted since must
+      // not burn its one-shot slot on an empty card the user never saw — and neither must a
+      // project that activates ON the kanban board, where the card (z 11) sits invisible under
+      // the opaque overlay (z 25). Same failure mode, same rule.
+      const liveIds = new Set(flow.map((n) => n.id))
+      const hasLiveStop = (project.breadcrumbs ?? []).some((b) => liveIds.has(b.nodeId))
+      if (!resumeCardShown.has(project.id) && hasLiveStop && !isKanbanOpen(project.id)) {
+        resumeCardShown.add(project.id)
+        setResumeProject(project)
+      } else {
+        setResumeProject(null)
       }
       // Consume a cross-project focus request (notification click on a background node).
       const pending = pendingFocusRef.current
@@ -4186,8 +4266,22 @@ export function Canvas() {
 
   // ---- multi-node actions (context menu) ----
   const deleteNodes = useCallback(
-    (ids: string[]) => {
+    (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
+      if (opts?.record !== false) {
+        const snapshots = nodesRef.current
+          .filter((n) => set.has(n.id))
+          .map((n) => snapshotNode(n, nodesRef.current))
+          .filter((s): s is NonNullable<typeof s> => s !== null)
+        if (snapshots.length) {
+          useReopenHistory.getState().push({
+            kind: 'nodes',
+            projectId: useProjects.getState().activeProjectId ?? '',
+            closedAt: Date.now(),
+            nodes: snapshots
+          })
+        }
+      }
       nodesRef.current.forEach((n) => {
         if (!set.has(n.id)) return
         // Permanent delete: the upcoming unmount must dispose the xterm, not park it (the
@@ -4200,6 +4294,10 @@ export function Canvas() {
         // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearLoop(n.id)
+        // The open-project attach-consent mirror dies with its caller (review #363 M-1) —
+        // symmetric with main's grant ledger, which clears on the same teardown (ptyDestroy).
+        // A node id revived later faces a fresh dialog, exactly as it faces a fresh grant.
+        clearAttachConsent(n.id)
       })
       setNodes((ns) => {
         // Free children of any deleted group back to absolute positions.
@@ -4293,7 +4391,7 @@ export function Canvas() {
       const loginIds = nodesRef.current
         .filter((n) => n.data.accountId === accountId && isAccountLoginNode(n.data))
         .map((n) => n.id)
-      if (loginIds.length) deleteNodes(loginIds)
+      if (loginIds.length) deleteNodes(loginIds, { record: false })
       setNodes((ns) =>
         ns.some((n) => n.data.accountId === accountId)
           ? ns.map((n) =>
@@ -5589,32 +5687,36 @@ export function Canvas() {
     [setNodes, markDirty]
   )
 
-  const goToNode = useCallback(
+  /**
+   * The ONE framing implementation behind both deliberate focus (`goToNode`) and breadcrumb
+   * back/forward (`stepAndFrame`) — extracted so CLAUDE.md's "Go to node" invariant has a single
+   * copy to regress. Fit the node in view instead of centering at a fixed zoom — `zoom:
+   * max(current, 1)` overshot large terminals (their body never fit the viewport). fitView sizes
+   * the zoom to the node and resolves group-relative positions itself; the clamp keeps a small
+   * node from filling the whole screen and a huge one from being fit microscopic.
+   *
+   * …but ONLY once React Flow has MEASURED the node. Its fit set is filtered by `measured`
+   * (no width/height fallback in there), so an unmeasured node leaves the set EMPTY, the
+   * bounds collapse to {0,0,0,0} and the camera flies to the canvas ORIGIN at max zoom —
+   * empty canvas, node off-screen. That is precisely the state a node is in for the first
+   * tick after its project loads, i.e. on every CROSS-PROJECT focus (OS-notification click,
+   * sessions sidebar, ⌘K jump, presence travel): the load and the focus happen in the same
+   * tick, so measuring can lose the race and only a second attempt would work. In that
+   * window we frame the node ourselves from its persisted size — see lib/nodeFocus.
+   *
+   * The measured check must read React Flow's OWN store (`getInternalNode`), not our node
+   * object: `measured` only reaches our state one render later, when `onNodesChange` applies
+   * the dimensions change, so our copy says "unmeasured" for nodes the store has long sized.
+   *
+   * The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`:
+   * a flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which
+   * is what kept a big node (a group frame most of all) further away than it needed to be.
+   * The free-rect solver reclaims the space the chrome does not actually occupy, so the node
+   * is framed tighter without sliding underneath anything. Falls back to the flat ratio when
+   * there is nothing sensible to solve — the same ratio the unmeasured branch uses.
+   */
+  const frameNode = useCallback(
     (node: Node) => {
-      // Fit the node in view instead of centering at a fixed zoom — `zoom: max(current, 1)`
-      // overshot large terminals (their body never fit the viewport). fitView sizes the zoom
-      // to the node and resolves group-relative positions itself; the clamp keeps a small
-      // node from filling the whole screen and a huge one from being fit microscopic.
-      //
-      // …but ONLY once React Flow has MEASURED the node. Its fit set is filtered by `measured`
-      // (no width/height fallback in there), so an unmeasured node leaves the set EMPTY, the
-      // bounds collapse to {0,0,0,0} and the camera flies to the canvas ORIGIN at max zoom —
-      // empty canvas, node off-screen. That is precisely the state a node is in for the first
-      // tick after its project loads, i.e. on every CROSS-PROJECT focus (OS-notification click,
-      // sessions sidebar, ⌘K jump, presence travel): the load and the focus happen in the same
-      // tick, so measuring can lose the race and only a second attempt would work. In that
-      // window we frame the node ourselves from its persisted size — see lib/nodeFocus.
-      //
-      // The measured check must read React Flow's OWN store (`getInternalNode`), not our node
-      // object: `measured` only reaches our state one render later, when `onNodesChange` applies
-      // the dimensions change, so our copy says "unmeasured" for nodes the store has long sized.
-      //
-      // The framing itself is solved against the CURRENT chrome layout, exactly like `fitAll`:
-      // a flat 20% ratio has to reserve enough slack for the dock/minimap on EVERY side, which
-      // is what kept a big node (a group frame most of all) further away than it needed to be.
-      // The free-rect solver reclaims the space the chrome does not actually occupy, so the node
-      // is framed tighter without sliding underneath anything. Falls back to the flat ratio when
-      // there is nothing sensible to solve — the same ratio the unmeasured branch below uses.
       const internal = getInternalNode(node.id)
       if (isMeasured(internal)) {
         const wrap = flowWrapRef.current
@@ -5639,6 +5741,127 @@ export function Canvas() {
     [fitView, setViewport, getInternalNode]
   )
 
+  const goToNode = useCallback(
+    (node: Node) => {
+      // Record the landing FIRST, and unconditionally: this is the one funnel every deliberate
+      // node focus goes through (notification click, sessions sidebar, ⌘K jump, presence travel,
+      // minimap double-click), and recording is independent of which framing branch runs below —
+      // including the branch that deliberately leaves the camera where it is.
+      const activeId = useProjects.getState().activeProjectId
+      // …with ONE exclusion: the ephemeral `subagent`/`loop` viz nodes. They are merged into the
+      // <ReactFlow nodes> prop but NEVER persisted — they are cleared on the next turn — and both
+      // double-click focus and the minimap's double-click land here. A breadcrumb for one is a
+      // permanently unresolvable id burning one of the 20 slots, so it is never recorded.
+      if (activeId && node.type !== 'subagent' && node.type !== 'loop') {
+        const target: BreadcrumbTarget = {
+          id: node.id,
+          kind: node.type as BreadcrumbTarget['kind'],
+          title: (node.data as { title?: string } | undefined)?.title ?? node.id,
+          agentId: (node.data as { agentId?: BreadcrumbTarget['agentId'] } | undefined)?.agentId
+        }
+        const status = useAgentStatus.getState().byId[node.id]
+        const next = recordBreadcrumb(navRef.current, target, status, Date.now())
+        // recordBreadcrumb returns the SAME object on a dedupe no-op, so identity is the skip test.
+        if (next !== navRef.current) {
+          navRef.current = next
+          bumpNav((v) => v + 1)
+          useProjects.getState().setProjectBreadcrumbs(activeId, next.list)
+          markDirty()
+        }
+      }
+      frameNode(node)
+    },
+    [frameNode, markDirty]
+  )
+
+  /**
+   * Walks the breadcrumb cursor one stop and flies the camera there. Browser back/forward for the
+   * canvas: this is the ONE path that must NOT record a stop — calling goToNode would append the
+   * landing and turn every step into a new tip — so it shares `frameNode` (the single framing
+   * implementation) and never goToNode itself.
+   *
+   * stepBreadcrumb skips stops whose node is gone, so a deleted node is walked THROUGH silently.
+   */
+  const stepAndFrame = useCallback(
+    (direction: 'back' | 'forward') => {
+      const activeId = useProjects.getState().activeProjectId
+      if (!activeId || isKanbanOpen(activeId)) return
+      const next = stepBreadcrumb(navRef.current, direction, (nodeId) =>
+        nodesRef.current.some((n) => n.id === nodeId)
+      )
+      if (!next) return
+      // Cursor only: it is machine-local and NOT persisted (only `list` rides the index entry),
+      // so a step writes no project state and marks nothing dirty — walking the camera back and
+      // forth must not queue a project.json write.
+      navRef.current = next
+      bumpNav((v) => v + 1)
+      const target = nodesRef.current.find((n) => n.id === next.list[next.index].nodeId)
+      if (!target) return
+      frameNode(target)
+    },
+    [frameNode]
+  )
+  const goBack = useCallback(() => stepAndFrame('back'), [stepAndFrame])
+  const goForward = useCallback(() => stepAndFrame('forward'), [stepAndFrame])
+
+  // Focus mode (issue #78): one terminal fills the window (reparented into the always-mounted
+  // focus surface below); the chrome hides behind it and reveals on pointer proximity.
+  const focusedId = useFocusNode((s) => s.focusedId)
+  // Where to land the camera after an exit — set by toggleFocusMode, consumed below AFTER the
+  // body class flips back. goToNode cannot run inside the toggle: the flow wrapper is
+  // display:none while focused (so the WebGL budget can reclaim covered holders), and fitView
+  // math against a 0-sized pane is exactly the origin-jump bug.
+  const focusReturnRef = useRef<string | null>(null)
+  useEffect(() => {
+    document.body.classList.toggle('focus-mode', !!focusedId)
+    if (!focusedId && focusReturnRef.current) {
+      const returnId = focusReturnRef.current
+      focusReturnRef.current = null
+      // Two frames: React Flow re-learns the pane's dimensions from its own ResizeObserver on
+      // the tick after display is restored; framing before that reads a stale/zero size.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const node = nodesRef.current.find((n) => n.id === returnId)
+          if (node) goToNode(node)
+        })
+      )
+    }
+    return () => document.body.classList.remove('focus-mode')
+  }, [focusedId, goToNode])
+  useEffect(() => {
+    if (!focusedId) return
+    // Proximity reveal instead of an invisible hover band: a band over the terminal's bottom
+    // edge would eat clicks on the very row a shell keeps its prompt on.
+    const onMove = (e: MouseEvent): void => {
+      document.body.classList.toggle('focus-reveal-bottom', window.innerHeight - e.clientY < 90)
+    }
+    window.addEventListener('mousemove', onMove)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      document.body.classList.remove('focus-reveal-bottom')
+    }
+  }, [focusedId])
+
+  const toggleFocusMode = useCallback(() => {
+    const store = useFocusNode.getState()
+    if (store.focusedId) {
+      // Landing on the node is DEFERRED to the focus-mode class effect (see focusReturnRef):
+      // the flow pane is still display:none at this point.
+      focusReturnRef.current = store.focusedId
+      store.clear()
+      return
+    }
+    // The kanban board is an opaque overlay and its card modal already IS a focused view of a
+    // session — engaging under it would just hide the canvas twice.
+    if (isKanbanOpen(useProjects.getState().activeProjectId)) return
+    const target = focusTargetId(nodesRef.current)
+    if (!target) {
+      setNotice({ kind: 'error', text: FOCUS_NO_TARGET_NOTICE })
+      return
+    }
+    store.focus(target)
+  }, [goToNode])
+
   const onNodeDoubleClick = useCallback(
     (_e: React.MouseEvent, node: Node) => {
       if (useSettings.getState().settings.doubleClickFocus) goToNode(node)
@@ -5661,6 +5884,81 @@ export function Canvas() {
     },
     [commitActiveToStore, writeDisk]
   )
+
+  /** `app.reopenLastClosed` (Cmd+Shift+T): pops the shared close-history stack and reopens a
+   *  project tab or recreates a deleted node batch — whichever was closed more recently.
+   *  Skips stale entries (already reopened another way, or the project was permanently
+   *  deleted since) and keeps walking back until it finds a usable one or the stack empties.
+   *  The DECISION (which branch, staleness, active-vs-stored) is the pure `planReopen`
+   *  (`lib/reopenPlan.ts`, unit-tested there); this loop only pops the real stack and executes
+   *  whichever `ReopenPlan` comes back — the side-effecting parts that need live Canvas state. */
+  const reopenLastClosedCommand = useCallback((): boolean => {
+    for (;;) {
+      const entry = useReopenHistory.getState().popNext()
+      if (!entry) return false
+
+      const { projects, activeProjectId } = useProjects.getState()
+      const project = projects.find((p) => p.id === entry.projectId)
+      const accounts = useSettings.getState().settings.claudeAccounts
+      const plan = planReopen(
+        entry,
+        projects,
+        activeProjectId,
+        new Set(nodesRef.current.map((n) => n.id)),
+        (snap, liveIds) =>
+          recreateNodeFromSnapshot(snap, {
+            liveNodeIds: liveIds,
+            project,
+            resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts),
+            // The TARGET project's own permission mode, not the caller's active one — a node
+            // restored into project B must start under B's override, never A's.
+            permissionModeFor: (agentId) => projectPermissionMode(project, agentId)
+          })
+      )
+
+      switch (plan.action) {
+        case 'skip':
+          continue
+        case 'reopenProject':
+          // A project switch — commit the live canvas back to the store first, or whatever the
+          // user was looking at is silently lost (the same invariant every other project switch/
+          // add/delete in this file honors via commitActiveToStore()).
+          commitActiveToStore()
+          useProjects.getState().reopenProject(plan.projectId)
+          setWelcomeOpen(false)
+          void writeDisk()
+          return true
+        case 'insertActive':
+          setNodes((ns) => [...ns, ...plan.nodes])
+          markDirty()
+          return true
+        case 'insertStored':
+          // Not on screen: write straight into the project's SERIALIZED nodes (the store, not
+          // React Flow) — the same mechanism canvas-control uses to create a node in a
+          // non-active project (Canvas.tsx:6499, :6540). armForColdOpen is required here: a bare
+          // `flowToNodeStates` drops `initialCommand` (never serialized on purpose), so an agent
+          // node restored this way would never launch its command on the eventual cold open.
+          for (const node of plan.nodes) {
+            useProjects
+              .getState()
+              .applyNodeMutation(plan.projectId, {
+                op: 'upsert',
+                node: flowToNodeStates([armForColdOpen(node)])[0]
+              })
+          }
+          void writeDisk()
+          if (plan.reopenProjectAfter) {
+            commitActiveToStore()
+            useProjects.getState().reopenProject(plan.projectId)
+            setWelcomeOpen(false)
+            void writeDisk()
+          } else {
+            switchProject(plan.projectId)
+          }
+          return true
+      }
+    }
+  }, [switchProject, setNodes, markDirty, writeDisk, commitActiveToStore])
 
   // ---- global shortcuts ----
   // The three trailing gestures below are registry-LESS chords (design D2: declared gestures,
@@ -5748,6 +6046,45 @@ export function Canvas() {
     return true
   }, [setCopyError])
 
+  /**
+   * ⌘←/→/↑/↓: hand the keyboard to the node in that direction — the multiplexer gesture
+   * (Ghostty's goto_split, tmux's select-pane -L) on a canvas. The mouse is why it earns its
+   * place: the wheel over a terminal belongs to that terminal's scrollback, so roaming a busy
+   * canvas otherwise means hunting for empty space to drag from first.
+   *
+   * The origin is the node the keyboard is actually IN, read off the focused element rather than
+   * off `selected`. Hover-dwell focus hands the keyboard to a terminal without selecting it, so a
+   * selection-only origin would walk from whichever node was last clicked — often not the one
+   * being typed in. Selection is the fallback for a canvas driven with no terminal focused.
+   */
+  const moveNodeFocus = useCallback(
+    (dir: FocusDirection): boolean => {
+      const nodes = nodesRef.current
+      const from =
+        document.activeElement?.closest(`.${FLOW_NODE_CLASS}`)?.getAttribute('data-id') ??
+        nodes.find((n) => n.selected && isFocusTarget(n))?.id ??
+        null
+      // Nothing focused, nothing selected: the first press ADOPTS the node nearest the view center
+      // instead of moving from it. Walking from an origin the user never chose lands somewhere
+      // arbitrary; adopting is the "you are here" a multiplexer's first move gives you for free.
+      if (!from) {
+        const center = viewCenter()
+        const seed = center ? nodeNearestPoint(nodes, center) : null
+        if (!seed) return false
+        focusNodeRef.current(seed)
+        return true
+      }
+      const next = nextNodeInDirection(nodes, from, dir)
+      if (next) focusNodeRef.current(next)
+      // Claimed even at the edge of the canvas, where there is nothing to move to. Declining
+      // would offer ⌘→ back to the focused terminal instead, and whatever it does there it is
+      // not "nothing" — a navigation key with nowhere to go should do nothing, not something
+      // else.
+      return true
+    },
+    [viewCenter]
+  )
+
   // ONE window keydown for every registry command + the legacy gestures. The deps live in a
   // ref refreshed each render so the listener is registered once; handlers return whether
   // they claimed the chord (an unavailable surface falls through to the platform).
@@ -5774,11 +6111,15 @@ export function Canvas() {
         useViewMode.getState().toggle(id)
         return true
       },
+      'view.focusMode': () => { toggleFocusMode(); return true },
       'panel.explorer': () => { showExplorer('toggle'); return true },
       'panel.sourceControl': () => { setScOpen((v) => !v); return true },
       'panel.sessions': () => { toggleSessionsPin(); return true },
+      'app.reopenLastClosed': reopenLastClosedCommand,
       'canvas.undo': () => { undo(); return true },
       'canvas.redo': () => { redo(); return true },
+      'canvas.goBack': () => { goBack(); return true },
+      'canvas.goForward': () => { goForward(); return true },
       'canvas.fitAll': () => { fitAll(); return true },
       'canvas.tidy': () => { arrangeAllNodes(); return true },
       'canvas.deleteSelection': deleteSelectionCommand,
@@ -5796,7 +6137,34 @@ export function Canvas() {
           )
         )
         return true
-      }
+      },
+      // Per-agent creates: the chord names the agent, so these bypass resolveNewNodeAgent (which
+      // answers "what does this project default to?") and open exactly what the row says.
+      'node.newAgent.claude': () => { addAgentNode('claude'); return true },
+      'node.newAgent.codex': () => { addAgentNode('codex'); return true },
+      'node.newAgent.gemini': () => { addAgentNode('gemini'); return true },
+      'node.newAgent.opencode': () => { addAgentNode('opencode'); return true },
+      'node.newAgent.grok': () => { addAgentNode('grok'); return true },
+      'node.newAgent.copilot': () => { addAgentNode('copilot'); return true },
+      'node.newSticky': () => { addSticky(); return true },
+      'node.newBrowser': () => { addBrowser(); return true },
+      // Opening the URL prompt IS claiming the chord — a cancelled prompt creates nothing, but the
+      // keystroke was consumed by us and must not fall through to the platform.
+      'node.newWebView': () => { void addWebView(); return true },
+      'node.newDino': () => { addDino(); return true },
+      'node.newFile': () => {
+        // Same gate the pane menu / ⌘K use for their "New file…" row: the file is created UNDER
+        // the project folder, so a cwd-less (inline) project has nowhere to put it. Refuse rather
+        // than open a prompt that could only fail — and refusing lets the chord fall through.
+        const project = useProjects.getState().getProject(activeProjectId ?? '')
+        if (!(project?.ssh?.remoteCwd ?? project?.cwd)) return false
+        void newProjectFile()
+        return true
+      },
+      'node.focusLeft': () => moveNodeFocus('left'),
+      'node.focusRight': () => moveNodeFocus('right'),
+      'node.focusUp': () => moveNodeFocus('up'),
+      'node.focusDown': () => moveNodeFocus('down')
       // node.close / node.toggleMarkdown: main-process intercepted on desktop; deliberately
       // no renderer handler (the browser owns ⌘W in the Server Edition — see bridge/stubs.ts).
       // terminal.* / scm.commit / speech.dictation: owned by their local listeners.
@@ -6697,6 +7065,11 @@ export function Canvas() {
   // and the batch that ENDS the gesture recomputes properly.
   const glyphSettledOpaqueRef = useRef<string[]>(EMPTY_OPAQUE)
   const glyphOpaqueSig = useMemo(() => {
+    // The focused node rides the set too (issue #78): it is reparented out of the viewport, so
+    // the shared layer must not consider it paintable — same commit, not one pass later, which
+    // is why it joins here rather than in a separate effect.
+    const withFocus = (ids: string[]): string[] =>
+      focusedId && !ids.includes(focusedId) ? [...ids, focusedId] : ids
     if (!glyphLayerActive) {
       glyphSettledOpaqueRef.current = EMPTY_OPAQUE
       return primeOpaqueNodeIds(EMPTY_OPAQUE)
@@ -6705,13 +7078,13 @@ export function Canvas() {
       const settled = glyphSettledOpaqueRef.current
       const gesture = gestureTerminalIds(nodes)
       return primeOpaqueNodeIds(
-        gesture.length === 0 ? settled : [...new Set([...settled, ...gesture])]
+        withFocus(gesture.length === 0 ? settled : [...new Set([...settled, ...gesture])])
       )
     }
     const next = opaqueNodeIds(nodes)
     glyphSettledOpaqueRef.current = next
-    return primeOpaqueNodeIds(next)
-  }, [glyphLayerActive, nodes])
+    return primeOpaqueNodeIds(withFocus(next))
+  }, [glyphLayerActive, nodes, focusedId])
   // The notification the render above could not send. It reaches the ONE case a render-time read
   // cannot: a terminal whose own node object did not change (so it never re-rendered) but which
   // something else slid underneath. Keyed on the signature, so it fires only on a real change.
@@ -6753,6 +7126,10 @@ export function Canvas() {
           zoomRafRef.current = null
           setZoomPct(Math.round(viewportRef.current.zoom * 100))
           setGroupLabelBoost(viewportRef.current.zoom)
+          // Feed the crisp gate (GPU text is a magnified bitmap past ~175%; the DOM renderer
+          // re-rasters and stays sharp). Idempotent + hysteresis inside, and the swaps it queues
+          // only run once the gesture settles — per-frame cost here is a float compare.
+          setWebglZoom(viewportRef.current.zoom)
         })
       }
     },
@@ -7147,6 +7524,240 @@ export function Canvas() {
         reply(delivered ?? { ok: false, error: 'delivery produced no reply' })
         return
       }
+
+      // ── `open-project` (issue #338 Task 2.2) — handled BEFORE the source-routing machinery ──
+      // A STORE_ANSWERED_VERBS member for the G5 reason (controlRouting.ts): routing is by
+      // SOURCE, and travelling would yank the human's view to the CALLER's project on every
+      // registration. Main already gated this request (gateOpenProject): the caller is verified,
+      // local, under the grant cap, and `args.cwd` is the RESOLVED path (P7) — the raw argument
+      // never reaches this process, so the dialog below can only ever show the resolved form
+      // (P5). The renderer's job: validate the source live-or-stored, decide the consent branch
+      // (planOpenProject — every grant passes a human decision exactly once, spec Q1), raise the
+      // dialog, apply the NON-ACTIVATING registerProject (P6 — no setActive/travel in any
+      // branch), and reply exactly once on confirm AND cancel (GC 12). The grant itself is
+      // recorded MAIN-side when this reply lands ok && verified (recordOpenProjectGrant) —
+      // nothing in this block authorizes anything.
+      if (verb === 'open-project') {
+        const resolvedCwd = args.cwd ?? ''
+        if (!resolvedCwd) {
+          reply({ ok: false, error: 'open-project requires --cwd' })
+          return
+        }
+        const opLive = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const opStored = useProjects
+          .getState()
+          .projects.flatMap((p) => p.nodes)
+          .find((n) => n.id === sourceNodeId)
+        if (!opLive && !opStored) {
+          reply({ ok: false, error: 'source node is not in any open project' })
+          return
+        }
+        if (!sourceIsControlCapable(opLive?.data.agentId ?? opStored?.agentId)) {
+          reply({ ok: false, error: 'source node is not a control-capable agent' })
+          return
+        }
+        const opTitle =
+          oneLine((opLive?.data.title as string) ?? opStored?.title ?? '') || sourceNodeId
+        // Apply one consent decision: register (create/adopt/idempotent hit) without activating,
+        // persist, remember the (caller, project) pair for dialog dedupe — authorization stays
+        // main-side — and reply with the id the caller can feed `--project`.
+        const opFinish = (adoptProbed?: Project) => {
+          const r = useProjects.getState().registerProject({
+            resolvedCwd,
+            name: args.name,
+            color: args.color,
+            ...(adoptProbed ? { probed: adoptProbed } : {})
+          })
+          recordAttachConsent(sourceNodeId, r.project.id)
+          void writeDisk()
+          reply({ ok: true, ...openProjectReply(r.project, r.created, r.adopted) })
+        }
+        // The probe only matters when no project owns this cwd yet (adopt-vs-create copy) — an
+        // idempotent hit must not pay a folder read.
+        const opProjects = useProjects.getState().projects
+        const opProbed = findProjectByCwd(opProjects, resolvedCwd)
+          ? null
+          : await api.workspace.probeFolder(resolvedCwd).catch(() => null)
+        const opPlan = planOpenProject({
+          projects: opProjects,
+          callerNodeId: sourceNodeId,
+          srcTitle: opTitle,
+          resolvedCwd,
+          probedName: opProbed?.name,
+          requestedName: args.name
+        })
+        if (opPlan.kind === 'silent') {
+          // This caller already passed a human decision for this project (Q1): idempotent, quiet.
+          opFinish()
+          return
+        }
+        // One confirm dialog at a time — the write/close rule, read off the shared set.
+        if (isDestructiveVerb(verb) && confirmBusy()) {
+          reply({ ok: false, error: 'a confirmation is already pending — try again' })
+          return
+        }
+        setConfirm({
+          message: opPlan.message,
+          confirmLabel: opPlan.confirmLabel,
+          requestedBy: opTitle,
+          onConfirm: () => {
+            setConfirm(null)
+            opFinish(
+              opPlan.confirmKind === 'adopt' && opProbed ? { ...opProbed, closed: false } : undefined
+            )
+          },
+          onCancel: () => reply({ ok: false, error: 'denied by user' })
+        })
+        return
+      }
+
+      // ── `--project` targeted opens (issue #338 Task 2.3) — the three open verbs, early ──────
+      // Main's gateProjectTarget already enforced own-or-granted BEFORE forwarding (spec §3):
+      // the renderer never sees an unauthorized target — the checks below are belt, not the
+      // boundary. This block routes an AUTHORIZED target to the right DATA OWNER without
+      // travelling (B4): the live canvas owns the ACTIVE project (a store write there would be
+      // clobbered by the next commitCanvas), the projects store owns every other. A target equal
+      // to the caller's OWN project falls through to the legacy path unchanged — exactly as if
+      // the flag were omitted (B3a), travel included.
+      if (
+        (verb === 'open-terminal' || verb === 'open-claude' || verb === 'open-agent') &&
+        args.project !== undefined
+      ) {
+        const targetId = args.project
+        // v1 excludes the flags that name ids inside another project (spec §2.2). The decision is
+        // the PURE projectTargetFlagRefusal — red-capable in projectOpen.test.ts (review #363
+        // I-2); this site only relays its answer. Uniformly refused — own-project callers just
+        // omit --project.
+        const tgFlagRefusal = projectTargetFlagRefusal(args)
+        if (tgFlagRefusal) {
+          reply({ ok: false, error: tgFlagRefusal })
+          return
+        }
+        const tgStore = useProjects.getState()
+        const tgLiveSrc = nodesRef.current.find((n) => n.id === sourceNodeId)
+        const tgStoredSrc = tgStore.projects
+          .flatMap((p) => p.nodes.map((n) => ({ node: n, projectId: p.id })))
+          .find((x) => x.node.id === sourceNodeId)
+        const callerProjectId = tgLiveSrc ? tgStore.activeProjectId : tgStoredSrc?.projectId
+        if (targetId !== callerProjectId) {
+          if (!tgLiveSrc && !tgStoredSrc) {
+            reply({ ok: false, error: 'source node is not in any open project' })
+            return
+          }
+          if (!sourceIsControlCapable(tgLiveSrc?.data.agentId ?? tgStoredSrc?.node.agentId)) {
+            reply({ ok: false, error: 'source node is not a control-capable agent' })
+            return
+          }
+          // Belt only — main already refused every stranger id with one byte-identical sentence
+          // (no existence oracle). This fires for a target main authorized that this renderer's
+          // store cannot see yet (mid-hydration), so it is worded transient.
+          const target = tgStore.getProject(targetId)
+          if (!target) {
+            reply({
+              ok: false,
+              error: 'project-target-refused: the target project is not available here — try again'
+            })
+            return
+          }
+          // Belt for the SSH invariant: a granted SSH id cannot exist (grants are minted only by
+          // local open-project) and main refuses ungranted ones — but if that ever breaks, the
+          // target is refused, not opened. A relay tab is another machine's project entirely.
+          if (target.ssh || target.remote) {
+            reply({
+              ok: false,
+              error:
+                'project-target-ssh-unsupported: opening sessions into an SSH project is not supported — do not retry'
+            })
+            return
+          }
+          const tgAgentId = (verb === 'open-agent' ? args.agent : 'claude') as AgentId
+          const tgIsTerminal = verb === 'open-terminal'
+          const tgCount = Math.max(
+            1,
+            Math.min(tgIsTerminal ? 8 : 5, parseInt(args.count || '1', 10) || 1)
+          )
+          // Defaults come from the TARGET, never the caller (spec §2.2): cwd falls back to the
+          // target project's root; the account funnel runs with the TARGET project (an account
+          // must not silently cross a project boundary, so the source node's account is NOT
+          // consulted); permission mode and launch-command overrides are the target's too.
+          const tgCwd = args.cwd || target.cwd
+          const tgAccount = tgIsTerminal
+            ? undefined
+            : resolveNewNodeAccount(undefined, target, useSettings.getState().settings.claudeAccounts)
+          const tgMode = tgIsTerminal ? undefined : projectPermissionMode(target, tgAgentId)
+          const tgActive = target.id === tgStore.activeProjectId
+          // Placement: below the lowest existing node in the TARGET (placeBelow(src) is
+          // meaningless in a project that does not contain the source). The live canvas is the
+          // truthful node set for the active project, the serialized store for any other.
+          const tgPlacedNodes = tgActive ? nodesRef.current : target.nodes
+          const tgMade: CanvasNode[] = []
+          let tgBase = { x: 0, y: 0 }
+          const tgIndexBase = tgActive ? nodesRef.current.length : target.nodes.length
+          for (let i = 0; i < tgCount; i++) {
+            const node = tgIsTerminal
+              ? createTerminalNode(tgIndexBase + i, tgCwd, { x: 0, y: 0 }, args.cmd)
+              : createAgentNode(
+                  tgAgentId,
+                  tgIndexBase + i,
+                  tgCwd,
+                  { x: 0, y: 0 },
+                  args.prompt,
+                  undefined,
+                  tgAccount,
+                  tgMode,
+                  // The TARGET project: its `.nodeterm/settings.json` launch override applies to
+                  // what runs in it, not the caller's.
+                  target.id
+                )
+            const w = (node.width as number) ?? 640
+            const h = (node.height as number) ?? 440
+            if (i === 0) tgBase = nextFreePosition(tgPlacedNodes, { width: w, height: h })
+            node.position = { x: tgBase.x + i * (w + 60) - w / 2, y: tgBase.y - h / 2 }
+            tgMade.push(node)
+          }
+          const tgIds = tgMade.map((n) => n.id)
+          const tgWhat = tgIsTerminal ? 'terminal' : tgAgentId
+          // No ropes and no context-links in either branch: both are per-project arrays, and an
+          // edge to a node in another project has no representation (v1 — #284's linking half).
+          // The skill text names the workaround (open a reader agent inside the target project).
+          if (tgActive) {
+            // The human is looking at the target (the caller is a background orchestrator):
+            // live-canvas insertion, normal initialCommand — the session starts immediately.
+            setNodes((ns) => [...ns, ...tgMade])
+            markDirty()
+            reply({
+              ok: true,
+              message: `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')})`,
+              result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+            })
+            return
+          }
+          // The normal orchestration case: the target is NOT active, so its serialized store is
+          // the source of truth. The launch command MOVES into pendingLaunch (armForColdOpen —
+          // initialCommand is deliberately never serialized) and the node is upserted through
+          // the same store path sticky uses, then persisted. Cold-open contract: the session
+          // starts when that project's canvas is next shown (mount spawns the PTY, the
+          // armed-launch effect delivers with its retry loop — Task 2.0's measured round-trip).
+          for (const node of tgMade) {
+            tgStore.applyNodeMutation(target.id, {
+              op: 'upsert',
+              node: flowToNodeStates([armForColdOpen(node)])[0]
+            })
+          }
+          void writeDisk()
+          reply({
+            ok: true,
+            message:
+              `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')}) — ` +
+              'starts when that project is next viewed',
+            result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+          })
+          return
+        }
+        // targetId === the caller's own project: fall through to the legacy path unchanged
+        // (B3a — behaves exactly as if --project were omitted).
+      }
+      // ── end of the early-handled (store-answered) verbs ─────────────────────────────────────
 
       // Which canvas answers? React Flow holds only the ACTIVE project's nodes, but every OTHER
       // project's tmux sessions keep running and are re-adopted on the next app start — so after a
@@ -8575,6 +9186,9 @@ export function Canvas() {
             disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
             transport.destroy(id)
             useAgentStatus.getState().remove(id)
+            // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent
+            // mirror dies with the node.
+            clearAttachConsent(id)
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
           }
@@ -9453,6 +10067,7 @@ export function Canvas() {
     (id: string) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
+      useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
       disposeRelayTabForProject(id)
       store.closeProject(id)
       void writeDisk()
@@ -9750,6 +10365,14 @@ export function Canvas() {
         icon: <IconRemote />,
         run: () => void connectRemote()
       },
+      {
+        id: 'focus-node',
+        label: 'Focus node',
+        hint: 'zen fullscreen fill distraction',
+        section: 'View',
+        icon: <IconFit />,
+        run: toggleFocusMode
+      },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: fitAll },
       // Hidden below 2 top-level nodes — see arrangeAllNodes.
       ...(hasArrangeableNodes()
@@ -9870,7 +10493,8 @@ export function Canvas() {
     restartIdleAgents,
     zoomTo100,
     arrangeAllNodes,
-    hasArrangeableNodes
+    hasArrangeableNodes,
+    toggleFocusMode
   ])
 
   // Build the palette's command list only when its inputs change — the inline `buildCommands()`
@@ -10314,6 +10938,25 @@ export function Canvas() {
           <UsageIndicator overBoard={kanbanOpen} onSetDefaultAccount={setProjectDefaultAccount} />
 </div>
 
+        {/* Canvas-mounted, deliberately NOT in the .top-banners column: this is about THIS canvas,
+            not an app-wide message. Opening a row records a new breadcrumb through goToNode — which
+            is correct, it is a deliberate landing like any other. */}
+        {resumeProject && (
+          <ResumeCard
+            // Keyed by project: switching from a project whose card was DISMISSED straight to one
+            // that qualifies never passes through null, so without a key React would reuse the
+            // instance and the new project's card would inherit the old one's dismissal.
+            key={resumeProject.id}
+            project={resumeProject}
+            nodes={nodesRef.current}
+            onOpen={(nodeId) => {
+              const node = nodesRef.current.find((n) => n.id === nodeId)
+              if (node) goToNode(node)
+              setResumeProject(null)
+            }}
+          />
+        )}
+
         <PresenceNamePrompt />
 
         {(!hasProjects || welcomeOpen) && (
@@ -10729,8 +11372,24 @@ export function Canvas() {
         zoomPct={zoomPct}
         canUndo={pastRef.current.length > 0}
         canRedo={futureRef.current.length > 0}
+        // Enabled state must agree with what a click will DO: stepBreadcrumb skips deleted stops
+        // and answers null when every stop in that direction is dead, so a raw index comparison
+        // renders an enabled arrow that does nothing. Cheap at the 20-entry cap, and it stays
+        // honest as nodes are deleted (Canvas re-renders on both bumpNav and nodes).
+        canGoBack={
+          !!stepBreadcrumb(navRef.current, 'back', (id) =>
+            nodesRef.current.some((n) => n.id === id)
+          )
+        }
+        canGoForward={
+          !!stepBreadcrumb(navRef.current, 'forward', (id) =>
+            nodesRef.current.some((n) => n.id === id)
+          )
+        }
         onUndo={undo}
         onRedo={redo}
+        onGoBack={goBack}
+        onGoForward={goForward}
         onAddTerminal={addTerminal}
         onAddSticky={addSticky}
         onSpawnTeam={() => setSpawnTeamDialog({})}
@@ -10750,6 +11409,19 @@ export function Canvas() {
         onDictate={toggleDictation}
         dictateActive={dictationOpen}
       />
+
+      {/* Focus mode surface (issue #78). ALWAYS mounted so the reparent target exists before the
+          commit that moves a node into it, and OUTSIDE <ReactFlow> on purpose — the flow wrapper
+          is one z-0 stacking context, so nothing inside it could ever rise above the sidebar. The
+          focused node's root is appended here imperatively by TerminalNode; the exit pill stays
+          above it. Esc is deliberately NOT an exit key — it must reach the CLI in the pane. */}
+      <div id={FOCUS_SURFACE_ID} className={`focus-surface${focusedId ? ' is-active' : ''}`}>
+        {focusedId && (
+          <button className="focus-exit" title="Exit focus (⌘⇧F)" onClick={toggleFocusMode}>
+            Exit focus
+          </button>
+        )}
+      </div>
     </div>
   )
 }

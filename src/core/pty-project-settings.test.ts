@@ -26,6 +26,13 @@ interface SpawnCall {
 }
 const spawns = vi.hoisted(() => [] as SpawnCall[])
 
+// This suite mocks node-pty and asserts the plain-shell spawn path. Pin off the session-host
+// backend so a built `out/session-host/host.cjs` on disk cannot flip create() onto the host
+// backend (where the mocked spawn is never called). See __fixtures__/no-session-host.ts.
+vi.mock('./session-host-backend', async () =>
+  (await import('./__fixtures__/no-session-host')).noSessionHost()
+)
+
 vi.mock('node-pty', () => ({
   spawn: (file: string, args: string[], opts: { env: Record<string, string> }) => {
     spawns.push({ file, args, env: { ...opts.env } })

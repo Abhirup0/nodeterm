@@ -14,6 +14,12 @@ import { ShortcutsSection, commitCandidate } from './ShortcutsSection'
 // so pin macOS here — `isMacPlatform()` is read at call time, never captured at module load.
 Object.defineProperty(window.navigator, 'platform', { value: 'MacIntel', configurable: true })
 
+/** How many commands ship with NO chord on the pinned (mac) platform. COMPUTED, because the
+ *  registry is a growing POOL: every unbound command added later would otherwise red these
+ *  counts with a number that says nothing about the behavior under test. Overrides are absent in
+ *  the cases below (or sanitized away), so the effective binding IS the mac default. */
+const UNASSIGNED = COMMAND_DEFINITIONS.filter((d) => d.defaultBindings.darwin.length === 0).length
+
 const setKb = (kb: unknown): void =>
   useSettings.setState({ settings: { ...DEFAULT_SETTINGS, keybindings: kb as never } })
 
@@ -151,14 +157,17 @@ describe('ShortcutsSection rows', () => {
   // body is `divide-y [&>*]:py-5`, so an empty wrapper is a visible empty block, not nothing.
   it('drops a whole group when neither its header nor any of its rows match', () => {
     render('close')
-    expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['Nodes'])
-    expect(ids()).toEqual(['node.close'])
-    // Exactly the policy row (its description names Close) and the ONE group wrapper holding the
-    // heading + its row — no empty siblings. The rail is a searchable row of its own and 'close'
-    // does not match it, so it is gone too.
+    // `app.reopenLastClosed`'s title "Reopen last closed" also matches 'close', so its group
+    // (General) now survives the filter too — General's group order precedes Nodes in the
+    // registry, matching the h3 order.
+    expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['General', 'Nodes'])
+    expect(ids()).toEqual(['app.reopenLastClosed', 'node.close'])
+    // Exactly the policy row (its description names Close) and the TWO group wrappers (General,
+    // holding `app.reopenLastClosed`; Nodes, holding `node.close`) — no empty siblings. The rail
+    // is a searchable row of its own and 'close' does not match it, so it is gone too.
     expect(pill()).toBeTruthy()
     expect(statusPill()).toBeNull()
-    expect(body().children).toHaveLength(2)
+    expect(body().children).toHaveLength(3)
     expect([...body().children].every((c) => (c.textContent ?? '').trim() !== '')).toBe(true)
   })
 
@@ -200,7 +209,7 @@ describe('ShortcutsSection rows', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 0',
-      'Unassigned 2',
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 0'
     ])
   })
@@ -217,6 +226,54 @@ describe('ShortcutsSection rows', () => {
     const armed = recorder('app.commandPalette', 'Press keys…')!
     expect(armed.getAttribute('data-shortcut-recording')).toBe('true')
     expect(armed.getAttribute('aria-label')).toBe('Record Command palette')
+  })
+
+  // The repo ships no Tailwind preflight, so a bare <button> keeps the browser's native chrome
+  // (border + fill + padding) — which turned every icon control into a chunky empty keycap on
+  // the first real render. The reset classes are load-bearing, not cosmetic.
+  it('strips native button chrome from every icon control', () => {
+    render()
+    // Reset only exists on an overridden row — create one first.
+    click(button('canvas.undo', 'Disable Undo')!)
+    const controls = [
+      button('app.commandPalette', 'Record Command palette')!,
+      button('app.commandPalette', 'Add a shortcut to Command palette')!,
+      button('app.commandPalette', 'Disable Command palette')!,
+      button('canvas.undo', 'Reset Undo')!
+    ]
+    for (const el of controls) {
+      expect(el.className).toContain('border-0')
+      expect(el.className).toContain('bg-transparent')
+      expect(el.className).toContain('p-0')
+    }
+  })
+
+  // The icon glyphs cannot say that Record REPLACES while Add appends — the hover tooltip is
+  // where that difference is spelled out. It is the app's custom Tooltip (350ms), not the native
+  // `title` (whose ~1.5s OS delay read as "no tooltip at all" on device).
+  it('explains the icon controls with the custom tooltip, not a native title', () => {
+    vi.useFakeTimers()
+    try {
+      render()
+      click(button('canvas.undo', 'Disable Undo')!)
+      const controls = [
+        button('app.commandPalette', 'Record Command palette')!,
+        button('app.commandPalette', 'Add a shortcut to Command palette')!,
+        button('app.commandPalette', 'Disable Command palette')!,
+        button('canvas.undo', 'Reset Undo')!
+      ]
+      for (const el of controls) expect(el.getAttribute('title')).toBeNull()
+      const add = controls[1]
+      act(() => {
+        add.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      })
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      expect(document.body.textContent).toContain('Add another shortcut')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   // Record and Add sit side by side in the same hover-revealed cluster with no text, so two
@@ -295,8 +352,8 @@ describe('the filter rail', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 0',
-      // fitAll + groupSelection ship with no default chord.
-      'Unassigned 2',
+      // fitAll + groupSelection + the PR-7 create pool ship with no default chord.
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 0'
     ])
   })
@@ -307,7 +364,7 @@ describe('the filter rail', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 1',
-      'Unassigned 2',
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 0'
     ])
   })
@@ -331,7 +388,7 @@ describe('the filter rail', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 1',
-      'Unassigned 2',
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 1'
     ])
 

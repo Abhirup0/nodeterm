@@ -18,6 +18,29 @@ workflows who benefit from a spatial layout over stacked tabs. Long-term vision 
 remote access and paid features — the architecture is built so those slot in without a
 UI rewrite (see Transport abstraction below).
 
+## Platform support
+
+macOS, Linux, and a browser Server Edition are the shipping targets; Windows is being brought up
+as a first-class desktop target (extraction from external PR #276). The policy for what "supported"
+means — and what you may assume when writing a feature — is three tiers, not "100% parity":
+
+- **Core is first-class everywhere.** The terminal + agent + canvas + session-continuity
+  experience must work on every desktop platform. Continuity is tmux on POSIX and, where there is
+  no tmux (Windows), a standalone session-host process — the mechanism differs, the guarantee does
+  not.
+- **POSIX-bound edges degrade explicitly, never silently.** Some subsystems are structurally tied
+  to POSIX (SSH ControlMaster, the unix-socket askpass transport, some tmux-only paths). On a
+  platform where they cannot work they must either use a platform-appropriate mechanism or be
+  clearly gated off — a feature that throws `EACCES`/`EPERM` on Windows because nobody checked is a
+  bug, not an accepted limitation.
+- **New code is platform-neutral by default.** Do not hardcode POSIX assumptions. Publish files
+  through `renameAtomic`/`writeFileAtomic` (`src/core/fs-atomic.ts`), not a bare `fs.rename` — the
+  guard test (`fs-atomic.guard.test.ts`) enforces this. Resolve path separators / absolute-path
+  checks / file-link dialects against the filesystem-owning core's platform, not the viewer's, and
+  never assume `/` or a unix socket. When a test can only run on one platform, gate it with
+  `it.skipIf(process.platform === 'win32')` (or the inverse) and say why — never let it fail the
+  cross-platform CI. The `windows-latest` CI job runs the platform-dependent suites on real Windows.
+
 ## Commands
 
 ```bash
@@ -595,8 +618,14 @@ session.
   all terminals — harmless in a plain shell). **Cmd (mac) / Ctrl+click** opens links in the
   output: URLs → default browser (`@xterm/addon-web-links`), file paths → editor node and
   directories → Explorer reveal (`terminal/file-links.ts`, existence-verified against the project
-  fs via cached parent-dir listings, with `path:line[:col]` compiler-output suffixes; relay-remote
-  nodes have no client fs so they are URL-only).
+  fs via cached parent-dir listings, with `path:line[:col]` compiler-output suffixes). The path
+  dialect follows the FILESYSTEM-OWNING CORE, not the viewer: desktop-local may use its own
+  platform, Server Edition and relay tabs use the core's reported `process.platform`, and SSH
+  projects are POSIX. A failed host-platform read disables file links for that connection — it
+  never guesses from the browser. Standalone `ssh` terminal nodes remain URL-only because they
+  have no remote fs API with which to verify a token; relay tabs do have a core-bound, jailed fs
+  API and therefore support file links. Windows existence matching is case-insensitive and accepts
+  both separators; UNC tokens are refused whole before they can be reinterpreted as cwd-relative.
 - **Agent** (`createAgentNode(agentId, …)`) — a terminal preset that runs an agent CLI as its
   `initialCommand` (runs once on open via `transport.write`, then cleared), with `data.agentId`
   set. Builtins (`claude`/`codex`/`gemini`) come from `AGENT_CONFIG` (clay color etc.).
@@ -1655,6 +1684,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     suspends the same items, so ⌘M / ⌘⇧B / ⌘, / off-mac Ctrl+W reach the recorder instead of the
     menu item that owns them; `menuStandsDown(false, …)` is `policyStandsDown(…)` by construction.
     The two INTERCEPT thunks stay independent parameters — only the menu ORs them.
+    **The CLOSE leg has one extra, policy-independent stand-down** (issue #383, off-mac only):
+    `closeStandsDownInTerminal(isMac, terminalFocused)` — off-mac `node.close`'s default chord is
+    Ctrl+W, readline's kill-word, so while a terminal has focus the close intercept lets the chord
+    fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
+    shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
+    keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
+    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
+    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -1724,6 +1761,34 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   (`getInternalNode`), not our node object — `measured` reaches our state one render later (via
   `onNodesChange`), so our copy lies about nodes the store has long sized. Unknowable size ⇒ the
   camera **stands still**; never fall back to a bare `fitView` there, that IS the origin jump.
+- **Breadcrumb trail** (`renderer/lib/breadcrumbs.ts` — all the pure logic lives there) — every
+  deliberate `goToNode` landing records a `NavStop` ({nodeId, at, note}) for the ACTIVE project, and
+  **Cmd+[ / Cmd+]** (`canvas.goBack` / `canvas.goForward`, bound in `shared/keybindings.ts`) plus the
+  two Dock buttons walk that trail; on a project activation a once-per-app-run **`ResumeCard`** offers
+  the last few distinct stops ("resume where you left off"). Load-bearing facts:
+  - **The trail is MACHINE-LOCAL and rides `IndexEntryV3.breadcrumbs`, never `.nodeterm/project.json`** —
+    the same tier as `viewport` / `defaultAccountId` / `capabilityAck`, for the same reason: a repo must
+    not carry one person's camera history to everyone who clones it. `fileToProject` therefore ignores a
+    `breadcrumbs` field found in the shared file (a forgery), and `projectToFile` never writes one.
+  - **The cursor is not persisted either.** Only `list` rides the entry; `BreadcrumbState.index` is
+    renderer-only and resets to the tip on activation. A step records no breadcrumb and rewrites no
+    `project.json` — the only persistence it triggers is the ordinary `onMove` viewport persist
+    (machine-local, same as any camera move; see the Zoom-chords bullet).
+  - **Cap 20** (`BREADCRUMB_CAP`, oldest dropped) and a **3 s dedupe** (`BREADCRUMB_DEDUPE_MS`, so a
+    re-triggered focus on the already-current node is a no-op — `recordBreadcrumb` returns the SAME
+    object, which is the caller's skip test). Recording past a back-step drops the forward tail, exactly
+    like a browser tab.
+  - **`stepBreadcrumb` skips stops whose node is gone** (never lands on a dead entry; no reachable stop
+    ⇒ `null` ⇒ the camera stands still), and `goToNode` **refuses to record ephemeral `subagent` / `loop`
+    nodes**: they are merged into the `<ReactFlow nodes>` prop but never persisted (cleared on the next
+    turn), so a breadcrumb for one is an id nothing can ever resolve, burning a slot forever.
+  - The `note` is a **snapshot** taken at record time (agent nodes reuse the sessions sidebar's own
+    `sessionStatusKind` + `STATE_LABEL` phrasing, preferring session name → node title → agent label), so
+    a later state change never retroactively rewrites history.
+  - **Surfaces:** Server Edition works as-is (shared renderer code + `WorkspaceStore`, which both
+    shells boot — no new bridge member); mobile is N/A (no canvas, no camera); the kanban board is
+    likewise N/A, and a project that activates ON the board neither shows nor spends its
+    once-per-run resume card (it would sit invisible under the opaque overlay).
 - **Command palette** (`CommandPalette.tsx`): ⌘/Ctrl+K; `Canvas.buildCommands` (create,
   switch project, jump to node by title/tag, open file…).
 - **Explorer** (`ExplorerPanel.tsx`, 🗂 / ⌘⇧E): lazy file tree of the active project `cwd`
@@ -1962,7 +2027,10 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   named in `menuItemIdsToSuspend` — Minimize (`MENU_ITEM_ID_MINIMIZE`), **Toggle Kanban Board
   (`MENU_ITEM_ID_KANBAN`, ⌘⇧B)** and **Settings (`MENU_ITEM_ID_SETTINGS`, ⌘,)** on every platform,
   plus Close (`MENU_ITEM_ID_CLOSE`) on Windows/Linux — because a disabled item suppresses its
-  accelerator and only then do those chords fall through to the terminal, or to the recorder. The
+  accelerator and only then do those chords fall through to the terminal, or to the recorder.
+  Off-mac the Close item is ALSO disabled whenever a terminal has focus, policy or no policy
+  (`closeStandsDownInTerminal`, issue #383): its role owns the Ctrl+W accelerator, and that
+  keystroke in a shell is readline's kill-word. The
   recorder leg is why ⌘M is bindable at all, and it fixed a live misfire: ⌘⇧B pressed into an armed
   recorder used to open the kanban board behind the Settings dialog, and ⌘, to re-open Settings.
   Kanban and Settings are
@@ -2018,10 +2086,29 @@ Voice-to-text input captured via microphone, turned into terminal text via on-de
 Built with **electron-builder** (config in the `package.json` `build` block: appId
 `com.nodeterm.app`, productName `nodeterm`, mac dmg+zip for arm64 **and** x64, `asarUnpack`
 node-pty, output `dist/`). The app icon is generated from the nodeterm mark by
-`scripts/make-icon.mjs` (sharp → `build/icon.png`, 1024², gitignored — regenerated by
-`make-icon`); electron-builder derives the `.icns`. Scripts: `npm run make-icon`, `npm run dist`
-(local **unsigned** arm64 `.dmg` smoke test). Production release signing/notarization and the
-update-feed hosting are handled outside this repo.
+`scripts/make-icon.mjs` (sharp → `build/icon.png` 1024² + multi-resolution `build/icon.ico`
+for Windows, both gitignored — regenerated by `make-icon`, which every dist script runs first);
+electron-builder derives the `.icns` from the PNG. Scripts: `npm run make-icon`, `npm run dist`
+(local **unsigned** arm64 `.dmg` smoke test), `npm run dist:win` (unsigned x64 NSIS installer +
+zip, `--publish never`). Production release signing/notarization and the update-feed hosting are
+handled outside this repo.
+
+**Windows packaging is GROUNDWORK, not a shippable app** (extracted from external PR #276; a
+Windows build is unusable until the session-host phase merges). Deliberate decisions: the target
+is **NSIS via electron-builder** — the fork switched to Squirrel.Windows
+(`electron-builder-squirrel-windows` + an 800-line `windows-installer.mjs` wrapper + its own
+update feed), but our pipeline is electron-builder end-to-end and NSIS is built in, needs no
+extra dependency, and is what electron-updater's generic provider expects on Windows — so
+Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-builder skips
+signing when no cert env is present). `bootstrap-windows.bat` (repo root) takes a fresh Windows
+machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
+winget hints (it never installs machine-wide tools itself, and refuses to run elevated) and runs
+`npm ci`. `.github/workflows/win-package-smoke.yml` is a **workflow_dispatch-only** packaging
+smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** Windows
+auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev feed — blocked
+on signing: an unsigned auto-update is a downgrade in trust), a release.yml Windows job, and the
+fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
+`resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 
 Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(onBeforeRestart?)` from `index.ts`):
 runs **only when `app.isPackaged`** (dev = no-op), checks on launch + every 6h, auto-downloads,
@@ -2044,6 +2131,42 @@ builds (unless `NODETERM_API_BASE` targets a local server). Schema example:
 `docs/announcements.example.json`. **Telemetry** (`src/main/telemetry.ts`) is a separate opt-out
 ping to `api.nodeterm.dev/v1/ping` (version/OS on launch + daily), gated on
 `settings.telemetryEnabled` + the same build/DNT guards; toggle in Settings → Privacy.
+
+## Atomic writes (never a bare `fs.rename`)
+
+Every store persists temp-file-then-rename. That is correct on POSIX and **silently lossy on
+Windows**: `MoveFileEx` fails with `EPERM` whenever the destination is open by anyone at that
+instant, and what opens a file you just wrote is Defender's real-time scanner, the search indexer,
+OneDrive over a synced profile, or two of our own concurrent writers racing one destination. The
+save throws and the data is gone — intermittently, unreproducibly, and **more often on the machines
+that are best protected**.
+
+`renameAtomic` / `writeFileAtomic` (`src/core/fs-atomic.ts`) retry briefly. Each attempt is still
+one indivisible rename, so a retry cannot tear a write. They deliberately do NOT retry forever
+(several callers report a failed save as `persisted:false`, and that contract outranks a save that
+eventually lands), do not retry `ENOENT`/`ENOSPC`, do not branch on platform (or the behaviour under
+test on a Mac is not the behaviour shipped to Windows), and never swallow the final error.
+
+**Nothing in the toolchain catches the bare version.** 28 files had it, across three spellings — the user's canvas, their
+settings, their sealed credentials, their pinned devices — and every one of them reads as a correct
+atomic write, because on the platform most of this was written on it is one. The only signal in a
+6,000-test suite was one store's overlapping-saves test, red on Windows for that store's whole life.
+So it is enforced by scan: `src/core/fs-atomic.guard.test.ts` fails on any bare `fs.rename` outside
+the helper. Full write-up, including the separate shared-temp-name bug at the same sites:
+**`docs/atomic-writes.md`**.
+
+SSH/scp staging follows the same ownership rule outside direct `fs` calls. Atomic remote stdin
+writes use `src/main/remote-atomic-write.ts`: a bounded `.nodeterm-<uuid>.tmp` leaf is placed beside
+the target BEFORE both complete paths are quoted, then the shell preserves the write/move status
+while cleaning that exact temp. The temp leaf must stay independent of the target leaf — appending
+`.uuid.tmp` to a valid `NAME_MAX` target makes the write impossible. It currently protects
+filesystem API writes, tmux.conf, the private hook endpoint, node
+tokens, agent status and pending answers; generated hook scripts/config merges still use their
+existing direct writes and must not be described as atomic. Upload directories use UUIDs across app
+processes. Downloads and media-cache copies use hidden UUID `.part` names; user-visible downloads
+also hold an exclusive candidate lock until the rename and cleanup finish. Never simplify any of
+those back to `<target>.tmp` / `<target>.part` or a read-only "does the destination exist?" check —
+the overlap tests exercise the resulting race.
 
 ## Conventions
 

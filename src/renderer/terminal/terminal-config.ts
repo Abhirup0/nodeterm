@@ -766,7 +766,7 @@ export function copyKeyAction(e: CopyShortcutEvent, hasSelection: boolean): Copy
  */
 export const SHIFT_ENTER_SEQ = '\x1b\r'
 
-export type TerminalKeyAction = CopyKeyAction | 'shift-enter'
+export type TerminalKeyAction = CopyKeyAction | 'shift-enter' | 'bubble'
 
 /**
  * Superset of `copyKeyAction` used by the terminal's custom key handler.
@@ -785,7 +785,8 @@ export type TerminalKeyAction = CopyKeyAction | 'shift-enter'
 export function terminalKeyAction(
   e: CopyShortcutEvent,
   hasSelection: boolean,
-  ownsProjectJump = false
+  ownsProjectJump = false,
+  registryOwns = false
 ): TerminalKeyAction {
   if (
     e.type === 'keydown' &&
@@ -797,5 +798,15 @@ export function terminalKeyAction(
   )
     return 'shift-enter'
   if (ownsProjectJump) return 'swallow'
-  return copyKeyAction(e, hasSelection)
+  const base = copyKeyAction(e, hasSelection)
+  if (base !== 'pass') return base
+  // `registryOwns` — decided by the caller via `terminalChordBubbles`, the same live-registry
+  // matcher discipline as `ownsProjectJump` — means the window dispatcher will claim this chord
+  // (an allowInTerminal app/canvas command). 'bubble' tells the consumer to return false WITHOUT
+  // preventDefault: xterm skips its own keymap (which would turn e.g. Ctrl+Shift+Arrow into a
+  // `CSI 1;N x` write and CANCEL the event, so the dispatcher never sees it) and the untouched
+  // event bubbles to the window listener. Deliberately LAST: the copy chords and Shift+Enter
+  // keep their existing owners whatever the registry says.
+  if (e.type === 'keydown' && registryOwns) return 'bubble'
+  return 'pass'
 }

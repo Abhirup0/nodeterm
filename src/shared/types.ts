@@ -19,6 +19,65 @@ import type {
   ModelGatewaySettings
 } from './agents/model-gateway'
 
+/** Profile-switch replacement intent. The trusted core validates and re-resolves it before teardown. */
+export interface PtyRecycleTarget {
+  profileId: string
+  cwd: string
+}
+
+/**
+ * A shell-independent request to start or resume an agent.
+ *
+ * The renderer deliberately does not turn this into a command line: the trusted core validates
+ * the semantic fields, resolves the current machine-local agent configuration, and encodes the
+ * launch for the concrete shell that owns the live session. In particular, `auto` is not a shell
+ * dialect until immediately before a Windows profile is spawned.
+ */
+export type AgentLaunchIntent =
+  | {
+      kind: 'agent'
+      action: 'start'
+      agentId: AgentId
+      /** Initial prompt for a new conversation. The core rejects control-bearing values. */
+      prompt?: string
+      /** Already version/policy-gated starting mode. The core re-validates it at execution. */
+      permissionMode?: AgentPermissionMode
+      /** Optional provider id minted for this first launch; never reused as a resume id. */
+      newSessionId?: string
+    }
+  | {
+      kind: 'agent'
+      action: 'resume'
+      agentId: AgentId
+      /** Existing provider id. Required for resume and runtime-validated by the trusted core. */
+      sessionId: string
+      /** Starting mode for the reconstructed CLI, where the selected agent supports it. */
+      permissionMode?: AgentPermissionMode
+    }
+
+/**
+ * One locally-authorized launch held behind canvas dependencies.
+ *
+ * `shell-command` is the explicit `open-terminal --cmd` compatibility path. It is opaque shell
+ * source, not something the app can safely parse back into argv. The whole PendingLaunch is
+ * machine-local and must be stripped from shared project files, exports, and inbound mutations.
+ */
+export type TerminalLaunchIntent =
+  | AgentLaunchIntent
+  | { kind: 'shell-command'; command: string }
+
+export type LaunchIntentFailureReason =
+  | 'invalid-intent'
+  | 'agent-unavailable'
+  | 'unsupported-shell'
+  | 'session-unavailable'
+  | 'delivery-failed'
+
+/** Opaque execution outcome. It must never contain a rendered command, executable, or argv. */
+export type LaunchIntentExecutionResult =
+  | { ok: true }
+  | { ok: false; reason: LaunchIntentFailureReason; message: string }
+
 export interface PtyCreateOptions {
   shell?: string
   /** Arguments for `shell` when it is run as the session program (e.g. ssh args). */
@@ -533,6 +592,15 @@ export interface BoardLogApi {
   onChanged(projectId: string, cb: () => void): () => void
 }
 
+/** One recorded "deliberate landing" on a node — the breadcrumb trail's unit. Frozen at record
+ *  time (nodeId only, no live pointer): a deleted node is filtered at render, a renamed one shows
+ *  its current title (read live), but the `note` stays a snapshot of what was happening then. */
+export interface NavStop {
+  nodeId: string
+  at: number
+  note: string
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
@@ -586,6 +654,10 @@ export interface Project {
    * lineage survives restarts; deletable like any selected edge.
    */
   ropes?: BridgeLink[]
+  /** Camera navigation history — deliberate node landings, newest last. MACHINE-LOCAL: rides
+   *  `IndexEntryV3.breadcrumbs`, never emitted into the shared project file (a repo must not carry
+   *  one person's wandering camera history). */
+  breadcrumbs?: NavStop[]
   /**
    * Closed projects are hidden from the tab bar but kept on disk with all their nodes (and their
    * tmux sessions left running) so they can be reopened from the start screen's "Recently closed"
@@ -640,7 +712,9 @@ export interface TmuxStatus {
   installCommand: string | null
   /** Button caption for installCommand (e.g. "Install Homebrew + tmux" when brew must come first). */
   installLabel: string | null
-  platform: string
+  /** `process.platform` of the core that owns the sessions/filesystem. `null` means the read
+   *  failed; callers must not substitute the browser's platform for a server or relay core. */
+  platform: string | null
 }
 
 /**
