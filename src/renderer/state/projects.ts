@@ -15,6 +15,7 @@ import type { ProjectCapability } from '@shared/project-capabilities'
 import type { ProjectIcon } from '@shared/project-icon'
 import { recordCapabilityAck, type CapabilityAnswer } from '@shared/project-capability-consent'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
+import { markWorkspaceDirty } from './workspaceDirty'
 
 interface ProjectsState {
   projects: Project[]
@@ -399,12 +400,19 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         return recordCapabilityAck(next, cap, 'declined')
       })
     }))
+    // The setter owns the persist (issue #318): its call sites — the AgentsSection toggle, the
+    // clone notice's decline — schedule no save of their own, so without this the choice was lost
+    // on restart unless an unrelated canvas edit happened to dirty the workspace afterwards.
+    markWorkspaceDirty()
   },
 
   recordProjectCapabilityAck(id, cap, answer) {
     set((s) => ({
       projects: s.projects.map((p) => (p.id === id ? recordCapabilityAck(p, cap, answer) : p))
     }))
+    // Same persistence gap as setProjectCapability: the notice's 'kept' answer rides
+    // IndexEntryV3.capabilityAck on the next save — which must actually be scheduled.
+    markWorkspaceDirty()
   },
 
   setDinoHighScore(id, score) {
