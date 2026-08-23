@@ -2,6 +2,8 @@
 // CLI source. No electron imports, so this module + CONTROL_CLI_SCRIPT are unit-testable.
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
 import { HOOK_CURL_HEADERS_SH } from '../core/agents/hook-curl-config-sh'
+import { CODEX_SANDBOX_HINT_SH } from '../core/agents/hook-sandbox-hint-sh'
+import { codexSandboxGuidanceLines } from '../core/context-link-core'
 import { AGENT_CONFIG, AGENT_HOOK_TARGETS, BUILTIN_AGENT_IDS } from '@shared/agents/config'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from '../core/agents/agent-message-flow'
@@ -362,6 +364,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     ...browserGuidanceLines(),
     '',
+    ...codexSandboxGuidanceLines(CONTROL_UNREACHABLE_MSG),
+    '',
     'Orchestration ("Build with Nodeterm orchestration"): first decide what is genuinely',
     'independent — for every "and then", ask whether the next step READS the previous step\'s',
     'output. If not, they are separate stations, open them all at once; if it does, open the',
@@ -403,6 +407,10 @@ export function buildCanvasControlInstructions(shimPath: string): string {
 // remote agent nodes only after a reconnect, with no signal on the wire — the same shape as the
 // managed hook script's stale window. Verbs are therefore designed to parse identically under both
 // the old and the new loop: give every flag a value, and the two loops agree.
+/** The shim's generic transport-failure sentence — exported so the agent-facing docs can quote it
+ *  verbatim and the parity test holds the two ends together (issue #367). */
+export const CONTROL_UNREACHABLE_MSG = 'Could not reach nodeterm (control endpoint unreachable).'
+
 export const CONTROL_SHIM_SCRIPT = `#!/bin/sh
 # nodeterm canvas-control CLI (auto-generated — do not edit).
 
@@ -428,6 +436,8 @@ if [ -n "$NODETERM_NODE_TOKEN_DIR" ] && [ -n "$NODETERM_NODE_ID" ]; then
 fi
 
 ${HOOK_CURL_HEADERS_SH}
+
+${CODEX_SANDBOX_HINT_SH}
 
 nt_verb="list"
 if [ $# -gt 0 ]; then nt_verb="$1"; shift; fi
@@ -510,8 +520,10 @@ if [ "$nt_code" = "200" ]; then
 fi
 cat "$nt_out" >&2 2>/dev/null
 rm -f "$nt_out"
+# Empty / 000 = the TRANSPORT failed, not the server. Under a codex sandbox that is the sandbox's
+# own connect() denial (issue #367), and the generic sentence would misdirect the agent.
 if [ -z "$nt_code" ] || [ "$nt_code" = "000" ]; then
-  echo "Could not reach nodeterm (control endpoint unreachable)." >&2
+  nt_codex_sandbox_hint || echo "${CONTROL_UNREACHABLE_MSG}" >&2
 fi
 exit 1
 `
@@ -671,6 +683,8 @@ Notes:
 - \`board\` and \`assign\` act on the CURRENTLY OPEN project's board — the same one you see when you
   toggle the kanban view. They need no confirmation.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.
+
+${codexSandboxGuidanceLines(CONTROL_UNREACHABLE_MSG).join('\n')}
 
 To orchestrate a team: decide the roles + a concrete starting prompt for each, then one
 \`spawn-team\` call (or \`open-claude\` per role followed by \`group\` + \`arrange\`).

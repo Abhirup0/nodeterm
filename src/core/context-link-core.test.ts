@@ -1,12 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildLinkDoc,
+  buildContextLinkSkillBody,
   buildLinkedContextInstructions,
   mergeInstructionsBlock,
   resolveLinkTranscript,
   setNodeTranscript,
-  transcriptPathOf
+  transcriptPathOf,
+  CONTEXT_SHIM_SCRIPT,
+  CONTEXT_UNREACHABLE_MSG
 } from './context-link-core'
+import { CODEX_SANDBOX_BLOCKED_LINE } from './agents/hook-sandbox-hint-sh'
 
 describe('buildLinkDoc', () => {
   it('enriches each link with tmux name, injected transcript path, and cwd', () => {
@@ -201,5 +205,25 @@ describe('buildLinkedContextInstructions', () => {
     expect(s).toContain('summary')
     expect(s).toContain('transcript')
     expect(s).toContain('terminal')
+  })
+
+  // Issue #367 — same parity discipline as canvas-control-core.test.ts: the shim's error
+  // sentences and the docs explaining them share constants, so neither can drift alone. The
+  // runtime behaviour is proven against real /bin/sh in context-link.cli.test.ts.
+  it('both agent-facing texts carry the codex-sandbox transport guidance (issue #367)', () => {
+    for (const body of [buildContextLinkSkillBody('/x/context.sh'), buildLinkedContextInstructions('/x/context.sh')]) {
+      expect(body).toContain(CONTEXT_UNREACHABLE_MSG.replace(/\.$/, ''))
+      expect(body).toContain(CODEX_SANDBOX_BLOCKED_LINE)
+      expect(body.toLowerCase()).toContain('escalated permissions')
+      expect(body).toMatch(/never relink, reinstall or restart nodeterm/)
+      expect(body).toContain('network.allow_unix_sockets')
+      expect(body).toContain('~/.codex/config.toml')
+    }
+  })
+
+  it('the shim embeds the sandbox hint, keeping the generic sentence for the non-sandbox case', () => {
+    expect(CONTEXT_SHIM_SCRIPT).toContain('nt_codex_sandbox_hint() {')
+    expect(CONTEXT_SHIM_SCRIPT).toContain('nt_codex_sandbox_hint && exit 1')
+    expect(CONTEXT_SHIM_SCRIPT).toContain(`echo "${CONTEXT_UNREACHABLE_MSG}" >&2`)
   })
 })

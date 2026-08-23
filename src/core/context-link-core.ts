@@ -4,6 +4,11 @@
 import type { ContextLinkInfo } from '../shared/types'
 import { sessionName } from './tmux-naming'
 import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
+import { CODEX_SANDBOX_BLOCKED_LINE, CODEX_SANDBOX_HINT_SH } from './agents/hook-sandbox-hint-sh'
+
+/** The shim's generic transport-failure sentence — exported so the agent-facing docs below can
+ *  quote it verbatim and the parity test holds the two ends together. */
+export const CONTEXT_UNREACHABLE_MSG = 'Could not read linked context (nodeterm unreachable).'
 
 // nodeId -> latest known transcript path, fed from the raw hook listener (see index.ts).
 const nodeTranscript = new Map<string, string>()
@@ -85,8 +90,29 @@ export function buildLinkedContextInstructions(shimPath: string): string {
     '```',
     '',
     'Only meaningful inside nodeterm (NODETERM_NODE_ID set) with a linked edge. If the CLI',
-    'says "Not a nodeterm session" or "No linked nodes", there is nothing to read — do not retry.'
+    'says "Not a nodeterm session" or "No linked nodes", there is nothing to read — do not retry.',
+    '',
+    ...codexSandboxGuidanceLines(CONTEXT_UNREACHABLE_MSG)
   ].join('\n')
+}
+
+/**
+ * The sandboxed-Codex transport guidance (issue #367), rendered into BOTH agent-facing bodies —
+ * the get-linked-context skill and the codex/gemini instructions block — quoting the shim's real
+ * error sentences so the docs and the generated script cannot drift apart (the parity test in
+ * context-link-core.test.ts walks the constants against both bodies).
+ */
+export function codexSandboxGuidanceLines(unreachableMsg: string): string[] {
+  return [
+    `Sandboxed Codex: if a call fails with "${unreachableMsg.replace(/\.$/, '')}" or with`,
+    `"${CODEX_SANDBOX_BLOCKED_LINE}",`,
+    "Codex's command sandbox is denying loopback/socket connections while nodeterm itself is",
+    'healthy. Retry the SAME command once with command-specific escalated permissions (approve the',
+    'escalation prompt) — never relink, reinstall or restart nodeterm for this error; that cannot',
+    'help. On macOS the permanent fix is adding the advertised hook socket path (the',
+    '`NODETERM_HOOK_SOCK` value) to `network.allow_unix_sockets` in ~/.codex/config.toml: hook',
+    'calls then work inside the sandbox with no escalation.'
+  ]
 }
 
 export interface LinkDocEntry {
@@ -168,6 +194,8 @@ fi
 
 ${HOOK_CURL_HEADERS_SH}
 
+${CODEX_SANDBOX_HINT_SH}
+
 nt_verb="list"
 if [ $# -gt 0 ]; then nt_verb="$1"; shift; fi
 
@@ -215,7 +243,12 @@ if [ "$nt_code" = "200" ]; then
 fi
 cat "$nt_out" >&2 2>/dev/null
 rm -f "$nt_out"
-echo "Could not read linked context (nodeterm unreachable)." >&2
+# Empty / 000 = the TRANSPORT failed, not the server. Under a codex sandbox that is the sandbox's
+# own connect() denial (issue #367), and the generic sentence below would misdirect the agent.
+if [ -z "$nt_code" ] || [ "$nt_code" = "000" ]; then
+  nt_codex_sandbox_hint && exit 1
+fi
+echo "${CONTEXT_UNREACHABLE_MSG}" >&2
 exit 1
 `
 
@@ -253,5 +286,7 @@ since it was first linked).
 \`--node\` is optional when you are linked to exactly one node; otherwise pass the id or title
 from \`list\`. If the CLI says "Not a nodeterm session" or "No linked nodes", there is nothing
 to read — do not retry.
+
+${codexSandboxGuidanceLines(CONTEXT_UNREACHABLE_MSG).join('\n')}
 `
 }
