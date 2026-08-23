@@ -94,6 +94,10 @@ describe('registry invariants', () => {
         darwin: ['Cmd+Z'], other: ['Cmd+Z'] },
       { id: 'canvas.redo', title: 'Redo', group: 'Canvas', scope: 'canvas',
         darwin: ['Cmd+Shift+Z'], other: ['Cmd+Shift+Z', 'Cmd+Y'] },
+      { id: 'canvas.goBack', title: 'Go back', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+['], other: ['Cmd+['] },
+      { id: 'canvas.goForward', title: 'Go forward', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+]'], other: ['Cmd+]'] },
       { id: 'canvas.deleteSelection', title: 'Delete selection', group: 'Canvas', scope: 'canvas',
         darwin: ['Delete', 'Backspace'], other: ['Delete', 'Backspace'], allowBareKey: true },
       { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
@@ -429,6 +433,15 @@ describe('resolveCommandForKeyEvent', () => {
   it('matches a default app chord', () => {
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), ctx(), {}, true))
       .toBe('app.commandPalette')
+  })
+  it('matches the bracket chords from the KEY the DOM reports', () => {
+    // The registry spells these `Cmd+[` / `Cmd+]` because the resolver compares against
+    // `e.key`. Spelled as the `e.code` values (`BracketLeft`/`BracketRight`) they would
+    // normalize to 'BRACKETLEFT' and match no keydown at all — a silently dead chord.
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: '[' }), ctx(), {}, true))
+      .toBe('canvas.goBack')
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: ']' }), ctx(), {}, true))
+      .toBe('canvas.goForward')
   })
   it('typing blocks commands without allowWhileTyping, allows the flagged ones', () => {
     expect(resolveCommandForKeyEvent(

@@ -592,6 +592,15 @@ export interface BoardLogApi {
   onChanged(projectId: string, cb: () => void): () => void
 }
 
+/** One recorded "deliberate landing" on a node — the breadcrumb trail's unit. Frozen at record
+ *  time (nodeId only, no live pointer): a deleted node is filtered at render, a renamed one shows
+ *  its current title (read live), but the `note` stays a snapshot of what was happening then. */
+export interface NavStop {
+  nodeId: string
+  at: number
+  note: string
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
@@ -645,6 +654,10 @@ export interface Project {
    * lineage survives restarts; deletable like any selected edge.
    */
   ropes?: BridgeLink[]
+  /** Camera navigation history — deliberate node landings, newest last. MACHINE-LOCAL: rides
+   *  `IndexEntryV3.breadcrumbs`, never emitted into the shared project file (a repo must not carry
+   *  one person's wandering camera history). */
+  breadcrumbs?: NavStop[]
   /**
    * Closed projects are hidden from the tab bar but kept on disk with all their nodes (and their
    * tmux sessions left running) so they can be reopened from the start screen's "Recently closed"
