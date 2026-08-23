@@ -376,6 +376,8 @@ import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
 import { useBoardLog } from '../state/boardLog'
 import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
+import { useFocusNode, FOCUS_SURFACE_ID } from '../state/focusNode'
+import { focusTargetId } from '../lib/focusTarget'
 import {
   createCanvasPublisher,
   isEphemeralNodeId,
@@ -525,6 +527,7 @@ interface PendingPeerState {
  */
 const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
 const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
+const FOCUS_NO_TARGET_NOTICE = 'Select a terminal or agent node to focus.'
 
 // The webview's file loader renders off the LOCAL disk and has no remote counterpart, so a host
 // path from a remote agent could only resolve to a same-named local file — or nothing. Refuse and
@@ -5658,6 +5661,64 @@ export function Canvas() {
     [fitView, setViewport, getInternalNode]
   )
 
+  // Focus mode (issue #78): one terminal fills the window (reparented into the always-mounted
+  // focus surface below); the chrome hides behind it and reveals on pointer proximity.
+  const focusedId = useFocusNode((s) => s.focusedId)
+  // Where to land the camera after an exit — set by toggleFocusMode, consumed below AFTER the
+  // body class flips back. goToNode cannot run inside the toggle: the flow wrapper is
+  // display:none while focused (so the WebGL budget can reclaim covered holders), and fitView
+  // math against a 0-sized pane is exactly the origin-jump bug.
+  const focusReturnRef = useRef<string | null>(null)
+  useEffect(() => {
+    document.body.classList.toggle('focus-mode', !!focusedId)
+    if (!focusedId && focusReturnRef.current) {
+      const returnId = focusReturnRef.current
+      focusReturnRef.current = null
+      // Two frames: React Flow re-learns the pane's dimensions from its own ResizeObserver on
+      // the tick after display is restored; framing before that reads a stale/zero size.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const node = nodesRef.current.find((n) => n.id === returnId)
+          if (node) goToNode(node)
+        })
+      )
+    }
+    return () => document.body.classList.remove('focus-mode')
+  }, [focusedId, goToNode])
+  useEffect(() => {
+    if (!focusedId) return
+    // Proximity reveal instead of an invisible hover band: a band over the terminal's bottom
+    // edge would eat clicks on the very row a shell keeps its prompt on.
+    const onMove = (e: MouseEvent): void => {
+      document.body.classList.toggle('focus-reveal-bottom', window.innerHeight - e.clientY < 90)
+    }
+    window.addEventListener('mousemove', onMove)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      document.body.classList.remove('focus-reveal-bottom')
+    }
+  }, [focusedId])
+
+  const toggleFocusMode = useCallback(() => {
+    const store = useFocusNode.getState()
+    if (store.focusedId) {
+      // Landing on the node is DEFERRED to the focus-mode class effect (see focusReturnRef):
+      // the flow pane is still display:none at this point.
+      focusReturnRef.current = store.focusedId
+      store.clear()
+      return
+    }
+    // The kanban board is an opaque overlay and its card modal already IS a focused view of a
+    // session — engaging under it would just hide the canvas twice.
+    if (isKanbanOpen(useProjects.getState().activeProjectId)) return
+    const target = focusTargetId(nodesRef.current)
+    if (!target) {
+      setNotice({ kind: 'error', text: FOCUS_NO_TARGET_NOTICE })
+      return
+    }
+    store.focus(target)
+  }, [goToNode])
+
   const onNodeDoubleClick = useCallback(
     (_e: React.MouseEvent, node: Node) => {
       if (useSettings.getState().settings.doubleClickFocus) goToNode(node)
@@ -5793,6 +5854,7 @@ export function Canvas() {
         useViewMode.getState().toggle(id)
         return true
       },
+      'view.focusMode': () => { toggleFocusMode(); return true },
       'panel.explorer': () => { showExplorer('toggle'); return true },
       'panel.sourceControl': () => { setScOpen((v) => !v); return true },
       'panel.sessions': () => { toggleSessionsPin(); return true },
@@ -6739,6 +6801,11 @@ export function Canvas() {
   // and the batch that ENDS the gesture recomputes properly.
   const glyphSettledOpaqueRef = useRef<string[]>(EMPTY_OPAQUE)
   const glyphOpaqueSig = useMemo(() => {
+    // The focused node rides the set too (issue #78): it is reparented out of the viewport, so
+    // the shared layer must not consider it paintable — same commit, not one pass later, which
+    // is why it joins here rather than in a separate effect.
+    const withFocus = (ids: string[]): string[] =>
+      focusedId && !ids.includes(focusedId) ? [...ids, focusedId] : ids
     if (!glyphLayerActive) {
       glyphSettledOpaqueRef.current = EMPTY_OPAQUE
       return primeOpaqueNodeIds(EMPTY_OPAQUE)
@@ -6747,13 +6814,13 @@ export function Canvas() {
       const settled = glyphSettledOpaqueRef.current
       const gesture = gestureTerminalIds(nodes)
       return primeOpaqueNodeIds(
-        gesture.length === 0 ? settled : [...new Set([...settled, ...gesture])]
+        withFocus(gesture.length === 0 ? settled : [...new Set([...settled, ...gesture])])
       )
     }
     const next = opaqueNodeIds(nodes)
     glyphSettledOpaqueRef.current = next
-    return primeOpaqueNodeIds(next)
-  }, [glyphLayerActive, nodes])
+    return primeOpaqueNodeIds(withFocus(next))
+  }, [glyphLayerActive, nodes, focusedId])
   // The notification the render above could not send. It reaches the ONE case a render-time read
   // cannot: a terminal whose own node object did not change (so it never re-rendered) but which
   // something else slid underneath. Keyed on the signature, so it fires only on a real change.
@@ -10033,6 +10100,14 @@ export function Canvas() {
         icon: <IconRemote />,
         run: () => void connectRemote()
       },
+      {
+        id: 'focus-node',
+        label: 'Focus node',
+        hint: 'zen fullscreen fill distraction',
+        section: 'View',
+        icon: <IconFit />,
+        run: toggleFocusMode
+      },
       { id: 'fit', label: 'Fit view', icon: <IconFit />, run: fitAll },
       // Hidden below 2 top-level nodes — see arrangeAllNodes.
       ...(hasArrangeableNodes()
@@ -10153,7 +10228,8 @@ export function Canvas() {
     restartIdleAgents,
     zoomTo100,
     arrangeAllNodes,
-    hasArrangeableNodes
+    hasArrangeableNodes,
+    toggleFocusMode
   ])
 
   // Build the palette's command list only when its inputs change — the inline `buildCommands()`
@@ -11033,6 +11109,19 @@ export function Canvas() {
         onDictate={toggleDictation}
         dictateActive={dictationOpen}
       />
+
+      {/* Focus mode surface (issue #78). ALWAYS mounted so the reparent target exists before the
+          commit that moves a node into it, and OUTSIDE <ReactFlow> on purpose — the flow wrapper
+          is one z-0 stacking context, so nothing inside it could ever rise above the sidebar. The
+          focused node's root is appended here imperatively by TerminalNode; the exit pill stays
+          above it. Esc is deliberately NOT an exit key — it must reach the CLI in the pane. */}
+      <div id={FOCUS_SURFACE_ID} className={`focus-surface${focusedId ? ' is-active' : ''}`}>
+        {focusedId && (
+          <button className="focus-exit" title="Exit focus (⌘⇧F)" onClick={toggleFocusMode}>
+            Exit focus
+          </button>
+        )}
+      </div>
     </div>
   )
 }
