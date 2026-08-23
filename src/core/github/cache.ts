@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import type { GitHubIssue } from '../../shared/github-issues'
+import { renameAtomic, tempNameFor } from '../fs-atomic'
 import { parseGitHubRepository } from './config'
 
 const DIRECTORY = 'github-issues-cache'
@@ -32,11 +33,6 @@ export class GitHubCacheError extends Error {
     super(code)
   }
 }
-
-/** Paired with `process.pid` in the temp name in `writePrivate`: the counter makes a name unique
- *  WITHIN this process, the pid makes it unique ACROSS processes (it restarts at 0 in every new
- *  one). Same scheme as agent-status-mirror's local write. */
-let writeSeq = 0
 
 function safeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -248,20 +244,20 @@ export class GitHubIssueCache {
 
   private async writePrivate(file: string, content: string): Promise<void> {
     await fs.mkdir(path.dirname(file), { recursive: true })
-    // The temp name is unique per call because two writers reach the same `<digest>.json` from
+    // The temp name must be unique per call because two writers reach the same `<digest>.json` from
     // different serialization domains: src/core/github/service.ts serializes mutations per
     // `${projectId}:${issueNumber}` (mutationChain) but single-flights refreshes per repository, so
     // a mutation's `saveComplete` and a refresh's `saveComplete` for one (userId, repository) are
     // ordered by nothing at all. Binding writes are looser still — `prepareState` runs under
-    // `statePreparations`, a Set that admits several at once, and they share a binding file. With a
-    // shared name one writer's rename publishes the other's half-written document, or moves the
-    // file out from under it entirely and the loser's rename fails. The pid covers the other
-    // direction: two processes on one data dir have no lock, and their counters both start at 0.
-    const temporary = `${file}.${process.pid}.${++writeSeq}.tmp`
+    // `statePreparations`, a Set that admits several at once, and they share a binding file.
+    // tempNameFor + renameAtomic (core/fs-atomic.ts) carry both halves of the fix: a collision-proof
+    // name, and the bounded retry for Windows sharing violations — see fs-atomic.ts for the account
+    // this file's original write-up became.
+    const temporary = tempNameFor(file)
     try {
       await fs.writeFile(temporary, content, { encoding: 'utf-8', mode: 0o600 })
       await fs.chmod(temporary, 0o600)
-      await fs.rename(temporary, file)
+      await renameAtomic(temporary, file)
     } catch (error) {
       // A unique name never self-heals the way the fixed one did (the next write just reused it),
       // so a failed write has to remove its own temp — the more so as the two mutation saves in

@@ -14,6 +14,12 @@ import { ShortcutsSection, commitCandidate } from './ShortcutsSection'
 // so pin macOS here — `isMacPlatform()` is read at call time, never captured at module load.
 Object.defineProperty(window.navigator, 'platform', { value: 'MacIntel', configurable: true })
 
+/** How many commands ship with NO chord on the pinned (mac) platform. COMPUTED, because the
+ *  registry is a growing POOL: every unbound command added later would otherwise red these
+ *  counts with a number that says nothing about the behavior under test. Overrides are absent in
+ *  the cases below (or sanitized away), so the effective binding IS the mac default. */
+const UNASSIGNED = COMMAND_DEFINITIONS.filter((d) => d.defaultBindings.darwin.length === 0).length
+
 const setKb = (kb: unknown): void =>
   useSettings.setState({ settings: { ...DEFAULT_SETTINGS, keybindings: kb as never } })
 
@@ -200,7 +206,7 @@ describe('ShortcutsSection rows', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 0',
-      'Unassigned 2',
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 0'
     ])
   })
@@ -343,8 +349,8 @@ describe('the filter rail', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 0',
-      // fitAll + groupSelection ship with no default chord.
-      'Unassigned 2',
+      // fitAll + groupSelection + the PR-7 create pool ship with no default chord.
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 0'
     ])
   })
@@ -355,7 +361,7 @@ describe('the filter rail', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 1',
-      'Unassigned 2',
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 0'
     ])
   })
@@ -379,7 +385,7 @@ describe('the filter rail', () => {
     expect(statusLabels()).toEqual([
       `All ${COMMAND_DEFINITIONS.length}`,
       'Modified 1',
-      'Unassigned 2',
+      `Unassigned ${UNASSIGNED}`,
       'Disabled 1'
     ])
 

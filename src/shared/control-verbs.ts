@@ -35,7 +35,10 @@
 // exactly what the renderer cannot see, and the renderer's dispatch receives a raw `verb: string`
 // off IPC anyway. `canvas-control-core.ts` re-exports this so main-side callers are unchanged.
 
-export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set(['write', 'close'])
+// `open-project` (issue #338): create/adopt/first-attach all raise a human confirm (spec B2 +
+// Q1), and its early-handled block in Canvas.tsx reads `isDestructiveVerb(verb)` before its
+// `confirmBusy()` refusal exactly as write/close's cases do — the drift alarm covers all three.
+export const DESTRUCTIVE_VERBS: ReadonlySet<string> = new Set(['write', 'close', 'open-project'])
 
 /**
  * Does this verb's dispatch case take its `confirmBusy()` refusal from the shared set?

@@ -14,6 +14,8 @@ import {
   MAIN_INTERCEPTED_COMMAND_IDS,
   findMainInterceptShadowing
 } from './keybindings'
+import type { CommandId } from './keybindings'
+import { AGENT_CONFIG, BUILTIN_AGENT_IDS } from './agents/config'
 import { parseShortcut } from './shortcut'
 import type { ShortcutKeyEvent } from './shortcut'
 
@@ -71,6 +73,8 @@ describe('registry invariants', () => {
         darwin: ['Cmd+Slash'], other: ['Cmd+Slash'], allowInTerminal: true },
       { id: 'view.kanbanToggle', title: 'Toggle kanban board', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+B'], other: ['Cmd+Shift+B'], allowInTerminal: true },
+      { id: 'view.focusMode', title: 'Toggle focus mode', group: 'General', scope: 'canvas',
+        darwin: ['Cmd+Shift+F'], other: ['Cmd+Shift+F'], allowInTerminal: true },
       { id: 'panel.explorer', title: 'Toggle explorer panel', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+E'], other: ['Cmd+Shift+E'], allowInTerminal: true },
       { id: 'panel.sourceControl', title: 'Toggle source control panel', group: 'General',
@@ -97,6 +101,29 @@ describe('registry invariants', () => {
         darwin: ['Cmd+T'], other: ['Cmd+T'] },
       { id: 'node.newAgent', title: 'New agent node', group: 'Nodes', scope: 'canvas',
         darwin: ['Cmd+Shift+C'], other: ['Cmd+Shift+C'] },
+      // The per-agent + per-node-kind creates: pool only, no default chord on either platform.
+      { id: 'node.newAgent.claude', title: 'New Claude Code node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newAgent.codex', title: 'New Codex node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newAgent.gemini', title: 'New Gemini node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newAgent.opencode', title: 'New opencode node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newAgent.grok', title: 'New Grok node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newAgent.copilot', title: 'New GitHub Copilot node', group: 'Nodes',
+        scope: 'canvas', darwin: [], other: [] },
+      { id: 'node.newSticky', title: 'New sticky note', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newBrowser', title: 'New browser node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newWebView', title: 'New web view node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newDino', title: 'New dino node', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
+      { id: 'node.newFile', title: 'New file…', group: 'Nodes', scope: 'canvas',
+        darwin: [], other: [] },
       { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
         darwin: ['Cmd+W'], other: ['Cmd+W'], allowInTerminal: true, allowWhileTyping: true },
       { id: 'node.toggleMarkdown', title: 'Toggle markdown view', group: 'Nodes', scope: 'app',
@@ -116,6 +143,48 @@ describe('registry invariants', () => {
   it('isCommandId accepts known ids and rejects unknowns', () => {
     expect(isCommandId('node.newTerminal')).toBe(true)
     expect(isCommandId('node.selfDestruct')).toBe(false)
+  })
+
+  // Parity with the agent registry, both directions. The union is spelled statically (so the
+  // CommandId type stays literal), which means nothing but this test notices when builtin agent
+  // #7 lands: it reds here until `node.newAgent.<id>` exists, and it reds again if a command
+  // outlives the agent it creates.
+  it('has one create command per builtin agent, titled from AGENT_CONFIG', () => {
+    const perAgent = COMMAND_DEFINITIONS.map((d) => d.id).filter((id) =>
+      id.startsWith('node.newAgent.')
+    )
+    expect([...perAgent].sort()).toEqual(
+      BUILTIN_AGENT_IDS.map((a) => `node.newAgent.${a}`).sort()
+    )
+    for (const agentId of BUILTIN_AGENT_IDS) {
+      const d = COMMANDS_BY_ID.get(`node.newAgent.${agentId}` as CommandId)
+      expect(d?.title).toBe(`New ${AGENT_CONFIG[agentId].label} node`)
+      expect(d?.group).toBe('Nodes')
+      expect(d?.scope).toBe('canvas')
+    }
+  })
+
+  // Every command this PR added ships with NO default chord — the pool grows, the out-of-box
+  // key map does not. A default sneaking in here would shadow an existing binding or steal a
+  // key from the terminal for a user who never asked for the command.
+  it('ships the new create commands unbound on both platforms', () => {
+    const added: readonly string[] = [
+      ...BUILTIN_AGENT_IDS.map((a) => `node.newAgent.${a}`),
+      'node.newSticky',
+      'node.newBrowser',
+      'node.newWebView',
+      'node.newDino',
+      'node.newFile'
+    ]
+    expect(added).toHaveLength(11)
+    for (const id of added) {
+      const d = COMMANDS_BY_ID.get(id as CommandId)
+      expect(d, id).toBeDefined()
+      expect(d!.defaultBindings.darwin, id).toEqual([])
+      expect(d!.defaultBindings.other, id).toEqual([])
+      expect(getEffectiveBindings(id as CommandId, {}, true), id).toEqual([])
+      expect(getEffectiveBindings(id as CommandId, {}, false), id).toEqual([])
+    }
   })
 })
 

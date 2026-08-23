@@ -69,17 +69,47 @@ describe('SshProjectManager', () => {
   it('writePendingAnswer writes the answer file over the master (atomic tmp+mv, decision on stdin)', async () => {
     const { mgr, run } = makeMgr()
     await mgr.connect('p1', conn)
-    const ok = await mgr.writePendingAnswer('p1', 'node-1-2', 'allow')
-    expect(ok).toBe(true)
-    const call = run.mock.calls.find((c) => (c[0] as string[]).join(' ').includes('.answer'))
-    expect(call).toBeTruthy()
-    const cmd = (call![0] as string[]).join(' ')
-    expect(cmd).toContain('umask 077')
-    expect(cmd).toContain('.nodeterm/pending')
-    // atomic tmp+mv: write to <id>.answer.tmp then rename onto <id>.answer.
-    expect(cmd).toMatch(/cat > [\s\S]*\.answer\.tmp/)
-    expect(cmd).toMatch(/mv -f [\s\S]*\.answer\.tmp[\s\S]*\.answer/)
-    expect(call![1]).toBe('allow') // decision written on stdin
+    const before = run.mock.calls.length
+    expect(await Promise.all([
+      mgr.writePendingAnswer('p1', 'node-1-2', 'allow'),
+      mgr.writePendingAnswer('p1', 'node-1-2', 'deny')
+    ])).toEqual([true, true])
+    const calls = run.mock.calls.slice(before).filter((c) => (c[0] as string[]).join(' ').includes('.answer'))
+    expect(calls).toHaveLength(2)
+    const commands = calls.map((call) => (call[0] as string[]).join(' '))
+    const temps = commands.map((cmd) => cmd.match(/cat > (\S*\.nodeterm-[0-9a-f-]{36}\.tmp')/)?.[1])
+    expect(temps[0]).toBeTruthy()
+    expect(temps[1]).toBeTruthy()
+    expect(temps[0]).not.toBe(temps[1])
+    for (let i = 0; i < commands.length; i++) {
+      expect(commands[i]).toContain('umask 077')
+      expect(commands[i]).toContain('.nodeterm/pending')
+      expect(commands[i]).toContain(`mv -f -- ${temps[i]} ~/'${'/.nodeterm/pending/node-1-2.answer'.slice(1)}'`)
+      expect(commands[i]).toContain(`rm -f -- ${temps[i]}`)
+    }
+    expect(calls.map((call) => call[1])).toEqual(['allow', 'deny']) // decisions stay on stdin
+  })
+
+  it('pushAgentStatus gives overlapping pushes separate temps and preserves private permissions', async () => {
+    const { mgr, run } = makeMgr()
+    await mgr.connect('p1', conn)
+    const before = run.mock.calls.length
+    await Promise.all([
+      mgr.pushAgentStatus('p1', '{"writer":1}'),
+      mgr.pushAgentStatus('p1', '{"writer":2}')
+    ])
+    const writes = run.mock.calls.slice(before).filter((call) => call[1]?.toString().includes('writer'))
+    expect(writes).toHaveLength(2)
+    const commands = writes.map((call) => (call[0] as string[]).at(-1)!)
+    const temps = commands.map((command) => command.match(/cat > (\S*\.nodeterm-[0-9a-f-]{36}\.tmp')/)?.[1])
+    expect(temps[0]).toBeTruthy()
+    expect(temps[1]).toBeTruthy()
+    expect(temps[0]).not.toBe(temps[1])
+    for (let i = 0; i < commands.length; i++) {
+      expect(commands[i]).toContain('umask 077')
+      expect(commands[i]).toContain(`mv -f -- ${temps[i]} ~/'${'/.nodeterm/agent-status-p1.json'.slice(1)}'`)
+      expect(commands[i]).toContain(`rm -f -- ${temps[i]}`)
+    }
   })
 
   it('writePendingAnswer refuses an invalid pendingId and a disconnected project (no run)', async () => {
@@ -113,9 +143,10 @@ describe('SshProjectManager', () => {
     })
     await mgr.connect('p1', conn, '/srv/repo')
     const out = await mgr.uploadFile('p1', '/local/img.png', 'img.png')
-    expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[a-z0-9]+\/img\.png$/)
+    expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[0-9a-f-]{36}\/img\.png$/)
     // scp targeted that exact absolute remote path (conn is { host: 'h', user: 'u' }).
     expect(scpCalls[0].join(' ')).toContain(`u@h:${out}`)
+    expect(run.mock.calls.some((call) => (call[0] as string[]).at(-1)?.startsWith('rm -rf -- '))).toBe(false)
   })
 
   it('uploadFile basenames a traversal fileName so it cannot escape the token dir', async () => {
@@ -138,9 +169,106 @@ describe('SshProjectManager', () => {
     await mgr.connect('p1', conn, '/srv/repo')
     // basename('../../evil') === 'evil' → sanitized to <dir>/evil; never escapes the token dir.
     const out = await mgr.uploadFile('p1', '/local/evil', '../../evil')
-    expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[a-z0-9]+\/evil$/)
+    expect(out).toMatch(/^\/home\/u\/\.nodeterm\/uploads\/[0-9a-f-]{36}\/evil$/)
     expect(out).not.toContain('..')
     expect(scpCalls[0].join(' ')).toContain(`u@h:${out}`)
+  })
+
+  it('uploadFile gives separate manager processes distinct remote staging directories', async () => {
+    const scpCalls: string[][] = []
+    const run = vi.fn(async (args: string[]) =>
+      args.join(' ').includes('printf %s')
+        ? { code: 0, stdout: '/home/u' }
+        : { code: 0, stdout: '' }
+    )
+    const runners = () => ({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async (args: string[]) => {
+        scpCalls.push(args)
+        return { code: 0 }
+      }),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    const first = new SshProjectManager(runners())
+    const second = new SshProjectManager(runners())
+    await Promise.all([first.connect('p1', conn), second.connect('p1', conn)])
+
+    const now = vi.spyOn(Date, 'now').mockReturnValue(123456789)
+    try {
+      const outputs = await Promise.all([
+        first.uploadFile('p1', '/local/a.png', 'same.png'),
+        second.uploadFile('p1', '/local/b.png', 'same.png')
+      ])
+      expect(outputs[0]).toMatch(/\/uploads\/[0-9a-f-]{36}\/same\.png$/)
+      expect(outputs[1]).toMatch(/\/uploads\/[0-9a-f-]{36}\/same\.png$/)
+      expect(outputs[0]).not.toBe(outputs[1])
+      expect(new Set(scpCalls.map((args) => args.at(-1))).size).toBe(2)
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it('uploadFile cleans only its quoted staging directory when scp fails', async () => {
+    const commands: string[] = []
+    const run = vi.fn(async (args: string[]) => {
+      const command = args.at(-1) ?? ''
+      commands.push(command)
+      return command.includes('printf %s')
+        ? { code: 0, stdout: "/Users/O'Brien Home" }
+        : { code: 0, stdout: '' }
+    })
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp: vi.fn(async () => ({ code: 1 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    await mgr.connect('p1', conn)
+
+    expect(await mgr.uploadFile('p1', '/local/a.png', 'same.png')).toBeNull()
+    const cleanup = commands.find((command) => command.startsWith('rm -rf -- '))
+    expect(cleanup).toMatch(
+      /^rm -rf -- '\/Users\/O'\\''Brien Home\/\.nodeterm\/uploads\/[0-9a-f-]{36}'$/
+    )
+  })
+
+  it('uploadFile attempts owned-stage cleanup when mkdir itself returns non-zero', async () => {
+    const commands: string[] = []
+    const run = vi.fn(async (args: string[]) => {
+      const command = args.at(-1) ?? ''
+      commands.push(command)
+      if (command.includes('printf %s')) return { code: 0, stdout: '/home/u' }
+      if (command.includes('/.nodeterm/uploads/') && command.startsWith('mkdir -p')) {
+        return { code: 1, stdout: '' }
+      }
+      return { code: 0, stdout: '' }
+    })
+    const runScp = vi.fn(async () => ({ code: 0 }))
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+      run,
+      runScp,
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: vi.fn()
+    })
+    await mgr.connect('p1', conn)
+
+    expect(await mgr.uploadFile('p1', '/local/a.png', 'same.png')).toBeNull()
+    expect(runScp).not.toHaveBeenCalled()
+    const mkdir = commands.find(
+      (command) => command.startsWith('mkdir -p') && command.includes('/.nodeterm/uploads/')
+    )
+    const cleanup = commands.find(
+      (command) => command.startsWith('rm -rf -- ') && command.includes('/.nodeterm/uploads/')
+    )
+    expect(mkdir).toBeTruthy()
+    expect(cleanup?.slice('rm -rf -- '.length)).toBe(mkdir?.slice('mkdir -p '.length))
   })
 
   it('connect writes + source-files the remote tmux.conf and returns its absolute path', async () => {
@@ -161,10 +289,17 @@ describe('SshProjectManager', () => {
     })
     const { tmuxConfPath } = await mgr.connect('p1', conn)
     expect(tmuxConfPath).toBe('/home/u/.nodeterm/tmux.conf')
-    // The conf was written via `cat >` (with the conf body as stdin) and then source-file'd.
-    const write = calls.find((c) => c.args.join(' ').includes(`cat > '/home/u/.nodeterm/tmux.conf'`))
+    // The conf was staged via a unique temp (body on stdin), atomically published, then sourced.
+    const write = calls.find((c) => c.args.join(' ').includes("/.nodeterm/tmux.conf'") && c.stdin)
     expect(write).toBeDefined()
     expect(write?.stdin).toContain('set -g mouse on')
+    const command = write?.args.at(-1) ?? ''
+    const temp = command.match(
+      /cat > ('\/home\/u\/\.nodeterm\/\.nodeterm-[0-9a-f-]{36}\.tmp')/
+    )?.[1]
+    expect(temp).toBeTruthy()
+    expect(command).toContain(`mv -f -- ${temp} '/home/u/.nodeterm/tmux.conf'`)
+    expect(command).toContain(`rm -f -- ${temp}`)
     expect(calls.some((c) => c.args.join(' ').includes(`source-file '/home/u/.nodeterm/tmux.conf'`))).toBe(true)
   })
 
@@ -456,16 +591,35 @@ describe('SshProjectManager', () => {
       return { mgr, scpCalls, runScp }
     }
 
-    it('lands the file under its remote basename and stages through .part', async () => {
+    it('lands the file under its remote basename and stages through a per-call .part', async () => {
       const { mgr, scpCalls } = makeDlMgr()
       await mgr.connect('p1', conn, '/srv/repo')
       const dir = await destDir()
       const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
       expect(res).toEqual({ ok: true, localPath: path.join(dir, 'notes.md'), dir: false })
       expect(await fs.readFile(path.join(dir, 'notes.md'), 'utf8')).toBe('payload')
-      // scp wrote to `<target>.part`, never straight to the final name.
-      expect(scpCalls[0][scpCalls[0].length - 1]).toBe(path.join(dir, 'notes.md.part'))
+      // scp wrote to a cross-process UUID part, never straight to the final name.
+      expect(path.basename(scpCalls[0].at(-1)!)).toMatch(
+        /^\.nodeterm-scp-[0-9a-f-]{36}\.part$/
+      )
       expect(await fs.readdir(dir)).toEqual(['notes.md'])
+    })
+
+    it('uses a fresh UUID stage when the same final name becomes free again', async () => {
+      const { mgr, scpCalls } = makeDlMgr()
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      const first = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+      expect(first.ok).toBe(true)
+      if (first.ok) await fs.rm(first.localPath)
+      const second = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+      expect(second.ok).toBe(true)
+      expect(scpCalls).toHaveLength(2)
+      expect(scpCalls[0].at(-1)).not.toBe(scpCalls[1].at(-1))
+      expect(scpCalls.map((args) => path.basename(args.at(-1)!))).toEqual([
+        expect.stringMatching(/^\.nodeterm-scp-[0-9a-f-]{36}\.part$/),
+        expect.stringMatching(/^\.nodeterm-scp-[0-9a-f-]{36}\.part$/)
+      ])
     })
 
     it('never overwrites an existing file, it takes the next (n) name', async () => {
@@ -476,6 +630,40 @@ describe('SshProjectManager', () => {
       const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
       expect(res).toMatchObject({ ok: true, localPath: path.join(dir, 'notes (2).md') })
       expect(await fs.readFile(path.join(dir, 'notes.md'), 'utf8')).toBe('mine')
+    })
+
+    it('treats a dangling symlink directory entry as occupied', async () => {
+      const { mgr } = makeDlMgr()
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      const dangling = path.join(dir, 'notes.md')
+      if (process.platform === 'win32') {
+        // A junction needs no Developer Mode privilege. Create it while its target exists, then
+        // remove the target to leave the same dangling directory entry lstat must preserve.
+        const vanished = path.join(dir, 'vanished')
+        await fs.mkdir(vanished)
+        await fs.symlink(vanished, dangling, 'junction')
+        await fs.rm(vanished, { recursive: true })
+      } else {
+        await fs.symlink('vanished', dangling)
+      }
+
+      // Node on Windows may report a dangling junction as accessible even though POSIX access(2)
+      // follows the link and returns ENOENT. Force that production-host behavior so an lstat →
+      // access regression is discriminated on the Windows test host too.
+      const windowsAccess = process.platform === 'win32'
+        ? vi.spyOn(fs, 'access').mockRejectedValue(
+            Object.assign(new Error('dangling target'), { code: 'ENOENT' })
+          )
+        : undefined
+      try {
+        const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+        expect(res).toMatchObject({ ok: true, localPath: path.join(dir, 'notes (2).md') })
+        expect((await fs.lstat(dangling)).isSymbolicLink()).toBe(true)
+        expect(await fs.readFile(path.join(dir, 'notes (2).md'), 'utf8')).toBe('payload')
+      } finally {
+        windowsAccess?.mockRestore()
+      }
     })
 
     it('passes -r for a remote directory (probed on the host, not taken from the renderer)', async () => {
@@ -491,10 +679,276 @@ describe('SshProjectManager', () => {
       const { mgr } = makeDlMgr(false, 1)
       await mgr.connect('p1', conn, '/srv/repo')
       const dir = await destDir()
-      const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
-      expect(res.ok).toBe(false)
-      expect(await fs.readdir(dir)).toEqual([])
+      const rm = vi.spyOn(fs, 'rm')
+      try {
+        const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+        expect(res.ok).toBe(false)
+        expect(await fs.readdir(dir)).toEqual([])
+        const partCleanup = rm.mock.calls.find(([target]) => String(target).endsWith('.part'))
+        expect(partCleanup?.[1]).toMatchObject({
+          recursive: true,
+          force: true,
+          maxRetries: 4,
+          retryDelay: 50
+        })
+      } finally {
+        rm.mockRestore()
+      }
     })
+
+    it('treats an unreadable destination check as failure, never as permission to overwrite', async () => {
+      const { mgr, runScp } = makeDlMgr()
+      await mgr.connect('p1', conn, '/srv/repo')
+      const dir = await destDir()
+      const denied = vi
+        .spyOn(fs, 'lstat')
+        .mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }))
+      try {
+        const res = await mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+        expect(res.ok).toBe(false)
+        expect(runScp).not.toHaveBeenCalled()
+        expect(await fs.readdir(dir)).toEqual([])
+      } finally {
+        denied.mockRestore()
+      }
+    })
+
+    it('overlapping downloads reserve distinct final names and publish whole files', async () => {
+      const dir = await destDir()
+      const scpTargets: string[] = []
+      let arrived = 0
+      let release!: () => void
+      const bothArrived = new Promise<void>((resolve) => { release = resolve })
+      const run = vi.fn(async (args: string[]) => ({
+        code: args.join(' ').includes('test -d') ? 1 : 0,
+        stdout: ''
+      }))
+      const runScp = vi.fn(async (args: string[]) => {
+        const target = args.at(-1)!
+        const body = ++arrived === 1 ? 'first' : 'second'
+        scpTargets.push(target)
+        if (arrived === 2) release()
+        await bothArrived
+        await fs.writeFile(target, body)
+        return { code: 0 }
+      })
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run,
+        runScp,
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      await mgr.connect('p1', conn, '/srv/repo')
+
+      const results = await Promise.all([
+        mgr.downloadFile('p1', '/srv/repo/notes.md', dir),
+        mgr.downloadFile('p1', '/srv/repo/notes.md', dir)
+      ])
+      expect(results.every((result) => result.ok)).toBe(true)
+      const localPaths = results.map((result) => result.ok ? result.localPath : '')
+      expect(new Set(localPaths).size).toBe(2)
+      expect(localPaths.map((file) => path.basename(file)).sort()).toEqual([
+        'notes (2).md',
+        'notes.md'
+      ])
+      expect(new Set(scpTargets).size).toBe(2)
+      expect((await Promise.all(localPaths.map((file) => fs.readFile(file, 'utf8')))).sort()).toEqual([
+        'first',
+        'second'
+      ])
+      expect((await fs.readdir(dir)).sort()).toEqual(['notes (2).md', 'notes.md'])
+    })
+
+    it('coordinates two spellings of the same destination directory', async () => {
+      const holder = await destDir()
+      const realDir = path.join(holder, 'real')
+      const aliasDir = path.join(holder, 'alias')
+      await fs.mkdir(realDir)
+      await fs.symlink(realDir, aliasDir, process.platform === 'win32' ? 'junction' : 'dir')
+      let arrived = 0
+      let release!: () => void
+      const bothArrived = new Promise<void>((resolve) => { release = resolve })
+      const runScp = vi.fn(async (args: string[]) => {
+        if (++arrived === 2) release()
+        await bothArrived
+        await fs.writeFile(args.at(-1)!, String(arrived))
+        return { code: 0 }
+      })
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run: vi.fn(async (args: string[]) => ({
+          code: args.join(' ').includes('test -d') ? 1 : 0,
+          stdout: ''
+        })),
+        runScp,
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      await mgr.connect('p1', conn, '/srv/repo')
+
+      const results = await Promise.all([
+        mgr.downloadFile('p1', '/srv/repo/notes.md', realDir),
+        mgr.downloadFile('p1', '/srv/repo/notes.md', aliasDir)
+      ])
+      expect(results.every((result) => result.ok)).toBe(true)
+      expect(
+        results.map((result) => result.ok ? path.basename(result.localPath) : '').sort()
+      ).toEqual(['notes (2).md', 'notes.md'])
+      expect((await fs.readdir(realDir)).sort()).toEqual(['notes (2).md', 'notes.md'])
+    })
+
+    it('overlapping media fetches use separate parts and publish one whole cached file', async () => {
+      const dir = await destDir()
+      const scpTargets: string[] = []
+      let arrived = 0
+      let release!: () => void
+      const bothArrived = new Promise<void>((resolve) => { release = resolve })
+      const run = vi.fn(async (args: string[]) => {
+        const command = args.at(-1) ?? ''
+        if (command.includes('printf %s')) return { code: 0, stdout: '/home/u' }
+        if (command.includes('test -d') || command.includes('wc -c')) {
+          return { code: 1, stdout: '' }
+        }
+        return { code: 0, stdout: '' }
+      })
+      const runScp = vi.fn(async (args: string[]) => {
+        const target = args.at(-1)!
+        const body = ++arrived === 1 ? 'AAAAA' : 'B'
+        scpTargets.push(target)
+        if (arrived === 2) release()
+        await bothArrived
+        await fs.writeFile(target, body)
+        return { code: 0 }
+      })
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run,
+        runScp,
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      await mgr.connect('p1', conn, '/srv/repo')
+
+      const results = await Promise.all([
+        mgr.cacheMediaFile('p1', '/srv/repo/demo.mp4', dir),
+        mgr.cacheMediaFile('p1', '/srv/repo/demo.mp4', dir)
+      ])
+      expect(results.every((result) => result.ok)).toBe(true)
+      expect(new Set(scpTargets).size).toBe(2)
+      expect(
+        scpTargets.every((target) =>
+          /^\.nodeterm-scp-[0-9a-f-]{36}\.part$/.test(path.basename(target))
+        )
+      ).toBe(true)
+      const localPath = results[0].ok ? results[0].localPath : ''
+      expect(results[1].ok && results[1].localPath).toBe(localPath)
+      expect(['AAAAA', 'B']).toContain(await fs.readFile(localPath, 'utf8'))
+      expect((await fs.readdir(dir)).filter((file) => file.endsWith('.part'))).toEqual([])
+    })
+
+    it('does not replace a cache entry when checking it fails for a reason other than absence', async () => {
+      const dir = await destDir()
+      const runScp = vi.fn(async () => ({ code: 0 }))
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run: vi.fn(async (args: string[]) => {
+          const command = args.at(-1) ?? ''
+          if (command.includes('printf %s')) return { code: 0, stdout: '/home/u' }
+          if (command.includes('wc -c')) return { code: 0, stdout: '7' }
+          return { code: command.includes('test -d') ? 1 : 0, stdout: '' }
+        }),
+        runScp,
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      await mgr.connect('p1', conn, '/srv/repo')
+      const denied = vi
+        .spyOn(fs, 'stat')
+        .mockRejectedValue(Object.assign(new Error('denied'), { code: 'EACCES' }))
+      try {
+        expect(await mgr.cacheMediaFile('p1', '/srv/repo/demo.mp4', dir)).toMatchObject({
+          ok: false
+        })
+        expect(runScp).not.toHaveBeenCalled()
+      } finally {
+        denied.mockRestore()
+      }
+    })
+
+    it.skipIf(process.platform !== 'win32')(
+      'coordinates Windows names that alias through a terminal dot',
+      async () => {
+        const dir = await destDir()
+        let arrived = 0
+        let release!: () => void
+        const bothArrived = new Promise<void>((resolve) => { release = resolve })
+        const runScp = vi.fn(async (args: string[]) => {
+          if (++arrived === 2) release()
+          await bothArrived
+          await fs.writeFile(args.at(-1)!, String(arrived))
+          return { code: 0 }
+        })
+        const mgr = new SshProjectManager({
+          userDataDir: '/ud',
+          spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+          run: vi.fn(async (args: string[]) => ({
+            code: args.join(' ').includes('test -d') ? 1 : 0,
+            stdout: ''
+          })),
+          runScp,
+          getHook: () => ({ port: 1, token: 't', version: '1' }),
+          onStatus: vi.fn()
+        })
+        await mgr.connect('p1', conn, '/srv/repo')
+
+        const results = await Promise.all([
+          mgr.downloadFile('p1', '/srv/repo/foo', dir),
+          mgr.downloadFile('p1', '/srv/repo/foo.', dir)
+        ])
+        const names = results.map((result) => result.ok ? path.basename(result.localPath) : '')
+        expect(names.sort()).toEqual(['foo', 'foo (2)'])
+      }
+    )
+
+    it.skipIf(process.platform !== 'darwin')(
+      'coordinates case aliases on the default macOS filesystem',
+      async () => {
+        const dir = await destDir()
+        let arrived = 0
+        let release!: () => void
+        const bothArrived = new Promise<void>((resolve) => { release = resolve })
+        const runScp = vi.fn(async (args: string[]) => {
+          if (++arrived === 2) release()
+          await bothArrived
+          await fs.writeFile(args.at(-1)!, String(arrived))
+          return { code: 0 }
+        })
+        const mgr = new SshProjectManager({
+          userDataDir: '/ud',
+          spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+          run: vi.fn(async (args: string[]) => ({
+            code: args.join(' ').includes('test -d') ? 1 : 0,
+            stdout: ''
+          })),
+          runScp,
+          getHook: () => ({ port: 1, token: 't', version: '1' }),
+          onStatus: vi.fn()
+        })
+        await mgr.connect('p1', conn, '/srv/repo')
+
+        const results = await Promise.all([
+          mgr.downloadFile('p1', '/srv/repo/Foo', dir),
+          mgr.downloadFile('p1', '/srv/repo/foo', dir)
+        ])
+        const names = results.map((result) => result.ok ? path.basename(result.localPath) : '')
+        expect(new Set(names.map((name) => name.toLowerCase())).size).toBe(2)
+      }
+    )
 
     it('refuses a remote path that names nothing downloadable, without invoking scp', async () => {
       const { mgr, runScp } = makeDlMgr()
@@ -533,6 +987,42 @@ describe('SshProjectManager', () => {
     expect(await mgr.uploadFile('p1', 'relative/path.png', 'x.png')).toBeNull()
     expect(scpCalls).toHaveLength(0) // scp never invoked for an unsafe localPath
   })
+
+  it.skipIf(process.platform !== 'win32')(
+    'uploadFile accepts absolute drive and UNC paths from the Windows host',
+    async () => {
+      const scpCalls: string[][] = []
+      const run = vi.fn(async (args: string[]) =>
+        args.join(' ').includes('printf %s')
+          ? { code: 0, stdout: '/home/u' }
+          : { code: 0, stdout: '' }
+      )
+      const runScp = vi.fn(async (args: string[]) => {
+        scpCalls.push(args)
+        return { code: 0 }
+      })
+      const mgr = new SshProjectManager({
+        userDataDir: '/ud',
+        spawnMaster: vi.fn(() => ({ kill: vi.fn(), on: vi.fn() })),
+        run,
+        runScp,
+        getHook: () => ({ port: 1, token: 't', version: '1' }),
+        onStatus: vi.fn()
+      })
+      await mgr.connect('p1', conn, '/srv/repo')
+
+      await expect(mgr.uploadFile('p1', 'C:\\drop\\drive.png', 'drive.png')).resolves.toMatch(
+        /\/drive\.png$/
+      )
+      await expect(
+        mgr.uploadFile('p1', '\\\\server\\share\\unc.png', 'unc.png')
+      ).resolves.toMatch(/\/unc\.png$/)
+      expect(scpCalls.map((args) => args.at(-2))).toEqual([
+        'C:\\drop\\drive.png',
+        '\\\\server\\share\\unc.png'
+      ])
+    }
+  )
 
   // --- leftover ControlMaster socket handling -----------------------------------------------
   //
@@ -1729,7 +2219,11 @@ describe('SshProjectManager', () => {
       await assertion
     })
 
-    it('attributes a cancel to the exact master pid through the real AskpassServer wiring', async () => {
+    // POSIX-only: the askpass transport is an AF_UNIX socket (SSH_ASKPASS over a `.sock`), which
+    // cannot bind on Windows (`listen EACCES` on a Temp `.sock`). The mechanism itself is never
+    // used on Windows, so this pins POSIX wiring; the file's drive/UNC uploadFile cases still run
+    // on the windows-latest job.
+    it.skipIf(process.platform === 'win32')('attributes a cancel to the exact master pid through the real AskpassServer wiring', async () => {
       // Pins the production wiring `askpassWasCancelled: (pid) => askpassServer.wasCancelledBy(pid)`
       // together with a spawner handle that reports its child's pid, i.e. that connect() actually
       // threads master.pid() through. The different-pid case is the load-bearing half: had connect()
@@ -2059,8 +2553,8 @@ describe('SshProjectManager — per-node tokens on the host', () => {
     const cmds = run.mock.calls.map(([a]) => (a as string[]).join(' '))
     // tmp + rename (`cat >` truncates, so writing straight at the file leaves an EMPTY token
     // behind when the host is out of quota or disk — see RemoteHooks.writeNodeTokens).
-    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-1.tmp' '/home/u/.nodeterm/node-tokens/node-1'"))).toBe(true)
-    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-2.tmp' '/home/u/.nodeterm/node-tokens/node-2'"))).toBe(true)
+    expect(cmds.some((c) => /mv -f -- .*node-tokens\/\.nodeterm-[0-9a-f-]{36}\.tmp' '\/home\/u\/\.nodeterm\/node-tokens\/node-1'/.test(c))).toBe(true)
+    expect(cmds.some((c) => /mv -f -- .*node-tokens\/\.nodeterm-[0-9a-f-]{36}\.tmp' '\/home\/u\/\.nodeterm\/node-tokens\/node-2'/.test(c))).toBe(true)
     // never on a command line — the host's process table is readable by its other users.
     expect(cmds.some((c) => c.includes('mac-of-node-1'))).toBe(false)
     const write = run.mock.calls.find(([a]) =>
@@ -2103,7 +2597,7 @@ describe('SshProjectManager — per-node tokens on the host', () => {
     run.mockClear()
     await mgr.writeNodeTokenForNode(controlPath, 'node-9')
     const cmds = run.mock.calls.map(([a]) => (a as string[]).join(' '))
-    expect(cmds.some((c) => c.includes("mv -f '/home/u/.nodeterm/node-tokens/.node-9.tmp' '/home/u/.nodeterm/node-tokens/node-9'"))).toBe(true)
+    expect(cmds.some((c) => /mv -f -- .*node-tokens\/\.nodeterm-[0-9a-f-]{36}\.tmp' '\/home\/u\/\.nodeterm\/node-tokens\/node-9'/.test(c))).toBe(true)
     // an unknown control path is a no-op, not a throw
     run.mockClear()
     await expect(mgr.writeNodeTokenForNode('/nope.sock', 'node-9')).resolves.toBeUndefined()

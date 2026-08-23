@@ -74,6 +74,23 @@ describe('codex thread identity prelude', () => {
     )
   })
 
+  // #350, at the resolver: two projects, a codex node in each with its OWN thread. A daemon-spawned
+  // tool shell for Project B's thread — with the daemon env CLEAN (no leaked NODETERM_NODE_ID, which
+  // is what the launcher fix guarantees) — must recover B's node and NEVER A's. This is the
+  // cross-project isolation the confused-deputy broke: when the daemon leaked node-A's id the guard
+  // above no-opped and B's tool shell stayed node-A, so B listed A's links and routed to A.
+  it('cross-project isolation: a clean tool shell for project B resolves B, never A (#350)', async () => {
+    record('thread-A', `nodeId=node-A\nendpoint=${dir}/hook-endpoint.env\nsignature=x\n`)
+    record('thread-B', `nodeId=node-B\nendpoint=${dir}/hook-endpoint.env\nsignature=x\n`)
+    const resolvedB = await resolve({ CODEX_THREAD_ID: 'thread-B' })
+    expect(resolvedB).toBe(`node-B|${dir}/hook-endpoint.env|1`)
+    expect(resolvedB).not.toContain('node-A')
+    // And symmetrically, A's thread never resolves to B.
+    expect(await resolve({ CODEX_THREAD_ID: 'thread-A' })).toBe(
+      `node-A|${dir}/hook-endpoint.env|1`
+    )
+  })
+
   it('is inert for every other agent (no CODEX_THREAD_ID, no record)', async () => {
     expect(await resolve({})).toBe('||')
     expect(await resolve({ CODEX_THREAD_ID: 'unknown-thread' })).toBe('||')

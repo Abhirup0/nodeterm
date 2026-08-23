@@ -6,6 +6,7 @@
  * canonical binding strings are shortcut.ts strings (`Cmd` = abstract primary modifier,
  * `Ctrl` = literal Control, modifier-only chords = hold-to-talk).
  */
+import { AGENT_CONFIG } from './agents/config'
 import {
   parseShortcut,
   serializeShortcut,
@@ -42,6 +43,7 @@ export type CommandId =
   | 'app.settings'
   | 'app.shortcutsPanel'
   | 'view.kanbanToggle'
+  | 'view.focusMode'
   | 'panel.explorer'
   | 'panel.sourceControl'
   | 'panel.sessions'
@@ -55,6 +57,20 @@ export type CommandId =
   | 'canvas.groupSelection'
   | 'node.newTerminal'
   | 'node.newAgent'
+  // Per-builtin-agent creates. The six ids are spelled STATICALLY (never derived from
+  // BUILTIN_AGENT_IDS) so this union stays literal — `isCommandId`, the overrides map and the
+  // handler table all depend on that.
+  | 'node.newAgent.claude'
+  | 'node.newAgent.codex'
+  | 'node.newAgent.gemini'
+  | 'node.newAgent.opencode'
+  | 'node.newAgent.grok'
+  | 'node.newAgent.copilot'
+  | 'node.newSticky'
+  | 'node.newBrowser'
+  | 'node.newWebView'
+  | 'node.newDino'
+  | 'node.newFile'
   | 'node.close'
   | 'node.toggleMarkdown'
   | 'terminal.find'
@@ -79,6 +95,12 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     defaultBindings: both('Cmd+Slash'), allowInTerminal: true },
   { id: 'view.kanbanToggle', title: 'Toggle kanban board', group: 'General', scope: 'app',
     defaultBindings: both('Cmd+Shift+B'), allowInTerminal: true },
+  // Focus mode fills the window with one node — most naturally invoked from INSIDE the terminal
+  // being enlarged, hence allowInTerminal. Scope stays 'canvas': over the kanban board or while
+  // typing in an input there is no node geometry for the toggle to act on (the pre-registry
+  // hardcoded chord fired in both places; the registry gating is the fix, not a regression).
+  { id: 'view.focusMode', title: 'Toggle focus mode', group: 'General', scope: 'canvas',
+    defaultBindings: both('Cmd+Shift+F'), allowInTerminal: true },
   { id: 'panel.explorer', title: 'Toggle explorer panel', group: 'General', scope: 'app',
     defaultBindings: both('Cmd+Shift+E'), allowInTerminal: true },
   { id: 'panel.sourceControl', title: 'Toggle source control panel', group: 'General', scope: 'app',
@@ -118,6 +140,32 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
     // Non-mac note: Ctrl+Shift+C is a common terminal-copy convention; kept for parity
     // with current behavior, revisit with telemetry.
     defaultBindings: both('Cmd+Shift+C') },
+  // Every command below ships UNBOUND on purpose: they expand the remappable POOL, and a chord
+  // nobody asked for would either shadow an existing default or steal a key from the terminal.
+  // The user assigns them in Settings → Keyboard Shortcuts; titles come from AGENT_CONFIG so a
+  // relabelled agent cannot drift from its row.
+  { id: 'node.newAgent.claude', title: `New ${AGENT_CONFIG.claude.label} node`, group: 'Nodes',
+    scope: 'canvas', defaultBindings: both() },
+  { id: 'node.newAgent.codex', title: `New ${AGENT_CONFIG.codex.label} node`, group: 'Nodes',
+    scope: 'canvas', defaultBindings: both() },
+  { id: 'node.newAgent.gemini', title: `New ${AGENT_CONFIG.gemini.label} node`, group: 'Nodes',
+    scope: 'canvas', defaultBindings: both() },
+  { id: 'node.newAgent.opencode', title: `New ${AGENT_CONFIG.opencode.label} node`, group: 'Nodes',
+    scope: 'canvas', defaultBindings: both() },
+  { id: 'node.newAgent.grok', title: `New ${AGENT_CONFIG.grok.label} node`, group: 'Nodes',
+    scope: 'canvas', defaultBindings: both() },
+  { id: 'node.newAgent.copilot', title: `New ${AGENT_CONFIG.copilot.label} node`, group: 'Nodes',
+    scope: 'canvas', defaultBindings: both() },
+  { id: 'node.newSticky', title: 'New sticky note', group: 'Nodes', scope: 'canvas',
+    defaultBindings: both() },
+  { id: 'node.newBrowser', title: 'New browser node', group: 'Nodes', scope: 'canvas',
+    defaultBindings: both() },
+  { id: 'node.newWebView', title: 'New web view node', group: 'Nodes', scope: 'canvas',
+    defaultBindings: both() },
+  { id: 'node.newDino', title: 'New dino node', group: 'Nodes', scope: 'canvas',
+    defaultBindings: both() },
+  { id: 'node.newFile', title: 'New file…', group: 'Nodes', scope: 'canvas',
+    defaultBindings: both() },
   // Main-process intercepted today (unconditional): keep firing everywhere.
   { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
     defaultBindings: both('Cmd+W'), allowInTerminal: true, allowWhileTyping: true },

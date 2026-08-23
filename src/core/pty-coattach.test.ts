@@ -17,6 +17,14 @@ const spawned: FakePty[] = []
 /** When set, the NEXT pty.spawn throws (simulates posix_spawn failing). */
 let failNextSpawn = false
 
+// Pin the persistence backend: `sessionHostSupported()` only asks whether
+// out/session-host/host.cjs exists on disk, so whether this suite exercises the mocked
+// `node-pty` spawn below or a real session-host shim depended on whether anyone had run
+// `npm run build` (or `npm run host:build`). See src/core/__fixtures__/no-session-host.ts.
+vi.mock('./session-host-backend', async () =>
+  (await import('./__fixtures__/no-session-host')).noSessionHost()
+)
+
 vi.mock('node-pty', () => ({
   spawn: (_file: string, _args: string[], _opts: unknown) => {
     if (failNextSpawn) {
