@@ -1684,6 +1684,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     suspends the same items, so ⌘M / ⌘⇧B / ⌘, / off-mac Ctrl+W reach the recorder instead of the
     menu item that owns them; `menuStandsDown(false, …)` is `policyStandsDown(…)` by construction.
     The two INTERCEPT thunks stay independent parameters — only the menu ORs them.
+    **The CLOSE leg has one extra, policy-independent stand-down** (issue #383, off-mac only):
+    `closeStandsDownInTerminal(isMac, terminalFocused)` — off-mac `node.close`'s default chord is
+    Ctrl+W, readline's kill-word, so while a terminal has focus the close intercept lets the chord
+    fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
+    shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
+    keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
+    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
+    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -2019,7 +2027,10 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   named in `menuItemIdsToSuspend` — Minimize (`MENU_ITEM_ID_MINIMIZE`), **Toggle Kanban Board
   (`MENU_ITEM_ID_KANBAN`, ⌘⇧B)** and **Settings (`MENU_ITEM_ID_SETTINGS`, ⌘,)** on every platform,
   plus Close (`MENU_ITEM_ID_CLOSE`) on Windows/Linux — because a disabled item suppresses its
-  accelerator and only then do those chords fall through to the terminal, or to the recorder. The
+  accelerator and only then do those chords fall through to the terminal, or to the recorder.
+  Off-mac the Close item is ALSO disabled whenever a terminal has focus, policy or no policy
+  (`closeStandsDownInTerminal`, issue #383): its role owns the Ctrl+W accelerator, and that
+  keystroke in a shell is readline's kill-word. The
   recorder leg is why ⌘M is bindable at all, and it fixed a live misfire: ⌘⇧B pressed into an armed
   recorder used to open the kanban board behind the Settings dialog, and ⌘, to re-open Settings.
   Kanban and Settings are

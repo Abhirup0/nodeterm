@@ -116,6 +116,7 @@ import {
   MENU_ITEM_ID_KANBAN,
   MENU_ITEM_ID_MINIMIZE,
   MENU_ITEM_ID_SETTINGS,
+  closeStandsDownInTerminal,
   installKeydownIntercepts,
   menuItemIdsToSuspend,
   menuStandsDown,
@@ -893,6 +894,15 @@ function syncMenuForStandDown(): void {
     const item = menu.getMenuItemById(id)
     if (item) item.enabled = enabled
   }
+  // The CLOSE item's extra, policy-independent stand-down (issue #383): off-mac its role owns the
+  // Ctrl+W accelerator above the page, and while a terminal has focus that keystroke is readline's
+  // kill-word. Applied ON TOP of the shared suspension — the item must never be MORE enabled than
+  // the shared rule says. Mac has no close item in the template, so the lookup is null there and
+  // this is a no-op by construction.
+  if (closeStandsDownInTerminal(interceptIsMac, terminalFocused)) {
+    const close = menu.getMenuItemById(MENU_ITEM_ID_CLOSE)
+    if (close) close.enabled = false
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -1049,7 +1059,9 @@ function createWindow(): BrowserWindow {
     currentInterceptBindings,
     interceptIsMac,
     () => shortcutRecording,
-    () => policyStandsDown(currentInterceptPolicy(), terminalFocused)
+    () => policyStandsDown(currentInterceptPolicy(), terminalFocused),
+    // The close leg's own, policy-independent stand-down (issue #383) — see the predicate's doc.
+    () => closeStandsDownInTerminal(interceptIsMac, terminalFocused)
   )
 
   // The THIRD way the page that armed a recorder (or reported terminal focus) can go away: a
