@@ -30,6 +30,7 @@ import {
   onNodeNowChange,
   onInboxActionable,
   isEventUnresolved,
+  trimInboxFeed,
   workingNodes,
   _resetForTest,
   _snapshot,
@@ -44,6 +45,7 @@ import {
   type MirrorUsage,
   type NodeStateChange,
   type NodeNowChange,
+  type InboxEvent,
   sweepStaleWorking
 } from './agent-status-mirror'
 
@@ -632,6 +634,105 @@ describe('inbox event production (via recordAgentEvent)', () => {
     expect(ib.nodes.x).toBeUndefined()
     expect(ib.events).toHaveLength(1)
     expect(ib.events[0].resolved).toBe(true)
+  })
+})
+
+// P2-7: on a busy multi-agent host the global 50-event cap evicted a node's `done` (and its live
+// ask) within minutes, so `ackDone` no-op'd (a retained DONE card on the phone never dismissed) and
+// the phone lost that node's newest-done / end-reason. The feed now keeps each node's newest done +
+// newest UNRESOLVED ask past the cut, in the same `events` array every reader already walks.
+describe('per-node retention past the cap (P2-7)', () => {
+  beforeEach(() => _resetForTest())
+  afterEach(() => _resetForTest())
+
+  /** Push one `done` inbox event for `nodeId` (a working-start pushes no feed event). */
+  function pushDone(nodeId: string, detail: string): void {
+    recordAgentEvent(ev({ nodeId, state: 'working', newTurn: true }))
+    recordAgentEvent(ev({ nodeId, state: 'done', lastMessage: detail }))
+  }
+
+  it("keeps a node's newest done when >CAP newer events from other nodes would evict it", () => {
+    pushDone('slow', 'Slow node finished') // the load-bearing done, pushed first (oldest)
+    // A busy sibling floods the feed well past the cap.
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    const events = _inboxSnapshot().events
+    const slow = events.filter((e) => e.nodeId === 'slow')
+    // The slow node's single done SURVIVES despite being far outside the newest-CAP window.
+    expect(slow).toHaveLength(1)
+    expect(slow[0].kind).toBe('done')
+    expect(slow[0].detail).toBe('Slow node finished')
+
+    // ...and ackDone now finds + resolves it and fires exactly one ack 'end' seam (the bug: a no-op).
+    const changes: NodeStateChange[] = []
+    const off = onNodeStateChange((c) => changes.push(c))
+    ackDone('slow')
+    off()
+    expect(_inboxSnapshot().events.find((e) => e.nodeId === 'slow')!.resolved).toBe(true)
+    expect(changes).toHaveLength(1)
+    expect(changes[0]).toMatchObject({ nodeId: 'slow', event: 'end', state: 'done', ack: true })
+  })
+
+  it("keeps a node's newest UNRESOLVED ask past the cap (isEventUnresolved stays true)", () => {
+    recordAgentEvent(ev({ nodeId: 'ask', state: 'blocked', lastMessage: 'Approve deploy?' }))
+    const askId = _inboxSnapshot().events.find((e) => e.nodeId === 'ask')!.id
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    const ask = _inboxSnapshot().events.filter((e) => e.nodeId === 'ask')
+    expect(ask).toHaveLength(1)
+    expect(ask[0].kind).toBe('approval')
+    expect(ask[0].resolved).toBeUndefined()
+    // The push-notify present→away hold reads this — it must still see the held event as live.
+    expect(isEventUnresolved('ask', askId)).toBe(true)
+  })
+
+  it('does NOT retain a RESOLVED ask past the cap — it drops with plain history', () => {
+    recordAgentEvent(ev({ nodeId: 'ask', state: 'blocked', lastMessage: 'Approve deploy?' }))
+    recordAgentEvent(ev({ nodeId: 'ask', state: 'working', newTurn: true })) // leaves blocked → resolved
+    expect(_inboxSnapshot().events.find((e) => e.nodeId === 'ask')!.resolved).toBe(true)
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    // The resolved ask is no longer protected, so the cap evicts it like any other history.
+    expect(_inboxSnapshot().events.some((e) => e.nodeId === 'ask')).toBe(false)
+  })
+
+  it('still bounds plain history to the cap (only the load-bearing extras survive)', () => {
+    pushDone('slow', 'Slow node finished') // one protected out-of-window survivor
+    for (let i = 0; i < INBOX_EVENTS_CAP + 10; i++) pushDone('busy', `busy turn ${i}`)
+
+    const events = _inboxSnapshot().events
+    const busy = events.filter((e) => e.nodeId === 'busy')
+    // The busy node's own history is still capped — the oldest turns fell off the front.
+    expect(busy).toHaveLength(INBOX_EVENTS_CAP)
+    expect(busy.some((e) => e.detail === 'busy turn 0')).toBe(false)
+    expect(busy[busy.length - 1].detail).toBe(`busy turn ${INBOX_EVENTS_CAP + 9}`)
+    // Total = the CAP window + the single protected survivor, not unbounded growth.
+    expect(events).toHaveLength(INBOX_EVENTS_CAP + 1)
+  })
+
+  it('trimInboxFeed (pure): drops resolved asks & old history, keeps newest done + unresolved ask', () => {
+    const mk = (id: string, nodeId: string, kind: InboxEvent['kind'], resolved?: boolean): InboxEvent => ({
+      id,
+      ts: Number(id.split('-')[0]),
+      nodeId,
+      kind,
+      title: id,
+      ...(resolved ? { resolved: true } : {})
+    })
+    // oldest→newest; cap 3 keeps the last 3 wholesale, older survive only if protected.
+    const feed = [
+      mk('1-1', 'A', 'approval', true), // resolved ask, out of window → DROP
+      mk('2-1', 'B', 'question'), // unresolved ask, out of window → KEEP
+      mk('3-1', 'C', 'done'), // newest done for C, out of window → KEEP
+      mk('4-1', 'D', 'done'),
+      mk('5-1', 'D', 'done'),
+      mk('6-1', 'D', 'done')
+    ]
+    const kept = trimInboxFeed(feed, 3)
+    expect(kept.map((e) => e.id)).toEqual(['2-1', '3-1', '4-1', '5-1', '6-1'])
+    // A no-op below the cap returns the same reference (order untouched).
+    const small = [mk('1-1', 'A', 'done')]
+    expect(trimInboxFeed(small, 3)).toBe(small)
   })
 })
 

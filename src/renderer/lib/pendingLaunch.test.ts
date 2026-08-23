@@ -50,6 +50,59 @@ describe('launchesToFire', () => {
   })
 })
 
+describe('launchesToFire — awaitSetupGroup (a worktree whose setup script must land first)', () => {
+  const live = new Set(['a', 'c'])
+  const armedForSetup = (id: string, groupId: string, after: string[] = []): ArmedNode => ({
+    id,
+    data: { pendingLaunch: { after, command: `echo ${id}`, awaitSetupGroup: groupId } }
+  })
+
+  it('holds the launch while the group’s setup run is not done', () => {
+    expect(launchesToFire([armedForSetup('c', 'g1')], {}, live, () => false)).toEqual([])
+  })
+
+  it('fires once the group’s setup run is done', () => {
+    expect(launchesToFire([armedForSetup('c', 'g1')], {}, live, () => true)).toEqual([
+      { id: 'c', command: 'echo c' }
+    ])
+  })
+
+  it('with no setupDone probe at all, the gate is open — an absent probe never strands a node', () => {
+    // Reached after an app restart: the run store is empty, and a node armed before the restart
+    // would otherwise wait forever for a run nobody is going to report on again.
+    expect(launchesToFire([armedForSetup('c', 'g1')], {}, live)).toEqual([
+      { id: 'c', command: 'echo c' }
+    ])
+  })
+
+  it('asks the probe about THIS node’s group', () => {
+    const asked: string[] = []
+    launchesToFire([armedForSetup('c', 'g-seven')], {}, live, (g) => {
+      asked.push(g)
+      return true
+    })
+    expect(asked).toEqual(['g-seven'])
+  })
+
+  it('needs BOTH gates: setup done AND every `after` dep satisfied', () => {
+    const node = [armedForSetup('c', 'g1', ['a'])]
+    // setup done, dep still working
+    expect(launchesToFire(node, { a: { state: 'working' } }, live, () => true)).toEqual([])
+    // dep done, setup still running
+    expect(launchesToFire(node, { a: { state: 'done' } }, live, () => false)).toEqual([])
+    // both
+    expect(launchesToFire(node, { a: { state: 'done' } }, live, () => true)).toEqual([
+      { id: 'c', command: 'echo c' }
+    ])
+  })
+
+  it('leaves a node with no awaitSetupGroup alone even while some setup is running', () => {
+    expect(launchesToFire([armed('c', [])], {}, live, () => false)).toEqual([
+      { id: 'c', command: 'echo c' }
+    ])
+  })
+})
+
 describe('unmetDeps', () => {
   it('reports only the deps still outstanding', () => {
     const live = new Set(['a', 'b', 'c'])

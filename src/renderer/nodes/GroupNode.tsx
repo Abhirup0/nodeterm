@@ -4,8 +4,9 @@ import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import { NODE_COLORS, ungroupNodes, type CanvasNode } from '../state/workspace'
 import { useProjects } from '../state/projects'
 import { useWorktrees, WORKTREE_STATUS_POLL_MS } from '../state/worktrees'
+import { useProjectSetup } from '../state/projectSetup'
 
-export type WorktreeAction = 'merge' | 'remove' | 'unbind'
+export type WorktreeAction = 'merge' | 'remove' | 'unbind' | 'rerun-setup'
 
 /**
  * Worktree-action handler bridge. React Flow instantiates custom nodes itself, so we can't
@@ -37,6 +38,20 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
   // (WORKTREE_STATUS_THROTTLE_MS) and is epoch-guarded, so asking often is free.
   const status = useWorktrees((s) => (wt ? s.statusByPath[wt.path] : undefined))
   const stale = useWorktrees((s) => (wt ? s.staleGroupIds.includes(id) : false))
+  // The project setup/archive script Canvas launched for THIS checkout, resolved through the
+  // attachment its ack made (an event carries no lane — see the store's header). Selected as the
+  // entry itself, so a render happens only when this group's run changes, not on every chunk of
+  // every other project's script.
+  const setupRun = useProjectSetup((s) => {
+    const runKey = s.groupRunKey[id]
+    return runKey === undefined ? undefined : s.byRunKey[runKey]
+  })
+  // A launch for this group is already on its way (requested, not yet acked — which includes the
+  // whole time a consent dialog is up). The re-run chip must not fire a second one: the service
+  // would answer `busy`, and the store's counter exists precisely because that ack must not be
+  // mistaken for "nothing is happening".
+  const setupPending = useProjectSetup((s) => (s.pendingByGroup[id] ?? 0) > 0)
+  const setupBusy = setupPending || setupRun?.state === 'running'
 
   // On an SSH project the poll is OFF, not merely useless: `git status <path>` would be answered by
   // the LOCAL filesystem for a project whose checkout lives on the host (remote git routing is
@@ -211,6 +226,45 @@ export function GroupNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 )}
               </span>
             )}
+            {setupRun &&
+              // What the project's script is doing to this checkout. Status only — the OUTPUT lives
+              // in the settings panel's run box (this is a frame header, not a log viewer), and the
+              // failed state is the one that has to be visible here: a node armed behind a failed
+              // setup is still holding its launch, and nothing else on the canvas says why.
+              //
+              // A FAILED SETUP IS THEREFORE A BUTTON, not a label. It is the only re-run that can
+              // clear this: the settings panel's Run executes at the project ROOT and claims the
+              // PROJECT lane, so it can never re-attach a worktree group's run — clicking it would
+              // leave this chip failed and its nodes armed forever. Re-running here re-attaches the
+              // group's lane, and a `done` from the new run releases them.
+              (setupRun.kind === 'setup' && setupRun.state === 'failed' ? (
+                <button
+                  className={`group-node__setup group-node__setup--${setupBusy ? 'running' : 'failed'} nodrag`}
+                  disabled={setupBusy}
+                  title={
+                    setupBusy
+                      ? 'Setup script is starting…'
+                      : `Setup script failed${setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`}.` +
+                        '\nNodes opened into this worktree may still be holding their launch.' +
+                        '\nClick to run it again — a successful run releases them.' +
+                        '\n(Its output is in Project settings → Setup.)'
+                  }
+                  onClick={() => worktreeActionHandler?.(id, 'rerun-setup')}
+                >
+                  {setupBusy ? 'setup …' : 'setup ✕ ↻'}
+                </button>
+              ) : (
+                <span
+                  className={`group-node__setup group-node__setup--${setupRun.state}`}
+                  title={
+                    `${setupRun.kind === 'archive' ? 'Archive' : 'Setup'} script: ${setupRun.state}` +
+                    (setupRun.exitCode === undefined ? '' : ` (exit ${setupRun.exitCode})`)
+                  }
+                >
+                  {setupRun.kind === 'archive' ? 'archive' : 'setup'}
+                  {setupRun.state === 'running' ? ' …' : setupRun.state === 'done' ? ' ✓' : ' ✕'}
+                </span>
+              ))}
             {!stale && (
               <button
                 className="group-node__wt-btn"

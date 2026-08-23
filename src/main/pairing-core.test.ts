@@ -285,6 +285,63 @@ describe('device registry helpers', () => {
   })
 })
 
+describe('DeviceEntry.relayDeviceId', () => {
+  // The desktop mints its OWN device id (it stamps the authorized_keys comment) and the phone
+  // sends its own — and only the phone's is what the server keys `relay_devices` on. Keeping
+  // just the local one made a paired device unnameable to the server, so a removal could never
+  // say WHICH row to revoke.
+  const entry: DeviceEntry = {
+    id: 'local-uuid',
+    name: 'iPhone',
+    token: 'agent-token',
+    pairedAt: 1,
+    lastSeenAt: 0,
+    relayDeviceId: 'phone-1'
+  }
+
+  it('round-trips through upsertDevice (it is persisted, not derived)', () => {
+    expect(upsertDevice([], entry)[0].relayDeviceId).toBe('phone-1')
+    const replaced = upsertDevice([{ ...entry, relayDeviceId: 'stale' }], entry)
+    expect(replaced).toEqual([entry])
+  })
+
+  it('is exposed to the renderer (an id, not a secret) while the token still is not', () => {
+    const [pub] = toPublicDevices([entry])
+    expect(pub.relayDeviceId).toBe('phone-1')
+    // Whole shape, not a subset: a mapper that spread the record would satisfy the line above
+    // AND leak `token`. Both assertions below fail on `devices.map((d) => ({ ...d }))`.
+    expect(pub).toEqual({
+      id: 'local-uuid',
+      name: 'iPhone',
+      pairedAt: 1,
+      lastSeenAt: 0,
+      relayDeviceId: 'phone-1'
+    })
+    expect(Object.keys(pub).sort()).toEqual([
+      'id',
+      'lastSeenAt',
+      'name',
+      'pairedAt',
+      'relayDeviceId'
+    ])
+    expect((pub as Record<string, unknown>).token).toBeUndefined()
+  })
+
+  it('is optional — a device paired before the field existed still maps, with no id and no token', () => {
+    const legacy: DeviceEntry = {
+      id: 'old',
+      name: 'Old Phone',
+      token: 'agent-token',
+      pairedAt: 1,
+      lastSeenAt: 0
+    }
+    expect(readDevices({ devices: [legacy] })).toEqual([legacy])
+    const [pub] = toPublicDevices([legacy])
+    expect(pub.relayDeviceId).toBeUndefined()
+    expect(Object.keys(pub)).not.toContain('token')
+  })
+})
+
 describe('pickLanIPv4', () => {
   it('picks the first non-internal, non-link-local IPv4', () => {
     const picked = pickLanIPv4({

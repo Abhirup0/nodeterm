@@ -5,6 +5,7 @@ import type {
   GitHubControlState,
   GitHubProjectApproval
 } from '../../shared/github-issues'
+import { renameAtomic, tempNameFor } from '../fs-atomic'
 import { parseGitHubRepository } from './config'
 
 const FILE_NAME = 'github-issues-control.json'
@@ -155,15 +156,20 @@ export class GitHubControlStore {
 
   private async write(state: GitHubControlState): Promise<void> {
     await fs.mkdir(this.userDataDir, { recursive: true })
-    // The fixed temp name is safe only because there is exactly ONE store instance per data dir and
-    // every write reaches here through THAT instance's mutate() writeQueue. A second instance on the
-    // same dir, or a caller that skips the queue, needs a unique `<file>.<pid>.<seq>.tmp` name (see
-    // workspace-store's writeAtomic) — otherwise two writers share this one temp and one rename
-    // publishes the other's half-written bytes.
-    const temporary = `${this.filePath}.tmp`
-    await fs.writeFile(temporary, JSON.stringify(state), { encoding: 'utf-8', mode: 0o600 })
-    await fs.chmod(temporary, 0o600)
-    await fs.rename(temporary, this.filePath)
+    // Unique temp + retrying rename (core/fs-atomic.ts). mutate()'s writeQueue serializes writes
+    // WITHIN this instance, but a second instance on the same data dir (Server Edition --data-dir)
+    // shares nothing with it — the fixed `<file>.tmp` name this used to carry let two such writers
+    // publish each other's half-written bytes. The unique name never self-heals, so a failed write
+    // removes its own temp before rethrowing.
+    const temporary = tempNameFor(this.filePath)
+    try {
+      await fs.writeFile(temporary, JSON.stringify(state), { encoding: 'utf-8', mode: 0o600 })
+      await fs.chmod(temporary, 0o600)
+      await renameAtomic(temporary, this.filePath)
+    } catch (error) {
+      await fs.rm(temporary, { force: true }).catch(() => {})
+      throw error
+    }
     await fs.chmod(this.filePath, 0o600)
   }
 }

@@ -1,6 +1,7 @@
 import { createWriteStream } from 'node:fs'
-import { mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import { join } from 'node:path'
+import { renameAtomic } from '../fs-atomic'
 import { Writable } from 'node:stream'
 import { WHISPER_DOWNLOAD_BASE, WHISPER_MODELS, whisperModel } from '../../shared/speech'
 
@@ -98,7 +99,7 @@ export class WhisperModelStore {
       }
       await writer.close()
       if (abort.signal.aborted) throw new Error('download cancelled')
-      await rename(partPath, this.modelPath(id))
+      await renameAtomic(partPath, this.modelPath(id))
       this.onProgress?.(id, 100)
     } catch (err) {
       sink.destroy()

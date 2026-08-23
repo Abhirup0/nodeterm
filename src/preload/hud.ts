@@ -20,6 +20,9 @@ export interface HudRow {
   activity?: string
   contextPercent?: number
   subagents: HudSubagentRow[]
+  /** A finished turn the user has not looked at yet (the sessions sidebar's `unread` mark) — the
+   *  row's sort tier and its "Unread" badge. */
+  unread: boolean
   updatedAt: number
 }
 export interface HudPush {
@@ -37,7 +40,7 @@ export interface HudPush {
   /** Expand the panel on hover (settings.notchHoverExpand); false = click-only. */
   hoverExpand: boolean
   /** settings.usagePercentMode — how a row's context percentage renders ("42% used" / "58% left"). */
-  percentMode: 'used' | 'remaining'
+  percentMode: 'used' | 'remaining' | 'tokens'
 }
 
 export interface HudApi {

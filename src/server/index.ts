@@ -31,11 +31,25 @@ import {
 } from '../core/model-gateway-credentials'
 import { DownloadTickets } from '../core/download-tickets'
 import { registerBoardLogHandlers, type BoardLogRoute } from '../core/board-log-handlers'
+import { ProjectTrustStore } from '../core/project-trust-store'
+import { ProjectSetupService } from '../core/project-setup-service'
+import {
+  makeProjectTrustRequester,
+  registerProjectSetupHandlers,
+  type ProjectSetupHandlerDeps
+} from '../core/project-setup-handlers'
+import { registerProjectLaunchInfoHandlers } from '../core/project-launch-info-handlers'
+import { registerWorktreeSharedPathsHandlers } from '../core/worktree-shared-paths-handlers'
+import { makeProjectSpawnOverrides } from '../core/project-spawn-overrides'
+import { makeLocalSetupRunner } from '../core/project-setup-runner-local'
+import { LogBuffer } from '../core/log-buffer'
+import { installLogSink } from '../core/log-sink'
+import { registerLogHandlers } from '../core/log-handlers'
 import os from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { serverEditionControlHandler } from './control-unsupported'
-import { loadOrCreateNodeAuthSecret } from '../core/agents/node-auth-secret'
-import { initNodeTokens, refreshNodeTokens } from '../core/agents/node-token-service'
+import { refreshNodeTokens } from '../core/agents/node-token-service'
+import { armServerNodeIdentity } from './node-identity-arm'
 import {
   writePendingAnswerLocal,
   startPendingSweep,
@@ -263,6 +277,51 @@ export async function startServer(
     downloadTickets,
     localProjectCwd: (projectId: string) => workspaceStore.localCwdForProject(projectId)
   })
+  // Project setup/archive runner — same construction as src/main/index.ts, and the SAME
+  // `registerProjectSetupHandlers` trust boundary (project-setup-handlers.ts): it derives rootPath/
+  // ssh/projectName from THIS process's own workspace index by projectId, never the renderer, and
+  // re-validates `worktreePath` against the project's actual git worktrees. No ssh leg here at all
+  // (the Server Edition has no SSH projects, same reason board-log's router below never resolves
+  // one) — `projectTargetInfo` never populates `ssh` on this shell, so an ssh-shaped target simply
+  // never arises.
+  const projectTrustStore = new ProjectTrustStore()
+  const projectSetupService = new ProjectSetupService({
+    trust: projectTrustStore,
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    runLocal: makeLocalSetupRunner()
+  })
+  const projectSetupDeps: ProjectSetupHandlerDeps = {
+    projectTargetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+    worktreeList: (repoPath) => gitService.worktreeList(repoPath)
+  }
+  registerProjectSetupHandlers(platform, projectSetupService, projectSetupDeps)
+  // `worktree:materialize-shared` — same sibling registrar and trust boundary as main/index.ts,
+  // over this process's own stores. The Server Edition has no SSH projects, so an ssh-shaped target
+  // never arises; the path validation and by-projectId list read are identical.
+  registerWorktreeSharedPathsHandlers(platform, {
+    readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+    targetInfo: projectSetupDeps.projectTargetInfo,
+    worktreeList: projectSetupDeps.worktreeList
+  })
+  // `project-settings:launch-info` — same sibling registrar as main/index.ts, sharing this
+  // process's own trust store.
+  registerProjectLaunchInfoHandlers(platform, workspaceStore, projectTrustStore)
+  // Project env + shell at the spawn — the same core factory main/index.ts wires, over this
+  // shell's own stores. `requestTrust` is wired here too, and deliberately so: the Server Edition's
+  // consent prompt goes to `platform.broadcast` (the service's default `sendConsent`), which is the
+  // right delivery HERE — every attached client is an authenticated operator of this host — where
+  // on the desktop it would also reach relay peers. A headless server with nobody attached simply
+  // gets no answer, the prompt expires, and the shared value stays unused: fail closed on the
+  // grant, fail open on the spawn.
+  ptyManager.setProjectSpawnOverrides(
+    makeProjectSpawnOverrides({
+      readSettings: (projectId) => workspaceStore.readProjectSettings(projectId),
+      targetInfo: (projectId) => workspaceStore.projectTargetInfo(projectId),
+      trust: projectTrustStore,
+      requestTrust: makeProjectTrustRequester(projectSetupService, projectSetupDeps)
+    })
+  )
+
   const github = registerGitHubIntegration({
     platform,
     userDataDir: config.dataDir,
@@ -282,6 +341,12 @@ export async function startServer(
       return cwd ? { kind: 'local', cwd } : { kind: 'unsupported' }
     }
   })
+
+  // Debug log ring (issue #78) — same core registrar as desktop. Headless is where a swallowed
+  // console hurts most; the browser-side panel reads this process's ring over the bridge.
+  const logBuffer = new LogBuffer()
+  installLogSink(logBuffer)
+  registerLogHandlers(platform, logBuffer, () => settingsStore.get().debugLogPanel)
 
   // Agent status pipeline — mirrors the desktop boot order in src/main/index.ts:
   // mirror-init → wire the hook-server listeners onto the platform → install the managed hook
@@ -467,10 +532,12 @@ export async function startServer(
   // arming the secret, and a headless host in legacy mode is where it is most likely to be needed.
   hookServer.setIdentityStrictOverride(() => settingsStore.get().hookIdentityStrict)
   try {
-    hookServer.setNodeAuthSecret(await loadOrCreateNodeAuthSecret())
-    // Materialise a token file for every persisted node so an already-running session becomes
-    // verified at its next hook event with no restart. No-ops into legacy mode without a secret.
-    initNodeTokens({ canvases: () => workspaceStore.persistedCanvases() })
+    // The whole node-identity arming (node secret + the S6 Codex record secret + node tokens) lives
+    // in one REAL production function so the boot test can drive the shipped path rather than a
+    // re-implementation of it (constraint 8). It arms `setCodexThreadIdentityAuthSecret` with the
+    // same secret so a MANAGED Codex account on a headless host signs/verifies its ownership records
+    // instead of throwing "identity authentication is unavailable" (Decision 1, both-shells).
+    await armServerNodeIdentity(hookServer, () => workspaceStore.persistedCanvases())
   } catch (error) {
     console.warn('[node-identity] no secret — hook identity unavailable, running legacy', error)
   }
@@ -594,6 +661,9 @@ export async function startServer(
     return {
       port: 0, // nothing bound
       async close() {
+        // Kill any in-flight setup/archive run: it is a detached process group, so nothing else in
+        // this teardown reaches it. Same call, same reason, in the serving branch's close() below.
+        projectSetupService.disposeAll()
         // Detach PTY clients — tmux sessions keep running (Phase 1 contract).
         sessionReaper.stop()
         pressure.stop()
@@ -646,6 +716,9 @@ export async function startServer(
   return {
     port,
     async close() {
+      // Kill any in-flight setup/archive run first: it is a detached process group (setsid), so
+      // neither the WS teardown nor ptyManager.killAll() below would ever reach it.
+      projectSetupService.disposeAll()
       // Detach PTY clients — tmux sessions keep running (Phase 1 contract; never kill the server).
       sessionReaper.stop()
       pressure.stop()

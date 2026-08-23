@@ -32,3 +32,30 @@ jobs:
 
       - name: Build (electron-vite)
         run: npm run build
+
+  # Windows is becoming a supported target (extraction from #276). The full suite still contains
+  # POSIX-shaped fixtures (/bin/sh, AF_UNIX binds), so this job runs the suites whose behaviour is
+  # platform-dependent and worth proving on the real platform — the atomic-write retry exists FOR
+  # Windows and is inert on the Linux job above. Widen the file list as Windows support lands
+  # (session host, shell profiles); the goal is that it converges on `npm test`.
+  quality-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build session host
+        run: npm run host:build
+
+      - name: Windows-relevant tests
+        run: npx vitest run src/core/fs-atomic.test.ts src/core/fs-atomic.guard.test.ts src/session-host/ src/core/session-host-client.test.ts src/core/session-host-launch-ledger.test.ts src/core/agent-launch.test.ts src/core/pty-session-host.test.ts src/main/media-protocol.test.ts src/main/remote-atomic-write.test.ts src/main/ssh-fs.test.ts src/main/remote-ssh/ssh-project.test.ts src/renderer/terminal/file-links.test.ts src/renderer/terminal/file-links.windows.test.ts src/renderer/terminal/file-link-dialect.test.ts src/renderer/terminal/host-platform.test.ts

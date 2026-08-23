@@ -8,7 +8,7 @@ import path from 'path'
 import crypto from 'node:crypto'
 import { platform } from './platform'
 import { IPC } from '../shared/ipc'
-import type { LicenseStatus } from '../shared/types'
+import type { LicenseDetail, LicenseSource, LicenseStatus } from '../shared/types'
 import { getDeviceId } from './device-id'
 import { ENTITLEMENT_PUBLIC_KEY } from './entitlement-key'
 
@@ -106,6 +106,25 @@ function seatsFrom(p: Payload | null): number {
   return p ? Math.max(PRO_FREE_SEATS, p.seats ?? PRO_FREE_SEATS) : 0
 }
 
+/** Every failure answers with this shape plus a reason code: zeros that are NEVER a device count.
+ * The renderer must read `error` first — "we could not look" and "you have no devices" are
+ * different facts, and rendering the first as the second is the bug this whole route exists for. */
+const EMPTY_DETAIL: LicenseDetail = { key: null, used: 0, seats: 0, source: null, error: null }
+
+const LICENSE_SOURCES: readonly string[] = ['keygen', 'apple', 'free']
+
+/** The source decides whether the UI offers "release other devices" at all, so an unrecognized
+ * word degrades to "none stated" (action hidden) rather than reaching the renderer as data. */
+function licenseSourceOf(v: unknown): LicenseSource | null {
+  return typeof v === 'string' && LICENSE_SOURCES.includes(v) ? (v as LicenseSource) : null
+}
+
+/** A count the server actually stated. A string, null or NaN is not one — see the 2xx guard in
+ * `licenseCall`, where "we could not read the body" must stay distinct from "no devices". */
+function isCount(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
 function statusFrom(token: string | undefined, error: string | null = null): LicenseStatus {
   const p = verify(token)
   return p
@@ -122,38 +141,53 @@ export function licensedSeats(): number {
   return seatsFrom(verify(load().token))
 }
 
+/**
+ * How long a license request may take IN TOTAL — headers and body.
+ *
+ * The timer must outlive the `fetch` promise and be cleared only once the body has been read.
+ * Clearing it when the headers arrive (`fetch(…).finally(clearTimeout)`) disarms the abort while
+ * the interesting half is still outstanding, and a response whose body never completes — a captive
+ * portal, a proxy that holds the connection open — then hangs the awaiting IPC handler FOREVER:
+ * the Release button sits on "Releasing…" with no failure and no way back.
+ */
+const REQUEST_TIMEOUT_MS = 8000
+
 async function call(path: string, body: unknown): Promise<{ token?: string; error?: string }> {
   if (!allowed()) return { error: 'disabled' }
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 8000)
     const res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
       signal: ctrl.signal
-    }).finally(() => clearTimeout(t))
+    })
     if (res.status === 204) return {}
     const json = (await res.json().catch(() => ({}))) as { token?: string; error?: string }
     if (!res.ok) return { error: json.error ?? 'network' }
     return json
   } catch {
     return { error: 'offline' }
+  } finally {
+    clearTimeout(t)
   }
 }
 
 // GET helper for the device-bound status poll.
 async function getJson(path: string): Promise<{ active?: boolean; token?: string; error?: string }> {
   if (!allowed()) return { error: 'disabled' }
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
-    const ctrl = new AbortController()
-    const t = setTimeout(() => ctrl.abort(), 8000)
-    const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal }).finally(() => clearTimeout(t))
+    const res = await fetch(`${API_BASE}${path}`, { signal: ctrl.signal })
     const json = (await res.json().catch(() => ({}))) as { active?: boolean; token?: string; error?: string }
     if (!res.ok) return { error: json.error ?? 'network' }
     return json
   } catch {
     return { error: 'offline' }
+  } finally {
+    clearTimeout(t)
   }
 }
 
@@ -206,6 +240,73 @@ export function initLicense(onChange?: () => void): void {
   }
 
   platform().handle(IPC.licenseStatus, () => statusFrom(load().token))
+
+  // Both routes are authorized by the stored entitlement token. Sending a deviceId instead would
+  // hand a key — which works on ANY machine — to whoever learned an id that rides query strings,
+  // telemetry and relay pairing. The token is the only credential on the wire here, and it goes
+  // in the BODY, never the URL.
+  const licenseCall = async (route: string): Promise<LicenseDetail> => {
+    const token = load().token
+    if (!token) return { ...EMPTY_DETAIL, error: 'unauthorized' }
+    if (!allowed()) return { ...EMPTY_DETAIL, error: 'disabled' }
+    // The timer covers the BODY too — see REQUEST_TIMEOUT_MS. This is the route the Release
+    // button awaits, so a request that never finishes leaves that button spinning for good.
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
+    try {
+      const res = await fetch(`${API_BASE}${route}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ entitlement: token }),
+        signal: ctrl.signal
+      })
+      const json = (await res.json().catch(() => ({}))) as {
+        key?: unknown
+        used?: unknown
+        seats?: unknown
+        source?: unknown
+        error?: unknown
+        retryAfterDays?: unknown
+      }
+      if (!res.ok) {
+        // The server's own reason code (401 unauthorized / 402 inactive / 429 too_soon /
+        // 400 not_applicable) is kept verbatim: the UI tells those four apart. `retryAfterDays`
+        // rides only 429 and is the whole content of that answer.
+        const days = isCount(json.retryAfterDays) ? json.retryAfterDays : 0
+        return {
+          ...EMPTY_DETAIL,
+          error: typeof json.error === 'string' && json.error ? json.error : 'network',
+          ...(days > 0 ? { retryAfterDays: days } : {})
+        }
+      }
+      // A 2xx we could not READ is a failed read, not a license with no devices. A captive portal
+      // or corporate proxy answers this POST with a 200 HTML page, and a bad deploy can answer
+      // `200 {}` or `200 {"used":"3"}` — coercing any of those to 0 while leaving `error` null
+      // renders "0 of 0 devices" and an empty key AS FACT, which is the one thing this route
+      // exists to prevent. Both counts must be real numbers; the legitimate non-keygen 200 states
+      // exactly that (`{key:null, used:0, seats:0, source:'apple'}`) and is untouched.
+      if (!isCount(json.used) || !isCount(json.seats)) {
+        return { ...EMPTY_DETAIL, error: 'network' }
+      }
+      return {
+        // `key: null` on a 200 is a real state (a keygen policy that hides keys, a license older
+        // than the column, a non-keygen source) — a success, not a failed read.
+        key: typeof json.key === 'string' ? json.key : null,
+        // Never clamped against seats: a cap lowered after activation makes used > seats real.
+        used: json.used,
+        seats: json.seats,
+        source: licenseSourceOf(json.source),
+        error: null
+      }
+    } catch {
+      return { ...EMPTY_DETAIL, error: 'offline' }
+    } finally {
+      clearTimeout(t)
+    }
+  }
+
+  platform().handle(IPC.licenseDetail, () => licenseCall('/v1/license/detail'))
+  platform().handle(IPC.licenseRelease, () => licenseCall('/v1/license/release'))
 
   // Device-bound upgrade: open Stripe checkout (carrying our deviceId), then poll the status
   // endpoint until the webhook has bound + minted the entitlement. Status arrives via broadcast.

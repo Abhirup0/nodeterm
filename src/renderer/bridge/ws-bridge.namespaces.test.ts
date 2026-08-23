@@ -80,6 +80,24 @@ describe('buildRealApi: workspace', () => {
   })
 })
 
+describe('buildRealApi: host platform', () => {
+  it('keeps a failed host read unknown instead of inventing Linux from the browser bridge', async () => {
+    const c = fakeClient()
+    c.request = (method: string, ...args: unknown[]) => {
+      c.calls.push({ kind: 'request', method, args })
+      return Promise.reject(new Error('server unavailable'))
+    }
+    const api = buildRealApi(c as never)
+
+    await expect(api.pty.tmuxStatus()).resolves.toEqual({
+      available: true,
+      installCommand: null,
+      installLabel: null,
+      platform: null
+    })
+  })
+})
+
 describe('buildRealApi: sessionMemory', () => {
   // A real WS namespace, not a stub: the same core service (`startSessionMemoryService`) registers
   // both channels in the server shell, so the browser gets a genuine per-session breakdown of the

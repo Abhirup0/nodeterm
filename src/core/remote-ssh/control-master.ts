@@ -684,13 +684,17 @@ export function remoteEndpointFileContents(
   version: string,
   tokenDir: string
 ): string {
+  // Every value is `posixQuote`d for the same reason as the local writer (issue #351): the managed
+  // script SOURCES this file under /bin/sh, so an unquoted space or shell metachar in the socket
+  // path, token, or token dir would break the source. Remote paths rarely carry spaces, but the
+  // token can hold any byte, and the guarantee should not depend on the host's home layout.
   return (
-    `NODETERM_HOOK_SOCK=${sock}\n` +
-    `NODETERM_HOOK_TOKEN=${token}\n` +
-    `NODETERM_HOOK_VERSION=${version}\n` +
+    `NODETERM_HOOK_SOCK=${posixQuote(sock)}\n` +
+    `NODETERM_HOOK_TOKEN=${posixQuote(token)}\n` +
+    `NODETERM_HOOK_VERSION=${posixQuote(version)}\n` +
     // The REMOTE token dir ($HOME/.nodeterm/node-tokens on the host), not ours. The host stores
     // per-node tokens only; it never holds a secret and can never mint.
-    `NODETERM_NODE_TOKEN_DIR=${tokenDir}\n`
+    `NODETERM_NODE_TOKEN_DIR=${posixQuote(tokenDir)}\n`
   )
 }
 

@@ -16,7 +16,7 @@ interface BoardLogPanelProps {
 /** The activity sentence WITHOUT the leading author name — the name is rendered separately in
  *  the author's color, so the feed reads like Trello (colored actor + muted action). column-*
  *  events carry no nodeId and so never reach a card-scoped feed; kept for completeness. */
-function eventBody(e: BoardLogEvent): string {
+export function eventBody(e: BoardLogEvent): string {
   switch (e.type) {
     case 'card-created':
       return `created this card in ${e.to ?? 'Ungrouped'}`
@@ -42,6 +42,10 @@ function eventBody(e: BoardLogEvent): string {
       return `removed the priority`
     case 'agent-message':
       return `sent a message to ${e.to ?? 'another node'} (${e.title ?? 'unknown outcome'})`
+    case 'agent-read-cookies':
+      // A loud, human-visible line for a cookie read (the whole point of the trace). `from` names the
+      // agent, `to` the domain it read; `title` names the browser node it drove.
+      return `read cookies for ${e.to ?? 'a site'}${e.title ? ` via ${e.title}` : ''}`
     default:
       // A newer peer may write event types this build doesn't know — show them neutrally.
       return `updated this card`

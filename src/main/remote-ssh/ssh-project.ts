@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs'
 import path from 'path'
+import { createHash, randomUUID } from 'crypto'
 import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
@@ -7,6 +8,7 @@ import { getMainWindow, sendToMain } from '../main-window'
 import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
 import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
+import { removeAtomic, renameAtomic } from '../../core/fs-atomic'
 import { findExecutableSync, shellPathNow } from '../../core/exec-path'
 import { isSafeRemoteHome } from '../../core/remote-safety'
 import { mediaCachePruneList, remoteMediaCacheName } from '../../core/remote-ssh/media-cache'
@@ -41,6 +43,14 @@ import { setRemoteSessionEnvWriter } from '../../core/remote-ssh/session-env'
 import { askpassServer } from './ssh-askpass'
 import { appSshAgent } from './ssh-agent'
 import { sessionName } from '../../core/tmux-naming'
+import { remoteAtomicWrite } from '../remote-atomic-write'
+import { buildCodexLauncherScript } from '../../core/codex-identity-proxy'
+import {
+  ACCOUNT_ID_RE,
+  assertCodexAccountId,
+  remoteCodexHome,
+  remoteCodexSocket
+} from '../../core/codex-accounts-core'
 
 interface Runners {
   userDataDir: string
@@ -69,6 +79,11 @@ interface Runners {
   runScp: (args: string[]) => Promise<{ code: number }>
   /** Live loopback hook-server coordinates (injected so the manager stays testable). */
   getHook: () => { port: number; token: string; version: string }
+  /** The standalone relay bundle (ws inlined) uploaded to a Linux host as `codex-relay.js`. Only
+   *  EXECUTABLE code is ever uploaded — never a credential (Property 1 / GC 6). Injected so the
+   *  manager stays a pure unit and so a host without the built artifact simply gets no managed
+   *  Codex runtime rather than a crash. Undefined keeps every non-Codex SSH path unchanged. */
+  codexRelaySource?: () => Promise<string>
   onStatus: (e: SshProjectStatusEvent) => void
   /** Delays between claude-probe retries after a FAILED attempt (claude not found). Injected so
    *  tests don't wait on real backoff; production uses PROBE_RETRY_DELAYS_MS. */
@@ -130,6 +145,29 @@ const PROBE_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
 
 /** How many `name (n)` variants a download tries before falling back to a stamped name. */
 const DOWNLOAD_NAME_ATTEMPTS = 50
+
+/** A hidden, bounded scp stage beside the final path, unique beyond process/PID namespaces. */
+function scpPartPath(finalPath: string): string {
+  return path.join(path.dirname(finalPath), `.nodeterm-scp-${randomUUID()}.part`)
+}
+
+/** Remove file-or-directory scp litter with Node's bounded Windows EPERM/EBUSY retry. */
+async function removeScpPart(partPath: string): Promise<void> {
+  await fs
+    .rm(partPath, {
+      recursive: true,
+      force: true,
+      maxRetries: 4,
+      retryDelay: 50
+    })
+    .catch(() => {})
+}
+
+/** Windows aliases terminal dots/spaces, so do not let two remote names bypass one reservation. */
+function localDownloadName(name: string): string {
+  if (process.platform !== 'win32') return name
+  return name.replace(/[. ]+$/, '') || 'download'
+}
 
 /** Cap on how much master stderr we retain (a misconfigured host can spew), enough for the error. */
 const MASTER_STDERR_CAP = 8 * 1024
@@ -199,8 +237,78 @@ export interface ConnectResult {
   hookEndpointPath?: string
   tmuxConfPath?: string
   remoteHome?: string
+  codexLauncherPath?: string
+  codexRelayScriptPath?: string
+  codexRelayRuntimePath?: string
+  codexCliPath?: string
   claudeAutoPermissionMode?: boolean
   remoteClaudeVersion?: string | null
+}
+
+/**
+ * Shared runtime assets (installation, not credentials) symlinked from the system Codex home into
+ * a managed account home so a managed login sees the same config/skills/plugins without sharing its
+ * credential jar or thread SQLite DB. Mirrors `SHARED_ENTRIES` in `codex-accounts.ts`; kept in
+ * lock-step by hand because that list lives in an Electron-only module this core-adjacent builder
+ * must not import. `auth.json` is deliberately NOT here (each home owns its own — §2.1).
+ */
+const REMOTE_CODEX_SHARED_ENTRIES = [
+  'config.toml',
+  'AGENTS.md',
+  'skills',
+  'plugins',
+  'packages',
+  'rules',
+  'hooks.json'
+] as const
+
+/**
+ * The `sh` that creates one isolated managed Codex home on the host: `umask 077` mkdir + `chmod
+ * 700`, then symlink each shared runtime asset in from the system home (installation shared,
+ * credentials never). Each failure prints a `NODETERM_CODEX_ACCOUNT_SETUP:<phase>` marker and exits
+ * non-zero so the caller can name the phase. `remoteHome` MUST already be `isSafeRemoteHome`-checked
+ * by the caller — a `$HOME` with a newline would append a command here (GC 7).
+ * Based on @Corvin's `remoteCodexAccountSetupCommand` in PR #112.
+ */
+export function remoteCodexAccountSetupCommand(remoteHome: string, accountId: string): string {
+  const home = remoteCodexHome(remoteHome, accountId)
+  const system = remoteCodexHome(remoteHome)
+  const shared = REMOTE_CODEX_SHARED_ENTRIES.map(
+    (name) =>
+      `if [ -e ${posixQuote(`${system}/${name}`)} ] && [ ! -e ${posixQuote(`${home}/${name}`)} ]; then ln -s ${posixQuote(`${system}/${name}`)} ${posixQuote(`${home}/${name}`)} || { printf '%s\\n' ${posixQuote(`NODETERM_CODEX_ACCOUNT_SETUP:link:${name}`)}; exit 71; }; fi;`
+  ).join(' ')
+  return `umask 077; mkdir -p ${posixQuote(home)} && chmod 700 ${posixQuote(home)} || { printf '%s\\n' 'NODETERM_CODEX_ACCOUNT_SETUP:home'; exit 70; }; ${shared}`
+}
+
+/**
+ * The `sh` that guarantees exactly one persistent Codex `app-server` per remote `CODEX_HOME`.
+ * Official standalone installs use the daemon manager (`app-server daemon start`); a plain npm/global
+ * install cannot (it refuses without `<CODEX_HOME>/packages/standalone/current/codex`), so this
+ * falls back to a single lock-guarded `nohup codex app-server --listen "unix://<sock>"` and reuses
+ * its socket + pid across every node on the account. The fallback is LIVE-VERIFIED against
+ * codex-cli 0.146.0 (see docs/superpowers/probes/2026-08-codex-ssh-remote.md — the `--listen` path
+ * binds `<CODEX_HOME>/app-server-control/app-server-control.sock` on a plain npm install).
+ * No credential is ever on this command line (GC 6). Based on @Corvin's PR #112.
+ */
+export function remoteCodexAppServerStartCommand(runtime: string, codexCli: string): string {
+  if (!path.posix.isAbsolute(runtime) || !path.posix.isAbsolute(codexCli)) {
+    throw new Error('Remote Codex runtime paths must be absolute')
+  }
+  const node = posixQuote(runtime)
+  const codex = posixQuote(codexCli)
+  return (
+    `${node} ${codex} app-server daemon start >/dev/null 2>&1 || { ` +
+    `nt_as_dir="$CODEX_HOME/app-server-control"; nt_as_sock="$nt_as_dir/app-server-control.sock"; nt_as_pid="$nt_as_dir/nodeterm-direct.pid"; nt_as_lock="$nt_as_dir/nodeterm-start.lock"; ` +
+    `mkdir -p "$nt_as_dir" && chmod 700 "$nt_as_dir" || exit 70; ` +
+    `nt_as_live=; if [ -S "$nt_as_sock" ] && [ -f "$nt_as_pid" ]; then nt_as_old_pid=$(cat "$nt_as_pid" 2>/dev/null || true); case "$nt_as_old_pid" in ''|*[!0-9]*) ;; *) kill -0 "$nt_as_old_pid" 2>/dev/null && nt_as_live=1 ;; esac; fi; ` +
+    `if [ -z "$nt_as_live" ] && mkdir "$nt_as_lock" 2>/dev/null; then ` +
+    `rm -f "$nt_as_sock" "$nt_as_pid"; ` +
+    `CODEX_HOME="$CODEX_HOME" nohup ${node} ${codex} app-server --listen "unix://$nt_as_sock" </dev/null >"$nt_as_dir/nodeterm-direct.log" 2>&1 & echo $! >"$nt_as_pid"; ` +
+    `rmdir "$nt_as_lock"; fi; ` +
+    `nt_as_i=0; while [ ! -S "$nt_as_sock" ] && [ "$nt_as_i" -lt 50 ]; do sleep 0.1; nt_as_i=$((nt_as_i + 1)); done; ` +
+    `[ -S "$nt_as_sock" ]; ` +
+    `}`
+  )
 }
 
 interface Conn {
@@ -215,6 +323,14 @@ interface Conn {
   /** The remote `$HOME`, resolved at connect. Used (Phase 2b) to jail remote transcript reads
    * under `<remoteHome>/.claude/projects`. Undefined if it couldn't be resolved (fail-open). */
   remoteHome?: string
+  /** Managed-Codex runtime paths staged at connect by `installRemoteCodexRuntime`. All undefined
+   * (the pre-Codex behavior) when node/codex/curl didn't resolve, no `codexRelaySource` was
+   * injected, or the upload failed — a host that simply cannot host managed Codex accounts, never a
+   * failed connect. `codexRelayRuntimePath` is the host's own Node; `codexCliPath` is `codex`. */
+  codexLauncherPath?: string
+  codexRelayScriptPath?: string
+  codexRelayRuntimePath?: string
+  codexCliPath?: string
   /** The project's remote repo cwd (Phase 4). Lets `refForRemoteCwd` route remote git ops to this
    * connection's master. Undefined when the project has no folder selected. */
   remoteCwd?: string
@@ -264,8 +380,6 @@ function scpBin(): string {
 export class SshProjectManager {
   private conns = new Map<string, Conn>()
   private remoteHooks: RemoteHooks
-  /** Per-manager counter mixed into each upload token so concurrent drops never collide. */
-  private uploadSeq = 0
   /** Projects whose agent-status mirror was actually pushed, gates the disconnect cleanup so a
    *  transient folder-picker browse (never pushed) doesn't pay an extra rm round-trip. */
   private statusPushed = new Set<string>()
@@ -409,6 +523,10 @@ export class SshProjectManager {
           hookEndpointPath: existing.hookEndpointPath,
           tmuxConfPath: existing.tmuxConfPath,
           remoteHome: existing.remoteHome,
+          codexLauncherPath: existing.codexLauncherPath,
+          codexRelayScriptPath: existing.codexRelayScriptPath,
+          codexRelayRuntimePath: existing.codexRelayRuntimePath,
+          codexCliPath: existing.codexCliPath,
           claudeAutoPermissionMode: existing.claudeAutoPermissionMode,
           remoteClaudeVersion: existing.remoteClaudeVersion
         }
@@ -565,13 +683,14 @@ export class SshProjectManager {
         if (remoteHome) {
           const confPath = `${remoteHome}/.nodeterm/tmux.conf`
           try {
-            const dir = `${remoteHome}/.nodeterm`
             // The runner RESOLVES (doesn't throw) on a non-zero remote exit, so the catch below
             // only guards a thrown error. Gate `tmuxConfPath` on the WRITE's exit code: a failed
             // write (mkdir perms, disk full, …) must leave it undefined so `remoteTmuxCommand`
             // never passes `-f <missing-conf>` (which makes tmux refuse to start → terminal dies).
+            // The invocation-owned temp also keeps an older valid config intact if ssh drops.
+            const confWrite = remoteAtomicWrite(confPath)
             const w = await this.r.run(
-              childArgs(conn, controlPath, `mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(confPath)}`),
+              childArgs(conn, controlPath, confWrite.command),
               remoteTmuxConf(50000)
             )
             if (w.code === 0) {
@@ -598,6 +717,18 @@ export class SshProjectManager {
           // Same not-awaited best-effort terms as the two installs.
           void this.materialiseNodeTokens(projectId, conn, controlPath, remoteHome)
         }
+        // Managed-Codex runtime: upload the relay bundle + launcher and probe node/codex/curl.
+        // Deliberately gated on `remoteHome` ALONE, not on `hookEndpointPath` — account isolation +
+        // a shared app-server need only the launcher/relay, never the canvas hooks, and the reverse
+        // hook tunnel can be legitimately unavailable on an otherwise healthy host (the Ubuntu/WSL
+        // case). Gating this on the tunnel made "Add Codex account" fail even when node, codex, curl,
+        // SSH and the account filesystem were all usable. AWAITED (unlike the hook installs above):
+        // the paths must be on `entry` before this connect reports `connected`, so a Codex node that
+        // launches immediately after resolves its runtime. Install-only-executable-code (Property 1):
+        // `installRemoteCodexRuntime` uploads the relay JS + launcher and NOTHING else.
+        const codexRuntime = remoteHome
+          ? await this.installRemoteCodexRuntime(conn, controlPath, remoteHome)
+          : null
         // Same ownership check the failure path makes below, and for the same reason: the setup
         // above is several remote round-trips, and a disconnect + reconnect inside that window
         // leaves a DIFFERENT attempt's master in the map. Writing this attempt's results onto it
@@ -610,6 +741,10 @@ export class SshProjectManager {
           entry.hookEndpointPath = hookEndpointPath
           entry.remoteHome = remoteHome
           entry.tmuxConfPath = tmuxConfPath
+          entry.codexLauncherPath = codexRuntime?.launcher
+          entry.codexRelayScriptPath = codexRuntime?.relay
+          entry.codexRelayRuntimePath = codexRuntime?.runtime
+          entry.codexCliPath = codexRuntime?.codex
           this.r.onStatus({ projectId, status: 'connected' })
           // The tunnel is live again on a master we just established (the reuse branch returned long
           // before this line), so this is exactly the moment the hook events lost while it was down
@@ -655,6 +790,10 @@ export class SshProjectManager {
           hookEndpointPath,
           tmuxConfPath,
           remoteHome,
+          codexLauncherPath: entry?.codexLauncherPath,
+          codexRelayScriptPath: entry?.codexRelayScriptPath,
+          codexRelayRuntimePath: entry?.codexRelayRuntimePath,
+          codexCliPath: entry?.codexCliPath,
           claudeAutoPermissionMode: entry?.claudeAutoPermissionMode,
           remoteClaudeVersion: entry?.remoteClaudeVersion
         }
@@ -737,9 +876,11 @@ export class SshProjectManager {
     if (!c) return null
     // `localPath` is a renderer string passed straight to scp as a positional arg. A value starting
     // with `-` (e.g. `-oProxyCommand=…`) would be parsed by scp as an OPTION (argv flag smuggling →
-    // RCE), not a file. A real OS file drop is always an absolute path, so require one here, this
-    // rejects `-`-prefixed, relative, and empty paths and fully closes the flag-smuggling vector.
-    if (!localPath.startsWith('/')) return null
+    // RCE), not a file. A real OS file drop is always absolute, but `/` is not a cross-platform
+    // absolute-path test: drive-letter and UNC drops are valid on Windows. Ask the local host's path
+    // implementation, while retaining the explicit option guard as defence in depth.
+    if (localPath.startsWith('-') || !path.isAbsolute(localPath)) return null
+    let stagedDir: string | undefined
     try {
       let home = c.remoteHome
       if (!home) {
@@ -747,8 +888,14 @@ export class SshProjectManager {
         if (r.code === 0 && isSafeRemoteHome(r.stdout.trim())) home = r.stdout.trim()
       }
       if (!home) return null
-      const token = `${Date.now().toString(36)}${(this.uploadSeq++).toString(36)}`
+      // The upload directory is the staging boundary, so it must be unique across PROCESSES, not
+      // merely calls on this manager. Two app instances can upload the same basename to one host;
+      // the former timestamp + per-instance counter could let both scp processes write one inode.
+      const token = randomUUID()
       const dir = `${home}/.nodeterm/uploads/${token}`
+      // mkdir can partially create parents before returning non-zero; once this invocation has a
+      // unique directory name, its finally block owns the cleanup attempt on every failure path.
+      stagedDir = dir
       const mk = await this.r.run(childArgs(c.conn, c.controlPath, `mkdir -p ${posixQuote(dir)}`))
       if (mk.code !== 0) return null
       // `fileName` is a renderer string: posixQuote blocks shell injection but NOT filesystem
@@ -758,9 +905,23 @@ export class SshProjectManager {
       if (!safe || safe === '.' || safe === '..') return null
       const remotePath = `${dir}/${safe}`
       const up = await this.r.runScp(scpArgs(c.conn, c.controlPath, localPath, remotePath))
-      return up.code === 0 ? remotePath : null
+      if (up.code !== 0) return null
+      // Successful uploads intentionally stay in the managed uploads directory. Only a failed
+      // call owes cleanup of the unique directory it minted.
+      stagedDir = undefined
+      return remotePath
     } catch {
       return null
+    } finally {
+      if (stagedDir) {
+        try {
+          await this.r.run(
+            childArgs(c.conn, c.controlPath, `rm -rf -- ${posixQuote(stagedDir)}`)
+          )
+        } catch {
+          // Best-effort: the failed transfer is already reported as null; cleanup cannot replace it.
+        }
+      }
     }
   }
 
@@ -773,16 +934,23 @@ export class SshProjectManager {
    *    folder the user picked in a native dialog); the renderer only names the REMOTE side, and
    *    that name is basenamed + sanitized (`safeDownloadBasename`) before it is joined. So no
    *    renderer string can steer the write, and `..` can never appear as a component.
-   *  - **Nothing existing is overwritten.** A collision takes the next `name (n)` candidate.
-   *  - **A failed transfer leaves no half-file under the real name.** scp writes to `<name>.part`
-   *    (a `.part` DIRECTORY for `-r`) and it is renamed into place only on exit 0, the same
-   *    write-then-rename discipline `sshWriteArgs` uses remotely. A failure unlinks the remains.
+   *  - **Nothing existing is overwritten.** A collision takes the next `name (n)` candidate. A
+   *    short exclusive lock coordinates that choice across app processes; it is removed in the
+   *    same finally block that releases the unique staging path.
+   *  - **A failed transfer leaves no half-file under the real name.** scp writes to a hidden,
+   *    UUID-owned `.part` (a `.part` DIRECTORY for `-r`) and it is renamed into place only on exit
+   *    0, the same write-then-rename discipline `sshWriteArgs` uses remotely. A failure unlinks
+   *    exactly its own remains. This local rename retries a transient Windows sharing-violation
+   *    error — see src/core/fs-atomic.ts.
    */
   async downloadFile(projectId: string, remotePath: string, destDir: string): Promise<DownloadResult> {
     const c = this.conns.get(projectId)
     if (!c) return { ok: false, error: 'Not connected.' }
-    const name = safeDownloadBasename(remotePath)
-    if (!name) return { ok: false, error: 'That path cannot be downloaded.' }
+    const remoteName = safeDownloadBasename(remotePath)
+    if (!remoteName) return { ok: false, error: 'That path cannot be downloaded.' }
+    const name = localDownloadName(remoteName)
+    let reservation: { finalPath: string; lockPath: string } | undefined
+    let partPath: string | undefined
     try {
       // Ask the REMOTE whether this is a directory rather than trusting the renderer's tree state:
       // it decides `-r`, and the tree can be stale. A failed probe is not evidence of "file" ,
@@ -791,33 +959,100 @@ export class SshProjectManager {
       const probe = await this.r.run(childArgs(c.conn, c.controlPath, `test -d ${quoteRemotePath(remotePath)}`))
       const isDir = probe.code === 0
       await fs.mkdir(destDir, { recursive: true })
-      const finalPath = await this.freeDestPath(destDir, name)
-      const partPath = `${finalPath}.part`
-      await fs.rm(partPath, { recursive: true, force: true }).catch(() => {})
-      const res = await this.r.runScp(scpDownArgs(c.conn, c.controlPath, remotePath, partPath, isDir))
+      reservation = await this.reserveDestPath(destDir, name)
+      partPath = scpPartPath(reservation.finalPath)
+      const res = await this.r.runScp(
+        scpDownArgs(c.conn, c.controlPath, remotePath, partPath, isDir)
+      )
       if (res.code !== 0) {
-        await fs.rm(partPath, { recursive: true, force: true }).catch(() => {})
         return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
       }
-      await fs.rename(partPath, finalPath)
-      return { ok: true, localPath: finalPath, dir: isDir }
+      await renameAtomic(partPath, reservation.finalPath)
+      return { ok: true, localPath: reservation.finalPath, dir: isDir }
     } catch {
       return { ok: false, error: 'The download could not be completed.' }
+    } finally {
+      if (partPath) await removeScpPart(partPath)
+      if (reservation) await removeAtomic(reservation.lockPath)
     }
   }
 
-  /** First `<dir>/<name>` variant that exists neither as the target nor as a leftover `.part`. */
-  private async freeDestPath(destDir: string, name: string): Promise<string> {
-    for (let attempt = 1; attempt <= DOWNLOAD_NAME_ATTEMPTS; attempt++) {
-      const candidate = path.join(destDir, candidateName(name, attempt))
-      const taken = await fs
-        .access(candidate)
-        .then(() => true)
-        .catch(() => false)
-      if (!taken) return candidate
+  /**
+   * Reserve the first free `<dir>/<name>` variant across app processes.
+   *
+   * A read-only `lstat(candidate)` is not a reservation: two downloads can both observe absence,
+   * choose one final path, and then atomically overwrite each other. The deterministic lock name
+   * is opened with `wx`, so exactly one cooperating process owns each candidate. A crash can leave
+   * a tiny lock behind; that safely advances the next download to `name (n)` instead of risking an
+   * overwrite. The hash keeps the lock filename bounded even for a maximum-length remote basename.
+   */
+  private async reserveDestPath(
+    destDir: string,
+    name: string
+  ): Promise<{ finalPath: string; lockPath: string }> {
+    const tryCandidate = async (
+      finalPath: string
+    ): Promise<{ finalPath: string; lockPath: string } | null> => {
+      // The lock itself lives inside destDir, so its key only needs the candidate basename. Using
+      // the full spelling lets two aliases of the same physical directory (junction/symlink/drive
+      // alias) create different locks beside the same target and race. Basename makes them
+      // converge without a realpath check that can itself go stale.
+      const candidate = path.basename(finalPath).normalize('NFC')
+      const caseInsensitive = process.platform === 'win32' || process.platform === 'darwin'
+      const normalized = caseInsensitive ? candidate.toLowerCase() : candidate
+      const key = createHash('sha256').update(normalized).digest('hex').slice(0, 20)
+      const lockPath = path.join(destDir, `.nodeterm-download-${key}.lock`)
+      let ownsLock = false
+      try {
+        const handle = await fs.open(lockPath, 'wx', 0o600)
+        ownsLock = true
+        await handle.close()
+        let taken = true
+        try {
+          // lstat asks whether the DIRECTORY ENTRY exists. access follows a symlink, so a dangling
+          // link reports ENOENT and was incorrectly treated as a free name, then replaced.
+          await fs.lstat(finalPath)
+        } catch (error) {
+          const code =
+            typeof error === 'object' && error && 'code' in error
+              ? String((error as { code: unknown }).code)
+              : ''
+          // A failed read is not evidence of absence. Only lstat's ENOENT proves the directory
+          // entry is free; EACCES/EIO and unknown failures must refuse instead of authorizing an
+          // overwrite. In particular, lstat succeeds for a dangling symlink while access did not.
+          if (code === 'ENOENT') taken = false
+          else throw error
+        }
+        if (taken) {
+          await removeAtomic(lockPath)
+          return null
+        }
+        return { finalPath, lockPath }
+      } catch (error) {
+        if (ownsLock) await removeAtomic(lockPath)
+        const code =
+          typeof error === 'object' && error && 'code' in error
+            ? String((error as { code: unknown }).code)
+            : ''
+        if (!ownsLock && code === 'EEXIST') return null
+        throw error
+      }
     }
-    // Every readable variant is taken: fall back to a stamped name rather than overwriting one.
-    return path.join(destDir, candidateName(name, Date.now()))
+
+    for (let attempt = 1; attempt <= DOWNLOAD_NAME_ATTEMPTS; attempt++) {
+      const reservation = await tryCandidate(path.join(destDir, candidateName(name, attempt)))
+      if (reservation) return reservation
+    }
+    // Every readable variant is taken: try stamped names rather than overwriting one. Still
+    // bounded, so a broken/unwritable directory fails honestly rather than looping forever.
+    const stamp = Date.now()
+    for (let offset = 0; offset < DOWNLOAD_NAME_ATTEMPTS; offset++) {
+      const reservation = await tryCandidate(
+        path.join(destDir, candidateName(name, stamp + offset))
+      )
+      if (reservation) return reservation
+    }
+    throw new Error('Could not reserve a download destination.')
   }
 
   /**
@@ -847,24 +1082,37 @@ export class SshProjectManager {
         childArgs(c.conn, c.controlPath, `wc -c < ${quoteRemotePath(remotePath)}`)
       )
       const remoteSize = sizeProbe.code === 0 ? parseInt(sizeProbe.stdout.trim(), 10) : NaN
-      const cachedSize = await fs
-        .stat(dest)
-        .then((s) => s.size)
-        .catch(() => -1)
+      let cachedSize = -1
+      try {
+        cachedSize = (await fs.stat(dest)).size
+      } catch (error) {
+        const code =
+          typeof error === 'object' && error && 'code' in error
+            ? String((error as { code: unknown }).code)
+            : ''
+        // Only ENOENT means there is no cached file. An unreadable cache entry must not be
+        // treated as permission to replace it with a fresh transfer.
+        if (code !== 'ENOENT') throw error
+      }
       if (Number.isFinite(remoteSize) && remoteSize >= 0 && cachedSize === remoteSize) {
         return { ok: true, localPath: dest }
       }
       await fs.mkdir(cacheDir, { recursive: true })
       // Same write-then-rename discipline as downloadFile: never leave a half-copied file
-      // under the final name, nt-media would happily serve a truncated video.
-      const partPath = `${dest}.part`
-      await fs.rm(partPath, { force: true }).catch(() => {})
-      const res = await this.r.runScp(scpDownArgs(c.conn, c.controlPath, remotePath, partPath, false))
-      if (res.code !== 0) {
-        await fs.rm(partPath, { force: true }).catch(() => {})
-        return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
+      // under the final name, nt-media would happily serve a truncated video. This local
+      // rename retries a transient Windows sharing-violation error — see src/core/fs-atomic.ts.
+      const partPath = scpPartPath(dest)
+      try {
+        const res = await this.r.runScp(
+          scpDownArgs(c.conn, c.controlPath, remotePath, partPath, false)
+        )
+        if (res.code !== 0) {
+          return { ok: false, error: 'The transfer failed. Is the file still there, and readable?' }
+        }
+        await renameAtomic(partPath, dest)
+      } finally {
+        await removeScpPart(partPath)
       }
-      await fs.rename(partPath, dest)
       void this.pruneMediaCache(cacheDir, path.basename(dest))
       return { ok: true, localPath: dest }
     } catch {
@@ -959,6 +1207,38 @@ export class SshProjectManager {
   refForRemoteCwd(cwd: string): { conn: SshConnection; controlPath: string } | undefined {
     for (const c of this.conns.values()) {
       if (c.remoteCwd && c.remoteCwd === cwd) return { conn: c.conn, controlPath: c.controlPath }
+    }
+    return undefined
+  }
+
+  /**
+   * Resolve the ref for the connection matching a FULL endpoint — host, user, effective port AND
+   * remote cwd. Sibling of `refForRemoteCwd`, not a replacement: matching on cwd alone is fine for
+   * the git-remote registry (a remote repo path is resolved from a node that already belongs to one
+   * project), but wrong for anything keyed by a project's own SERVER, which is what running that
+   * project's setup script is.
+   *
+   * Two ways cwd-only matching picks the wrong box, both reachable with ordinary config:
+   *  - The DEFAULT remoteCwd is `~`, so every project that never chose a directory collides with
+   *    every other one — the first connection in map order would win them all, forever.
+   *  - Same host and user on different PORTS are routinely different machines (containers, or hosts
+   *    behind one NAT), and a host/user-only check waves that straight through.
+   *
+   * `undefined` when nothing matches — a disconnected project and a wrong-endpoint one are the same
+   * answer here, and the caller reports it rather than dialing a new connection.
+   */
+  refForEndpoint(endpoint: {
+    host: string
+    user: string
+    port?: number
+    remoteCwd: string
+  }): { conn: SshConnection; controlPath: string } | undefined {
+    const wantPort = endpoint.port ?? 22
+    for (const c of this.conns.values()) {
+      if (c.remoteCwd !== endpoint.remoteCwd) continue
+      if (c.conn.host !== endpoint.host || c.conn.user !== endpoint.user) continue
+      if ((c.conn.port ?? 22) !== wantPort) continue
+      return { conn: c.conn, controlPath: c.controlPath }
     }
     return undefined
   }
@@ -1140,15 +1420,13 @@ export class SshProjectManager {
     const c = this.conns.get(projectId)
     if (!c) return
     const file = this.statusFilePath(projectId, c)
-    const q = quoteRemotePath(file)
-    const qTmp = quoteRemotePath(`${file}.tmp`)
     this.statusPushed.add(projectId)
     await this.r
       .run(
         childArgs(
           c.conn,
           c.controlPath,
-          `umask 077; mkdir -p ${quoteRemotePath(file.slice(0, file.lastIndexOf('/')))} && cat > ${qTmp} && mv -f ${qTmp} ${q}`
+          remoteAtomicWrite(file, { restrictPermissions: true }).command
         ),
         json
       )
@@ -1245,15 +1523,12 @@ export class SshProjectManager {
     if (decision !== 'allow' && decision !== 'deny') return false
     const dir = c.remoteHome ? `${c.remoteHome}/.nodeterm/pending` : '~/.nodeterm/pending'
     const file = `${dir}/${pendingId}.answer`
-    const q = quoteRemotePath(file)
-    const qTmp = quoteRemotePath(`${file}.tmp`)
-    const qDir = quoteRemotePath(dir)
     const { code } = await this.r
       .run(
         childArgs(
           c.conn,
           c.controlPath,
-          `umask 077; mkdir -p ${qDir} && cat > ${qTmp} && mv -f ${qTmp} ${q}`
+          remoteAtomicWrite(file, { restrictPermissions: true }).command
         ),
         decision
       )
@@ -1269,6 +1544,344 @@ export class SshProjectManager {
   remoteHomeForControlPath(controlPath: string): string | undefined {
     for (const c of this.conns.values()) if (c.controlPath === controlPath) return c.remoteHome
     return undefined
+  }
+
+  // ── Managed REMOTE Codex accounts (S6 PR 6) ───────────────────────────────────────────────
+  // The DESKTOP drives the whole remote leg over the project's live ControlMaster: it uploads only
+  // executable code (the relay bundle + launcher) and runs `codex`/relay subcommands with
+  // `childArgs`. The SSH host is a dumb target — it runs plain `codex` + `node` + the uploaded
+  // relay JS, and needs NO nodeterm-side account handlers (I2 resolved: no Server-Edition bridge
+  // handlers for the remote leg — see the PR body). A remote `$HOME` is DATA: every method that
+  // builds an absolute remote path re-validates it with `isSafeRemoteHome` first (GC 7), because a
+  // `$HOME` carrying a newline would otherwise append a command. Based on @Corvin's PR #112.
+
+  /** Guard a connection's remote home before it becomes an absolute remote path. `isSafeRemoteHome`
+   *  rejects a `$HOME` that is relative, over-long, or carries a control char / newline (GC 7). */
+  private codexRemoteHome(c: Conn | undefined): string {
+    if (!c) throw new Error('SSH host is not connected')
+    if (!isSafeRemoteHome(c.remoteHome)) {
+      throw new Error('Could not resolve a safe SSH host home directory')
+    }
+    return c.remoteHome as string
+  }
+
+  private connByControlPath(controlPath: string): Conn | undefined {
+    for (const c of this.conns.values()) if (c.controlPath === controlPath) return c
+    return undefined
+  }
+
+  /** Create one isolated managed Codex home on the host (umask-077 mkdir + shared-asset symlinks).
+   *  Never uploads a credential — the account's `auth.json` is created ON the host by a later
+   *  device login. Returns the remote home, or throws with the named failure phase. */
+  async remoteCodexAccountAdd(
+    projectId: string,
+    accountId: string
+  ): Promise<{ home: string } | null> {
+    assertCodexAccountId(accountId)
+    const c = this.conns.get(projectId)
+    const remoteHome = this.codexRemoteHome(c)
+    const home = remoteCodexHome(remoteHome, accountId)
+    const { code, stdout } = await this.r.run(
+      childArgs(c!.conn, c!.controlPath, remoteCodexAccountSetupCommand(remoteHome, accountId))
+    )
+    if (code !== 0) {
+      const marker = stdout
+        .split(/\r?\n/)
+        .find((line) => /^NODETERM_CODEX_ACCOUNT_SETUP:(?:home|link:[A-Za-z0-9._-]+)$/.test(line))
+      const phase = marker?.slice('NODETERM_CODEX_ACCOUNT_SETUP:'.length) ?? 'remote command'
+      throw new Error(
+        `Could not create the isolated Codex account directory (${phase}; SSH exit ${code})`
+      )
+    }
+    return { home }
+  }
+
+  /**
+   * Read a managed remote account's ChatGPT identity by asking its own app-server `account/read`.
+   * A managed account (has an id) must own a REAL `auth.json` — a file, not a symlink (the shared
+   * assets are symlinked; the credential is not) — before this reports anything, so a home with no
+   * device login yet returns null instead of leaking the system login's identity. The system
+   * account (no id) reads its own `~/.codex`. Never uploads or downloads a credential.
+   */
+  async remoteCodexAccountIdentity(
+    projectId: string,
+    accountId?: string
+  ): Promise<{ email: string | null } | null> {
+    if (accountId) assertCodexAccountId(accountId)
+    const c = this.conns.get(projectId)
+    if (!c || !isSafeRemoteHome(c.remoteHome)) return null
+    if (!c.codexRelayScriptPath || !c.codexRelayRuntimePath || !c.codexCliPath) return null
+    const remoteHome = c.remoteHome as string
+    const home = remoteCodexHome(remoteHome, accountId)
+    if (accountId) {
+      // A managed account's identity is gated on a REAL, non-symlink auth.json: the shared runtime
+      // assets are symlinks, the credential jar is never — so `test -f && test ! -L` is what
+      // distinguishes "this account has actually logged in" from "it inherited a shared config".
+      const auth = await this.r.run(
+        childArgs(
+          c.conn,
+          c.controlPath,
+          `test -f ${posixQuote(`${home}/auth.json`)} && test ! -L ${posixQuote(`${home}/auth.json`)}`
+        )
+      )
+      if (auth.code !== 0) return null
+    }
+    const socket = remoteCodexSocket(remoteHome, accountId)
+    const start = remoteCodexAppServerStartCommand(c.codexRelayRuntimePath, c.codexCliPath)
+    const command = `CODEX_HOME=${posixQuote(home)} ${start} && ${posixQuote(c.codexRelayRuntimePath)} ${posixQuote(c.codexRelayScriptPath)} account-read ${posixQuote(socket)}`
+    const result = await this.r.run(childArgs(c.conn, c.controlPath, command))
+    if (result.code !== 0) return null
+    try {
+      const parsed = JSON.parse(result.stdout) as { email?: unknown }
+      return { email: typeof parsed.email === 'string' ? parsed.email : null }
+    } catch {
+      return null
+    }
+  }
+
+  /** Stop the account's app-server and delete its home (credential jar included). Runs entirely on
+   *  the host — the credential never travels. No-op false when not connected. */
+  async remoteCodexAccountRemove(projectId: string, accountId: string): Promise<boolean> {
+    assertCodexAccountId(accountId)
+    const c = this.conns.get(projectId)
+    if (!c || !isSafeRemoteHome(c.remoteHome)) return false
+    const home = remoteCodexHome(c.remoteHome as string, accountId)
+    const stop = c.codexCliPath
+      ? `CODEX_HOME=${posixQuote(home)} ${posixQuote(c.codexCliPath)} app-server daemon stop >/dev/null 2>&1 || true; `
+      : ''
+    const command = `${stop}rm -rf -- ${posixQuote(home)}`
+    return (await this.r.run(childArgs(c.conn, c.controlPath, command))).code === 0
+  }
+
+  /**
+   * Install ONLY executable code (Property 1 / GC 6): the standalone relay bundle + the launcher.
+   * One relay process later serves every node on this host; account separation stays CODEX_HOME +
+   * one app-server socket per account. Gated on node + codex + curl all resolving through
+   * `readlink -f` (the launcher shells `curl`; the relay + app-server run under the host's node).
+   * Returns null — never throws — when the host cannot host managed Codex accounts, so a plain SSH
+   * connect is never failed by this.
+   */
+  private async installRemoteCodexRuntime(
+    conn: SshConnection,
+    controlPath: string,
+    remoteHome: string
+  ): Promise<{ launcher: string; relay: string; runtime: string; codex: string } | null> {
+    if (!this.r.codexRelaySource) return null
+    if (!isSafeRemoteHome(remoteHome)) return null
+    // Resolve node/codex/curl through the login shell, then `readlink -f` each to an absolute real
+    // path (a shell alias / nvm shim would not survive into a non-interactive relay launch). All
+    // three must resolve; curl backs the launcher's token POSTs.
+    const probe = await this.r.run(
+      childArgs(
+        conn,
+        controlPath,
+        `$SHELL -lc ${posixQuote('nt_node=$(command -v node) && readlink -f "$nt_node"; nt_codex=$(command -v codex) && readlink -f "$nt_codex"; nt_curl=$(command -v curl) && readlink -f "$nt_curl"')}`
+      )
+    )
+    const lines = probe.code === 0 ? probe.stdout.trim().split(/\r?\n/) : []
+    const runtime = lines[0]
+    const codex = lines[1]
+    if (!runtime?.startsWith('/') || !codex?.startsWith('/') || lines.length < 3) return null
+    const dir = `${remoteHome}/.nodeterm/bin`
+    const launcher = `${dir}/nodeterm-codex`
+    const relay = `${dir}/codex-relay.js`
+    const source = await this.r.codexRelaySource()
+    // The relay bundle is written to the host over the SSH ControlMaster (`childArgs` → the
+    // multiplexed ssh child, body on stdin). CodeQL note: this file-data→network write is confined
+    // to the authenticated SSH transport, and the payload is our OWN executable bundle, never a
+    // credential (Property 1). `chmod 700` — owner-only, executable code.
+    const writeRelay = await this.r.run(
+      childArgs(
+        conn,
+        controlPath,
+        `umask 077; mkdir -p ${posixQuote(dir)} && cat > ${posixQuote(relay)} && chmod 700 ${posixQuote(relay)}`
+      ),
+      source
+    )
+    if (writeRelay.code !== 0) return null
+    // The launcher embeds the app-server start command (absolute node + codex only, no secret). Same
+    // SSH-tunnel-confined write; still only executable code.
+    const writeLauncher = await this.r.run(
+      childArgs(
+        conn,
+        controlPath,
+        `umask 077; cat > ${posixQuote(launcher)} && chmod 700 ${posixQuote(launcher)}`
+      ),
+      buildCodexLauncherScript(remoteCodexAppServerStartCommand(runtime, codex))
+    )
+    return writeLauncher.code === 0 ? { launcher, relay, runtime, codex } : null
+  }
+
+  /** Ensure one app-server is live for the system account plus each named managed account, and
+   *  return their control-socket paths. Every id is validated before it becomes a path; the runtime
+   *  must be installed or this throws (the remote leg is unavailable, never silently degraded). */
+  async remoteCodexCatalog(
+    controlPath: string,
+    accountIds: string[]
+  ): Promise<Array<{ accountId?: string; socketPath: string }>> {
+    const c = this.connByControlPath(controlPath)
+    if (!c || !isSafeRemoteHome(c.remoteHome)) throw new Error('SSH Codex host is unavailable')
+    for (const id of accountIds) assertCodexAccountId(id)
+    if (!c.codexCliPath || !c.codexRelayRuntimePath) throw new Error('SSH Codex CLI is unavailable')
+    const remoteHome = c.remoteHome as string
+    const ids: Array<string | undefined> = [undefined, ...accountIds]
+    for (const id of ids) {
+      const home = remoteCodexHome(remoteHome, id)
+      const startCommand = remoteCodexAppServerStartCommand(c.codexRelayRuntimePath, c.codexCliPath)
+      const start = await this.r.run(
+        childArgs(c.conn, c.controlPath, `CODEX_HOME=${posixQuote(home)} ${startCommand}`)
+      )
+      if (start.code !== 0) throw new Error('SSH Codex app-server is unavailable')
+    }
+    return ids.map((accountId) => ({
+      accountId,
+      socketPath: remoteCodexSocket(remoteHome, accountId)
+    }))
+  }
+
+  /** Does the account's app-server already know this thread? The relay's `thread-check` does a live
+   *  `thread/read` and exits 0 only when the far side reports the thread with an absolute path+cwd —
+   *  the verify-before-recycle primitive (§4.2 step 4). Fail-closed false on any bad input / miss. */
+  async remoteCodexThreadExists(
+    controlPath: string,
+    accountId: string | undefined,
+    threadId: string
+  ): Promise<boolean> {
+    if (accountId) assertCodexAccountId(accountId)
+    if (!ACCOUNT_ID_RE.test(threadId)) return false
+    const c = this.connByControlPath(controlPath)
+    if (!c || !isSafeRemoteHome(c.remoteHome)) return false
+    if (!c.codexRelayRuntimePath || !c.codexRelayScriptPath) return false
+    const socket = remoteCodexSocket(c.remoteHome as string, accountId)
+    const command = `${posixQuote(c.codexRelayRuntimePath)} ${posixQuote(c.codexRelayScriptPath)} thread-check ${posixQuote(socket)} ${posixQuote(threadId)}`
+    return (await this.r.run(childArgs(c.conn, c.controlPath, command))).code === 0
+  }
+
+  /** Cross-account expose ON THE HOST: hardlink the one authoritative rollout for `threadId` into
+   *  the target account and verify the target app-server can discover it. The relay's `expose-thread`
+   *  fails closed (non-zero) when the thread is ambiguous (more than one distinct rollout inode
+   *  across catalogs) or unavailable — this surfaces that as a thrown refusal (Property 3). */
+  async remoteCodexExposeThread(
+    controlPath: string,
+    accountId: string | undefined,
+    threadId: string,
+    accountIds: string[]
+  ): Promise<void> {
+    const c = this.connByControlPath(controlPath)
+    if (!c || !isSafeRemoteHome(c.remoteHome) || !c.codexRelayRuntimePath || !c.codexRelayScriptPath) {
+      throw new Error('SSH Codex runtime is unavailable')
+    }
+    const catalog = await this.remoteCodexCatalog(controlPath, accountIds)
+    const target = remoteCodexSocket(c.remoteHome as string, accountId)
+    const args = catalog.map((entry) => posixQuote(entry.socketPath)).join(' ')
+    const command = `${posixQuote(c.codexRelayRuntimePath)} ${posixQuote(c.codexRelayScriptPath)} expose-thread ${posixQuote(target)} ${posixQuote(threadId)} ${args}`
+    if ((await this.r.run(childArgs(c.conn, c.controlPath, command))).code !== 0) {
+      throw new Error('SSH Codex session is unavailable or ambiguous')
+    }
+  }
+
+  /**
+   * Atomic remote import (Property 2 + 11): copy one authoritative LOCAL rollout into a remote
+   * account home so its conversation id survives the machine hop. The source stays untouched; the
+   * remote write is STAGED under `~/.nodeterm/codex-imports/<token>.part` and installed into
+   * `CODEX_HOME/<sessionsRelativePath>` only after scp completes.
+   *
+   * The discipline PR 3 enforced locally, now over SSH:
+   *  - **No-op if the thread already exists** on the target (never re-import).
+   *  - **Never overwrite** an existing remote target: the install `sh` uses `ln` (hardlink), which
+   *    fails ATOMICALLY with `EEXIST` when the target exists — the same never-overwrite primitive as
+   *    PR 3's local `linkSync`, with no check-then-act race. `mv` is deliberately NOT used (it would
+   *    silently clobber). A partial/racing import can never corrupt a target account's rollout.
+   *  - **Verify-before-recycle:** after install, re-catalog and re-check discoverability; if the far
+   *    side cannot see the thread, ROLL THE STAGED FILE BACK and refuse — no half-landed state.
+   *
+   * Argument order + `{ imported }` return match the `CodexSshImporter` contract PR 5 typed against
+   * (the source-leg planner hands off here). `imported: false` is the already-present no-op;
+   * `imported: true` means a fresh, verified land.
+   */
+  async remoteCodexImportThread(
+    projectId: string,
+    accountId: string | undefined,
+    threadId: string,
+    sessionsRelativePath: string,
+    localRolloutPath: string
+  ): Promise<{ imported: boolean }> {
+    if (accountId) assertCodexAccountId(accountId)
+    if (!ACCOUNT_ID_RE.test(threadId)) throw new Error('Invalid Codex thread id')
+    // The relative path is renderer/main-supplied but ends up as a remote absolute path, so it is
+    // confined to `sessions/…` with no absolute segment and no `.`/`..`/empty component (traversal
+    // guard — the host layout U7 proves `sessions/` is a sibling of the socket under CODEX_HOME).
+    if (
+      !sessionsRelativePath.startsWith('sessions/') ||
+      path.posix.isAbsolute(sessionsRelativePath) ||
+      sessionsRelativePath
+        .split('/')
+        .some((segment) => !segment || segment === '.' || segment === '..')
+    ) {
+      throw new Error('Invalid Codex rollout path')
+    }
+    const c = this.conns.get(projectId)
+    const remoteHome = this.codexRemoteHome(c)
+    if (await this.remoteCodexThreadExists(c!.controlPath, accountId, threadId)) {
+      return { imported: false }
+    }
+
+    const target = `${remoteCodexHome(remoteHome, accountId)}/${sessionsRelativePath}`
+    const targetDir = target.slice(0, target.lastIndexOf('/'))
+    const token = randomUUID()
+    const stagingDir = `${remoteHome}/.nodeterm/codex-imports`
+    const staging = `${stagingDir}/${token}.part`
+    const prepared = await this.r.run(
+      childArgs(
+        c!.conn,
+        c!.controlPath,
+        `mkdir -p ${posixQuote(stagingDir)} && chmod 700 ${posixQuote(stagingDir)}`
+      )
+    )
+    if (prepared.code !== 0) throw new Error('Could not prepare remote Codex import')
+    // Upload the LOCAL rollout to a private staging path over the SSH ControlMaster. CodeQL note:
+    // this file-data→network transfer is confined to the authenticated SSH transport; the rollout is
+    // conversation data the user is deliberately moving to a host they own, never a credential.
+    const uploaded = await this.r.runScp(scpArgs(c!.conn, c!.controlPath, localRolloutPath, staging))
+    if (uploaded.code !== 0) {
+      await this.r
+        .run(childArgs(c!.conn, c!.controlPath, `rm -f ${posixQuote(staging)}`))
+        .catch(() => {})
+      throw new Error('Could not upload Codex conversation')
+    }
+    // Atomic install that NEVER overwrites — the same discipline as PR 3's local `linkSync`
+    // (`commitCodexRolloutExposure`), now over SSH: `ln` (hardlink) is used, NOT `mv`, precisely
+    // because POSIX `mv` SILENTLY overwrites its destination. `link(2)` instead fails atomically
+    // with `EEXIST` (non-zero) when the target already exists — there is no check-then-act window a
+    // concurrent writer could race (a bare `[ -e ] && mv` would have one). Same-filesystem holds:
+    // staging (`$HOME/.nodeterm/codex-imports`) and target (`$HOME/.nodeterm/cx/<digest>/sessions`
+    // or `$HOME/.codex/sessions`) are both under the host `$HOME`; a cross-device `ln` (`EXDEV`)
+    // also fails closed here (exit 17), it is never silently copied. On success `chmod 600` the
+    // shared inode (credential-adjacent conversation) and drop the staging name, leaving the target.
+    const installed = await this.r.run(
+      childArgs(
+        c!.conn,
+        c!.controlPath,
+        `mkdir -p ${posixQuote(targetDir)} && chmod 700 ${posixQuote(targetDir)} || { rm -f ${posixQuote(staging)}; exit 70; }; ` +
+          `if ln ${posixQuote(staging)} ${posixQuote(target)} 2>/dev/null; then ` +
+          `chmod 600 ${posixQuote(target)}; rm -f ${posixQuote(staging)}; ` +
+          `else rm -f ${posixQuote(staging)}; exit 17; fi`
+      )
+    )
+    if (installed.code !== 0) {
+      throw new Error('Remote Codex conversation already exists or could not be installed')
+    }
+    // Verify-before-recycle: re-catalog so a running app-server re-reads its index, then re-check
+    // discoverability. If the far side still cannot see the thread, roll the staged file back and
+    // refuse — the caller must never recycle a node onto a half-landed import (§4.2 step 4).
+    await this.remoteCodexCatalog(c!.controlPath, accountId ? [accountId] : [])
+    if (!(await this.remoteCodexThreadExists(c!.controlPath, accountId, threadId))) {
+      await this.r
+        .run(childArgs(c!.conn, c!.controlPath, `rm -f ${posixQuote(target)}`))
+        .catch(() => {})
+      throw new Error('Remote Codex app-server did not discover the imported conversation')
+    }
+    return { imported: true }
   }
 
   // ── Managed REMOTE Claude accounts (Task 12) ──────────────────────────────────────────────
@@ -1578,7 +2191,12 @@ export function initSshProject(
   /** Passed straight through to the manager's `onTunnelVerified` (see Runners). It lives on the
    *  caller because the resync it drives needs main's agent-status funnel and transcript readers,
    *  none of which this module knows about. */
-  onTunnelVerified?: (projectId: string, controlPath: string, conn: SshConnection) => void
+  onTunnelVerified?: (projectId: string, controlPath: string, conn: SshConnection) => void,
+  /** Resolves the standalone relay bundle (`out/main/codex-relay.js`, ws inlined) to upload to a
+   *  Linux host. Injected by the caller (main/index.ts) so this module reads no build artifact
+   *  itself. Undefined ⇒ no managed Codex runtime is installed, and every non-Codex path is
+   *  unchanged (Server Edition passes nothing today — see the PR's I2 decision). */
+  codexRelaySource?: () => Promise<string>
 ): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()
@@ -1675,6 +2293,7 @@ export function initSshProject(
         )
       }),
     getHook: () => ({ port: hookServer.getPort(), token: hookServer.getToken(), version: hookServer.getVersion() }),
+    codexRelaySource,
     // Per-node identity for REMOTE nodes. Both come from the same module the local materialiser
     // uses, so one canvas cannot be judged by two different rules depending on where it runs.
     nodeIdsForProject: (projectId) => nodeIdsForCanvas(projectId),

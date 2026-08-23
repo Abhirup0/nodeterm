@@ -1,3 +1,6 @@
+import { projectSectionId } from './project-settings-targets'
+import type { ProjectIcon } from '@shared/project-icon'
+
 export type SettingsSectionId =
   | 'terminal'
   | 'shell'
@@ -6,6 +9,7 @@ export type SettingsSectionId =
   | 'notch'
   | 'phone'
   | 'speech'
+  | 'shortcuts'
   | 'agents'
   | 'usage'
   | 'accounts'
@@ -22,12 +26,26 @@ export type SettingsSectionId =
   | 'ssh'
   | 'updates'
   | 'privacy'
+  | 'debug'
+  | `project-${string}`
+
+export interface ProjectNavItem {
+  id: string
+  name: string
+  color: string
+  icon?: ProjectIcon
+}
 
 export interface SettingsSectionRef {
   id: SettingsSectionId
   title: string
   /** Only meaningful on macOS (the notch capsule) — hidden elsewhere by `visibleSettingsGroups`. */
   macOnly?: boolean
+  /** Project-section rows only (`project-${string}` ids): the project's own color/icon, so the
+   *  sidebar can render its `ProjectGlyph` beside the title instead of the generic folder glyph
+   *  every project section used to share. Absent on every static section. */
+  color?: string
+  icon?: ProjectIcon
 }
 
 export interface SettingsGroup {
@@ -69,7 +87,8 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'appearance', title: 'Appearance' },
       { id: 'notch', title: 'Notch', macOnly: true },
       { id: 'notifications', title: 'Notifications' },
-      { id: 'speech', title: 'Speech' }
+      { id: 'speech', title: 'Speech' },
+      { id: 'shortcuts', title: 'Keyboard Shortcuts' }
     ]
   },
   {
@@ -89,7 +108,8 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     sections: [
       { id: 'license', title: 'License' },
       { id: 'updates', title: 'Updates' },
-      { id: 'privacy', title: 'Privacy' }
+      { id: 'privacy', title: 'Privacy' },
+      { id: 'debug', title: 'Debug' }
     ]
   }
 ]
@@ -110,4 +130,24 @@ export function visibleSettingsGroups(isMac: boolean): SettingsGroup[] {
   return SETTINGS_GROUPS.map((g) => ({ ...g, sections: g.sections.filter((s) => !s.macOnly) })).filter(
     (g) => g.sections.length > 0
   )
+}
+
+/**
+ * Render-time only — deliberately NOT part of `SETTINGS_GROUPS`. Open projects change at
+ * runtime, so this builds a group from the current project list on every render instead of
+ * baking project ids into the static nav (which would break the `nav.test.ts` section-count
+ * pins). Returns null when there are no open projects, so callers can skip rendering the group.
+ */
+export function projectsSettingsGroup(projects: ProjectNavItem[]): SettingsGroup | null {
+  if (projects.length === 0) return null
+  return {
+    id: 'projects',
+    title: 'Projects',
+    sections: projects.map((p) => ({
+      id: projectSectionId(p.id),
+      title: p.name,
+      color: p.color,
+      icon: p.icon
+    }))
+  }
 }

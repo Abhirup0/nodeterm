@@ -122,7 +122,7 @@ describe('pairing-service revoke: atomic writes', () => {
     expect(await tmpsIn(sshDir())).toEqual([])
   })
 
-  it('a failed agent.json rename removes its own temp, rejects, and leaves the old device list intact', async () => {
+  it('a failed agent.json rename removes its own temp, reports local:false, and leaves the old device list intact', async () => {
     const svc = await service()
     const before = await fs.readFile(agentJson(), 'utf-8')
     // EXDEV is the realistic one: ~/.nodeterm on another filesystem than the temp.
@@ -130,7 +130,9 @@ describe('pairing-service revoke: atomic writes', () => {
       Object.assign(new Error('EXDEV: cross-device link not permitted, rename'), { code: 'EXDEV' })
     )
 
-    await expect(svc.revokeDevice('a')).rejects.toThrow(/EXDEV/)
+    // Reported rather than thrown since the revoke grew its server leg — `local:false` is the
+    // caller-visible failure now, and it must never come back `true` on an unpublished write.
+    expect((await svc.revokeDevice('a')).local).toBe(false)
 
     // A leaked temp here is a leaked credential: it holds every device's `agentToken`, at 0600,
     // under a unique name nothing will ever write again.
@@ -141,7 +143,7 @@ describe('pairing-service revoke: atomic writes', () => {
     expect(await fs.readFile(authKeys(), 'utf-8')).toContain('nodeterm-ios-a')
   })
 
-  it('a failed authorized_keys rename removes its own temp and still rejects', async () => {
+  it('a failed authorized_keys rename removes its own temp and still reports local:false', async () => {
     const svc = await service()
     const before = await fs.readFile(authKeys(), 'utf-8')
     const realRename = fs.rename
@@ -154,7 +156,7 @@ describe('pairing-service revoke: atomic writes', () => {
       return (realRename as any)(from, to)
     }) as any)
 
-    await expect(svc.revokeDevice('a')).rejects.toThrow(/EACCES/)
+    expect((await svc.revokeDevice('a')).local).toBe(false)
     vi.restoreAllMocks()
 
     expect(await tmpsIn(sshDir())).toEqual([])

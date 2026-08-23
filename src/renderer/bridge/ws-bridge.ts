@@ -18,6 +18,8 @@ import type { GitHubControlApi, GitHubIssuesApi } from '../../shared/github-issu
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
   type BoardLogApi,
+  type LogApi,
+  type LogRecord,
   type BoardLogReadResult,
   type ChatTranscriptResult,
   type ClaudeApi,
@@ -202,11 +204,22 @@ const AI_NAMING_UNAVAILABLE = {
   message: 'AI naming is not available in the server edition yet'
 }
 
-/** Build the real `pty` / `workspace` / `settings` namespaces (plus the top-level `userDataDir`)
- *  over an RpcClient, mirroring the preload's invoke(→request)/send(→cast) split exactly. */
+/** Build the real `pty` / `workspace` / `projectSettings` / `settings` namespaces (plus the
+ *  top-level `userDataDir`) over an RpcClient, mirroring the preload's
+ *  invoke(→request)/send(→cast) split exactly. */
 export function buildRealApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'pty' | 'workspace' | 'settings' | 'agent' | 'userDataDir'> {
+): Pick<
+  NodeTerminalApi,
+  | 'pty'
+  | 'workspace'
+  | 'projectSettings'
+  | 'projectSetup'
+  | 'worktree'
+  | 'settings'
+  | 'agent'
+  | 'userDataDir'
+> {
   const pty: PtyApi = {
     create: (options: PtyCreateOptions) =>
       client.request(IPC.ptyCreate, options) as ReturnType<PtyApi['create']>,
@@ -232,7 +245,7 @@ export function buildRealApi(
     tmuxStatus: () =>
       client
         .request(IPC.ptyTmuxStatus)
-        .catch(() => ({ available: true, installCommand: null, installLabel: null, platform: 'linux' })) as Promise<TmuxStatus>,
+        .catch(() => ({ available: true, installCommand: null, installLabel: null, platform: null })) as Promise<TmuxStatus>,
     // Unknown on failure (null), never a rejection: the restart poller reads null as "not a
     // shell yet" and gives up on its own deadline.
     paneCommand: (persistKey) =>
@@ -285,6 +298,67 @@ export function buildRealApi(
     onExternalChange: () => () => {}
   }
 
+  // REAL: WorkspaceStore (core) registers the project-settings:* channels too — same
+  // registerIpc() call as workspace above — so the server serves this on both shells.
+  const projectSettings: NodeTerminalApi['projectSettings'] = {
+    read: (projectId) =>
+      client.request(IPC.projectSettingsRead, projectId) as ReturnType<
+        NodeTerminalApi['projectSettings']['read']
+      >,
+    writeShared: (projectId, doc) =>
+      client.request(IPC.projectSettingsWriteShared, projectId, doc) as Promise<boolean>,
+    updateLocal: (projectId, local) =>
+      client.request(IPC.projectSettingsUpdateLocal, projectId, local) as Promise<boolean>,
+    launchInfo: (projectId) =>
+      client.request(IPC.projectSettingsLaunchInfo, projectId) as ReturnType<
+        NodeTerminalApi['projectSettings']['launchInfo']
+      >,
+    // REAL: `ProjectSetupService.ensureFamilyTrusted` broadcasts IPC.projectTrustChanged on every
+    // approval, for each project id that asked.
+    onTrustChanged: (cb) => client.subscribe(IPC.projectTrustChanged, cb as Listener)
+  }
+
+  // REAL: registerProjectSetupHandlers (core) is wired on the same construction-order point as
+  // src/main/index.ts. Wire carries exactly `(projectId, kind, worktreePath?)` — no rootPath/
+  // projectName/ssh; the server derives those itself from its own workspace index, same as main.
+  const projectSetup: NodeTerminalApi['projectSetup'] = {
+    run: (projectId, kind, worktreePath) =>
+      client.request(IPC.projectSetupRun, projectId, kind, worktreePath) as ReturnType<
+        NodeTerminalApi['projectSetup']['run']
+      >,
+    cancel: (runKey) => client.request(IPC.projectSetupCancel, runKey) as Promise<boolean>,
+    consent: async (requestId, answer) => {
+      client.cast(IPC.projectSetupConsentSubmit, requestId, answer)
+    },
+    // Fails CLOSED on a rejection rather than throwing at the caller: over the relay this method is
+    // host-only, so a guest's call comes back E_FORBIDDEN — and "not trusted" is exactly the right
+    // answer for a client that may not raise the host's dialog.
+    requestTrust: (projectId, family) =>
+      client.request(IPC.projectSetupRequestTrust, projectId, family).then(
+        (v) => v === true,
+        () => false
+      ),
+    onConsentRequest: (cb) => client.subscribe(IPC.projectSetupConsentRequest, cb as Listener),
+    onConsentDismiss: (cb) => client.subscribe(IPC.projectSetupConsentDismiss, cb as Listener),
+    onEvent: (projectId, cb) => {
+      const unsub = client.subscribe(IPC.projectSetupEvent(projectId), cb as Listener)
+      client.cast(IPC.projectSetupSubscribe, projectId)
+      return () => {
+        unsub()
+        client.cast(IPC.projectSetupUnsubscribe, projectId)
+      }
+    }
+  }
+
+  // REAL: registerWorktreeSharedPathsHandlers (core), same construction point as main/server. Wire
+  // carries exactly `(projectId, worktreePath)`; the server reads the sharedPaths list itself.
+  const worktree: NodeTerminalApi['worktree'] = {
+    materializeShared: (projectId, worktreePath) =>
+      client.request(IPC.worktreeMaterializeShared, projectId, worktreePath) as ReturnType<
+        NodeTerminalApi['worktree']['materializeShared']
+      >
+  }
+
   const settings: SettingsApi = {
     load: () => client.request(IPC.settingsLoad) as Promise<Settings>,
     save: (s: Settings) => client.request(IPC.settingsSave, s) as Promise<void>
@@ -319,7 +393,7 @@ export function buildRealApi(
   // `/worktrees/…` at the filesystem root (the server usually runs as root, and git would create it).
   const userDataDir = (): Promise<string> => client.request(IPC.appUserDataDir) as Promise<string>
 
-  return { pty, workspace, settings, agent, userDataDir }
+  return { pty, workspace, projectSettings, projectSetup, worktree, settings, agent, userDataDir }
 }
 
 export function buildGitHubApi(
@@ -345,6 +419,10 @@ export function buildGitHubApi(
       >,
     clearCache: (projectId) =>
       client.request(IPC.githubIssuesClearCache, projectId) as Promise<void>,
+    projectAvatar: (projectId) =>
+      client.request(IPC.githubProjectAvatar, projectId) as ReturnType<
+        GitHubIssuesApi['projectAvatar']
+      >,
     onChanged: (projectId, listener) =>
       client.subscribe(IPC.githubIssuesChanged(projectId), listener as Listener)
   }
@@ -381,7 +459,7 @@ export function buildGitHubApi(
  */
 export function buildFilesApi(
   client: RpcClient
-): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context' | 'boardLog'> {
+): Pick<NodeTerminalApi, 'fs' | 'git' | 'files' | 'context' | 'boardLog' | 'logs'> {
   const fs: FsApi = {
     list: (dirPath) => client.request(IPC.fsList, dirPath) as ReturnType<FsApi['list']>,
     read: (filePath) => client.request(IPC.fsRead, filePath) as Promise<string>,
@@ -518,7 +596,22 @@ export function buildFilesApi(
     }
   }
 
-  return { fs, git, files, context, boardLog }
+  // Same core on the server, so the log ring is real over the bridge — the panel debugs the
+  // Server Edition process, which is exactly where a packaged-app console is least visible.
+  const logs: LogApi = {
+    snapshot: () => client.request(IPC.logSnapshot) as Promise<LogRecord[]>,
+    clear: () => client.cast(IPC.logClear),
+    onBatch: (cb) => {
+      const unsub = client.subscribe(IPC.logBatch, cb as Listener)
+      client.cast(IPC.logSubscribe)
+      return () => {
+        unsub()
+        client.cast(IPC.logUnsubscribe)
+      }
+    }
+  }
+
+  return { fs, git, files, context, boardLog, logs }
 }
 
 /**

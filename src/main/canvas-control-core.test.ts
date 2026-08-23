@@ -8,7 +8,11 @@ import {
   CONTROL_SHIM_SCRIPT
 } from './canvas-control-core'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
+import { PROJECT_TARGETABLE_VERBS } from './project-grants'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
+import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
+import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
+import { BROWSER_CAPABILITY_OFF_MESSAGE } from './browser-drive'
 
 describe('parseControlRequest', () => {
   it('accepts known verbs', () => {
@@ -21,6 +25,23 @@ describe('parseControlRequest', () => {
 
   it('rejects unknown verbs', () => {
     expect(parseControlRequest('nuke', {})).toEqual({ error: 'Unknown verb: nuke' })
+  })
+
+  it('open-project requires --cwd (issue #338, PR 1)', () => {
+    expect(parseControlRequest('open-project', {})).toEqual({
+      error: 'open-project requires --cwd <abs-path>'
+    })
+    expect(parseControlRequest('open-project', { cwd: '/tmp/repo' })).toEqual({
+      verb: 'open-project',
+      args: { cwd: '/tmp/repo' }
+    })
+  })
+
+  it('open-project IS destructive — its create/adopt/first-attach dialog is confirm-gated (PR 2)', () => {
+    // PR 1 left a tripwire here asserting the opposite; PR 2 added the early-handled dispatch
+    // block that reads `isDestructiveVerb(verb)` before its `confirmBusy()` refusal, so the
+    // membership and the dispatch now exist together (control-destructive.test.ts is the alarm).
+    expect(isDestructiveVerb('open-project')).toBe(true)
   })
 
   it('requires a target for write/close', () => {
@@ -256,6 +277,18 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts say a busy target is QUEUED, not refused (deliver-on-idle, PR 7)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // PR 7 replaced "busy target is refused with targetBusy" with a bounded deliver-on-idle
+      // queue. The prose must describe the queue, and must NOT reassert the pre-PR-7 claim — an
+      // orchestrating agent that reads "busy = hard refusal" polls or gives up instead of trusting
+      // the queue. This test reddens on a revert to the old sentence.
+      expect(body.toLowerCase()).toContain('queued')
+      expect(body).not.toMatch(/busy target answers `targetBusy` instead/i)
+      expect(body).not.toMatch(/delivered only\s+when the target is verifiably\s+idle/i)
+    }
+  })
+
   it('renders the RETRYABLE table — the table is the source, not a re-typed copy', () => {
     const body = buildCanvasSkillBody('/x/shim.sh')
     const yesAt = body.indexOf('Worth retrying')
@@ -268,6 +301,66 @@ describe('parseControlRequest', () => {
       const word = new RegExp(`\\b${kind}\\b`)
       expect(word.test(retryable ? yesSection : noSection), `${kind} in its group`).toBe(true)
       expect(word.test(retryable ? noSection : yesSection), `${kind} not in the other`).toBe(false)
+    }
+  })
+
+  // --- the `browser` verb's agent-facing docs (S8 PR 10 Task 10.1) -----------------------------
+  // The flag surface is code (`BROWSER_ACTION_KEYS` + the modifier list); the doc must carry every
+  // flag, so a flag added to the parser without a doc line reddens here rather than shipping unseen.
+  it('both agent-facing texts document the browser verb and its FULL flag surface', () => {
+    // The modifiers `parseBrowserArgs` reads off the arg map, listed here so the doc cannot drop one.
+    const modifierFlags = ['into', 'clear', 'press', 'times', 'scroll', 'wait', 'timeout', 'screenshot', 'cookies']
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('`browser --node')
+      // Every action key from the pure parser table appears as a documented `--<key>` flag.
+      for (const key of BROWSER_ACTION_KEYS) {
+        expect(body, `action --${key} documented`).toContain(`--${key}`)
+      }
+      for (const flag of modifierFlags) {
+        expect(body, `modifier --${flag} documented`).toContain(`--${flag}`)
+      }
+    }
+  })
+
+  it('both browser docs teach refs over selectors and state the real contract', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      const lower = body.toLowerCase()
+      // Teach @refs over CSS selectors (Task 10.1).
+      expect(body).toContain('@ref')
+      expect(lower).toContain('prefer')
+      expect(lower).toContain('selector')
+      // Verified-only + the per-project switch, OFF by default.
+      expect(lower).toContain('verified')
+      expect(lower).toMatch(/off by default/)
+      // Cookies are LOUDLY TRACED, and cookie WRITES are refused.
+      expect(lower).toContain('trace')
+      expect(lower).toMatch(/no set-cookie|writes are not|cannot set|no cookie-write/)
+      // Server Edition has no browser control.
+      expect(lower).toContain('server edition')
+    }
+  })
+
+  // The consent sentence is a contract string owned by browser-drive.ts (main). The doc must carry
+  // it BYTE-FOR-BYTE so an agent that reads it stops instead of burning a turn — importing the real
+  // constant here reddens the doc on any drift of the source string.
+  it('both browser docs carry the capability-off sentence verbatim from the source', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain(BROWSER_CAPABILITY_OFF_MESSAGE)
+    }
+  })
+
+  it('renders the browser retry table from BROWSER_RETRYABLE, not re-typed prose', () => {
+    const body = buildCanvasSkillBody('/x/shim.sh')
+    const yesAt = body.indexOf('Browser outcomes worth retrying')
+    const noAt = body.indexOf('Browser outcomes that are terminal')
+    expect(yesAt).toBeGreaterThan(-1)
+    expect(noAt).toBeGreaterThan(yesAt)
+    const yesSection = body.slice(yesAt, noAt)
+    const noSection = body.slice(noAt, body.indexOf('\n\n', noAt) === -1 ? undefined : body.indexOf('\n\n', noAt))
+    for (const [kind, retryable] of Object.entries(BROWSER_RETRYABLE)) {
+      const label = BROWSER_OUTCOME_LABEL[kind as keyof typeof BROWSER_OUTCOME_LABEL]
+      expect((retryable ? yesSection : noSection).includes(label), `${kind} label in its group`).toBe(true)
+      expect((retryable ? noSection : yesSection).includes(label), `${kind} label not in the other`).toBe(false)
     }
   })
 
@@ -289,10 +382,18 @@ describe('parseControlRequest', () => {
  * day the real `browser` verb lands, which is exactly when the PR body, the changelog and the
  * Settings copy all have to stop saying "nothing changes for anyone".
  */
-describe('the strict identity bucket is pre-positioned, not live', () => {
-  it('`browser` is not a verb this app has, so the bucket gates nothing today', () => {
+describe('the strict identity bucket now gates a real verb', () => {
+  it('`browser` IS a real verb (PR 7) AND is in the verified-only bucket', () => {
+    // The day the real `browser` verb lands, this assertion FLIPS from "not a verb" to "a real,
+    // strict verb" — which is exactly when the PR body, the changelog and the Settings copy stop
+    // saying "nothing changes for anyone". It requires `--node` and is otherwise validated by the
+    // pure `parseBrowserArgs` in the drive path.
     expect(STRICT_CONTROL_VERBS.has('browser')).toBe(true)
-    expect(parseControlRequest('browser', {})).toEqual({ error: 'Unknown verb: browser' })
+    expect(parseControlRequest('browser', {})).toEqual({ error: 'browser: --node <id> is required' })
+    expect(parseControlRequest('browser', { node: 'browser-1', read: 'title' })).toEqual({
+      verb: 'browser',
+      args: { node: 'browser-1', read: 'title' }
+    })
   })
 
   it('`open-browser` IS a real verb and is deliberately NOT in the bucket', () => {
@@ -342,5 +443,94 @@ describe('the messaging verbs parse', () => {
       error: 'notify does not accept --text'
     })
     expect(isDestructiveVerb('notify')).toBe(false)
+  })
+})
+
+describe('open-project + --project docs land with the dispatch (issue #338, spec §8)', () => {
+  const bodies: [string, string][] = [
+    ['skill', buildCanvasSkillBody('/x/shim.sh')],
+    ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
+  ]
+
+  it('both bodies document open-project: idempotent, confirmed (a denial is final), local-only, the returned id, no tab focus', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('open-project --cwd')
+      expect(body, name).toMatch(/[Ii]dempotent/)
+      // The confirm may be denied, and a denial is terminal — never advice to retry it.
+      expect(body, name).toMatch(/denial is final/)
+      // Local-only (B5) and no focus (B4), stated to the agent as facts.
+      expect(body, name).toMatch(/refused from an SSH project/)
+      expect(body, name).toMatch(/never\s+focuses/)
+      expect(body, name).toContain('projectId')
+    }
+  })
+
+  it('every --project-targetable verb line documents the flag — walked off the REAL set', () => {
+    // The drift alarm walks PROJECT_TARGETABLE_VERBS (src/main/project-grants.ts) rather than a
+    // re-typed list: a fourth verb joining the set without its doc line goes red here, and a doc
+    // line dropping the flag goes red too.
+    for (const [name, body] of bodies) {
+      for (const verb of PROJECT_TARGETABLE_VERBS) {
+        const line = body.split('\n').find((l) => l.includes(`\`${verb} `))
+        expect(line, `${name}: a doc line for ${verb}`).toBeTruthy()
+        expect(line, `${name}: ${verb} documents --project`).toContain('--project')
+      }
+    }
+  })
+
+  it('both bodies state the own-or-returned-id rule as fact, the cold-open contract, and the flag exclusion', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('any other id is refused')
+      // The cold-open sentence: a session opened into a non-active project starts when the user
+      // next views it — and the agent is told not to poll for that.
+      expect(body, name).toMatch(/starts when the user next views/)
+      expect(body, name).toMatch(/do not poll/)
+      expect(body, name).toMatch(/`--group`\/`--after` cannot\s+be combined with `--project`/)
+    }
+  })
+
+  it('the orchestration recipe gains the multi-repo pattern', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toContain('one project per repository')
+      expect(body, name).toContain('open-project --cwd <repo>')
+      // v1 has no cross-project links; the workaround is named.
+      expect(body, name).toMatch(/reader agent inside that project/)
+    }
+  })
+})
+
+describe('the --project clause tells the truth about travel (review #363 I-1 + M-3)', () => {
+  const bodies: [string, string][] = [
+    ['skill', buildCanvasSkillBody('/x/shim.sh')],
+    ['instructions', buildCanvasControlInstructions('/x/shim.sh')]
+  ]
+
+  it('no-travel is promised ONLY for a returned id; own id is documented as flag-omitted (travel included)', () => {
+    for (const [name, body] of bodies) {
+      // The clause slice: from the `--project` flag doc to the open-project entry that follows
+      // it in both bodies — anchored, so a caveat cannot drift into another paragraph (the
+      // recipe) and still count (M-3).
+      const start = body.indexOf('`--project <id>`')
+      const end = body.indexOf('open-project --cwd')
+      expect(start, `${name}: clause start`).toBeGreaterThan(-1)
+      expect(end, `${name}: clause before the open-project entry`).toBeGreaterThan(start)
+      const clause = body.slice(start, end)
+      // Own id ≡ the flag omitted, view switch included — the REAL behavior (Canvas.tsx's
+      // own-id leg falls through to the legacy path, travel included; pinned in
+      // control-open-project.source.test.ts). The doc must say the same, not more.
+      expect(clause, name).toMatch(/behaves exactly as if the flag\s+were omitted/)
+      expect(clause, name).toMatch(/view switch\s+included/)
+      // The no-travel promise exists only attached to the RETURNED id…
+      expect(clause, name).toMatch(
+        /returned to YOU\s+in this session, which never switches the\s+user'?s view/
+      )
+      // …and the old universal phrasing ("without switching the user's view", said of the whole
+      // flag) is gone from the body entirely.
+      expect(body, name).not.toMatch(/without switching/)
+      // M-3: the do-not-poll caveat and the refusal rule live in the clause ITSELF — dropping
+      // them here while the recipe's copy survives is red.
+      expect(clause, name).toMatch(/do not poll/)
+      expect(clause, name).toContain('any other id is refused')
+    }
   })
 })
