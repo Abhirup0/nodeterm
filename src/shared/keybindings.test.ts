@@ -49,6 +49,13 @@ describe('registry invariants', () => {
     expect(COMMANDS_BY_ID.get('canvas.fitAll')?.defaultBindings.darwin).toEqual([])
   })
 
+  it('reopen-last-closed defaults to Cmd+Shift+T and works in a terminal', () => {
+    const def = COMMANDS_BY_ID.get('app.reopenLastClosed')
+    expect(def?.defaultBindings.darwin).toEqual(['Cmd+Shift+T'])
+    expect(def?.defaultBindings.other).toEqual(['Cmd+Shift+T'])
+    expect(def?.allowInTerminal).toBe(true)
+  })
+
   it('pins the WHOLE table — every row PR 2 will dispatch on, in source order', () => {
     // Source order is contractual (first match wins in the resolver), so the array order is
     // asserted too. A dropped flag — allowInTerminal above all — reds this test.
@@ -73,16 +80,24 @@ describe('registry invariants', () => {
         darwin: ['Cmd+Slash'], other: ['Cmd+Slash'], allowInTerminal: true },
       { id: 'view.kanbanToggle', title: 'Toggle kanban board', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+B'], other: ['Cmd+Shift+B'], allowInTerminal: true },
+      { id: 'view.focusMode', title: 'Toggle focus mode', group: 'General', scope: 'canvas',
+        darwin: ['Cmd+Shift+F'], other: ['Cmd+Shift+F'], allowInTerminal: true },
       { id: 'panel.explorer', title: 'Toggle explorer panel', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+E'], other: ['Cmd+Shift+E'], allowInTerminal: true },
       { id: 'panel.sourceControl', title: 'Toggle source control panel', group: 'General',
         scope: 'app', darwin: ['Cmd+Shift+G'], other: ['Cmd+Shift+G'], allowInTerminal: true },
       { id: 'panel.sessions', title: 'Pin sessions sidebar', group: 'General', scope: 'app',
         darwin: ['Cmd+Shift+L'], other: ['Cmd+Shift+L'], allowInTerminal: true },
+      { id: 'app.reopenLastClosed', title: 'Reopen last closed', group: 'General', scope: 'app',
+        darwin: ['Cmd+Shift+T'], other: ['Cmd+Shift+T'], allowInTerminal: true },
       { id: 'canvas.undo', title: 'Undo', group: 'Canvas', scope: 'canvas',
         darwin: ['Cmd+Z'], other: ['Cmd+Z'] },
       { id: 'canvas.redo', title: 'Redo', group: 'Canvas', scope: 'canvas',
         darwin: ['Cmd+Shift+Z'], other: ['Cmd+Shift+Z', 'Cmd+Y'] },
+      { id: 'canvas.goBack', title: 'Go back', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+['], other: ['Cmd+['] },
+      { id: 'canvas.goForward', title: 'Go forward', group: 'Canvas', scope: 'canvas',
+        darwin: ['Cmd+]'], other: ['Cmd+]'] },
       { id: 'canvas.deleteSelection', title: 'Delete selection', group: 'Canvas', scope: 'canvas',
         darwin: ['Delete', 'Backspace'], other: ['Delete', 'Backspace'], allowBareKey: true },
       { id: 'canvas.fitAll', title: 'Fit all nodes in view', group: 'Canvas', scope: 'canvas',
@@ -118,6 +133,14 @@ describe('registry invariants', () => {
         darwin: [], other: [] },
       { id: 'node.newFile', title: 'New file…', group: 'Nodes', scope: 'canvas',
         darwin: [], other: [] },
+      { id: 'node.focusLeft', title: 'Focus node to the left', group: 'Nodes', scope: 'canvas',
+        darwin: ['Cmd+ArrowLeft'], other: ['Ctrl+Shift+ArrowLeft'], allowInTerminal: true },
+      { id: 'node.focusRight', title: 'Focus node to the right', group: 'Nodes', scope: 'canvas',
+        darwin: ['Cmd+ArrowRight'], other: ['Ctrl+Shift+ArrowRight'], allowInTerminal: true },
+      { id: 'node.focusUp', title: 'Focus node above', group: 'Nodes', scope: 'canvas',
+        darwin: ['Cmd+ArrowUp'], other: ['Ctrl+Shift+ArrowUp'], allowInTerminal: true },
+      { id: 'node.focusDown', title: 'Focus node below', group: 'Nodes', scope: 'canvas',
+        darwin: ['Cmd+ArrowDown'], other: ['Ctrl+Shift+ArrowDown'], allowInTerminal: true },
       { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
         darwin: ['Cmd+W'], other: ['Cmd+W'], allowInTerminal: true, allowWhileTyping: true },
       { id: 'node.toggleMarkdown', title: 'Toggle markdown view', group: 'Nodes', scope: 'app',
@@ -331,12 +354,12 @@ describe('findKeybindingConflicts', () => {
 
 describe('sanitizeKeybindingOverrides', () => {
   it('passes through a clean override map', () => {
-    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+T'] }, true)
-    expect(r).toEqual({ overrides: { 'node.newTerminal': ['Cmd+Shift+T'] }, warnings: [] })
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+Y'] }, true)
+    expect(r).toEqual({ overrides: { 'node.newTerminal': ['Cmd+Shift+Y'] }, warnings: [] })
   })
   it('canonicalizes spellings', () => {
-    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['shift+cmd+t'] }, true)
-    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['shift+cmd+y'] }, true)
+    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+Y'] })
   })
   it('drops unknown ids with a warning, keeps the rest', () => {
     const r = sanitizeKeybindingOverrides(
@@ -346,8 +369,8 @@ describe('sanitizeKeybindingOverrides', () => {
     expect(r.warnings.some((w) => w.includes('node.selfDestruct'))).toBe(true)
   })
   it('drops an invalid binding string but keeps valid siblings', () => {
-    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+T', 'T'] }, true)
-    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+    const r = sanitizeKeybindingOverrides({ 'node.newTerminal': ['Cmd+Shift+Y', 'T'] }, true)
+    expect(r.overrides).toEqual({ 'node.newTerminal': ['Cmd+Shift+Y'] })
     expect(r.warnings.length).toBe(1)
   })
   it('a non-empty list that is entirely invalid falls back to defaults, not disabled', () => {
@@ -418,6 +441,15 @@ describe('resolveCommandForKeyEvent', () => {
   it('matches a default app chord', () => {
     expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: 'k' }), ctx(), {}, true))
       .toBe('app.commandPalette')
+  })
+  it('matches the bracket chords from the KEY the DOM reports', () => {
+    // The registry spells these `Cmd+[` / `Cmd+]` because the resolver compares against
+    // `e.key`. Spelled as the `e.code` values (`BracketLeft`/`BracketRight`) they would
+    // normalize to 'BRACKETLEFT' and match no keydown at all — a silently dead chord.
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: '[' }), ctx(), {}, true))
+      .toBe('canvas.goBack')
+    expect(resolveCommandForKeyEvent(ev({ metaKey: true, key: ']' }), ctx(), {}, true))
+      .toBe('canvas.goForward')
   })
   it('typing blocks commands without allowWhileTyping, allows the flagged ones', () => {
     expect(resolveCommandForKeyEvent(

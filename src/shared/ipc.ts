@@ -455,6 +455,7 @@ export const IPC = {
   // SAS to display); renderer → main to approve/reject. Until approved, the host serves no
   // pty/fs RPCs or input frames, so a leaked offer cannot grant silent access.
   remoteHostPeerPending: 'remote:host:peer-pending',
+  remoteHostPeerPendingCleared: 'remote:host:peer-pending-cleared',
   remoteHostApprove: 'remote:host:approve',
   remoteHostReject: 'remote:host:reject',
   // Host canvas mirror: renderer pushes its serialized active-project canvas to main;

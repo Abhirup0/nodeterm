@@ -47,7 +47,12 @@ function subscribe<A extends unknown[] = []>(channel: string) {
 const subscribeMutation = subscribe<[CanvasMutation]>(IPC.remoteHostApplyMutation)
 // Fan-out subscriber for the connection-approval prompt (main → host renderer when a client
 // finishes the handshake; carries the SAS to show in the approval dialog).
-const subscribePeerPending = subscribe<[{ sas: string | null; id: string }]>(IPC.remoteHostPeerPending)
+const subscribePeerPending = subscribe<[{ sas: string | null; id: string; pub?: string | null }]>(
+  IPC.remoteHostPeerPending
+)
+const subscribePeerPendingCleared = subscribe<[{ id: string | null; pub?: string | null }]>(
+  IPC.remoteHostPeerPendingCleared
+)
 
 // New relay tunnel (Stage 4). Non-per-id host events reuse the fan-out helper; per-connection
 // client events (sas/approved/frame/closed) attach directly per connectionId.
@@ -562,8 +567,9 @@ const api: NodeTerminalApi = {
     sendCanvasState: (state) => ipcRenderer.send(IPC.remoteHostCanvasState, state),
     onApplyMutation: subscribeMutation,
     onPeerPending: subscribePeerPending,
-    approve: (id: string) => ipcRenderer.send(IPC.remoteHostApprove, { id }),
-    reject: (id: string) => ipcRenderer.send(IPC.remoteHostReject, { id }),
+    onPeerPendingCleared: subscribePeerPendingCleared,
+    approve: (id: string, pub?: string) => ipcRenderer.send(IPC.remoteHostApprove, { id, pub }),
+    reject: (id: string, pub?: string) => ipcRenderer.send(IPC.remoteHostReject, { id, pub }),
     setPhoneAccess: (enabled) => ipcRenderer.send(IPC.remoteStandingHostSet, enabled)
   },
   relayHost: {

@@ -7,8 +7,10 @@
  */
 import {
   getEffectiveBindings, sanitizeKeybindingOverrides, normalizeTerminalShortcutPolicy,
+  resolveCommandForKeyEvent, COMMANDS_BY_ID,
   type CommandId, type KeybindingOverrides, type TerminalShortcutPolicy
 } from '@shared/keybindings'
+import type { ShortcutKeyEvent } from '@shared/shortcut'
 import { shortcutKeyParts } from '@shared/shortcut'
 import { isMacPlatform } from '@shared/platform-utils'
 import { DEFAULT_SETTINGS } from '@shared/types'
@@ -105,6 +107,33 @@ export function dictationBinding(): string {
  *  unknown value must degrade to `app-first` (today's behavior) rather than reach dispatch. */
 export function terminalShortcutPolicy(): TerminalShortcutPolicy {
   return normalizeTerminalShortcutPolicy(useSettings.getState().settings.terminalShortcutPolicy)
+}
+
+/** Should this keydown, seen INSIDE a focused terminal, bypass xterm and bubble to the window
+ *  dispatcher? True only when the live registry resolves it to an app/canvas command that is
+ *  allowed in terminals. This is the caller-side matcher for `terminalKeyAction`'s `registryOwns`
+ *  (the one-matcher discipline `ownsProjectJump` set): xterm's own keymap CONSUMES some chords —
+ *  modified arrows become `CSI 1;N x` and the event is cancelled — so without this, a registry
+ *  chord like Ctrl+Shift+Arrow never reaches the dispatcher from the one place it targets.
+ *  Everything the resolver already encodes applies for free: under terminal-first the resolver
+ *  refuses non-terminal-scope commands (the chord stays with the shell), an unbound/remapped
+ *  chord follows the live overrides, and `kanbanOpen` refuses canvas-scope commands so a modal
+ *  terminal over the board keeps its bytes. Terminal-SCOPE commands are excluded — their local
+ *  listeners own them and this helper must not reroute their chords. */
+export function terminalChordBubbles(e: ShortcutKeyEvent, kanbanOpen: boolean): boolean {
+  const id = resolveCommandForKeyEvent(
+    e,
+    {
+      typing: false,
+      terminal: true,
+      terminalFirst: terminalShortcutPolicy() === 'terminal-first',
+      kanbanOpen
+    },
+    activeKeybindingOverrides(),
+    isMacPlatform()
+  )
+  if (id === null) return false
+  return COMMANDS_BY_ID.get(id)?.scope !== 'terminal'
 }
 
 /** Once per command, ever (persisted in settings so Server Edition shares it): record that

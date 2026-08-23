@@ -69,6 +69,25 @@ describe('save → load round trip (v3)', () => {
     expect(loaded.projects[1]).toMatchObject({ id: 'p2', name: 'inline' })
   })
 
+  // The breadcrumb trail is one person's camera history: it must survive a full app restart on THIS
+  // machine (index entry) and never reach the git-shared project file every teammate clones.
+  it('keeps a project\'s breadcrumbs machine-local: they survive a fresh store, the shared file never carries them', async () => {
+    const breadcrumbs = [
+      { nodeId: 'term-1', at: 1_700_000_000_000, note: 'looked at the pty' },
+      { nodeId: 'term-2', at: 1_700_000_060_000, note: '' }
+    ]
+    await new WorkspaceStore().save(ws([project({ cwd: projRoot, breadcrumbs })]))
+
+    const fileRaw = await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8')
+    expect(fileRaw).not.toContain('breadcrumbs')
+    expect(fileRaw).not.toContain('looked at the pty')
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].breadcrumbs).toEqual(breadcrumbs)
+
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].breadcrumbs).toEqual(breadcrumbs)
+  })
+
   it('does not rewrite (or bump rev of) an unchanged project file', async () => {
     const store = new WorkspaceStore()
     const w = ws([project({ cwd: projRoot })])

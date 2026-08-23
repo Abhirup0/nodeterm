@@ -6028,6 +6028,101 @@ button.group-node__setup:disabled {
   gap: 8px;
 }
 
+/* ---- Resume-where-you-left-off card (breadcrumb trail, once per project activation) ---- */
+/* Anchored in .flow-wrap under the controls cluster (top: 54px, 34px tall) rather than beside it,
+   so the two never overlap; the left side is the sessions sidebar's (top: 54px, left: 14px).
+   z-index 11 sits above the canvas and BELOW the sidebar (12) — a card the user has not dismissed
+   must never cover a panel they deliberately opened — and below the kanban overlay (25), where the
+   canvas and everything on it is correctly hidden. */
+.resume-card {
+  position: absolute;
+  top: 100px;
+  right: 14px;
+  z-index: 11;
+  width: 260px;
+  max-width: calc(100vw - 28px);
+  padding: 8px 8px 6px;
+  background: rgba(var(--menu-rgb), 0.96);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, calc(0.45 * var(--shadow-k)));
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.resume-card__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 6px 4px;
+}
+
+.resume-card__title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.resume-card__close {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.resume-card__close:hover {
+  background: var(--panel-header);
+  color: var(--text);
+}
+
+.resume-card__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.resume-card__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 6px;
+  background: transparent;
+  border: none;
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.resume-card__row:hover {
+  background: var(--panel-header);
+}
+
+.resume-card__note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-card__time {
+  flex: none;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
 /* ---- Claude usage indicator (in the bottom-left cluster) ---- */
 .usage-indicator {
   /* Positioned — so the z-index rules below still apply and the popover anchors here — but PLACED
@@ -11040,6 +11135,83 @@ button.group-node__setup:disabled {
   scrollbar-width: thin;
 }
 
+/* ================================= Focus mode (issue #78) ==================================
+   One terminal fills the window. The surface is a fixed opaque layer ABOVE the canvas (z 40 —
+   over the sidebar's 12 and the dock's 20, under menus at 46 and dialogs at 55/70), and the
+   focused `.term-node` is REPARENTED into it (TerminalNode's layout effect) — same element,
+   same xterm, no respawn. Chrome is not "hidden": it simply sits under the opaque surface, and
+   the dock is lifted above it (z 41) on pointer proximity / hover. */
+.focus-surface {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: none;
+}
+.focus-surface.is-active {
+  display: block;
+  background: var(--canvas-bg);
+}
+/* The reparented node root: fill the surface edge to edge. width/height 100% still resolve
+   against the surface; the absolute inset pins it regardless of the flow-node sizing props. */
+.focus-surface .term-node {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+}
+/* Canvas-only affordances are meaningless off-canvas: resize grips, link handles, flow ports. */
+.focus-surface .react-flow__resize-control,
+.focus-surface .bridge-handle,
+.focus-surface .react-flow__handle {
+  display: none;
+}
+.focus-exit {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 2;
+  border: 1px solid var(--border);
+  background: rgba(var(--menu-rgb), 0.92);
+  color: var(--text);
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 4px 12px;
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.16s ease-out;
+}
+.focus-exit:hover {
+  opacity: 1;
+}
+/* The canvas itself goes display:none, not merely covered (review finding on #267): an
+   IntersectionObserver does not model occlusion, so covered-but-displayed terminals kept
+   reporting visible, kept their WebGL contexts, and a full budget then refused the one node
+   filling the screen (tryGrant only evicts HIDDEN holders). display:none zeroes their geometry,
+   they report hidden, the budget reclaims them — and 16+ occluded terminals stop rendering
+   frames nobody can see. Their size votes go null via applyFit's focus gate, like the board. */
+body.focus-mode .flow-wrap {
+  display: none;
+}
+/* Dock reveal: proximity (Canvas toggles `focus-reveal-bottom` on mousemove) or direct hover
+   keeps it up once revealed. Lifted above the surface, faded via opacity only. */
+body.focus-mode .dock {
+  z-index: 41;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease-out;
+}
+body.focus-mode.focus-reveal-bottom .dock,
+body.focus-mode .dock:hover {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (prefers-reduced-motion: reduce) {
+  .focus-exit,
+  body.focus-mode .dock {
+    transition: none;
+  }
+}
 /* S6 — account identity + provenance pills (AccountIdentityPills). One cluster wherever a Codex
    account is shown (settings, node chrome, create/switch menus) so an account reads identically
    everywhere. Theme-aware via --tint-rgb / semantic tokens; no new colour language. */

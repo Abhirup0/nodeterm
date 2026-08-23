@@ -1684,6 +1684,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     suspends the same items, so ⌘M / ⌘⇧B / ⌘, / off-mac Ctrl+W reach the recorder instead of the
     menu item that owns them; `menuStandsDown(false, …)` is `policyStandsDown(…)` by construction.
     The two INTERCEPT thunks stay independent parameters — only the menu ORs them.
+    **The CLOSE leg has one extra, policy-independent stand-down** (issue #383, off-mac only):
+    `closeStandsDownInTerminal(isMac, terminalFocused)` — off-mac `node.close`'s default chord is
+    Ctrl+W, readline's kill-word, so while a terminal has focus the close intercept lets the chord
+    fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
+    shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
+    keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
+    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
+    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -1753,6 +1761,34 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   (`getInternalNode`), not our node object — `measured` reaches our state one render later (via
   `onNodesChange`), so our copy lies about nodes the store has long sized. Unknowable size ⇒ the
   camera **stands still**; never fall back to a bare `fitView` there, that IS the origin jump.
+- **Breadcrumb trail** (`renderer/lib/breadcrumbs.ts` — all the pure logic lives there) — every
+  deliberate `goToNode` landing records a `NavStop` ({nodeId, at, note}) for the ACTIVE project, and
+  **Cmd+[ / Cmd+]** (`canvas.goBack` / `canvas.goForward`, bound in `shared/keybindings.ts`) plus the
+  two Dock buttons walk that trail; on a project activation a once-per-app-run **`ResumeCard`** offers
+  the last few distinct stops ("resume where you left off"). Load-bearing facts:
+  - **The trail is MACHINE-LOCAL and rides `IndexEntryV3.breadcrumbs`, never `.nodeterm/project.json`** —
+    the same tier as `viewport` / `defaultAccountId` / `capabilityAck`, for the same reason: a repo must
+    not carry one person's camera history to everyone who clones it. `fileToProject` therefore ignores a
+    `breadcrumbs` field found in the shared file (a forgery), and `projectToFile` never writes one.
+  - **The cursor is not persisted either.** Only `list` rides the entry; `BreadcrumbState.index` is
+    renderer-only and resets to the tip on activation. A step records no breadcrumb and rewrites no
+    `project.json` — the only persistence it triggers is the ordinary `onMove` viewport persist
+    (machine-local, same as any camera move; see the Zoom-chords bullet).
+  - **Cap 20** (`BREADCRUMB_CAP`, oldest dropped) and a **3 s dedupe** (`BREADCRUMB_DEDUPE_MS`, so a
+    re-triggered focus on the already-current node is a no-op — `recordBreadcrumb` returns the SAME
+    object, which is the caller's skip test). Recording past a back-step drops the forward tail, exactly
+    like a browser tab.
+  - **`stepBreadcrumb` skips stops whose node is gone** (never lands on a dead entry; no reachable stop
+    ⇒ `null` ⇒ the camera stands still), and `goToNode` **refuses to record ephemeral `subagent` / `loop`
+    nodes**: they are merged into the `<ReactFlow nodes>` prop but never persisted (cleared on the next
+    turn), so a breadcrumb for one is an id nothing can ever resolve, burning a slot forever.
+  - The `note` is a **snapshot** taken at record time (agent nodes reuse the sessions sidebar's own
+    `sessionStatusKind` + `STATE_LABEL` phrasing, preferring session name → node title → agent label), so
+    a later state change never retroactively rewrites history.
+  - **Surfaces:** Server Edition works as-is (shared renderer code + `WorkspaceStore`, which both
+    shells boot — no new bridge member); mobile is N/A (no canvas, no camera); the kanban board is
+    likewise N/A, and a project that activates ON the board neither shows nor spends its
+    once-per-run resume card (it would sit invisible under the opaque overlay).
 - **Command palette** (`CommandPalette.tsx`): ⌘/Ctrl+K; `Canvas.buildCommands` (create,
   switch project, jump to node by title/tag, open file…).
 - **Explorer** (`ExplorerPanel.tsx`, 🗂 / ⌘⇧E): lazy file tree of the active project `cwd`
@@ -1991,7 +2027,10 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   named in `menuItemIdsToSuspend` — Minimize (`MENU_ITEM_ID_MINIMIZE`), **Toggle Kanban Board
   (`MENU_ITEM_ID_KANBAN`, ⌘⇧B)** and **Settings (`MENU_ITEM_ID_SETTINGS`, ⌘,)** on every platform,
   plus Close (`MENU_ITEM_ID_CLOSE`) on Windows/Linux — because a disabled item suppresses its
-  accelerator and only then do those chords fall through to the terminal, or to the recorder. The
+  accelerator and only then do those chords fall through to the terminal, or to the recorder.
+  Off-mac the Close item is ALSO disabled whenever a terminal has focus, policy or no policy
+  (`closeStandsDownInTerminal`, issue #383): its role owns the Ctrl+W accelerator, and that
+  keystroke in a shell is readline's kill-word. The
   recorder leg is why ⌘M is bindable at all, and it fixed a live misfire: ⌘⇧B pressed into an armed
   recorder used to open the kanban board behind the Settings dialog, and ⌘, to re-open Settings.
   Kanban and Settings are
