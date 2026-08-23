@@ -2525,11 +2525,20 @@ export interface RemoteHostApi {
    * `approve()` before any of the client's pty/fs RPCs are served; `sas` is the channel
    * verification code to display. Returns an unsubscribe function.
    */
-  onPeerPending(listener: (info: { sas: string | null; id: string }) => void): () => void
-  /** Approve the pending client (by its pending id) → the host begins serving its pty/fs RPCs. */
-  approve(id: string): void
-  /** Reject the pending client (by its pending id) → the connection is dropped. */
-  reject(id: string): void
+  onPeerPending(
+    listener: (info: { sas: string | null; id: string; pub?: string | null }) => void
+  ): () => void
+  /** The pending prompt expired host-side (120 s) — the dialog must drop or re-arm, else its
+   *  Approve is a silent no-op against a dead id (issue #372). */
+  onPeerPendingCleared(
+    listener: (info: { id: string | null; pub?: string | null }) => void
+  ): () => void
+  /** Approve the pending client → the host begins serving its pty/fs RPCs. `pub` (the peer's
+   *  stable box key) survives the phone's reconnect churn where the per-attach `id` does not —
+   *  pass both when known. */
+  approve(id: string, pub?: string): void
+  /** Reject the pending client → the connection is dropped. Same id/pub matching as approve. */
+  reject(id: string, pub?: string): void
   /**
    * Start/stop the standing (phone) relay host so a paired phone can reach this Mac from anywhere.
    * Mirrors `settings.phoneAccessEnabled`.
