@@ -140,12 +140,12 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
       <NodeResizer minWidth={NODE_MIN_SIZES.diff.width} minHeight={NODE_MIN_SIZES.diff.height} isVisible={selected} color={data.color} />
 
       <div className="term-node__header">
-        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <span className="term-node__title-text" title={`${rel} — ${commitOid ? commitOid.slice(0, 7) : staged ? 'staged' : 'working'}`}>
           {rel.split('/').pop()}
           <span className="diff-node__tag">{commitOid ? commitOid.slice(0, 7) : staged ? 'staged' : 'changes'}</span>
         </span>
         <span className="term-node__spacer" />
+        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <button
           className="term-node__close"
           title="Close"

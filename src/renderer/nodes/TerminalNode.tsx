@@ -4438,9 +4438,6 @@ export function TerminalNode({
             ))}
           </div>
         )}
-        {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
-          <MaximizeButton id={id} maximized={!!data.premaxRect} />
-        )}
         {editingTitle ? (
           <input
             className="term-node__title nodrag"
@@ -4744,6 +4741,9 @@ export function TerminalNode({
               </button>
             </Tooltip>
           )}
+        {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
+          <MaximizeButton id={id} maximized={!!data.premaxRect} />
+        )}
         <button
           className="term-node__close"
           title="Close (ends the session)"

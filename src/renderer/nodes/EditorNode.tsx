@@ -263,7 +263,6 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       />
 
       <div className="term-node__header">
-        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <span className="term-node__title-text" title={filePath}>
           {fileName}
           {!isImage && !isPdf && dirty ? ' ●' : ''}
@@ -290,6 +289,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </button>
           </>
         )}
+        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <button
           className="term-node__close"
           title="Close"
