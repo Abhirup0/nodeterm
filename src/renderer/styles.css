@@ -1255,6 +1255,37 @@ body,
   flex-shrink: 0;
 }
 
+/* Maximize toggle (issue #399): the macOS green traffic light, next to the color dot. The arrow
+   glyphs appear on header hover — same behavior as the real thing. */
+.term-node__maximize {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  background: #28c840;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.term-node__maximize svg {
+  width: 8px;
+  height: 8px;
+  fill: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+}
+
+.term-node__header:hover .term-node__maximize svg {
+  opacity: 1;
+}
+
+.term-node__maximize:hover {
+  background: #2fd948;
+}
+
 .term-node__title {
   flex: 1;
   background: transparent;

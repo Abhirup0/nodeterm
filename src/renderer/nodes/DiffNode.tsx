@@ -10,6 +10,7 @@ import { sshFs } from '../terminal/ssh-fs'
 import { useSession } from '../session/session'
 import type { CanvasNode } from '../state/workspace'
 import { tooLargeSize, formatBytes } from '@shared/fsLimits'
+import { MaximizeButton } from './MaximizeButton'
 
 /**
  * A Monaco diff editor node for a changed file. Staged diff = HEAD vs index;
@@ -139,6 +140,7 @@ export function DiffNode({ id, data, selected }: NodeProps<CanvasNode>) {
       <NodeResizer minWidth={NODE_MIN_SIZES.diff.width} minHeight={NODE_MIN_SIZES.diff.height} isVisible={selected} color={data.color} />
 
       <div className="term-node__header">
+        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <span className="term-node__title-text" title={`${rel} — ${commitOid ? commitOid.slice(0, 7) : staged ? 'staged' : 'working'}`}>
           {rel.split('/').pop()}
           <span className="diff-node__tag">{commitOid ? commitOid.slice(0, 7) : staged ? 'staged' : 'changes'}</span>

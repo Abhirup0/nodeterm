@@ -71,6 +71,11 @@ export interface NodeData {
   hideFanout?: boolean
   /** Expanded height to restore when un-collapsing (kept out of the persisted size). */
   expandedHeight?: number
+  /**
+   * Set while the node is maximized to the viewport (issue #399): the ROOT-space rect the
+   * restore toggle gives back. Persisted — see CanvasNodeState.premaxRect.
+   */
+  premaxRect?: { x: number; y: number; width: number; height: number }
   /** One-shot command run once when the terminal first opens (not persisted). */
   initialCommand?: string
   /**
@@ -1187,6 +1192,89 @@ function fitAncestorChain(nodes: CanvasNode[], groupId: string | undefined): Can
 }
 
 /**
+ * Maximize (issue #399): resize `nodeId` to occupy `rect` — the visible viewport in ROOT/flow
+ * coordinates, computed by the caller from the camera (`maximizeTargetRect`) — remembering the
+ * node's own rect in `data.premaxRect` so `restoreMaximizedNode` can put everything back. This is
+ * a real resize, not a camera move: the node goes through its normal resize path, so a terminal
+ * reflows and the pty gets its new cols/rows.
+ *
+ * Grouped nodes work too: the new position is written parent-relative and every ancestor frame is
+ * re-fitted (`fitAncestorChain`) in the SAME transform — `extent:'parent'` would otherwise clamp a
+ * child bigger than its frame into an inverted range (the snap `groupSelectedNodes` documents).
+ *
+ * Refused (returned unchanged): unknown id, a group frame (maximizing the container would drag its
+ * whole subtree), a collapsed node (header-only; expand first), and a node already maximized.
+ */
+export function maximizeNodeToRect(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node || node.type === 'group' || node.data.collapsed || node.data.premaxRect) return nodes
+  // The remembered position is ROOT-space, not parent-relative: re-fitting the frame around the
+  // maximized child MOVES the frame's origin (it hugs), so a parent-relative restore would come
+  // back a few px off — and root-space also survives the frame being ungrouped meanwhile.
+  const root = rootPosition(node, nodes)
+  const premaxRect = {
+    x: root.x,
+    y: root.y,
+    width: nodeW(node) || (node.style?.width as number) || 0,
+    height: nodeH(node) || (node.style?.height as number) || 0
+  }
+  if (!(premaxRect.width > 0) || !(premaxRect.height > 0)) return nodes
+  // rect is root-space; a grouped node's position is relative to its frame, so subtract the
+  // ancestor origins (root position minus own offset = the parent chain's origin).
+  const originX = root.x - node.position.x
+  const originY = root.y - node.position.y
+  const next = nodes.map((n) =>
+    n.id === nodeId
+      ? {
+          ...n,
+          position: { x: rect.x - originX, y: rect.y - originY },
+          width: rect.width,
+          height: rect.height,
+          style: { ...n.style, width: rect.width, height: rect.height },
+          // Drop the stale measurement in the same tick: flowToNodeStates prefers `measured` over
+          // `width`/`height`, and a commit racing the re-measure would persist the OLD size.
+          measured: undefined,
+          data: { ...n.data, premaxRect, expandedHeight: rect.height }
+        }
+      : n
+  )
+  return fitAncestorChain(next, node.parentId)
+}
+
+/**
+ * The toggle's second click: give the node back the rect `maximizeNodeToRect` remembered — the
+ * exact canvas spot it occupied, converted from root-space into wherever its parent chain sits
+ * now — and re-fit the ancestor frames back down around it. No-op when the node is missing or
+ * not maximized.
+ */
+export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  const prev = node?.data.premaxRect
+  if (!node || !prev) return nodes
+  const root = rootPosition(node, nodes)
+  const originX = root.x - node.position.x
+  const originY = root.y - node.position.y
+  const next = nodes.map((n) =>
+    n.id === nodeId
+      ? {
+          ...n,
+          position: { x: prev.x - originX, y: prev.y - originY },
+          width: prev.width,
+          height: prev.height,
+          style: { ...n.style, width: prev.width, height: prev.height },
+          measured: undefined,
+          data: { ...n.data, premaxRect: undefined, expandedHeight: prev.height }
+        }
+      : n
+  )
+  return fitAncestorChain(next, node.parentId)
+}
+
+/**
  * Wraps nodes that share ONE container in a new group frame. The members may themselves be
  * frames, so this is how a nested tree is built. The frame is created beside its members inside
  * their current parent and every root-space position stays fixed. Mixed containers and
@@ -1514,6 +1602,7 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         collapsed,
         hideFanout: n.hideFanout,
         expandedHeight: n.size.height,
+        premaxRect: n.premaxRect,
         shell: n.shell,
         cwd: n.cwd,
         text: n.text,
@@ -1604,7 +1693,8 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         ssh: n.data.ssh,
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
-        worktree: n.data.worktree
+        worktree: n.data.worktree,
+        premaxRect: n.data.premaxRect
       }
     })
 }
