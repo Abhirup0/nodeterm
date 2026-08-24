@@ -109,17 +109,20 @@ if not exist "%VSWHERE%" (
 )
 
 set "VSWHERE_ARGS=-products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -latest -property installationPath"
-call "%VSWHERE%" %VSWHERE_ARGS% >nul 2>nul
-if errorlevel 1 (
-    echo [FAILED] vswhere could not query Visual Studio installations.
-    exit /b 1
-)
-
 rem vswhere returns exit code 0 even when the query matches nothing. Capture the first path and
 rem test the value itself; checking only ERRORLEVEL silently accepts a machine without C++ tools.
 set "VS_INSTALLATION="
+rem CALL is intentional: production uses vswhere.exe, but the cmd.exe tests inject a .cmd fixture
+rem that must return control to this script.
 for /f "usebackq delims=" %%I in (`call "%VSWHERE%" %VSWHERE_ARGS% 2^>nul`) do if not defined VS_INSTALLATION set "VS_INSTALLATION=%%I"
 if not defined VS_INSTALLATION (
+    rem FOR /F does not preserve the nested command's exit status. Query again only after an empty
+    rem capture so the retry status classifies query failure versus no matching installation.
+    call "%VSWHERE%" %VSWHERE_ARGS% >nul 2>nul
+    if errorlevel 1 (
+        echo [FAILED] vswhere could not query Visual Studio installations.
+        exit /b 1
+    )
     echo [MISSING] No Visual Studio installation with the C++ build tools component was found.
     echo   Install:  winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
     exit /b 1

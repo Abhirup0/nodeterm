@@ -2102,9 +2102,13 @@ extra dependency, and is what electron-updater's generic provider expects on Win
 Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-builder skips
 signing when no cert env is present). `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
-winget hints (it never installs machine-wide tools itself, and refuses to run elevated) and runs
-`npm ci`. `.github/workflows/win-package-smoke.yml` is a **workflow_dispatch-only** packaging
-smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** Windows
+winget hints (it never installs machine-wide tools itself, and the full bootstrap refuses to run
+elevated) and runs `npm ci`. Its `--check-vs-build-tools` mode is the narrow exception used by
+`quality-windows`: it branches before the elevation refusal, runs only the VS C++ probe, and exits
+before the Node / Python / `npm ci` steps. Fixture injection additionally requires the explicit
+`NODETERM_BOOTSTRAP_TESTING=1` sentinel. `.github/workflows/win-package-smoke.yml` is a
+**workflow_dispatch-only** packaging smoke on windows-latest — build only, never publishes.
+**Follow-ups, in order:** Windows
 auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev feed — blocked
 on signing: an unsigned auto-update is a downgrade in trust), a release.yml Windows job, and the
 fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
