@@ -17,6 +17,7 @@ import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
+import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
 import { isSafeLocalTranscriptPath } from '../core/claude-accounts-core'
@@ -135,8 +136,10 @@ export function wireAgentStatus(
   // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
   // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
   // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
-  // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
-  // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
+  // onTaskNotification/onToolResult: both are claude transcript features (the task-notification
+  // sniff exists because claude's hooks never send the async subagent's real end; codex's
+  // SubagentStop hook IS the real end, so its subagent cards need no transcript sniffing —
+  // and the declined-ask rescue is claude-only too).
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
   const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
 
@@ -215,7 +218,35 @@ export function wireAgentStatus(
     // on the host; the server has no SSH-project manager (see the module header), so every node it
     // serves is local and there is nothing to skip.
     if (agentId === 'gemini' || agentId === 'codex') {
-      const p = payload as { session_id?: string; transcript_path?: string; hook_event_name?: string }
+      const p = payload as {
+        session_id?: string
+        transcript_path?: string
+        hook_event_name?: string
+        agent_id?: string
+      }
+      // Codex subagent events (spawn_agent), BEFORE the meter track — same rule as the desktop:
+      // every agent_id-tagged event carries the PARENT's session_id with the CHILD's rollout as
+      // transcript_path (measured, codex-cli 0.146.0), so falling through would re-point the
+      // parent's context meter at the child's rollout. The shared subagentTail instance means the
+      // existing nodeSubagents cleanup paths cover codex ids too.
+      if (agentId === 'codex' && p.agent_id) {
+        if (p.hook_event_name === 'SubagentStart') {
+          subagentTail.trackFile(
+            p.agent_id,
+            safeTranscriptPath(p.transcript_path),
+            createCodexSubagentFormatter
+          )
+          if (nodeId) {
+            const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+            set.add(p.agent_id)
+            nodeSubagents.set(nodeId, set)
+          }
+        } else if (p.hook_event_name === 'SubagentStop') {
+          subagentTail.finish(p.agent_id)
+          if (nodeId) nodeSubagents.get(nodeId)?.delete(p.agent_id)
+        }
+        return
+      }
       const transcriptPath = safeTranscriptPath(p.transcript_path)
       const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
       if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)

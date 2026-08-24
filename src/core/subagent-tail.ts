@@ -28,6 +28,12 @@ interface Tracked {
    * this the torn line's halves each fail JSON.parse and the whole line is silently lost.
    */
   carry?: Buffer | null
+  /**
+   * Per-entry chunk formatter (trackFile's). Deliberately per ENTRY, not per tail instance:
+   * a codex formatter is STATEFUL (it suppresses the fork-replay prefix of the child rollout),
+   * so two concurrent subagents sharing one closure would gate each other's output.
+   */
+  fmt?: (text: string) => string
 }
 
 function textOf(content: unknown): string {
@@ -134,6 +140,17 @@ export function splitCompleteLines(data: Buffer): { text: string; carry: Buffer 
 
 export interface SubagentTail {
   track(toolUseId: string, transcriptPath: string | undefined): void
+  /**
+   * Tail an already-resolved transcript FILE — no meta-dir matching, no claude formatting.
+   * The codex leg: SubagentStart hands us the child rollout's path directly, and `newFormatter`
+   * builds that entry's (stateful) line formatter. Same 400ms tick, cap, carry and finish
+   * semantics as track().
+   */
+  trackFile(
+    toolUseId: string,
+    filePath: string | undefined,
+    newFormatter?: () => (text: string) => string
+  ): void
   finish(toolUseId: string): void
 }
 
@@ -193,7 +210,7 @@ export function createSubagentTail(
       const data = e.carry?.length ? Buffer.concat([e.carry, buf]) : buf
       const { text, carry } = splitCompleteLines(data)
       e.carry = carry
-      const out = formatSubagentChunk(text)
+      const out = (e.fmt ?? formatSubagentChunk)(text)
       if (out) emit(toolUseId, out + '\n')
     } catch {
       // file may not exist yet / transient read error
@@ -217,12 +234,22 @@ export function createSubagentTail(
       tracked.set(toolUseId, { dir, file: null, offset: 0 })
       if (!timer) timer = setInterval(tick, 400) // only runs while subagents are active
     },
+    trackFile(toolUseId, filePath, newFormatter) {
+      if (!filePath || tracked.has(toolUseId)) return
+      tracked.set(toolUseId, {
+        dir: path.dirname(filePath),
+        file: filePath,
+        offset: 0,
+        fmt: newFormatter?.()
+      })
+      if (!timer) timer = setInterval(tick, 400)
+    },
     finish(toolUseId) {
       // The file is complete now, so a held-back carry is a real final line that just lacks
       // its trailing newline — flush it after the final read instead of dropping it.
       const flushCarry = (e: Tracked): void => {
         if (!e.carry?.length) return
-        const out = formatSubagentChunk(e.carry.toString('utf-8'))
+        const out = (e.fmt ?? formatSubagentChunk)(e.carry.toString('utf-8'))
         e.carry = null
         if (out) emit(toolUseId, out + '\n')
       }

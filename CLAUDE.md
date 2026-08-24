@@ -933,7 +933,8 @@ else, and its context links must keep classifying across restarts).
   process re-advertises the same endpoint (restart handoff). A `setRawListener` channel feeds
   the per-node context-window meter (`context-tail.ts` — **one tail per agent**, each with its own
   `parse` dep: claude's usage records, `codexContextParse`, `geminiContextParse`) and the subagent
-  live-transcript (`subagent-tail.ts`, claude only). The same events feed the **agent-status mirror**
+  live-transcript (`subagent-tail.ts` — claude via meta-dir `track`, codex via `trackFile` with the
+  stateful `codex-subagent-format.ts` formatter). The same events feed the **agent-status mirror**
   (`core/agent-status-mirror.ts`) the mobile companion reads; the mirror carries an optional
   `settings` block (`claudePermissionMode`/`autoSupported`/`claudeAccounts`) so the phone can
   launch agents with the desktop's permission mode + managed accounts, and SSH slices get their
@@ -1109,6 +1110,28 @@ else, and its context links must keep classifying across restarts).
   (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
   `.meta.json`), tails it read-only, formats each line (assistant text + tool calls + results),
   and streams chunks over `agent:subagent-activity` into the store.
+  **Codex** (2026-08-24, `spawn_agent` collaboration — issue #401) joined via its **native
+  `SubagentStart`/`SubagentStop` hooks**, measured on codex-cli 0.146.0, keyed by `agent_id` (NOT
+  `tool_use_id` — nothing correlates the spawn tool call with the Start it launches; agent_id is
+  stable across the child's life, parallel + nested spawns included, and nested children fire
+  through the same subscription so every card connects flat to the owning terminal node). Facts a
+  refactor must not lose: **(1)** every agent_id-tagged codex event carries the PARENT's
+  `session_id` with the CHILD's rollout as `transcript_path` — both raw listeners skip the
+  context-meter track for them (else the parent's meter re-points at the child) and `normalizeCodex`
+  returns null for child tool events (else a child Bash event flips a finished parent back to
+  RUNNING after an async spawn); pinned by `hook-verified-parity.test.ts`. **(2)** the spawn task
+  text is **encrypted end-to-end** (`tool_input.message` and the NEW_TASK payload are Fernet blobs)
+  — there is no `taskLabel`; the readable `Task name:` header reaches the card via the activity
+  stream instead. **(3)** the live tail is `subagentTail.trackFile` (the path is handed to us —
+  no meta-dir matching) with the **stateful, per-entry** `createCodexSubagentFormatter`
+  (`core/codex-subagent-format.ts`): a spawn child is a FORK of the parent thread, so its rollout
+  opens with a replay of the parent's context, suppressed until the
+  `inter_agent_communication_metadata` / NEW_TASK gate — per entry, because two concurrent
+  subagents sharing one closure would gate each other. **(4)** codex's `SubagentStop` IS the real
+  end (no async-launch-ack trap, no task-notification sniffing), carrying
+  `last_assistant_message` as the card's result. Remote (SSH) codex nodes get cards but no live
+  activity yet (the child rollout is on the host; claude's `remote-subagent-tail` has no codex
+  counterpart — follow-up).
 - **/loop, /schedule & /cron node** (agents in `RECURRING_CAPABLE`) — detected from the **tools**
   the agent invokes (robust; users often phrase it in natural language so the prompt rarely starts
   with the slash): `PreToolUse` for `Skill` (skill ∈ loop/schedule/cron), `CronCreate` (→ cron,

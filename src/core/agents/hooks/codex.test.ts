@@ -18,7 +18,7 @@ describe('buildCodexHooksAndTrust', () => {
     expect(buildCodexHooksAndTrust(null, 'cmd', '/h/hooks.json')).toBeNull()
   })
 
-  it('appends the managed handler to all six events + emits one trust entry per event', () => {
+  it('appends the managed handler to all eight events + emits one trust entry per event', () => {
     const command = buildManagedCommand('/home/u/.nodeterm/agent-hooks/codex.sh')
     const built = buildCodexHooksAndTrust({}, command, '/home/u/.codex/hooks.json')
     expect(built).not.toBeNull()
@@ -82,7 +82,7 @@ describe('buildCodexHooksAndTrust', () => {
     expect(built.config.hooks?.PreCompact).toBeUndefined()
   })
 
-  // GOLDEN: these six hashes were read from a LIVE codex config.toml on a host where the status
+  // GOLDEN: the first six hashes were read from a LIVE codex config.toml on a host where the status
   // hooks fire correctly (codex-cli 0.114.0). Locking them guards the exact JSON canonicalization
   // codex hashes against — any drift here silently breaks every codex status badge.
   it('matches the byte-exact trust hashes codex accepts in the field', () => {
@@ -95,7 +95,18 @@ describe('buildCodexHooksAndTrust', () => {
       pre_tool_use: 'sha256:4518d886ca33ee61eba15a15e6348df03891a37f496a9a29a7eaae8b05623eed',
       permission_request: 'sha256:c15e31e91f0ad513f1dd37bbbf5e1263cb0ba7a819b16dd60bc85f576d5bcb85',
       post_tool_use: 'sha256:ec6d59bff150ef00c30f7ef63abdf3c5a839a12f98ebe5dc542ecdfcc2da9d2f',
-      stop: 'sha256:bd559fa7db307ab42dac8fa42b49c46b3daa50f944adad2f0a97140a70c70081'
+      stop: 'sha256:bd559fa7db307ab42dac8fa42b49c46b3daa50f944adad2f0a97140a70c70081',
+      // The subagent pair was verified live differently: a capture home whose trust entries were
+      // computed by this same algorithm had codex-cli 0.146.0 FIRE SubagentStart/SubagentStop
+      // (spawn_agent measurement run, 2026-08-24) — i.e. codex accepted hashes of this shape for
+      // these labels. The values below pin the canonicalization for this command string.
+      subagent_start: 'sha256:9034d6329983b581fc9f996344766d6129321c5c33369a79c9971aa8879d3d5f',
+      subagent_stop: 'sha256:88c207ae65d9d016967fce19b01735b5700f827cbfdb48692e42305f7427f0b6'
     })
+  })
+
+  it('subscribes the subagent pair (spawn_agent fan-out) with snake_case labels', () => {
+    expect(CODEX_EVENTS).toContain('SubagentStart')
+    expect(CODEX_EVENTS).toContain('SubagentStop')
   })
 })
