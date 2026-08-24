@@ -234,6 +234,7 @@ import {
   viewportForRect,
   type FocusableNode
 } from '../lib/nodeFocus'
+import { maximizeTargetRect } from '../lib/nodeMaximize'
 import {
   recordBreadcrumb,
   stepBreadcrumb,
@@ -453,6 +454,8 @@ import {
   accountsForProject,
   sshAccountsHint,
   ungroupNodes,
+  maximizeNodeToRect,
+  restoreMaximizedNode,
   type CanvasNode
 } from '../state/workspace'
 import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
@@ -6128,6 +6131,37 @@ export function Canvas() {
     [viewCenter]
   )
 
+  /**
+   * The header maximize toggle's chord (issue #399). Same origin rule as `moveNodeFocus`: the
+   * node the keyboard is actually IN (hover-dwell focuses a terminal without selecting it), else
+   * the single selected node — a multi-selection is ambiguous, so it declines and the chord
+   * falls through. Declines (false) rather than half-acts everywhere the button would not show:
+   * group frames, collapsed nodes, an unmeasured container.
+   */
+  const toggleMaximizeCommand = useCallback((): boolean => {
+    const nodes = nodesRef.current
+    const focusedId = document.activeElement
+      ?.closest(`.${FLOW_NODE_CLASS}`)
+      ?.getAttribute('data-id')
+    const selected = nodes.filter((n) => n.selected)
+    const target =
+      (focusedId ? nodes.find((n) => n.id === focusedId) : undefined) ??
+      (selected.length === 1 ? selected[0] : undefined)
+    if (!target || target.type === 'group') return false
+    if (target.data.premaxRect) {
+      setNodes((ns) => restoreMaximizedNode(ns, target.id))
+      markDirty()
+      return true
+    }
+    if (target.data.collapsed) return false
+    const wrap = flowWrapRef.current?.getBoundingClientRect()
+    const rect = wrap ? maximizeTargetRect(getViewport(), wrap.width, wrap.height) : null
+    if (!rect) return false
+    setNodes((ns) => maximizeNodeToRect(ns, target.id, rect))
+    markDirty()
+    return true
+  }, [setNodes, markDirty, getViewport])
+
   // ONE window keydown for every registry command + the legacy gestures. The deps live in a
   // ref refreshed each render so the listener is registered once; handlers return whether
   // they claimed the chord (an unavailable surface falls through to the platform).
@@ -6207,7 +6241,8 @@ export function Canvas() {
       'node.focusLeft': () => moveNodeFocus('left'),
       'node.focusRight': () => moveNodeFocus('right'),
       'node.focusUp': () => moveNodeFocus('up'),
-      'node.focusDown': () => moveNodeFocus('down')
+      'node.focusDown': () => moveNodeFocus('down'),
+      'node.maximize': toggleMaximizeCommand
       // node.close / node.toggleMarkdown: main-process intercepted on desktop; deliberately
       // no renderer handler (the browser owns ⌘W in the Server Edition — see bridge/stubs.ts).
       // terminal.* / scm.commit / speech.dictation: owned by their local listeners.

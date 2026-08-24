@@ -8,6 +8,7 @@
 import { useReactFlow, useStoreApi } from '@xyflow/react'
 import { Tooltip } from '../components/Tooltip'
 import { IconMaximize, IconRestoreSize } from '../components/icons'
+import { commandTooltip } from '../lib/keybindingOverrides'
 import { markWorkspaceDirty } from '../state/workspaceDirty'
 import { maximizeNodeToRect, restoreMaximizedNode, type CanvasNode } from '../state/workspace'
 import { maximizeTargetRect } from '../lib/nodeMaximize'
@@ -31,7 +32,10 @@ export function MaximizeButton({ id, maximized }: { id: string; maximized: boole
 
   return (
     <Tooltip
-      label={maximized ? 'Restore previous size and position' : 'Maximize — fill the visible canvas'}
+      label={commandTooltip(
+        maximized ? 'Restore previous size and position' : 'Maximize — fill the visible canvas',
+        'node.maximize'
+      )}
     >
       <button
         className="term-node__maximize nodrag"

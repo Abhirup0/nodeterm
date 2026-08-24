@@ -141,6 +141,8 @@ describe('registry invariants', () => {
         darwin: ['Cmd+ArrowUp'], other: ['Ctrl+Shift+ArrowUp'], allowInTerminal: true },
       { id: 'node.focusDown', title: 'Focus node below', group: 'Nodes', scope: 'canvas',
         darwin: ['Cmd+ArrowDown'], other: ['Ctrl+Shift+ArrowDown'], allowInTerminal: true },
+      { id: 'node.maximize', title: 'Maximize / restore node', group: 'Nodes', scope: 'canvas',
+        darwin: ['Cmd+Shift+Enter'], other: ['Cmd+Shift+Enter'], allowInTerminal: true },
       { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
         darwin: ['Cmd+W'], other: ['Cmd+W'], allowInTerminal: true, allowWhileTyping: true },
       { id: 'node.toggleMarkdown', title: 'Toggle markdown view', group: 'Nodes', scope: 'app',
