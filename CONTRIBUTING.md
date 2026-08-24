@@ -143,6 +143,14 @@ that file advertises presents nothing forever when the file is old or unreadable
 hook script alone could heal itself, the same node proved itself through one client and was refused
 through another for the life of the session.
 
+**A stream error is not a throw you can catch.** When a write to `process.stdout`/`stderr` fails —
+`EPIPE` down a closed pipe, `EIO` after macOS revokes a closed terminal's tty — node reports it by
+emitting `'error'` on the stream a tick later, and the default for an unhandled `'error'` event is
+to kill the process. The stack it carries was captured at the write, so the crash *reads* as if it
+happened synchronously at your `console.log`, and wrapping that call in `try/catch` changes nothing
+(measured on node 22). If you write to a stream that can go away, attach an `'error'` listener and
+latch the writer off — `installLogSink` (`src/core/log-sink.ts`) is the worked example. Issue #382.
+
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
