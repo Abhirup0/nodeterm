@@ -4338,9 +4338,11 @@ export function Canvas() {
           disposeTerminalOnUnmount(sessionForProject(useProjects.getState().activeProjectId ?? '').id, n.id)
         if (n.type === 'terminal') transport.destroy(n.id)
         // Permanent deletion → drop the node's persisted agent status (sessionId/session/
-        // unread/loop). Node unmount no longer does this, so deletion must. The loop card's
-        // UI overrides live in agentNodes and are skipped by unmount's clearForParent.
+        // unread/loop) AND its subagent fan-out. Node unmount does neither (issue #402: an
+        // unmount is a project switch, not an end — a mid-run card cleared there never came
+        // back), so deletion must do both.
         useAgentStatus.getState().remove(n.id)
+        useAgentNodes.getState().clearForParent(n.id)
         useAgentNodes.getState().clearLoop(n.id)
         // The open-project attach-consent mirror dies with its caller (review #363 M-1) —
         // symmetric with main's grant ledger, which clears on the same teardown (ptyDestroy).
@@ -9320,6 +9322,9 @@ export function Canvas() {
             disposeTerminalOnUnmount(sessionForProject(projectId).id, id) // node may be parked from the project switch
             transport.destroy(id)
             useAgentStatus.getState().remove(id)
+            // Unmount no longer clears the fan-out (issue #402), so this cross-project delete
+            // must — the node unmounted at the project switch with its cards kept in the store.
+            useAgentNodes.getState().clearForParent(id)
             // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent
             // mirror dies with the node.
             clearAttachConsent(id)
@@ -9387,8 +9392,10 @@ export function Canvas() {
           remoteKill?.()
           // Nothing else to clean up: with no node anywhere, there is no canvas entry to remove and
           // no parked terminal to dispose. Persisted agent status is dropped anyway, since a
-          // session id can outlive the node it belonged to.
+          // session id can outlive the node it belonged to — and so is any subagent fan-out the
+          // store still holds for the id (kept across unmounts since issue #402).
           useAgentStatus.getState().remove(nodeId)
+          useAgentNodes.getState().clearForParent(nodeId)
           setConfirm(null)
         }
       })
@@ -10354,7 +10361,7 @@ export function Canvas() {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
       // End the tmux sessions of every terminal in the deleted project, and drop their
-      // persisted agent status (node unmount no longer removes it).
+      // persisted agent status and subagent fan-out (node unmount removes neither — issue #402).
       const project = store.getProject(id)
       project?.nodes.forEach((n) => {
         if ((n.kind ?? 'terminal') === 'terminal') {
@@ -10362,6 +10369,7 @@ export function Canvas() {
           transport.destroy(n.id)
         }
         useAgentStatus.getState().remove(n.id)
+        useAgentNodes.getState().clearForParent(n.id)
       })
       // SSH project: the per-node `transport.destroy` above only ends the REMOTE session for
       // the (mounted) ACTIVE project's nodes — a non-active project has no live local sessions,
