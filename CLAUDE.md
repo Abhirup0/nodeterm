@@ -1765,7 +1765,10 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   deliberate `goToNode` landing records a `NavStop` ({nodeId, at, note}) for the ACTIVE project, and
   **Cmd+[ / Cmd+]** (`canvas.goBack` / `canvas.goForward`, bound in `shared/keybindings.ts`) plus the
   two Dock buttons walk that trail; on a project activation a once-per-app-run **`ResumeCard`** offers
-  the last few distinct stops ("resume where you left off"). Load-bearing facts:
+  the last few distinct stops ("resume where you left off") — **opt-in via
+  `settings.showResumeCard` (Settings → Appearance, default OFF)**: while disabled the
+  once-per-app-run slot is not spent, so enabling it later still shows the card on the next
+  activation; the chords/Dock buttons work regardless. Load-bearing facts:
   - **The trail is MACHINE-LOCAL and rides `IndexEntryV3.breadcrumbs`, never `.nodeterm/project.json`** —
     the same tier as `viewport` / `defaultAccountId` / `capabilityAck`, for the same reason: a repo must
     not carry one person's camera history to everyone who clones it. `fileToProject` therefore ignores a
