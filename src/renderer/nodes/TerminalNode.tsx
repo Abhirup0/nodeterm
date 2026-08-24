@@ -3881,19 +3881,18 @@ export function TerminalNode({
     // honestly keyed on what its closure captures.
   }, [termKey])
 
-  /**
-   * Remove transient subagent render overrides when this React node leaves the active canvas.
-   * Live agent status deliberately survives the unmount: selecting a session in another project
-   * swaps the whole active canvas, but the session we left is still alive and must remain Running
-   * or Waiting in the cross-project sidebar. Real node deletion removes the status explicitly in
-   * `Canvas.deleteNodes`; a later hook/session event owns every other state transition.
-   */
-  useEffect(
-    () => () => {
-      useAgentNodes.getState().clearForParent(id)
-    },
-    [id]
-  )
+  // There is deliberately NO unmount-scoped store cleanup here (issue #402). Live agent status
+  // survives the unmount — selecting a session in another project swaps the whole active canvas,
+  // but the session we left is still alive and must remain Running or Waiting in the cross-project
+  // sidebar. The subagent fan-out survives for the same reason: an unmount says the COMPONENT went
+  // away, not that the work did, and a still-running subagent's card cleared here could never come
+  // back (`start` only fires from live hook events, and a subagent already past its PreToolUse
+  // emits no second one — the card was gone for the rest of its run). Canvas's ephemeral-node memo
+  // skips cards whose parent is not on the active canvas, so a kept entry renders nothing while
+  // away and simply reappears on switch-back. Clearing is owned by the signals that actually mean
+  // "this fan-out is over": a genuine new turn / `sessionPhase === 'end'` in Canvas's status
+  // listener, and every permanent-removal path (`deleteNodes`, cross-project `closeSession`,
+  // `deleteProject`), which must call `clearForParent` explicitly now that unmount does not.
 
   // glyphgrid origin sync. React Flow rewrites these two props per frame while the node is
   // dragged; `setOrigin` is change-gated inside the engine, and a drag is exactly the gesture the
