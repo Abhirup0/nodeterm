@@ -247,3 +247,36 @@ export function nextFreePosition(
   }
   return { x: left + size.width / 2, y: bottom + 80 + size.height / 2 }
 }
+
+/**
+ * What an explicit "Open folder…" should do when it lands on a project already showing the
+ * `unavailable` placeholder (issue #385).
+ *
+ * The placeholder is minted at load time when the ref can't be read, and a save deliberately
+ * emits a header-only ref for it — never a file — so a stale placeholder can't clobber a source
+ * that might come back. Correct, but it also means a project whose file the user DELETED can
+ * never write one again: nothing clears the flag for a local project, so it stays unreadable at
+ * every later load. The tab goes inert (`tabClickAction` → 'ignore') while the sessions sidebar,
+ * which knows nothing of `unavailable`, still switches to it — the asymmetry issue #385 reports.
+ *
+ * Opening the folder is a deliberate act, so it is the right moment to break the loop — but only
+ * on evidence:
+ *   - `absent`  → the file really is gone. Clear the flag so the next save recreates it; an empty
+ *                 canvas is the truthful state, since that is what deleting the file left.
+ *   - `present` → it reads again (restored, a git checkout). Rehydrate from disk rather than
+ *                 clearing the flag, or an empty placeholder would be saved over real nodes.
+ *   - `unreadable` → we cannot tell. Change nothing; the placeholder is exactly the right answer.
+ */
+export type UnavailableRecovery = 'clear' | 'rehydrate' | 'keep'
+
+export function unavailableRecovery(
+  project: { unavailable?: boolean; ssh?: unknown },
+  fileState: 'present' | 'absent' | 'unreadable'
+): UnavailableRecovery {
+  // Remote projects are not ours to judge from a local stat — their file lives on the host, and
+  // their placeholder is cleared by the reconnect path instead.
+  if (!project.unavailable || project.ssh) return 'keep'
+  if (fileState === 'absent') return 'clear'
+  if (fileState === 'present') return 'rehydrate'
+  return 'keep'
+}

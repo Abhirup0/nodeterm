@@ -21,6 +21,10 @@ const ROWS = {
     keywords: ['appearance', 'theme', 'light', 'dark', 'mode', 'colour', 'color', 'chrome']
   },
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
+  resumeCard: {
+    title: 'Resume card',
+    keywords: ['resume', 'where you left off', 'breadcrumb', 'card', 'popup', 'trail']
+  },
   menuItems: {
     title: 'Node menu items',
     keywords: ['menu', 'context', 'right click', 'items', 'hide']
@@ -82,6 +86,7 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
   const accent = useSettings((s) => s.settings.accent)
   const hiddenNodeMenuItems = useSettings((s) => s.settings.hiddenNodeMenuItems)
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
+  const showResumeCard = useSettings((s) => s.settings.showResumeCard)
   const update = useSettings((s) => s.update)
   return (
     <SettingsSection
@@ -127,6 +132,19 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
             ))}
           </div>
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.resumeCard}>
+        <FieldRow
+          label="Resume card"
+          description='Offer a "Resume where you left off" card when a project is activated, listing your last few node landings. Cmd+[ / Cmd+] and the Dock arrows walk the same trail either way.'
+          control={
+            <Switch
+              checked={showResumeCard}
+              onChange={(v) => update({ showResumeCard: v })}
+              ariaLabel="Show the resume card on project activation"
+            />
+          }
+        />
       </SearchableRow>
       {/* One wrapper element per row: the section body puts a divider and its own padding around
           every direct child, so a heading + caption + list must arrive as a single node. */}

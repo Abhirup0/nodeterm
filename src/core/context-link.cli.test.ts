@@ -460,3 +460,52 @@ describe('context-link shim keeps credentials off curl\'s command line', () => {
     expect(argv).not.toContain('X-Nodeterm-Node-Token')
   })
 })
+
+// Issue #367, context-link leg. The sh fragment is the SAME one the canvas-control shim embeds
+// (hook-sandbox-hint-sh.ts) and the full platform/transport matrix lives in
+// canvas-control-shim.test.ts; what this suite pins is that the CONTEXT shim wired it into ITS
+// failure tail — with its own generic sentence kept byte-for-byte for the non-sandbox case.
+describe('codex-sandbox self-diagnosis (issue #367)', () => {
+  function deadRun(env: Record<string, string>): Promise<{ stderr: string; code?: number }> {
+    return run('/bin/sh', [shim, 'list'], {
+      env: {
+        PATH: process.env.PATH ?? '',
+        NODETERM_NODE_ID: 'node-A',
+        NODETERM_HOOK_SOCK: join(dir, 'nobody-listens.sock'),
+        NODETERM_HOOK_TOKEN: 'x',
+        ...env
+      }
+    }).then(
+      () => ({ stderr: '' }),
+      (e) => e as { stderr: string; code?: number }
+    )
+  }
+
+  it('under the sandbox, a dead transport names the sandbox + escalated retry, not "unreachable"', async () => {
+    const err = await deadRun({ CODEX_SANDBOX_NETWORK_DISABLED: '1' })
+    expect(err.code).toBe(1)
+    expect(err.stderr).toContain("Codex's sandbox blocked this connection to nodeterm")
+    expect(err.stderr).toContain('escalated permissions')
+    expect(err.stderr).not.toContain('Could not read linked context (nodeterm unreachable).')
+  })
+
+  // The mutation guard: drop the env-var branch and the case above reddens; invert it and this does.
+  it('without the env var the original genuine-unreachable sentence stands', async () => {
+    const err = await deadRun({})
+    expect(err.stderr).toContain('Could not read linked context (nodeterm unreachable).')
+    expect(err.stderr).not.toContain("Codex's sandbox")
+  })
+
+  it('a healthy endpoint is untouched by the sandbox var (failure-path only)', async () => {
+    const out = await run('/bin/sh', [shim, 'list'], {
+      env: {
+        PATH: process.env.PATH ?? '',
+        NODETERM_NODE_ID: 'node-A',
+        NODETERM_HOOK_PORT: String(hookServer.getPort()),
+        NODETERM_HOOK_TOKEN: hookServer.getToken(),
+        CODEX_SANDBOX_NETWORK_DISABLED: '1'
+      }
+    })
+    expect(out.stdout).toContain('Builder')
+  })
+})

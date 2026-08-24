@@ -140,6 +140,38 @@ describe('per-project capability fields in the shared file', () => {
   })
 })
 
+describe('breadcrumbs are MACHINE-LOCAL, like viewport/capabilityAck', () => {
+  it('round-trips through the index entry and never reaches the shared file', () => {
+    const stop = { nodeId: 'term-abc', at: 1000, note: 'terminal · t' }
+    const p = project({ cwd: '/a/foo', breadcrumbs: [stop] })
+    const { index, files } = splitWorkspace(
+      { version: 2, activeProjectId: 'p1', projects: [p] },
+      () => 1,
+      '2026-08-15T00:00:00.000Z'
+    )
+    expect(index.entries[0].breadcrumbs).toEqual([stop])
+    expect(serializeProjectFile(files.get('/a/foo')!)).not.toContain('breadcrumbs')
+
+    const restored = fileToProject(files.get('/a/foo')!, {
+      id: 'p1', cwd: '/a/foo', breadcrumbs: [stop]
+    })
+    expect(restored.breadcrumbs).toEqual([stop])
+
+    // A file-borne `breadcrumbs` (forgery — a repo carrying navigation history) is never read.
+    const forged = fileToProject(
+      { ...files.get('/a/foo')!, breadcrumbs: [stop] } as never,
+      { id: 'p1', cwd: '/a/foo' }
+    )
+    expect(forged.breadcrumbs).toBeUndefined()
+  })
+
+  it('an entry with no breadcrumbs adds no bytes to the committed file', () => {
+    const f = projectToFile(project(), 1, 'ts')
+    expect('breadcrumbs' in f).toBe(false)
+    expect(serializeProjectFile(f)).not.toContain('breadcrumbs')
+  })
+})
+
 describe('sameProjectContent', () => {
   it('ignores rev and savedAt, sees node changes', () => {
     const a = projectToFile(project(), 1, '2026-01-01T00:00:00.000Z')

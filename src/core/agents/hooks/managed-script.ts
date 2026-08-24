@@ -87,6 +87,7 @@
 import { codexThreadIdentityResolverSh } from '../../codex-thread-identity-sh'
 import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
 import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
+import { NODE_TOKEN_READ_SH } from '../node-token-sh'
 
 /**
  * Bumped by hand whenever this script's CONTRACT with the server changes. Not a git sha and not a
@@ -107,9 +108,13 @@ import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
  *     and any session the PHONE spawns on that host, which runs the host's installed script — stay
  *     `legacy` until the project reconnects.
  */
-export const MANAGED_SCRIPT_REVISION = 3
+export const MANAGED_SCRIPT_REVISION = 4
 /** The first revision that reads NODETERM_NODE_TOKEN_DIR and sends the node token (PR #195). */
 export const MIN_TOKEN_AWARE_REVISION = 3
+/* rev 4 (issue #384): the token read moved to the shared resolver in `node-token-sh.ts`, which
+ * falls back to the standard token dirs when the endpoint file advertises none. The floor stays 3
+ * on purpose — rev 3 CAN read a token, which is the only question `MIN_TOKEN_AWARE_REVISION`
+ * answers; calling it stale would tell a working session to reconnect for nothing. */
 
 function safeIdentityRoot(): string | null {
   try {
@@ -172,13 +177,10 @@ export function buildManagedScript(
     '# ever present its own. Absent (pre-v2 endpoint, pre-upgrade session, remote write that failed)',
     '# leaves it EMPTY, and an empty header is exactly what the server reads as `legacy`: the POST',
     '# still happens and nothing about it fails. Kept in a function because the failover below has to',
-    '# RE-read it against the dir of the endpoint it adopted.',
-    'nt_read_node_token() {',
-    '  nt_node_token=""',
-    '  if [ -n "$NODETERM_NODE_TOKEN_DIR" ] && [ -n "$NODETERM_NODE_ID" ]; then',
-    '    nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID" 2>/dev/null)',
-    '  fi',
-    '}',
+    '# RE-read it against the dir of the endpoint it adopted — which is why the resolver takes that',
+    '# endpoint as an argument (see node-token-sh.ts, and issue #384 for the population its',
+    '# fallbacks exist for: an endpoint file that is still LIVE but advertises no dir at all).',
+    NODE_TOKEN_READ_SH,
     'nt_read_node_token',
     HOOK_CURL_HEADERS_SH,
     'payload=$(cat)',
@@ -332,8 +334,10 @@ export function buildManagedScript(
     '    # The token is re-read HERE, per candidate, not once at the top: it must come from the dir',
     '    # the endpoint we just adopted advertises. Reusing the primary\'s (or the previous',
     '    # candidate\'s) would send our kid to a server that cannot judge it — harmless, but also',
-    '    # pointless, and it would hide a real identity behind a legacy.',
-    '    nt_read_node_token',
+    '    # pointless, and it would hide a real identity behind a legacy. The adopted path is passed',
+    '    # in for the same reason: when that endpoint advertises no dir, the fallback must derive',
+    '    # from ITS directory, never from the one we are walking away from.',
+    '    nt_read_node_token "$nt_ep"',
     '    nt_request_post && return 0',
     '  done',
     '  return 1',

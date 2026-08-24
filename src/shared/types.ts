@@ -592,6 +592,15 @@ export interface BoardLogApi {
   onChanged(projectId: string, cb: () => void): () => void
 }
 
+/** One recorded "deliberate landing" on a node — the breadcrumb trail's unit. Frozen at record
+ *  time (nodeId only, no live pointer): a deleted node is filtered at render, a renamed one shows
+ *  its current title (read live), but the `note` stays a snapshot of what was happening then. */
+export interface NavStop {
+  nodeId: string
+  at: number
+  note: string
+}
+
 /** A project is one canvas/page: its own nodes, viewport, and default working dir. */
 export interface Project {
   id: string
@@ -645,6 +654,10 @@ export interface Project {
    * lineage survives restarts; deletable like any selected edge.
    */
   ropes?: BridgeLink[]
+  /** Camera navigation history — deliberate node landings, newest last. MACHINE-LOCAL: rides
+   *  `IndexEntryV3.breadcrumbs`, never emitted into the shared project file (a repo must not carry
+   *  one person's wandering camera history). */
+  breadcrumbs?: NavStop[]
   /**
    * Closed projects are hidden from the tab bar but kept on disk with all their nodes (and their
    * tmux sessions left running) so they can be reopened from the start screen's "Recently closed"
@@ -827,6 +840,9 @@ export interface WorkspaceApi {
   save(workspace: Workspace): Promise<void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
   probeFolder(folder: string): Promise<Project | null>
+  /** Whether <folder>/.nodeterm/project.json is `present`, definitely `absent`, or `unreadable`
+   *  (any non-ENOENT error). Never guesses absence from a failed read — see issue #385. */
+  projectFileState(folder: string): Promise<'present' | 'absent' | 'unreadable'>
   /** Fired once after an on-disk migration: `v2` = a v2→v3 migration wrote .nodeterm/ dirs into the
    *  project folders; `exec` = the custom shell / advanced ssh args of already-open projects moved
    *  out of the shared project file into this machine's own workspace index (@shared/node-exec). */
@@ -1285,6 +1301,10 @@ export interface Settings {
   /** Ids of terminal node header buttons the user has hidden; empty = everything visible. Gated by
    *  HIDEABLE_HEADER_BUTTONS the same way. */
   hiddenHeaderButtons: string[]
+  /** Whether project activation offers the "Resume where you left off" card (breadcrumb trail's
+   *  once-per-app-run popup). OFF by default — it interrupts every project switch, so it is
+   *  opt-in. Cmd+[ / Cmd+] and the Dock buttons walk the trail regardless of this. */
+  showResumeCard: boolean
   /** Whether usage percentages render as consumed ("32% used"), remaining ("68% left"), or raw
    *  token counts ("48k/200k tokens" — context-window surfaces only; provider quota surfaces
    *  have no token counts and fall back to 'used' display). 'remaining' is the historical
@@ -1457,6 +1477,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Nothing hidden out of the box, so existing users see the menu and header they already know.
   hiddenNodeMenuItems: [],
   hiddenHeaderButtons: [],
+  // Opt-in: the resume card pops over the canvas on every qualifying project activation, which
+  // reads as noise to users who navigate by the trail chords/Dock buttons instead.
+  showResumeCard: false,
   usagePercentMode: 'remaining',
   defaultAgent: 'claude',
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
@@ -2512,11 +2535,20 @@ export interface RemoteHostApi {
    * `approve()` before any of the client's pty/fs RPCs are served; `sas` is the channel
    * verification code to display. Returns an unsubscribe function.
    */
-  onPeerPending(listener: (info: { sas: string | null; id: string }) => void): () => void
-  /** Approve the pending client (by its pending id) → the host begins serving its pty/fs RPCs. */
-  approve(id: string): void
-  /** Reject the pending client (by its pending id) → the connection is dropped. */
-  reject(id: string): void
+  onPeerPending(
+    listener: (info: { sas: string | null; id: string; pub?: string | null }) => void
+  ): () => void
+  /** The pending prompt expired host-side (120 s) — the dialog must drop or re-arm, else its
+   *  Approve is a silent no-op against a dead id (issue #372). */
+  onPeerPendingCleared(
+    listener: (info: { id: string | null; pub?: string | null }) => void
+  ): () => void
+  /** Approve the pending client → the host begins serving its pty/fs RPCs. `pub` (the peer's
+   *  stable box key) survives the phone's reconnect churn where the per-attach `id` does not —
+   *  pass both when known. */
+  approve(id: string, pub?: string): void
+  /** Reject the pending client → the connection is dropped. Same id/pub matching as approve. */
+  reject(id: string, pub?: string): void
   /**
    * Start/stop the standing (phone) relay host so a paired phone can reach this Mac from anywhere.
    * Mirrors `settings.phoneAccessEnabled`.
