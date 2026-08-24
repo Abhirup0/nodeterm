@@ -38,12 +38,31 @@ describe('the cutoff is a dated commitment, not a "later"', () => {
     expect(NODE_IDENTITY_STRICT_AFTER.toISOString().slice(0, 10)).toBe(NODE_IDENTITY_STRICT_DATE)
   })
 
-  it('names the action in both sentences, so the user is told what to do', () => {
+  it('names an action that CAN work, in both sentences', () => {
     for (const note of [IDENTITY_RESTART_NOTE, IDENTITY_REFUSED_NOTE]) {
-      expect(note).toContain('Restart agent')
+      expect(note).toContain('Close and reopen this node')
       // One line: both are PREFIXED onto a reply, and a multi-line prefix buries the reply.
       expect(note).not.toContain('\n')
     }
+  })
+
+  it('does NOT prescribe the in-place agent restart, which cannot fix this (#384)', () => {
+    // `agent-restart.ts` re-launches the CLI INSIDE the same pane and leaves the pty, the tmux
+    // session and therefore the session ENVIRONMENT untouched — and identity is read out of that
+    // environment. So the old advice was guaranteed not to work for the population it was handed
+    // to, which is the same loop IDENTITY_UNMINTABLE_NOTE was written to break.
+    for (const note of [IDENTITY_RESTART_NOTE, IDENTITY_REFUSED_NOTE]) {
+      expect(note).not.toContain('Restart agent')
+    }
+  })
+
+  it('the refusal points at the escape hatch, since it has no date to wait for', () => {
+    // IDENTITY_REFUSED_NOTE fires on BOTH sides of the cutoff (the latch does not wait for it), so
+    // unlike the warning it cannot tell the user "this becomes strict on <date>". The Settings row
+    // is the only thing that releases it without a working fix, and a stranded user's symptom
+    // never says "identity", so the sentence has to name it.
+    expect(IDENTITY_REFUSED_NOTE).toContain('Settings')
+    expect(IDENTITY_REFUSED_NOTE).not.toContain(NODE_IDENTITY_STRICT_DATE)
   })
 
   it('says, in the refusal, that the command did not run', () => {

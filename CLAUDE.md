@@ -973,6 +973,19 @@ else, and its context links must keep classifying across restarts).
     the Server Edition silently without the feature; the boundary tests cannot tell you a field is
     *missing*. `hook-verified-parity.test.ts` asserts it at source level because this repo has
     shipped a one-shell hook-server change three times.
+  - **Every generated sh client reads the token through ONE resolver** (`nt_read_node_token`,
+    `core/agents/node-token-sh.ts`) — the managed hook script, `nodeterm.sh` and `context.sh`. The
+    token dir is advertised only by the endpoint FILE, and a session is pinned for life to the
+    endpoint PATH it got at tmux creation, so a client that reads only what that file advertises
+    presents nothing forever when the file is pre-v2 (SSH hosts' shared `~/.nodeterm/hook-
+    endpoint.env`, whose per-project socket path is re-bound on every connect, so it stays LIVE) or
+    unreadable (a phone-spawned session). Issue #384: the hook script FAILS OVER and re-reads the
+    token from the endpoint it adopts, the two shims did neither — so the same node proved itself
+    through one client and was refused through the other by the trust-on-first-proof latch, for the
+    life of the session. The resolver falls back to `<dir of the endpoint file>/node-tokens` (the
+    layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
+    — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
+    dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
 
   Enforcement is dated (`NODE_IDENTITY_STRICT_AFTER`, 2026-10-13, read through `isStrictInstant` so a
   clock years ahead cannot enter strict mode early) with a `settings.hookIdentityStrict` escape hatch

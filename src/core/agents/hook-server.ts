@@ -376,7 +376,7 @@ class HookServer {
    * changes — today, the members of a case-folding collision group (`node-token-service.ts`).
    *
    * It exists only to pick the right refusal SENTENCE. `IDENTITY_REFUSED_NOTE` tells the user to
-   * restart the node to pick up an identity; for these nodes there is nothing to pick up, so that
+   * reopen the node to pick up an identity; for these nodes there is nothing to pick up, so that
    * advice sends them round a loop while the only other signal is a `console.warn` in a log they
    * are not reading. The other unmintable population — an id outside `isSafeNodeId`, which reaches
    * the canvas because `fileToProject` does not validate ids out of `project.json` — needs no
@@ -420,8 +420,9 @@ class HookServer {
    * An unmintable node is `allow-with-warning` for the whole window — `controlPolicy` cannot see
    * that it is unmintable, and would not change its verdict if it could, because running is the
    * right answer there. So the window was the ONE period in which these nodes were guaranteed to be
-   * told to "Restart this node… to pick one up", which is the loop `IDENTITY_UNMINTABLE_NOTE` was
-   * written to end. The note was unreachable exactly while it was needed.
+   * told to "Close and reopen this node to pick one up", which is the loop
+   * `IDENTITY_UNMINTABLE_NOTE` was written to end. The note was unreachable exactly while it was
+   * needed.
    */
   private identityWarningNote(nodeId: string): string {
     return this.identityUnmintable(nodeId) ? IDENTITY_UNMINTABLE_WARN_NOTE : IDENTITY_RESTART_NOTE
