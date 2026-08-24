@@ -216,6 +216,7 @@ import {
 } from '../lib/controlRouting'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
 import {
+  unavailableRecovery,
   planOpenProject,
   recordAttachConsent,
   openProjectReply,
@@ -533,6 +534,14 @@ interface PendingPeerState {
   /** Human-facing peer name, if the tunnel carries one. The relay `RelayPeerPending` payload does
    *  not yet, so this is undefined → the ConsentNotice falls back to a generic subject. */
   label?: string
+  /** Which host raised it: the new relay tunnel (confirm via relayHost) or the legacy
+   *  standing/interactive phone host (approve/reject via remoteHost). Issue #372: the phone
+   *  source lost its dialog when the SAS prompt migrated to relayHost while iOS still speaks
+   *  the legacy dialect — both sources feed this ONE dialog until that migration lands. */
+  source: 'relay' | 'phone'
+  /** The peer's stable box key (phone source): survives the phone's reconnect churn where the
+   *  per-attach id does not, so a mid-retry Approve still lands. */
+  pub?: string | null
 }
 
 /**
@@ -2018,14 +2027,22 @@ export function Canvas() {
       if (useSettings.getState().settings.phoneAccessEnabled) {
         window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
       }
-      // Offer the resume card once per project per app run. "Once" is only spent on a card that
-      // could actually render: a project whose breadcrumbs ALL point at nodes deleted since must
-      // not burn its one-shot slot on an empty card the user never saw — and neither must a
-      // project that activates ON the kanban board, where the card (z 11) sits invisible under
-      // the opaque overlay (z 25). Same failure mode, same rule.
+      // Offer the resume card once per project per app run — and only when the user opted in
+      // (settings.showResumeCard, default off): while disabled the one-shot slot is NOT spent,
+      // so flipping the switch on later still shows the card on the next activation. "Once" is
+      // only spent on a card that could actually render: a project whose breadcrumbs ALL point
+      // at nodes deleted since must not burn its one-shot slot on an empty card the user never
+      // saw — and neither must a project that activates ON the kanban board, where the card
+      // (z 11) sits invisible under the opaque overlay (z 25). Same failure mode, same rule.
       const liveIds = new Set(flow.map((n) => n.id))
       const hasLiveStop = (project.breadcrumbs ?? []).some((b) => liveIds.has(b.nodeId))
-      if (!resumeCardShown.has(project.id) && hasLiveStop && !isKanbanOpen(project.id)) {
+      const resumeCardEnabled = useSettings.getState().settings.showResumeCard
+      if (
+        resumeCardEnabled &&
+        !resumeCardShown.has(project.id) &&
+        hasLiveStop &&
+        !isKanbanOpen(project.id)
+      ) {
         resumeCardShown.add(project.id)
         setResumeProject(project)
       } else {
@@ -2372,8 +2389,34 @@ export function Canvas() {
   // (docs/ios-protocol-migration.md) and Task 10 deletes the `remoteHost` dialect outright. So we
   // fully migrate rather than keep both sources alive (which would only complicate that removal).
   useEffect(() => {
-    return window.nodeTerminal.relayHost.onPeerPending((info) => setPendingPeer(info))
-  }, [])
+    return window.nodeTerminal.relayHost.onPeerPending((info) =>
+      setPendingPeer({ ...info, source: 'relay' })
+    )
+  }, [setPendingPeer])
+
+  // The LEGACY phone host feeds the SAME dialog (issue #372): when the SAS prompt migrated to
+  // the relayHost tunnel, the phone — still on the legacy dialect — lost its prompt entirely:
+  // `remoteHostPeerPending` was emitted into the void, approve() became unreachable, and NO new
+  // device could ever be pinned over the relay ("Awaiting host approval." forever). Two rules
+  // from the race in that issue: a retry-churning phone re-raises with a fresh id but a STABLE
+  // pub + SAS (the payload replaces the open dialog in place — visually nothing changes), and a
+  // host-side expiry drops the dialog rather than leaving Approve aimed at a dead id.
+  useEffect(() => {
+    const unPending = window.nodeTerminal.remoteHost.onPeerPending((info) =>
+      setPendingPeer({ ...info, source: 'phone', label: 'Your phone' })
+    )
+    const unCleared = window.nodeTerminal.remoteHost.onPeerPendingCleared((info) => {
+      setPendingPeerState((cur) => {
+        const next = cur && cur.source === 'phone' && cur.id === info.id ? null : cur
+        confirmFlags.current.peer = !!next
+        return next
+      })
+    })
+    return () => {
+      unPending()
+      unCleared()
+    }
+  }, [setPendingPeer])
 
   // Team Access seat table (docs/…/team-access, Task 3): a SEPARATE relay-host subscription set from
   // the SAS-approval effect above — one feeds the dialog, this one feeds the live/pending seats store.
@@ -9996,6 +10039,19 @@ export function Canvas() {
     const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
     if (existing) {
       useProjects.getState().openFolderProject(folder)
+      // An `unavailable` placeholder never recovers on its own: a save emits a header-only ref for
+      // it (never a file), so a deleted project.json stays deleted and every later load re-mints
+      // the placeholder. Opening the folder is the deliberate act that breaks that loop — but only
+      // on evidence, since clearing the flag lets the next save write this empty canvas. See #385.
+      const recovery = unavailableRecovery(existing, await api.workspace.projectFileState(folder))
+      if (recovery === 'clear') {
+        useProjects.getState().setProjectUnavailable(existing.id, false)
+      } else if (recovery === 'rehydrate') {
+        // `present` is a stat, not a parse: a corrupt file stats fine, and probeFolder answering
+        // null there means the placeholder is still the honest state.
+        const back = await api.workspace.probeFolder(folder)
+        if (back) useProjects.getState().replaceProject({ ...back, id: existing.id, closed: false })
+      }
     } else {
       // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
       // another machine's project) — only a virgin folder gets a brand-new project.
@@ -11210,7 +11266,11 @@ export function Canvas() {
           enterConfirms={false}
           danger
           onConfirm={() => {
-            window.nodeTerminal.relayHost.confirm(peerApprovalView(pendingPeer).confirmId)
+            if (pendingPeer.source === 'phone') {
+              window.nodeTerminal.remoteHost.approve(pendingPeer.id, pendingPeer.pub ?? undefined)
+            } else {
+              window.nodeTerminal.relayHost.confirm(peerApprovalView(pendingPeer).confirmId)
+            }
             setPendingPeer(null)
           }}
           // The relay host API offers no explicit reject (see main/remote/relay-host-service.ts):
@@ -11218,6 +11278,11 @@ export function Canvas() {
           // confirms (`onOpen` fires after both humans match the SAS), so closing this dialog
           // without confirming leaves the pending peer un-admitted and it times out server-side.
           onCancel={() => {
+            // The legacy phone host HAS an explicit reject (unlike relayHost, where declining is
+            // just not-confirming): use it, so a denied phone is dropped instead of idling out.
+            if (pendingPeer.source === 'phone') {
+              window.nodeTerminal.remoteHost.reject(pendingPeer.id, pendingPeer.pub ?? undefined)
+            }
             setPendingPeer(null)
           }}
         />

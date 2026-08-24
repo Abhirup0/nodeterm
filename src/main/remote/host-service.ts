@@ -888,6 +888,7 @@ export function initRemoteHost(
   // phone host, and a single "Approve" click broadcasts to both listeners — so each acts only on
   // an event carrying ITS OWN pending id, never on one meant for the other host.
   let pendingApprovalId: string | null = null
+  let pendingApprovalPub: string | null = null
 
   function send(channel: string, ...args: unknown[]): void {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args)
@@ -947,11 +948,17 @@ export function initRemoteHost(
         // and appears in the facepile only — see docs/team-presence.md ("Peers may have no cursor").
         phone.join()
         pendingApprovalId = randomUUID()
-        send(IPC.remoteHostPeerPending, { sas: s.sas(), id: pendingApprovalId })
+        pendingApprovalPub = s.peerPublicKeyB64()
+        send(IPC.remoteHostPeerPending, {
+          sas: s.sas(),
+          id: pendingApprovalId,
+          pub: pendingApprovalPub
+        })
       },
       onClose: () => {
         phone.leave()
         pendingApprovalId = null
+        pendingApprovalPub = null
       }
     })
 
@@ -967,15 +974,23 @@ export function initRemoteHost(
   // Host human approved the pending device → start serving its pty/fs RPCs. Only act on a
   // still-pending session: the approve/reject channels are shared with the standing phone host,
   // so an event meant for the phone must not disturb an already-approved interactive session.
-  ipcMain.on(IPC.remoteHostApprove, (_e, msg: { id?: string } = {}) => {
-    if (!pendingApprovalId || msg?.id !== pendingApprovalId) return
+  ipcMain.on(IPC.remoteHostApprove, (_e, msg: { id?: string; pub?: string } = {}) => {
+    const matched =
+      (pendingApprovalId && msg?.id === pendingApprovalId) ||
+      (pendingApprovalPub && msg?.pub === pendingApprovalPub)
+    if (!matched) return
     pendingApprovalId = null
+    pendingApprovalPub = null
     if (session && !session.isApproved()) session.approve()
   })
   // Host human rejected the pending device → drop the connection entirely (pending sessions only).
-  ipcMain.on(IPC.remoteHostReject, (_e, msg: { id?: string } = {}) => {
-    if (!pendingApprovalId || msg?.id !== pendingApprovalId) return
+  ipcMain.on(IPC.remoteHostReject, (_e, msg: { id?: string; pub?: string } = {}) => {
+    const matched =
+      (pendingApprovalId && msg?.id === pendingApprovalId) ||
+      (pendingApprovalPub && msg?.pub === pendingApprovalPub)
+    if (!matched) return
     pendingApprovalId = null
+    pendingApprovalPub = null
     if (session && !session.isApproved()) endSession()
   })
 

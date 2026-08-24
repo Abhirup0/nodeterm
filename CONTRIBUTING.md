@@ -134,6 +134,15 @@ here has: not while the kanban board covers it, not while the user is typing.
 reasoning. A comment that restates the code is noise; one that says "do not simplify this back,
 here is what broke" is the point.
 
+**A generated sh client reads its node token through the one resolver.** Every POSIX-sh client we
+emit (the managed hook script, `nodeterm.sh`, `context.sh`) presents this node's per-node identity by
+calling `nt_read_node_token` from `core/agents/node-token-sh.ts` — never by re-typing
+`head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID"`. That copy was issue #384: a session is
+pinned for life to the endpoint FILE path it got at tmux creation, so a client that trusts only what
+that file advertises presents nothing forever when the file is old or unreadable — and because the
+hook script alone could heal itself, the same node proved itself through one client and was refused
+through another for the life of the session.
+
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and

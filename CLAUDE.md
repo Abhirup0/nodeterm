@@ -164,6 +164,19 @@ Persistence has two layers:
   are set aside as `project.json.corrupt-<ts>`. "Open folder…" adopts an existing
   `.nodeterm/project.json` — the probe MINTS the project id (node ids — tmux names — kept), and
   re-opening the folder is answered by the cwd lookup, not a second adoption.
+  **An `unavailable` placeholder used to be a DEAD END** (issue #385): a save deliberately emits a
+  header-only ref for it and never a file, so a `project.json` the user deleted was never
+  recreated, every later load re-minted the placeholder, and nothing cleared the flag for a LOCAL
+  project (`reopenProject` clears only `closed`; the sole `setProjectUnavailable(id,false)` caller
+  is the relay reconnect). The tab went inert (`tabClickAction` → `'ignore'`) while the sessions
+  sidebar — which has no concept of `unavailable` — still switched to it. An explicit "Open
+  folder…" now breaks the loop, but only on EVIDENCE: `WorkspaceStore.projectFileState` reports
+  `present | absent | unreadable` and **only a definite ENOENT counts as absence**, because
+  clearing the flag lets the next save write the placeholder's empty canvas over whatever is
+  there. Absent ⇒ clear; present ⇒ re-probe and rehydrate under the EXISTING entry id (a corrupt
+  file stats fine, so a null probe keeps the placeholder); unreadable ⇒ change nothing. The
+  decision is the pure `unavailableRecovery` (`renderer/lib/projectOpen.ts`), and it refuses to
+  judge a REMOTE project from a local stat.
   **The shared file carries content, not identity**: no project `id`, no `viewport`, no
   `defaultAccountId` — those are machine-local and ride the index entry (`IndexEntryV3`), beside
   `localApprovalId`/`localExec`. Two folders holding the same committed canvas (worktree, branch
@@ -960,6 +973,19 @@ else, and its context links must keep classifying across restarts).
     the Server Edition silently without the feature; the boundary tests cannot tell you a field is
     *missing*. `hook-verified-parity.test.ts` asserts it at source level because this repo has
     shipped a one-shell hook-server change three times.
+  - **Every generated sh client reads the token through ONE resolver** (`nt_read_node_token`,
+    `core/agents/node-token-sh.ts`) — the managed hook script, `nodeterm.sh` and `context.sh`. The
+    token dir is advertised only by the endpoint FILE, and a session is pinned for life to the
+    endpoint PATH it got at tmux creation, so a client that reads only what that file advertises
+    presents nothing forever when the file is pre-v2 (SSH hosts' shared `~/.nodeterm/hook-
+    endpoint.env`, whose per-project socket path is re-bound on every connect, so it stays LIVE) or
+    unreadable (a phone-spawned session). Issue #384: the hook script FAILS OVER and re-reads the
+    token from the endpoint it adopts, the two shims did neither — so the same node proved itself
+    through one client and was refused through the other by the trust-on-first-proof latch, for the
+    life of the session. The resolver falls back to `<dir of the endpoint file>/node-tokens` (the
+    layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
+    — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
+    dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
 
   Enforcement is dated (`NODE_IDENTITY_STRICT_AFTER`, 2026-10-13, read through `isStrictInstant` so a
   clock years ahead cannot enter strict mode early) with a `settings.hookIdentityStrict` escape hatch
@@ -1765,7 +1791,10 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   deliberate `goToNode` landing records a `NavStop` ({nodeId, at, note}) for the ACTIVE project, and
   **Cmd+[ / Cmd+]** (`canvas.goBack` / `canvas.goForward`, bound in `shared/keybindings.ts`) plus the
   two Dock buttons walk that trail; on a project activation a once-per-app-run **`ResumeCard`** offers
-  the last few distinct stops ("resume where you left off"). Load-bearing facts:
+  the last few distinct stops ("resume where you left off") — **opt-in via
+  `settings.showResumeCard` (Settings → Appearance, default OFF)**: while disabled the
+  once-per-app-run slot is not spent, so enabling it later still shows the card on the next
+  activation; the chords/Dock buttons work regardless. Load-bearing facts:
   - **The trail is MACHINE-LOCAL and rides `IndexEntryV3.breadcrumbs`, never `.nodeterm/project.json`** —
     the same tier as `viewport` / `defaultAccountId` / `capabilityAck`, for the same reason: a repo must
     not carry one person's camera history to everyone who clones it. `fileToProject` therefore ignores a

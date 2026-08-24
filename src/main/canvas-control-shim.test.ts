@@ -19,7 +19,7 @@ const run = promisify(execFile)
 
 let dir = ''
 let shim = ''
-let received: { verb: string; nodeId: string; args: Record<string, string> }[] = []
+let received: { verb: string; nodeId: string; args: Record<string, string>; verified?: boolean }[] = []
 
 beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-shim-'))
@@ -368,6 +368,71 @@ describe('canvas-control shim presents the per-node token', () => {
     })
     expect(seen).toEqual([{ path: '/control/list', nodeToken: '' }])
   })
+
+  // ISSUE #384. The dir is advertised ONLY by the endpoint file, and a session is pinned for life
+  // to the endpoint PATH it was handed at tmux creation — so an endpoint file that is still LIVE
+  // but advertises no dir (SSH hosts used to share one `~/.nodeterm/hook-endpoint.env`, and the
+  // per-project socket path it names is RE-BOUND on every connect) left the shim presenting nothing
+  // for the life of the session. Reproduced against a real host before this test existed: the same
+  // node proved itself through the managed hook script — which fails over and re-reads the token
+  // from the endpoint it adopts — and was then refused here by the trust-on-first-proof latch.
+  it('finds it BESIDE the endpoint file when the file advertises no dir (#384)', async () => {
+    seen.length = 0
+    const home = path.join(dir, 'pinned-home')
+    const data = path.join(home, '.nodeterm')
+    fs.mkdirSync(path.join(data, 'node-tokens'), { recursive: true })
+    fs.writeFileSync(path.join(data, 'node-tokens', 'node-1'), 'BESIDE-TOKEN\n', { mode: 0o600 })
+    const endpoint = path.join(data, 'hook-endpoint-oldproject.env')
+    // A pre-v2 endpoint file: transport + bearer, no NODETERM_NODE_TOKEN_DIR line at all.
+    fs.writeFileSync(endpoint, `NODETERM_HOOK_PORT=${tcpPort}\nNODETERM_HOOK_TOKEN=whatever\nNODETERM_HOOK_VERSION=1\n`)
+    await callShim(['list'], {
+      HOME: home,
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_TOKEN: '',
+      NODETERM_HOOK_ENDPOINT: endpoint
+    })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: 'BESIDE-TOKEN' }])
+  })
+
+  it('finds it in the standard data dir when there is no readable endpoint file at all', async () => {
+    // The shape the phone hands a session it spawns: the transport rides the env and
+    // NODETERM_HOOK_ENDPOINT is empty (no host process existed at spawn), so nothing ever
+    // advertises a dir and there is no endpoint path to derive one from either.
+    seen.length = 0
+    const home = path.join(dir, 'phone-home')
+    fs.mkdirSync(path.join(home, '.nodeterm', 'node-tokens'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.nodeterm', 'node-tokens', 'node-1'), 'HOME-TOKEN\n', { mode: 0o600 })
+    await callShim(['list'], {
+      HOME: home,
+      NODETERM_HOOK_PORT: String(tcpPort),
+      NODETERM_HOOK_ENDPOINT: ''
+    })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: 'HOME-TOKEN' }])
+  })
+
+  it('still prefers the ADVERTISED dir — a fallback can only fill a gap, never override', async () => {
+    // The monotonicity claim in node-token-sh.ts made observable: nothing that verifies today may
+    // start reading out of a different directory because a fallback exists.
+    seen.length = 0
+    const home = path.join(dir, 'both-home')
+    fs.mkdirSync(path.join(home, '.nodeterm', 'node-tokens'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.nodeterm', 'node-tokens', 'node-1'), 'FALLBACK-TOKEN\n', { mode: 0o600 })
+    await callShim(['list'], {
+      HOME: home,
+      NODETERM_HOOK_PORT: String(tcpPort),
+      NODETERM_NODE_TOKEN_DIR: tokenDir
+    })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: 'CANVAS-NODE-TOKEN' }])
+  })
+
+  it('is keyed by node id in EVERY candidate, not only the advertised one', async () => {
+    seen.length = 0
+    const home = path.join(dir, 'other-home')
+    fs.mkdirSync(path.join(home, '.nodeterm', 'node-tokens'), { recursive: true })
+    fs.writeFileSync(path.join(home, '.nodeterm', 'node-tokens', 'node-9'), 'NODE-9-TOKEN\n', { mode: 0o600 })
+    await callShim(['list'], { HOME: home, NODETERM_HOOK_PORT: String(tcpPort) })
+    expect(seen).toEqual([{ path: '/control/list', nodeToken: '' }])
+  })
 })
 
 // A command line is not private: `ps` and /proc/<pid>/cmdline are world-readable, so `curl -H
@@ -497,6 +562,106 @@ describe('canvas-control shim keeps credentials off curl\'s command line', () =>
   })
 })
 
+// Issue #367: Codex's command sandbox denies connect() for every address family (Linux seccomp;
+// macOS seatbelt deny-default), so curl dies with HTTP 000 while nodeterm is perfectly healthy —
+// and the old message ("control endpoint unreachable") sent agents off to relink/restart a server
+// that was never the problem. Codex exports CODEX_SANDBOX_NETWORK_DISABLED=1 into every sandboxed
+// command, so the shim can tell the two failures apart. Run against real /bin/sh with a genuinely
+// dead endpoint; `uname` is faked on PATH so the macOS-only remedy line is deterministic on any CI.
+describe('codex-sandbox self-diagnosis (issue #367)', () => {
+  let deadSock = ''
+  let unameDir = (os: 'Darwin' | 'Linux'): string => os // reassigned in beforeAll
+
+  beforeAll(() => {
+    deadSock = path.join(dir, 'nobody-listens.sock')
+    const bins: Record<string, string> = {}
+    unameDir = (osName) => {
+      if (!bins[osName]) {
+        const d = path.join(dir, `fake-uname-${osName.toLowerCase()}`)
+        fs.mkdirSync(d, { recursive: true })
+        fs.writeFileSync(path.join(d, 'uname'), `#!/bin/sh\necho ${osName}\n`, { mode: 0o755 })
+        bins[osName] = d
+      }
+      return bins[osName]
+    }
+  })
+
+  const sandboxEnv = (osName: 'Darwin' | 'Linux', extra: Record<string, string> = {}): Record<string, string> => ({
+    PATH: `${unameDir(osName)}:${process.env.PATH ?? ''}`,
+    NODETERM_HOOK_PORT: '',
+    NODETERM_HOOK_SOCK: deadSock,
+    CODEX_SANDBOX_NETWORK_DISABLED: '1',
+    ...extra
+  })
+
+  it('under the sandbox, a dead socket names the sandbox and the escalated retry — not "unreachable"', async () => {
+    await expect(callShim(['list'], sandboxEnv('Linux'))).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("Codex's sandbox blocked this connection to nodeterm")
+    })
+    await expect(callShim(['list'], sandboxEnv('Linux'))).rejects.toMatchObject({
+      stderr: expect.stringContaining('escalated permissions')
+    })
+    const err = await callShim(['list'], sandboxEnv('Linux')).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain('do not relink or restart it')
+    expect(err.stderr).not.toContain('Could not reach nodeterm')
+  })
+
+  it('on Darwin with a socket advertised, it also prints the config.toml allowlist remedy with the path', async () => {
+    const err = await callShim(['list'], sandboxEnv('Darwin')).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain(`network.allow_unix_sockets = ["${deadSock}"]`)
+    expect(err.stderr).toContain('~/.codex/config.toml')
+  })
+
+  it('on Linux the allowlist line is withheld — the Linux sandbox has no such allowlist', async () => {
+    const err = await callShim(['list'], sandboxEnv('Linux')).catch((e) => e as { stderr: string })
+    expect(err.stderr).not.toContain('network.allow_unix_sockets')
+  })
+
+  it('the same diagnosis fires on the TCP branch (a sandboxed curl to loopback dies identically)', async () => {
+    // A port with no listener: bind-then-close frees it, and nothing else grabs it mid-test.
+    const http = await import('node:http')
+    const probe = http.createServer()
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r))
+    const freePort = (probe.address() as { port: number }).port
+    await new Promise<void>((r) => probe.close(() => r()))
+    const err = await callShim(['list'], {
+      PATH: `${unameDir('Linux')}:${process.env.PATH ?? ''}`,
+      NODETERM_HOOK_PORT: String(freePort),
+      CODEX_SANDBOX_NETWORK_DISABLED: '1'
+    }).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain("Codex's sandbox blocked this connection to nodeterm")
+  })
+
+  // THE MUTATION GUARD for the env-var branch: without the variable, the same dead transport must
+  // keep the original sentence to the byte — dropping the branch turns the sandbox cases above
+  // red, and inverting it turns this one red.
+  it('without CODEX_SANDBOX_NETWORK_DISABLED the original genuine-unreachable message stands', async () => {
+    const err = await callShim(['list'], {
+      PATH: `${unameDir('Darwin')}:${process.env.PATH ?? ''}`,
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_SOCK: deadSock
+    }).catch((e) => e as { stderr: string })
+    expect(err.stderr).toContain('Could not reach nodeterm (control endpoint unreachable).')
+    expect(err.stderr).not.toContain("Codex's sandbox")
+  })
+
+  it('never fires on a genuine HTTP error — the server answered, so the transport is fine', async () => {
+    // `boom` reaches the real hook server (which answers 400 with a body): sandbox var set, but
+    // nt_code is a real status, not 000.
+    const err = await callShim(['boom'], { CODEX_SANDBOX_NETWORK_DISABLED: '1' }).catch(
+      (e) => e as { stderr: string }
+    )
+    expect(err.stderr).toContain('that verb exploded')
+    expect(err.stderr).not.toContain("Codex's sandbox")
+  })
+
+  it('a healthy endpoint stays healthy with the sandbox var set (the hint is failure-path only)', async () => {
+    const { stdout } = await callShim(['list'], { CODEX_SANDBOX_NETWORK_DISABLED: '1' })
+    expect(stdout.trim()).toBe('did list')
+  })
+})
+
 describe('parseControlBody', () => {
   it('reads the shim dialect: nodeId plus arg.<name> fields', () => {
     expect(
@@ -573,5 +738,66 @@ describe('sticky through the shim (verified-only verb)', () => {
       stderr: expect.stringContaining('Sticky write refused.')
     })
     expect(received.length).toBe(before)
+  })
+})
+
+// ISSUE #384, END TO END, through the real policy. The latch ("trust on first proof") refuses a
+// node that HAS authenticated the moment a caller naming it cannot — immediately, on both sides of
+// the dated cutoff — and `IDENTITY_REFUSED_NOTE` is the sentence the issue is titled after.
+//
+// The two halves only meet because the clients disagreed: the managed hook script fails over to a
+// live sibling endpoint and re-reads the token from ITS dir, so the node proves itself; the shim
+// had no failover and no fallback, so on a session pinned to an endpoint file that advertises no
+// token dir it presented nothing for the rest of that session's life. Proven by one client,
+// refused through the other, with "Restart agent" as the only advice — and an in-place agent
+// restart re-launches the CLI in the same pane, with the same environment and the same endpoint
+// file, so it could never have helped.
+describe('a latched node is not refused just because its endpoint advertises no dir (#384)', () => {
+  const SECRET = Buffer.alloc(32, 11)
+  let home = ''
+  let tokens = ''
+  let pinned = ''
+
+  beforeAll(() => {
+    hookServer.setNodeAuthSecret(SECRET)
+    hookServer.forgetProvenNode('node-1') // earlier describes share the id; start from unlatched
+    home = path.join(dir, 'latched-home')
+    tokens = path.join(home, '.nodeterm', 'node-tokens')
+    fs.mkdirSync(tokens, { recursive: true })
+    fs.writeFileSync(path.join(tokens, 'node-1'), `${nodeAuthToken(SECRET, 'node-1')}\n`, { mode: 0o600 })
+    // The pinned endpoint: a LIVE transport (the per-project socket path is re-bound on every
+    // connect, so an old file keeps reaching a current server) and no NODETERM_NODE_TOKEN_DIR line.
+    pinned = path.join(home, '.nodeterm', 'hook-endpoint-oldproject.env')
+    fs.writeFileSync(
+      pinned,
+      `NODETERM_HOOK_PORT=${hookServer.getPort()}\nNODETERM_HOOK_TOKEN=${hookServer.getToken()}\nNODETERM_HOOK_VERSION=1\n`
+    )
+  })
+
+  afterAll(() => {
+    hookServer.clearNodeAuthSecretForTests()
+    hookServer.forgetProvenNode('node-1')
+  })
+
+  it('latches the node on its first verified call', async () => {
+    expect(hookServer.isNodeProven('node-1')).toBe(false)
+    await callShim(['list'], { HOME: home, NODETERM_NODE_TOKEN_DIR: tokens })
+    expect(hookServer.isNodeProven('node-1')).toBe(true)
+  })
+
+  it('then still runs a mutation through the pinned endpoint, verified', async () => {
+    const before = received.length
+    const { stdout } = await callShim(['open-terminal'], {
+      HOME: home,
+      NODETERM_HOOK_PORT: '',
+      NODETERM_HOOK_TOKEN: '',
+      NODETERM_HOOK_ENDPOINT: pinned
+    })
+    // The exact string the issue is titled after, and the warning-window one beside it.
+    expect(stdout).not.toContain('not presenting its node identity')
+    expect(stdout.trim()).toBe('did open-terminal')
+    expect(received.length).toBe(before + 1)
+    // Not merely tolerated — actually identified, which is what the latch was protecting.
+    expect(received.at(-1)?.verified).toBe(true)
   })
 })
