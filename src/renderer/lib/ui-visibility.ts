@@ -30,6 +30,7 @@ export const HIDEABLE_MENU_ITEMS: readonly HideableRow[] = [
 
 /** Hideable terminal node header buttons, in header order. */
 export const HIDEABLE_HEADER_BUTTONS: readonly HideableRow[] = [
+  { id: 'maximize', label: 'Maximize' },
   { id: 'refresh', label: 'Refresh' },
   { id: 'mic', label: 'Dictate' },
   { id: 'ai-name', label: 'Name with AI' },

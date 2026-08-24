@@ -183,6 +183,7 @@ import { hintLabel, isWindowsPlatform, isMacPlatform } from '@shared/platform-ut
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
+import { MaximizeButton } from './MaximizeButton'
 import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -4436,6 +4437,9 @@ export function TerminalNode({
               />
             ))}
           </div>
+        )}
+        {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
+          <MaximizeButton id={id} maximized={!!data.premaxRect} />
         )}
         {editingTitle ? (
           <input

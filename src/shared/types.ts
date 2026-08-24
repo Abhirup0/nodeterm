@@ -377,6 +377,14 @@ export interface CanvasNodeState {
   commitOid?: string
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
+  /**
+   * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
+   * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
+   * Absent = not maximized. Persisted so the restore survives a reload. Root-space on purpose:
+   * maximizing a grouped node re-fits (and thereby moves) its frame, so a parent-relative rect
+   * would restore a few px off — and root-space also survives the frame being ungrouped meanwhile.
+   */
+  premaxRect?: { x: number; y: number; width: number; height: number }
 }
 
 /**
