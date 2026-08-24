@@ -36,7 +36,8 @@ export const APPEARANCE_RESET_KEYS = [
   'accent',
   'hiddenNodeMenuItems',
   'hiddenHeaderButtons',
-  'showResumeCard'
+  'showResumeCard',
+  'windowTitleActiveSession'
 ] as const satisfies readonly (keyof Settings)[]
 
 /** The defaults for `keys`, as a patch for `useSettings.update`. */

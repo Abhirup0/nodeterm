@@ -193,6 +193,12 @@ import {
 import { isTerminalTarget, type ContextElement } from '../lib/keyContext'
 import { installTerminalFocusMirror } from '../lib/terminalFocusMirror'
 import {
+  applyWindowTitle,
+  composeWindowTitle,
+  installActiveNodeTracker,
+  windowBaseTitle
+} from '../lib/windowTitle'
+import {
   activeKeybindingOverrides,
   chipFor,
   commandTooltip,
@@ -6332,6 +6338,42 @@ export function Canvas() {
       }),
     []
   )
+
+  // Active session → native window title (issue #414, opt-in `settings.windowTitleActiveSession`):
+  // lets window-title-based time trackers (ActivityWatch) tell sessions apart. Two latest-wins
+  // signals feed the active node — keyboard focus landing inside a node's DOM (the tracker), and
+  // a single-node SELECTION (clicking a node header moves no focus, so focus alone would miss the
+  // most common "I'm on this node now" gesture). The write is `document.title` on both surfaces:
+  // Electron mirrors page-title changes onto the BrowserWindow, the Server Edition titles the
+  // browser tab. A node id that stops resolving (delete, project switch) degrades to the project
+  // name; disabled composes back to the boot title, captured before the first write.
+  const windowTitleEnabled = settings.windowTitleActiveSession
+  const [titleNodeId, setTitleNodeId] = useState<string | null>(null)
+  useEffect(() => {
+    if (!windowTitleEnabled) return
+    return installActiveNodeTracker({ report: setTitleNodeId })
+  }, [windowTitleEnabled])
+  useEffect(() => {
+    if (!windowTitleEnabled) return
+    const sel = nodes.filter((n) => n.selected)
+    if (sel.length === 1) setTitleNodeId(sel[0].id)
+  }, [windowTitleEnabled, nodes])
+  useEffect(() => {
+    const nodeTitle = windowTitleEnabled
+      ? nodes.find((n) => n.id === titleNodeId)?.data.title
+      : undefined
+    applyWindowTitle(
+      composeWindowTitle({
+        enabled: windowTitleEnabled,
+        baseTitle: windowBaseTitle(),
+        nodeTitle,
+        projectName: activeProjectName
+      })
+    )
+  }, [windowTitleEnabled, titleNodeId, nodes, activeProjectName])
+  // Unmount-only restore (Canvas gives way to the welcome screen when the last open project
+  // closes): without it the departing canvas's title would outlive the canvas.
+  useEffect(() => () => applyWindowTitle(windowBaseTitle()), [])
 
   // ⌘/Ctrl+0 on the DESKTOP never reaches the keydown handler above: Electron's default View menu
   // binds the accelerator to `resetZoom`, and a menu accelerator is handled before the page sees
