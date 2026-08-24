@@ -216,6 +216,7 @@ import {
 } from '../lib/controlRouting'
 import { applyStickyWrite, parseStickyArgs, resolveStickyRef } from '../lib/stickyWrite'
 import {
+  unavailableRecovery,
   planOpenProject,
   recordAttachConsent,
   openProjectReply,
@@ -10038,6 +10039,19 @@ export function Canvas() {
     const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
     if (existing) {
       useProjects.getState().openFolderProject(folder)
+      // An `unavailable` placeholder never recovers on its own: a save emits a header-only ref for
+      // it (never a file), so a deleted project.json stays deleted and every later load re-mints
+      // the placeholder. Opening the folder is the deliberate act that breaks that loop — but only
+      // on evidence, since clearing the flag lets the next save write this empty canvas. See #385.
+      const recovery = unavailableRecovery(existing, await api.workspace.projectFileState(folder))
+      if (recovery === 'clear') {
+        useProjects.getState().setProjectUnavailable(existing.id, false)
+      } else if (recovery === 'rehydrate') {
+        // `present` is a stat, not a parse: a corrupt file stats fine, and probeFolder answering
+        // null there means the placeholder is still the honest state.
+        const back = await api.workspace.probeFolder(folder)
+        if (back) useProjects.getState().replaceProject({ ...back, id: existing.id, closed: false })
+      }
     } else {
       // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
       // another machine's project) — only a virgin folder gets a brand-new project.

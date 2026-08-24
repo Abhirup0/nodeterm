@@ -171,6 +171,8 @@ export class WorkspaceStore {
     platform().handle(IPC.workspaceLoad, () => this.load())
     platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
+    platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
+      typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
     platform().handle(IPC.projectSettingsRead, (projectId: unknown) =>
       typeof projectId === 'string' ? this.readProjectSettings(projectId) : null)
     platform().handle(IPC.projectSettingsWriteShared, (projectId: unknown, doc: ProjectSettingsDoc) =>
@@ -942,6 +944,25 @@ export class WorkspaceStore {
     // anywhere), so its nodes come up with no custom shell and no extra ssh args — the safe
     // defaults. Only values this machine typed itself are ever restored (@shared/node-exec).
     return read ? fileToProject(read.file, { id: freshProjectId(), cwd: folder }) : null
+  }
+
+  /**
+   * Is this folder's `.nodeterm/project.json` genuinely gone, merely unreadable, or fine?
+   *
+   * `readProjectFile` collapses all three into `null`, which is right for its callers (they only
+   * need "can I use it") but wrong for recovery: clearing a project's `unavailable` placeholder
+   * lets the next save WRITE its empty canvas, so doing that on a file that is present but
+   * momentarily unreadable (permissions, a stalled mount) would overwrite the only copy. A failed
+   * read is never evidence of absence — so the errno is the answer, and anything that is not a
+   * definite ENOENT reports `unreadable`, the side that changes nothing. See issue #385.
+   */
+  async projectFileState(cwd: string): Promise<'present' | 'absent' | 'unreadable'> {
+    try {
+      await fs.stat(projectFilePath(cwd))
+      return 'present'
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unreadable'
+    }
   }
 
   localRefPaths(): string[] {
