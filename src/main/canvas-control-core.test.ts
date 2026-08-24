@@ -5,8 +5,13 @@ import {
   mergeCanvasControlBlock,
   buildCanvasControlInstructions,
   buildCanvasSkillBody,
-  CONTROL_SHIM_SCRIPT
+  CONTROL_SHIM_SCRIPT,
+  CONTROL_UNREACHABLE_MSG
 } from './canvas-control-core'
+import {
+  CODEX_SANDBOX_BLOCKED_LINE,
+  CODEX_SANDBOX_RETRY_LINE
+} from '../core/agents/hook-sandbox-hint-sh'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { PROJECT_TARGETABLE_VERBS } from './project-grants'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
@@ -221,6 +226,35 @@ describe('parseControlRequest', () => {
     const body = buildCanvasControlInstructions('/tmp/nodeterm.sh')
     expect(body).toContain('--flag=value')
     expect(body).toMatch(/starts? with `--`/)
+  })
+
+  // Issue #367: the shim's transport-failure sentences and the docs that explain them are held
+  // together by constants — re-typing either side in prose is how the guidance and the generated
+  // script drift. The runtime behaviour itself is proven against real /bin/sh in
+  // canvas-control-shim.test.ts; this pins the TEACHING of it into both agent-facing bodies.
+  it('both agent-facing texts carry the codex-sandbox transport guidance (issue #367)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // Names both exact errors the agent can see: the generic sentence and the sandbox one.
+      expect(body).toContain(CONTROL_UNREACHABLE_MSG.replace(/\.$/, ''))
+      expect(body).toContain(CODEX_SANDBOX_BLOCKED_LINE)
+      // The one action that works everywhere, and the never-do.
+      expect(body.toLowerCase()).toContain('escalated permissions')
+      expect(body).toMatch(/never relink, reinstall or restart nodeterm/)
+      // The macOS permanent remedy, named exactly as codex's config reads it.
+      expect(body).toContain('network.allow_unix_sockets')
+      expect(body).toContain('~/.codex/config.toml')
+    }
+  })
+
+  it('the shim embeds the sandbox hint and its call sites in both failure tails', () => {
+    // The fragment (one definition)...
+    expect(CONTROL_SHIM_SCRIPT).toContain('nt_codex_sandbox_hint() {')
+    expect(CONTROL_SHIM_SCRIPT).toContain(CODEX_SANDBOX_BLOCKED_LINE)
+    expect(CONTROL_SHIM_SCRIPT).toContain(CODEX_SANDBOX_RETRY_LINE)
+    // ...and the fallback shape: the genuine-unreachable sentence survives to the byte.
+    expect(CONTROL_SHIM_SCRIPT).toContain(
+      `nt_codex_sandbox_hint || echo "${CONTROL_UNREACHABLE_MSG}" >&2`
+    )
   })
 
   it('send/reply require --text (Task 5.4)', () => {

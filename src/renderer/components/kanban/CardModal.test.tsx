@@ -3,6 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectKanban } from '@shared/types'
+import { pushDialog, popDialog, resetDialogStack } from '../dialog-stack'
 import { CardModal } from './CardModal'
 import type { KanbanSession } from './KanbanView'
 
@@ -13,6 +14,19 @@ vi.mock('../../session/session', () => ({
       shell: { openExternal: vi.fn(async () => {}) }
     }
   })
+}))
+
+// Stub non-terminal/non-browser child panels so CardModal tests run in isolation without store/context dependencies
+vi.mock('./BoardLogPanel', () => ({
+  BoardLogPanel: () => null
+}))
+
+vi.mock('./CardMetaBar', () => ({
+  CardMetaBar: () => null
+}))
+
+vi.mock('../ContextMeter', () => ({
+  ContextMeter: () => null
 }))
 
 // Mock ModalTerminal and BrowserSurface to keep tests lightweight and focused on CardModal
@@ -43,15 +57,17 @@ describe('CardModal', () => {
   let host: HTMLDivElement
 
   beforeEach(() => {
+    resetDialogStack()
     host = document.createElement('div')
     document.body.append(host)
   })
 
   afterEach(() => {
+    resetDialogStack()
     document.body.innerHTML = ''
   })
 
-  it('allows editing sticky note text and preserves space characters', () => {
+  it('writes through raw textarea value on sticky note edit (including whitespace and newlines)', () => {
     const session: KanbanSession = {
       id: 'node-sticky-1',
       title: 'First line',
@@ -107,16 +123,16 @@ describe('CardModal', () => {
 
     expect(onEditSticky).toHaveBeenCalledWith('First line ')
 
-    // Type multiple words with trailing spaces
+    // Type multiple lines and trailing spaces
     act(() => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(
         textarea,
-        'First line with multiple spaces '
+        'First line\n  indented line  '
       )
       textarea.dispatchEvent(new Event('input', { bubbles: true }))
     })
 
-    expect(onEditSticky).toHaveBeenCalledWith('First line with multiple spaces ')
+    expect(onEditSticky).toHaveBeenCalledWith('First line\n  indented line  ')
 
     // Escape while editing cancels edit mode without closing the modal
     act(() => {
@@ -298,6 +314,101 @@ describe('CardModal', () => {
       openCanvasBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect(onOpenCanvas).toHaveBeenCalledTimes(1)
+
+    act(() => root.unmount())
+  })
+
+  it('does not close modal on mousedown inside the card sheet (stopPropagation)', () => {
+    const session: KanbanSession = {
+      id: 'node-sticky-sheet',
+      title: 'Sheet Note',
+      color: '#ffd60a',
+      kind: 'sticky',
+      text: 'Sheet Note',
+      spawn: {}
+    }
+
+    const root = createRoot(host)
+    const onClose = vi.fn()
+
+    act(() =>
+      root.render(
+        <CardModal
+          session={session}
+          columnTitle="To Do"
+          board={board}
+          onChangeBoard={vi.fn()}
+          onClose={onClose}
+          onOpenCanvas={vi.fn()}
+          onRename={vi.fn()}
+          onEditSticky={vi.fn()}
+          onBrowserNav={vi.fn()}
+        />
+      )
+    )
+
+    const sheet = document.body.querySelector<HTMLElement>('.kanban-modal')!
+    expect(sheet).toBeTruthy()
+
+    // Clicking inside the modal sheet must NOT propagate to the scrim onMouseDown (onClose)
+    act(() => {
+      sheet.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    })
+    expect(onClose).not.toHaveBeenCalled()
+
+    act(() => root.unmount())
+  })
+
+  it('respects isTopDialog ownership: ignores Escape when another dialog is stacked on top', () => {
+    const session: KanbanSession = {
+      id: 'node-sticky-dialog-stack',
+      title: 'Dialog Stack Note',
+      color: '#ffd60a',
+      kind: 'sticky',
+      text: 'Dialog Stack Note',
+      spawn: {}
+    }
+
+    const root = createRoot(host)
+    const onClose = vi.fn()
+
+    act(() =>
+      root.render(
+        <CardModal
+          session={session}
+          columnTitle="To Do"
+          board={board}
+          onChangeBoard={vi.fn()}
+          onClose={onClose}
+          onOpenCanvas={vi.fn()}
+          onRename={vi.fn()}
+          onEditSticky={vi.fn()}
+          onBrowserNav={vi.fn()}
+        />
+      )
+    )
+
+    // Simulate another modal dialog opening on top of CardModal in the dialog stack
+    act(() => {
+      pushDialog('dialog-overlay-top')
+    })
+
+    // Escape should NOT close CardModal while another dialog is top of stack
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(onClose).not.toHaveBeenCalled()
+
+    // When the top dialog is dismissed, CardModal becomes top dialog again
+    act(() => {
+      popDialog('dialog-overlay-top')
+    })
+
+    // Escape now closes CardModal
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(onClose).toHaveBeenCalledTimes(1)
 
     act(() => root.unmount())
   })
