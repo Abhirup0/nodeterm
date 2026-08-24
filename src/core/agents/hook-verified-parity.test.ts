@@ -157,6 +157,23 @@ describe('both shells register a 4-arg raw listener', () => {
     expect(branches(code('src/main/index.ts'))).toBe(branches(code('src/server/agent-status.ts')))
   })
 
+  // Same one-shell-drift rule, next instance: the codex subagent branch (spawn_agent fan-out).
+  // Both raw listeners must (a) tail the child rollout off SubagentStart via trackFile and
+  // (b) skip the context-meter track for agent_id-tagged child events — a shell missing (a)
+  // silently has no live activity, and one missing (b) re-points the parent's meter at the
+  // child's rollout (SubagentStart carries the parent session_id with the CHILD's path).
+  it('both raw listeners carry the codex subagent branch (trackFile + agent_id gate)', () => {
+    for (const rel of ['src/main/index.ts', 'src/server/agent-status.ts']) {
+      const src = code(rel)
+      expect(src, `${rel} misses the SubagentStart trackFile branch`).toMatch(
+        /SubagentStart'\s*\)\s*\{\s*subagentTail\.trackFile/
+      )
+      expect(src, `${rel} misses the agent_id child-event gate`).toMatch(
+        /agentId === 'codex' && p\.agent_id/
+      )
+    }
+  })
+
   it('the normalized listener is where verified travels, and it is the only gate input', () => {
     // Both shells subscribe to the SAME src/core hook server, so this one line is what carries the
     // flag to the src/core mirror on both of them. A refactor that drops it here would leave the

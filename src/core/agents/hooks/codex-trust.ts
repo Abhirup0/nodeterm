@@ -38,6 +38,8 @@ export type CodexEventLabel =
   | 'session_start'
   | 'user_prompt_submit'
   | 'stop'
+  | 'subagent_start'
+  | 'subagent_stop'
 
 export type CodexTrustEntry = {
   /** Path on disk to the hooks.json that declares the hook (the "key_source"). */
