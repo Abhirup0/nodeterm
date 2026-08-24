@@ -227,3 +227,33 @@ describe('buildLinkedContextInstructions', () => {
     expect(CONTEXT_SHIM_SCRIPT).toContain(`echo "${CONTEXT_UNREACHABLE_MSG}" >&2`)
   })
 })
+
+// The context-link shim is generated source that no compiler ever checks, and it is the only
+// context-link client. A quoting or `for`-list slip in it fails silently on the user's machine —
+// and, for an SSH project, on a machine we cannot inspect. `sh -n` is the cheap half of the
+// discipline the canvas-control shim gets in full (canvas-control-shim.test.ts runs that one for
+// real); the two share `nt_read_node_token`, so the behaviour is covered there.
+describe('the context-link shim', () => {
+  it('is valid POSIX sh', async () => {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const fs = await import('node:fs')
+    const os = await import('node:os')
+    const path = await import('node:path')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nodeterm-context-shim-'))
+    const file = path.join(dir, 'context.sh')
+    fs.writeFileSync(file, CONTEXT_SHIM_SCRIPT, { mode: 0o755 })
+    try {
+      await expect(promisify(execFile)('/bin/sh', ['-n', file])).resolves.toBeTruthy()
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves the per-node token through the one shared reader (#384)', () => {
+    // Not a second copy of `head -n 1 "$NODETERM_NODE_TOKEN_DIR/…"`: that copy is what left a
+    // session pinned to a pre-v2 endpoint file presenting nothing for its whole life.
+    expect(CONTEXT_SHIM_SCRIPT).toContain('nt_read_node_token')
+    expect(CONTEXT_SHIM_SCRIPT).not.toContain('nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR')
+  })
+})

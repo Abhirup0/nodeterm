@@ -269,6 +269,9 @@ export const IPC = {
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
+  /** Is a folder's .nodeterm/project.json present / absent / unreadable — the distinction
+   *  `probeFolder`'s null collapses. Recovery of an `unavailable` project needs it (issue #385). */
+  workspaceProjectFileState: 'workspace:project-file-state',
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',

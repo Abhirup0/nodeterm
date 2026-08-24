@@ -5,6 +5,7 @@ import type { ContextLinkInfo } from '../shared/types'
 import { sessionName } from './tmux-naming'
 import { HOOK_CURL_HEADERS_SH } from './agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_BLOCKED_LINE, CODEX_SANDBOX_HINT_SH } from './agents/hook-sandbox-hint-sh'
+import { NODE_TOKEN_READ_SH } from './agents/node-token-sh'
 
 /** The shim's generic transport-failure sentence — exported so the agent-facing docs below can
  *  quote it verbatim and the parity test holds the two ends together. */
@@ -183,14 +184,13 @@ if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then
   . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :
 fi
 
-# The PER-NODE capability: the endpoint file (v2) advertises the directory, the token is one file
-# in it named for THIS node id — a lookup by name, never a scan, so a session can only ever present
-# its own. Missing (pre-v2 endpoint, a node whose token was never materialised) leaves it empty,
-# which the server reads as legacy — the request still goes, exactly as before.
-nt_node_token=""
-if [ -n "$NODETERM_NODE_TOKEN_DIR" ] && [ -n "$NODETERM_NODE_ID" ]; then
-  nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID" 2>/dev/null)
-fi
+# The PER-NODE capability, resolved by the one shared reader (see node-token-sh.ts): the token is
+# one file named for THIS node id — a lookup by name, never a scan, so a session can only ever
+# present its own. The endpoint file (v2) advertises the directory; when it does not — a pinned
+# pre-v2 endpoint that is still live, a session whose transport came from the env — the resolver
+# falls back to the standard locations rather than reading as \`legacy\` forever (issue #384).
+${NODE_TOKEN_READ_SH}
+nt_read_node_token
 
 ${HOOK_CURL_HEADERS_SH}
 

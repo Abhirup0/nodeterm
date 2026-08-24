@@ -100,11 +100,22 @@ export function isStrictInstant(now: Date): boolean {
  * It says what could not be established, that the command ran anyway, the exact action that fixes
  * it, and the date after which it stops being a note and starts being a refusal. One line, because
  * it is a prefix and a multi-line prefix buries the reply the agent actually asked for.
+ *
+ * THE ACTION IS "close and reopen", not "Restart agent" — issue #384. Both sentences used to name
+ * the in-place restart, and that one is measurably incapable of fixing this: `agent-restart.ts`
+ * types the CLI's exit line and re-launches it INSIDE the same pane, deliberately leaving the pty,
+ * the tmux session and therefore the whole session ENVIRONMENT untouched. Identity is read out of
+ * that environment (`$NODETERM_HOOK_ENDPOINT` → the token dir it advertises), so the restart
+ * cannot change the answer, however many times it is run. Only a new tmux session picks up the
+ * current `-e` env, and on an SSH host only a reconnect rewrites the endpoint file, the shim, the
+ * hook script and the token files. Naming an action that cannot work is the exact loop
+ * `IDENTITY_UNMINTABLE_NOTE` exists to break, and it was being handed to a far larger population.
  */
 export const IDENTITY_RESTART_NOTE =
   'NodeTerm could not confirm which node sent this command: this session is not presenting its ' +
-  'node identity, so it ran unverified. Restart this node (right-click it, "Restart agent") to ' +
-  `pick one up — from ${STRICT_DATE} commands from a session without one are refused.`
+  'node identity, so it ran unverified. Close and reopen this node to pick one up (on an SSH ' +
+  `project, reconnect the project first) — from ${STRICT_DATE} commands from a session without ` +
+  'one are refused.'
 
 /**
  * The same situation once it is refused — after the cutoff, or once the node has proven itself and
@@ -115,8 +126,9 @@ export const IDENTITY_RESTART_NOTE =
  */
 export const IDENTITY_REFUSED_NOTE =
   'NodeTerm could not confirm which node sent this command, so it did not run: this session is ' +
-  'not presenting its node identity. Restart this node (right-click it, "Restart agent") to pick ' +
-  'one up.'
+  'not presenting its node identity. Close and reopen this node to pick one up — on an SSH ' +
+  'project, reconnect the project first — or turn off Settings → Agents → "Require verified node ' +
+  'identity for canvas control".'
 
 /**
  * The refusal for a node that can NEVER have an identity, however many times it is restarted.
@@ -131,10 +143,11 @@ export const IDENTITY_REFUSED_NOTE =
  *    `nodeAuthToken` returns '' for it forever.
  *
  * Giving those `IDENTITY_REFUSED_NOTE` is the worst kind of wrong answer: it names an action
- * ("Restart this node… to pick one up") that is guaranteed not to work, so the user restarts in a
- * loop while the only real signal — a `console.warn` in the main-process log — sits somewhere they
- * will never look. This sentence names the cause instead, refuses to advise a restart, and points
- * at both real ways out: fix the id, or use the escape hatch, which does release this.
+ * ("Close and reopen this node to pick one up") that is guaranteed not to work, so the user
+ * reopens in a loop while the only real signal — a `console.warn` in the main-process log — sits
+ * somewhere they will never look. This sentence names the cause instead, refuses to advise any
+ * action on the node, and points at both real ways out: fix the id, or use the escape hatch,
+ * which does release this.
  *
  * It is one of a PAIR: this is the refusal, `IDENTITY_UNMINTABLE_WARN_NOTE` is the same cause said
  * during the warning window, where the command ran. The two differ in one clause and share the

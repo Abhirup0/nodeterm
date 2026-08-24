@@ -4,6 +4,7 @@
 import { HOOK_CURL_HEADERS_SH } from '../core/agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_HINT_SH } from '../core/agents/hook-sandbox-hint-sh'
 import { codexSandboxGuidanceLines } from '../core/context-link-core'
+import { NODE_TOKEN_READ_SH } from '../core/agents/node-token-sh'
 import { AGENT_CONFIG, AGENT_HOOK_TARGETS, BUILTIN_AGENT_IDS } from '@shared/agents/config'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { FANOUT_PER_TURN, PAIR_MIN_INTERVAL_MS } from '../core/agents/agent-message-flow'
@@ -426,14 +427,15 @@ if [ -n "$NODETERM_HOOK_ENDPOINT" ] && [ -r "$NODETERM_HOOK_ENDPOINT" ]; then
   . "$NODETERM_HOOK_ENDPOINT" 2>/dev/null || :
 fi
 
-# The PER-NODE capability: the endpoint file (v2) advertises the directory, the token is one file
-# in it named for THIS node id — a lookup by name, never a scan, so a session can only ever present
-# its own. Missing (pre-v2 endpoint, a node whose token was never materialised) leaves it empty,
-# which the server reads as legacy — the request still goes, exactly as before.
-nt_node_token=""
-if [ -n "$NODETERM_NODE_TOKEN_DIR" ] && [ -n "$NODETERM_NODE_ID" ]; then
-  nt_node_token=$(head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID" 2>/dev/null)
-fi
+# The PER-NODE capability: the token is one file named for THIS node id — a lookup by name, never
+# a scan, so a session can only ever present its own. The endpoint file (v2) advertises the
+# directory; the resolver falls back to the standard locations when it does not, because a session
+# is pinned for life to the endpoint PATH it was handed at tmux creation and an old file that is
+# still live advertises none. That was issue #384: the node proved itself through the hook script
+# (which fails over) and was then refused here, permanently, by the trust-on-first-proof latch.
+# Missing everywhere leaves it empty, which the server reads as legacy — the request still goes.
+${NODE_TOKEN_READ_SH}
+nt_read_node_token
 
 ${HOOK_CURL_HEADERS_SH}
 

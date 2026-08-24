@@ -285,6 +285,12 @@ export function buildRealApi(
     // next writeDisk() overwrote the team's shared canvas. Data loss, not a degrade.
     probeFolder: (folder: string) =>
       client.request(IPC.workspaceProbeFolder, folder) as ReturnType<WorkspaceApi['probeFolder']>,
+    // REAL for the same reason: core registers IPC.workspaceProjectFileState, and a stub would
+    // have to answer 'unreadable' — which is the side that never recovers a deleted project file.
+    projectFileState: (folder: string) =>
+      client.request(IPC.workspaceProjectFileState, folder) as ReturnType<
+        WorkspaceApi['projectFileState']
+      >,
     // REAL: core broadcasts IPC.workspaceMigrated after a v2→v3 migration (workspace-store.ts).
     onMigrated: (cb) => client.subscribe(IPC.workspaceMigrated, cb as Listener),
     // REAL: core broadcasts IPC.workspaceCorruptRecovered from the load path (workspace-store.ts).
