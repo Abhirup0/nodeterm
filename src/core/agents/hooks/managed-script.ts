@@ -201,20 +201,39 @@ export function buildManagedScript(
     '# `nt_pending` stays empty otherwise, so the POST tag and the poll loop below are both inert.',
     'nt_pending=""',
     'nt_pending_file=""',
-    'if [ -n "$NODETERM_PERM_WAIT_SECS" ] && [ "$NODETERM_PERM_WAIT_SECS" -gt 0 ] 2>/dev/null; then',
-    '  case "$payload" in',
-    '    *\'"hook_event_name":"PermissionRequest"\'*|*\'"hook_event_name": "PermissionRequest"\'*)',
-    '      nt_node=$(printf %s "$NODETERM_NODE_ID" | tr -c \'A-Za-z0-9_-\' \'_\')',
-    '      nt_ms=$(date +%s%3N 2>/dev/null)',
-    '      case "$nt_ms" in \'\'|*[!0-9]*) nt_ms=$(date +%s) ;; esac',
-    '      nt_pending="${nt_node}-${nt_ms}-$$"',
-    '      nt_dir="$HOME/.nodeterm/pending"',
-    '      (umask 077; mkdir -p "$nt_dir") 2>/dev/null || :',
-    '      nt_pending_file="$nt_dir/$nt_pending.json"',
-    '      (umask 077; printf %s "$payload" > "$nt_pending_file") 2>/dev/null || :',
-    '      ;;',
-    '  esac',
-    'fi',
+    // CLAUDE-ONLY, at BUILD time — not env-gated (issue #409). The old assumption was "non-claude
+    // agents never see NODETERM_PERM_WAIT_SECS", but the var rides the CLAUDE node's session env
+    // (default-on hookReplyApprovals) and env is INHERITED: a codex launched from inside a claude
+    // node's shell — or any nested process — carries it. Codex renders its approval dialog only
+    // AFTER the PermissionRequest hook exits (measured, codex-cli 0.149.1), so the inherited wait
+    // held every codex approval for the full 45s, posted the ask under the WRONG (claude) node id,
+    // and on an answer printed claude's decision JSON into codex's own decision contract — which
+    // docs/hook-reply-approvals.md explicitly says is unverified. Emitting the arm only into
+    // claude's script kills all three for every other agent, whatever the inherited env says;
+    // claude's script stays byte-identical. tmux sessions outlive the app with their spawn-time
+    // env, which is why "hookReplyApprovals: false" did not stop the field report — the fix must
+    // not depend on the env at all.
+    ...(agentId === 'claude'
+      ? [
+          'if [ -n "$NODETERM_PERM_WAIT_SECS" ] && [ "$NODETERM_PERM_WAIT_SECS" -gt 0 ] 2>/dev/null; then',
+          '  case "$payload" in',
+          '    *\'"hook_event_name":"PermissionRequest"\'*|*\'"hook_event_name": "PermissionRequest"\'*)',
+          '      nt_node=$(printf %s "$NODETERM_NODE_ID" | tr -c \'A-Za-z0-9_-\' \'_\')',
+          '      nt_ms=$(date +%s%3N 2>/dev/null)',
+          '      case "$nt_ms" in \'\'|*[!0-9]*) nt_ms=$(date +%s) ;; esac',
+          '      nt_pending="${nt_node}-${nt_ms}-$$"',
+          '      nt_dir="$HOME/.nodeterm/pending"',
+          '      (umask 077; mkdir -p "$nt_dir") 2>/dev/null || :',
+          '      nt_pending_file="$nt_dir/$nt_pending.json"',
+          '      (umask 077; printf %s "$payload" > "$nt_pending_file") 2>/dev/null || :',
+          '      ;;',
+          '  esac',
+          'fi'
+        ]
+      : [
+          '# Hook-reply approvals are claude-only; this script never arms the wait, even when the',
+          '# session env inherited NODETERM_PERM_WAIT_SECS from a claude node (issue #409).'
+        ]),
     '# --- Endpoint failover helpers --------------------------------------------------',
     // How many endpoints we may POST to AFTER the primary failed. See the "Fallback ordering and
     // bound" block comment above buildManagedScript for the full reasoning; the short version:
@@ -355,6 +374,13 @@ export function buildManagedScript(
     '  # never outlives its reader. The perm-wait branch keeps the file for its "answered" POST.',
     '  { nt_send_request; rm -f "$nt_payload_file" 2>/dev/null || :; } &',
     'fi',
+    // The poll/decision section below is claude-only at BUILD time, like the arm above: with
+    // nt_pending permanently empty it was already unreachable in other agents' scripts, but
+    // keeping claude's decision JSON inside codex.sh is exactly the kind of latent cross-dialect
+    // output issue #409 was about — strip it so nothing in a non-claude script can ever print a
+    // decision.
+    ...(agentId === 'claude'
+      ? [
     '# Hold the hook open for a phone/canvas answer file, polling every 0.5s up to the armed seconds.',
     'if [ -n "$nt_pending" ]; then',
     '  nt_answer="$HOME/.nodeterm/pending/$nt_pending.answer"',
@@ -412,7 +438,9 @@ export function buildManagedScript(
     '  done',
     '  # Timed out: clean up the request + payload files and print nothing → Claude shows its normal prompt.',
     '  rm -f "$nt_pending_file" "$nt_payload_file" 2>/dev/null || :',
-    'fi',
+    'fi'
+        ]
+      : []),
     'exit 0',
     ''
   ].join('\n')

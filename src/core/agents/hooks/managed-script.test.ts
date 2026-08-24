@@ -120,10 +120,25 @@ describe('buildManagedScript', () => {
       expect(s).toContain('rm -f "$nt_answer" "$nt_pending_file"')
       expect(s).toContain('rm -f "$nt_pending_file"')
     })
-    it('is a no-op branch for a non-claude agent script too (env-gated, present but inert)', () => {
-      const codex = buildManagedScript('codex')
-      expect(codex).toContain('NODETERM_PERM_WAIT_SECS')
-      expect(codex).toContain('/hook/codex')
+    // Issue #409: NODETERM_PERM_WAIT_SECS rides the CLAUDE node's session env and is INHERITED by
+    // nested processes — a codex launched from inside a claude node's shell carried it, and codex
+    // renders its approval dialog only AFTER the PermissionRequest hook exits (measured,
+    // codex-cli 0.149.1), so the inherited wait held every codex approval for the full armed
+    // seconds and could print claude's decision JSON into codex's own (unverified) decision
+    // contract. The wait is therefore claude-only at BUILD time: absent from every other agent's
+    // script, whatever the env says.
+    it('the wait branch is ABSENT from a non-claude agent script, not merely env-inert', () => {
+      for (const agent of ['codex', 'gemini', 'grok', 'copilot', 'opencode']) {
+        const script = buildManagedScript(agent)
+        expect(script, `${agent} script arms the perm wait`).not.toContain('NODETERM_PERM_WAIT_SECS * 2')
+        expect(script, `${agent} script polls the answer file`).not.toContain('.answer')
+        expect(script, `${agent} script can print a decision`).not.toContain('hookSpecificOutput')
+        expect(script).toContain(`/hook/${agent}`)
+      }
+      // And claude keeps the whole branch.
+      const claude = buildManagedScript('claude')
+      expect(claude).toContain('nt_max=$((NODETERM_PERM_WAIT_SECS * 2))')
+      expect(claude).toContain('"behavior":"deny"')
     })
   })
 
