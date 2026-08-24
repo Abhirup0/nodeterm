@@ -1,6 +1,9 @@
 {
   "name": "node-terminal",
   "version": "0.3.2",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
   "description": "node-based terminal manager — multiple draggable, zoomable terminals on a single canvas.",
   "author": {
     "name": "enes",

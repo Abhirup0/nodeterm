@@ -14,24 +14,17 @@ import {
   decideDragOutcome,
   type CopyFeedback
 } from './copy-feedback'
+import { readLocal, writeLocal } from '../lib/localStore'
 
-/** Guarded both ways: this module is imported by node-environment vitest suites, and a browser
- *  with storage disabled must not break copying. */
+/** Unreadable storage means "already seen" — a hint that can never be remembered would otherwise
+ *  reappear on every copy — while an UNSET key means not seen. Hence the fallback argument: a null
+ *  check alone cannot tell those two apart. */
 function hintSeen(): boolean {
-  try {
-    if (typeof localStorage === 'undefined') return true
-    return localStorage.getItem(HINT_STORAGE_KEY) === '1'
-  } catch {
-    return true
-  }
+  return readLocal(HINT_STORAGE_KEY, '1') === '1'
 }
 
 function markHintSeen(): void {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(HINT_STORAGE_KEY, '1')
-  } catch {
-    // A hint we cannot remember is better shown once too often than not at all — but never fatal.
-  }
+  writeLocal(HINT_STORAGE_KEY, '1')
 }
 
 export interface CopyFeedbackApi {
