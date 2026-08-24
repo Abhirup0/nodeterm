@@ -21,6 +21,20 @@ const ROWS = {
     keywords: ['appearance', 'theme', 'light', 'dark', 'mode', 'colour', 'color', 'chrome']
   },
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
+  windowTitle: {
+    title: 'Window title',
+    keywords: [
+      'window',
+      'title',
+      'session',
+      'tab',
+      'tracker',
+      'time',
+      'activitywatch',
+      'focused',
+      'native'
+    ]
+  },
   resumeCard: {
     title: 'Resume card',
     keywords: ['resume', 'where you left off', 'breadcrumb', 'card', 'popup', 'trail']
@@ -87,6 +101,7 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
   const hiddenNodeMenuItems = useSettings((s) => s.settings.hiddenNodeMenuItems)
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
   const showResumeCard = useSettings((s) => s.settings.showResumeCard)
+  const windowTitleActiveSession = useSettings((s) => s.settings.windowTitleActiveSession)
   const update = useSettings((s) => s.update)
   return (
     <SettingsSection
@@ -132,6 +147,24 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
             ))}
           </div>
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.windowTitle}>
+        <FieldRow
+          label="Show active session in window title"
+          description={
+            'Sets the native window title (and the browser tab, on the Server Edition) to the ' +
+            'focused node and project — "api server — myrepo — node-terminal" — so ' +
+            'window-title-based time trackers like ActivityWatch can tell sessions apart. ' +
+            'Off keeps the static title.'
+          }
+          control={
+            <Switch
+              checked={windowTitleActiveSession}
+              onChange={(v) => update({ windowTitleActiveSession: v })}
+              ariaLabel="Show the active session in the window title"
+            />
+          }
+        />
       </SearchableRow>
       <SearchableRow {...ROWS.resumeCard}>
         <FieldRow
