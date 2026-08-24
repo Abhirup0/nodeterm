@@ -76,6 +76,7 @@ export type CommandId =
   | 'node.focusRight'
   | 'node.focusUp'
   | 'node.focusDown'
+  | 'node.maximize'
   | 'node.close'
   | 'node.toggleMarkdown'
   | 'terminal.find'
@@ -199,6 +200,13 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   { id: 'node.focusDown', title: 'Focus node below', group: 'Nodes', scope: 'canvas',
     defaultBindings: { darwin: ['Cmd+ArrowDown'], other: ['Ctrl+Shift+ArrowDown'] },
     allowInTerminal: true },
+  // The header maximize toggle's chord (issue #399): fill the viewport with the node under the
+  // keyboard (else the single selected node), or restore it. allowInTerminal for focus-mode's
+  // reason — the hand that wants more rows is already typing in the terminal being enlarged.
+  // ⌘⇧Enter is iTerm2's maximize-pane chord — the same gesture terminal users already know —
+  // and collides with nothing here (scm.commit's ⌘Enter is a different chord, scm scope).
+  { id: 'node.maximize', title: 'Maximize / restore node', group: 'Nodes', scope: 'canvas',
+    defaultBindings: both('Cmd+Shift+Enter'), allowInTerminal: true },
   // Main-process intercepted today (unconditional): keep firing everywhere.
   { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
     defaultBindings: both('Cmd+W'), allowInTerminal: true, allowWhileTyping: true },
