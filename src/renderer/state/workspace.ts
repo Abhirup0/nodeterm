@@ -1223,12 +1223,46 @@ export function maximizeNodeToRect(
     height: nodeH(node) || (node.style?.height as number) || 0
   }
   if (!(premaxRect.width > 0) || !(premaxRect.height > 0)) return nodes
+  return withNodeRect(nodes, node, rect, { premaxRect })
+}
+
+/**
+ * Zone snap (issue #394 v1): place `nodeId` at `rect` — a zone of the visible viewport in
+ * ROOT/flow coordinates (`zoneTargetRect`). Plain placement, no toggle state: unlike maximize it
+ * writes no `premaxRect` (a node sent to "left half" has simply been MOVED, exactly as if by
+ * hand) and an existing `premaxRect` is left alone, so a maximized node snapped into a zone still
+ * restores to its pre-maximize spot. Refusals match the maximize matrix minus already-maximized:
+ * unknown id, group frame, collapsed node.
+ */
+export function placeNodeInRect(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  if (!node || node.type === 'group' || node.data.collapsed) return nodes
+  return withNodeRect(nodes, node, rect, {})
+}
+
+/**
+ * The shared placement core: put `node` at the ROOT-space `rect` (converted to parent-relative),
+ * patch its data, and re-fit the ancestor frames in the same transform — `extent:'parent'` would
+ * otherwise clamp a child bigger than its frame into an inverted range (the snap
+ * `groupSelectedNodes` documents).
+ */
+function withNodeRect(
+  nodes: CanvasNode[],
+  node: CanvasNode,
+  rect: { x: number; y: number; width: number; height: number },
+  dataPatch: Partial<NodeData>
+): CanvasNode[] {
   // rect is root-space; a grouped node's position is relative to its frame, so subtract the
   // ancestor origins (root position minus own offset = the parent chain's origin).
+  const root = rootPosition(node, nodes)
   const originX = root.x - node.position.x
   const originY = root.y - node.position.y
   const next = nodes.map((n) =>
-    n.id === nodeId
+    n.id === node.id
       ? {
           ...n,
           position: { x: rect.x - originX, y: rect.y - originY },
@@ -1238,7 +1272,7 @@ export function maximizeNodeToRect(
           // Drop the stale measurement in the same tick: flowToNodeStates prefers `measured` over
           // `width`/`height`, and a commit racing the re-measure would persist the OLD size.
           measured: undefined,
-          data: { ...n.data, premaxRect, expandedHeight: rect.height }
+          data: { ...n.data, expandedHeight: rect.height, ...dataPatch }
         }
       : n
   )
@@ -1255,23 +1289,7 @@ export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): Canva
   const node = nodes.find((n) => n.id === nodeId)
   const prev = node?.data.premaxRect
   if (!node || !prev) return nodes
-  const root = rootPosition(node, nodes)
-  const originX = root.x - node.position.x
-  const originY = root.y - node.position.y
-  const next = nodes.map((n) =>
-    n.id === nodeId
-      ? {
-          ...n,
-          position: { x: prev.x - originX, y: prev.y - originY },
-          width: prev.width,
-          height: prev.height,
-          style: { ...n.style, width: prev.width, height: prev.height },
-          measured: undefined,
-          data: { ...n.data, premaxRect: undefined, expandedHeight: prev.height }
-        }
-      : n
-  )
-  return fitAncestorChain(next, node.parentId)
+  return withNodeRect(nodes, node, prev, { premaxRect: undefined })
 }
 
 /**

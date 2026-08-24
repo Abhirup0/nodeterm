@@ -77,6 +77,10 @@ export type CommandId =
   | 'node.focusUp'
   | 'node.focusDown'
   | 'node.maximize'
+  | 'node.zoneLeft'
+  | 'node.zoneRight'
+  | 'node.zoneUp'
+  | 'node.zoneDown'
   | 'node.close'
   | 'node.toggleMarkdown'
   | 'terminal.find'
@@ -207,6 +211,20 @@ export const COMMAND_DEFINITIONS: readonly CommandDefinition[] = [
   // and collides with nothing here (scm.commit's ⌘Enter is a different chord, scm scope).
   { id: 'node.maximize', title: 'Maximize / restore node', group: 'Nodes', scope: 'canvas',
     defaultBindings: both('Cmd+Shift+Enter'), allowInTerminal: true },
+  // Zone snap (issue #394 v1): send the node under the keyboard (else the single selected one)
+  // into a half of the visible canvas — the Rectangle/Magnet ⌃⌥arrow idiom, which is why the mac
+  // default is Ctrl+Alt (literal Control, not Cmd). Off-mac the halves ship UNBOUND: Ctrl+Alt+Arrow
+  // would trip the speech.dictation hold chord there ('Cmd+Alt' resolves to Ctrl+Alt held — the
+  // exact trap the node.focus* comment documents), and Ctrl+Shift+Arrow is those focus commands.
+  // Quarters and thirds have no commands — the node context menu's "Snap to zone" carries them.
+  { id: 'node.zoneLeft', title: 'Snap node to left half', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Ctrl+Alt+ArrowLeft'], other: [] }, allowInTerminal: true },
+  { id: 'node.zoneRight', title: 'Snap node to right half', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Ctrl+Alt+ArrowRight'], other: [] }, allowInTerminal: true },
+  { id: 'node.zoneUp', title: 'Snap node to top half', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Ctrl+Alt+ArrowUp'], other: [] }, allowInTerminal: true },
+  { id: 'node.zoneDown', title: 'Snap node to bottom half', group: 'Nodes', scope: 'canvas',
+    defaultBindings: { darwin: ['Ctrl+Alt+ArrowDown'], other: [] }, allowInTerminal: true },
   // Main-process intercepted today (unconditional): keep firing everywhere.
   { id: 'node.close', title: 'Close node / window', group: 'Nodes', scope: 'app',
     defaultBindings: both('Cmd+W'), allowInTerminal: true, allowWhileTyping: true },
