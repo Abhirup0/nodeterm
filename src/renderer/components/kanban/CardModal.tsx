@@ -5,6 +5,14 @@ import { IconChat, IconMic, IconSearch } from '../icons'
 import { ContextMeter } from '../ContextMeter'
 import { useAgentStatus } from '../../state/agentStatus'
 import { useCardPanel } from '../../state/cardPanel'
+import {
+  useCardModalSize,
+  resolveModalSize,
+  maxModalSize,
+  clampAxis,
+  CARD_MODAL_MIN_W,
+  CARD_MODAL_MIN_H
+} from '../../state/cardModalSize'
 import { useSession } from '../../session/session'
 import type { ProjectKanban } from '@shared/types'
 import type { KanbanSession } from './KanbanView'
@@ -56,6 +64,80 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   const togglePanel = useCardPanel((s) => s.toggle)
   const isTerminal = session.kind === 'terminal'
   const isBrowser = session.kind === 'browser'
+
+  // ── Resizable / maximizable sheet (issue #389) ──────────────────────────────────────────────
+  // The sheet stays CENTRED; resize is symmetric about the centre, so every edge/corner handle
+  // tracks the cursor 1:1 with `Δsize = 2·Δcursor` and we never manage a left/top. Size (and the
+  // maximized flag) is remembered per machine in localStorage — see cardModalSize.ts.
+  const savedWidth = useCardModalSize((s) => s.width)
+  const savedHeight = useCardModalSize((s) => s.height)
+  const maximized = useCardModalSize((s) => s.maximized)
+  const rememberSize = useCardModalSize((s) => s.remember)
+  const setMaximized = useCardModalSize((s) => s.setMaximized)
+  const [viewport, setViewport] = useState(() => ({
+    w: typeof window === 'undefined' ? 1280 : window.innerWidth,
+    h: typeof window === 'undefined' ? 800 : window.innerHeight
+  }))
+  const [size, setSize] = useState(() =>
+    resolveModalSize({ width: savedWidth, height: savedHeight, maximized }, viewport.w, viewport.h)
+  )
+  const resizingRef = useRef(false)
+
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight })
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // Recompute the rendered size whenever the remembered size, the maximized flag, or the viewport
+  // changes — but never while a drag is mid-flight (that owns `size` directly).
+  useEffect(() => {
+    if (resizingRef.current) return
+    setSize(resolveModalSize({ width: savedWidth, height: savedHeight, maximized }, viewport.w, viewport.h))
+  }, [savedWidth, savedHeight, maximized, viewport.w, viewport.h])
+
+  const startResize = (dir: string) => (e: React.PointerEvent) => {
+    if (maximized) return
+    e.preventDefault()
+    e.stopPropagation()
+    const handle = e.currentTarget as HTMLElement
+    handle.setPointerCapture(e.pointerId)
+    resizingRef.current = true
+    const startX = e.clientX
+    const startY = e.clientY
+    const startW = size.width
+    const startH = size.height
+    // Cache the ceiling once; capture keeps events flowing even over the terminal/browser webview.
+    const max = maxModalSize(window.innerWidth, window.innerHeight)
+    let latest = { width: startW, height: startH }
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX
+      const dy = ev.clientY - startY
+      let w = startW
+      let h = startH
+      if (dir.includes('e')) w = startW + 2 * dx
+      if (dir.includes('w')) w = startW - 2 * dx
+      if (dir.includes('s')) h = startH + 2 * dy
+      if (dir.includes('n')) h = startH - 2 * dy
+      latest = {
+        width: clampAxis(w, CARD_MODAL_MIN_W, max.width),
+        height: clampAxis(h, CARD_MODAL_MIN_H, max.height)
+      }
+      setSize(latest)
+    }
+    const onUp = () => {
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', onUp)
+      handle.removeEventListener('pointercancel', onUp)
+      resizingRef.current = false
+      rememberSize(latest.width, latest.height) // persist the size the drag settled on
+    }
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', onUp)
+    handle.addEventListener('pointercancel', onUp)
+  }
+
+  const RESIZE_DIRS = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']
 
   const nameWithAi = async () => {
     setNaming(true)
@@ -118,8 +200,29 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
   return createPortal(
     <div className="kanban-modal-scrim" onMouseDown={onClose}>
       {/* stopPropagation: clicks inside the sheet must not reach the scrim-close */}
-      <div className="kanban-modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="kanban-modal__header">
+      <div
+        className="kanban-modal"
+        style={{ width: size.width, height: size.height }}
+        data-maximized={maximized || undefined}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {!maximized &&
+          RESIZE_DIRS.map((d) => (
+            <div
+              key={d}
+              className={`kanban-modal__resize kanban-modal__resize--${d}`}
+              onPointerDown={startResize(d)}
+            />
+          ))}
+        <div
+          className="kanban-modal__header"
+          onDoubleClick={(e) => {
+            // Double-click the header BACKGROUND toggles maximize — not the title (rename) or actions.
+            const t = e.target as HTMLElement
+            if (t.closest('button') || t.closest('input') || t.closest('.kanban-modal__title')) return
+            setMaximized(!maximized)
+          }}
+        >
           <span className="kanban-card__nodedot" style={{ background: session.color }} />
           {editingTitle ? (
             <input
@@ -189,6 +292,14 @@ export function CardModal({ session, columnTitle, board, onChangeBoard, onClose,
             onClick={togglePanel}
           >
             <IconChat />
+          </button>
+          <button
+            className="kanban-modal__action"
+            title={maximized ? 'Restore size' : 'Maximize'}
+            aria-pressed={maximized}
+            onClick={() => setMaximized(!maximized)}
+          >
+            {maximized ? '❐' : '⤢'}
           </button>
           <button className="kanban-modal__action" title="Open on canvas" onClick={onOpenCanvas}>
             ↗

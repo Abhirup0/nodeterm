@@ -8890,8 +8890,11 @@ button.group-node__setup:disabled {
 }
 .kanban-modal {
   animation: kanban-pop 0.16s ease-out;
-  width: min(1040px, calc(100vw - 96px));
-  height: min(680px, calc(100vh - 120px));
+  /* width/height are inline (remembered per machine — see cardModalSize.ts). These are the safety
+     ceiling so the sheet can never exceed the viewport, even for the frame before the clamp runs. */
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  position: relative;
   display: flex;
   flex-direction: column;
   background: var(--surface-sunken);
@@ -8900,6 +8903,29 @@ button.group-node__setup:disabled {
   box-shadow: 0 24px 80px rgba(0, 0, 0, calc(0.6 * var(--shadow-k)));
   overflow: hidden;
 }
+/* Resize handles (issue #389): thin strips just inside each edge, larger squares at the corners.
+   Inset (not outset) so the sheet's overflow:hidden / border-radius doesn't clip them. */
+.kanban-modal__resize {
+  position: absolute;
+  z-index: 6;
+  touch-action: none;
+}
+.kanban-modal__resize--n { top: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
+.kanban-modal__resize--s { bottom: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
+.kanban-modal__resize--w { left: 0; top: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+.kanban-modal__resize--e { right: 0; top: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+.kanban-modal__resize--ne,
+.kanban-modal__resize--nw,
+.kanban-modal__resize--se,
+.kanban-modal__resize--sw {
+  width: 14px;
+  height: 14px;
+  z-index: 7; /* corners beat the edge strips they overlap */
+}
+.kanban-modal__resize--ne { top: 0; right: 0; cursor: nesw-resize; }
+.kanban-modal__resize--nw { top: 0; left: 0; cursor: nwse-resize; }
+.kanban-modal__resize--se { bottom: 0; right: 0; cursor: nwse-resize; }
+.kanban-modal__resize--sw { bottom: 0; left: 0; cursor: nesw-resize; }
 .kanban-modal__header {
   flex: 0 0 auto;
   display: flex;
