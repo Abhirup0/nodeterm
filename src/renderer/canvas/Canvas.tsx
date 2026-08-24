@@ -2026,14 +2026,22 @@ export function Canvas() {
       if (useSettings.getState().settings.phoneAccessEnabled) {
         window.nodeTerminal.remoteHost.sendCanvasState({ nodes: flowToNodeStates(nodesRef.current) })
       }
-      // Offer the resume card once per project per app run. "Once" is only spent on a card that
-      // could actually render: a project whose breadcrumbs ALL point at nodes deleted since must
-      // not burn its one-shot slot on an empty card the user never saw — and neither must a
-      // project that activates ON the kanban board, where the card (z 11) sits invisible under
-      // the opaque overlay (z 25). Same failure mode, same rule.
+      // Offer the resume card once per project per app run — and only when the user opted in
+      // (settings.showResumeCard, default off): while disabled the one-shot slot is NOT spent,
+      // so flipping the switch on later still shows the card on the next activation. "Once" is
+      // only spent on a card that could actually render: a project whose breadcrumbs ALL point
+      // at nodes deleted since must not burn its one-shot slot on an empty card the user never
+      // saw — and neither must a project that activates ON the kanban board, where the card
+      // (z 11) sits invisible under the opaque overlay (z 25). Same failure mode, same rule.
       const liveIds = new Set(flow.map((n) => n.id))
       const hasLiveStop = (project.breadcrumbs ?? []).some((b) => liveIds.has(b.nodeId))
-      if (!resumeCardShown.has(project.id) && hasLiveStop && !isKanbanOpen(project.id)) {
+      const resumeCardEnabled = useSettings.getState().settings.showResumeCard
+      if (
+        resumeCardEnabled &&
+        !resumeCardShown.has(project.id) &&
+        hasLiveStop &&
+        !isKanbanOpen(project.id)
+      ) {
         resumeCardShown.add(project.id)
         setResumeProject(project)
       } else {
