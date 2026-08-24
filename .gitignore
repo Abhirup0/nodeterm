@@ -9,6 +9,7 @@ dist/
 
 build/icon.png
 build/icon.ico
+build/icon.icns
 
 # bundled tmux — a ~2MB universal binary, built by scripts/build-tmux.mjs (the source of truth)
 # and copied into the app by electron-builder's mac extraResources. Never committed.
