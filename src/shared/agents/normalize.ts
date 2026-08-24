@@ -296,12 +296,42 @@ interface CodexPayload {
   prompt?: string
   tool_name?: string
   tool_input?: { prompt?: string; question?: string; questions?: { question?: string }[] }
+  // Subagent (spawn_agent collaboration) fields, measured on codex-cli 0.146.0:
+  // SubagentStart/SubagentStop carry agent_id + agent_type, and a CHILD's own tool events carry
+  // agent_id/agent_type too (the child runs inside the same codex process, so its hooks fire
+  // through the parent's subscription). SubagentStop adds last_assistant_message.
+  agent_id?: string
+  agent_type?: string
+  last_assistant_message?: string
 }
 
 export function normalizeCodex(env: RawHookEnvelope): NormalizedAgentEvent | null {
   const p = env.payload as CodexPayload
   const ev = p.hook_event_name ?? p.hookEventName
   const base = { nodeId: env.nodeId, agentId: env.agentId, sessionId: p.session_id }
+
+  // Subagent fan-out (spawn_agent). Keyed by agent_id — the child's rollout/session uuid —
+  // NOT tool_use_id: the spawn tool's Pre/PostToolUse and the SubagentStart it launches carry
+  // different turn ids and nothing correlates them, while agent_id is stable across the child's
+  // whole life (measured: parallel + nested spawns each get a distinct agent_id, and a nested
+  // child's Start/Stop fire through the same subscription). No taskLabel: the spawn message is
+  // encrypted end-to-end (tool_input.message AND the NEW_TASK payload in the child rollout are
+  // Fernet blobs), so there is no task text to show — the live transcript tail carries the
+  // readable "Task name:" header instead.
+  if (ev === 'SubagentStart' && p.agent_id) {
+    return { ...base, kind: 'subagent-start', toolUseId: p.agent_id, subagentType: p.agent_type }
+  }
+  // The real end signal — codex fires SubagentStop when the child's turn completes, so unlike
+  // claude there is no async-launch-ack trap to dodge here. Duration/token counts are not in the
+  // payload; the card keeps its live-timer elapsed and the result text.
+  if (ev === 'SubagentStop' && p.agent_id) {
+    return { ...base, kind: 'subagent-end', toolUseId: p.agent_id, result: p.last_assistant_message }
+  }
+  // A CHILD's own tool events (tagged agent_id) must not drive the PARENT node's state: after an
+  // async spawn the parent's turn can end (Stop → done) while the child still runs, and a child
+  // Bash event mapping to 'working' would flip a finished node back to RUNNING with no later
+  // parent event to clear it. Child activity reaches the card via the rollout tail instead.
+  if (p.agent_id) return null
 
   // UserPromptSubmit is codex's turn start — flag newTurn so the renderer clears
   // per-turn fan-out once per turn, not on every tool event.
