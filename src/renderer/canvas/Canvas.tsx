@@ -235,6 +235,7 @@ import {
   type FocusableNode
 } from '../lib/nodeFocus'
 import { maximizeTargetRect } from '../lib/nodeMaximize'
+import { ZONES, zoneTargetRect, type ZoneId } from '../lib/nodeZones'
 import {
   recordBreadcrumb,
   stepBreadcrumb,
@@ -456,6 +457,7 @@ import {
   ungroupNodes,
   maximizeNodeToRect,
   restoreMaximizedNode,
+  placeNodeInRect,
   type CanvasNode
 } from '../state/workspace'
 import { codexAccountSelectable, codexAccountSwitchStillEligible } from './codex-account-switch'
@@ -6132,13 +6134,12 @@ export function Canvas() {
   )
 
   /**
-   * The header maximize toggle's chord (issue #399). Same origin rule as `moveNodeFocus`: the
-   * node the keyboard is actually IN (hover-dwell focuses a terminal without selecting it), else
-   * the single selected node — a multi-selection is ambiguous, so it declines and the chord
-   * falls through. Declines (false) rather than half-acts everywhere the button would not show:
-   * group frames, collapsed nodes, an unmeasured container.
+   * The node a placement command acts on (maximize, zone snap). Same origin rule as
+   * `moveNodeFocus`: the node the keyboard is actually IN (hover-dwell focuses a terminal
+   * without selecting it), else the single selected node — a multi-selection is ambiguous, so
+   * the caller declines and the chord falls through. Never a group frame.
    */
-  const toggleMaximizeCommand = useCallback((): boolean => {
+  const placementTargetNode = useCallback((): CanvasNode | undefined => {
     const nodes = nodesRef.current
     const focusedId = document.activeElement
       ?.closest(`.${FLOW_NODE_CLASS}`)
@@ -6147,7 +6148,16 @@ export function Canvas() {
     const target =
       (focusedId ? nodes.find((n) => n.id === focusedId) : undefined) ??
       (selected.length === 1 ? selected[0] : undefined)
-    if (!target || target.type === 'group') return false
+    return !target || target.type === 'group' ? undefined : target
+  }, [])
+
+  /**
+   * The header maximize toggle's chord (issue #399). Declines (false) rather than half-acts
+   * everywhere the button would not show: group frames, collapsed nodes, an unmeasured container.
+   */
+  const toggleMaximizeCommand = useCallback((): boolean => {
+    const target = placementTargetNode()
+    if (!target) return false
     if (target.data.premaxRect) {
       setNodes((ns) => restoreMaximizedNode(ns, target.id))
       markDirty()
@@ -6160,7 +6170,28 @@ export function Canvas() {
     setNodes((ns) => maximizeNodeToRect(ns, target.id, rect))
     markDirty()
     return true
-  }, [setNodes, markDirty, getViewport])
+  }, [placementTargetNode, setNodes, markDirty, getViewport])
+
+  /**
+   * Zone snap (issue #394 v1): place `nodeId` (or the placement target, for the keyboard chords)
+   * into a zone of the visible canvas. Same declines as maximize; no toggle state — the node has
+   * simply been moved, exactly as if by hand (see `placeNodeInRect`).
+   */
+  const snapNodeToZone = useCallback(
+    (zone: ZoneId, nodeId?: string): boolean => {
+      const target = nodeId
+        ? nodesRef.current.find((n) => n.id === nodeId)
+        : placementTargetNode()
+      if (!target || target.type === 'group' || target.data.collapsed) return false
+      const wrap = flowWrapRef.current?.getBoundingClientRect()
+      const rect = wrap ? zoneTargetRect(getViewport(), wrap.width, wrap.height, zone) : null
+      if (!rect) return false
+      setNodes((ns) => placeNodeInRect(ns, target.id, rect))
+      markDirty()
+      return true
+    },
+    [placementTargetNode, setNodes, markDirty, getViewport]
+  )
 
   // ONE window keydown for every registry command + the legacy gestures. The deps live in a
   // ref refreshed each render so the listener is registered once; handlers return whether
@@ -6242,7 +6273,11 @@ export function Canvas() {
       'node.focusRight': () => moveNodeFocus('right'),
       'node.focusUp': () => moveNodeFocus('up'),
       'node.focusDown': () => moveNodeFocus('down'),
-      'node.maximize': toggleMaximizeCommand
+      'node.maximize': toggleMaximizeCommand,
+      'node.zoneLeft': () => snapNodeToZone('left-half'),
+      'node.zoneRight': () => snapNodeToZone('right-half'),
+      'node.zoneUp': () => snapNodeToZone('top-half'),
+      'node.zoneDown': () => snapNodeToZone('bottom-half')
       // node.close / node.toggleMarkdown: main-process intercepted on desktop; deliberately
       // no renderer handler (the browser owns ⌘W in the Server Edition — see bridge/stubs.ts).
       // terminal.* / scm.commit / speech.dictation: owned by their local listeners.
@@ -6419,6 +6454,27 @@ export function Canvas() {
         : ([
             { label: 'Duplicate', icon: <IconDuplicate />, onClick: () => duplicateNodes(ids, at) }
           ] as MenuItem[])),
+      // Zone snap (issue #394 v1): place THIS node into a region of the visible canvas at that
+      // region's size — halves/quarters/thirds. Single non-group, non-collapsed target only (the
+      // same declines as the ⌃⌥arrow chords; a multi-selection stacking into one zone is noise).
+      ...(ids.length === 1 &&
+      !isHidden('snap-zone', hidden) &&
+      (() => {
+        const n = nodesRef.current.find((nd) => nd.id === ids[0])
+        return !!n && n.type !== 'group' && !n.data.collapsed
+      })()
+        ? ([
+            {
+              type: 'submenu',
+              label: 'Snap to zone',
+              icon: <IconGrid />,
+              children: ZONES.map((z) => ({
+                label: z.label,
+                onClick: () => snapNodeToZone(z.id, ids[0])
+              }))
+            }
+          ] as MenuItem[])
+        : []),
       ...(ids.length === 1 && (() => {
         const a = agentIdOf(ids[0])
         return !!a && canBranch(a)

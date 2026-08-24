@@ -3,6 +3,7 @@ import {
   flowToNodeStates,
   maximizeNodeToRect,
   nodeStatesToFlow,
+  placeNodeInRect,
   restoreMaximizedNode
 } from './workspace'
 import type { CanvasNode } from './workspace'
@@ -160,5 +161,44 @@ describe('maximizeTargetRect', () => {
     expect(maximizeTargetRect({ x: 0, y: 0, zoom: 1 }, 0, 0, 24)).toBeNull()
     expect(maximizeTargetRect({ x: 0, y: 0, zoom: 1 }, 160, 800, 24)).toBeNull()
     expect(maximizeTargetRect({ x: 0, y: 0, zoom: 0 }, 1200, 800, 24)).toBeNull()
+  })
+})
+
+describe('placeNodeInRect (zone snap, issue #394 v1)', () => {
+  it('places a top-level node at the rect without writing premaxRect', () => {
+    const next = placeNodeInRect([term('a', { x: 40, y: 60 })], 'a', RECT)
+    const a = next.find((n) => n.id === 'a')!
+    expect(a.position).toEqual({ x: 1000, y: 2000 })
+    expect(a.width).toBe(1600)
+    expect(a.height).toBe(900)
+    expect(a.data.premaxRect).toBeUndefined()
+  })
+
+  it('leaves an existing premaxRect alone — a maximized node snapped to a zone still restores', () => {
+    const maxed = maximizeNodeToRect([term('a', { x: 40, y: 60 })], 'a', RECT)
+    const zoned = placeNodeInRect(maxed, 'a', { x: 0, y: 0, width: 700, height: 900 })
+    expect(zoned[0].data.premaxRect).toEqual({ x: 40, y: 60, width: 320, height: 240 })
+    const restored = restoreMaximizedNode(zoned, 'a')
+    expect(restored[0].position).toEqual({ x: 40, y: 60 })
+    expect(restored[0].width).toBe(320)
+  })
+
+  it('re-fits the frame around a grouped node, absolute rect honoured', () => {
+    const g = group('g', { x: 100, y: 100 })
+    const child = term('a', { x: 50, y: 80 }, { width: 320, height: 240 }, { parentId: 'g', extent: 'parent' })
+    const next = placeNodeInRect([g, child], 'a', RECT)
+    const a = next.find((n) => n.id === 'a')!
+    const frame = next.find((n) => n.id === 'g')!
+    expect(frame.position.x + a.position.x).toBeCloseTo(RECT.x)
+    expect(frame.position.y + a.position.y).toBeCloseTo(RECT.y)
+    expect((frame.width as number)!).toBeGreaterThanOrEqual(RECT.width)
+  })
+
+  it('refuses group frames, collapsed nodes and unknown ids', () => {
+    const collapsed = term('c', { x: 0, y: 0 })
+    collapsed.data = { ...collapsed.data, collapsed: true }
+    expect(placeNodeInRect([group('g', { x: 0, y: 0 })], 'g', RECT)[0].width).toBe(600)
+    expect(placeNodeInRect([collapsed], 'c', RECT)[0].width).toBe(320)
+    expect(placeNodeInRect([term('a', { x: 1, y: 2 })], 'nope', RECT)).toEqual([term('a', { x: 1, y: 2 })])
   })
 })
