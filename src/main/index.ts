@@ -3464,7 +3464,10 @@ app.whenReady().then(async () => {
     // path, and the result is cached (the artifact never changes within an app run). A missing
     // artifact resolves to '' — `installRemoteCodexRuntime` treats an empty bundle as "no runtime"
     // and never fails a plain SSH connect over it.
-    loadCodexRelayBundle
+    loadCodexRelayBundle,
+    // Lead-pane width (issue #119) for the remote tmux conf, read at connect time so the host
+    // carries the value the user last saved. 0 (the default) keeps the conf byte-identical.
+    () => settingsStore.get().tmuxLeadPaneWidth
   )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,

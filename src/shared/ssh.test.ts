@@ -13,6 +13,7 @@ import {
   sshConnectionIdForProject,
   sshHostKey
 } from './ssh'
+import { leadPaneHookLines } from './tmux-lead-pane'
 
 describe('sshHostKey', () => {
   it('is user@host', () => {
@@ -283,6 +284,18 @@ describe('remoteTmuxConf', () => {
   it('floors history-limit at 1000', () => {
     expect(remoteTmuxConf(10)).toContain('set -g history-limit 1000')
     expect(remoteTmuxConf(50000)).toContain('set -g history-limit 50000')
+  })
+  it('lead-pane width OFF (default/0/invalid) is byte-identical and carries no set-hook (issue #119)', () => {
+    // The opt-in guarantee: nodeterm ships no tmux hooks unless the user turned the setting on,
+    // and the off path must be bit-for-bit the pre-feature conf.
+    expect(remoteTmuxConf(50000, 0)).toBe(c)
+    expect(remoteTmuxConf(50000, NaN)).toBe(c)
+    expect(c).not.toContain('set-hook')
+  })
+  it('lead-pane width ON only APPENDS the shared guarded hook pair', () => {
+    const on = remoteTmuxConf(50000, 72)
+    expect(on.startsWith(c)).toBe(true)
+    expect(on).toContain(leadPaneHookLines(72))
   })
 })
 
