@@ -38,6 +38,7 @@ import {
   remoteTerminateForegroundArgs,
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
+import { probeAgentSockToPin } from './remote-ssh/agent-probe'
 import { parsePaneCursor } from './pane-cursor'
 import {
   recordFreshSpawnOwner,
@@ -2119,6 +2120,28 @@ export class PtyManager {
     // `ownerProjectId` — and no cwd, agent, account or hook env either. A mirrored client that
     // lands on a re-created session gets the same bare login shell it got before this feature.
     const projectOverrides = await this.projectSpawnOverrides(options)
+    // Resolved HERE for the same synchronous-spawnSession reason as projectOverrides — and the
+    // relay host's detached callers pass no `sshRemote` at all, so this is the one path that needs
+    // it. Re-derive the login-agent pin for the endpoint (issue #427): same memoized `ssh -G`
+    // probe the ControlMaster's connect uses, and it OVERWRITES any inbound value — `sshRemote` is
+    // renderer-built and its conn can descend from a shareable project file, so only the local
+    // probe may decide which agent socket the argv builders pin. The annotated conn is what the
+    // session stores, so every later remote op (capture, sendText, remote git) rides the same
+    // answer. Fail-open: a failed probe ⇒ undefined ⇒ the pre-#427 command lines.
+    if (options.sshRemote) {
+      options = {
+        ...options,
+        sshRemote: {
+          ...options.sshRemote,
+          conn: {
+            ...options.sshRemote.conn,
+            identityAgentSock: await probeAgentSockToPin(options.sshRemote.conn).catch(
+              () => undefined
+            )
+          }
+        }
+      }
+    }
     const sessionId = this.spawnSession(
       options,
       clientId,
