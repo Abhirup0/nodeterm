@@ -23,6 +23,12 @@
 //    `IdentityAgent` in ~/.ssh/config overrides `SSH_AUTH_SOCK` and is the documented setup for
 //    them; ssh-project.ts surfaces an error hint naming IdentityAgent for the rest (a hint, not
 //    a retry - see connectOnce's failure tail for why retrying on the ambient agent is wrong).
+//    CAVEAT (issue #427): the ENV-REFERENCE spellings — `IdentityAgent SSH_AUTH_SOCK` and
+//    friends — resolve through the very variable this file overrides, so "config overrides env"
+//    is false for exactly those users. They are honored anyway: an `ssh -G` probe
+//    (core/remote-ssh/agent-probe.ts) detects them per host and the argv builders pin the
+//    ambient socket with `-o IdentityAgent=…`, which beats both the config line and this
+//    override. This env override itself stays unconditional — read that file before touching it.
 //
 // The agent runs in the FOREGROUND (`-D`) as a direct child, so `kill()` really ends it (the
 // default double-forks away and would survive us), and with a default identity lifetime (`-t`)
