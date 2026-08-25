@@ -712,6 +712,58 @@ Monaco is wired in `renderer/editor/monaco-setup.ts` (language workers bundled v
 `?worker` — no CDN; CSP `worker-src` allows them). Markdown rendering is shared in
 `renderer/lib/markdown.ts` (`marked` + DOMPurify sanitize).
 
+### Webview keep-alive across project switches (browser/web nodes)
+
+Issue #301: a project switch used to reload every browser node's page — SPA state, forms, scroll,
+websockets gone — because the load effect swaps the whole React Flow node array and an Electron
+`<webview>`'s guest process dies on DOM detach (a webview cannot be parked like xterm). The fix
+keeps the ELEMENT mounted instead of trying to preserve anything through a remount. The facts it
+rests on are measured (Electron 42.x probes + in-app verification, 2026-08-26):
+
+- A guest **survives** sibling insert/remove around its element (React reconciliation of kept,
+  order-stable keyed children never touches them), and **survives `display:none`** of itself or an
+  ancestor — state intact, viewport size and scroll kept (the guest is NOT resized to 0), repaint
+  pixel-identical on reveal, timers running throttled like a background tab.
+- A guest **dies** on any DOM *move* (`insertBefore`/`appendChild` of an attached element detaches
+  first), taking a full page reload with it. React moves a kept child exactly when its RELATIVE
+  ORDER among kept children changes (`lastPlacedIndex`), and React Flow renders nodes in
+  prop-array order keyed by id (`adoptUserNodes` rebuilds `nodeLookup` in array order) — so the
+  merged prop's order discipline IS the feature.
+
+Mechanics (`renderer/lib/webviewKeepAlive.ts` pure + tested, `state/webviewKeepAlive.ts` store,
+merged in Canvas exactly like the ephemeral subagent cards — Canvas state, persistence, undo and
+the wire never see any of it):
+
+- Every webview-hosting node (`browser`/`web`) renders in ONE stable **pool region** at the tail
+  of the `<ReactFlow>` nodes prop, ordered by the pool's entries; entry order never changes while
+  an entry lives (append/remove only — `webviewKeepAlive.test.ts` pins the order-stability
+  invariant, `webview-keepalive-reconcile.test.tsx` pins the no-detach consequence against real
+  React). Visible cost of the hoist: an unselected browser/web node paints above other unselected
+  z-0 nodes it overlaps (selection's z 1000 still wins).
+- On switch-away the outgoing project's pages become **ghosts**: same node id, `display:none`,
+  non-interactive, parked at the origin, `data.ghost` telling the surfaces to route facts at the
+  pool (`updateGhostData`) instead of `updateNodeData`. On return the SAME element goes live
+  again; `overlayKeepAliveData` folds ghost-time navigations into the loaded nodes inside the one
+  `setNodes`, so the `url` prop never moves under the surviving surface (which would navigate it).
+- **The merge is keyed on the MOUNTED project (`keepAliveFromRef`), never `activeProjectId`, and a
+  mounted entry whose node is missing falls back to its ghost.** Both exist because the pool store
+  (zustand/useSyncExternalStore), the ref and `setNodes` do not land in one commit: a switch renders
+  interleavings where the id would otherwise drop out of the merged list for one commit — and one
+  absent commit is an unmount, i.e. a dead guest ([MEASURED]: the ghost→live direction remounted
+  every returning page until the fallback; live→ghost never did). A genuinely deleted node's entry
+  is dropped at the deletion funnels (handleNodesChange's `remove`, `deleteNodes`, the peer-mutation
+  remove, project deletion/prune), with the next retire as backstop — never by the merge.
+- **Memory bounds** (same posture as park/WebGL: a lever must not end live work): a ghost is
+  hidden, so the existing Browser Memory Saver discards its guest after `BROWSER_DISCARD_MS`
+  unless loading/audible/agent-driven — `onGuestDiscarded` then drops the entry (a husk would hold
+  a cap slot). `BACKGROUND_WEBVIEW_MAX` (8) hard-caps live background guests, evicting
+  longest-retired first; `activateProject` runs BEFORE `retireProject` on every switch so a
+  returning page sheds its background clock before that eviction can pick it.
+- E2E-verified under Xvfb (CDP): same webContents across Alpha→Beta→Alpha, typed form text + JS
+  state + tick counter continuous, zero reloads; wrapper + webview DOM elements identity-stable in
+  both directions. Server Edition: inert (no `<webview>` in a plain browser — ghosts are empty
+  husks, nothing to preserve). Mobile: N/A (no canvas).
+
 ## Agent support (Claude / Codex / Gemini / Copilot / opencode / Grok / custom)
 
 The app is a pluggable multi-agent system: Claude Code is one builtin of

@@ -3,14 +3,22 @@ import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import type { CanvasNode } from '../state/workspace'
 import { BrowserSurface } from './BrowserSurface'
 import { BrowserDrivingIndicator } from './BrowserDrivingChip'
+import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
 
 /**
  * A navigable Chromium browser node: node chrome (frame/header/resize/close) wrapping the shared
  * {@link BrowserSurface} (webview + toolbar). The last top-level URL persists to `data.url` so the
  * node reopens where it was; the same surface backs the kanban card modal's browser popup.
+ *
+ * A background KEEP-ALIVE GHOST (`data.ghost` — see lib/webviewKeepAlive.ts) renders the same
+ * tree (the mounted `<webview>` is the point), hidden by the ghost node's `display:none` style.
+ * Only the wiring differs: navigation/title facts go to the pool entry (there is no live node in
+ * React Flow to update — `updateNodeData` on a ghost id is a dropped change), and a memory-saver
+ * discard ends the entry outright (a ghost without its guest is a husk holding a cap slot).
  */
 export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const { deleteElements, updateNodeData } = useReactFlow()
+  const ghost = data.ghost === true
 
   return (
     <div className={`term-node browser-node${selected ? ' selected' : ''}`} style={{ borderTopColor: data.color }}>
@@ -51,8 +59,13 @@ export default function BrowserNode({ id, data, selected }: NodeProps<CanvasNode
           nodeId={id}
           url={(data.url as string) ?? ''}
           partition={data.partition as string | undefined}
-          onUrlChange={(u) => updateNodeData(id, { url: u })}
-          onTitleChange={(t) => updateNodeData(id, { title: t })}
+          onUrlChange={(u) =>
+            ghost ? useWebviewKeepAlive.getState().updateGhostData(id, { url: u }) : updateNodeData(id, { url: u })
+          }
+          onTitleChange={(t) =>
+            ghost ? useWebviewKeepAlive.getState().updateGhostData(id, { title: t }) : updateNodeData(id, { title: t })
+          }
+          onGuestDiscarded={ghost ? () => useWebviewKeepAlive.getState().drop(id) : undefined}
         />
       </div>
     </div>

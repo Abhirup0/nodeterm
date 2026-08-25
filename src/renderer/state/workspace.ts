@@ -117,6 +117,14 @@ export interface NodeData {
    * through persistence untouched on Server Edition / mobile, where a browser node has no <webview>.
    */
   partition?: string
+  /**
+   * browser/web-only, NEVER persisted: this node object is a background KEEP-ALIVE GHOST — a
+   * `display:none` stand-in merged into the `<ReactFlow>` prop so the `<webview>` of a project the
+   * user switched away from stays mounted (its guest process dies on DOM detach). Ghosts live only
+   * in `state/webviewKeepAlive.ts` pool entries; Canvas state, persistence, undo and the wire never
+   * hold one. The surfaces read it to route their callbacks at the pool instead of React Flow.
+   */
+  ghost?: boolean
   diffStaged?: boolean
   commitOid?: string
   /** dino-only: best score reached in the T-Rex Runner game. */
