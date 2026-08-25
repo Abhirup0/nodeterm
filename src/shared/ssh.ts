@@ -300,6 +300,8 @@ set -as terminal-features ",*:clipboard"
 # known to speak RGB. The attached client is our xterm.js renderer, which does — declare it via
 # terminal-features like the clipboard entry, never terminal-overrides (see MIGRATION). Issue #78.
 set -as terminal-features ",*:RGB"
+# OSC 8 hyperlink passthrough — tmux strips the escape unless the outer terminal declares it.
+set -as terminal-features ",*:hyperlinks"
 # And advertise it to the programs INSIDE the panes: half the ecosystem checks COLORTERM before
 # emitting 24-bit SGR. Global env, copied into each session at creation — this conf is written and
 # source-filed at connect (warm server) and rides -f on cold start, so it lands before sessions do.

@@ -35,6 +35,12 @@ describe('tmuxConf', () => {
     expect(c).not.toMatch(/set -a[gs]? terminal-overrides/)
   })
 
+  it('declares hyperlinks via terminal-features so OSC 8 links reach the renderer', () => {
+    // tmux strips the OSC 8 escape unless the outer terminal declares support, leaving only the
+    // label text — a link whose URL is not also printed can then never be opened.
+    expect(c).toContain('set -as terminal-features ",*:hyperlinks"')
+  })
+
   it('copies mouse selections through tmux (OSC 52), with no macOS-only pbcopy pipe', () => {
     expect(c).toContain('bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')
     expect(c).toContain('bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel')

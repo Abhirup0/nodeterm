@@ -20,7 +20,7 @@
 //     genuinely cannot distinguish a repainted wrap from prose that exactly fills the row),
 //     gated tightly and capped at MAX_JOIN_ROWS, and the regex still has to match across the
 //     seam for a link to result.
-import type { ILink, ILinkProvider, Terminal } from '@xterm/xterm'
+import type { ILink, ILinkHandler, ILinkProvider, Terminal } from '@xterm/xterm'
 
 export interface FileToken {
   /** The raw matched span (drives the underline range), incl. any :line:col suffix. */
@@ -156,15 +156,52 @@ export function matchUrlTokens(lineText: string): UrlToken[] {
   for (const m of lineText.matchAll(URL_RE)) {
     const text = m[0].replace(TRAILING_PUNCT, '')
     if (text.length < 8) continue // "http://x" is the shortest sane URL
-    try {
-      const u = new URL(text)
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') continue
-    } catch {
-      continue
-    }
+    if (!isHttpUrl(text)) continue
     out.push({ text, startIndex: m.index, url: text })
   }
   return out
+}
+
+function isHttpUrl(text: string): boolean {
+  try {
+    const u = new URL(text)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * OSC 8 hyperlinks — a visible label with the URL riding in an escape sequence (what Claude
+ * Code, gh and systemd emit), so the text-matching providers above never see the URL. xterm
+ * parses the sequence natively but activates nothing unless `options.linkHandler` is set (its
+ * built-in fallback is a window.confirm). The URI is invisible text the label hides, so a
+ * `javascript:`/`file:` link must never reach openExternal.
+ */
+export function createOsc8LinkHandler(openUrl: (url: string) => void): ILinkHandler {
+  return {
+    activate: (event: MouseEvent, text: string): void => {
+      if (!(event.metaKey || event.ctrlKey)) return
+      if (isHttpUrl(text)) openUrl(text)
+    }
+  }
+}
+
+/**
+ * The OSC 8 URI at a buffer cell, or null. Private API (`CellData.extended.urlId` +
+ * `_core._oscLinkService`), because the public buffer API exposes no hyperlink data and the
+ * tmux click fallback below has nothing else to hit-test one with.
+ */
+export function osc8UrlAt(term: Terminal, row: number, col: number): string | null {
+  const cell = term.buffer.active.getLine(row)?.getCell(col)
+  const urlId = (cell as unknown as { extended?: { urlId?: number } } | undefined)?.extended?.urlId
+  if (!urlId) return null
+  const uri = (
+    term as unknown as {
+      _core?: { _oscLinkService?: { getLinkData(id: number): { uri: string } | undefined } }
+    }
+  )._core?._oscLinkService?.getLinkData(urlId)?.uri
+  return uri && isHttpUrl(uri) ? uri : null
 }
 
 /** Absolute path for a token: absolutes pass through, relatives resolve against cwd,
@@ -487,6 +524,14 @@ export function installLinkClickFallback(
     if (term.modes.mouseTrackingMode === 'none') return
     const pos = bufferPosFromEvent(term, ev)
     if (!pos) return
+    const osc8 = osc8UrlAt(term, pos.row, pos.col)
+    if (osc8) {
+      ev.preventDefault()
+      ev.stopPropagation()
+      term.clearSelection()
+      deps.openUrl(osc8)
+      return
+    }
     const logical = paragraphContaining(bufferView(term), pos.row)
     if (!logical) return
     const idx = (pos.row - logical.startRow) * term.cols + pos.col
