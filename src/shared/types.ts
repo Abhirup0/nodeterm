@@ -1118,6 +1118,13 @@ export interface Settings {
    *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
    *  black window framing it; `dark`/`light` pin it. See renderer/lib/appTheme.ts. */
   appTheme: 'auto' | 'dark' | 'light'
+  /** Scale factor for the whole application UI (1 = 100%; issue #299, 4K readability). Applied as
+   *  PAGE ZOOM (`webFrame.setZoomFactor`) on desktop, so menus, node headers, dialogs — and
+   *  terminal glyphs — all scale together: the terminal font-size setting stays in CSS px, so its
+   *  effective size is fontSize × uiScale (the Settings row says so). Hand-editable; every reader
+   *  resolves it through `resolveUiScale` (shared/ui-scale.ts), which clamps to [0.5, 2] and maps
+   *  garbage to 1. Server Edition: intentionally inert — the browser owns page zoom (Cmd/Ctrl+±). */
+  uiScale: number
   /** Reflect the active session in the NATIVE window title ("<node> — <project> — node-terminal"),
    *  so window-title-based time trackers (ActivityWatch et al.) can tell sessions apart — the same
    *  thing iTerm2 / Windows Terminal do per tab (issue #414). Opt-in and OFF by default: the title
@@ -1446,6 +1453,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Follows the terminal theme, whose own default is dark — so an install that never touches
   // either setting keeps the dark chrome it has always had.
   appTheme: 'auto',
+  uiScale: 1,
   windowTitleActiveSession: false,
   terminalTheme: 'nodeterm-dark',
   fontWeight: 400,
@@ -2862,6 +2870,12 @@ export interface NodeTerminalApi {
   focusWindow(): void
   /** Set the macOS Dock badge to the unread-message count (0 clears it). */
   setBadgeCount(count: number): void
+  /** Apply the UI-scale setting as page zoom for THIS window (desktop: `webFrame.setZoomFactor`).
+   *  The preload re-clamps through `resolveUiScale` — the value originates in hand-editable
+   *  settings.json, and the boundary must not trust the caller to have done it. Server Edition:
+   *  documented no-op — a browser page cannot set its own page zoom, and the browser already owns
+   *  the identical mechanism (Cmd/Ctrl+±). */
+  setUiZoomFactor(factor: number): void
   /** Absolute filesystem path for a dropped/picked File (for drag-into-terminal). */
   getPathForFile(file: File): string
   /** Absolute writable base dir (Electron userData) for app-managed files like default worktrees. */

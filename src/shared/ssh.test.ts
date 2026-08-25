@@ -297,6 +297,17 @@ describe('remoteTmuxConf', () => {
     expect(on.startsWith(c)).toBe(true)
     expect(on).toContain(leadPaneHookLines(72))
   })
+  it('does NOT list the account-scope names in update-environment (they are LOCAL-conf only)', () => {
+    // A remote session's account env arrives via `-e` on the ssh-exec'd create; the attaching
+    // client's own env is the remote LOGIN SHELL's, which never carries our account dirs. Listing
+    // the names here would make every reattach copy/strip against that wrong environment —
+    // stripping a managed remote account's CLAUDE_CONFIG_DIR out of its own session. The local
+    // conf lists them (ACCOUNT_SCOPE_UPDATE_ENV in pty-manager, issue #419); this pin is what
+    // keeps a future "unify the two confs" cleanup from exporting the fix to the wrong side.
+    for (const name of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NODETERM_CODEX_ACCOUNT_ID']) {
+      expect(c).not.toContain(name)
+    }
+  })
 })
 
 describe('remoteTmuxCommand confPath', () => {
