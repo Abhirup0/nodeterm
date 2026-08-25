@@ -56,6 +56,7 @@ import { createCanvasRasterizer, type AtlasPageHealth } from '../glyphgrid/raste
 import { useProjects } from '../state/projects'
 import { useSettings } from '../state/settings'
 import { useViewMode, viewFor } from '../state/viewMode'
+import { readLocal } from '../lib/localStore'
 
 /** Atlas page edge, in DEVICE pixels. 2048 (not Phase 0's 1024) because the atlas cells are
  *  device-sized AND the page is now keyed by COLOUR: at dpr 2 a 13px terminal font is roughly a
@@ -753,7 +754,7 @@ function usableCell(cell: DeviceCell | undefined): DeviceCell | null {
  */
 function glyphDebugOn(): boolean {
   try {
-    return typeof localStorage !== 'undefined' && localStorage.getItem('nodeterm.glyphgridDebug') === '1'
+    return readLocal('nodeterm.glyphgridDebug') === '1'
   } catch {
     // Storage can throw outright (Safari private mode, a locked-down embedder). Debug off is
     // always a safe answer.
