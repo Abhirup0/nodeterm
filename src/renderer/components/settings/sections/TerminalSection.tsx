@@ -9,6 +9,7 @@ import { SectionReset } from '../SectionReset'
 import { Switch } from '@renderer/ui/Switch'
 import { Select } from '@renderer/ui/Select'
 import { NumberField } from '@renderer/ui/NumberField'
+import { Input } from '@renderer/ui/Input'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { TERMINAL_RESET_KEYS } from '@renderer/lib/settingsReset'
 import {
@@ -61,6 +62,10 @@ const ROWS = {
   middleClickPaste: {
     title: 'Middle-click paste',
     keywords: ['middle', 'click', 'mouse', 'paste', 'primary', 'selection', 'x11', 'linux', 'wheel']
+  },
+  wordSeparator: {
+    title: 'Word selection',
+    keywords: ['word', 'separator', 'selection', 'double click', 'identifier', 'hyphen']
   },
   boldBright: {
     title: 'Bold text uses bright colours',
@@ -316,6 +321,21 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
             }
           />
         </div>
+      </SearchableRow>
+
+      <SearchableRow {...ROWS.wordSeparator}>
+        <FieldRow
+          label="Word separators"
+          description="Characters that end a word when you double-click terminal text. Remove a character to keep it inside selections; for example, leave hyphen out to select a full issue ID."
+          control={
+            <Input
+              className="w-48 font-mono"
+              value={settings.terminalWordSeparator}
+              onChange={(e) => update({ terminalWordSeparator: e.target.value })}
+              aria-label="Terminal word separators"
+            />
+          }
+        />
       </SearchableRow>
 
       <SearchableRow {...ROWS.boldBright}>

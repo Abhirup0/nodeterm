@@ -220,6 +220,7 @@ export type XtermVisualSettings = Pick<
   Settings,
   | 'fontFamily'
   | 'fontSize'
+  | 'terminalWordSeparator'
   | 'fontWeight'
   | 'fontWeightBold'
   | 'drawBoldTextInBrightColors'
@@ -238,6 +239,7 @@ export type XtermVisualSettings = Pick<
 export const XTERM_VISUAL_KEYS = [
   'fontFamily',
   'fontSize',
+  'terminalWordSeparator',
   'fontWeight',
   'fontWeightBold',
   'drawBoldTextInBrightColors',
@@ -307,6 +309,7 @@ export function mergeProjectVisuals(
 export interface XtermVisualOptions {
   fontFamily: string
   fontSize: number
+  wordSeparator: string
   // xterm widens these to `FontWeight` ('normal' | 'bold' | '100'… | number). We only ever WRITE
   // numbers, but the type has to match what `term.options` exposes or the live target can't be
   // compared against a real terminal.
@@ -336,6 +339,7 @@ export function xtermOptionsFromSettings(
   return {
     fontFamily: s.fontFamily,
     fontSize: s.fontSize,
+    wordSeparator: s.terminalWordSeparator,
     fontWeight: terminalFontWeight(s.fontWeight, 400),
     fontWeightBold: terminalFontWeight(s.fontWeightBold, 700),
     drawBoldTextInBrightColors: s.drawBoldTextInBrightColors,
@@ -408,6 +412,7 @@ export function applyLiveOptions(
 
   if (o.fontFamily !== next.fontFamily) o.fontFamily = next.fontFamily
   if (o.fontSize !== next.fontSize) o.fontSize = next.fontSize
+  if (o.wordSeparator !== next.wordSeparator) o.wordSeparator = next.wordSeparator
   if (o.lineHeight !== next.lineHeight) o.lineHeight = next.lineHeight
   if (o.letterSpacing !== next.letterSpacing) o.letterSpacing = next.letterSpacing
   if (o.fontWeight !== next.fontWeight) o.fontWeight = next.fontWeight

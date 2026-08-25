@@ -1111,6 +1111,8 @@ export type TerminalCursorInactiveStyle = TerminalCursorStyle | 'outline' | 'non
 export interface Settings {
   fontSize: number
   fontFamily: string
+  /** Characters that end a word during xterm double-click selection. */
+  terminalWordSeparator: string
   cursorBlink: boolean
   /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto` (the default)
    *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
@@ -1427,6 +1429,8 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+  // Keep hyphens, underscores, slashes and dots inside words so identifiers and paths select whole.
+  terminalWordSeparator: " ()[]{}',\"",
   cursorBlink: true,
   // Every appearance default below reproduces the pre-feature look bit-for-bit: the default theme
   // carries the old hardcoded background/foreground, and block/outline/1/0 are xterm's own
