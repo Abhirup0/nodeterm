@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync } from 'fs'
+import os from 'os'
+import path from 'path'
 import { initPlatform, resetPlatformForTests, type CorePlatform } from './platform'
 import { fakePlatform } from './platform-fake'
 import {
@@ -28,7 +31,11 @@ function testPlatform() {
   let clients: number[] = []
   const senderListeners = new Map<string, (senderId: number, ...args: any[]) => void>()
   const p: CorePlatform = {
-    userDataDir: '/tmp/nodeterm-canvas-sync-test',
+    // A fresh mkdtemp dir, never a fixed literal: this platform is registered via initPlatform,
+    // so a predictable '/tmp/...' here reads (to CodeQL's js/insecure-temporary-file, and to a
+    // parallel test run) as every production write through platform().userDataDir landing on a
+    // shared guessable temp path — the exact fix platform-fake.ts documents.
+    userDataDir: mkdtempSync(path.join(os.tmpdir(), 'nodeterm-canvas-sync-')),
     appVersion: '0.0.0-test',
     isPackaged: false,
     handle: () => {},
