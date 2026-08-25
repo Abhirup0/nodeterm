@@ -44,6 +44,36 @@ describe('SshProjectManager', () => {
     expect(spawnMaster).toHaveBeenCalledTimes(1)
   })
 
+  it('pins the login agent on the master argv when the probe marks the endpoint (issue #427)', async () => {
+    const statuses: string[] = []
+    const spawnMaster = vi.fn(() => ({ kill: vi.fn(), on: vi.fn() }))
+    const mgr = new SshProjectManager({
+      userDataDir: '/ud',
+      spawnMaster,
+      run: vi.fn(async () => ({ code: 0, stdout: '' })),
+      runScp: vi.fn(async () => ({ code: 0 })),
+      getHook: () => ({ port: 1, token: 't', version: '1' }),
+      onStatus: (e) => statuses.push(e.status),
+      probeAgentSock: async () => '/tmp/launchd.x/Listeners'
+    })
+    await mgr.connect('p1', conn)
+    const args = ((spawnMaster.mock.calls[0] as unknown[])[0] as string[]).join(' ')
+    expect(args).toContain('-o IdentityAgent=/tmp/launchd.x/Listeners')
+    expect(args).not.toContain('AddKeysToAgent=yes')
+    // The stored conn carries the pin, so every later childArgs consumer rides the same answer.
+    expect(mgr.refForProject('p1')?.conn.identityAgentSock).toBe('/tmp/launchd.x/Listeners')
+  })
+
+  it('strips an INBOUND identityAgentSock: only the local probe may aim ssh at an agent socket', async () => {
+    // conn descends from IPC (and its ancestors from a shareable project file); without the probe
+    // dep the annotation must overwrite a smuggled value with undefined, not honor it.
+    const { mgr, spawnMaster } = makeMgr()
+    await mgr.connect('p1', { ...conn, identityAgentSock: '/tmp/evil.sock' } as SshConnection)
+    const args = ((spawnMaster.mock.calls[0] as unknown[])[0] as string[]).join(' ')
+    expect(args).not.toContain('IdentityAgent=')
+    expect(mgr.refForProject('p1')?.conn.identityAgentSock).toBeUndefined()
+  })
+
   it('listDir parses remote dir entries', async () => {
     const { mgr } = makeMgr()
     await mgr.connect('p1', conn)

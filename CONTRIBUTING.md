@@ -120,6 +120,16 @@ three times.
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.
 
+**A spawn-env write does not reach a tmux session on its own.** The shared tmux server takes each
+new session's env from its own GLOBAL env (inherited from whichever client *started* the server) —
+the creating client's process env only matters for names listed in `update-environment` (or passed
+as non-secret `-e` pairs). Setting `env.FOO` in `pty-manager` therefore works for the plain-shell
+fallback and for the one client that happens to start the server, and silently does nothing (or
+worse, leaks the server-starter's value into everyone else) after that. That is how issue #419
+shipped: managed-account `CLAUDE_CONFIG_DIR` leaked into system-account sessions. New per-session
+env either joins `ACCOUNT_SCOPE_UPDATE_ENV` / the gateway list, or rides `-e` — and gets a
+real-tmux test (`account-env.realtmux.test.ts` is the pattern).
+
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,
 ⌘, — are still handled above the page, so your `keydown` branch simply never runs: steal the chord
