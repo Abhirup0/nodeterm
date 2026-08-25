@@ -524,15 +524,32 @@ export function sshAccountsHint(
     : null
 }
 
-/** Account for a NEW Claude node: explicit pick, else the project default, else system. */
+/**
+ * Account for a NEW Claude node: explicit pick, else the project default, else system.
+ *
+ * `explicit === null` is an EXPLICIT "System account" pick and short-circuits past the project
+ * default. Before it existed, the submenu row wearing the user's system email launched the
+ * PROJECT DEFAULT account — the clearest "picked X, ran as Y" in issue #419 — because "no
+ * account passed" and "system picked" were the same value.
+ *
+ * Validation runs against the accounts ELIGIBLE for this project (`accountsForProject`), not the
+ * raw list, mirroring what every picker offers. The raw list also holds `pending` rows (their dir
+ * exists but no login lives in it yet) and accounts pinned to ANOTHER machine's host (their dir
+ * exists only over there) — a `defaultAccountId` pointing at either used to be stamped onto the
+ * node, whose spawn then fell into the missing/empty-dir fallback and silently ran under a
+ * different identity (#419 again). Ineligible ⇒ undefined ⇒ the honest system default.
+ */
 export function resolveNewNodeAccount(
-  explicit: string | undefined,
-  project: { defaultAccountId?: string } | undefined,
+  explicit: string | null | undefined,
+  project:
+    | { defaultAccountId?: string; ssh?: { server: { host: string; user: string } } }
+    | undefined,
   accounts: ClaudeAccount[]
 ): string | undefined {
+  if (explicit === null) return undefined
   const id = explicit ?? project?.defaultAccountId
   // A stale default (account since removed) must not stamp dead ids onto new nodes.
-  return id && accounts.some((a) => a.id === id) ? id : undefined
+  return id && accountsForProject(accounts, project).some((a) => a.id === id) ? id : undefined
 }
 
 /**
