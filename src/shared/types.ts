@@ -1193,18 +1193,18 @@ export interface Settings {
   panHoverDelay: number
   doubleClickFocus: boolean
   /**
-   * Let a MIDDLE CLICK inside a terminal paste the X PRIMARY selection (Linux only — macOS and
-   * Windows have no PRIMARY, so this changes nothing there).
+   * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
+   * PRIMARY selection and no tmux middle-click habit, so the guard changes nothing visible there).
    *
-   * OFF by default, and that is a deliberate reversal of what the app shipped. The paste was never
-   * ours: Chromium performs it on the hidden textarea xterm keeps under the cursor, which means it
-   * ignored the desktop's own `gtk-enable-primary-paste` (Chromium applies that only to its Views
-   * widgets, not to web content) and the user had NO way to switch it off — issue #84. It fires
-   * hardest inside agent TUIs, whose input box sits exactly where the pointer is, so a stray click
-   * drops whatever was last selected anywhere on the machine into a live agent prompt.
-   *
-   * tmux's own middle-click paste is UNAFFECTED either way: that one is a tmux root binding pasting
-   * tmux's buffer, and it never reached the browser.
+   * OFF by default, and OFF means the middle button is fully INERT inside a terminal — tmux's own
+   * middle-click paste included. That is a consequence of the real mechanism (issue #84, measured
+   * on the reporting machine): the paste never happens in the browser. xterm forwards a mouse
+   * report for the middle button and something DOWNSTREAM of the pty consumes it — tmux's root
+   * `MouseDown2Pane` binding pastes tmux's buffer at a shell prompt, and an agent TUI reads the X
+   * PRIMARY selection itself. There is no browser default action to cancel, so the guard swallows
+   * the event before xterm can forward it (`guardMiddleClickPaste`), and tmux's paste necessarily
+   * goes with it. The default stays off because the paste fires hardest inside agent TUIs: a stray
+   * click drops whatever was last selected anywhere on the machine into a live agent prompt.
    */
   terminalMiddleClickPaste: boolean
   /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). On macOS a two-finger trackpad
