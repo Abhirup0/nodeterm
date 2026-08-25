@@ -14,6 +14,7 @@ import { DEFAULT_SETTINGS, type Settings } from '@shared/types'
 export const TERMINAL_RESET_KEYS = [
   'fontFamily',
   'fontSize',
+  'terminalWordSeparator',
   'fontWeight',
   'fontWeightBold',
   'drawBoldTextInBrightColors',
