@@ -1267,6 +1267,14 @@ export interface Settings {
    *  renderer. See `resolveTerminalRenderer` (shared/webgl.ts) for the full history. */
   terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
+  /** OPT-IN lead-pane width for Claude Code agent teams (issue #119). 0 = off (default): the
+   *  generated tmux confs stay byte-identical to their pre-feature output — no `set-hook` at all.
+   *  40–90 = emit guarded after-resize-pane / after-split-window hooks (shared/tmux-lead-pane.ts)
+   *  that keep the lead pane at this % of the node width when CC's team backend re-applies its
+   *  hardcoded 70/30 split. Hand-editable; re-validated at the conf-generation site
+   *  (`sanitizeLeadPaneWidth`). Honest side effect while on: a manual 50/50 split in a plain
+   *  terminal node is nudged to the target too. */
+  tmuxLeadPaneWidth: number
   /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
    *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
   offscreenTerminalMinutes: number
@@ -1479,6 +1487,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ptyShadowClients: true,
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
+  tmuxLeadPaneWidth: 0,
   offscreenTerminalMinutes: 10,
   commitAgent: 'claude',
   commitAgentCommand: '',

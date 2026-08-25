@@ -86,6 +86,10 @@ interface Runners {
    *  Codex runtime rather than a crash. Undefined keeps every non-Codex SSH path unchanged. */
   codexRelaySource?: () => Promise<string>
   onStatus: (e: SshProjectStatusEvent) => void
+  /** Current `settings.tmuxLeadPaneWidth` (issue #119), read at connect time so the value the
+   *  remote conf carries is the one the user last saved. Optional: absent (tests, older callers)
+   *  ⇒ 0 ⇒ the pre-feature conf, byte-identical. Sanitized inside `leadPaneHookLines`. */
+  leadPaneWidth?: () => number
   /** Delays between claude-probe retries after a FAILED attempt (claude not found). Injected so
    *  tests don't wait on real backoff; production uses PROBE_RETRY_DELAYS_MS. */
   probeRetryDelaysMs?: number[]
@@ -708,7 +712,9 @@ export class SshProjectManager {
             const confWrite = remoteAtomicWrite(confPath)
             const w = await this.r.run(
               childArgs(conn, controlPath, confWrite.command),
-              remoteTmuxConf(50000)
+              // Lead-pane width applies on the host too: an agent team spawned in a remote
+              // session squeezes the lead exactly like a local one. 0/absent ⇒ pre-feature conf.
+              remoteTmuxConf(50000, this.r.leadPaneWidth?.() ?? 0)
             )
             if (w.code === 0) {
               // source-file is best-effort (pushes options into a warm server); ignore its result.
@@ -2213,7 +2219,10 @@ export function initSshProject(
    *  Linux host. Injected by the caller (main/index.ts) so this module reads no build artifact
    *  itself. Undefined ⇒ no managed Codex runtime is installed, and every non-Codex path is
    *  unchanged (Server Edition passes nothing today — see the PR's I2 decision). */
-  codexRelaySource?: () => Promise<string>
+  codexRelaySource?: () => Promise<string>,
+  /** Current `settings.tmuxLeadPaneWidth` for the remote tmux conf (issue #119). Injected by
+   *  main/index.ts because the settings store lives there; absent ⇒ 0 ⇒ pre-feature conf. */
+  leadPaneWidth?: () => number
 ): SshProjectManager {
   const ssh = sshBin()
   const scp = scpBin()
@@ -2315,6 +2324,7 @@ export function initSshProject(
       }),
     getHook: () => ({ port: hookServer.getPort(), token: hookServer.getToken(), version: hookServer.getVersion() }),
     codexRelaySource,
+    leadPaneWidth,
     // Per-node identity for REMOTE nodes. Both come from the same module the local materialiser
     // uses, so one canvas cannot be judged by two different rules depending on where it runs.
     nodeIdsForProject: (projectId) => nodeIdsForCanvas(projectId),

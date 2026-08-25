@@ -4,6 +4,11 @@ import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Switch } from '@renderer/ui/Switch'
 import { NumberField } from '@renderer/ui/NumberField'
+import {
+  LEAD_PANE_WIDTH_DEFAULT,
+  LEAD_PANE_WIDTH_MAX,
+  LEAD_PANE_WIDTH_MIN
+} from '@shared/tmux-lead-pane'
 
 const ROWS = {
   enabled: {
@@ -11,6 +16,10 @@ const ROWS = {
     keywords: ['tmux', 'persistent', 'session', 'continuity']
   },
   scrollback: { title: 'Scrollback lines', keywords: ['tmux', 'scrollback', 'history', 'lines'] },
+  leadPane: {
+    title: 'Keep lead pane wide (agent teams)',
+    keywords: ['lead', 'pane', 'width', 'agent', 'team', 'teammates', 'split', 'claude', 'resize']
+  },
   offscreen: {
     title: 'Release offscreen terminals',
     keywords: ['offscreen', 'memory', 'ram', 'release', 'reattach', 'idle', 'minutes']
@@ -52,6 +61,39 @@ export function TmuxSection({ isActive }: { isActive: boolean }): React.JSX.Elem
               step={1000}
               onChange={(v) => update({ tmuxScrollback: v || 50000 })}
             />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.leadPane}>
+        <FieldRow
+          label="Keep lead pane wide (agent teams)"
+          description={
+            'Claude Code agent teams re-apply a hardcoded 70/30 tmux split on every teammate spawn, squeezing the pane you type into. ' +
+            'When on, guarded tmux hooks keep the lead pane at the chosen % of the node width (40–90), locally and on SSH hosts (at next connect). ' +
+            'Side effect: a manual 50/50 split in a plain terminal is nudged to the same width. ' +
+            'Turning it off leaves a running tmux server’s hooks in place until that server exits (close all terminals, or tmux -L node-terminal kill-server).'
+          }
+          control={
+            <div className="flex items-center gap-2">
+              {settings.tmuxLeadPaneWidth > 0 ? (
+                <NumberField
+                  value={settings.tmuxLeadPaneWidth}
+                  min={LEAD_PANE_WIDTH_MIN}
+                  max={LEAD_PANE_WIDTH_MAX}
+                  step={1}
+                  ariaLabel="Lead pane width (%)"
+                  // Raw value stored; out-of-range hand edits are re-validated where the conf is
+                  // generated (sanitizeLeadPaneWidth), so mid-typing values never snap under the
+                  // user's cursor.
+                  onChange={(v) => update({ tmuxLeadPaneWidth: Number.isFinite(v) ? v : 0 })}
+                />
+              ) : null}
+              <Switch
+                checked={settings.tmuxLeadPaneWidth > 0}
+                onChange={(v) => update({ tmuxLeadPaneWidth: v ? LEAD_PANE_WIDTH_DEFAULT : 0 })}
+                ariaLabel="Keep lead pane wide"
+              />
+            </div>
           }
         />
       </SearchableRow>
