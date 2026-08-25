@@ -847,6 +847,39 @@ export function buildTranscriptApi(
   }
 }
 
+/**
+ * Managed CLAUDE accounts over the WS bridge (issue #313). REAL, not a stub: the lifecycle moved
+ * into `src/core/claude-accounts-service.ts`, so the server registers the same four channels the
+ * desktop does and the browser can create, log into and remove accounts. Deliberately NOT added to
+ * `relay-api.ts` — a relay tab drives someone else's machine, and minting an account there would
+ * create it on the HOST while this renderer's settings.json records it as one of its own.
+ *
+ * `waitLogin` is a straight passthrough of a poll that runs up to 5 minutes. That is safe because
+ * RpcClient has no request timeout: a pending request rejects only when the socket drops, which is
+ * exactly the outcome the caller wants (the login row stays pending and offers Retry).
+ *
+ * The `codexAccounts` namespace stays STUBBED (E_UNSUPPORTED). Its switch verbs authorize the
+ * owning window by Electron WebContents id, which has no meaning over a WS connection — porting it
+ * needs a connection-identity design, not a builder.
+ */
+export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi, 'claudeAccounts'> {
+  return {
+    claudeAccounts: {
+      add: (ctx) =>
+        client.request(IPC.claudeAccountsAdd, ctx) as Promise<{
+          id: string
+          configDir: string
+          versionSupported: boolean
+        }>,
+      waitLogin: (id, ctx) =>
+        client.request(IPC.claudeAccountsWaitLogin, id, ctx) as Promise<{ email: string } | null>,
+      cancelWaitLogin: (id) =>
+        client.request(IPC.claudeAccountsCancelWait, id) as Promise<void>,
+      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>
+    }
+  }
+}
+
 /** WS URL for the current page: same host, `/ws`, ws→http / wss→https. */
 function wsUrl(): string {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -963,6 +996,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildUsageApi(client),
     ...buildSessionMemoryApi(client),
     ...buildGitHubApi(client),
+    ...buildClaudeAccountsApi(client),
     codex: buildCodexApi(client),
     // `claude` is assembled from two builders: `cliCaps` from the relay-shared one, and the
     // transcript reader from the Server-Edition-only one (which also supplies `chat`).

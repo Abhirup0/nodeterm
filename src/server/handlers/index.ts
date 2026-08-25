@@ -10,6 +10,7 @@ import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
+import { registerClaudeAccountsIpc } from '../../core/claude-accounts-service'
 import { codexUsageAccounts } from '../../core/codex-accounts-core'
 import { codexHomeFor } from '../../core/codex-config-dir'
 import {
@@ -89,6 +90,15 @@ export function registerCoreHandlers(
   // app-server, just without the shared one. Arming the record secret is orthogonal to that
   // degrade: it never launches an app-server, it only lets the record layer sign.
   registerCodexIdentityIpc(() => UNKNOWN_CODEX_IDENTITY_CAPS)
+
+  // Managed CLAUDE accounts (issue #313). The lifecycle is core, so a browser-only deployment can
+  // create, log into and remove them exactly as the desktop does — env injection, the transcript
+  // readers, usage and the account pickers were already core and had nothing to bind to here.
+  // No `installSkill`: canvas control is not wired on this edition (its hook server answers
+  // `control unavailable` by name), so a per-account skill file would point at nothing.
+  // No `remote`: the Server Edition has no SSH-project manager, so an `AccountCtx` carrying a
+  // projectId takes the LOCAL path — the same degrade desktop takes before its manager exists.
+  registerClaudeAccountsIpc()
 
   // Claude subscription usage. Previously desktop-only — the browser bridge answered `null`, so
   // the pill never rendered in the Server Edition. The poll runs UNGATED here (the default), not
