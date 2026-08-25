@@ -6401,6 +6401,28 @@ button.group-node__setup:disabled {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+/* Popover-footer action (issue #420): opens the system-scoped `claude /login` terminal. A quiet
+   full-width row, styled with the same tint/accent tokens as `.usage-account__use` so it reads
+   in both themes. */
+.usage-popover__switch {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-align: left;
+  color: rgba(var(--tint-rgb), 0.55);
+  background: rgba(var(--tint-rgb), 0.06);
+  cursor: pointer;
+}
+.usage-popover__switch:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 /* ---- Session-memory panel (opened by the system-resource pill) ----
    Same surface, border and shadow as `.usage-popover` above — the two panels open from adjacent
    pills in the same corner, so anything that made them read as different kinds of thing would be
