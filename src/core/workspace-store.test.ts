@@ -630,6 +630,44 @@ describe('appendRemoteNode (phone-registered sessions over the relay)', () => {
   })
 })
 
+describe('removeRemoteNode (the phone\'s "End session" over the relay)', () => {
+  it('finds the node by SCAN (no projectId on the wire), removes it and broadcasts the change', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    fake.sent.length = 0
+    expect(await store.removeRemoteNode('term-1')).toBe(true)
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    const raw = await fs.readFile(file, 'utf-8')
+    const f = JSON.parse(raw)
+    expect(f.rev).toBe(2)
+    expect(f.nodes).toEqual([])
+    // Recorded as OUR write + announced explicitly, exactly like appendRemoteNode.
+    expect(store.isSelfWrite(file, raw)).toBe(true)
+    const broadcast = fake.sent.filter((s) => s.channel === 'workspace:external-change')
+    expect(broadcast).toHaveLength(1)
+    expect(broadcast[0].args[0]).toMatchObject({ id: 'p1', cwd: projRoot })
+    expect(broadcast[0].args[0].nodes).toEqual([])
+  })
+
+  it('a node in no local project answers false with nothing written (unregistered phone session)', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot })]))
+    const file = path.join(projRoot, '.nodeterm/project.json')
+    const before = await fs.readFile(file, 'utf-8')
+    expect(await store.removeRemoteNode('term-nope-1')).toBe(false)
+    expect(await fs.readFile(file, 'utf-8')).toBe(before) // untouched, no rev churn
+  })
+
+  it('skips ssh and inline entries — their files are not on this machine / do not exist', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([
+      project({ id: 'ssh1', ssh: { server: { host: 'h', user: 'u' } as never, remoteCwd: '~/x' }, cwd: undefined }),
+      project({ id: 'inline1' })
+    ]))
+    expect(await store.removeRemoteNode('term-1')).toBe(false)
+  })
+})
+
 describe('refreshSshProject', () => {
   const sshConn = { server: { host: 'h', user: 'u' } as any, remoteCwd: '~/app' }
   const remoteFileOf = async (store: WorkspaceStore, p: Project) => {
