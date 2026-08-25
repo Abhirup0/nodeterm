@@ -141,3 +141,35 @@ export function appendProjectNode(raw: string, input: RemoteNodeInput, now: Date
   root.savedAt = now.toISOString()
   return JSON.stringify(root, null, 2)
 }
+
+/**
+ * Pure removal of a node from a project.json's raw text — the host side of the relay
+ * `pty.destroy` verb ("End session" on the phone), mirroring what the desktop's × does to the
+ * canvas after `transport.destroy`. Same raw-object discipline as `appendProjectNode`: every
+ * field this version does not know round-trips untouched, and dangling references the node may
+ * leave behind (kanban assignments, bridges, ropes) are deliberately NOT chased here — their
+ * readers already tolerate and lazily prune dead ids, exactly as they do after a desktop delete.
+ *
+ * Returns null whenever nothing must be written: unparsable/wrong-shape text (a file we couldn't
+ * parse must never be invented or overwritten), or a node id that simply isn't in this file —
+ * which is an ANSWER (try the next project), not an error.
+ */
+export function removeProjectNode(raw: string, nodeId: string, now: Date): string | null {
+  if (typeof nodeId !== 'string' || !nodeId) return null
+  let root: Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+    root = parsed as Record<string, unknown>
+  } catch {
+    return null
+  }
+  if (root.version !== 1 || typeof root.rev !== 'number' || !Array.isArray(root.nodes)) return null
+  const nodes = root.nodes as Array<Record<string, unknown>>
+  if (!nodes.some((n) => n?.id === nodeId)) return null
+
+  root.nodes = nodes.filter((n) => n?.id !== nodeId)
+  root.rev = (root.rev as number) + 1
+  root.savedAt = now.toISOString()
+  return JSON.stringify(root, null, 2)
+}
