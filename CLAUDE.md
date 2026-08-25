@@ -1311,14 +1311,31 @@ else, and its context links must keep classifying across restarts).
     (`resolveNewNodeAccount`: explicit submenu pick → `project.defaultAccountId` → system default
     `~/.claude`), then **immutable** and **persisted** (serializers). `undefined` = system default
     = **bit-for-bit legacy behavior** (no env touched). Inherited by **Branch** (the
-    terminal→chat fork it also fed is gone — the SDK chat node was removed 2026-07). A pending
-    (not-yet-logged-in) account resolves to `undefined` until it completes.
+    terminal→chat fork it also fed is gone — the SDK chat node was removed 2026-07). Two #419
+    rules inside the resolver: the submenu's **System row passes `null`** (an EXPLICIT system
+    pick that skips the project default — before that, the row wearing the system email launched
+    the project-default account), and validation runs against `accountsForProject`, not the raw
+    list, so a **pending** account or one **pinned to another machine's host** is never stamped
+    onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
   - **Env injection** — `pty-manager` sets `CLAUDE_CONFIG_DIR` in the spawn env AND as a tmux `-e`
     (local); for a remote node it emits an **absolute-path** remote tmux `-e` built from the
     connection-cached `remoteHome` (skipped **fail-open** if home is unresolved). `AUTH_ENV_STRIP`
     (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`) is deleted from the
     child env so a stray env key can't shadow the account. A **missing** account dir → warn +
-    silent system fallback.
+    silent system fallback. **The account-scope names ride the LOCAL conf's `update-environment`
+    (`ACCOUNT_SCOPE_UPDATE_ENV`, issue #419)** — the shared tmux server inherits the env of the
+    client that STARTS it, so a server started by a managed-account node used to leak that
+    account's `CLAUDE_CONFIG_DIR` (and any un-stripped auth key) into every session created
+    without a `-e` override: system nodes, plain terminals and the missing-dir fallback silently
+    ran as that account ("the system account is entangled with the next account in the list").
+    Listing the names makes tmux copy each from the creating client's env and **strip it when the
+    client lacks it** (proven against a real tmux in `account-env.realtmux.test.ts`, seeded-server
+    case included; `ensureUpdateEnvKeys` retrofits a long-lived pre-fix server). The same listing
+    is what makes codex's explicit system-scope overwrite (`CODEX_HOME` /
+    `NODETERM_CODEX_ACCOUNT_ID`) actually reach sessions on a shared server. **LOCAL conf only**
+    — the remote conf must NOT get these names: a remote attach client's env is the login
+    shell's, and the copy/strip would run against that wrong environment (pinned in
+    `ssh.test.ts`).
   - **Login flow** — Settings → Accounts → **Add** creates a `pending` account and drops a canvas
     **login node** that runs `claude /login` under the account dir. Main polls the dir's
     `.claude.json` (`LOGIN_POLL_MS` 2 s, up to `LOGIN_TIMEOUT_MS` 5 min) for `oauthAccount.email`;
