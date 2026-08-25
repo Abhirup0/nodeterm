@@ -747,6 +747,7 @@ describe('repaintResync', () => {
 const visual = (p: Partial<XtermVisualSettings> = {}): XtermVisualSettings => ({
   fontFamily: 'Menlo',
   fontSize: 13,
+  terminalWordSeparator: " ()[]{}',\"",
   fontWeight: 400,
   fontWeightBold: 700,
   drawBoldTextInBrightColors: true,
@@ -790,6 +791,7 @@ describe('xtermOptionsFromSettings', () => {
       visual({
         fontFamily: 'JetBrains Mono',
         fontSize: 15,
+        terminalWordSeparator: ' ',
         cursorBlink: false,
         cursorStyle: 'bar',
         cursorInactiveStyle: 'none',
@@ -799,6 +801,7 @@ describe('xtermOptionsFromSettings', () => {
     )
     expect(o.fontFamily).toBe('JetBrains Mono')
     expect(o.fontSize).toBe(15)
+    expect(o.wordSeparator).toBe(' ')
     expect(o.cursorBlink).toBe(false)
     expect(o.cursorStyle).toBe('bar')
     expect(o.cursorInactiveStyle).toBe('none')
@@ -862,6 +865,14 @@ describe('applyLiveOptions', () => {
     expect(r.themeChanged).toBe(false)
     expect(term.options.fontSize).toBe(16)
     expect(term.writes).toEqual(['fontSize'])
+  })
+
+  it('applies a word-separator change without refitting the terminal', () => {
+    const term = fakeTerm(visual())
+    const r = applyLiveOptions(term, visual({ terminalWordSeparator: ' ' }))
+    expect(r).toEqual({ metricsChanged: false, themeChanged: false })
+    expect(term.options.wordSeparator).toBe(' ')
+    expect(term.writes).toEqual(['wordSeparator'])
   })
 
   it.each([
