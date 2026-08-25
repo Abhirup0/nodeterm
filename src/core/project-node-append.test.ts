@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { appendProjectNode } from './project-node-append'
+import { appendProjectNode, removeProjectNode } from './project-node-append'
 
 const NOW = new Date('2026-07-16T10:00:00.000Z')
 
@@ -178,5 +178,46 @@ describe('appendProjectNode', () => {
     )
     expect(f.nodes[0].title.length).toBeLessThanOrEqual(120)
     expect(f.nodes[0].agentId).toBeUndefined()
+  })
+})
+
+describe('removeProjectNode', () => {
+  const two = [sibling, { ...sibling, id: 'term-bbb-2', ssh: undefined, sshRemoteTmux: undefined }]
+
+  it('removes the node, bumps rev, refreshes savedAt', () => {
+    const out = removeProjectNode(baseFile(two), 'term-aaa-1', NOW)
+    expect(out).not.toBeNull()
+    const f = JSON.parse(out!)
+    expect(f.rev).toBe(8)
+    expect(f.savedAt).toBe('2026-07-16T10:00:00.000Z')
+    expect(f.nodes.map((n: { id: string }) => n.id)).toEqual(['term-bbb-2'])
+  })
+
+  it('round-trips every field it does not know (bridges, kanban, future schema)', () => {
+    const extra = {
+      bridges: [{ from: 'term-aaa-1', to: 'term-bbb-2' }],
+      kanban: { columns: [], assignments: [{ nodeId: 'term-aaa-1', columnId: 'c1' }] },
+      futureField: { keep: true }
+    }
+    const f = JSON.parse(removeProjectNode(baseFile(two, extra), 'term-aaa-1', NOW)!)
+    // Dangling references are deliberately left for their readers' lazy pruning (same as a
+    // desktop delete) — removal must not reinterpret parts of the file it does not own.
+    expect(f.bridges).toEqual(extra.bridges)
+    expect(f.kanban).toEqual(extra.kanban)
+    expect(f.futureField).toEqual(extra.futureField)
+    expect(f.viewport).toEqual({ x: 1, y: 2, zoom: 0.5 })
+  })
+
+  it('answers null for a node id not in this file — "try the next project", no rev churn', () => {
+    expect(removeProjectNode(baseFile(two), 'term-zzz-9', NOW)).toBeNull()
+    expect(removeProjectNode(baseFile([]), 'term-aaa-1', NOW)).toBeNull()
+  })
+
+  it('refuses: bad JSON / wrong shape / wrong version / empty id — never invents a file', () => {
+    expect(removeProjectNode('{ not json', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode('[1,2]', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode('{"version":99,"rev":1,"nodes":[]}', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode('{"version":1}', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode(baseFile(two), '', NOW)).toBeNull()
   })
 })
