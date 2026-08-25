@@ -1,7 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildFilesApi, buildRealApi, buildSessionMemoryApi } from './ws-bridge'
+import {
+  buildClaudeAccountsApi,
+  buildFilesApi,
+  buildRealApi,
+  buildSessionMemoryApi
+} from './ws-bridge'
+import { buildStubApi } from './stubs'
+import { E_UNSUPPORTED } from '../../shared/rpc'
 import { IPC } from '../../shared/ipc'
 
 function fakeClient() {
@@ -148,5 +155,53 @@ describe('buildRealApi: sessionMemory', () => {
     const src = readFileSync(join(__dirname, 'ws-bridge.ts'), 'utf8')
     const install = src.slice(src.indexOf('export async function installWsBridge'))
     expect(install).toContain('...buildSessionMemoryApi(client)')
+  })
+})
+
+/**
+ * Issue #313: the managed-Claude-account lifecycle moved into src/core, so the server registers
+ * the same four channels the desktop does. Before that every member rejected E_UNSUPPORTED from
+ * the stub — a browser deployment could SELECT a managed account but never create or remove one.
+ */
+describe('buildClaudeAccountsApi', () => {
+  it('all four members request the real channels, ctx included', async () => {
+    const c = fakeClient()
+    const { claudeAccounts } = buildClaudeAccountsApi(c as never)
+    await claudeAccounts.add()
+    await claudeAccounts.add({ projectId: 'p1' })
+    await claudeAccounts.waitLogin('a1')
+    await claudeAccounts.waitLogin('a1', { projectId: 'p1' })
+    await claudeAccounts.cancelWaitLogin('a1')
+    await claudeAccounts.remove('a1', { projectId: 'p1' })
+    expect(c.calls).toEqual([
+      { kind: 'request', method: IPC.claudeAccountsAdd, args: [undefined] },
+      { kind: 'request', method: IPC.claudeAccountsAdd, args: [{ projectId: 'p1' }] },
+      { kind: 'request', method: IPC.claudeAccountsWaitLogin, args: ['a1', undefined] },
+      { kind: 'request', method: IPC.claudeAccountsWaitLogin, args: ['a1', { projectId: 'p1' }] },
+      { kind: 'request', method: IPC.claudeAccountsCancelWait, args: ['a1'] },
+      { kind: 'request', method: IPC.claudeAccountsRemove, args: ['a1', { projectId: 'p1' }] }
+    ])
+  })
+
+  // Same trap as buildSessionMemoryApi's: buildStubApi() already satisfies `claudeAccounts`, so a
+  // dropped spread compiles and the stub silently wins in every browser session.
+  it('is spread into the assembled window.nodeTerminal', () => {
+    const src = readFileSync(join(__dirname, 'ws-bridge.ts'), 'utf8')
+    const install = src.slice(src.indexOf('export async function installWsBridge'))
+    expect(install).toContain('...buildClaudeAccountsApi(client)')
+  })
+
+  // The Codex half is deliberately NOT ported: its switch verbs authorize the owning window by
+  // Electron WebContents id, which has no meaning over a WS connection. It must keep REFUSING with
+  // the coded error rather than silently no-opping — that code is what the Settings section reads
+  // to say "manage them from the desktop app" instead of a generic failure.
+  it('codexAccounts stays an E_UNSUPPORTED stub', async () => {
+    const s = buildStubApi()
+    await expect(s.codexAccounts.add()).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.codexAccounts.waitLogin('a1')).rejects.toMatchObject({ code: E_UNSUPPORTED })
+    await expect(s.codexAccounts.cancelWaitLogin('a1')).rejects.toMatchObject({
+      code: E_UNSUPPORTED
+    })
+    await expect(s.codexAccounts.remove('a1')).rejects.toMatchObject({ code: E_UNSUPPORTED })
   })
 })

@@ -57,6 +57,7 @@ import {
   syntheticAnsweredEvent
 } from '../core/agents/pending-approvals'
 import { installManagedAgentHooks } from '../core/agents/hooks'
+import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import {
   initAgentStatusMirror,
   flush as flushAgentStatusMirror,
@@ -516,6 +517,11 @@ export async function startServer(
     } catch (e) {
       console.warn('[nodeterm-server] managed hook install failed', e)
     }
+    // Managed Claude accounts each carry their OWN settings.json (Claude Code resolves it relative
+    // to CLAUDE_CONFIG_DIR), so the hook has to be re-installed there as well or a managed account
+    // reports no agent status at all. Same loop the desktop runs, minus the canvas skill: canvas
+    // control is not wired on this edition. Per-account fail-open lives inside the helper.
+    installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [])
   }
   await hookServer.start()
   // Canvas control does not exist on this edition, and saying so BY NAME is the whole point: the
