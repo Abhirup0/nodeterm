@@ -8,6 +8,8 @@ import {
   createCodexAccountLoginNode,
   createAgentNode,
   createDinoNode,
+  createSystemLoginNode,
+  isAccountLoginNode,
   fitGroupToChildren,
   flowToNodeStates,
   groupSelectedNodes,
@@ -752,6 +754,36 @@ describe('createCodexAccountLoginNode', () => {
     // With an agentId of 'codex' this would be an agent node and take the agent paths; the login
     // terminal is scoped purely because its account id is a managed CODEX one (see #345/#346).
     expect(createCodexAccountLoginNode('acct-2', 0).data.agentId).toBeUndefined()
+  })
+})
+
+describe('createSystemLoginNode (issue #420)', () => {
+  it('produces a SYSTEM-scoped login terminal: no accountId, no agentId, its own title', () => {
+    const node = createSystemLoginNode(0)
+    expect(node.type).toBe('terminal')
+    expect(node.data.title).toBe('Switch Claude account')
+    // No accountId = the plain-terminal spawn env, so `claude /login` writes ~/.claude — the
+    // whole point of the switch. Agent-less like the managed login nodes.
+    expect(node.data.accountId).toBeUndefined()
+    expect(node.data.agentId).toBeUndefined()
+    expect(node.data.initialCommand).toBe('claude /login')
+  })
+
+  it('is never swept by account removal, and a serialized copy sheds the login signature', () => {
+    const node = createSystemLoginNode(0)
+    // Live (pre-first-open) data matches isAccountLoginNode via initialCommand — harmless,
+    // because both destroy paths (Canvas + AccountsSection) additionally require accountId
+    // equality with the removed account, and this node has none.
+    expect(isAccountLoginNode(node.data)).toBe(true)
+    expect(node.data.accountId).toBeUndefined()
+    // The durable half: initialCommand never survives a serialize, and the title is NOT the
+    // managed factory's 'Claude login' — so a persisted copy fails isAccountLoginNode outright.
+    // That is also the anti-respawn guarantee: a restarted app rehydrates this node with no
+    // command at all, so `claude /login` can only ever run the once the user clicked for.
+    const persisted = flowToNodeStates([node])[0]
+    expect((persisted as { initialCommand?: string }).initialCommand).toBeUndefined()
+    const back = nodeStatesToFlow([persisted])[0]
+    expect(isAccountLoginNode(back.data)).toBe(false)
   })
 })
 
