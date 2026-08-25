@@ -259,6 +259,12 @@ describe('remoteTmuxConf', () => {
     expect(c).toContain('set -as terminal-features ",*:RGB"')
     expect(c).toContain('set-environment -g COLORTERM truecolor')
   })
+
+  it('declares hyperlinks via terminal-features so OSC 8 links reach the renderer', () => {
+    // tmux strips the OSC 8 escape unless the outer terminal declares support, leaving only the
+    // label text — a link whose URL is not also printed can then never be opened.
+    expect(c).toContain('set -as terminal-features ",*:hyperlinks"')
+  })
   it('clears the override/feature arrays a long-lived server accumulated from older versions', () => {
     // A tmux server outlives the app and keeps every entry ever sourced into it; the stale
     // smcup@/rmcup@/indn@ entries would otherwise keep breaking scrolling forever. Measured:

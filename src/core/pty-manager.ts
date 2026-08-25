@@ -275,6 +275,8 @@ set -as terminal-features ",*:clipboard"
 # known to speak RGB. xterm.js does, so declare it — via terminal-features like the clipboard
 # entry above, never terminal-overrides (see the MIGRATION note). Issue #78.
 set -as terminal-features ",*:RGB"
+# OSC 8 hyperlink passthrough — tmux strips the escape unless the outer terminal declares it.
+set -as terminal-features ",*:hyperlinks"
 # Mouse copy: on release tmux copies to its buffer AND (thanks to the two lines above) emits OSC 52,
 # which the client writes to the system clipboard. No pipe-to-a-local-command here, deliberately.
 bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel

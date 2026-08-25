@@ -24,4 +24,8 @@ describe('DEFAULT_SETTINGS', () => {
   it('uses the shared worktree path template default', () => {
     expect(DEFAULT_SETTINGS.worktreePathTemplate).toBe(DEFAULT_WORKTREE_PATH_TEMPLATE)
   })
+
+  it('keeps common identifier and path characters inside terminal word selections', () => {
+    expect(DEFAULT_SETTINGS.terminalWordSeparator).not.toMatch(/[-_/.]/)
+  })
 })

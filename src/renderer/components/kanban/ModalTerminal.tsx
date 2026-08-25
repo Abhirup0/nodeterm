@@ -17,6 +17,7 @@ import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../../terminal/file-drop'
 import { guardMiddleClickPaste } from '../../terminal/middle-click'
+import { createOsc8LinkHandler } from '../../terminal/file-links'
 import { parseOsc52 } from '../../terminal/osc52'
 import { activateUnicode11 } from '../../terminal/unicode-width'
 import { useCopyFeedback } from '../../terminal/useCopyFeedback'
@@ -161,6 +162,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // view of one session, and a card that renders it in different colours reads as a different
     // terminal. (It used to hardcode its own background, which is exactly what happened.)
     const term = new Terminal(xtermOptionsFromSettings(s))
+    // Without a handler xterm answers an OSC 8 click with a window.confirm — the one surface
+    // where this session's links would prompt instead of opening like the canvas node's.
+    term.options.linkHandler = createOsc8LinkHandler((uri) =>
+      window.nodeTerminal.shell.openExternal(uri)
+    )
     // The modal is a second view of the SAME tmux session, so it has to measure characters the way
     // the canvas node does. Two views on two width tables would disagree about where the columns
     // are — and the pty runs at the SMALLEST subscriber's grid, so the disagreement would be live.

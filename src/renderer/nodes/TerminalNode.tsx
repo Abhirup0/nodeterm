@@ -27,6 +27,7 @@ import { parseOsc52 } from '../terminal/osc52'
 import { activateUnicode11 } from '../terminal/unicode-width'
 import {
   createFileLinkProvider,
+  createOsc8LinkHandler,
   createUrlLinkProvider,
   installLinkClickFallback,
   makeDirListingLookup
@@ -2460,6 +2461,11 @@ export function TerminalNode({
       // inside their activate handlers, so plain clicks stay selections.
       term.registerLinkProvider(
         createUrlLinkProvider(term, (uri) => window.nodeTerminal.shell.openExternal(uri))
+      )
+      // Not in xtermOptionsFromSettings: the handler closes over the shell bridge, which the
+      // pure options builder must not know.
+      term.options.linkHandler = createOsc8LinkHandler((uri) =>
+        window.nodeTerminal.shell.openExternal(uri)
       )
       const projectFs = (): { fs: FsApi; ssh: boolean } => {
         const st = useProjects.getState()

@@ -1115,11 +1115,21 @@ export type TerminalCursorInactiveStyle = TerminalCursorStyle | 'outline' | 'non
 export interface Settings {
   fontSize: number
   fontFamily: string
+  /** Characters that end a word during xterm double-click selection. */
+  terminalWordSeparator: string
   cursorBlink: boolean
   /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto` (the default)
    *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
    *  black window framing it; `dark`/`light` pin it. See renderer/lib/appTheme.ts. */
   appTheme: 'auto' | 'dark' | 'light'
+  /** Reflect the active session in the NATIVE window title ("<node> — <project> — node-terminal"),
+   *  so window-title-based time trackers (ActivityWatch et al.) can tell sessions apart — the same
+   *  thing iTerm2 / Windows Terminal do per tab (issue #414). Opt-in and OFF by default: the title
+   *  is OS-visible surface area (window switchers, screen sharing), so an update must not start
+   *  broadcasting session names for users who never asked. Renderer-only (`document.title` —
+   *  Electron mirrors page-title changes onto the BrowserWindow, and the Server Edition gets the
+   *  browser tab title through the identical write), so there is no bridge member to stub. */
+  windowTitleActiveSession: boolean
   /** Terminal colour scheme — an id from `renderer/terminal/themes.ts`. Resolution is tolerant
    *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
    *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
@@ -1423,6 +1433,8 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+  // Keep hyphens, underscores, slashes and dots inside words so identifiers and paths select whole.
+  terminalWordSeparator: " ()[]{}',\"",
   cursorBlink: true,
   // Every appearance default below reproduces the pre-feature look bit-for-bit: the default theme
   // carries the old hardcoded background/foreground, and block/outline/1/0 are xterm's own
@@ -1430,6 +1442,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Follows the terminal theme, whose own default is dark — so an install that never touches
   // either setting keeps the dark chrome it has always had.
   appTheme: 'auto',
+  windowTitleActiveSession: false,
   terminalTheme: 'nodeterm-dark',
   fontWeight: 400,
   fontWeightBold: 700,

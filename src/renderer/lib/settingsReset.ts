@@ -14,6 +14,7 @@ import { DEFAULT_SETTINGS, type Settings } from '@shared/types'
 export const TERMINAL_RESET_KEYS = [
   'fontFamily',
   'fontSize',
+  'terminalWordSeparator',
   'fontWeight',
   'fontWeightBold',
   'drawBoldTextInBrightColors',
@@ -36,7 +37,8 @@ export const APPEARANCE_RESET_KEYS = [
   'accent',
   'hiddenNodeMenuItems',
   'hiddenHeaderButtons',
-  'showResumeCard'
+  'showResumeCard',
+  'windowTitleActiveSession'
 ] as const satisfies readonly (keyof Settings)[]
 
 /** The defaults for `keys`, as a patch for `useSettings.update`. */
