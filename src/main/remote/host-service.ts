@@ -12,7 +12,10 @@
 //   - `OP.Input`  frame -> `write(sessionId, <utf-8 payload>)`
 //   - `OP.Resize` frame -> `resize(sessionId, cols, rows)` (payload = 2x uint16 LE)
 //   - RPC `pty.kill {streamId}` -> `kill(null, sessionId)` (null = the relay owns this pty; it has
-//     no UI subscribers, so dropping its sinks releases it)
+//     no UI subscribers, so dropping its sinks releases it — the tmux session keeps running)
+//   - RPC `pty.destroy {streamId}` -> the injected `destroyNode` (the phone's "End session"):
+//     permanently ends the stream's tmux session and takes the node off its canvas — the same two
+//     steps the desktop × performs. The target is resolved from the stream, never client params.
 // Output backpressure: when `sendFrame` returns false the host pauses the PTY via `setFlow`
 // and resumes it on the next successful send.
 //
@@ -24,6 +27,7 @@ import { randomUUID } from 'crypto'
 import path from 'path'
 import { app, ipcMain, type BrowserWindow } from 'electron'
 import { IPC } from '../../shared/ipc'
+import { REF_MAX_LEN } from '../../shared/presence'
 import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '../../shared/types'
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
@@ -191,7 +195,12 @@ export function createHostHandlers(
   git?: HostGitOps,
   // Registers a phone-started session as a project node (WorkspaceStore.appendRemoteNode).
   // Absent ⇒ `projects.registerNode` is not served.
-  registerNode?: (projectId: string, node: RemoteNodeInput) => Promise<boolean>
+  registerNode?: (projectId: string, node: RemoteNodeInput) => Promise<boolean>,
+  // Permanently ends a node's session + removes the node from its canvas — the phone's
+  // "End session" (`pty.destroy`), reaching the SAME path as the desktop ×
+  // (`destroySession(…, {everySocket:true})` + node removal). Absent ⇒ `pty.destroy` is not
+  // served, which is what an un-wired context (and every pre-feature test fake) should say.
+  destroyNode?: (nodeId: string) => Promise<void>
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -464,11 +473,55 @@ export function createHostHandlers(
   function handleKill(req: RpcRequest): void {
     const streamId = num(asRecord(req.params).streamId, -1)
     const stream = streams.get(streamId)
-    if (stream) {
-      pty.kill(null, stream.sessionId)
-      dropStream(streamId)
+    // An unknown streamId is an honest error, not a silent success: answering `true` here hid
+    // every failure on this path from the client (issue #374) — the app had nothing to surface.
+    if (!stream) {
+      socket.respond(req.id, false, { message: 'Unknown streamId.' })
+      return
     }
+    pty.kill(null, stream.sessionId)
+    dropStream(streamId)
     socket.respond(req.id, true, {})
+  }
+
+  /**
+   * The phone's "End session": permanently end the stream's tmux session and remove its node from
+   * the canvas, via the injected `destroyNode` — the same path the desktop × takes. Three rules:
+   * - The target is the STREAM's `persistKey`, never a client-sent node id: a client can only
+   *   destroy a session it has actually attached to (post-approval), the same envelope every
+   *   other session-scoped RPC here lives in.
+   * - The viewer is dropped in the SAME synchronous turn as the destroy begins (the R4 adjacency
+   *   rule): a late Input frame must never be written into a session on its way out.
+   * - The answer is honest. `destroyNode` absent, an unknown streamId, or a failed destroy all
+   *   respond `ok:false` with a message the phone can show — never an unconditional success.
+   */
+  function handleDestroy(req: RpcRequest): void {
+    if (!destroyNode) {
+      socket.respond(req.id, false, { message: 'pty.destroy is not served on this host.' })
+      return
+    }
+    const streamId = num(asRecord(req.params).streamId, -1)
+    const stream = streams.get(streamId)
+    if (!stream) {
+      socket.respond(req.id, false, { message: 'Unknown streamId.' })
+      return
+    }
+    // Same cap the desktop wire applies to a client-supplied node id (endFromClient/REF_MAX_LEN):
+    // the key was client-chosen at attach time and a destroy kills things — refuse, never truncate.
+    if (stream.persistKey.length > REF_MAX_LEN) {
+      socket.respond(req.id, false, { message: 'Invalid node id.' })
+      return
+    }
+    const nodeId = stream.persistKey
+    pty.kill(null, stream.sessionId)
+    dropStream(streamId)
+    void destroyNode(nodeId)
+      .then(() => socket.respond(req.id, true, {}))
+      .catch((err: unknown) =>
+        socket.respond(req.id, false, {
+          message: (err as Error)?.message ?? 'Could not end the session.'
+        })
+      )
   }
 
   return {
@@ -485,6 +538,9 @@ export function createHostHandlers(
           break
         case 'pty.kill':
           handleKill(req)
+          break
+        case 'pty.destroy':
+          handleDestroy(req)
           break
         case 'pty.scroll':
           handleScroll(req)
@@ -729,6 +785,9 @@ export interface HostSessionOptions {
   git?: HostGitOps
   /** Registers a phone-started session as a project node (`projects.registerNode`). Optional. */
   registerNode?: (projectId: string, node: RemoteNodeInput) => Promise<boolean>
+  /** Permanently ends a node's session + removes the node (`pty.destroy`). Optional: absent ⇒
+   *  the verb answers with an honest "not served" error. */
+  destroyNode?: (nodeId: string) => Promise<void>
   /** Extra fs/git jail roots beyond the shared canvas's node cwds — production passes the
    *  workspace's local project cwds: the phone browses EVERY project over `projects.list`, so a
    *  canvas-only jail denied whichever project the desktop didn't happen to have focused. */
@@ -849,7 +908,8 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     opts.listProjects ?? (async () => ''),
     opts.getClientId ?? (() => null),
     opts.git,
-    opts.registerNode
+    opts.registerNode,
+    opts.destroyNode
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -869,6 +929,9 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
 export interface HostBridgeDeps {
   git?: HostGitOps
   registerNode?: (projectId: string, node: { id: string; title?: string; agentId?: string }) => Promise<boolean>
+  /** The phone's "End session" (`pty.destroy`): destroy the tmux session on every socket it could
+   *  live on + take the node off its project's canvas — the desktop ×'s two steps. */
+  destroyNode?: (nodeId: string) => Promise<void>
   /** Workspace-level jail roots (local project cwds) merged with the canvas node cwds. */
   workspaceRoots?: () => string[]
 }
@@ -939,6 +1002,7 @@ export function initRemoteHost(
       listProjects,
       git: bridge.git,
       registerNode: bridge.registerNode,
+      destroyNode: bridge.destroyNode,
       extraRoots: bridge.workspaceRoots,
       // Typing attribution: this session's input frames are this phone's keystrokes.
       getClientId: () => phone.id(),
