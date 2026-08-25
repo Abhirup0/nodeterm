@@ -24,7 +24,7 @@ import { readProjectCapabilities, type ProjectCapability } from '../shared/proje
 import type { CapabilityAckMap } from './project-capability-consent'
 import { hoistLegacyNodeExec, type LocalNodeExecMap } from '../shared/node-exec'
 import { collisionSeed, derivedProjectId, freshProjectId } from '../shared/project-id'
-import { appendProjectNode, type RemoteNodeInput } from './project-node-append'
+import { appendProjectNode, removeProjectNode, type RemoteNodeInput } from './project-node-append'
 
 /** Checked remote read: `absent` (no file — safe to push our cache) is NOT `error` (connection
  *  down / ssh failure — a failed read is never evidence of absence, so nothing may be pushed). */
@@ -1314,6 +1314,64 @@ export class WorkspaceStore {
       )
     } catch { /* the file is written and cached; the next load/poll surfaces the node */ }
     return true
+  }
+
+  /**
+   * Takes a DESTROYED session's node off its project's canvas — the host side of the relay
+   * `pty.destroy` verb ("End session" on the phone), run AFTER the tmux kill so the file only ever
+   * loses a node whose session is already gone. Node ids are globally unique (they are tmux
+   * session names), so the node is looked up by SCAN across the local ref projects — the phone
+   * addresses sessions by streamId→nodeId and knows no projectId. Same v1 scope and the same
+   * announce-and-record discipline as `appendRemoteNode` above, and queued on `saveChain` for the
+   * same read-modify-write reason. A node found in NO file is an answer (an unregistered phone
+   * session, an inline project), not an error: the caller treats false as "nothing to remove".
+   */
+  removeRemoteNode(nodeId: string, now = new Date()): Promise<boolean> {
+    const run = this.saveChain.then(() => this.removeRemoteNodeNow(nodeId, now))
+    this.saveChain = run.catch(() => {})
+    return run
+  }
+
+  private async removeRemoteNodeNow(nodeId: string, now: Date): Promise<boolean> {
+    for (const e of this.index?.entries ?? []) {
+      // Local ref projects only, like appendRemoteNode: an ssh ref's file lives on another
+      // machine (and a relay `pty.attach` only ever reaches THIS machine's tmux anyway).
+      if (!e.cwd || e.ssh) continue
+      const file = projectFilePath(e.cwd)
+      let raw: string
+      try {
+        raw = await fs.readFile(file, 'utf-8')
+      } catch {
+        continue
+      }
+      const updated = removeProjectNode(raw, nodeId, now)
+      if (updated === null) continue // not in this project (or unreadable file) — keep looking
+      try {
+        await writeAtomic(file, updated)
+      } catch {
+        return false
+      }
+      this.lastWritten.set(file, updated)
+      try {
+        const parsed = JSON.parse(updated) as ProjectFileV1
+        this.revs.set(e.id, parsed.rev)
+        platform().broadcast(
+          IPC.workspaceExternalChange,
+          fileToProject(parsed, {
+            id: e.id,
+            cwd: e.cwd,
+            closed: e.closed,
+            viewport: e.viewport,
+            defaultAccountId: e.defaultAccountId,
+            breadcrumbs: e.breadcrumbs,
+            capabilityAck: e.capabilityAck,
+            localExec: e.localExec
+          })
+        )
+      } catch { /* the file is written and cached; the next load/poll drops the node */ }
+      return true
+    }
+    return false
   }
 
   /**

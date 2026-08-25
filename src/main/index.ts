@@ -3310,6 +3310,16 @@ app.whenReady().then(async () => {
       projectId: string,
       node: { id: string; title?: string; agentId?: string; accountId?: string }
     ) => workspaceStore.appendRemoteNode(projectId, node),
+    // "End session" from the phone (`pty.destroy`): the SAME two steps the desktop × performs —
+    // kill the tmux session on every socket it could live on (the sweep may have seen it on either
+    // — see the session-memory panel's kill rule), then take the node off its project's canvas
+    // (written as an outside edit, so the watcher broadcasts it and the canvas drops the node
+    // live). Node removal is best-effort by design: an unregistered phone session or an inline
+    // project has no file entry to remove, and that must not fail a destroy that already landed.
+    destroyNode: async (nodeId: string) => {
+      await ptyManager.destroySession(null, nodeId, { everySocket: true })
+      await workspaceStore.removeRemoteNode(nodeId).catch(() => false)
+    },
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).

@@ -556,6 +556,33 @@ export function UsageIndicator({
           {dedupeProviderRows(visibleProviders).map((p) => (
             <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
           ))}
+          {/* Issue #420 — "Switch account" where the limit is displayed: opens a terminal
+              running the SYSTEM-scoped `claude /login` (createSystemLoginNode), so picking the
+              other org is one click from the panel that said you need to. Nothing changes until
+              the user completes the login IN that terminal — the CLI's own org picker + OAuth —
+              which is why there is no confirm dialog in front of it: the terminal is the
+              confirmation surface, and the tooltip names what completing it changes. LOCAL scope
+              only: on an SSH project a system login would rewrite the HOST's ~/.claude, and
+              saying "switch account" while meaning another machine's identity is the kind of
+              ambiguity this popover exists to avoid. Hidden with the Claude provider — a switch
+              button for numbers the user chose not to see would be an orphan. */}
+          {scope.kind === 'local' && !hidden.has('claude') && (
+            <button
+              type="button"
+              className="usage-popover__switch"
+              title={
+                'Opens a terminal running `claude /login` for the system account (~/.claude). ' +
+                'Completing it switches the org/account all system sessions use — running ' +
+                'sessions carry on under the new one. Managed accounts keep their own logins.'
+              }
+              onClick={() => {
+                setOpen(false)
+                window.dispatchEvent(new CustomEvent('nodeterm:switch-system-account'))
+              }}
+            >
+              ⇄ Switch account…
+            </button>
+          )}
         </div>
       )}
       {/* The SSH pill is visually identical to the local one — same labels, same bar — so the
