@@ -212,6 +212,8 @@ import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
+import { backgroundNodeIds, mergeWithKeepAlive, overlayKeepAliveData } from '../lib/webviewKeepAlive'
+import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
 import {
   routeControlSource,
   needsLiveCanvas,
@@ -1160,6 +1162,13 @@ export function Canvas() {
    * the initial empty `useNodesState([])` can never be committed as some project's canvas.
    */
   const nodesProjectIdRef = useRef<string | null>(null)
+  /**
+   * The project whose webview nodes the NEXT load must retire into the keep-alive pool. Separate
+   * from `nodesProjectIdRef` on purpose: the epoch tag is invalidated on the load effect's
+   * bail-outs (welcome screen) while the previous nodes stay MOUNTED — and mounted pages must
+   * still be retired, not dropped, when the next project loads.
+   */
+  const keepAliveFromRef = useRef<string | null>(null)
   // focusNodeById, for callbacks declared ABOVE its definition (openFile's dedupe focuses the
   // already-open node). Assigned right after the definition, same render-mirror idiom as nodesRef.
   const focusNodeRef = useRef<(nodeId: string) => void>(() => {})
@@ -1226,10 +1235,20 @@ export function Canvas() {
   // a fixed toll for panels the content never reaches.
   const fitAll = useCallback(() => {
     const wrap = flowWrapRef.current
-    const bounds = getNodesBounds(getNodes())
+    // Keep-alive ghosts are invisible stand-ins parked at the origin — framing them would drag
+    // every fit toward 0,0. Excluded from BOTH halves: the padding solve's bounds and fitView's
+    // own fit set (the explicit `nodes` list; a real node unmeasured this early is dropped by
+    // React Flow's measured filter, which at a user-gesture fit means nothing in practice).
+    const fitNodes = getNodes().filter((n) => (n as CanvasNode).data?.ghost !== true)
+    const bounds = getNodesBounds(fitNodes)
     const padding = wrap ? solveFitPadding(wrap, bounds.width, bounds.height) : null
     // Nothing to fit, or chrome swallowing the viewport: let fitView use its own framing.
-    void fitView({ duration: 300, padding: padding ?? 0.1 })
+    void fitView({
+      duration: 300,
+      padding: padding ?? 0.1,
+      // Empty canvas: fall back to the bare call (its no-op), never an empty fit set (origin jump).
+      ...(fitNodes.length ? { nodes: fitNodes.map((n) => ({ id: n.id })) } : {})
+    })
   }, [fitView, getNodes, getNodesBounds])
 
   /**
@@ -1602,11 +1621,19 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loopSig stands in for the byId read
   }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSelId, nodes])
 
-  // Merge the persisted nodes with the ephemeral ones once per change (not per render),
-  // so React Flow's array-identity short-circuit holds while panning/zooming.
+  // Merge the persisted nodes with the ephemeral ones and the webview keep-alive pool once per
+  // change (not per render), so React Flow's array-identity short-circuit holds while
+  // panning/zooming. The pool region (active webview nodes hoisted to the tail + background
+  // ghosts) is what keeps a `<webview>`'s DOM element stationary across project switches — see
+  // lib/webviewKeepAlive.ts for the order invariant this merge must never break.
+  const keepAliveEntries = useWebviewKeepAlive((s) => s.entries)
   const allNodes = useMemo(
-    () => (ephemeralNodes.length ? [...nodes, ...ephemeralNodes] : nodes),
-    [nodes, ephemeralNodes]
+    // Keyed on the MOUNTED project (whose nodes `nodes` holds — see mergeWithKeepAlive's doc for
+    // the one-commit window where that is not the active project). The ref only moves inside the
+    // load effect, which also replaces `nodes`, so the deps below always cover it.
+    () => mergeWithKeepAlive(nodes, ephemeralNodes, keepAliveEntries, keepAliveFromRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [nodes, ephemeralNodes, keepAliveEntries]
   )
 
   // Context-link edges, statically styled (no per-message activity in the pull model).
@@ -1974,7 +2001,28 @@ export function Canvas() {
       )
     }
     loadingRef.current = true
-    const flow = nodeStatesToFlow(project.nodes)
+    // Webview keep-alive (issue #301): move the OUTGOING project's browser/web pages into the
+    // background pool before the node swap, so their `<webview>` elements stay mounted (as hidden
+    // ghosts in the merged prop) instead of dying with the unmount. `keepAliveFromRef` — not
+    // `nodesProjectIdRef` — names the outgoing project because the welcome-screen bail-outs above
+    // null the epoch tag while deliberately leaving the previous nodes mounted, and those pages
+    // should survive a welcome-screen round trip too.
+    const keepAlive = useWebviewKeepAlive.getState()
+    const outgoingPid = keepAliveFromRef.current
+    // Activate BEFORE retire: the incoming project's entries must shed their background clock
+    // before the retire's cap eviction runs, or the pool's oldest page could be evicted at the
+    // exact switch that reveals it.
+    keepAlive.activateProject(project.id)
+    if (outgoingPid && outgoingPid !== project.id) keepAlive.retireProject(outgoingPid, nodesRef.current)
+    keepAliveFromRef.current = project.id
+    // A RETURNING project's pages navigated while ghosted: load its nodes with the pool's live
+    // url/title already applied, in the SAME setNodes — a later correction would move the `url`
+    // prop under the surviving surface and navigate the very page the pool preserved.
+    const flow = overlayKeepAliveData(
+      nodeStatesToFlow(project.nodes),
+      useWebviewKeepAlive.getState().entries,
+      project.id
+    )
     setNodes(flow)
     // React Flow now holds THIS project's canvas: the commit guard may pair it with the active id
     // again. Both refs are assigned HERE, synchronously, because `setNodes` only lands on the next
@@ -2085,6 +2133,18 @@ export function Canvas() {
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeProjectId, reloadNonce, setNodes, setViewport])
+
+  // Keep-alive pool hygiene: a PERMANENTLY deleted project's ghosts must die now, not at the next
+  // switch (an invisible page is still a live Chromium process). Keyed on the id signature — the
+  // projects array is rebuilt on every node serialization, the id set is not. Closed-but-kept
+  // projects keep their entries on purpose: closing detaches like a project switch, and the
+  // memory saver reaps their pages on its own clock.
+  const projectIdsSig = useProjects((s) => s.projects.map((p) => p.id).join(' '))
+  useEffect(() => {
+    useWebviewKeepAlive
+      .getState()
+      .prune(new Set(projectIdsSig === '' ? [] : projectIdsSig.split(' ')))
+  }, [projectIdsSig])
 
   /**
    * Counts EDITS (not saves). `writeDisk` captures it before it builds the snapshot and clears
@@ -2585,8 +2645,12 @@ export function Canvas() {
       if (projectId !== useProjects.getState().activeProjectId) {
         // Not on screen (a parked / background project): no terminal is mounted, but one may be
         // PARKED from a recent project switch — dispose it, as an active-project remove does.
-        if (mutation.op === 'remove')
+        if (mutation.op === 'remove') {
           disposeTerminalOnUnmount(sessionForProject(projectId).id, mutation.id)
+          // ...and its keep-alive ghost: a background webview node a peer deleted must not keep
+          // its page running invisibly until the next switch.
+          useWebviewKeepAlive.getState().drop(mutation.id)
+        }
         if (useProjects.getState().applyNodeMutation(projectId, mutation)) markDirty()
         return
       }
@@ -2602,6 +2666,9 @@ export function Canvas() {
         const gone = nodesRef.current.find((n) => n.id === mutation.id)
         if (gone?.type === 'terminal')
           disposeTerminalOnUnmount(sessionForProject(projectId).id, gone.id)
+        // A removed webview node's keep-alive entry ends with it (see handleNodesChange's remove
+        // branch for the local twin of this).
+        useWebviewKeepAlive.getState().drop(mutation.id)
       }
       // Keep the ref in step immediately: a burst (a peer's bulk delete) arrives within one tick,
       // before React re-renders, and each mutation must build on the previous one.
@@ -2686,7 +2753,22 @@ export function Canvas() {
       // the wire — every client derives them from agent:status), so the two cannot drift.
       const ephIds = new Set(Object.keys(useAgentNodes.getState().byId))
       const isEph = (id: string) => isEphemeralNodeId(id, ephIds)
+      // Keep-alive GHOSTS (background webview nodes) live outside the managed state too, and
+      // nothing about one is a canvas edit: React Flow still emits measure/deselect noise for
+      // them (a `display:none` node measures 0), and letting that through would apply changes to
+      // ids the state does not hold — and mark the ACTIVE project dirty for a background fact.
+      const ghostIds = backgroundNodeIds(
+        useWebviewKeepAlive.getState().entries,
+        // The MOUNTED project, matching the merge (see mergeWithKeepAlive): during a switch's
+        // first commit these changes still describe the outgoing project's canvas.
+        keepAliveFromRef.current
+      )
       const managed = changes.filter((c) => {
+        if ('id' in c && ghostIds.has(c.id)) return false
+        // A real deletion ends the node's keep-alive entry too — the merge deliberately falls
+        // back to an invisible ghost when an entry's node is missing (see mergeWithKeepAlive),
+        // so without this a closed browser node's page would keep running unseen.
+        if (c.type === 'remove') useWebviewKeepAlive.getState().drop(c.id)
         if ('id' in c && isEph(c.id)) {
           const store = useAgentNodes.getState()
           // Stored as an OFFSET from the parent agent, never as a canvas position — see offsetFrom.
@@ -4376,6 +4458,9 @@ export function Canvas() {
         useAgentStatus.getState().remove(n.id)
         useAgentNodes.getState().clearForParent(n.id)
         useAgentNodes.getState().clearLoop(n.id)
+        // Permanent deletion ends the node's keep-alive entry too — this funnel removes nodes by
+        // setNodes, so handleNodesChange's remove branch never sees them.
+        useWebviewKeepAlive.getState().drop(n.id)
         // The open-project attach-consent mirror dies with its caller (review #363 M-1) —
         // symmetric with main's grant ledger, which clears on the same teardown (ptyDestroy).
         // A node id revived later faces a fresh dialog, exactly as it faces a fresh grant.
@@ -9398,6 +9483,7 @@ export function Canvas() {
             // Same teardown symmetry as deleteNodes (review #363 M-1): the attach-consent
             // mirror dies with the node.
             clearAttachConsent(id)
+            useWebviewKeepAlive.getState().drop(id)
             useProjects.getState().removeNode(projectId, id)
             void writeDisk()
           }

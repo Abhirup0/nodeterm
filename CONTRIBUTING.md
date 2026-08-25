@@ -86,6 +86,16 @@ need it too, and wire it in the same change.
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
 
+- **Never unmount, move or re-key a browser/web node's element.** An Electron `<webview>`'s guest
+  process dies on DOM detach — and a detach includes any `insertBefore`/`appendChild` MOVE of an
+  attached element, which React performs whenever a kept child's relative order among kept keyed
+  children changes. That is why webview-hosting nodes render in one stable pool region at the tail
+  of the `<ReactFlow>` nodes prop (`renderer/lib/webviewKeepAlive.ts` — read its header before
+  touching the merge, the node array swap in Canvas's load effect, or anything that reorders
+  nodes), and why a background project's pages stay mounted as hidden ghosts instead of
+  unmounting. `display:none` is safe (measured: state, scroll and viewport size survive); a reorder
+  or unmount reloads the user's page and loses their in-page state.
+
 These are the ones that come up in review most often. Each exists because its absence caused a real
 bug.
 
