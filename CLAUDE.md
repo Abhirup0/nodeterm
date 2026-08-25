@@ -1320,7 +1320,7 @@ else, and its context links must keep classifying across restarts).
     child env so a stray env key can't shadow the account. A **missing** account dir → warn +
     silent system fallback.
   - **Login flow** — Settings → Accounts → **Add** creates a `pending` account and drops a canvas
-    **login node** that runs `claude /login` under the account dir. Main polls the dir's
+    **login node** that runs `claude /login` under the account dir. Core polls the dir's
     `.claude.json` (`LOGIN_POLL_MS` 2 s, up to `LOGIN_TIMEOUT_MS` 5 min) for `oauthAccount.email`;
     on capture the account flips out of `pending` with its email as the default label. Account
     removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
@@ -1334,9 +1334,31 @@ else, and its context links must keep classifying across restarts).
     no listener is a silent no-op, which is how the Codex half shipped inert (#346) — pinned now by
     `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
     never heard.
+  - **The lifecycle is CORE, and both shells register it** (issue #313) —
+    `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
+    / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
+    wrapper and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`. Two optional
+    deps carry everything core cannot reach: `installSkill` (desktop passes `installCanvasSkillInto`
+    — the server passes none, because **canvas control is not wired on that shell at all**, so a
+    per-account SKILL.md would point at nothing) and `remote`, a **thunk** resolving the SSH legs
+    (desktop's manager is created after the registration, and the server has none — in both cases
+    an `AccountCtx` carrying a `projectId` degrades to the LOCAL path, which is the pre-existing
+    behavior this preserves). **Three surfaces:** Desktop unchanged (same channels, same shapes,
+    same remote fallbacks); **Server Edition** now full — real `buildClaudeAccountsApi` over the
+    ws-bridge (the 5-min `waitLogin` is a straight passthrough because RpcClient has no request
+    timeout), minus SSH accounts and the canvas skill; **Mobile: N/A** — the phone launches with
+    the accounts the agent-status mirror advertises and never mints one. **Managed CODEX accounts
+    stay desktop-only** and their bridge namespace stays an `E_UNSUPPORTED` stub: the switch verbs
+    authorize the owning window by Electron WebContents id, which has no meaning over a WS
+    connection. The Settings section now *names* that refusal instead of leaving an unhandled
+    promise rejection — a spinner that stops and says nothing reads as a dead button.
   - **Hook install** — the managed hook is merged into **each account dir's** `settings.json` at
     add-account **and** at app launch (local, shared `install-helper.ts`) / via
-    `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status.
+    `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status. The
+    launch-time loop is ONE function (`installHooksIntoLocalAccounts`, beside the service) that
+    both shells call — the desktop passing the canvas skill as its `extra`. A second copy is the
+    drift this file warns about elsewhere: the Server Edition shipped without the per-account leg
+    entirely, so a managed account there reported no agent status at all.
   - **Account-aware readers** — transcript resolution is scoped per account (`transcriptRootFor`
     picks the account dir's `projects/`, composite cache key includes `accountId`); the same
     threading runs through the session-name poll, restart handoff, and `ChatPanel` (the ⌘M

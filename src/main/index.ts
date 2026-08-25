@@ -243,7 +243,7 @@ import {
   isSafeRemoteTranscriptPath,
   remoteAccountConfigDirAbs
 } from '../core/claude-accounts-core'
-import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from '../core/agents/hooks/claude'
+import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -2328,21 +2328,10 @@ app.whenReady().then(async () => {
   installManagedAgentHooks()
   // Managed accounts each carry their own settings.json AND skills/ (Claude Code resolves both
   // relative to CLAUDE_CONFIG_DIR) — re-install the hook + canvas skill there too (idempotent),
-  // so an app update's new versions reach every account dir. Best-effort: one failing account
-  // must never block launch (match installManagedAgentHooks' fail-open).
-  for (const acct of settingsStore.get().claudeAccounts ?? []) {
-    if (acct.host) continue // remote accounts live on another host; nothing to install locally
-    try {
-      installClaudeHooksInto(claudeConfigDirFor(acct.id))
-      installCanvasSkillInto(claudeConfigDirFor(acct.id))
-      // Ensure fullscreen TUI in this account dir (write-if-absent, version-gated). Off the
-      // critical path: it awaits the memoized CLI probe, then writes fail-open. (The system
-      // ~/.claude is handled by installManagedAgentHooks above, which covers Server Edition too.)
-      void ensureClaudeFullscreenTuiInto(claudeConfigDirFor(acct.id))
-    } catch (e) {
-      console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
-    }
-  }
+  // so an app update's new versions reach every account dir. The loop is shared with the Server
+  // Edition's boot (src/core/claude-accounts-service.ts); the canvas skill is the desktop's own
+  // addition, because canvas control is not wired on that shell at all.
+  installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [], installCanvasSkillInto)
   // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
