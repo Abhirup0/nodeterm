@@ -436,6 +436,10 @@ export function buildStubApi(): Omit<
       }
     },
     setBadgeCount: noop,
+    // UI scale is page zoom, and a browser page cannot set its own — the browser already owns the
+    // identical mechanism (Cmd/Ctrl+±, persisted per site). Intentionally inert; the Settings row
+    // is disabled with this reason on the Server Edition (AppearanceSection's browser branch).
+    setUiZoomFactor: noop,
     getPathForFile: (): string => '',
     notify: async (payload: NotifyPayload): Promise<'shown' | 'failed' | 'skipped'> => {
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
