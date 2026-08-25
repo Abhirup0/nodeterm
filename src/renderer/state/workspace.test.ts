@@ -550,6 +550,37 @@ describe('resolveNewNodeAccount', () => {
     expect(resolveNewNodeAccount(undefined, {}, accounts)).toBeUndefined())
   it('undefined when the project is undefined', () =>
     expect(resolveNewNodeAccount(undefined, undefined, accounts)).toBeUndefined())
+  // #419 — the "picked X, ran as Y" legs.
+  it('null = the EXPLICIT System pick — it must not resolve to the project default (#419)', () =>
+    // Before null existed, the submenu's System row (labelled with the system email) passed
+    // "no account", which this resolver read as "apply the project default".
+    expect(resolveNewNodeAccount(null, { defaultAccountId: 'a1' }, accounts)).toBeUndefined())
+  it('a PENDING default never stamps its id — its dir exists but holds no login (#419)', () =>
+    expect(
+      resolveNewNodeAccount(
+        undefined,
+        { defaultAccountId: 'p1' },
+        [...accounts, { id: 'p1', label: 'new account', createdAt: 0, pending: true }]
+      )
+    ).toBeUndefined())
+  it("a default pinned to another machine's host never lands on a LOCAL project (#419)", () =>
+    // Its config dir exists only on that host, so locally the spawn would fall into the
+    // missing-dir fallback — and pre-fix, from there into whatever the shared tmux server held.
+    expect(
+      resolveNewNodeAccount(
+        undefined,
+        { defaultAccountId: 'r1' },
+        [{ id: 'r1', label: 'server', createdAt: 0, host: 'u@h' }]
+      )
+    ).toBeUndefined())
+  it('an SSH project keeps its own host-matched account', () =>
+    expect(
+      resolveNewNodeAccount(
+        'r1',
+        { ssh: { server: { host: 'h', user: 'u' } } },
+        [{ id: 'r1', label: 'server', createdAt: 0, host: 'u@h' }]
+      )
+    ).toBe('r1'))
 })
 
 describe('accountId on Claude node factories', () => {

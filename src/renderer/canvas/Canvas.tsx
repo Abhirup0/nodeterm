@@ -3847,7 +3847,9 @@ export function Canvas() {
       agentId: AgentId,
       center?: { x: number; y: number },
       groupId?: string,
-      accountId?: string,
+      // `null` = the user EXPLICITLY picked the System account row: resolveNewNodeAccount then
+      // skips the project default instead of treating the pick as "no pick" (#419).
+      accountId?: string | null,
       initialPrompt?: string
     ) => {
       const project = useProjects.getState().getProject(activeProjectId)
@@ -3859,7 +3861,7 @@ export function Canvas() {
       let account: string | undefined
       if (agentId === 'codex') {
         const decision = resolveNewCodexNodeAccount(
-          accountId,
+          accountId ?? undefined,
           useSettings.getState().settings.codexAccounts,
           connectedProjectIdForHost
         )
@@ -6820,8 +6822,10 @@ export function Canvas() {
       )
       return [
         ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
-          // Claude gets an account picker submenu when ≥1 account exists; System = project
-          // default (resolved). Other agents stay flat (accounts are Claude-only).
+          // Claude gets an account picker submenu when ≥1 account exists. The System row is an
+          // EXPLICIT pick (`null`), never "no pick": before that distinction, clicking the row
+          // labelled with the user's system email launched the PROJECT DEFAULT managed account
+          // (#419). Other agents stay flat (accounts are Claude-only).
           if (aid === 'claude' && (accounts.length > 0 || accountsHint)) {
             return {
               type: 'submenu',
@@ -6831,7 +6835,7 @@ export function Canvas() {
                 {
                   label: withDefaultMark(systemLabel),
                   icon: <AgentIcon agentId="claude" />,
-                  onClick: () => addAgentNode('claude', at, groupId)
+                  onClick: () => addAgentNode('claude', at, groupId, null)
                 },
                 ...accounts.map(
                   (a): MenuItem => ({
