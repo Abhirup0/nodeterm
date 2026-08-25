@@ -140,6 +140,23 @@ describe('createAgentNode — account default color', () => {
     expect(node.data.accountId).toBeUndefined()
   })
 
+  // `mergeSettings` merges without checking, so a hand-edited `"claudeAccounts": null` survives
+  // load and reaches this read. That would throw on `.find` one level ABOVE the `typeof color`
+  // guard — the same class of failure that guard exists to prevent, one layer out.
+  it('survives a null account list from a hand-edited settings.json', () => {
+    useSettings.setState({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        claudeAccounts: null as unknown as ClaudeAccount[],
+        codexAccounts: null as unknown as CodexAccount[]
+      }
+    })
+    const claude = createAgentNode('claude', 0, undefined, undefined, undefined, undefined, 'a1')
+    const codex = createAgentNode('codex', 0, undefined, undefined, undefined, undefined, 'c1')
+    expect(claude.data.color).toBe(AGENT_COLOR('claude'))
+    expect(codex.data.color).toBe(AGENT_COLOR('codex'))
+  })
+
   it('leaves an account-less node exactly where it was before the feature', () => {
     withAccounts([account('a1', '#0a84ff')])
     expect(createAgentNode('claude', 0).data.color).toBe(AGENT_COLOR('claude'))

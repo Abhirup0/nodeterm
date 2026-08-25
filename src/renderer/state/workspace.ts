@@ -568,11 +568,14 @@ export function createAgentNode(
   // so a second login of either builtin is recognizable on the canvas at a glance. `agentAccountColor`
   // asks the list that OWNS this agent's accounts — the two are keyed independently, so a Claude
   // account must never color a Codex node that happens to share its id.
+  // `?? []` on both lists, matching the phone path in `src/main`: `mergeSettings` merges without
+  // checking, so a hand-edited `"claudeAccounts": null` survives load and would throw on `.find`
+  // one level ABOVE the `typeof color` guard — i.e. the very failure that guard exists to prevent.
   const settings = useSettings.getState().settings
   const color =
     agentAccountColor(agentId, boundAccountId, {
-      claude: settings.claudeAccounts,
-      codex: settings.codexAccounts
+      claude: settings.claudeAccounts ?? [],
+      codex: settings.codexAccounts ?? []
     }) ?? agentColor
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
   // Agents → Launch commands — see `agentLaunchOverride`) replaces the bare CLI in the assembled

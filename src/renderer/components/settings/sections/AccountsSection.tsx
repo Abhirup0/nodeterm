@@ -142,7 +142,9 @@ function AccountColorSwatches({
         <button
           key={c}
           type="button"
-          aria-label={c}
+          // "<what> <hex>", the convention the Appearance accent picker set — a bare hex is not a
+          // name a screen reader can do anything with.
+          aria-label={`Node color ${c}`}
           aria-pressed={color === c}
           onClick={() => onPick(c)}
           style={{ background: c }}

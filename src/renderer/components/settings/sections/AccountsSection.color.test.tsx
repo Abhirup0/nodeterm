@@ -49,7 +49,13 @@ beforeEach(() => {
   ;(window as unknown as { nodeTerminal: unknown }).nodeTerminal = {
     usage: { fetch: async () => null },
     ssh: { list: async () => [] },
-    codexAccounts: { systemIdentity: async () => null, identity: async () => null }
+    codexAccounts: { systemIdentity: async () => null, identity: async () => null },
+    // Every swatch click is a `useSettings.update()`, which schedules a real 300 ms coalesced
+    // save. Whether that timer fires before the worker exits is pure timing — and when it does,
+    // an absent `settings.save` throws INSIDE the timer, which vitest reports as an unhandled
+    // error and exits 1 on even though every test passed. Stubbed so the file cannot poison a
+    // longer run it happens to share a worker with.
+    settings: { save: async () => {} }
   }
 })
 
@@ -61,7 +67,7 @@ describe('AccountsSection — default node color', () => {
   it('stores the picked color on the account', () => {
     const { host, root } = renderSection([account])
     act(() => {
-      swatch(host, 'work', '#0a84ff').click()
+      swatch(host, 'work', 'Node color #0a84ff').click()
     })
     expect(colorOf('a1')).toBe('#0a84ff')
     root.unmount()
@@ -78,8 +84,8 @@ describe('AccountsSection — default node color', () => {
 
   it('marks the picked swatch as selected', () => {
     const { host, root } = renderSection([{ ...account, color: '#0a84ff' }])
-    expect(swatch(host, 'work', '#0a84ff').getAttribute('aria-pressed')).toBe('true')
-    expect(swatch(host, 'work', '#32d74b').getAttribute('aria-pressed')).toBe('false')
+    expect(swatch(host, 'work', 'Node color #0a84ff').getAttribute('aria-pressed')).toBe('true')
+    expect(swatch(host, 'work', 'Node color #32d74b').getAttribute('aria-pressed')).toBe('false')
     expect(swatch(host, 'work', 'Default').getAttribute('aria-pressed')).toBe('false')
     root.unmount()
   })
@@ -94,7 +100,7 @@ describe('AccountsSection — default node color', () => {
     const other: ClaudeAccount = { id: 'a2', label: 'personal', createdAt: 0, color: '#ff453a' }
     const { host, root } = renderSection([account, other])
     act(() => {
-      swatch(host, 'work', '#0a84ff').click()
+      swatch(host, 'work', 'Node color #0a84ff').click()
     })
     expect(colorOf('a1')).toBe('#0a84ff')
     expect(colorOf('a2')).toBe('#ff453a')
@@ -107,7 +113,7 @@ describe('AccountsSection — default node color', () => {
   it('stores the picked color on a Codex account', () => {
     const { host, root } = renderSection([], [{ id: 'c1', label: 'codex work' }])
     act(() => {
-      swatch(host, 'codex work', '#32d74b').click()
+      swatch(host, 'codex work', 'Node color #32d74b').click()
     })
     expect(codexColorOf('c1')).toBe('#32d74b')
     root.unmount()
@@ -127,7 +133,7 @@ describe('AccountsSection — default node color', () => {
   it('colors a Codex account without touching a Claude account of the same id', () => {
     const { host, root } = renderSection([{ ...account, id: 'x1' }], [{ id: 'x1', label: 'codex' }])
     act(() => {
-      swatch(host, 'codex', '#32d74b').click()
+      swatch(host, 'codex', 'Node color #32d74b').click()
     })
     expect(codexColorOf('x1')).toBe('#32d74b')
     expect(colorOf('x1')).toBeUndefined()
