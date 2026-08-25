@@ -26,6 +26,16 @@ export interface SshConnection {
    * untrusted document is not. See `stripLocalExecArgs`.
    */
   execTrusted?: boolean
+  /**
+   * DERIVED, in memory only (issue #427): the ambient login-agent socket to pin via
+   * `-o IdentityAgent=<path>` because the host's own effective ssh config says
+   * `IdentityAgent SSH_AUTH_SOCK` (or an equivalent env reference) — which under the app-private
+   * agent's env override would resolve to the WRONG agent. Set exclusively by the `ssh -G` probe
+   * (`core/remote-ssh/agent-probe.ts`); both annotation points (SshProjectManager.connect,
+   * PtyManager's remote spawn) OVERWRITE any inbound value, so a shared project.json or a
+   * canvas-sync peer cannot aim our ssh at a socket of their choosing. Never persisted.
+   */
+  identityAgentSock?: string
   /** Display label, copied from the saved server when the node is created. */
   label?: string
 }

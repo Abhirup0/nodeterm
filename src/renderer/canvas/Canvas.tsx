@@ -433,6 +433,7 @@ import {
   fitGroupToChildren,
   createAccountLoginNode,
   createCodexAccountLoginNode,
+  createSystemLoginNode,
   isAccountLoginNode,
   systemAccountDisplay,
   createAgentNode,
@@ -3908,6 +3909,29 @@ export function Canvas() {
       window.removeEventListener('nodeterm:add-codex-account-login', onAddCodexAccountLogin)
   }, [setNodes, markDirty, viewCenter])
 
+  // Issue #420 — the usage popover's "Switch account" dispatches 'nodeterm:switch-system-account'
+  // to open a terminal running `claude /login` under the SYSTEM env (no accountId — see
+  // createSystemLoginNode for why that is its own factory, not a reuse of the managed one).
+  // Local by construction: the popover only offers the action on a local scope, and this listener
+  // never resolves an ssh binding — so even a stray dispatch spawns the login on THIS machine,
+  // the only machine whose ~/.claude the action claims to switch.
+  useEffect(() => {
+    const onSwitchSystemAccount = (): void => {
+      setNodes((ns) => [
+        ...ns.map((n) => ({ ...n, selected: false })),
+        { ...createSystemLoginNode(ns.length, viewCenter()), selected: true }
+      ])
+      markDirty()
+      // The popover is reachable from over the kanban board too (`overBoard`) — leave the board
+      // so the user actually sees the login node they must interact with. Same rationale as the
+      // Settings-overlay close in the add-account listeners above.
+      const pid = useProjects.getState().activeProjectId
+      if (pid && isKanbanOpen(pid)) useViewMode.getState().toggle(pid)
+    }
+    window.addEventListener('nodeterm:switch-system-account', onSwitchSystemAccount)
+    return () => window.removeEventListener('nodeterm:switch-system-account', onSwitchSystemAccount)
+  }, [setNodes, markDirty, viewCenter])
+
   // Resolve the system account's email once, so context menus (built via getState) can label
   // the "System account" entry with it.
   useEffect(() => useSystemAccount.getState().ensure(), [])
@@ -3929,7 +3953,9 @@ export function Canvas() {
       agentId: AgentId,
       center?: { x: number; y: number },
       groupId?: string,
-      accountId?: string,
+      // `null` = the user EXPLICITLY picked the System account row: resolveNewNodeAccount then
+      // skips the project default instead of treating the pick as "no pick" (#419).
+      accountId?: string | null,
       initialPrompt?: string
     ) => {
       const project = useProjects.getState().getProject(activeProjectId)
@@ -3941,7 +3967,7 @@ export function Canvas() {
       let account: string | undefined
       if (agentId === 'codex') {
         const decision = resolveNewCodexNodeAccount(
-          accountId,
+          accountId ?? undefined,
           useSettings.getState().settings.codexAccounts,
           connectedProjectIdForHost
         )
@@ -6905,8 +6931,10 @@ export function Canvas() {
       )
       return [
         ...BUILTIN_AGENT_IDS.filter((aid) => !disabled.includes(aid)).map((aid): MenuItem => {
-          // Claude gets an account picker submenu when ≥1 account exists; System = project
-          // default (resolved). Other agents stay flat (accounts are Claude-only).
+          // Claude gets an account picker submenu when ≥1 account exists. The System row is an
+          // EXPLICIT pick (`null`), never "no pick": before that distinction, clicking the row
+          // labelled with the user's system email launched the PROJECT DEFAULT managed account
+          // (#419). Other agents stay flat (accounts are Claude-only).
           if (aid === 'claude' && (accounts.length > 0 || accountsHint)) {
             return {
               type: 'submenu',
@@ -6916,7 +6944,7 @@ export function Canvas() {
                 {
                   label: withDefaultMark(systemLabel),
                   icon: <AgentIcon agentId="claude" />,
-                  onClick: () => addAgentNode('claude', at, groupId)
+                  onClick: () => addAgentNode('claude', at, groupId, null)
                 },
                 ...accounts.map(
                   (a): MenuItem => ({

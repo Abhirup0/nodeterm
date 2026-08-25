@@ -532,15 +532,32 @@ export function sshAccountsHint(
     : null
 }
 
-/** Account for a NEW Claude node: explicit pick, else the project default, else system. */
+/**
+ * Account for a NEW Claude node: explicit pick, else the project default, else system.
+ *
+ * `explicit === null` is an EXPLICIT "System account" pick and short-circuits past the project
+ * default. Before it existed, the submenu row wearing the user's system email launched the
+ * PROJECT DEFAULT account — the clearest "picked X, ran as Y" in issue #419 — because "no
+ * account passed" and "system picked" were the same value.
+ *
+ * Validation runs against the accounts ELIGIBLE for this project (`accountsForProject`), not the
+ * raw list, mirroring what every picker offers. The raw list also holds `pending` rows (their dir
+ * exists but no login lives in it yet) and accounts pinned to ANOTHER machine's host (their dir
+ * exists only over there) — a `defaultAccountId` pointing at either used to be stamped onto the
+ * node, whose spawn then fell into the missing/empty-dir fallback and silently ran under a
+ * different identity (#419 again). Ineligible ⇒ undefined ⇒ the honest system default.
+ */
 export function resolveNewNodeAccount(
-  explicit: string | undefined,
-  project: { defaultAccountId?: string } | undefined,
+  explicit: string | null | undefined,
+  project:
+    | { defaultAccountId?: string; ssh?: { server: { host: string; user: string } } }
+    | undefined,
   accounts: ClaudeAccount[]
 ): string | undefined {
+  if (explicit === null) return undefined
   const id = explicit ?? project?.defaultAccountId
   // A stale default (account since removed) must not stamp dead ids onto new nodes.
-  return id && accounts.some((a) => a.id === id) ? id : undefined
+  return id && accountsForProject(accounts, project).some((a) => a.id === id) ? id : undefined
 }
 
 /**
@@ -743,6 +760,36 @@ export function createCodexAccountLoginNode(
     title: 'Codex login',
     accountId,
     initialCommand: 'codex login'
+  }
+  return node
+}
+
+/**
+ * Terminal node that SWITCHES the system (~/.claude) Claude identity — the usage popover's
+ * "Switch account" action (issue #420). Runs `claude /login` with NO `accountId`, so the spawn
+ * env is bit-for-bit the plain-terminal one and the OAuth writes the system `~/.claude` —
+ * which is the point: every system-scope session follows the new org, exactly as a hand-typed
+ * `claude /login` would make them. Deliberately a SEPARATE factory from
+ * `createAccountLoginNode`: that one REQUIRES an accountId because config-dir scoping is its
+ * purpose, and its 'Claude login' title is the durable signature `isAccountLoginNode` keys on
+ * to destroy login nodes together with their removed account — a sweep this node must never be
+ * caught by (both destroy paths also gate on accountId equality, and this node has none).
+ *
+ * The docblock hazard on `isAccountLoginNode` — a respawned `claude /login` overwriting the
+ * system identity — is only a hazard when it happens UNASKED. Here the overwrite is the feature,
+ * and "once" is structural rather than promised: `initialCommand` is consumed on first mount and
+ * never serialized (`flowToNodeStates` drops it), so after an app restart or a machine reboot
+ * this node is an inert plain terminal, not a login prompt nobody requested.
+ *
+ * Local only, on purpose: on an SSH project a system login would rewrite THAT host's ~/.claude,
+ * so the popover does not offer the action there (see UsageIndicator).
+ */
+export function createSystemLoginNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  const node = createTerminalNode(index, undefined, center)
+  node.data = {
+    ...node.data,
+    title: 'Switch Claude account',
+    initialCommand: 'claude /login'
   }
   return node
 }

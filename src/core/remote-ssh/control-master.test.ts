@@ -118,6 +118,41 @@ describe('masterArgs', () => {
   })
 })
 
+describe('agent pin (identityAgentSock, issue #427)', () => {
+  // A conn the `ssh -G` probe marked: this host's effective config says `IdentityAgent
+  // SSH_AUTH_SOCK` (or equivalent), so the ambient login-agent socket is pinned on argv — a
+  // command-line -o beats both the config line and the app-agent env override.
+  const pinned = { ...conn, identityAgentSock: '/tmp/launchd.abc/Listeners' }
+
+  it('masterArgs pins the login agent and drops the forced AddKeysToAgent', () => {
+    const args = masterArgs(pinned, '/s.sock')
+    expect(args.join(' ')).toContain('-o IdentityAgent=/tmp/launchd.abc/Listeners')
+    // Forcing AddKeysToAgent=yes at a LOGIN agent would load an askpass-unlocked key into it
+    // until logout — the exact leak the app-private agent exists to close. The user's own config
+    // decides for a pinned host.
+    expect(args).not.toContain('AddKeysToAgent=yes')
+  })
+  it('childArgs carries the pin too: the ControlMaster=auto fallback re-authenticates for real', () => {
+    const args = childArgs(pinned, '/s.sock', 'tmux ls')
+    expect(args.join(' ')).toContain('-o IdentityAgent=/tmp/launchd.abc/Listeners')
+    expect(args.at(-1)).toBe('tmux ls')
+  })
+  it('scp up AND down carry the pin: scp re-authenticates when the master socket is gone', () => {
+    expect(scpArgs(pinned, '/s.sock', '/l/f', '/r/f').join(' ')).toContain(
+      '-o IdentityAgent=/tmp/launchd.abc/Listeners'
+    )
+    expect(scpDownArgs(pinned, '/s.sock', '/r/f', '/l/f').join(' ')).toContain(
+      '-o IdentityAgent=/tmp/launchd.abc/Listeners'
+    )
+  })
+  it('an unpinned conn is byte-identical to the pre-#427 argv (the exact-array tests above are the pin)', () => {
+    // Belt and braces beside the toEqual pins: absence of the option, not just equality.
+    for (const args of [masterArgs(conn, '/s.sock'), childArgs(conn, '/s.sock'), scpArgs(conn, '/s.sock', '/l', '/r')]) {
+      expect(args.join(' ')).not.toContain('IdentityAgent=')
+    }
+  })
+})
+
 describe('childArgs', () => {
   it('muxes over the master socket, self-healing (auto + persist), and appends a remote command', () => {
     expect(childArgs(conn, '/s.sock', 'tmux ls')).toEqual([...childPrefix, 'deploy@h.example.com', 'tmux ls'])

@@ -14,6 +14,7 @@ import { useSharedGlyph } from './canvas/SharedGlyphLayer'
 // between the two coordinators.
 import { resolveTerminalRenderer } from '../shared/webgl'
 import { resolveTerminalTheme } from './terminal/themes'
+import { resolveUiScale } from '../shared/ui-scale'
 import { useAppTheme } from './state/useAppTheme'
 
 export default function App() {
@@ -49,6 +50,17 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = appTheme
   }, [appTheme])
+
+  // Apply the UI scale as page zoom (issue #299 — 4K readability; the why-page-zoom write-up
+  // lives in shared/ui-scale.ts). Gated on `hydrated` so boot doesn't flash-reset a scaled window
+  // to the 100% default before settings.json has been read — Electron restores the zoom it
+  // persisted per origin, and asserting the default over it would visibly bounce the whole UI.
+  // On the Server Edition `setUiZoomFactor` is a documented no-op (the browser owns page zoom).
+  const uiScale = useSettings((s) => s.settings.uiScale)
+  const settingsHydrated = useSettings((s) => s.hydrated)
+  useEffect(() => {
+    if (settingsHydrated) window.nodeTerminal.setUiZoomFactor(resolveUiScale(uiScale))
+  }, [uiScale, settingsHydrated])
 
   // Keep the view-mode store's default in sync with the Settings choice, so projects the user
   // hasn't explicitly toggled follow it (and flip live when the setting changes).
