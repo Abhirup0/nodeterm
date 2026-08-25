@@ -269,6 +269,9 @@ export const IPC = {
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
+  /** Is a folder's .nodeterm/project.json present / absent / unreadable — the distinction
+   *  `probeFolder`'s null collapses. Recovery of an `unavailable` project needs it (issue #385). */
+  workspaceProjectFileState: 'workspace:project-file-state',
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',
@@ -455,6 +458,7 @@ export const IPC = {
   // SAS to display); renderer → main to approve/reject. Until approved, the host serves no
   // pty/fs RPCs or input frames, so a leaked offer cannot grant silent access.
   remoteHostPeerPending: 'remote:host:peer-pending',
+  remoteHostPeerPendingCleared: 'remote:host:peer-pending-cleared',
   remoteHostApprove: 'remote:host:approve',
   remoteHostReject: 'remote:host:reject',
   // Host canvas mirror: renderer pushes its serialized active-project canvas to main;

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { NODE_MIN_SIZES } from '../lib/nodeSizing'
 import {
   Handle,
@@ -22,6 +22,7 @@ import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../ter
 import type { TerminalTransport } from '../terminal/transport'
 import { guardMiddleClickPaste } from '../terminal/middle-click'
 import { patchTerminalScale } from '../terminal/scale-fix'
+import { focusedNodeId, subscribeFocusedNode, focusSurfaceEl } from '../state/focusNode'
 import { parseOsc52 } from '../terminal/osc52'
 import { activateUnicode11 } from '../terminal/unicode-width'
 import {
@@ -142,7 +143,7 @@ import { PresenceChips } from '../components/PresenceChips'
 import { useAgentNodes } from '../state/agentNodes'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useProjects } from '../state/projects'
-import { useViewMode, viewFor } from '../state/viewMode'
+import { isKanbanOpen, useViewMode, viewFor } from '../state/viewMode'
 import { useSshConn } from '../state/sshConn'
 import { useWorktrees } from '../state/worktrees'
 import { isRemoteSessionNode } from '@shared/worktree'
@@ -171,12 +172,18 @@ import { agentEnvSnapshot } from '@renderer/lib/agentEnv'
 import { normalizedAgentModel } from '@shared/agents/model-gateway'
 import { ensureActivePermissionMode } from '../state/permissionMode'
 import { buildSshArgs, sshConnectionIdForProject, sshHostKey, type SshConnection } from '@shared/ssh'
-import { chipFor, effectiveBindings, terminalShortcutPolicy } from '../lib/keybindingOverrides'
+import {
+  chipFor,
+  effectiveBindings,
+  terminalChordBubbles,
+  terminalShortcutPolicy
+} from '../lib/keybindingOverrides'
 import { matchesShortcut } from '@shared/shortcut'
 import { hintLabel, isWindowsPlatform, isMacPlatform } from '@shared/platform-utils'
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
+import { MaximizeButton } from './MaximizeButton'
 import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -1158,6 +1165,52 @@ export function TerminalNode({
     read()
     return subscribeOpaqueSet(read)
   }, [id])
+  // Focus mode (issue #78) — same render-time read + subscription shape as `glyphOpaque` above,
+  // for the same ordering reason: the `glyphOff` term computed this render must agree with the
+  // reparent this same commit performs, or the shared-glyph teardown runs a pass behind the DOM.
+  const [, bumpFocused] = useState(0)
+  const focused = focusedNodeId() === id
+  const focusedRef = useRef(focused)
+  focusedRef.current = focused
+  useEffect(() => {
+    const read = (): void => {
+      const now = focusedNodeId() === id
+      if (now === focusedRef.current) return
+      focusedRef.current = now
+      bumpFocused((n) => n + 1)
+    }
+    read()
+    return subscribeFocusedNode(read)
+  }, [id])
+  // The reparent itself: move the WHOLE node root into the focus surface, imperatively. Not a
+  // React portal — switching a portal container unmounts/remounts the subtree, which recreates
+  // the xterm host div while the lifecycle effect (keyed on respawnNonce) never re-runs; the
+  // terminal would go blank. Moving the host element is the operation park/adopt already proved
+  // safe: every listener the terminal owns is bound to `term.element` or the host, not to a
+  // position in the tree. useLayoutEffect + cleanup, so the node is back under React's recorded
+  // parent BEFORE React ever detaches it (the commit-phase removeChild would throw otherwise) —
+  // the cleanup runs on unfocus AND ahead of unmount (project switch while focused).
+  useLayoutEffect(() => {
+    if (!focused) return
+    const root = rootRef.current
+    const surface = focusSurfaceEl()
+    if (!root || !surface) return
+    // Shared mode: the grid teardown must land in THIS commit, before paint. The participation
+    // effect below is passive (after paint), so without this a fullscreen frame paints while the
+    // grid is still registered at the old on-canvas position and the node still wears the
+    // glyph-mode styling (transparent body, rows hidden) — one blank frame per ⌘⇧F. The passive
+    // effect then re-runs with the same answer and no-ops. (Review finding on #267.)
+    glyphSyncRef.current?.(false)
+    const home = root.parentElement
+    surface.appendChild(root)
+    return () => {
+      try {
+        home?.appendChild(root)
+      } catch {
+        /* home unmounted with the project — React already gave up on this subtree */
+      }
+    }
+  }, [focused])
   const [mdHtml, setMdHtml] = useState('')
   const [editingTitle, setEditingTitle] = useState(false)
   const hoveredRef = useRef(false)
@@ -1247,7 +1300,11 @@ export function TerminalNode({
   // Mirrored into a ref for the lifecycle effect's closures (which cannot see fresh props), and
   // read by `setupGlyph` itself — the mount-time setup runs from that effect, not from the
   // participation effect below, so the gate has to live where every caller passes through it.
-  const glyphOff = collapsed || mdMode || glyphOpaque || dragging
+  // `focused` is a MUST-BE-OPAQUE reason (issue #78): a focus-mode node is reparented out of the
+  // React Flow viewport, so the shared layer's glyphs — positioned from on-canvas geometry —
+  // would paint somewhere the node no longer is. Routes through the same setup/teardown the
+  // collapse/⌘M/stacking/drag reasons always used; v1 deliberately forces the DOM/WebGL path.
+  const glyphOff = collapsed || mdMode || glyphOpaque || dragging || focused
   const glyphOffRef = useRef(glyphOff)
   glyphOffRef.current = glyphOff
   // The NOT-ON-SCREEN half on its own. `setupGlyph`'s gate needs to tell the two reasons apart:
@@ -1964,7 +2021,11 @@ export function TerminalNode({
         // keeps its last size (the "parked SOLO subscriber leaves the pty alone" case). When the board
         // closes, the boardOpen effect re-runs applyFit and the `sentCols/sentRows` reset below forces
         // a fresh report of the real fit.
-        if (boardOpenRef.current) {
+        // Focus mode covers this node the same way the board does: the flow wrapper is
+        // display:none (so the WebGL budget can reclaim the hidden holders — review finding on
+        // #267), and a 0-sized container must vote "not viewing", never a clamped tiny grid.
+        const coveredByFocus = focusedNodeId() !== null && focusedNodeId() !== id
+        if (boardOpenRef.current || coveredByFocus) {
           if (sessionId && !boardParked) {
             boardParked = true
             sentCols = 0
@@ -2371,7 +2432,10 @@ export function TerminalNode({
       // grant/release swaps renderers without the text visibly reflowing (see the helper).
       quantizeCharSize(term)
       applyFit()
-      patchTerminalScale(term, getZoom)
+      // Reads the STORE, not the component's focusedRef: a parked terminal keeps the closure
+      // from the instance that created it, and a ref from a dead instance never updates — the
+      // store keyed by the stable node id is current across park/adopt (issue #78).
+      patchTerminalScale(term, () => (focusedNodeId() === id ? 1 : getZoom()))
       // OSC 52 clipboard write: route the decoded text to the local clipboard. This is the PRIMARY
       // copy path: tmux's mouse is ON, so a drag-select in copy-mode emits OSC 52 to us on the
       // user's behalf (`set-clipboard on` + `terminal-features ",*:clipboard"`), and this handler is
@@ -2475,8 +2539,18 @@ export function TerminalNode({
     term.attachCustomKeyEventHandler((e) => {
       const ownsProjectJump =
         terminalShortcutPolicy() !== 'terminal-first' && liveProjectJumpTarget(e) !== null
-      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump)
+      const registryOwns = terminalChordBubbles(
+        e,
+        isKanbanOpen(useProjects.getState().activeProjectId ?? '')
+      )
+      const action = terminalKeyAction(e, term.hasSelection(), ownsProjectJump, registryOwns)
       if (action === 'pass') return true
+      // 'bubble': the window dispatcher owns this chord (an allowInTerminal registry command).
+      // Return false so xterm skips its own keymap — which would consume e.g. Ctrl+Shift+Arrow
+      // into a CSI write and cancel the event — and DO NOT preventDefault: the dispatcher bails
+      // on defaultPrevented events, so a prevented bubble would kill the very dispatch this
+      // exists to reach.
+      if (action === 'bubble') return false
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
       // Shift+Enter → ESC+CR so agent CLIs insert a newline instead of submitting
@@ -3807,19 +3881,18 @@ export function TerminalNode({
     // honestly keyed on what its closure captures.
   }, [termKey])
 
-  /**
-   * Remove transient subagent render overrides when this React node leaves the active canvas.
-   * Live agent status deliberately survives the unmount: selecting a session in another project
-   * swaps the whole active canvas, but the session we left is still alive and must remain Running
-   * or Waiting in the cross-project sidebar. Real node deletion removes the status explicitly in
-   * `Canvas.deleteNodes`; a later hook/session event owns every other state transition.
-   */
-  useEffect(
-    () => () => {
-      useAgentNodes.getState().clearForParent(id)
-    },
-    [id]
-  )
+  // There is deliberately NO unmount-scoped store cleanup here (issue #402). Live agent status
+  // survives the unmount — selecting a session in another project swaps the whole active canvas,
+  // but the session we left is still alive and must remain Running or Waiting in the cross-project
+  // sidebar. The subagent fan-out survives for the same reason: an unmount says the COMPONENT went
+  // away, not that the work did, and a still-running subagent's card cleared here could never come
+  // back (`start` only fires from live hook events, and a subagent already past its PreToolUse
+  // emits no second one — the card was gone for the rest of its run). Canvas's ephemeral-node memo
+  // skips cards whose parent is not on the active canvas, so a kept entry renders nothing while
+  // away and simply reappears on switch-back. Clearing is owned by the signals that actually mean
+  // "this fan-out is over": a genuine new turn / `sessionPhase === 'end'` in Canvas's status
+  // listener, and every permanent-removal path (`deleteNodes`, cross-project `closeSession`,
+  // `deleteProject`), which must call `clearForParent` explicitly now that unmount does not.
 
   // glyphgrid origin sync. React Flow rewrites these two props per frame while the node is
   // dragged; `setOrigin` is change-gated inside the engine, and a drag is exactly the gesture the
@@ -3919,6 +3992,11 @@ export function TerminalNode({
     boardOpenRef.current = boardOpen
     applyFitRef.current?.()
   }, [boardOpen])
+
+  // Focus mode engaged/exited anywhere on the canvas: re-run our size vote (applyFit reads
+  // focusedNodeId() live). Mount-stable — the focused-node subscription above only re-renders
+  // the node whose own membership flipped, and every OTHER terminal is the one being covered.
+  useEffect(() => subscribeFocusedNode(() => applyFitRef.current?.()), [])
 
   const toggleCollapse = () =>
     setNodes((ns) =>
@@ -4286,7 +4364,7 @@ export function TerminalNode({
         isUnread ? ' unread' : ''
       }${status?.state === 'working' ? ' working' : ''}${
         status?.state === 'waiting' || status?.state === 'blocked' ? ' attention' : ''
-      }${glyphMounted ? ' term-node--glyphgrid' : ''}`}
+      }${glyphMounted ? ' term-node--glyphgrid' : ''}${focused ? ' term-node--focused' : ''}`}
       ref={rootRef}
       style={{ borderTopColor: data.color }}
       onMouseEnter={() => (hoveredRef.current = true)}
@@ -4662,6 +4740,9 @@ export function TerminalNode({
               </button>
             </Tooltip>
           )}
+        {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
+          <MaximizeButton id={id} maximized={!!data.premaxRect} />
+        )}
         <button
           className="term-node__close"
           title="Close (ends the session)"

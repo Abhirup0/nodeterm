@@ -116,6 +116,7 @@ import {
   MENU_ITEM_ID_KANBAN,
   MENU_ITEM_ID_MINIMIZE,
   MENU_ITEM_ID_SETTINGS,
+  closeStandsDownInTerminal,
   installKeydownIntercepts,
   menuItemIdsToSuspend,
   menuStandsDown,
@@ -180,6 +181,7 @@ import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
+import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { agentAccountColor } from '../shared/agents/account-color'
@@ -894,6 +896,15 @@ function syncMenuForStandDown(): void {
     const item = menu.getMenuItemById(id)
     if (item) item.enabled = enabled
   }
+  // The CLOSE item's extra, policy-independent stand-down (issue #383): off-mac its role owns the
+  // Ctrl+W accelerator above the page, and while a terminal has focus that keystroke is readline's
+  // kill-word. Applied ON TOP of the shared suspension — the item must never be MORE enabled than
+  // the shared rule says. Mac has no close item in the template, so the lookup is null there and
+  // this is a no-op by construction.
+  if (closeStandsDownInTerminal(interceptIsMac, terminalFocused)) {
+    const close = menu.getMenuItemById(MENU_ITEM_ID_CLOSE)
+    if (close) close.enabled = false
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -1050,7 +1061,9 @@ function createWindow(): BrowserWindow {
     currentInterceptBindings,
     interceptIsMac,
     () => shortcutRecording,
-    () => policyStandsDown(currentInterceptPolicy(), terminalFocused)
+    () => policyStandsDown(currentInterceptPolicy(), terminalFocused),
+    // The close leg's own, policy-independent stand-down (issue #383) — see the predicate's doc.
+    () => closeStandsDownInTerminal(interceptIsMac, terminalFocused)
   )
 
   // The THIRD way the page that armed a recorder (or reported terminal focus) can go away: a
@@ -2085,8 +2098,10 @@ app.whenReady().then(async () => {
   // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
   // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
   // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
-  // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
-  // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
+  // onTaskNotification/onToolResult: both are claude transcript features (the task-notification
+  // sniff exists because claude's hooks never send the async subagent's real end; codex's
+  // SubagentStop hook IS the real end, so its subagent cards need no transcript sniffing —
+  // and the declined-ask rescue is claude-only too).
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
   // Hand the gemini session-name reader its path authority (declared above the handlers that use
   // it, assigned here where the tail exists).
@@ -2604,14 +2619,45 @@ app.whenReady().then(async () => {
     // jailed by the same `safeTranscriptPath` claude uses (widened to those two agents' transcript
     // roots), because a forged POST could otherwise aim a file read at an arbitrary local path.
     if (agentId === 'gemini' || agentId === 'codex') {
-      const p = payload as { session_id?: string; transcript_path?: string; hook_event_name?: string }
+      const p = payload as {
+        session_id?: string
+        transcript_path?: string
+        hook_event_name?: string
+        agent_id?: string
+      }
       // A REMOTE (SSH) node's transcript lives on the HOST, and these tails read the LOCAL disk —
       // a host path like `~/.gemini/tmp/…` clears the local jail, so without this we would meter
       // whatever same-named file happens to exist on THIS machine. Remote meters for these agents
       // are out of scope (remote-context-tail.ts is that path), so skip rather than report the
       // wrong machine's numbers. The Server Edition needs no counterpart: it has no SSH projects,
       // which is why its copy of this branch is otherwise identical but lacks these two lines.
+      // (A remote codex node's subagent CARDS still work — normalize is machine-agnostic — it is
+      // only the live-activity tail that has no remote leg yet.)
       if (nodeId && ptyManager.sshRemoteForNode(nodeId)) return
+      // Codex subagent events (spawn_agent), BEFORE the meter track: every agent_id-tagged event
+      // carries the PARENT's session_id with the CHILD's rollout as transcript_path (measured,
+      // codex-cli 0.146.0 — SubagentStart and the child's own tool events alike), so falling
+      // through would re-point the parent's context meter at the child's rollout. The tail is the
+      // shared subagentTail instance: releaseNodeTails/SessionEnd cleanup then covers codex ids
+      // through the same nodeSubagents bookkeeping claude uses.
+      if (agentId === 'codex' && p.agent_id) {
+        if (p.hook_event_name === 'SubagentStart') {
+          subagentTail.trackFile(
+            p.agent_id,
+            safeTranscriptPath(p.transcript_path),
+            createCodexSubagentFormatter
+          )
+          if (nodeId) {
+            const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+            set.add(p.agent_id)
+            nodeSubagents.set(nodeId, set)
+          }
+        } else if (p.hook_event_name === 'SubagentStop') {
+          subagentTail.finish(p.agent_id)
+          if (nodeId) nodeSubagents.get(nodeId)?.delete(p.agent_id)
+        }
+        return
+      }
       const transcriptPath = safeTranscriptPath(p.transcript_path)
       const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
       if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)

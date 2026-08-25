@@ -5,7 +5,7 @@ import { useSettings } from '../state/settings'
 import {
   activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip, chipFor,
   setKeybindingOverride, commandKeysFor, dictationBinding,
-  terminalShortcutPolicy, noteTerminalCapture
+  terminalShortcutPolicy, terminalChordBubbles, noteTerminalCapture
 } from './keybindingOverrides'
 
 const setKb = (kb: unknown) =>
@@ -22,9 +22,9 @@ describe('activeKeybindingOverrides', () => {
   })
   it('sanitizes and memoizes by reference, warning once per change', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    setKb({ 'node.newTerminal': ['Cmd+Shift+T'], 'bogus.command': ['Cmd+X'] })
+    setKb({ 'node.newTerminal': ['Cmd+Shift+Y'], 'bogus.command': ['Cmd+X'] })
     const first = activeKeybindingOverrides()
-    expect(first).toEqual({ 'node.newTerminal': ['Cmd+Shift+T'] })
+    expect(first).toEqual({ 'node.newTerminal': ['Cmd+Shift+Y'] })
     expect(activeKeybindingOverrides()).toBe(first)
     expect(warn).toHaveBeenCalledTimes(1)
     warn.mockRestore()
@@ -198,5 +198,59 @@ describe('commandKeysFor / dictationBinding', () => {
     expect(dictationBinding()).toBe('Cmd+Alt+D')
     setKeybindingOverride('speech.dictation', [])
     expect(dictationBinding()).toBe('')
+  })
+})
+
+describe('terminalChordBubbles', () => {
+  // Platform-independent by construction: every case pins an explicit literal-Ctrl override, so
+  // the assertions do not depend on which platform the test host reports.
+  const bubbleEv = (p: Partial<ShortcutKeyEvent>): ShortcutKeyEvent => ({
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    key: 'ArrowLeft',
+    ...p
+  })
+
+  it('true for an allowInTerminal canvas command the dispatcher would claim', () => {
+    setKb({ 'node.focusLeft': ['Ctrl+Shift+ArrowLeft'] })
+    expect(
+      terminalChordBubbles(bubbleEv({ ctrlKey: true, shiftKey: true, key: 'ArrowLeft' }), false)
+    ).toBe(true)
+  })
+
+  it('false under terminal-first — the chord stays with the shell', () => {
+    useSettings.setState({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        keybindings: { 'node.focusLeft': ['Ctrl+Shift+ArrowLeft'] } as never,
+        terminalShortcutPolicy: 'terminal-first'
+      }
+    })
+    expect(
+      terminalChordBubbles(bubbleEv({ ctrlKey: true, shiftKey: true, key: 'ArrowLeft' }), false)
+    ).toBe(false)
+  })
+
+  it('false over the kanban board for a canvas-scope command', () => {
+    setKb({ 'node.focusLeft': ['Ctrl+Shift+ArrowLeft'] })
+    expect(
+      terminalChordBubbles(bubbleEv({ ctrlKey: true, shiftKey: true, key: 'ArrowLeft' }), true)
+    ).toBe(false)
+  })
+
+  it('false for a terminal-scope command — its local listener owns the chord', () => {
+    setKb({ 'terminal.find': ['Ctrl+Shift+F1'] })
+    expect(
+      terminalChordBubbles(bubbleEv({ ctrlKey: true, shiftKey: true, key: 'F1' }), false)
+    ).toBe(false)
+  })
+
+  it('false for a chord nothing resolves', () => {
+    setKb(undefined)
+    expect(
+      terminalChordBubbles(bubbleEv({ ctrlKey: true, shiftKey: true, key: 'F12' }), false)
+    ).toBe(false)
   })
 })

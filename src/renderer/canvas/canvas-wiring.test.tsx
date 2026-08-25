@@ -126,3 +126,95 @@ describe('the end-session confirm describes both things it does', () => {
     }
   })
 })
+
+describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
+  // Same discipline as the dispatch-map pins above: Canvas has no render harness, and each of
+  // these rules failed silently once (or would) — a source read is the only net.
+
+  it('goToNode refuses to record the ephemeral subagent/loop viz nodes', () => {
+    // A breadcrumb for one is an id nothing can ever resolve (they are cleared on the next turn),
+    // permanently burning one of the 20 slots.
+    expect(CANVAS_SRC).toContain("node.type !== 'subagent' && node.type !== 'loop'")
+  })
+
+  it('stepAndFrame never records — it frames through the shared frameNode, not goToNode', () => {
+    const step = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('const stepAndFrame = useCallback'),
+      CANVAS_SRC.indexOf('const goBack = useCallback')
+    )
+    expect(step.length).toBeGreaterThan(0)
+    // Recording inside a step would turn every back-step into a new tip.
+    expect(step).not.toContain('recordBreadcrumb')
+    expect(step).not.toContain('goToNode(')
+    // The single framing implementation — the "Go to node" origin-jump invariant has ONE copy.
+    expect(step).toContain('frameNode(target)')
+  })
+
+  it('there is exactly ONE framing implementation (frameNode) shared by focus and steps', () => {
+    // The measured-check-reads-the-store rule regresses through a second copy first.
+    expect(CANVAS_SRC.match(/isMeasured\(internal\)/g) ?? []).toHaveLength(1)
+  })
+
+  it('the resume card slot is spent only on a card that can render, and only when opted in', () => {
+    // Gated on settings.showResumeCard (default off) FIRST — a disabled card must not spend the
+    // one-shot slot — then once per app run, only with a live stop, and never under the opaque
+    // kanban overlay.
+    expect(CANVAS_SRC).toContain(
+      'resumeCardEnabled &&\n        !resumeCardShown.has(project.id) &&\n        hasLiveStop &&\n        !isKanbanOpen(project.id)'
+    )
+    expect(CANVAS_SRC).toContain(
+      'const resumeCardEnabled = useSettings.getState().settings.showResumeCard'
+    )
+  })
+})
+
+describe('reopen-last-closed records and dispatches through the shared history stack', () => {
+  it('records a project close before hiding it', () => {
+    expect(CANVAS_SRC).toContain('useReopenHistory.getState().push({ kind: \'project\'')
+  })
+
+  it('records a node-delete batch, opting the account-removal cleanup out', () => {
+    expect(CANVAS_SRC).toContain("kind: 'nodes'")
+    expect(CANVAS_SRC).toContain('deleteNodes(loginIds, { record: false })')
+  })
+
+  it('registers the command in the dispatch map', () => {
+    expect(CANVAS_SRC).toContain("'app.reopenLastClosed': reopenLastClosedCommand")
+  })
+
+  it('never live-inserts into a non-active project — routes through applyNodeMutation instead', () => {
+    // The bug this pins: a synchronous setNodes() right after switchProject()/reopenProject()
+    // races the active-project load effect and silently loses the recreated nodes.
+    expect(CANVAS_SRC).toContain('.applyNodeMutation(plan.projectId, {')
+  })
+
+  it('arms a cold-open command before writing a restored node into a non-active project', () => {
+    // The bug this pins: flowToNodeStates alone drops initialCommand, so an agent node restored
+    // into a project that isn't on screen would never launch its command on the eventual cold
+    // open — armForColdOpen is what carries it through serialization.
+    expect(CANVAS_SRC).toContain('node: flowToNodeStates([armForColdOpen(node)])[0]')
+  })
+
+  it('commits the live canvas to the store before every reopenProject call — never a bare switch', () => {
+    // The bug this pins: useProjects.getState().reopenProject(...) is a project SWITCH, and every
+    // switch/add/delete elsewhere in this file calls commitActiveToStore() first so the live
+    // canvas isn't silently lost. Both reopen-a-project call sites inside reopenLastClosedCommand
+    // must do the same, rather than referencing the later `reopenProject` wrapper (a TDZ hazard
+    // from this callback's declaration point).
+    const calls = CANVAS_SRC.match(/useProjects\.getState\(\)\.reopenProject\(/g) ?? []
+    const guarded = CANVAS_SRC.match(/commitActiveToStore\(\)\n\s+useProjects\.getState\(\)\.reopenProject\(/g) ?? []
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    expect(guarded.length).toBe(calls.length)
+  })
+
+  it('resolves permission mode against the TARGET project being restored into, not the caller\'s active one', () => {
+    expect(CANVAS_SRC).toContain('permissionModeFor: (agentId) => projectPermissionMode(project, agentId)')
+  })
+
+  it('extracts the reopen decision into the pure, tested planReopen', () => {
+    expect(CANVAS_SRC).toContain('const plan = planReopen(')
+    expect(CANVAS_SRC).toContain("case 'insertActive':")
+    expect(CANVAS_SRC).toContain("case 'insertStored':")
+    expect(CANVAS_SRC).toContain("case 'reopenProject':")
+  })
+})

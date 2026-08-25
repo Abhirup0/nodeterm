@@ -75,8 +75,10 @@ describe('/codex-thread/bind refuses a path-unsafe thread id', () => {
     }
     expect(bound).toEqual([])
     // Nothing anywhere: not in the store, and — the `..` row — not in the store's parent either.
+    // (`sock/` is the hook server's own unix-socket listener dir, issue #367 — always present,
+    // never a record.)
     expect(existsSync(codexThreadIdentityRoot())).toBe(false)
-    expect(readdirSync(dir)).toEqual(['hook-endpoint.env'])
+    expect(readdirSync(dir).sort()).toEqual(['hook-endpoint.env', 'sock'])
   })
 
   it('still binds a thread id the app-server would actually mint', async () => {

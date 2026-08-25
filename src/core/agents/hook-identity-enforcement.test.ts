@@ -361,7 +361,10 @@ describe('the latch is memory, not state', () => {
     const walk = (root: string): string[] =>
       readdirSync(root).flatMap((entry) => {
         const full = join(root, entry)
-        return statSync(full).isDirectory() ? walk(full) : [full]
+        const st = statSync(full)
+        // Regular files only: the hook server's own unix socket (issue #367) lives under the data
+        // dir too, and a socket is not readable state — opening it is ENXIO, not evidence.
+        return st.isDirectory() ? walk(full) : st.isFile() ? [full] : []
       })
     for (const file of walk(dir)) {
       // A persisted latch is a node that one filesystem accident can brick forever. Nothing on
@@ -537,12 +540,17 @@ describe('a node that can NEVER have an identity is told so, and not told to res
     expect(controlCalls).toEqual([])
   })
 
-  it('does not say "Restart", because restarting is the thing that cannot work', () => {
+  it('advises no recovery action on the node, because none can work', () => {
+    // The contrast, on the axis that matters: the ordinary refusal names a way back (reopen the
+    // node — #384 moved it off the in-place "Restart agent", which reuses the same environment and
+    // therefore could never help either); this one refuses to name any, because for a colliding or
+    // invalid node id there is none short of editing project.json.
+    expect(IDENTITY_UNMINTABLE_NOTE).not.toContain('Close and reopen this node')
     expect(IDENTITY_UNMINTABLE_NOTE).not.toContain('Restart')
-    expect(IDENTITY_REFUSED_NOTE).toContain('Restart')
+    expect(IDENTITY_REFUSED_NOTE).toContain('Close and reopen this node')
   })
 
-  it('keeps the ordinary sentence for an ordinary node — the one a restart DOES fix', async () => {
+  it('keeps the ordinary sentence for an ordinary node — the one reopening DOES fix', async () => {
     const res = await control('open-terminal', 'n-ordinary-refusal')
     expect(res.status).toBe(403)
     expect((await res.text()).trim()).toBe(IDENTITY_REFUSED_NOTE)
@@ -576,7 +584,7 @@ describe('a node that can NEVER have an identity is told so, and not told to res
  * THE WINDOW IS WHERE THAT SENTENCE WAS NEEDED, AND IT WAS THE ONE PLACE IT COULD NOT REACH.
  *
  * Measured against a real hook server on 2026-08-14: node `Term-X`, a refused case-fold collision
- * member, was handed `IDENTITY_RESTART_NOTE` — "Restart this node… to pick one up" — for a node
+ * member, was handed `IDENTITY_RESTART_NOTE` — "Close and reopen this node to pick one up" — for a node
  * that has nothing to pick up. `controlPolicy` answers `allow-with-warning` for exactly this
  * population until 2026-10-13, and the warn branch emitted one fixed string, so the unmintable
  * wording only ever appeared AFTER the cutoff (or for a latched node). For the whole warning

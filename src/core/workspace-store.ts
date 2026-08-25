@@ -171,6 +171,8 @@ export class WorkspaceStore {
     platform().handle(IPC.workspaceLoad, () => this.load())
     platform().handle(IPC.workspaceSave, (workspace: Workspace) => this.save(workspace))
     platform().handle(IPC.workspaceProbeFolder, (folder: string) => this.probeFolder(folder))
+    platform().handle(IPC.workspaceProjectFileState, (cwd: unknown) =>
+      typeof cwd === 'string' && cwd ? this.projectFileState(cwd) : 'unreadable')
     platform().handle(IPC.projectSettingsRead, (projectId: unknown) =>
       typeof projectId === 'string' ? this.readProjectSettings(projectId) : null)
     platform().handle(IPC.projectSettingsWriteShared, (projectId: unknown, doc: ProjectSettingsDoc) =>
@@ -282,6 +284,7 @@ export class WorkspaceStore {
               closed: e.closed,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              breadcrumbs: e.breadcrumbs,
               capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, p)
             })
@@ -301,6 +304,7 @@ export class WorkspaceStore {
               closed: e.closed,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
+              breadcrumbs: e.breadcrumbs,
               capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, e.cache)
             })
@@ -829,6 +833,7 @@ export class WorkspaceStore {
         // moment a folder is briefly unmounted.
         if (old?.viewport) e.viewport = old.viewport
         if (old?.defaultAccountId) e.defaultAccountId = old.defaultAccountId
+        if (old?.breadcrumbs) e.breadcrumbs = old.breadcrumbs
         // The clone-notice acknowledgment must also survive an unavailable window: forgetting it
         // would re-raise a notice the user already answered the moment the folder remounts.
         if (old?.capabilityAck) e.capabilityAck = old.capabilityAck
@@ -941,6 +946,25 @@ export class WorkspaceStore {
     return read ? fileToProject(read.file, { id: freshProjectId(), cwd: folder }) : null
   }
 
+  /**
+   * Is this folder's `.nodeterm/project.json` genuinely gone, merely unreadable, or fine?
+   *
+   * `readProjectFile` collapses all three into `null`, which is right for its callers (they only
+   * need "can I use it") but wrong for recovery: clearing a project's `unavailable` placeholder
+   * lets the next save WRITE its empty canvas, so doing that on a file that is present but
+   * momentarily unreadable (permissions, a stalled mount) would overwrite the only copy. A failed
+   * read is never evidence of absence — so the errno is the answer, and anything that is not a
+   * definite ENOENT reports `unreadable`, the side that changes nothing. See issue #385.
+   */
+  async projectFileState(cwd: string): Promise<'present' | 'absent' | 'unreadable'> {
+    try {
+      await fs.stat(projectFilePath(cwd))
+      return 'present'
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unreadable'
+    }
+  }
+
   localRefPaths(): string[] {
     return (this.index?.entries ?? []).filter((e) => e.cwd).map((e) => projectFilePath(e.cwd!))
   }
@@ -965,6 +989,7 @@ export class WorkspaceStore {
       closed: e.closed,
       viewport: e.viewport,
       defaultAccountId: e.defaultAccountId,
+      breadcrumbs: e.breadcrumbs,
       capabilityAck: e.capabilityAck,
       localExec: e.localExec
     })
@@ -1294,6 +1319,7 @@ export class WorkspaceStore {
           closed: e.closed,
           viewport: e.viewport,
           defaultAccountId: e.defaultAccountId,
+          breadcrumbs: e.breadcrumbs,
           capabilityAck: e.capabilityAck,
           localExec: e.localExec
         })
@@ -1356,7 +1382,7 @@ export class WorkspaceStore {
     this.revs.set(e.id, e.cache.rev)
     return fileToProject(e.cache, {
       id: e.id, ssh: e.ssh, closed: e.closed,
-      viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+      viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
       capabilityAck: e.capabilityAck, localExec: e.localExec
     })
   }
@@ -1463,7 +1489,7 @@ export class WorkspaceStore {
       else this.unmirrored.delete(e.id) // pure adopt: the server copy IS the truth now — nothing owed
       return fileToProject(adopted, {
         id: e.id, ssh: e.ssh, closed: e.closed,
-        viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+        viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
         capabilityAck: e.capabilityAck, localExec: e.localExec
       })
     }
@@ -1478,7 +1504,7 @@ export class WorkspaceStore {
         this.unmirrored.add(e.id) // the merged set must land on the server
         merged = fileToProject(e.cache, {
           id: e.id, ssh: e.ssh, closed: e.closed,
-          viewport: e.viewport, defaultAccountId: e.defaultAccountId,
+          viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
           capabilityAck: e.capabilityAck, localExec: e.localExec
         })
       }

@@ -157,14 +157,17 @@ describe('ShortcutsSection rows', () => {
   // body is `divide-y [&>*]:py-5`, so an empty wrapper is a visible empty block, not nothing.
   it('drops a whole group when neither its header nor any of its rows match', () => {
     render('close')
-    expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['Nodes'])
-    expect(ids()).toEqual(['node.close'])
-    // Exactly the policy row (its description names Close) and the ONE group wrapper holding the
-    // heading + its row — no empty siblings. The rail is a searchable row of its own and 'close'
-    // does not match it, so it is gone too.
+    // `app.reopenLastClosed`'s title "Reopen last closed" also matches 'close', so its group
+    // (General) now survives the filter too — General's group order precedes Nodes in the
+    // registry, matching the h3 order.
+    expect([...host.querySelectorAll('h3')].map((h) => h.textContent)).toEqual(['General', 'Nodes'])
+    expect(ids()).toEqual(['app.reopenLastClosed', 'node.close'])
+    // Exactly the policy row (its description names Close) and the TWO group wrappers (General,
+    // holding `app.reopenLastClosed`; Nodes, holding `node.close`) — no empty siblings. The rail
+    // is a searchable row of its own and 'close' does not match it, so it is gone too.
     expect(pill()).toBeTruthy()
     expect(statusPill()).toBeNull()
-    expect(body().children).toHaveLength(2)
+    expect(body().children).toHaveLength(3)
     expect([...body().children].every((c) => (c.textContent ?? '').trim() !== '')).toBe(true)
   })
 
