@@ -66,7 +66,7 @@ export interface MessagingStoredNode {
  */
 export interface AgentMessagingDeps {
   paneOwner(nodeId: string): Promise<PaneOwner | null>
-  sendFramedPayload(nodeId: string, payload: string): Promise<boolean>
+  sendEnvelope(nodeId: string, envelope: string): Promise<boolean>
   hasLiveSession(nodeId: string): boolean
   mirrorEntry?(nodeId: string): MirrorEntry | undefined
   /** The main-process projects store (`workspaceStore.persistedCanvases()` on the desktop). */
@@ -500,15 +500,17 @@ export async function runDelivery(
     paneOwner: (id) => deps.paneOwner(id),
     // #210 retired the `#{bracket_paste_flag}` probe with a "do not reintroduce" note
     // (pty-manager.ts): pre-3.7 tmux cannot distinguish "the app did not ask" from "I cannot
-    // ask". So the dep answers true and the gate never refuses on it. What keeps herdr :260
-    // closed instead: gate 1 + gate 2 admit only a VERIFIED-idle supported agent CLI in the
-    // pane's foreground, and `agent-message.realtty.test.ts` proves the framed transport lands
-    // the envelope as one block against a real paste-aware reader.
+    // ask". So the dep answers true and the gate never refuses on it. Since #453 the delivery
+    // itself is `paste-buffer -p` (tmux frames from the pane's REAL state, or not at all), so
+    // what keeps herdr :260 closed: gate 1 + gate 2 admit only a VERIFIED-idle supported agent
+    // CLI in the pane's foreground — all known ones keep bracketed paste on at the composer —
+    // and `agent-message.realtty.test.ts` proves the delivery lands the envelope as one block
+    // against a real paste-aware reader.
     // TODO(pr7): a supported agent CLI idling WITHOUT bracketed paste on is asserted by no test —
     // if one exists, its deliveries splice line-by-line and only the receipt/trace make it
     // visible. Measure per CLI before relying on this any further.
     bracketPasteRequested: async () => true,
-    sendFramed: (id, payload) => deps.sendFramedPayload(id, payload),
+    sendEnvelope: (id, envelope) => deps.sendEnvelope(id, envelope),
     mirrorEntry: (id) => (deps.mirrorEntry ?? coreMirrorEntry)(id),
     tokenFilePresent: (id) => nodeTokenFilePresent(id),
     lock: (id, fn) => withNodeLock(id, fn),

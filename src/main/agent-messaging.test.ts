@@ -58,7 +58,7 @@ function fakeDeps(over: Partial<AgentMessagingDeps> = {}): AgentMessagingDeps & 
         pids: [200]
       }
     },
-    sendFramedPayload: async (nodeId, payload) => {
+    sendEnvelope: async (nodeId, payload) => {
       rec.sent.push({ nodeId, payload })
       return true
     },
@@ -195,7 +195,7 @@ describe('deliverFromControl', () => {
         { id: 'p1', nodes: [{ id: 'a1', title: 'Alpha', agentId: 'claude' }, ...nodes] }
       ],
       // Slow the write so every delivery overlaps every other before ANY noteSent can land.
-      sendFramedPayload: async (nodeId, payload) => {
+      sendEnvelope: async (nodeId, payload) => {
         await new Promise((r) => setTimeout(r, 25))
         deps.rec.sent.push({ nodeId, payload })
         return true

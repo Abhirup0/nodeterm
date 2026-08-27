@@ -54,7 +54,7 @@ import {
 } from './agent-message-decide'
 import { deliverAgentMessage, type DeliveryDeps, type DeliveryRequest } from './agent-message'
 import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './pane-owner'
-import { localFramedDelivery, runPasteDelivery } from '../tmux-naming'
+import { localPasteDelivery, runPasteDelivery } from '../tmux-naming'
 
 // ── Real-tool discovery (same rules as agent-message.realtty.test.ts) ───────────────────────────
 function findPasteAwareBash(): string | null {
@@ -268,9 +268,9 @@ function realPaneOwner(session: string): DeliveryDeps['paneOwner'] {
   }
 }
 
-function realSendFramed(session: string): DeliveryDeps['sendFramed'] {
+function realSendEnvelope(session: string): DeliveryDeps['sendEnvelope'] {
   return async (_id, payload) => {
-    const plan = localFramedDelivery(socket, session, payload)
+    const plan = localPasteDelivery(socket, session, payload, true)
     if (!plan) return false
     return runPasteDelivery(plan, async (args, input) => {
       execFileSync(TMUX as string, args, { env: tenv, input, encoding: 'utf8' })
@@ -341,7 +341,7 @@ describe('a phone-spawned session is a valid messaging target', () => {
       const deps: DeliveryDeps = {
         paneOwner: realPaneOwner(SESSION),
         bracketPasteRequested: async () => true,
-        sendFramed: realSendFramed(SESSION),
+        sendEnvelope: realSendEnvelope(SESSION),
         mirrorEntry: (id) => mirrorEntry(id),
         tokenFilePresent: (id) => nodeTokenFilePresent(id),
         lock: async (_id, fn) => fn(),

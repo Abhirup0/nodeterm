@@ -2,7 +2,6 @@ import type { MirrorEntry } from '../agent-status-mirror'
 import type { AgentState } from '../../shared/agents/normalize'
 import type { PaneOwner } from '../../shared/agents/pane-owner-predicate'
 import { agentPidIn, isAgentPane } from '../../shared/agents/pane-owner-predicate'
-import { bracketedInjection, PASTE_END, PASTE_START } from '../paste-injection'
 import { buildEnvelope, newFrameNonce } from './agent-message-envelope'
 import { PANE_PROBE_TIMEOUT_MS, probeWithin } from './pane-probe'
 import {
@@ -17,7 +16,7 @@ import {
 import type { DeliveryTraceInput } from './agent-message-trace'
 
 /**
- * `deliverAgentMessage` — ONE primitive: lock, pre-flight, framed write, post-write re-verify,
+ * `deliverAgentMessage` — ONE primitive: lock, pre-flight, paste-framed write, post-write re-verify,
  * receipt.
  *
  * EVERY side effect is an injected dep. That is not testing ceremony: it is what lets the
@@ -115,8 +114,14 @@ export interface DeliveryDeps {
    * deleted when `sendText` stopped needing to ask. See the long note at the refusal that uses it.
    */
   bracketPasteRequested(nodeId: string): Promise<boolean>
-  /** ONE write: the framed text and the Enter together. Resolves false when the pane is gone. */
-  sendFramed(nodeId: string, payload: string): Promise<boolean>
+  /**
+   * ONE tmux invocation: the envelope pasted (tmux frames it from the pane's real bracketed-paste
+   * state — `paste-buffer -p`) and the submit as a `send-keys Enter` in the same command list.
+   * Takes the PLAIN envelope text: the payload must carry no ESC byte of ours, because tmux ≥ 3.7
+   * passes paste-buffer content through vis(3), which renders an embedded frame as literal `^[`
+   * text (issue #453). Resolves false when the pane is gone.
+   */
+  sendEnvelope(nodeId: string, envelope: string): Promise<boolean>
   /** The target's status mirror entry — gate 2's whole input. */
   mirrorEntry(nodeId: string): MirrorEntry | undefined
   /** `nodeTokenFilePresent(nodeId)`. */
@@ -398,36 +403,45 @@ export async function deliverAgentMessage(
     // no implementation wired anywhere. Whoever wires it inherits the same three-way problem the
     // old note described ('1' = aware, '0' = genuinely unaware, '' or error = CANNOT ASK), because
     // `targetNotPasteAware` says "the pane did not ask" when the truth may be "we could not ask".
-    // The cheap way out now exists and did not before: this module could stop probing and instead
-    // let the same `paste-buffer -p` delivery carry the envelope, since tmux frames it correctly
-    // or not at all — but that is a decision for the PR that ships the verbs, not this one.
+    // Since #453 the delivery below IS that `paste-buffer -p` path — tmux frames the envelope
+    // correctly or not at all — so the residual exposure is exactly one shape: a supported agent
+    // CLI idling with bracketed paste OFF would receive the multi-line envelope unframed and
+    // splice it line by line. No such CLI is known (claude/codex/gemini all keep DECSET 2004 on
+    // at the composer, and #453 measured `bracket_paste_flag` = 1 on every Claude pane checked);
+    // whoever meets one wires this dep for real instead of widening the delivery.
     if (!(await deps.bracketPasteRequested(req.targetNodeId)))
       return refuse({ kind: 'targetNotPasteAware' })
 
-    // herdr :48 — the text and the Enter ride ONE write. Two writes race the receiving TUI's paste
-    // heuristics, and an Enter arriving milliseconds behind the text is absorbed as pasted content
-    // instead of a submit, leaving the prompt composed but unsubmitted.
+    // The envelope goes out PLAIN — tmux applies the bracketed-paste frame itself and the Enter
+    // rides the same tmux command list as a separate key event (`PtyManager.sendEnvelope` →
+    // `localPasteDelivery`/`remotePasteDelivery`, enter=true). This replaced a JS-composed frame
+    // (`bracketedInjection`, deleted): tmux ≥ 3.7 passes paste-buffer content through vis(3), so a
+    // payload-carried `ESC[200~` arrived as the literal text `^[[200~` and the `\r` riding inside
+    // the frameless burst never submitted (issue #453, measured on the bundled tmux 3.7b).
     //
-    // herdr :116 — the frame is applied ONLY because the pane asked for bracketed paste above.
-    // Framing an unaware app made OpenCode read `A != B` as shell mode.
-    const payload = bracketedInjection(
-      buildEnvelope({
-        nonce: (deps.nonce ?? newFrameNonce)(),
-        sourceId: req.sourceNodeId,
-        sourceTitle: req.sourceTitle,
-        replyTo: req.sourceNodeId,
-        body: req.body
-      }),
-      true
-    )
+    // herdr :48 — the race that note feared (an Enter milliseconds behind an UNMARKED burst being
+    // absorbed as pasted content) cannot occur here: the Enter arrives after tmux's own `ESC[201~`
+    // close marker, a boundary a paste-aware composer cannot re-chunk across. Probe B in #453
+    // measured exactly this delivery submitting cleanly against a live Claude Code pane.
+    //
+    // herdr :116 — framing an unaware app made OpenCode read `A != B` as shell mode; `-p` frames
+    // only when the pane's app really requested bracketed paste, so that failure mode is tmux's
+    // to prevent now, not ours.
+    const payload = buildEnvelope({
+      nonce: (deps.nonce ?? newFrameNonce)(),
+      sourceId: req.sourceNodeId,
+      sourceTitle: req.sourceTitle,
+      replyTo: req.sourceNodeId,
+      body: req.body
+    })
     // The receipt watch opens BEFORE the bytes go out. A fast target can submit its next turn while
     // the post-write probe is still in flight — 2s locally, a real ssh round-trip remotely — and a
     // subscription opened after that probe would miss it and report `stalled` for a message that
     // demonstrably landed. See `watchForReceipt`: that miss is what makes an LLM send it twice.
     const watch = watchForReceipt(req.targetNodeId, deps.subscribeEvents)
-    const wrote = await deps.sendFramed(req.targetNodeId, payload)
+    const wrote = await deps.sendEnvelope(req.targetNodeId, payload)
     // The pane went away between the gate and the write. Not a failure of ours and not retryable:
-    // the node is gone. It IS traced: a `sendFramed` that fails after a partial write has left
+    // the node is gone. It IS traced: a `sendEnvelope` that fails after a partial write has left
     // bytes in somebody's pane, and that must not be the one event with no record.
     if (!wrote) {
       watch.cancel()
@@ -460,6 +474,3 @@ export async function deliverAgentMessage(
     return { kind: 'delivered', traceId: t.traceId, traced: t.traced, receipt: 'observed', signal }
   })
 }
-
-/** Re-exported so a caller building a payload assertion uses the same markers the framer does. */
-export { PASTE_START, PASTE_END }

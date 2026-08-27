@@ -29,7 +29,6 @@ import {
   remoteTmuxPtyArgs,
   type RemoteSessionEnv,
   remotePasteDelivery,
-  remoteFramedDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
   remotePaneOwnerArgs,
@@ -62,7 +61,6 @@ import {
   sessionName,
   isSessionName,
   localPasteDelivery,
-  localFramedDelivery,
   runPasteDelivery
 } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
@@ -4138,35 +4136,44 @@ export class PtyManager {
    */
 
   /**
-   * Deliver one ALREADY-FRAMED payload — the agent-messaging envelope, composed by
-   * `bracketedInjection` in `deliverAgentMessage` — into a node's pane, local or SSH.
+   * Deliver the agent-messaging envelope — PLAIN text from `deliverAgentMessage` — into a node's
+   * pane, local or SSH, through the SAME plans as `sendText` with the Enter always on: tmux frames
+   * the paste from the pane's real bracketed-paste state (`paste-buffer -p`) and the submit is a
+   * separate `send-keys Enter` in the same tmux command list.
    *
-   * A two-line dispatcher over `localFramedDelivery` / `remoteFramedDelivery`, exactly as
-   * `sendText` is over its plans and for the same reason: the composition (the no-sanitize rule,
-   * the well-formed-frame assertion, the per-call buffer, the failure sweep) lives in the plan
-   * builders, where `agent-message.realtty.test.ts` drives the local one against a real tmux and
-   * a real bash. NOT `sendText`: that path sanitizes structurally, which would strip the ESC
-   * bytes that ARE this payload's frame.
+   * This replaced `sendFramedPayload`, which pushed a JS-composed `ESC[200~…ESC[201~\r` payload
+   * through `paste-buffer` with no `-p`: tmux ≥ 3.7 passes paste-buffer content through vis(3),
+   * which rendered that frame as literal `^[[200~` text in the composer and swallowed the submit
+   * (issue #453 — see the tombstones in tmux-naming.ts and paste-injection.ts). The plans
+   * sanitize the payload structurally (`sanitizePasteText` inside `localPasteDelivery` /
+   * `remotePasteDelivery`), which is now correct for this caller too: the envelope carries no ESC
+   * byte on purpose, and one smuggled in by a body must never reach a paste buffer.
+   *
+   * NOT `sendText` itself, because of the empty-payload contract: `sendText('', {enter:true})`
+   * means "submit whatever is composed", and a lone Enter into an agent's composer is exactly the
+   * accidental submit a messaging delivery must never perform — an empty envelope refuses here.
+   * (`buildEnvelope` can never return '', so this is a guard against a future caller, not a path.)
    */
-  async sendFramedPayload(persistKey: string, payload: string): Promise<boolean> {
+  async sendEnvelope(persistKey: string, envelope: string): Promise<boolean> {
+    if (envelope.length === 0) return false
     const target = sessionName(persistKey)
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
     try {
       if (sshRemote) {
         const ssh = findSsh()
         if (!ssh) return false
-        const plan = remoteFramedDelivery(sshRemote.conn, sshRemote.controlPath, target, payload)
+        const plan = remotePasteDelivery(sshRemote.conn, sshRemote.controlPath, target, envelope, true)
         if (!plan) return false
         return await runPasteDelivery(plan, (args, input) => runWithStdin(ssh, args, input))
       }
       if (!this.tmuxPath) return false
       const tmuxPath = this.tmuxPath
-      const plan = localFramedDelivery(TMUX_SOCKET, target, payload)
+      const plan = localPasteDelivery(TMUX_SOCKET, target, envelope, true)
       if (!plan) return false
       return await runPasteDelivery(plan, (args, input) => runWithStdin(tmuxPath, args, input))
     } catch {
-      // A builder throwing (unsafe target, an unframed payload) lands here; `runPasteDelivery`
-      // itself answers false rather than throwing, so the buffer sweep is never skipped.
+      // A builder throwing (an unsafe target) lands here; `runPasteDelivery` itself answers false
+      // rather than throwing, so the buffer sweep is never skipped.
       return false
     }
   }
