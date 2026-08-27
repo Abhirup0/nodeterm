@@ -396,6 +396,41 @@ run, whose shim never learned to send the header, posts nothing while the re-att
 the node — and is then refused for as long as it lives. It is genuinely indistinguishable from an
 impostor; the only code answer would be giving up the latch. The escape hatch is what that case has.
 
+### ⚠ The same asymmetry one layer down: a stale ENDPOINT — issue #445
+
+#384's shape repeated at the transport level. A session is pinned for life to the endpoint *path*
+it was handed, and that path's FILE can advertise a port nothing listens on: the app quit or
+crashed and has not rewritten it yet, the hook server's `start()` failed and left a previous run's
+file standing, or the path carries a retired project id that is never rewritten again. The managed
+hook script survived all of these — its bounded candidate walk (`nt_candidates`/`nt_adopt`) adopts
+a live sibling endpoint and re-reads the token from the adopted dir — while the two sh shims posted
+once at the dead port and died with "control endpoint unreachable": hook events healed themselves,
+canvas control did not, and the field report was a reviewer launch silently dropped from a live
+worktree session.
+
+Three fixes, all in the same change:
+
+- **The walk is shared** (`core/agents/hook-endpoint-failover-sh.ts`), the same extraction
+  `node-token-sh.ts` performed for the token read: one definition, three clients. Both shims fail
+  over on a dead transport only — an HTTP answer of any code is authoritative and is never re-sent
+  to another instance — and re-read the token from each adopted endpoint (`nt_read_node_token
+  "$candidate"`). The walk is skipped under `CODEX_SANDBOX_NETWORK_DISABLED` (#367: the sandbox
+  denies every connect, so each candidate would burn a doomed curl and the sandbox hint is already
+  the right diagnosis).
+- **Publication reflects listener liveness**: `hookServer.stop()` and a FAILED `start()` now delete
+  `hook-endpoint.env` (the desktop calls `stop()` on quit), and a failed `listen()` no longer
+  wedges the singleton — it used to leave `this.server` assigned, so every later `start()` was a
+  silent no-op at port 0 under a stale advertisement. A crash skips the delete, which is exactly
+  what the client walk exists for.
+- **The refusals name the state**: "no endpoint anywhere" and "an advertised endpoint that is not
+  listening" are different facts with opposite advice, so the shims append `STALE_ENDPOINT_HINT`
+  in the second case instead of leaving one generic sentence covering both.
+
+The safety argument is the walk's own: the node id in the body identifies the session, a foreign
+instance that does not know it answers with its ordinary refusal, and a foreign token dir yields a
+foreign `kid` = `legacy`. Real /bin/sh coverage: `canvas-control-shim.failover.test.ts`,
+`context-link-shim.failover.test.ts`, `hook-server.recovery.test.ts`.
+
 ### The escape hatch
 
 `settings.hookIdentityStrict` — Settings → Agents → *Require verified node identity for canvas
