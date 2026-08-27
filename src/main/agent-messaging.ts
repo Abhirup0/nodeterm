@@ -400,6 +400,16 @@ export function renderMessageOutcome(o: AgentMessageOutcome): AgentMessageReply 
         error: `targetHookScriptStale: ${o.note}. ${advice}`,
         result: o
       }
+    case 'targetPaneUnreadable':
+      return {
+        ok: false,
+        error:
+          `targetPaneUnreadable: the target's pane could not be read in time (the ssh/tmux probe ` +
+          `failed or timed out) — this says nothing about what is running in it. On an SSH project ` +
+          `this usually means the host link is saturated or reconnecting; the message was refused ` +
+          `rather than sent blind. ${advice}`,
+        result: o
+      }
     case 'targetNotAgentPane':
       return {
         ok: false,

@@ -133,7 +133,8 @@ describe('deliverAgentMessage — sequencing', () => {
   it('pre-flight refuses BEFORE writing anything when the pane cannot be read', async () => {
     const r = recorder({ paneOwner: async () => null })
     const out = await deliverAgentMessage(req(), r.deps)
-    expect(out).toEqual({ kind: 'targetNotAgentPane', observed: 'unknown' })
+    // issue #460: an unreadable pane is its own refusal — not "not running its agent".
+    expect(out).toEqual({ kind: 'targetPaneUnreadable' })
     expect(r.sends).toEqual([])
     expect(r.order).not.toContain('bracketPasteRequested')
   })
