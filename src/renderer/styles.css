@@ -2833,6 +2833,19 @@ body,
   flex: 1;
 }
 
+/* Live-session badge on a "Recently closed" row (issue #442): a closed project keeps its tmux
+   sessions running, and this is the one place that says so. Green = the RUNNING vocabulary. */
+.welcome__recent-sessions {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--success);
+  background: rgba(48, 209, 88, 0.14);
+}
+
 .welcome__recent-del {
   margin-left: auto;
   flex: none;
