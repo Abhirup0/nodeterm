@@ -8,6 +8,7 @@ import { Select } from '@renderer/ui/Select'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Input } from '@renderer/ui/Input'
 import { hintLabel } from '@shared/platform-utils'
+import { clampWheelZoomSpeed } from '@renderer/canvas/wheel-zoom'
 import { DEFAULT_WORKTREE_PATH_TEMPLATE } from '@shared/worktree'
 
 const ROWS = {
@@ -40,6 +41,10 @@ const ROWS = {
     keywords: ['worktree', 'git', 'path', 'folder', 'repo', 'branch', 'template']
   },
   wheelZoom: { title: 'Scroll wheel zooms', keywords: ['zoom', 'wheel', 'scroll', 'mouse', 'pan'] },
+  wheelZoomSpeed: {
+    title: 'Wheel zoom speed',
+    keywords: ['zoom', 'wheel', 'speed', 'sensitivity', 'step', 'jump', 'mouse', 'scroll']
+  },
   trackpadPan: {
     title: 'Trackpad scroll pans',
     keywords: ['trackpad', 'pan', 'scroll', 'zoom', 'magic', 'mouse', 'two-finger', 'macos']
@@ -233,6 +238,37 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
           }
         />
       </SearchableRow>
+      <div
+        className={
+          'mt-3 space-y-3 border-l border-border pl-4' +
+          (settings.wheelZoom ? '' : ' pointer-events-none opacity-40')
+        }
+        aria-disabled={!settings.wheelZoom}
+      >
+        <SearchableRow {...ROWS.wheelZoomSpeed}>
+          <FieldRow
+            label="Wheel zoom speed"
+            description="How far one wheel click zooms. Turn it down if a single click jumps too far (common on high-resolution wheels like the MX Master)."
+            control={
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={0.2}
+                  max={2}
+                  step={0.1}
+                  value={clampWheelZoomSpeed(settings.wheelZoomSpeed)}
+                  aria-label="Wheel zoom speed"
+                  onChange={(e) => update({ wheelZoomSpeed: Number(e.target.value) })}
+                  className="w-40 accent-[var(--accent)]"
+                />
+                <span className="w-12 text-right text-[12px] text-muted tabular-nums">
+                  {clampWheelZoomSpeed(settings.wheelZoomSpeed).toFixed(1)}×
+                </span>
+              </div>
+            }
+          />
+        </SearchableRow>
+      </div>
       <SearchableRow {...ROWS.trackpadPan}>
         <FieldRow
           label="Trackpad scroll pans"
