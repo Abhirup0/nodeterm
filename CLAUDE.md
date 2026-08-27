@@ -247,7 +247,27 @@ project's nodes only.** The contract:
   nodes, which reattach warm or cold-restore). `hasProjects` counts only **open** projects, so
   closing the last open one shows the welcome screen. **Permanent** deletion (`deleteProject`:
   `transport.destroy(nodeId)` per terminal + drop agent status + SSH teardown) now only happens
-  via the `×` on a "Recently closed" entry.
+  via the `×` on a "Recently closed" entry. **Closing now SAYS what it parks** (issue #442 —
+  "close" read like cleanup while meaning "hide, and keep running"): a project with terminal
+  nodes gets a confirm naming the count, with an opt-in **"end its sessions too"** checkbox
+  (default OFF — parking stays the rule; checked flips the confirm to danger). The pure half is
+  `renderer/lib/projectCloseSessions.ts`: **one definition of N** — the project's terminal-kind
+  nodes, exactly the set the action addresses (`transport.destroy` is idempotent on a dead
+  session), never a liveness-verified count that could disagree with the action; the END happens
+  at confirm time against the re-resolved node set (agents spawn nodes on their own). A relay tab
+  or a 0-terminal project closes silently (byte-identical old path). `endProjectSessions` mirrors
+  `deleteProject`'s teardown EXCEPT it keeps agent status (the persisted sessionId is what lets a
+  reopen cold-restore `--resume`) and never disconnects SSH masters (close never managed the
+  connection). The `×` also confirms now, via `deleteConfirmCopy` — a relay tab gets "removes
+  only this machine's view; reconnecting brings it back" with no danger styling (deleting the
+  view is what turns the next connect into a first-connect re-adopt), local/SSH get the session
+  count + "the folder (incl. .nodeterm/project.json) is not deleted". And "Recently closed" rows
+  show a **live-session badge** (`closedSessionCounts` over ONE on-demand local
+  `sessionMemory.read` per welcome-screen appearance — never a timer; `ok:false` ⇒ no badge,
+  never "0"; an SSH project's host-side sessions are deliberately not claimed by the local
+  count). Server Edition: all renderer-side; the ws-bridge `sessionMemory` is real, so badges
+  describe the server machine; the `sshProject` legs only run for `project.ssh`, which that
+  shell never has.
 - A project's `cwd` (folder picker, `dialog:select-folder`) is passed to terminal/Claude
   node factories so new terminals open there. **Folder ↔ project is deduped:** "Open folder…"
   reuses the existing project with that `cwd` (and its nodes) instead of creating a duplicate.
@@ -1714,7 +1734,10 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   and one per panel open / `⟳`. Same rule this file already sets for **Remote usage**, for the same
   reason: every remote read is an ssh exec plus a `ps` of somebody else's whole process table. The
   full sweep runs on the panel's MOUNT (it is unmounted while closed) and on `⟳` — never on a timer,
-  never from the pill.
+  never from the pill. One more consumer, same discipline: the welcome screen runs ONE **local**
+  sweep per appearance (only while "Recently closed" is non-empty) for its per-project
+  live-session badges (issue #442), bypassing the panel's store on purpose — it must not disturb
+  `state/sessionMemory.ts`'s module-level scope stamp, and its scope is always THIS machine.
 - **The pill is the single owner of the store's `startHostPoll` / `stopHostPoll`** — the timer and the
   active-scope stamp are MODULE SINGLETONS. The panel must never call them: a `stopHostPoll` on
   unmount would clear the pill's interval with nothing left to restart it, and the number would
