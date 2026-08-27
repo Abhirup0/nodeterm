@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canCommitCanvas, canClearDirty } from './persistGuards'
+import { canCommitCanvas, canClearDirty, canCreateOnCanvas } from './persistGuards'
 
 describe('canCommitCanvas', () => {
   it('commits while the nodes in hand belong to the active project', () => {
@@ -24,6 +24,31 @@ describe('canCommitCanvas', () => {
     expect(canCommitCanvas('a', '')).toBe(false)
     expect(canCommitCanvas(null, '')).toBe(false)
     expect(canCommitCanvas('', '')).toBe(false)
+  })
+})
+
+describe('canCreateOnCanvas', () => {
+  it('creates while the canvas on screen belongs to the active project', () => {
+    expect(canCreateOnCanvas('a', 'a')).toBe(true)
+  })
+
+  // Issue #443: the store already says B (a tab switch, or a bailed load effect that left the
+  // previous nodes mounted) while A's canvas is what the user sees. Creating here would insert
+  // the node into A's canvas but stamp B's cwd / account default / launch command onto it — for
+  // an agent session that is silent write access to the wrong repo. Refuse (the caller says so
+  // loudly); never resolve the project from ambient state that disagrees with the screen.
+  it('refuses to create while the canvas shows a different project than the active one', () => {
+    expect(canCreateOnCanvas('a', 'b')).toBe(false)
+  })
+
+  // Before the first load effect, or after a bailed one, React Flow's nodes belong to NO project.
+  it('refuses to create before any project canvas is installed', () => {
+    expect(canCreateOnCanvas(null, 'a')).toBe(false)
+  })
+
+  it('refuses to create with no active project', () => {
+    expect(canCreateOnCanvas('a', '')).toBe(false)
+    expect(canCreateOnCanvas(null, '')).toBe(false)
   })
 })
 
