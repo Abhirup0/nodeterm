@@ -1039,6 +1039,24 @@ else, and its context links must keep classifying across restarts).
     layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
     — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
     dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
+  - **Every generated sh client walks the SAME endpoint failover** (`nt_candidates`/`nt_adopt`,
+    `core/agents/hook-endpoint-failover-sh.ts`) — issue #445, the endpoint-level twin of #384: a
+    session is pinned for life to the endpoint PATH it got at tmux creation, so an app
+    quit/restart (or a retired project id) leaves it POSTing at a dead port while a live endpoint
+    file sits right next to it. The managed hook script had the bounded candidate walk (locals
+    before tunnels, `nt_fallback_max` 3, token re-read from the ADOPTED endpoint's dir); the two
+    shims did not, so hook events healed themselves while every canvas-control verb died with
+    "control endpoint unreachable" — in the field, a reviewer launch silently dropped. Now shared,
+    one definition. Two server-side halves in `hook-server.ts`: a FAILED `listen()` un-wedges the
+    singleton (it used to leave `this.server` set, making every retry a silent no-op at port 0)
+    and both `stop()` and the failed-start path delete `hook-endpoint.env` — publication reflects
+    listener liveness; a crash skips that, which is exactly what the client walk exists for. An
+    HTTP answer of any code is authoritative: only a dead transport (curl 000/'') fails over, so a
+    403/400 is never re-sent to another instance. The walk is skipped under
+    `CODEX_SANDBOX_NETWORK_DISABLED` (#367 — the sandbox denies every connect, the hint is the
+    right diagnosis) and the final error now distinguishes "no endpoint anywhere" from "an
+    advertised endpoint that is not listening" (`STALE_ENDPOINT_HINT`). Desktop quit calls
+    `hookServer.stop()` on the second before-quit pass, after the flush window.
 
   Enforcement is dated (`NODE_IDENTITY_STRICT_AFTER`, 2026-10-13, read through `isStrictInstant` so a
   clock years ahead cannot enter strict mode early) with a `settings.hookIdentityStrict` escape hatch
