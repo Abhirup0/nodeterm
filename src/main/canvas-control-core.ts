@@ -3,6 +3,7 @@
 // Electron/ipc/server wiring lives in canvas-control.ts + index.ts + hook-server.ts.
 import { HOOK_CURL_HEADERS_SH } from '../core/agents/hook-curl-config-sh'
 import { CODEX_SANDBOX_HINT_SH } from '../core/agents/hook-sandbox-hint-sh'
+import { HOOK_ENDPOINT_FALLBACK_SH, STALE_ENDPOINT_HINT } from '../core/agents/hook-endpoint-failover-sh'
 import { codexSandboxGuidanceLines } from '../core/context-link-core'
 import { NODE_TOKEN_READ_SH } from '../core/agents/node-token-sh'
 import { AGENT_CONFIG, AGENT_HOOK_TARGETS, BUILTIN_AGENT_IDS } from '@shared/agents/config'
@@ -496,23 +497,67 @@ while [ "$nt_i" -lt "$nt_count" ]; do
   esac
 done
 
+${HOOK_ENDPOINT_FALLBACK_SH}
+
 nt_out=$(mktemp 2>/dev/null || echo "/tmp/nodeterm-control.$$")
-if [ -n "$NODETERM_HOOK_SOCK" ]; then
-  nt_code=$(nt_hook_headers |
-    curl -sS -o "$nt_out" -w '%{http_code}' -X POST --config - \\
-    --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/control/$nt_verb" \\
-    -H "Accept: text/plain" \\
-    --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
-elif [ -n "$NODETERM_HOOK_PORT" ]; then
-  nt_code=$(nt_hook_headers |
-    curl -sS -o "$nt_out" -w '%{http_code}' -X POST --config - \\
-    "http://127.0.0.1:\${NODETERM_HOOK_PORT}/control/$nt_verb" \\
-    -H "Accept: text/plain" \\
-    --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
-else
-  rm -f "$nt_out"
-  echo "nodeterm control endpoint unavailable." >&2
-  exit 1
+
+# One POST against the CURRENT endpoint vars — call as \`nt_control_post "$@"\` so the translated
+# curl args reach it. Sets nt_code: '' when there is no transport to try at all, curl's
+# %{http_code} otherwise ('000' = the transport failed before any HTTP answer). nt_had_transport
+# remembers that SOMETHING was ever advertised, so the final error can tell "no endpoint
+# anywhere" from "an endpoint that is not listening" — those need opposite advice.
+nt_control_post() {
+  nt_code=""
+  if [ -n "$NODETERM_HOOK_SOCK" ]; then
+    nt_had_transport=1
+    nt_code=$(nt_hook_headers |
+      curl -sS -o "$nt_out" -w '%{http_code}' -X POST --config - \\
+      --unix-socket "$NODETERM_HOOK_SOCK" "http://localhost/control/$nt_verb" \\
+      -H "Accept: text/plain" \\
+      --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
+  elif [ -n "$NODETERM_HOOK_PORT" ]; then
+    nt_had_transport=1
+    nt_code=$(nt_hook_headers |
+      curl -sS -o "$nt_out" -w '%{http_code}' -X POST --config - \\
+      "http://127.0.0.1:\${NODETERM_HOOK_PORT}/control/$nt_verb" \\
+      -H "Accept: text/plain" \\
+      --data-urlencode "nodeId=\${NODETERM_NODE_ID}" "$@" 2>/dev/null)
+  fi
+}
+# An answer from the server — any HTTP code — is authoritative; only a dead transport fails over.
+nt_reached() { [ -n "$nt_code" ] && [ "$nt_code" != "000" ]; }
+
+nt_had_transport=""
+nt_control_post "$@"
+
+# Endpoint failover (issue #445), the same bounded walk the managed hook script runs: a session is
+# pinned for life to the endpoint PATH it was handed at tmux creation, so an app quit/restart (or a
+# retired project id) leaves it posting at a dead port while a live endpoint file sits right next
+# to it. Before this walk the hook script healed itself and this shim died on the SAME stale file —
+# "control endpoint unreachable" with the requested verb silently dropped. Skipped under a codex
+# sandbox: there the sandbox denies EVERY connect (issue #367), so each candidate would burn a
+# doomed curl and the sandbox hint below is already the right diagnosis.
+if ! nt_reached && [ -z "$CODEX_SANDBOX_NETWORK_DISABLED" ]; then
+  nt_list=$(nt_candidates "$NODETERM_HOOK_ENDPOINT")
+  if [ -n "$nt_list" ]; then
+    nt_n=0
+    # A heredoc, not a pipe: the loop must run in THIS shell so the endpoint vars nt_adopt sets
+    # (and nt_code) survive it. "$@" still holds the translated curl args — the read loop never
+    # touches the positional parameters.
+    while IFS= read -r nt_ep; do
+      [ -n "$nt_ep" ] || continue
+      nt_n=$((nt_n + 1))
+      [ "$nt_n" -le "$nt_fallback_max" ] || break
+      nt_adopt "$nt_ep" || continue
+      # Re-read the token FROM THE ADOPTED ENDPOINT's dir (node-token-sh.ts): the capability must
+      # come from the instance we are about to call, never the one we are walking away from.
+      nt_read_node_token "$nt_ep"
+      nt_control_post "$@"
+      nt_reached && break
+    done <<NT_CANDIDATES
+$nt_list
+NT_CANDIDATES
+  fi
 fi
 
 if [ "$nt_code" = "200" ]; then
@@ -525,7 +570,14 @@ rm -f "$nt_out"
 # Empty / 000 = the TRANSPORT failed, not the server. Under a codex sandbox that is the sandbox's
 # own connect() denial (issue #367), and the generic sentence would misdirect the agent.
 if [ -z "$nt_code" ] || [ "$nt_code" = "000" ]; then
-  nt_codex_sandbox_hint || echo "${CONTROL_UNREACHABLE_MSG}" >&2
+  if [ -z "$nt_had_transport" ]; then
+    echo "nodeterm control endpoint unavailable." >&2
+  else
+    nt_codex_sandbox_hint || echo "${CONTROL_UNREACHABLE_MSG}" >&2
+    if [ -z "$CODEX_SANDBOX_NETWORK_DISABLED" ]; then
+      echo "${STALE_ENDPOINT_HINT}" >&2
+    fi
+  fi
 fi
 exit 1
 `
