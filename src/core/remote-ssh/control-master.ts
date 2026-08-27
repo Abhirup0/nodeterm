@@ -3,7 +3,13 @@
 import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
-import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+import {
+  posixQuote,
+  quoteRemotePath,
+  remoteTmuxCommand,
+  remoteTmuxPathPrologue,
+  type SshConnection
+} from '../../shared/ssh'
 import {
   TMUX_SOCKET,
   assertFramedPayload,
@@ -19,6 +25,17 @@ import { PANE_OWNER_FMT, foregroundArgvArgs } from '../agents/pane-owner'
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
+
+/**
+ * Every remote command that invokes `tmux` goes through this: the PATH-append prologue
+ * (`remoteTmuxPathPrologue`, issue #449) plus the command. Without it a bare `tmux` dies with
+ * `command not found` on any host whose ssh exec-channel PATH misses the install dir — most
+ * visibly macOS with Homebrew's tmux in `/opt/homebrew/bin`. The prologue is one assignment, so
+ * the command's own exit code (what `probeSaysAbsent` and every caller reads) is unchanged.
+ */
+function tmuxCmd(body: string): string {
+  return `${remoteTmuxPathPrologue()}${body}`
+}
 
 /**
  * Per-project ControlMaster socket path. Deliberately SHORT and space-free. The macOS userData dir
@@ -211,7 +228,7 @@ export function exitMasterArgs(conn: SshConnection, controlPath: string): string
   return ['-O', 'exit', '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
 }
 export function remoteTmuxHasSessionArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
-  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} has-session -t ${sessionId}`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} has-session -t ${sessionId}`))
 }
 /**
  * Every nodeterm tmux session on the host, by name.
@@ -227,7 +244,7 @@ export function remoteListSessionsArgs(conn: SshConnection, controlPath: string)
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} list-sessions -F '#{session_name}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} list-sessions -F '#{session_name}'`)
   )
 }
 
@@ -286,7 +303,7 @@ export function remoteTmuxPasteArgs(
     `if-shell -F -t ${sessionId} '#{pane_in_mode}' 'send-keys -t ${sessionId} -X cancel' ';' ` +
     `paste-buffer -d -p -r -b ${buffer} -t ${sessionId}`
   if (enter) cmd += ` ';' send-keys -t ${sessionId} Enter`
-  return childArgs(conn, controlPath, cmd)
+  return childArgs(conn, controlPath, tmuxCmd(cmd))
 }
 
 /**
@@ -307,7 +324,7 @@ export function remoteTmuxFramedPasteArgs(
     `${tmux} load-buffer -b ${buffer} - ';' ` +
     `if-shell -F -t ${sessionId} '#{pane_in_mode}' 'send-keys -t ${sessionId} -X cancel' ';' ` +
     `paste-buffer -d -r -b ${buffer} -t ${sessionId}`
-  return childArgs(conn, controlPath, cmd)
+  return childArgs(conn, controlPath, tmuxCmd(cmd))
 }
 
 /**
@@ -354,7 +371,7 @@ export function remoteTmuxEnterArgs(
   sessionId: string
 ): string[] {
   assertPasteTarget(sessionId)
-  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`))
 }
 
 /** `delete-buffer` on the REMOTE server — the sweep for a remote paste that never ran. */
@@ -364,7 +381,7 @@ export function remoteDeleteBufferArgs(
   buffer: string
 ): string[] {
   assertPasteBuffer(buffer)
-  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} delete-buffer -b ${buffer}`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} delete-buffer -b ${buffer}`))
 }
 
 /**
@@ -468,7 +485,7 @@ export function remoteTmuxKillArgs(
   sessionId: string,
   socket: string = RMT_TMUX_SOCKET
 ): string[] {
-  return childArgs(conn, controlPath, `tmux -L ${socket} kill-session -t ${exactTarget(sessionId)}`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${socket} kill-session -t ${exactTarget(sessionId)}`))
 }
 
 /**
@@ -492,7 +509,7 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`)
   )
 }
 /**
@@ -505,7 +522,7 @@ export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, 
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`)
   )
 }
 
@@ -518,7 +535,7 @@ export function remotePaneProcessArgs(
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_pid}|#{pane_current_command}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_pid}|#{pane_current_command}'`)
   )
 }
 
@@ -553,7 +570,7 @@ export function remotePaneOwnerArgs(conn: SshConnection, controlPath: string, se
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`)
   )
 }
 
@@ -594,11 +611,11 @@ export function remotePaneCursorArgs(
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{cursor_x} #{cursor_y} #{cursor_flag}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{cursor_x} #{cursor_y} #{cursor_flag}'`)
   )
 }
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {
-  return childArgs(conn, controlPath, 'command -v tmux')
+  return childArgs(conn, controlPath, tmuxCmd('command -v tmux'))
 }
 export function listDirArgs(conn: SshConnection, controlPath: string, path: string): string[] {
   return childArgs(conn, controlPath, `ls -1Ap ${quoteRemotePath(path)}`)
@@ -760,8 +777,42 @@ export function remoteTmuxPtyArgs(
     // was remote code execution EVEN WITH the posixQuote above. A function replacement is never
     // pattern-expanded, so the quoted bytes land verbatim. See control-master.injection.test.ts.
     cmd = cmd.replace('new-session -A ', () => `new-session -A ${extraEnv.map(posixQuote).join(' ')} `)
+  cmd = tmuxOrExplain(cmd, remoteCwd)
   if (sessionEnv) cmd = `${remoteSessionEnvPrologue(sessionEnv, confPath)}${cmd}`
-  return ['-t', ...childArgs(conn, controlPath, cmd)]
+  // The PATH prologue goes at the very FRONT of the composed line: the session-env prologue's own
+  // tmux calls (start-server / show-options) and the `command -v tmux` guard must resolve the
+  // binary the same way new-session does.
+  return ['-t', ...childArgs(conn, controlPath, tmuxCmd(cmd))]
+}
+
+/** What a tmux-less remote loses, told to the user IN the pane. English + apostrophe-free: each
+ *  line is embedded as one single-quoted printf argument in the remote shell line. */
+const REMOTE_TMUX_MISSING_LINES = [
+  'nodeterm: tmux was not found on this host.',
+  'nodeterm runs remote terminals inside tmux so they survive disconnects, app restarts and project switches.',
+  'Install tmux on the host (brew install tmux / apt install tmux / dnf install tmux) and reopen this terminal.',
+  'Starting a plain shell instead - it will NOT persist when this terminal closes.'
+]
+
+/**
+ * Wrap the interactive remote tmux command so a host WITHOUT tmux gets a readable explanation and
+ * a usable plain login shell, instead of the raw `zsh:1: command not found: tmux` that closed the
+ * pane immediately (issue #449). Runs after the PATH widening, so it only fires when tmux is
+ * genuinely absent from PATH + every known install dir. The fallback shell is the honest local
+ * analogue: `PtyManager` falls back to a plain shell when the LOCAL tmux is unavailable too.
+ * `cd` first (best-effort) so the shell at least opens in the node's cwd; `${SHELL:-sh}` because
+ * an exec channel without SHELL set should still produce a prompt rather than exec ''.
+ */
+function tmuxOrExplain(tmuxCommand: string, remoteCwd: string): string {
+  const msg = REMOTE_TMUX_MISSING_LINES.map(posixQuote).join(' ')
+  // The `;` separators are SPACE-PADDED on purpose: the tmux command ends in a single-quoted
+  // token, and `'…';` glues the separator onto that token in the injection tests' shell parser
+  // (a real sh splits them, but the padded form is equally valid and keeps the parse exact).
+  return (
+    `if command -v tmux >/dev/null 2>&1 ; then ${tmuxCommand} ; else ` +
+    `printf '%s\\n' '' ${msg} '' ; cd ${quoteRemotePath(remoteCwd)} 2>/dev/null ; ` +
+    `exec "\${SHELL:-sh}" -l ; fi`
+  )
 }
 
 /** Credentials for a remote session, delivered WITHOUT argv: a 0600 file (staged over the
