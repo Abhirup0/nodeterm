@@ -2254,20 +2254,30 @@ the same script hand-packs `build/icon.icns` (size-checked frames — issue #369
 zip, `--publish never`). Production release signing/notarization and the update-feed hosting are
 handled outside this repo.
 
-**Windows packaging is GROUNDWORK, not a shippable app** (extracted from external PR #276; a
-Windows build is unusable until the session-host phase merges). Deliberate decisions: the target
+**Windows ships as an UNSIGNED BETA** (extracted from external PR #276; the session-host phase
+#305 merged 2026-08-20, and the decision to release without signing is #454 — CI-green, but no
+real-device daily-use verification yet, and that is a stated risk, not an oversight). Deliberate
+decisions: the target
 is **NSIS via electron-builder** — the fork switched to Squirrel.Windows
 (`electron-builder-squirrel-windows` + an 800-line `windows-installer.mjs` wrapper + its own
 update feed), but our pipeline is electron-builder end-to-end and NSIS is built in, needs no
 extra dependency, and is what electron-updater's generic provider expects on Windows — so
 Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-builder skips
-signing when no cert env is present). `bootstrap-windows.bat` (repo root) takes a fresh Windows
+signing when no cert env is present; SmartScreen warns on install). Release wiring is
+`release.yml`'s `release-win` job: on every version tag it uploads the NSIS installer + zip as
+GitHub Release assets — **best-effort by design** (the `publish` promote gate does not wait on
+it, so a Windows failure never strands the mac+linux release) and with **no update-feed leg**:
+`dist:win` stamps `nodeTermUpdates=disabled`, so the shipped app's updater is cleanly off (no
+latest.yml anywhere, no 404 polling; users update by downloading the next installer). Do not
+add `*.yml`/`*.blockmap` to that job's upload globs — that IS the auto-update leg, and it waits
+on signing. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and refuses to run elevated) and runs
 `npm ci`. `.github/workflows/win-package-smoke.yml` is a **workflow_dispatch-only** packaging
-smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** Windows
-auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev feed — blocked
-on signing: an unsigned auto-update is a downgrade in trust), a release.yml Windows job, and the
+smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** code signing,
+then Windows auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev
+feed — blocked
+on signing: an unsigned auto-update is a downgrade in trust), and the
 fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 
