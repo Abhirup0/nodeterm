@@ -262,6 +262,18 @@ interferes; status bar off, **mouse on**, 50k history, `set-clipboard on` + `ter
 sessions survive when no client is attached. `src/shared/ssh.ts`'s `remoteTmuxConf` is the same
 config for an SSH project's remote tmux.
 
+**Every REMOTE tmux invocation starts with `remoteTmuxPathPrologue()`** (`shared/ssh.ts` — PATH
+**append**: `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `$HOME/.local/bin`): an ssh
+exec channel gets a non-login shell, and on a macOS host Homebrew's `shellenv` lives in
+`~/.zprofile`, so a host whose own terminal runs tmux fine answered
+`zsh:1: command not found: tmux` to every command of ours (issue #449 — the same class as the
+remote claude probe's login-shell + PATH fix). Append, never prepend: a PATH that already resolves
+tmux keeps exactly that binary, so nothing re-pairs a long-lived tmux server with a different
+client build. When tmux is genuinely absent the interactive spawn (`tmuxOrExplain`,
+`control-master.ts`) prints what is missing, how to install it and what a tmux-less remote loses,
+then degrades to a plain login shell — mirroring the local plain-shell fallback; the raw
+`command not found` line must never be the user-facing error again.
+
 **tmux owns the mouse — scrolling, selection, and the alternate screen are all its job.** This is
 the native behavior, and it is deliberate:
 - **The wheel scrolls tmux's own history** (`history-limit`), not the emulator's buffer.
