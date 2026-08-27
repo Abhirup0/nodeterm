@@ -39,6 +39,7 @@ import {
 } from './remote-ssh/control-master'
 import { probeAgentSockToPin } from './remote-ssh/agent-probe'
 import { parsePaneCursor } from './pane-cursor'
+import { classifyPaneCwd } from './pane-cwd'
 import {
   recordFreshSpawnOwner,
   forgetPaneOwner,
@@ -2239,15 +2240,67 @@ export class PtyManager {
     // (`persisted` in spawnSession) — i.e. exactly "this session survives losing its client",
     // which is what the renderer's cache-dispose levers must not assume. See PtyCreateResult.
     const persistent = !!spawned?.persistKey
-    return accountFallback
-      ? {
-          sessionId,
-          fresh,
-          accountFallback,
-          persistent,
-          ...(screen ? { screen } : {})
+    // Stale-cwd probe (issue #464), WARM local-tmux reattach only: `new-session -A` reattached a
+    // session whose shell may sit on a DELETED directory inode (a re-created same-named folder is
+    // a different inode, so the getcwd errors never self-heal). A fresh spawn already validated
+    // its cwd above; a plain shell has no session that outlived anything; an SSH-remote session's
+    // cwd lives on the host (its probe would need a remote round trip — deliberately out of v1).
+    // Failure/unknowable ⇒ absent ⇒ no banner: the flag is only ever raised on tmux's own answer.
+    const staleCwd =
+      !fresh && tmuxBacked && !options.sshRemote && !spawned?.sessionHost && options.persistKey
+        ? await this.paneCwdStale(options.persistKey)
+        : false
+    return {
+      sessionId,
+      fresh,
+      persistent,
+      ...(accountFallback ? { accountFallback } : {}),
+      ...(staleCwd ? { staleCwd: true as const } : {}),
+      ...(screen ? { screen } : {})
+    }
+  }
+
+  /**
+   * Is the live tmux session's working directory GONE (deleted, or deleted and re-created at the
+   * same path — issue #464)? Asks tmux for `#{pane_current_path}` — a format present since 1.7,
+   * so no version hazard — and classifies through the pure `classifyPaneCwd` (see pane-cwd.ts for
+   * the per-platform signals, one measured and one inferred). Exact-match target: `=name:` —
+   * the trailing colon matters, and is MEASURED (tmux 3.4): for a target-PANE a bare `=name`
+   * resolves NOTHING silently (exit 0, every format empty), while `=name:` is "exactly this
+   * session, its active pane". Without `=`, tmux falls back to fnmatch-then-prefix matching and
+   * could answer about a DIFFERENT node whose id extends this one (the same trap the kill path
+   * documents). Any failure answers `false` — no banner on a guess.
+   */
+  private async paneCwdStale(persistKey: string): Promise<boolean> {
+    if (!this.tmuxPath) return false
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        [
+          '-L',
+          TMUX_SOCKET,
+          'display-message',
+          '-p',
+          '-t',
+          `=${sessionName(persistKey)}:`,
+          '#{pane_current_path}'
+        ],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      // Strip ONLY the transport's trailing newline — a path may legally end in spaces, and the
+      // Linux " (deleted)" suffix must survive untouched for the classifier to see it.
+      const reported = stdout.replace(/\r?\n$/, '')
+      const dirExists = (p: string): boolean => {
+        try {
+          return fs.statSync(p).isDirectory()
+        } catch {
+          return false
         }
-      : { sessionId, fresh, persistent, ...(screen ? { screen } : {}) }
+      }
+      return classifyPaneCwd(reported, dirExists) === 'stale'
+    } catch {
+      return false
+    }
   }
 
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the

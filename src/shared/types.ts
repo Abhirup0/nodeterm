@@ -157,6 +157,19 @@ export interface PtyCreateResult {
    *  system account. The renderer flags the account chip (folder-missing warning) when true. */
   accountFallback?: boolean
   /**
+   * WARM reattach only (local tmux): the reattached session's live working directory no longer
+   * exists — the folder was deleted (or deleted and re-created, which is a DIFFERENT inode, so the
+   * shell inside keeps printing `getcwd: cannot access parent directories`; issue #464). `tmux
+   * new-session -A` ignores the cwd we pass on a reattach, so this is the only moment the fact is
+   * knowable cheaply. The renderer shows a dismissible banner with an explicit
+   * recycle-and-respawn action — NOTHING is typed into the pane and nothing restarts on its own
+   * (the pane may be mid-work, and text into a pane is injection).
+   *
+   * Absent = fine or unknowable (fresh spawn, plain shell, SSH-remote session, probe failed, or a
+   * core older than this field over the relay) — the banner never shows on a guess.
+   */
+  staleCwd?: boolean
+  /**
    * The CURRENT SCREEN of a session this create JOINED (co-attach), captured from tmux — write it
    * into the fresh xterm before the live stream starts.
    *
