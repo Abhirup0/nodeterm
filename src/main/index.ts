@@ -46,6 +46,7 @@ import {
   type RevocationTargets
 } from './browser-revocation'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { TrackpadGestureLedger } from './trackpad-gesture'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -976,6 +977,20 @@ function createWindow(): BrowserWindow {
   // (both projects, every terminal). Bounded by the policy so a boot-path crash can't loop;
   // past the budget the user decides. The tmux sessions all live in this process, so a reload
   // costs nothing but the canvas re-hydrating from the workspace store.
+  // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
+  // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
+  // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
+  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
+  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
+  // canvas/wheel-gesture.ts for the two halves of the contract.
+  const trackpadLedger = new TrackpadGestureLedger()
+  win.webContents.on('input-event', (_event, input) => {
+    const active = trackpadLedger.observe(input.type)
+    if (active !== null && !win.isDestroyed()) {
+      win.webContents.send(IPC.canvasTrackpadGesture, active)
+    }
+  })
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
