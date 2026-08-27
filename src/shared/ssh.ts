@@ -275,6 +275,34 @@ export function quoteRemotePath(p: string): string {
   return posixQuote(p)
 }
 
+/**
+ * Directories where tmux commonly lives but that an ssh EXEC channel's PATH misses. An exec
+ * channel gets a non-login, non-interactive shell — the same trap the remote claude probe hit
+ * (`core/remote-ssh/claude-version-probe.ts`): on a macOS host Homebrew's `shellenv` lives in
+ * `~/.zprofile`, which only LOGIN shells source, so `tmux` resolves fine in the user's own
+ * terminal and every remote command of ours died with `zsh:1: command not found: tmux`
+ * (issue #449). Known absolute locations beat inherited-PATH luck — `findTmux()`'s rule, applied
+ * to the machine we cannot install anything on.
+ *
+ *  - `/opt/homebrew/bin` — Homebrew on Apple Silicon (the issue's report).
+ *  - `/usr/local/bin` — Homebrew on Intel macs; classic hand-installs on Linux/BSD.
+ *  - `/opt/local/bin` — MacPorts.
+ *  - `$HOME/.local/bin` — per-user installs (expanded by the REMOTE shell; the prologue keeps it
+ *    inside double quotes).
+ */
+export const REMOTE_TMUX_PATH_DIRS = '/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin'
+
+/**
+ * Shell prologue (note the trailing `; `) prepended to every remote command that invokes `tmux`.
+ * APPENDED to PATH, never prepended: a host whose exec-channel PATH already resolves tmux keeps
+ * using exactly that binary — the same "system first" rule as the local `findTmux()`, and the only
+ * ordering that cannot re-pair a long-lived tmux server with a different client build. The `$PATH`
+ * / `$HOME` references expand on the REMOTE side (the whole line travels as one ssh argument).
+ */
+export function remoteTmuxPathPrologue(): string {
+  return `PATH="$PATH:${REMOTE_TMUX_PATH_DIRS}"; `
+}
+
 /** Remote variant of pty-manager's tmuxConf — same behavior, same reasoning (see `tmuxConf` for
  *  the long version). Mouse ON: tmux owns scrolling and selection, the pane is on the alternate
  *  screen, and NOTHING is hydrated on reattach (tmux redraws and its own history is scrollable).
