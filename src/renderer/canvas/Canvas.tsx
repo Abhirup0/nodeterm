@@ -212,6 +212,12 @@ import { PresenceLayer } from '../components/PresenceLayer'
 import { Facepile } from '../components/Facepile'
 import { PresenceNamePrompt } from '../components/PresenceNamePrompt'
 import { nodeTravel, projectTravel } from '../lib/presenceTravel'
+import {
+  closeConfirmCopy,
+  closedSessionCounts,
+  deleteConfirmCopy,
+  planProjectClose
+} from '../lib/projectCloseSessions'
 import { backgroundNodeIds, mergeWithKeepAlive, overlayKeepAliveData } from '../lib/webviewKeepAlive'
 import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
 import {
@@ -1127,6 +1133,25 @@ export function Canvas() {
   // whether the dialog offers (and warns about) the push to origin — a repo with no `origin` must
   // never be threatened with a publish that cannot happen.
   const [mergeTarget, setMergeTargetState] = useState<MergeState | null>(null)
+  // Project awaiting the CLOSE confirm (issue #442): parking stays the default; `end` mirrors the
+  // dialog's opt-in "end its sessions too" checkbox. `count` is the terminal-node count taken at
+  // request time — the confirm re-resolves the node set, so the action ends the set that exists
+  // when the user answers, not a snapshot (agents spawn nodes on their own).
+  const [closeTarget, setCloseTargetState] = useState<{
+    id: string
+    name: string
+    count: number
+    end: boolean
+  } | null>(null)
+  // Closed project awaiting the PERMANENT-delete confirm (the "Recently closed" ×). The copy is
+  // computed at request time by `deleteConfirmCopy` — a relay tab gets the "removes only this
+  // machine's view" wording instead of a destructive one.
+  const [deleteTarget, setDeleteTargetState] = useState<{
+    id: string
+    message: string
+    confirmLabel: string
+    danger: boolean
+  } | null>(null)
   const [mergePush, setMergePush] = useState(false)
   const settings = useSettings((s) => s.settings)
   const gatewayModels = useModelGateway((s) => s.models)
@@ -1335,7 +1360,9 @@ export function Canvas() {
     remove: false,
     move: false,
     merge: false,
-    peer: false
+    peer: false,
+    closeProject: false,
+    deleteProject: false
   })
   // Every confirm setter flips its flag AT CALL TIME. Assigning the mirror during RENDER (what this
   // used to do) is a tick too late: two agent verbs arriving in separate IPC events before React
@@ -1361,10 +1388,30 @@ export function Canvas() {
     confirmFlags.current.peer = !!v
     setPendingPeerState(v)
   }, [])
+  const setCloseTarget = useCallback((v: { id: string; name: string; count: number; end: boolean } | null) => {
+    confirmFlags.current.closeProject = !!v
+    setCloseTargetState(v)
+  }, [])
+  const setDeleteTarget = useCallback(
+    (v: { id: string; message: string; confirmLabel: string; danger: boolean } | null) => {
+      confirmFlags.current.deleteProject = !!v
+      setDeleteTargetState(v)
+    },
+    []
+  )
   /** Is any confirm open — or being opened (the async gap in `requestRemoveWorktree`)? */
   const confirmBusy = useCallback(() => {
     const f = confirmFlags.current
-    return f.confirm || f.remove || f.move || f.merge || f.peer || removePendingRef.current
+    return (
+      f.confirm ||
+      f.remove ||
+      f.move ||
+      f.merge ||
+      f.peer ||
+      f.closeProject ||
+      f.deleteProject ||
+      removePendingRef.current
+    )
   }, [])
 
   const nodeTypes = useMemo(
@@ -10369,20 +10416,79 @@ export function Canvas() {
     [persist]
   )
 
-  // Close a project: hide it from the tab bar but keep it (and its tmux/agent sessions) intact
-  // so it can be reopened later from the start screen. Non-destructive — the inverse of the old
-  // "Delete project". Switching away unmounts its nodes (a detach, not a kill); the sessions
-  // survive exactly like a project switch, and a cold restart later reconstructs them.
-  const closeProject = useCallback(
-    (id: string) => {
+  // End every terminal session a project parks, WITHOUT deleting the project (the opt-in half of
+  // the close dialog, issue #442). Mirrors `deleteProject`'s session teardown with two deliberate
+  // differences: agent status is KEPT (the persisted sessionId is what lets a later reopen
+  // cold-restore `claude --resume` the conversation — ending the process is a reboot, not an
+  // amnesia), and SSH masters are NOT disconnected (close never managed the connection before,
+  // and a reopen expects it exactly as a project switch left it).
+  const endProjectSessions = useCallback((id: string) => {
+    const project = useProjects.getState().getProject(id)
+    if (!project) return
+    project.nodes.forEach((n) => {
+      if ((n.kind ?? 'terminal') === 'terminal') {
+        disposeTerminalOnUnmount(sessionForProject(id).id, n.id) // may be parked from a recent switch away
+        transport.destroy(n.id)
+        useAgentNodes.getState().clearForParent(n.id) // ephemeral fan-out of a session that just ended
+      }
+    })
+    // SSH project / host attachments: `transport.destroy` reaches a remote session only through a
+    // LIVE local client, which an unmounted node has not — kill by name over the still-alive
+    // masters, same as deleteProject (idempotent; a dead master is a best-effort miss).
+    const terminalIds = project.nodes
+      .filter((n) => (n.kind ?? 'terminal') === 'terminal')
+      .map((n) => n.id)
+    if (project.ssh) {
+      void window.nodeTerminal.sshProject.killSessions(id, terminalIds).catch(() => {})
+    }
+    for (const scopeId of useSshConn.getState().attachmentScopesOf(id)) {
+      const nodeIds =
+        hostAttachmentsFor(id, project.nodes, project.ssh?.server).find(
+          (a) => a.scopeId === scopeId
+        )?.nodeIds ?? []
+      void window.nodeTerminal.sshProject.killSessions(scopeId, nodeIds).catch(() => {})
+    }
+  }, [])
+
+  // Close a project: hide it from the tab bar but keep it (and, by default, its tmux/agent
+  // sessions) intact so it can be reopened later from the start screen. Non-destructive — the
+  // inverse of the old "Delete project". Switching away unmounts its nodes (a detach, not a
+  // kill); the sessions survive exactly like a project switch, and a cold restart later
+  // reconstructs them. `endSessions` is the close dialog's explicit opt-in — the node set is
+  // re-resolved HERE (after the fresh commit), so the action ends the sessions that exist at
+  // confirm time, not the set that was counted when the dialog opened.
+  const performCloseProject = useCallback(
+    (id: string, endSessions = false) => {
       const store = useProjects.getState()
       if (id === store.activeProjectId) commitActiveToStore()
+      if (endSessions) endProjectSessions(id)
       useReopenHistory.getState().push({ kind: 'project', projectId: id, closedAt: Date.now() })
       disposeRelayTabForProject(id)
       store.closeProject(id)
       void writeDisk()
     },
-    [commitActiveToStore, writeDisk, disposeRelayTabForProject]
+    [commitActiveToStore, writeDisk, disposeRelayTabForProject, endProjectSessions]
+  )
+
+  // The one entrance for both Close surfaces (tab caret menu + sidebar context menu). A project
+  // parking terminal sessions gets a confirm that SAYS so — with the count, and an opt-in to end
+  // them (issue #442: "close" read like cleanup while actually meaning "hide, and keep running").
+  // A relay tab or a project with no terminal nodes closes silently, exactly as before.
+  const closeProject = useCallback(
+    (id: string) => {
+      const store = useProjects.getState()
+      // Count the LIVE canvas, not a stale serialization — agents may have spawned nodes since
+      // the last commit.
+      if (id === store.activeProjectId) commitActiveToStore()
+      const project = store.getProject(id)
+      const plan = planProjectClose(project)
+      if (plan.kind === 'silent' || !project) {
+        performCloseProject(id)
+        return
+      }
+      setCloseTarget({ id, name: project.name, count: plan.sessionCount, end: false })
+    },
+    [commitActiveToStore, performCloseProject, setCloseTarget]
   )
 
   // Right-click on a sidebar project header: mostly the same project actions as the tab caret
@@ -10564,6 +10670,51 @@ export function Canvas() {
     },
     [commitActiveToStore, writeDisk, disposeRelayTabForProject]
   )
+
+  // The "Recently closed" × goes through a confirm now (issue #442): it is the one permanently
+  // destructive project action, and its copy must distinguish what is removed here from what
+  // continues to exist elsewhere (a relay tab: only this machine's view; local/SSH: the sessions
+  // end, the folder and its .nodeterm/project.json stay).
+  const requestDeleteClosed = useCallback(
+    (id: string) => {
+      const project = useProjects.getState().getProject(id)
+      if (!project) return
+      setDeleteTarget({ id, ...deleteConfirmCopy(project) })
+    },
+    [setDeleteTarget]
+  )
+
+  // Live `nt-*` session counts for the start screen's "Recently closed" badges — the visibility
+  // half of issue #442 ("something that tells me parked sessions exist"). ONE on-demand LOCAL
+  // sweep per welcome-screen appearance (and per closed-list change), never a timer — the same
+  // cadence discipline as the session-memory panel, and the local sweep is the cheap leg. Uses
+  // `window.nodeTerminal` directly (not the active session's api): the badges describe THIS
+  // machine, whatever tab happens to be active. `ok:false`/a rejected call ⇒ no badges — a failed
+  // sweep must never render as "0 sessions". An SSH project's sessions live on its host and are
+  // deliberately not claimed by this local count (its close dialog already said what it parks).
+  const welcomeVisible = !hasProjects || welcomeOpen
+  const [closedSessionBadges, setClosedSessionBadges] = useState<Record<string, number> | null>(
+    null
+  )
+  useEffect(() => {
+    if (!welcomeVisible || closedProjects.length === 0) {
+      setClosedSessionBadges(null)
+      return
+    }
+    let stale = false
+    void window.nodeTerminal.sessionMemory
+      .read({ remote: false })
+      .then((r) => {
+        if (stale) return
+        setClosedSessionBadges(r.ok ? closedSessionCounts(r.rows, closedProjects) : null)
+      })
+      .catch(() => {
+        if (!stale) setClosedSessionBadges(null)
+      })
+    return () => {
+      stale = true
+    }
+  }, [welcomeVisible, closedProjects])
 
   const now = useMemo(() => Date.now(), [transcriptHits])
   const transcriptCommands = useMemo<Command[]>(
@@ -11292,8 +11443,9 @@ export function Canvas() {
               color: p.color,
               icon: p.icon
             }))}
+            sessionCounts={closedSessionBadges ?? undefined}
             onReopen={reopenProject}
-            onDeleteClosed={deleteProject}
+            onDeleteClosed={requestDeleteClosed}
             onClose={hasProjects ? () => setWelcomeOpen(false) : undefined}
             overBoard={kanbanOpen}
           />
@@ -11540,6 +11692,44 @@ export function Canvas() {
             }
             setPendingPeer(null)
           }}
+        />
+      )}
+
+      {closeTarget &&
+        (() => {
+          const copy = closeConfirmCopy(closeTarget.name, closeTarget.count)
+          return (
+            <ConfirmDialog
+              message={copy.message}
+              // Ending is the exception, parking the rule: the checkbox defaults OFF, and only a
+              // checked box flips the confirm into the destructive label + danger styling (which
+              // also parks autofocus on Cancel — see ConfirmDialog).
+              option={{
+                label: copy.optionLabel,
+                checked: closeTarget.end,
+                onChange: (end) => setCloseTargetState((t) => (t ? { ...t, end } : t))
+              }}
+              confirmLabel={closeTarget.end ? copy.confirmEnd : copy.confirmKeep}
+              danger={closeTarget.end}
+              onConfirm={() => {
+                performCloseProject(closeTarget.id, closeTarget.end)
+                setCloseTarget(null)
+              }}
+              onCancel={() => setCloseTarget(null)}
+            />
+          )
+        })()}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          message={deleteTarget.message}
+          confirmLabel={deleteTarget.confirmLabel}
+          danger={deleteTarget.danger}
+          onConfirm={() => {
+            deleteProject(deleteTarget.id)
+            setDeleteTarget(null)
+          }}
+          onCancel={() => setDeleteTarget(null)}
         />
       )}
 

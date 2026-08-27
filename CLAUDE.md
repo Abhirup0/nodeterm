@@ -247,7 +247,27 @@ project's nodes only.** The contract:
   nodes, which reattach warm or cold-restore). `hasProjects` counts only **open** projects, so
   closing the last open one shows the welcome screen. **Permanent** deletion (`deleteProject`:
   `transport.destroy(nodeId)` per terminal + drop agent status + SSH teardown) now only happens
-  via the `×` on a "Recently closed" entry.
+  via the `×` on a "Recently closed" entry. **Closing now SAYS what it parks** (issue #442 —
+  "close" read like cleanup while meaning "hide, and keep running"): a project with terminal
+  nodes gets a confirm naming the count, with an opt-in **"end its sessions too"** checkbox
+  (default OFF — parking stays the rule; checked flips the confirm to danger). The pure half is
+  `renderer/lib/projectCloseSessions.ts`: **one definition of N** — the project's terminal-kind
+  nodes, exactly the set the action addresses (`transport.destroy` is idempotent on a dead
+  session), never a liveness-verified count that could disagree with the action; the END happens
+  at confirm time against the re-resolved node set (agents spawn nodes on their own). A relay tab
+  or a 0-terminal project closes silently (byte-identical old path). `endProjectSessions` mirrors
+  `deleteProject`'s teardown EXCEPT it keeps agent status (the persisted sessionId is what lets a
+  reopen cold-restore `--resume`) and never disconnects SSH masters (close never managed the
+  connection). The `×` also confirms now, via `deleteConfirmCopy` — a relay tab gets "removes
+  only this machine's view; reconnecting brings it back" with no danger styling (deleting the
+  view is what turns the next connect into a first-connect re-adopt), local/SSH get the session
+  count + "the folder (incl. .nodeterm/project.json) is not deleted". And "Recently closed" rows
+  show a **live-session badge** (`closedSessionCounts` over ONE on-demand local
+  `sessionMemory.read` per welcome-screen appearance — never a timer; `ok:false` ⇒ no badge,
+  never "0"; an SSH project's host-side sessions are deliberately not claimed by the local
+  count). Server Edition: all renderer-side; the ws-bridge `sessionMemory` is real, so badges
+  describe the server machine; the `sshProject` legs only run for `project.ssh`, which that
+  shell never has.
 - A project's `cwd` (folder picker, `dialog:select-folder`) is passed to terminal/Claude
   node factories so new terminals open there. **Folder ↔ project is deduped:** "Open folder…"
   reuses the existing project with that `cwd` (and its nodes) instead of creating a duplicate.
@@ -261,6 +281,18 @@ interferes; status bar off, **mouse on**, 50k history, `set-clipboard on` + `ter
 ",*:clipboard"`, and the copy-mode mouse bindings). Because the tmux *server* outlives the app,
 sessions survive when no client is attached. `src/shared/ssh.ts`'s `remoteTmuxConf` is the same
 config for an SSH project's remote tmux.
+
+**Every REMOTE tmux invocation starts with `remoteTmuxPathPrologue()`** (`shared/ssh.ts` — PATH
+**append**: `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `$HOME/.local/bin`): an ssh
+exec channel gets a non-login shell, and on a macOS host Homebrew's `shellenv` lives in
+`~/.zprofile`, so a host whose own terminal runs tmux fine answered
+`zsh:1: command not found: tmux` to every command of ours (issue #449 — the same class as the
+remote claude probe's login-shell + PATH fix). Append, never prepend: a PATH that already resolves
+tmux keeps exactly that binary, so nothing re-pairs a long-lived tmux server with a different
+client build. When tmux is genuinely absent the interactive spawn (`tmuxOrExplain`,
+`control-master.ts`) prints what is missing, how to install it and what a tmux-less remote loses,
+then degrades to a plain login shell — mirroring the local plain-shell fallback; the raw
+`command not found` line must never be the user-facing error again.
 
 **tmux owns the mouse — scrolling, selection, and the alternate screen are all its job.** This is
 the native behavior, and it is deliberate:
@@ -1039,6 +1071,24 @@ else, and its context links must keep classifying across restarts).
     layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
     — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
     dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
+  - **Every generated sh client walks the SAME endpoint failover** (`nt_candidates`/`nt_adopt`,
+    `core/agents/hook-endpoint-failover-sh.ts`) — issue #445, the endpoint-level twin of #384: a
+    session is pinned for life to the endpoint PATH it got at tmux creation, so an app
+    quit/restart (or a retired project id) leaves it POSTing at a dead port while a live endpoint
+    file sits right next to it. The managed hook script had the bounded candidate walk (locals
+    before tunnels, `nt_fallback_max` 3, token re-read from the ADOPTED endpoint's dir); the two
+    shims did not, so hook events healed themselves while every canvas-control verb died with
+    "control endpoint unreachable" — in the field, a reviewer launch silently dropped. Now shared,
+    one definition. Two server-side halves in `hook-server.ts`: a FAILED `listen()` un-wedges the
+    singleton (it used to leave `this.server` set, making every retry a silent no-op at port 0)
+    and both `stop()` and the failed-start path delete `hook-endpoint.env` — publication reflects
+    listener liveness; a crash skips that, which is exactly what the client walk exists for. An
+    HTTP answer of any code is authoritative: only a dead transport (curl 000/'') fails over, so a
+    403/400 is never re-sent to another instance. The walk is skipped under
+    `CODEX_SANDBOX_NETWORK_DISABLED` (#367 — the sandbox denies every connect, the hint is the
+    right diagnosis) and the final error now distinguishes "no endpoint anywhere" from "an
+    advertised endpoint that is not listening" (`STALE_ENDPOINT_HINT`). Desktop quit calls
+    `hookServer.stop()` on the second before-quit pass, after the flush window.
 
   Enforcement is dated (`NODE_IDENTITY_STRICT_AFTER`, 2026-10-13, read through `isStrictInstant` so a
   clock years ahead cannot enter strict mode early) with a `settings.hookIdentityStrict` escape hatch
@@ -1684,7 +1734,10 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   and one per panel open / `⟳`. Same rule this file already sets for **Remote usage**, for the same
   reason: every remote read is an ssh exec plus a `ps` of somebody else's whole process table. The
   full sweep runs on the panel's MOUNT (it is unmounted while closed) and on `⟳` — never on a timer,
-  never from the pill.
+  never from the pill. One more consumer, same discipline: the welcome screen runs ONE **local**
+  sweep per appearance (only while "Recently closed" is non-empty) for its per-project
+  live-session badges (issue #442), bypassing the panel's store on purpose — it must not disturb
+  `state/sessionMemory.ts`'s module-level scope stamp, and its scope is always THIS machine.
 - **The pill is the single owner of the store's `startHostPoll` / `stopHostPoll`** — the timer and the
   active-scope stamp are MODULE SINGLETONS. The panel must never call them: a `stopHostPoll` on
   unmount would clear the pill's interval with nothing left to restart it, and the number would
@@ -2236,20 +2289,30 @@ the same script hand-packs `build/icon.icns` (size-checked frames — issue #369
 zip, `--publish never`). Production release signing/notarization and the update-feed hosting are
 handled outside this repo.
 
-**Windows packaging is GROUNDWORK, not a shippable app** (extracted from external PR #276; a
-Windows build is unusable until the session-host phase merges). Deliberate decisions: the target
+**Windows ships as an UNSIGNED BETA** (extracted from external PR #276; the session-host phase
+#305 merged 2026-08-20, and the decision to release without signing is #454 — CI-green, but no
+real-device daily-use verification yet, and that is a stated risk, not an oversight). Deliberate
+decisions: the target
 is **NSIS via electron-builder** — the fork switched to Squirrel.Windows
 (`electron-builder-squirrel-windows` + an 800-line `windows-installer.mjs` wrapper + its own
 update feed), but our pipeline is electron-builder end-to-end and NSIS is built in, needs no
 extra dependency, and is what electron-updater's generic provider expects on Windows — so
 Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-builder skips
-signing when no cert env is present). `bootstrap-windows.bat` (repo root) takes a fresh Windows
+signing when no cert env is present; SmartScreen warns on install). Release wiring is
+`release.yml`'s `release-win` job: on every version tag it uploads the NSIS installer + zip as
+GitHub Release assets — **best-effort by design** (the `publish` promote gate does not wait on
+it, so a Windows failure never strands the mac+linux release) and with **no update-feed leg**:
+`dist:win` stamps `nodeTermUpdates=disabled`, so the shipped app's updater is cleanly off (no
+latest.yml anywhere, no 404 polling; users update by downloading the next installer). Do not
+add `*.yml`/`*.blockmap` to that job's upload globs — that IS the auto-update leg, and it waits
+on signing. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and refuses to run elevated) and runs
 `npm ci`. `.github/workflows/win-package-smoke.yml` is a **workflow_dispatch-only** packaging
-smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** Windows
-auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev feed — blocked
-on signing: an unsigned auto-update is a downgrade in trust), a release.yml Windows job, and the
+smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** code signing,
+then Windows auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev
+feed — blocked
+on signing: an unsigned auto-update is a downgrade in trust), and the
 fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 
