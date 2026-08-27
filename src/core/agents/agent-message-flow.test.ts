@@ -351,7 +351,7 @@ describe('the limiter is consulted BEFORE any pane probe', () => {
           return null
         },
         bracketPasteRequested: async () => true,
-        sendFramed: async () => {
+        sendEnvelope: async () => {
           writes.push(1)
           return true
         },

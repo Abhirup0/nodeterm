@@ -12,7 +12,6 @@ import {
 } from '../../shared/ssh'
 import {
   TMUX_SOCKET,
-  assertFramedPayload,
   assertPasteTarget,
   assertPasteBuffer,
   pasteBufferName,
@@ -307,48 +306,15 @@ export function remoteTmuxPasteArgs(
 }
 
 /**
- * The remote leg of the messaging envelope's delivery — `remoteFramedDelivery`'s argv. The exact
- * mirror of `localTmuxFramedPasteArgs` (tmux-naming.ts): NO `-p`, because the payload already
- * carries its frame and tmux re-framing it would render the inner markers as garbage; `-r` so the
- * bytes land verbatim; no trailing Enter, because the composed `\r` rides inside the paste.
+ * ── DELETED: `remoteTmuxFramedPasteArgs` / `remoteFramedDelivery` ───────────────────────────────
+ *
+ * The remote mirror of the framed-plan trio deleted in tmux-naming.ts — see the tombstone there
+ * for the whole measurement (issue #453: tmux ≥ 3.7 passes paste-buffer content through vis(3),
+ * so a payload-carried `ESC[200~` arrives as the literal text `^[[200~`). The SSH leg was the
+ * WORSE case: the remote host's tmux is whatever the server runs, so the mangle appeared and
+ * disappeared per host. The envelope now rides `remotePasteDelivery` above (`-p` + a separate
+ * Enter, `PtyManager.sendEnvelope`), exactly like every other remote write.
  */
-export function remoteTmuxFramedPasteArgs(
-  conn: SshConnection,
-  controlPath: string,
-  sessionId: string,
-  buffer: string
-): string[] {
-  assertPasteTarget(sessionId, buffer)
-  const tmux = `tmux -L ${RMT_TMUX_SOCKET}`
-  const cmd =
-    `${tmux} load-buffer -b ${buffer} - ';' ` +
-    `if-shell -F -t ${sessionId} '#{pane_in_mode}' 'send-keys -t ${sessionId} -X cancel' ';' ` +
-    `paste-buffer -d -r -b ${buffer} -t ${sessionId}`
-  return childArgs(conn, controlPath, tmuxCmd(cmd))
-}
-
-/**
- * The plan for delivering one composed frame remotely — same three decisions as
- * `localFramedDelivery`, taken by the SAME `assertFramedPayload` rather than restated: this is the
- * one plan pair that does not sanitize (the frame's ESC bytes must survive), so it refuses
- * anything that is not `bracketedInjection` output. No bare-Enter case: an envelope is never
- * empty, and a lone Enter into an agent's composer is an accidental submit.
- */
-export function remoteFramedDelivery(
-  conn: SshConnection,
-  controlPath: string,
-  sessionId: string,
-  payload: string
-): PasteDelivery | null {
-  if (payload.length === 0) return null
-  assertFramedPayload(payload)
-  const buffer = pasteBufferName()
-  return {
-    args: remoteTmuxFramedPasteArgs(conn, controlPath, sessionId, buffer),
-    body: payload,
-    cleanup: remoteDeleteBufferArgs(conn, controlPath, buffer)
-  }
-}
 
 /**
  * A bare Enter into the remote pane — the remote half of `sendText`'s empty-payload case.

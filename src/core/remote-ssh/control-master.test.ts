@@ -6,7 +6,6 @@ import {
   childArgs,
   remoteTmuxHasSessionArgs,
   remoteTmuxPasteArgs,
-  remoteFramedDelivery,
   remoteTmuxEnterArgs,
   probeSaysAbsent,
   remoteCapturePaneArgs,
@@ -588,48 +587,6 @@ describe('killing a session by name (both sockets, exact target)', () => {
   })
 })
 
-/**
- * The remote leg of the messaging envelope's delivery — the exact mirror of `localFramedDelivery`
- * (see tmux-naming.test.ts for the local twin and the full argument): payload byte-for-byte over
- * stdin, `paste-buffer -r` with NO `-p` (the bytes already carry their frame), no trailing Enter
- * (the composed `\r` rides inside the paste), and a refusal for anything that is not
- * `bracketedInjection` output — this is the one plan that does not sanitize, so it must not accept
- * what sanitize would have caught.
- */
-describe('remoteFramedDelivery', () => {
-  const TMUX = `tmux -L ${RMT_TMUX_SOCKET}`
-  const PASTE_START = '\x1b[200~'
-  const PASTE_END = '\x1b[201~'
-  const framed = (inner: string): string => PASTE_START + inner + PASTE_END + '\r'
-
-  it('moves the payload byte-for-byte and never re-frames (-r, no -p, no Enter)', () => {
-    const payload = framed('line one\nline two')
-    const plan = remoteFramedDelivery(conn, '/s.sock', 'nt-x', payload)!
-    expect(plan.body).toBe(payload)
-    const line = plan.args.slice(-1)[0]
-    const buf = /-b (nt-paste-[0-9a-f]{12}) /.exec(line)?.[1]
-    expect(buf).toBeTruthy()
-    expect(plan.args).toEqual([
-      ...childPrefix,
-      'deploy@h.example.com',
-      `${TP}${TMUX} load-buffer -b ${buf} - ';' ` +
-        `if-shell -F -t nt-x '#{pane_in_mode}' 'send-keys -t nt-x -X cancel' ';' ` +
-        `paste-buffer -d -r -b ${buf} -t nt-x`
-    ])
-    expect(line).not.toContain('-p -r')
-    expect(line).not.toContain('Enter')
-    expect(plan.cleanup?.slice(-1)[0]).toBe(`${TP}${TMUX} delete-buffer -b ${buf}`)
-  })
-
-  it('refuses a payload that is not a well-formed, pre-sanitized frame', () => {
-    expect(() => remoteFramedDelivery(conn, '/s.sock', 'nt-x', 'naked\r')).toThrow(/framed/)
-    expect(() => remoteFramedDelivery(conn, '/s.sock', 'nt-x', framed(`a${PASTE_END}b`))).toThrow(/framed/)
-    expect(remoteFramedDelivery(conn, '/s.sock', 'nt-x', '')).toBeNull()
-  })
-
-  it('refuses an unsafe target like every sibling builder', () => {
-    expect(() => remoteFramedDelivery(conn, '/s.sock', 'nt-x; kill-server', framed('x'))).toThrow(
-      /unsafe tmux paste target/
-    )
-  })
-})
+// The `remoteFramedDelivery` suite that lived here is gone with the plan itself (issue #453) —
+// the envelope now rides `remotePasteDelivery` (enter=true); see the tombstones in
+// control-master.ts and tmux-naming.ts.

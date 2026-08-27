@@ -25,8 +25,8 @@ import os from 'os'
 import path from 'path'
 import { deliverAgentMessage, type DeliveryDeps, type DeliveryRequest } from './agent-message'
 import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './pane-owner'
-import { bracketedInjection, PASTE_END, PASTE_START, sanitizePasteText } from '../paste-injection'
-import { localFramedDelivery, runPasteDelivery } from '../tmux-naming'
+import { PASTE_END, PASTE_START, sanitizePasteText } from '../paste-injection'
+import { localPasteDelivery, runPasteDelivery } from '../tmux-naming'
 import { buildEnvelope } from './agent-message-envelope'
 import { MANAGED_SCRIPT_REVISION } from './hooks/managed-script'
 import type { MirrorEntry } from '../agent-status-mirror'
@@ -150,15 +150,21 @@ function realPaneOwner(session: string): DeliveryDeps['paneOwner'] {
 }
 
 /**
- * The REAL write: the PRODUCTION plan (`localFramedDelivery` → `runPasteDelivery`), exactly what
- * `PtyManager.sendFramedPayload` runs — payload over `load-buffer -`'s stdin, `paste-buffer -r`
- * with no `-p` and no separate Enter. Until PR 5 this helper used `send-keys -l --`, which proved
- * the bytes but not the transport; now the same real reader judges the argv that ships.
+ * The REAL write: the PRODUCTION plan (`localPasteDelivery` with enter=true → `runPasteDelivery`),
+ * exactly what `PtyManager.sendEnvelope` runs — the PLAIN envelope over `load-buffer -`'s stdin,
+ * `paste-buffer -d -p -r` (tmux draws the frame from the pane's real bracketed-paste state) and a
+ * `send-keys Enter` in the same invocation. The plan carries no ESC byte of ours: on tmux ≥ 3.7
+ * `paste-buffer` passes buffer content through vis(3), so a payload-carried frame arrives as
+ * literal `^[` text (issue #453) — which is why the old already-framed plan is gone.
  */
-function realSendFramed(session: string): DeliveryDeps['sendFramed'] {
+function realSendEnvelope(session: string): DeliveryDeps['sendEnvelope'] {
   return async (_id, payload) => {
-    const plan = localFramedDelivery(socket, session, payload)
+    const plan = localPasteDelivery(socket, session, payload, true)
     if (!plan) return false
+    // The regression pin at the transport seam: nothing WE stage for a paste buffer may carry an
+    // escape byte — tmux ≥ 3.7 would render it as text, tmux ≤ 3.6 would hand the pane raw
+    // structure a payload could have smuggled in.
+    expect(plan.body).not.toContain('\x1b')
     return runPasteDelivery(plan, async (args, input) => {
       execFileSync(TMUX as string, args, { env, input, encoding: 'utf8' })
     })
@@ -176,7 +182,7 @@ function deps(session: string, over: Partial<DeliveryDeps> = {}): DeliveryDeps {
   return {
     paneOwner: realPaneOwner(session),
     bracketPasteRequested: async () => true,
-    sendFramed: realSendFramed(session),
+    sendEnvelope: realSendEnvelope(session),
     mirrorEntry: () => idle,
     tokenFilePresent: () => true,
     lock: async (_id, fn) => fn(),
@@ -306,7 +312,7 @@ suite('REAL tmux pane, REAL bash: what the delivery actually does', () => {
       // rather than sending a multi-line body line-by-line. That is the correct fail direction, and
       // it is the direction this test pins: whatever the flag says, an answer that is not '1' must
       // REFUSE, never fall back to the unframed path.
-      const s = 'flagprobe'
+      const s = 'nt-flagprobe' // nt- name: on a tmux >= 3.7 host the aware branch really delivers
       startPane(s, 'claude')
       const flag = tmux('display-message', '-p', '-t', s, '#{bracket_paste_flag}').trim()
       const probe: DeliveryDeps['bracketPasteRequested'] = async () => flag === '1'
@@ -375,8 +381,8 @@ suite('the mutation controls — run, not described', () => {
     30_000
   )
 
-  it('the shipped framer really is the sanitizing one — byte level, next to the pane level', () => {
-    expect(bracketedInjection(`x${ESC}[201~y`, true)).toBe(`${PASTE_START}x[201~y${PASTE_END}${CR}`)
+  it('the shipped sanitizer really strips ESC — byte level, next to the pane level', () => {
+    expect(sanitizePasteText(`x${ESC}[201~y`)).toBe('x[201~y')
     expect(sanitizePasteText(`x${ESC}y`)).toBe('xy')
   })
 })
