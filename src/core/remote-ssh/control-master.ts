@@ -19,7 +19,7 @@ import {
 } from '../tmux-naming'
 import { sanitizePasteText } from '../paste-injection'
 import { canControlCanvas } from '../../shared/agents/config'
-import { PANE_OWNER_FMT, foregroundArgvArgs } from '../agents/pane-owner'
+import { COMBINED_PANE_MARKER, PANE_OWNER_FMT, PS_FOREGROUND_FLAGS } from '../agents/pane-owner'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
@@ -527,41 +527,63 @@ export function remoteTerminateForegroundArgs(
   )
 }
 /**
- * Ask the REMOTE tmux for everything the ownership read needs in one round-trip — the remote
- * counterpart of `PtyManager.paneOwner`'s first call. Same single-quoting rule as
- * `remotePaneCommandArgs`: the `#{…}` fields have to reach the remote tmux verbatim rather than
- * being eaten by the remote shell.
+ * The ONE-round-trip remote pane-owner read (issue #460) — identity AND foreground `ps` in a
+ * single ssh exec, replacing the two-trip pair below (tombstone).
+ *
+ * WHY one trip, measured: `deliverAgentMessage` bounds the whole read with
+ * `PANE_PROBE_TIMEOUT_MS` (2s). Over a healthy mux channel each exec is ~100ms and two fit
+ * easily — but when the master cannot serve a channel, `-o ControlMaster=auto` silently
+ * "disables multiplexing" and every exec becomes a FULL ssh login. Measured on a real sshd with
+ * its 64 `MaxSessions` exhausted by 70 held channels: the probe exec printed
+ * `mux_client_request_session: session request failed: Session open refused by peer`, fell back
+ * to a direct connection, and still exited 0 — at 258ms on loopback, i.e. 0.5–1.5s per exec over
+ * a WAN. Two sequential fallback logins straddle the 2s budget, `probeWithin` answers null, and
+ * the delivery gate refused a LIVE agent pane — persistently, for as long as the canvas held the
+ * channels (field report: issue #460, on a host with 85 live `nt-` sessions). One trip halves
+ * both the latency and the fallback-login count (the 72k-logins hazard the probe's own comment
+ * warns about).
+ *
+ * Shape rules, each learned elsewhere in this repo:
+ *  - the identity line is fenced by `COMBINED_PANE_MARKER`, printed through a QUOTED printf
+ *    format — an unquoted word-initial `##` is an sh comment and prints an empty line
+ *    (session-memory-remote's measured trap);
+ *  - a failed tmux read `exit 9`s so the whole exec throws and the caller answers null — "no
+ *    such session" must stay indistinguishable from the old first-trip failure;
+ *  - the tty never crosses back into OUR command line: it is cut from the reply INSIDE the same
+ *    shell (`${o#*|}`) and expanded quoted, with a `/dev/*` case guard, so there is nothing
+ *    left for `isSafeTty` to defend at the splice (the parser still applies it to the reply);
+ *  - a `ps` that errors prints nothing below the marker (`2>/dev/null || :`) — identity with no
+ *    rows parses to null, exactly the two-trip contract;
+ *  - the `ps` flags are `PS_FOREGROUND_FLAGS`, the same constant the local leg passes as argv,
+ *    so the two legs cannot drift.
  */
-export function remotePaneOwnerArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
-  return childArgs(
-    conn,
-    controlPath,
-    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`)
-  )
+export function remotePaneOwnerCombinedArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string
+): string[] {
+  // Every splice is checked at the splice (assertPasteTarget's own rule): the id is interpolated
+  // unquoted into a script the remote login shell parses, so a name this app did not generate is
+  // refused here rather than trusted to some caller's discipline.
+  assertPasteTarget(sessionId)
+  const ps = PS_FOREGROUND_FLAGS.join(' ')
+  const script =
+    `o=$(${tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`)}) || exit 9; ` +
+    `printf '%s\\n' "${COMBINED_PANE_MARKER.trimEnd()} $o"; ` +
+    'tty=${o#*|}; tty=${tty%%|*}; ' +
+    `case "$tty" in /dev/*) ps ${ps} -t "$tty" 2>/dev/null || : ;; esac`
+  return childArgs(conn, controlPath, script)
 }
 
 /**
- * The second round-trip: `ps` on the REMOTE host, listing the pane tty's processes.
+ * ── DELETED: `remotePaneOwnerArgs` / `remoteForegroundArgvArgs` ─────────────────────────────────
  *
- * `tty` is a value the remote host printed back at us (`#{pane_tty}`), so it is DATA crossing into
- * a command line — exactly the class `remote-safety.ts` exists for. Two layers, both required:
- * `isSafeTty` refuses anything outside `[A-Za-z0-9/._-]` (returning null here, which the caller
- * reads as "unknown"), and what survives is `posixQuote`d at the splice. No credential is involved
- * — a tty path is the whole payload — so nothing here needs, or may grow, a stdin header channel
- * (Global Constraint 6).
- *
- * The `ps` flags are the ones measured for the local leg, unchanged: they are valid on both GNU and
- * BSD `ps`, and the remote host is at least as likely to be either.
+ * The two-round-trip remote pane read. Replaced by `remotePaneOwnerCombinedArgs` above (issue
+ * #460): under a saturated or dead ControlMaster each trip silently became a full ssh login, and
+ * two of them could not fit the delivery gate's 2s probe budget — a live agent pane then read as
+ * `unknown`, persistently. Do not resurrect the pair "for simplicity": the second trip is also a
+ * second fallback LOGIN in exactly the degraded state that made the first one slow.
  */
-export function remoteForegroundArgvArgs(
-  conn: SshConnection,
-  controlPath: string,
-  tty: string
-): string[] | null {
-  const call = foregroundArgvArgs(tty)
-  if (!call) return null
-  return childArgs(conn, controlPath, `${call.bin} ${call.args.map(posixQuote).join(' ')}`)
-}
 
 /**
  * Ask the REMOTE tmux where a pane's cursor is — the remote counterpart of `PtyManager.paneCursor`,

