@@ -379,7 +379,8 @@ export async function deliverAgentMessage(
     }
     const gate = decideDelivery(facts)
     if (gate.kind !== 'proceed') return refuse(gate)
-    // `before` is non-null here: `isAgentPane(null, …)` is `unknown`, which the gate refused.
+    // `before` is non-null here: `isAgentPane(null, …)` is `unknown`, which the gate refused
+    // (as `targetPaneUnreadable` since issue #460 — unreadable is not evidence of not-agent).
     const owner = before as PaneOwner
 
     // herdr :260 — a multi-line envelope on the UNFRAMED fallback would be submitted line by line

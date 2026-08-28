@@ -31,8 +31,7 @@ import {
   remotePasteDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
-  remotePaneOwnerArgs,
-  remoteForegroundArgvArgs,
+  remotePaneOwnerCombinedArgs,
   remotePaneProcessArgs,
   remoteTerminateForegroundArgs,
   remotePaneCursorArgs
@@ -44,7 +43,7 @@ import {
   forgetPaneOwner,
   shouldRecordOwnership
 } from './agents/pane-ownership'
-import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './agents/pane-owner'
+import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parseCombinedPaneOwner, parsePaneOwner } from './agents/pane-owner'
 import { binariesFor, isAgentPane, type PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
 import {
@@ -4069,14 +4068,16 @@ export class PtyManager {
    * command. Deliberately has NO deadline of its own: the caller bounds it (`probeWithin`), the
    * same way the restart poll bounds `paneCommand`.
    *
-   * Two round-trips, not one: tmux does not know the foreground process group (`#{pane_pid}` is the
-   * shell it forked, which is usually NOT in it), so the tty has to come back before `ps` can be
-   * asked about it. On the SSH leg both ride the same ControlMaster — and both are `ssh` children
-   * that outlive the caller's 2s deadline (they are reaped at `PROC_TIMEOUT_MS`), so a caller that
-   * retries `unknown` on a short timer stacks them. See `agents/pane-probe.ts` for why that needs a
-   * circuit breaker rather than a shorter timeout.
+   * LOCALLY two round-trips, not one: tmux does not know the foreground process group
+   * (`#{pane_pid}` is the shell it forked, which is usually NOT in it), so the tty has to come
+   * back before `ps` can be asked about it — and two local execFiles cost nothing. The SSH leg is
+   * ONE round-trip (`remotePaneOwnerCombinedArgs`, issue #460): there each exec is an `ssh` child
+   * that outlives the caller's 2s deadline (reaped at `PROC_TIMEOUT_MS`) and becomes a full LOGIN
+   * whenever the master cannot serve a channel, so a caller that retries `unknown` on a short
+   * timer stacks them. See `agents/pane-probe.ts` for why that needs a circuit breaker rather
+   * than a shorter timeout.
    *
-   * `remotePaneOwnerArgs` splices the session id unquoted (`-t ${sessionId}`), exactly as every
+   * `remotePaneOwnerCombinedArgs` splices the session id unquoted (`-t ${sessionId}`), exactly as every
    * sibling builder does. That is safe only because `sessionName()` sanitises to `[A-Za-z0-9_-]`
    * before it ever gets here — the guarantee lives THERE, not in this call.
    */
@@ -4086,18 +4087,18 @@ export class PtyManager {
     const sshRemote = live?.sshRemote
     try {
       if (sshRemote) {
+        // ONE round-trip, not two (issue #460): under a saturated or dead ControlMaster every
+        // exec silently falls back to a FULL ssh login, and two sequential fallback logins do not
+        // fit the caller's 2s probe budget — a live agent pane then read as `unknown`,
+        // persistently. The combined script carries both halves; the parser applies the same
+        // grammars the two-trip read used. See `remotePaneOwnerCombinedArgs` for the measurement.
         const ssh = findSsh()
         if (!ssh) return null
-        const first = await runAsync(
+        const out = await runAsync(
           ssh,
-          remotePaneOwnerArgs(sshRemote.conn, sshRemote.controlPath, target)
+          remotePaneOwnerCombinedArgs(sshRemote.conn, sshRemote.controlPath, target)
         )
-        const identity = parsePaneOwner(first.stdout)
-        if (!identity) return null
-        const psArgs = remoteForegroundArgvArgs(sshRemote.conn, sshRemote.controlPath, identity.tty)
-        if (!psArgs) return null
-        const second = await runAsync(ssh, psArgs)
-        return paneOwnerFrom(identity, second.stdout)
+        return parseCombinedPaneOwner(out.stdout)
       }
       // The session host has no tty/tmux identity surface. Do not query an unrelated POSIX tmux
       // merely because one is installed beside this native Windows generation.
