@@ -136,8 +136,13 @@ factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agent
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
-subagent | loop | dino` — `subagent` and `loop` are render-only (ephemeral hook-driven viz) and
-never persisted. A node's `data`
+subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
+viz) and never persisted. `trigger` (issue #493, landing in phases — schema only so far, no
+renderer/scheduler yet) is a first-class PERSISTED kind: its spec (`CanvasNodeState.trigger`,
+@shared/trigger) is git-shared CONTENT sanitized as hostile input on every load path
+(`sanitizeNodeTriggers`), and the definition alone never fires — execution consent is the
+machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
+reads as disarmed until armed on this machine). A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
 initialCommand, filePath, diffStaged`, `agentId` (which agent CLI a terminal node runs —
 persisted), and `accountId` (which managed Claude account a terminal node runs under — immutable,

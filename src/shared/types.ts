@@ -270,7 +270,9 @@ export interface RecycledInfo {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
+// 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
+// spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino' | 'trigger'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -390,6 +392,14 @@ export interface CanvasNodeState {
   commitOid?: string
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
+  /**
+   * trigger-only: the schedule + payload + target this node represents (issue #493). Git-shared
+   * CONTENT — deliberately, the team shares the definition — which is exactly why it is treated
+   * as hostile on every load path (`sanitizeNodeTriggers` in core/workspace-files) and why the
+   * definition alone never fires: execution additionally requires this machine's arm record
+   * (`core/trigger-arm-store.ts`), bound to the spec's exact content. See @shared/trigger.
+   */
+  trigger?: import('./trigger').TriggerSpec
   /**
    * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
    * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
