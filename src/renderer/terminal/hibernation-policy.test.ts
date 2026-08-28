@@ -95,7 +95,7 @@ describe('planHibernation', () => {
 
   it('refuses a node the restart gate itself refuses (no session id / not resumable)', () => {
     expect(planHibernation([base('a', { sessionId: undefined })], NOW, cfg)).toEqual([])
-    expect(planHibernation([base('a', { agentId: 'opencode' })], NOW, cfg)).toEqual([])
+    expect(planHibernation([base('a', { agentId: 'custom:unknown' })], NOW, cfg)).toEqual([])
     expect(planHibernation([base('a', { agentId: undefined })], NOW, cfg)).toEqual([])
   })
 

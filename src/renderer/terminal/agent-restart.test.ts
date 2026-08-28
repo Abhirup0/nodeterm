@@ -37,8 +37,7 @@ describe('exitSequence', () => {
     expect(exitSequence('gemini')).toBe('/quit')
     expect(exitSequence('gemini')).not.toContain('--delete')
     expect(exitSequence('copilot')).toBe('/exit')
-    // opencode is resumable but we know no way to ask it to quit, so it is still not a target.
-    expect(exitSequence('opencode')).toBeNull()
+    expect(exitSequence('opencode')).toBe('/exit')
     expect(exitSequence('my-custom')).toBeNull()
   })
 })
@@ -77,11 +76,7 @@ describe('restartEligibility', () => {
       ok: false,
       reason: 'no-session'
     })
-    // opencode: resumable, but no exit sequence — so still never a target.
-    expect(restartEligibility('opencode', 'waiting', 'abc')).toEqual({
-      ok: false,
-      reason: 'not-resumable'
-    })
+    expect(restartEligibility('opencode', 'waiting', 'abc')).toEqual({ ok: true })
     expect(restartEligibility('my-custom', 'waiting', 'abc')).toEqual({
       ok: false,
       reason: 'not-resumable'
@@ -314,11 +309,11 @@ describe('performRestartResume', () => {
 
   it('refuses an agent without an exit sequence', async () => {
     const { io } = fakeIo()
-    // opencode is in RESUMABLE_AGENTS but not in EXIT_SEQUENCES: the exit-line table is its own,
+    // A custom agent with no exit sequence: the exit-line table is its own
     // independent half of the gate.
     expect(
       await performRestartResume({
-        agentId: 'opencode',
+        agentId: 'custom:unknown',
         sessionId: 's',
         io,
         paneCommand: async () => 'zsh'
@@ -532,7 +527,7 @@ describe('performExitPhase', () => {
     ).toBe('not-eligible')
     expect(
       await performExitPhase({
-        agentId: 'opencode', // resumable, but no exit sequence
+        agentId: 'custom:unknown', // no exit sequence
         sessionId: 's',
         io,
         paneCommand: async () => 'zsh'
@@ -1095,8 +1090,8 @@ describe('planBulkRestart', () => {
   it('ignores nodes that were never restart targets, instead of counting them as skips', () => {
     const plan = planBulkRestart([
       cand({ id: 'shell', agentId: undefined }), // plain terminal
-      cand({ id: 'oc', agentId: 'opencode' }), // resumable, but no exit sequence
-      cand({ id: 'custom', agentId: 'my-custom' }), // neither
+      cand({ id: 'custom1', agentId: 'my-custom' }), // neither
+      cand({ id: 'custom2', agentId: 'custom:other' }), // neither
       cand({ id: 'a' })
     ])
     expect(plan.runnable).toEqual(['a'])
@@ -1131,7 +1126,7 @@ describe('planBulkRestart', () => {
     // whatever else is true of it — the background check may not turn a non-target into a skip.
     const plan = planBulkRestart([
       cand({ id: 'shell', agentId: undefined, backgroundTask: true }),
-      cand({ id: 'oc', agentId: 'opencode', backgroundTask: true })
+      cand({ id: 'oc', agentId: 'my-custom', backgroundTask: true })
     ])
     expect(plan.runnable).toEqual([])
     expect(plan.skipped).toEqual({ working: 0, noSession: 0 })
