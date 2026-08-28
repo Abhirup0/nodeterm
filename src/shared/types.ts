@@ -1215,13 +1215,18 @@ export interface Settings {
   /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
    *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
    *  markdown-toggle chord) still switches either way. Default ON since the release after
-   *  v0.3.3 (maintainer decision on issue #495; docs open as docs). An absent key picks up the
-   *  new default via the shallow merge; an explicit `false` is respected. Caveat, same shape as
-   *  `terminalGpuRendering`'s boolean history: `saveNow` materializes EVERY key, so a file
-   *  saved by v0.3.3 itself (the one release that defaulted off) carries `false`
-   *  indistinguishable from a user's explicit off — those installs keep off, which is the safe
-   *  direction (never overwrite what may be an explicit choice). */
+   *  v0.3.3 (maintainer decision on issue #495; a preview is one ⌘M from the editor, so the
+   *  rendered view is the better first sight for docs). A one-shot load migration keyed on
+   *  `openMarkdownPreviewMigrated` (see mergeSettings) forces this ON once for every existing
+   *  file — including one saved by v0.3.3, the one release that defaulted off and whose
+   *  full-snapshot saves materialized `false` for users who never touched the toggle. After
+   *  the migration the user's own opt-out is permanent. */
   openMarkdownPreview: boolean
+  /** One-shot marker for the openMarkdownPreview default flip (#495). Absent = the file
+   *  predates the flip → the load migration sets `openMarkdownPreview: true` and stamps this
+   *  true; present = the migration already ran (or the install was born after it) and the
+   *  stored `openMarkdownPreview` value is the user's own, never touched again. */
+  openMarkdownPreviewMigrated: boolean
   /**
    * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
    * PRIMARY selection and no tmux middle-click habit, so the guard changes nothing visible there).
@@ -1501,6 +1506,7 @@ export const DEFAULT_SETTINGS: Settings = {
   panHoverDelay: 600,
   doubleClickFocus: true,
   openMarkdownPreview: true,
+  openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
   trackpadPan: true,
