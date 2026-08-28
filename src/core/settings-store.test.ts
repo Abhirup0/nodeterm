@@ -60,6 +60,26 @@ describe('SettingsStore nested-default merge', () => {
     expect(store.get().ptyShadowClients).toBe(false)
   })
 
+  it('turns markdown auto-preview ON for a settings.json that predates the key', () => {
+    // Every pre-v0.3.3 install upgrades with no `openMarkdownPreview` in its file: the shallow
+    // merge is what delivers the flipped default (#495) to exactly that population.
+    writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ fontSize: 15 }), 'utf-8')
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().openMarkdownPreview).toBe(true)
+  })
+
+  it('keeps an explicit openMarkdownPreview:false — an opt-out survives the default flip', () => {
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ openMarkdownPreview: false }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().openMarkdownPreview).toBe(false)
+  })
+
   it('leaves an already-modern speech object alone', () => {
     writeFileSync(
       path.join(dir, 'settings.json'),

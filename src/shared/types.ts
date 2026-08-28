@@ -1214,7 +1214,13 @@ export interface Settings {
   doubleClickFocus: boolean
   /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
    *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
-   *  markdown-toggle chord) still switches either way. Default off: the historical behavior. */
+   *  markdown-toggle chord) still switches either way. Default ON since the release after
+   *  v0.3.3 (maintainer decision on issue #495; docs open as docs). An absent key picks up the
+   *  new default via the shallow merge; an explicit `false` is respected. Caveat, same shape as
+   *  `terminalGpuRendering`'s boolean history: `saveNow` materializes EVERY key, so a file
+   *  saved by v0.3.3 itself (the one release that defaulted off) carries `false`
+   *  indistinguishable from a user's explicit off — those installs keep off, which is the safe
+   *  direction (never overwrite what may be an explicit choice). */
   openMarkdownPreview: boolean
   /**
    * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
@@ -1494,7 +1500,7 @@ export const DEFAULT_SETTINGS: Settings = {
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
-  openMarkdownPreview: false,
+  openMarkdownPreview: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
   trackpadPan: true,
