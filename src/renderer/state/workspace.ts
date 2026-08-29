@@ -1340,6 +1340,37 @@ function withNodeRect(
  * now — and re-fit the ancestor frames back down around it. No-op when the node is missing or
  * not maximized.
  */
+/**
+ * Re-fit an ALREADY maximized node to a new frame, keeping its restore rect.
+ *
+ * Maximize is a MODE, not a one-shot placement: while it is on, the node claims the whole usable
+ * canvas. Pinning or unpinning a side panel changes what "whole" means, so the node follows.
+ * A node that is not maximized is left alone — that one was put where it is by hand or by a zone
+ * verb, and those are placements the user owns.
+ */
+export function refitMaximizedNode(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  const premaxRect = node?.data.premaxRect
+  if (!node || !premaxRect) return nodes
+  // Idempotent: the caller re-measures on every panel change, and most of those land on the rect
+  // the node already has. Returning the same array keeps the workspace out of the dirty/save path
+  // and lets the caller decide by identity whether anything actually moved.
+  const root = rootPosition(node, nodes)
+  if (
+    root.x === rect.x &&
+    root.y === rect.y &&
+    nodeW(node) === rect.width &&
+    nodeH(node) === rect.height
+  ) {
+    return nodes
+  }
+  return withNodeRect(nodes, node, rect, { premaxRect })
+}
+
 export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): CanvasNode[] {
   const node = nodes.find((n) => n.id === nodeId)
   const prev = node?.data.premaxRect

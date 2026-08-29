@@ -248,8 +248,9 @@ import {
   viewportForRect,
   type FocusableNode
 } from '../lib/nodeFocus'
-import { maximizeTargetRect } from '../lib/nodeMaximize'
-import { ZONES, zoneTargetRect, type ZoneId } from '../lib/nodeZones'
+import { NODE_MAXIMIZE_MARGIN_PX, maximizeTargetRect } from '../lib/nodeMaximize'
+import { measurePinnedInsets } from '../lib/pinnedInsets'
+import { ZONE_GUTTER_PX, ZONES, zoneTargetRect, type ZoneId } from '../lib/nodeZones'
 import {
   recordBreadcrumb,
   stepBreadcrumb,
@@ -477,6 +478,7 @@ import {
   sshAccountsHint,
   ungroupNodes,
   maximizeNodeToRect,
+  refitMaximizedNode,
   restoreMaximizedNode,
   placeNodeInRect,
   type CanvasNode
@@ -6413,12 +6415,68 @@ export function Canvas() {
     }
     if (target.data.collapsed) return false
     const wrap = flowWrapRef.current?.getBoundingClientRect()
-    const rect = wrap ? maximizeTargetRect(getViewport(), wrap.width, wrap.height) : null
+    const rect = wrap
+      ? maximizeTargetRect(
+          getViewport(),
+          wrap.width,
+          wrap.height,
+          NODE_MAXIMIZE_MARGIN_PX,
+          measurePinnedInsets(wrap)
+        )
+      : null
     if (!rect) return false
     setNodes((ns) => maximizeNodeToRect(ns, target.id, rect))
     markDirty()
     return true
   }, [placementTargetNode, setNodes, markDirty, getViewport])
+
+  /**
+   * Keep a maximized node fitted to the area the pinned side panels leave over.
+   *
+   * Maximize is a MODE, not a one-shot placement — a zone snap is the one-shot kind and stays
+   * where it was put. While maximize is on the node claims the whole usable canvas, so pinning a
+   * panel (the node would slide under it), unpinning one (the node would sit short of the space it
+   * just gained), or a panel simply changing width (`uiScale`, the drawer's wide variant) has to
+   * move it.
+   *
+   * A ResizeObserver rather than the pin flags alone: the explorer drawer animates in over 160ms
+   * (`nt-drawer-in`), so measuring one frame after the state change catches it mid-slide. The
+   * observer fires again as it settles. `refitMaximizedNode` is idempotent, so the extra ticks
+   * cost nothing and the workspace is only marked dirty when a node actually moved.
+   */
+  const fitMaximizedToUsableArea = useCallback(() => {
+    if (!nodesRef.current.some((n) => n.data.premaxRect)) return
+    const wrap = flowWrapRef.current?.getBoundingClientRect()
+    if (!wrap) return
+    const rect = maximizeTargetRect(
+      getViewport(),
+      wrap.width,
+      wrap.height,
+      NODE_MAXIMIZE_MARGIN_PX,
+      measurePinnedInsets(wrap)
+    )
+    if (!rect) return
+    const current = nodesRef.current
+    const fitted = current.reduce(
+      (acc, n) => (n.data.premaxRect ? refitMaximizedNode(acc, n.id, rect) : acc),
+      current
+    )
+    if (fitted === current) return
+    setNodes((ns) => ns.reduce((acc, n) => (n.data.premaxRect ? refitMaximizedNode(acc, n.id, rect) : acc), ns))
+    markDirty()
+  }, [getViewport, setNodes, markDirty])
+
+  useEffect(() => {
+    fitMaximizedToUsableArea()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => fitMaximizedToUsableArea())
+    for (const el of document.querySelectorAll('.sessions-sidebar--pinned, .drawer--pinned')) {
+      observer.observe(el)
+    }
+    return () => observer.disconnect()
+    // The pin/open flags mount and unmount the panels, so they decide WHAT to observe; the
+    // observer then covers every size change of whatever is docked.
+  }, [sessionsPinned, sessionsDismissed, explorerOpen, explorer.pinned, fitMaximizedToUsableArea])
 
   /**
    * Zone snap (issue #394 v1): place `nodeId` (or the placement target, for the keyboard chords)
@@ -6432,7 +6490,17 @@ export function Canvas() {
         : placementTargetNode()
       if (!target || target.type === 'group' || target.data.collapsed) return false
       const wrap = flowWrapRef.current?.getBoundingClientRect()
-      const rect = wrap ? zoneTargetRect(getViewport(), wrap.width, wrap.height, zone) : null
+      const rect = wrap
+        ? zoneTargetRect(
+            getViewport(),
+            wrap.width,
+            wrap.height,
+            zone,
+            NODE_MAXIMIZE_MARGIN_PX,
+            ZONE_GUTTER_PX,
+            measurePinnedInsets(wrap)
+          )
+        : null
       if (!rect) return false
       setNodes((ns) => placeNodeInRect(ns, target.id, rect))
       markDirty()

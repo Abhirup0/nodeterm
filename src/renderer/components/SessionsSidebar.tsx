@@ -454,7 +454,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
 
   return (
     <aside
-      className="sessions-sidebar"
+      className={props.pinned ? 'sessions-sidebar sessions-sidebar--pinned' : 'sessions-sidebar'}
       onMouseEnter={props.onMouseEnter}
       onMouseLeave={props.onMouseLeave}
     >
