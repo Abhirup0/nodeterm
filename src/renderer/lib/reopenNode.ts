@@ -44,7 +44,10 @@ type SnapshotSource = {
   data: NodeData
 }
 
-const UNRESTORABLE: ReadonlySet<string> = new Set(['group', 'subagent', 'loop'])
+// 'trigger' has no matching case in recreateNodeFromSnapshot's buildBase below (it always
+// recreates to null) — excluded here so a deleted trigger node never becomes a dead, clickable
+// closed-session/reopen-history entry.
+const UNRESTORABLE: ReadonlySet<string> = new Set(['group', 'subagent', 'loop', 'trigger'])
 
 /** Captures a node right before deletion. `all` must be the FULL live tree (before any
  *  mutation), so the parent chain is still walkable. Returns null for kinds this feature
