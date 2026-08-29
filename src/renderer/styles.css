@@ -212,8 +212,7 @@ body,
 .tabbar button,
 .tabbar input,
 .tab,
-.tabbar__tabs,
-.tabbar__projects {
+.tabbar__tabs {
   -webkit-app-region: no-drag;
 }
 
@@ -237,15 +236,15 @@ body,
   letter-spacing: 0.2px;
 }
 
-/* Tabs as a single rounded pill of segments. Lives in `.tabbar__projects` with the +
-   as a sibling — the + used to be the last child of this scroller, so enough tabs
-   hid it with no scrollbar to say it was still there (issue #375). */
+/* Tabs as a single rounded pill of segments. The + is a sibling in `.tabbar__projects`
+   so it cannot scroll away with the tabs (issue #375). The wrapper is flex:1 and is
+   NOT in the no-drag list — it is the remaining title-bar drag region. Do not put
+   flex:1 on the pill itself: that inflates an empty capsule for every 2-tab window. */
 .tabbar__projects {
   display: flex;
   align-items: center;
   gap: 4px;
   flex: 1;
-  min-width: 0; /* shrink the pill, never shove the + off the window */
 }
 .tabbar__tabs {
   display: flex;
@@ -257,8 +256,6 @@ body,
   border: 1px solid var(--border);
   border-radius: 17px;
   overflow-x: auto;
-  flex: 1;
-  min-width: 0;
   /* Scrollable but without the native scrollbar (foreign-looking in a title-bar tab strip);
      trackpad swipe / wheel still scroll, and the active tab is scrolled into view. */
   scrollbar-width: none;
@@ -412,6 +409,8 @@ body,
   align-items: center;
   justify-content: center;
   align-self: center;
+  /* Load-bearing once the pill no longer has flex:1: without this a squeezed bar
+     shrinks the 28px + instead of scrolling the tabs. */
   flex-shrink: 0;
   width: 28px;
   height: 28px;

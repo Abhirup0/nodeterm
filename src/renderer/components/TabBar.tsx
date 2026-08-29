@@ -181,8 +181,10 @@ export function TabBar({
     setEditingId(null)
   }
 
-  // Drop-at-end: the strip's empty area AND the pinned + (which used to live inside the
-  // scroller, so a drop on it already meant "after the last tab").
+  // Drop-at-end: the wrapper (gap between pill and +, empty title-bar to the right of +,
+  // and the + itself). Per-tab handlers stopPropagation, so a drop ON a tab is still
+  // insert-before. The + used to live inside the scroller, so a drop on it already meant
+  // "after the last tab".
   const onEndZoneDragOver = (e: DragEvent) => {
     if (!dragId) return
     e.preventDefault()
@@ -243,20 +245,22 @@ export function TabBar({
         </div>
 
         {/* Projects group: the pill scrolls; the + is a SIBLING so it cannot scroll away
-            with the tabs (issue #375). min-width:0 on this wrapper is what lets the pill
-            shrink instead of pushing the + off the window. */}
-        <div className="tabbar__projects">
+            with the tabs (issue #375). End-zone drop lives on this wrapper (covers the
+            4px gap and the +); per-tab handlers still stopPropagation. */}
         <div
-          className="tabbar__tabs"
-          ref={tabsRef}
-          onWheel={(e) => {
-            // Translate a vertical mouse wheel into horizontal strip scrolling (trackpads
-            // already produce deltaX). Nothing above the canvas scrolls vertically anyway.
-            if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
-          }}
+          className="tabbar__projects"
           onDragOver={onEndZoneDragOver}
           onDrop={onEndZoneDrop}
         >
+          <div
+            className="tabbar__tabs"
+            ref={tabsRef}
+            onWheel={(e) => {
+              // Translate a vertical mouse wheel into horizontal strip scrolling (trackpads
+              // already produce deltaX). Nothing above the canvas scrolls vertically anyway.
+              if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY
+            }}
+          >
           {projects.map((p) => {
             const active = p.id === activeId
             const unreadCount = p.nodes.filter((n) => unreadSet.has(n.id)).length
@@ -388,15 +392,13 @@ export function TabBar({
               </div>
             )
           })}
-        </div>
+          </div>
           <button
             type="button"
             className="tab__add"
             title="New project"
             aria-label="New project"
             onClick={onOpenWelcome}
-            onDragOver={onEndZoneDragOver}
-            onDrop={onEndZoneDrop}
           >
             +
           </button>
