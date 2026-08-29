@@ -385,6 +385,7 @@ import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
 import { useReopenHistory } from '../state/reopenHistory'
 import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
+import { buildClosedSessionEntries } from '../lib/closedHistory'
 import { planReopen } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
@@ -4571,6 +4572,19 @@ export function Canvas() {
             closedAt: Date.now(),
             nodes: snapshots
           })
+        }
+        const deletedAt = Date.now()
+        const closedEntries = buildClosedSessionEntries(
+          set,
+          nodesRef.current,
+          deletedAt,
+          () => crypto.randomUUID()
+        )
+        if (closedEntries.length) {
+          useProjects.getState().recordClosedSessions(
+            useProjects.getState().activeProjectId ?? '',
+            closedEntries
+          )
         }
       }
       nodesRef.current.forEach((n) => {

@@ -168,6 +168,30 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
   })
 })
 
+describe('deleteNodes also records persisted closed-session history', () => {
+  it('builds entries from the full pre-delete tree and the same "now"/ids used for reopenHistory', () => {
+    expect(CANVAS_SRC).toContain('const deletedAt = Date.now()')
+    expect(CANVAS_SRC).toContain('buildClosedSessionEntries(')
+    expect(CANVAS_SRC).toContain('set,\n          nodesRef.current,\n          deletedAt,')
+  })
+
+  it('records into the store only when entries were actually built', () => {
+    expect(CANVAS_SRC).toContain('if (closedEntries.length) {')
+    expect(CANVAS_SRC).toContain('.recordClosedSessions(')
+  })
+
+  it('sits inside the same `opts?.record !== false` guard as the reopenHistory push', () => {
+    // The bug this pins: recording closed-session history OUTSIDE the guard would enter it for
+    // the account-removal cleanup delete too, which reopenHistory deliberately excludes.
+    const guardBlock = CANVAS_SRC.slice(
+      CANVAS_SRC.indexOf('if (opts?.record !== false) {'),
+      CANVAS_SRC.indexOf('if (opts?.record !== false) {') + 1500
+    )
+    expect(guardBlock).toContain('useReopenHistory.getState().push(')
+    expect(guardBlock).toContain('buildClosedSessionEntries(')
+  })
+})
+
 describe('reopen-last-closed records and dispatches through the shared history stack', () => {
   it('records a project close before hiding it', () => {
     expect(CANVAS_SRC).toContain('useReopenHistory.getState().push({ kind: \'project\'')
