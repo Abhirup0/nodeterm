@@ -73,6 +73,7 @@ export function ClosedHistorySection(props: ClosedHistorySectionProps): JSX.Elem
                     e.stopPropagation()
                     props.onDeleteProject(row.projectId)
                   }}
+                  onKeyDown={(e) => e.stopPropagation()}
                 >
                   ×
                 </button>
@@ -102,6 +103,7 @@ export function ClosedHistorySection(props: ClosedHistorySectionProps): JSX.Elem
                     e.stopPropagation()
                     props.onDiscardSession(row.projectId, row.entry.id)
                   }}
+                  onKeyDown={(e) => e.stopPropagation()}
                 >
                   ×
                 </button>

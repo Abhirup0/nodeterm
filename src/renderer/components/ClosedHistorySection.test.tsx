@@ -89,6 +89,31 @@ describe('ClosedHistorySection', () => {
     expect(onReopenSession).not.toHaveBeenCalled()
   })
 
+  it('pressing Enter on the × keyboard-activates discard without also triggering reopen', async () => {
+    // A real browser synthesizes a `click` on a focused <button> when Enter/Space is pressed,
+    // AFTER the keydown has already bubbled (a keydown handler's stopPropagation cannot stop a
+    // separate click event from firing). jsdom's dispatchEvent does not synthesize that click for
+    // us, so both events are dispatched explicitly here to reproduce the real sequence: the
+    // keydown must not reach the row's onKeyDown (which would fire reopen), and the button's own
+    // onClick still fires discard as it always did for a mouse click.
+    const onReopenSession = vi.fn()
+    const onDiscardSession = vi.fn()
+    await render(
+      <ClosedHistorySection
+        {...baseProps} projects={projects}
+        onReopenSession={onReopenSession} onDiscardSession={onDiscardSession}
+      />
+    )
+    const del = host.querySelector('.sessions-sidebar__history-del[aria-label="Discard"]') as HTMLElement
+    expect(del).toBeTruthy()
+    await act(async () => {
+      del.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      del.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onDiscardSession).toHaveBeenCalledWith('p2', 'e1')
+    expect(onReopenSession).not.toHaveBeenCalled()
+  })
+
   it('collapsed hides the row list but keeps the header', async () => {
     await render(<ClosedHistorySection {...baseProps} projects={projects} collapsed={true} />)
     expect(host.textContent).toContain('Recently closed')
