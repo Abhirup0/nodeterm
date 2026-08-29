@@ -183,10 +183,21 @@ describe('deleteNodes also records persisted closed-session history', () => {
   it('sits inside the same `opts?.record !== false` guard as the reopenHistory push', () => {
     // The bug this pins: recording closed-session history OUTSIDE the guard would enter it for
     // the account-removal cleanup delete too, which reopenHistory deliberately excludes.
-    const guardBlock = CANVAS_SRC.slice(
-      CANVAS_SRC.indexOf('if (opts?.record !== false) {'),
-      CANVAS_SRC.indexOf('if (opts?.record !== false) {') + 1500
-    )
+    // The guard block is extracted up to its ACTUAL matching closing brace (brace-depth
+    // counting) rather than a fixed-length slice, so this test would actually fail if a future
+    // edit moved the recording call to just past the guard's real end.
+    const guardStart = CANVAS_SRC.indexOf('if (opts?.record !== false) {')
+    const braceStart = CANVAS_SRC.indexOf('{', guardStart)
+    let depth = 0
+    let i = braceStart
+    for (; i < CANVAS_SRC.length; i++) {
+      if (CANVAS_SRC[i] === '{') depth++
+      else if (CANVAS_SRC[i] === '}') {
+        depth--
+        if (depth === 0) break
+      }
+    }
+    const guardBlock = CANVAS_SRC.slice(braceStart, i + 1)
     expect(guardBlock).toContain('useReopenHistory.getState().push(')
     expect(guardBlock).toContain('buildClosedSessionEntries(')
   })
