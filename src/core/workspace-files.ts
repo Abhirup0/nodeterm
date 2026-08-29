@@ -143,6 +143,8 @@ export interface IndexEntryV3 {
   name: string
   color: string
   closed?: boolean
+  /** Set alongside `closed: true` — see `Project.closedAt`. */
+  closedAt?: number
   /** MACHINE-LOCAL camera for a ref'd project (local folder or ssh). Where this user is looking is
    *  not something a repo shares — the file's copy churned the git diff on every pan. */
   viewport?: Viewport
@@ -334,6 +336,7 @@ export function fileToProject(
     cwd?: string
     ssh?: Project['ssh']
     closed?: boolean
+    closedAt?: number
     /** This machine's camera. Falls back to the file's legacy one (a pre-change file, or a
      *  teammate's) and then to a frame that puts the canvas on screen. */
     viewport?: Viewport
@@ -397,6 +400,7 @@ export function fileToProject(
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {}),
+    ...(base.closedAt ? { closedAt: base.closedAt } : {}),
     // Machine-local, from the index entry ONLY: a file field named `capabilityAck` is a forgery
     // attempt (the shared file cannot carry this machine's consent) and is simply never read.
     ...(base.capabilityAck ? { capabilityAck: base.capabilityAck } : {}),
@@ -479,7 +483,11 @@ export function splitWorkspace(
       : incoming.id
     seenIds.add(id)
     const p = id === incoming.id ? incoming : { ...incoming, id }
-    const header = { id: p.id, name: p.name, color: p.color, ...(p.closed ? { closed: true } : {}) }
+    const header = {
+      id: p.id, name: p.name, color: p.color,
+      ...(p.closed ? { closed: true } : {}),
+      ...(p.closedAt ? { closedAt: p.closedAt } : {})
+    }
     // The machine-local half of a REF'd project (a folder or an ssh endpoint), which used to ride
     // the shared file: this user's camera and this machine's default managed account. Deliberately
     // NOT added to the `unavailable` branch below — a placeholder's viewport is the {0,0,1} of an

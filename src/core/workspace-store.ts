@@ -284,6 +284,7 @@ export class WorkspaceStore {
               id: e.id,
               cwd: e.cwd,
               closed: e.closed,
+              closedAt: e.closedAt,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
               breadcrumbs: e.breadcrumbs,
@@ -304,6 +305,7 @@ export class WorkspaceStore {
               id: e.id,
               ssh: e.ssh,
               closed: e.closed,
+              closedAt: e.closedAt,
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
               breadcrumbs: e.breadcrumbs,
@@ -989,6 +991,7 @@ export class WorkspaceStore {
       id: e.id,
       cwd: e.cwd,
       closed: e.closed,
+      closedAt: e.closedAt,
       viewport: e.viewport,
       defaultAccountId: e.defaultAccountId,
       breadcrumbs: e.breadcrumbs,
@@ -1307,6 +1310,7 @@ export class WorkspaceStore {
           id: e.id,
           cwd: e.cwd,
           closed: e.closed,
+          closedAt: e.closedAt,
           viewport: e.viewport,
           defaultAccountId: e.defaultAccountId,
           breadcrumbs: e.breadcrumbs,
@@ -1363,6 +1367,7 @@ export class WorkspaceStore {
             id: e.id,
             cwd: e.cwd,
             closed: e.closed,
+            closedAt: e.closedAt,
             viewport: e.viewport,
             defaultAccountId: e.defaultAccountId,
             breadcrumbs: e.breadcrumbs,
@@ -1429,7 +1434,7 @@ export class WorkspaceStore {
     }
     this.revs.set(e.id, e.cache.rev)
     return fileToProject(e.cache, {
-      id: e.id, ssh: e.ssh, closed: e.closed,
+      id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
       viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
       capabilityAck: e.capabilityAck, localExec: e.localExec
     })
@@ -1536,7 +1541,7 @@ export class WorkspaceStore {
       if (owed) this.unmirrored.add(e.id)
       else this.unmirrored.delete(e.id) // pure adopt: the server copy IS the truth now — nothing owed
       return fileToProject(adopted, {
-        id: e.id, ssh: e.ssh, closed: e.closed,
+        id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
         viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
         capabilityAck: e.capabilityAck, localExec: e.localExec
       })
@@ -1551,7 +1556,7 @@ export class WorkspaceStore {
         this.revs.set(e.id, e.cache.rev)
         this.unmirrored.add(e.id) // the merged set must land on the server
         merged = fileToProject(e.cache, {
-          id: e.id, ssh: e.ssh, closed: e.closed,
+          id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
           viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
           capabilityAck: e.capabilityAck, localExec: e.localExec
         })
@@ -1587,12 +1592,13 @@ function nodesMissingFrom(base: CanvasNodeState[], from: CanvasNodeState[]): Can
 }
 
 /** A labeled grey placeholder for a ref whose file can't be read right now. */
-function unavailableProject(e: { id: string; name: string; color: string; closed?: boolean; cwd?: string; ssh?: Project['ssh'] }): Project {
+function unavailableProject(e: { id: string; name: string; color: string; closed?: boolean; closedAt?: number; cwd?: string; ssh?: Project['ssh'] }): Project {
   return {
     id: e.id, name: e.name, color: e.color,
     viewport: { x: 0, y: 0, zoom: 1 }, nodes: [],
     ...(e.cwd ? { cwd: e.cwd } : {}), ...(e.ssh ? { ssh: e.ssh } : {}),
     ...(e.closed ? { closed: true } : {}),
+    ...(e.closedAt ? { closedAt: e.closedAt } : {}),
     unavailable: true
   }
 }

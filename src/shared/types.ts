@@ -709,6 +709,11 @@ export interface Project {
    * list. Absent/false = an open tab. A closed project never becomes `activeProjectId`.
    */
   closed?: boolean
+  /** Set alongside `closed: true` — when this project was closed, for sorting "recently closed"
+   *  history newest-first. Machine-local (see `IndexEntryV3.closedAt`) — never written into the
+   *  shared project file, same rule as `closed` itself. Absent on a project closed before this
+   *  field existed; such entries sort last. */
+  closedAt?: number
   /**
    * Sessions (terminal/agent/sticky/…) deleted from this project, most-recent-first, capped at
    * 20. Git-shared like `nodes`/`kanban` — reopening a teammate's deleted session is intentional.
