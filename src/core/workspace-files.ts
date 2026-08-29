@@ -7,7 +7,7 @@ import {
   stripSharedNodeExec,
   type LocalNodeExecMap
 } from '../shared/node-exec'
-import type { BridgeLink, CanvasNodeState, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
+import type { BridgeLink, CanvasNodeState, ClosedSessionEntry, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
 import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
@@ -123,6 +123,8 @@ export interface ProjectFileV1 {
   agentMessaging?: boolean
   dinoHighScore?: number
   kanban?: ProjectKanban
+  /** Git-shared closed-session history — see `Project.closedSessions`. */
+  closedSessions?: ClosedSessionEntry[]
 }
 
 /** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
@@ -254,6 +256,14 @@ export function projectToFile(
   const nodes = sanitizeNodeTriggers(
     stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
   )
+  const closedSessions = p.closedSessions?.length
+    ? p.closedSessions.map((e) => ({
+        ...e,
+        node: sanitizeNodeTriggers(
+          stripSharedNodeExec(p.cwd ? toPortableNodes([e.node], p.cwd) : [e.node])
+        )[0]
+      }))
+    : undefined
   const icon = sanitizeProjectIcon(p.icon)
   return {
     version: 1,
@@ -273,7 +283,8 @@ export function projectToFile(
     // the acknowledgment is machine-local (IndexEntryV3.capabilityAck) and must never travel.
     ...projectCapabilityFields(p),
     ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {}),
-    ...(p.kanban ? { kanban: p.kanban } : {})
+    ...(p.kanban ? { kanban: p.kanban } : {}),
+    ...(closedSessions ? { closedSessions } : {})
   }
 }
 
@@ -286,6 +297,24 @@ export function validKanban(k: unknown): k is ProjectKanban {
     !!k &&
     Array.isArray((k as ProjectKanban).columns) &&
     Array.isArray((k as ProjectKanban).assignments)
+  )
+}
+
+/** Tolerant-reader guard for `closedSessions`, same shallow-shape rule as `validKanban`: anything
+ *  that isn't an array of `{id, closedAt, node}` objects is dropped rather than trusted, so a
+ *  legacy/hand-edited file degrades to no history instead of crashing. */
+export function validClosedSessions(x: unknown): x is ClosedSessionEntry[] {
+  return (
+    Array.isArray(x) &&
+    x.every(
+      (e) =>
+        !!e &&
+        typeof e === 'object' &&
+        typeof (e as ClosedSessionEntry).id === 'string' &&
+        typeof (e as ClosedSessionEntry).closedAt === 'number' &&
+        !!(e as ClosedSessionEntry).node &&
+        typeof (e as ClosedSessionEntry).node === 'object'
+    )
   )
 }
 
@@ -349,6 +378,22 @@ export function fileToProject(
     ...readProjectCapabilities(f),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
+    ...(validClosedSessions(f.closedSessions)
+      ? {
+          closedSessions: f.closedSessions.map((e) => ({
+            ...e,
+            node: sanitizeNodeTriggers(
+              sanitizeBrowserPartitions(
+                applyLocalNodeExec(
+                  base.cwd ? resolveNodes([e.node], base.cwd) : [e.node],
+                  base.localExec
+                ),
+                base.id
+              )
+            )[0]
+          }))
+        }
+      : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {}),
