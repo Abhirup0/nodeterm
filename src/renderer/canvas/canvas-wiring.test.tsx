@@ -203,6 +203,46 @@ describe('deleteNodes also records persisted closed-session history', () => {
   })
 })
 
+describe('reopening a persisted closed-session entry shares reopenLastClosed\'s execution', () => {
+  it('extracts the switch-on-plan-action body into its own callback', () => {
+    expect(CANVAS_SRC).toContain('const executeReopenPlan = useCallback(')
+    expect(CANVAS_SRC).toContain('(plan: Exclude<ReopenPlan, { action: \'skip\' }>): boolean => {')
+  })
+
+  it('reopenLastClosedCommand delegates to it instead of inlining the switch', () => {
+    const fnStart = CANVAS_SRC.indexOf('const reopenLastClosedCommand = useCallback(')
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 950)
+    expect(fnBody).toContain('return executeReopenPlan(plan)')
+    expect(fnBody).not.toContain('switch (plan.action)')
+  })
+
+  it('consumes the entry before doing anything else, so a stale double-click cannot reopen it twice', () => {
+    const fnStart = CANVAS_SRC.indexOf('const reopenClosedSessionCommand = useCallback(')
+    expect(fnStart).toBeGreaterThan(-1)
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 260)
+    expect(fnBody).toContain('.consumeClosedSession(projectId, entryId)')
+    expect(fnBody).toContain('if (!consumed) return false')
+    expect(fnBody).toContain('void writeDisk()')
+  })
+
+  it('wraps the consumed entry as a synthetic ReopenEntry and reuses the pure planReopen', () => {
+    const fnStart = CANVAS_SRC.indexOf('const reopenClosedSessionCommand = useCallback(')
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1200)
+    expect(fnBody).toContain("kind: 'nodes'")
+    expect(fnBody).toContain('nodes: [stateToReopenSnapshot(consumed)]')
+    expect(fnBody).toContain('const plan = planReopen(')
+    expect(fnBody).toContain("if (plan.action === 'skip') return false")
+    expect(fnBody).toContain('return executeReopenPlan(plan)')
+  })
+
+  it('resolves permission mode and account against the TARGET project, same as reopenLastClosedCommand', () => {
+    const fnStart = CANVAS_SRC.indexOf('const reopenClosedSessionCommand = useCallback(')
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1200)
+    expect(fnBody).toContain('resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts)')
+    expect(fnBody).toContain('permissionModeFor: (agentId) => projectPermissionMode(project, agentId)')
+  })
+})
+
 describe('reopen-last-closed records and dispatches through the shared history stack', () => {
   it('records a project close before hiding it', () => {
     expect(CANVAS_SRC).toContain('useReopenHistory.getState().push({ kind: \'project\'')

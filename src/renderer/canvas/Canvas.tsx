@@ -383,10 +383,10 @@ import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNoteP
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
-import { useReopenHistory } from '../state/reopenHistory'
+import { useReopenHistory, type ReopenEntry } from '../state/reopenHistory'
 import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
-import { buildClosedSessionEntries } from '../lib/closedHistory'
-import { planReopen } from '../lib/reopenPlan'
+import { buildClosedSessionEntries, stateToReopenSnapshot } from '../lib/closedHistory'
+import { planReopen, type ReopenPlan } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
 import { useSettings } from '../state/settings'
@@ -6195,40 +6195,13 @@ export function Canvas() {
     [commitActiveToStore, writeDisk]
   )
 
-  /** `app.reopenLastClosed` (Cmd+Shift+T): pops the shared close-history stack and reopens a
-   *  project tab or recreates a deleted node batch — whichever was closed more recently.
-   *  Skips stale entries (already reopened another way, or the project was permanently
-   *  deleted since) and keeps walking back until it finds a usable one or the stack empties.
-   *  The DECISION (which branch, staleness, active-vs-stored) is the pure `planReopen`
-   *  (`lib/reopenPlan.ts`, unit-tested there); this loop only pops the real stack and executes
-   *  whichever `ReopenPlan` comes back — the side-effecting parts that need live Canvas state. */
-  const reopenLastClosedCommand = useCallback((): boolean => {
-    for (;;) {
-      const entry = useReopenHistory.getState().popNext()
-      if (!entry) return false
-
-      const { projects, activeProjectId } = useProjects.getState()
-      const project = projects.find((p) => p.id === entry.projectId)
-      const accounts = useSettings.getState().settings.claudeAccounts
-      const plan = planReopen(
-        entry,
-        projects,
-        activeProjectId,
-        new Set(nodesRef.current.map((n) => n.id)),
-        (snap, liveIds) =>
-          recreateNodeFromSnapshot(snap, {
-            liveNodeIds: liveIds,
-            project,
-            resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts),
-            // The TARGET project's own permission mode, not the caller's active one — a node
-            // restored into project B must start under B's override, never A's.
-            permissionModeFor: (agentId) => projectPermissionMode(project, agentId)
-          })
-      )
-
+  /** Executes a `ReopenPlan` already decided by `planReopen` — the side-effecting half shared by
+   *  `Cmd+Shift+T` (`reopenLastClosedCommand`) and reopening a persisted closed-session entry
+   *  from the sidebar (`reopenClosedSessionCommand`). Returns whether it did anything ('skip'
+   *  plans are the caller's problem — this function never receives one). */
+  const executeReopenPlan = useCallback(
+    (plan: Exclude<ReopenPlan, { action: 'skip' }>): boolean => {
       switch (plan.action) {
-        case 'skip':
-          continue
         case 'reopenProject':
           // A project switch — commit the live canvas back to the store first, or whatever the
           // user was looking at is silently lost (the same invariant every other project switch/
@@ -6267,8 +6240,87 @@ export function Canvas() {
           }
           return true
       }
+    },
+    [switchProject, setNodes, markDirty, writeDisk, commitActiveToStore]
+  )
+
+  /** `app.reopenLastClosed` (Cmd+Shift+T): pops the shared close-history stack and reopens a
+   *  project tab or recreates a deleted node batch — whichever was closed more recently.
+   *  Skips stale entries (already reopened another way, or the project was permanently
+   *  deleted since) and keeps walking back until it finds a usable one or the stack empties.
+   *  The DECISION (which branch, staleness, active-vs-stored) is the pure `planReopen`
+   *  (`lib/reopenPlan.ts`, unit-tested there); this loop only pops the real stack and executes
+   *  whichever `ReopenPlan` comes back via `executeReopenPlan` — the side-effecting parts that
+   *  need live Canvas state. */
+  const reopenLastClosedCommand = useCallback((): boolean => {
+    for (;;) {
+      const entry = useReopenHistory.getState().popNext()
+      if (!entry) return false
+
+      const { projects, activeProjectId } = useProjects.getState()
+      const project = projects.find((p) => p.id === entry.projectId)
+      const accounts = useSettings.getState().settings.claudeAccounts
+      const plan = planReopen(
+        entry,
+        projects,
+        activeProjectId,
+        new Set(nodesRef.current.map((n) => n.id)),
+        (snap, liveIds) =>
+          recreateNodeFromSnapshot(snap, {
+            liveNodeIds: liveIds,
+            project,
+            resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts),
+            permissionModeFor: (agentId) => projectPermissionMode(project, agentId)
+          })
+      )
+
+      if (plan.action === 'skip') continue
+      return executeReopenPlan(plan)
     }
-  }, [switchProject, setNodes, markDirty, writeDisk, commitActiveToStore])
+  }, [executeReopenPlan])
+
+  /** Reopens ONE entry from a project's persisted `closedSessions` (the sidebar's "Recently
+   *  closed" section) — the browsable counterpart to `Cmd+Shift+T`. Consumes the entry
+   *  immediately so a stale double-click can't reopen it twice; if it turns out to recreate to
+   *  nothing (a kind this feature doesn't cover), the entry stays consumed rather than un-popped —
+   *  same "don't resurrect a stale entry" rule `planReopen` already applies to the in-memory
+   *  stack. Either way the consume already mutated `projectId`'s stored `closedSessions` — which
+   *  may not be the ACTIVE project, so nothing else here is guaranteed to flush it to disk. Force
+   *  an explicit save rather than relying on the active-canvas debounce (`markDirty`), which only
+   *  covers the active project. */
+  const reopenClosedSessionCommand = useCallback(
+    (projectId: string, entryId: string): boolean => {
+      const consumed = useProjects.getState().consumeClosedSession(projectId, entryId)
+      if (!consumed) return false
+      void writeDisk()
+
+      const { projects, activeProjectId } = useProjects.getState()
+      const project = projects.find((p) => p.id === projectId)
+      const accounts = useSettings.getState().settings.claudeAccounts
+      const syntheticEntry: ReopenEntry = {
+        kind: 'nodes',
+        projectId,
+        closedAt: consumed.closedAt,
+        nodes: [stateToReopenSnapshot(consumed)]
+      }
+      const plan = planReopen(
+        syntheticEntry,
+        projects,
+        activeProjectId,
+        new Set(nodesRef.current.map((n) => n.id)),
+        (snap, liveIds) =>
+          recreateNodeFromSnapshot(snap, {
+            liveNodeIds: liveIds,
+            project,
+            resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts),
+            permissionModeFor: (agentId) => projectPermissionMode(project, agentId)
+          })
+      )
+      if (plan.action === 'skip') return false
+      return executeReopenPlan(plan)
+    },
+    [executeReopenPlan, writeDisk]
+  )
 
   // ---- global shortcuts ----
   // The three trailing gestures below are registry-LESS chords (design D2: declared gestures,
