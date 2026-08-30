@@ -218,3 +218,48 @@ describe('reopen-last-closed records and dispatches through the shared history s
     expect(CANVAS_SRC).toContain("case 'reopenProject':")
   })
 })
+
+describe('node creation resolves its project LIVE and only onto a matching canvas (issue #443)', () => {
+  // The bug this pins: the sessions-sidebar "+" switches projects and THEN opens the creation
+  // menu, whose onClick closures were built under the PREVIOUS render and frozen into setMenu
+  // state. A creation callback that closed over that render's `activeProjectId` charged the new
+  // node to the OLD project — its cwd, its account default, its `.nodeterm/settings.json` launch
+  // command — while inserting it into the NEW project's canvas. For an agent session that is
+  // silent read/write access to the wrong repo. The rule: every creation funnel reads the active
+  // project from the store AT CLICK TIME and pairs it with the canvas epoch tag before creating.
+  it('reads the active project from the store at call time in every creation funnel', () => {
+    const liveReads =
+      CANVAS_SRC.match(/const targetProjectId = useProjects\.getState\(\)\.activeProjectId/g) ?? []
+    // addAgentNode, addTerminal, createNodeInColumn, explainCommit.
+    expect(liveReads.length).toBe(4)
+  })
+
+  it('guards every creation funnel with canCreateOnCanvas against the canvas epoch tag', () => {
+    const guards =
+      CANVAS_SRC.match(/canCreateOnCanvas\(nodesProjectIdRef\.current, targetProjectId\)/g) ?? []
+    expect(guards.length).toBe(4)
+  })
+
+  it('refuses a mismatch loudly — a dead click with no message is how #443 stayed undiagnosable', () => {
+    expect(CANVAS_SRC).toContain('node-create refused: canvas holds')
+    expect(CANVAS_SRC).toContain(
+      'the canvas on screen is not the active project’s. Switch tabs once and try again.'
+    )
+  })
+
+  it('logs the spawn triple (project, group, cwd) so the next report is diagnosable', () => {
+    const logs = CANVAS_SRC.match(/\[nodeterm\] node-create agent=/g) ?? []
+    // addAgentNode + addTerminal.
+    expect(logs.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('resolves the created node\'s project record from the live target id, never the closure', () => {
+    // The exact stale read the bug shipped with: `getProject(activeProjectId)` inside a creation
+    // funnel, where `activeProjectId` is the RENDER's value. Every creation funnel now pairs its
+    // guard with `getProject(targetProjectId)`; a reintroduced closure read would bring #443 back
+    // with the whole suite green.
+    const liveRecordReads =
+      CANVAS_SRC.match(/const project = useProjects\.getState\(\)\.getProject\(targetProjectId\)/g) ?? []
+    expect(liveRecordReads.length).toBe(4)
+  })
+})

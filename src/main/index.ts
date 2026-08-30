@@ -1614,7 +1614,7 @@ app.whenReady().then(async () => {
   // src/main/agent-messaging.ts for the whole map.
   const messagingDeps: AgentMessagingDeps = {
     paneOwner: (id) => ptyManager.paneOwner(id),
-    sendFramedPayload: (id, payload) => ptyManager.sendFramedPayload(id, payload),
+    sendEnvelope: (id, envelope) => ptyManager.sendEnvelope(id, envelope),
     hasLiveSession: (id) => ptyManager.hasLiveSession(id),
     projects: () => workspaceStore.persistedCanvases(),
     isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
@@ -3652,6 +3652,12 @@ app.on('before-quit', (e) => {
     // And the askpass relay's socket file: close() is what unlinks a unix socket (process exit
     // does not), and a lingering file is one more thing the next start() has to clear.
     askpassServer.stop()
+    // Hook server last among the closers, and on THIS pass so the flush window above could still
+    // receive hook POSTs: stopping unlinks its socket AND its endpoint file (issue #445), so a
+    // graceful quit never leaves an advertisement pointing at a dead port for the tmux sessions
+    // that outlive the app. The next launch rewrites both; a crash skips this, which is what the
+    // generated clients' endpoint failover exists for.
+    hookServer.stop()
     // A SIGTERM quit (dev runners, `kill`, logout) arrives through Chromium's shutdown
     // detector, and this pass's re-issued app.quit() cannot resume the OS-initiated
     // termination the first pass preventDefault'ed: both passes run, but will-quit never

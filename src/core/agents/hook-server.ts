@@ -733,6 +733,17 @@ class HookServer {
     await new Promise<void>((resolve, reject) => {
       const onErr = (e: Error): void => {
         this.server?.off('listening', onOk)
+        // A failed listen must not WEDGE the singleton (issue #445): `this.server` was assigned
+        // before the bind, so leaving it set makes every later start() a silent early-return with
+        // port 0 — while a previous run's endpoint file keeps advertising a dead port to every
+        // tmux session on the machine. Reset to the clean never-started state so start() can be
+        // retried without restarting the app, and drop the stale advertisement (the file reflects
+        // listener liveness; a client that still holds the path fails over — see the sh shims).
+        this.server?.close()
+        this.server = null
+        this.port = 0
+        this.token = ''
+        this.removeEndpointFile()
         reject(e)
       }
       const onOk = (): void => {
@@ -1034,6 +1045,21 @@ class HookServer {
     }
   }
 
+  /**
+   * Best-effort unlink of the endpoint file, so the advertisement on disk reflects listener
+   * liveness (issue #445): a file that outlives its listener sends every generated client to a
+   * dead port first — and before the shims learned the endpoint failover, stopped canvas-control
+   * cold. Run on stop() and on a failed start(). A crash cannot run it, which is exactly why the
+   * clients still carry the failover walk; this only closes the windows we CAN close.
+   */
+  private removeEndpointFile(): void {
+    try {
+      unlinkSync(this.endpointFilePath())
+    } catch {
+      /* nothing to remove — or no booted platform to name the path (tests); both are fine */
+    }
+  }
+
   // `permWaitSecs > 0` opts this session into the deterministic hook-reply approval flow: the
   // managed permission hook holds for that many seconds for a phone/canvas answer file before
   // falling through to Claude's interactive prompt. 0/undefined ⇒ NODETERM_PERM_WAIT_SECS absent ⇒
@@ -1077,6 +1103,10 @@ class HookServer {
   stop(): void {
     this.server?.close()
     this.server = null
+    // The file must not advertise a listener that no longer exists (issue #445): a stopped server
+    // whose endpoint file survives sends every long-lived tmux session's client to a dead port.
+    // The next start() rewrites it; between the two, clients fail over or say "stale" honestly.
+    this.removeEndpointFile()
     this.unixServer?.close()
     this.unixServer = null
     // Unlink so the NEXT bind is clean even if close() lost the race with process exit; the
