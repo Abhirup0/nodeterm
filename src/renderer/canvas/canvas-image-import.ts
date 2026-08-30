@@ -9,6 +9,21 @@ export function isCanvasImageDropTarget(target: EventTarget | null, wrap: Elemen
   )
 }
 
+/** True for anywhere a folder-drop should be handled: canvas background, the Welcome screen,
+ *  general app chrome (sidebar/dock backgrounds, tab strip empty area) — anywhere that isn't a
+ *  more specific drop target (a terminal, an editor, a dialog, a form control, or a node body).
+ *  Unlike isCanvasImageDropTarget this is NOT restricted to `.react-flow__pane`, because a
+ *  folder drop must also work with no project open yet (the Welcome screen is an overlay, not
+ *  necessarily inside the pane). */
+export function isFolderDropTarget(target: EventTarget | null): boolean {
+  const element = target instanceof Element ? target : null
+  if (!element) return false
+  return !element.closest(
+    'input, textarea, select, button, [contenteditable], [role="dialog"], ' +
+      '.monaco-editor, .xterm, .react-flow__node'
+  )
+}
+
 /**
  * Why a canvas image import cannot proceed, or null when it may. One rule, one message, so the
  * drop path and the paste path cannot disagree about either.

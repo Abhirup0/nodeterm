@@ -4,7 +4,8 @@ import {
   canvasImagePasteArmedAfterKey,
   canvasImportRefusal,
   guardedCanvasImagePlacements,
-  isCanvasImageDropTarget
+  isCanvasImageDropTarget,
+  isFolderDropTarget
 } from './canvas-image-import'
 
 describe('canvasImportRefusal', () => {
@@ -41,6 +42,46 @@ describe('isCanvasImageDropTarget', () => {
     const wrap = root.querySelector('.flow-wrap')!
     expect(isCanvasImageDropTarget(root.querySelector('[role="dialog"]'), wrap)).toBe(false)
     expect(isCanvasImageDropTarget(root.querySelector('.sessions-sidebar'), wrap)).toBe(false)
+  })
+})
+
+describe('isFolderDropTarget', () => {
+  it('accepts the canvas pane, the Welcome screen, and general app chrome', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <div class="react-flow__pane"><span>pane</span></div>
+      <div class="welcome"><span>welcome</span></div>
+      <aside class="sessions-sidebar"><span>sidebar</span></aside>
+    `
+    expect(isFolderDropTarget(root.querySelector('.react-flow__pane span'))).toBe(true)
+    expect(isFolderDropTarget(root.querySelector('.welcome span'))).toBe(true)
+    expect(isFolderDropTarget(root.querySelector('.sessions-sidebar span'))).toBe(true)
+  })
+
+  it('rejects terminals, editors, dialogs, form controls, and node bodies', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <div class="xterm"><span>term</span></div>
+      <div class="monaco-editor"><span>editor</span></div>
+      <div role="dialog"><span>dialog</span></div>
+      <input />
+      <textarea></textarea>
+      <button>btn</button>
+      <div contenteditable="true"><span>editable</span></div>
+      <div class="react-flow__node"><span>node body</span></div>
+    `
+    expect(isFolderDropTarget(root.querySelector('.xterm span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('.monaco-editor span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('[role="dialog"] span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('input'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('textarea'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('button'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('[contenteditable] span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('.react-flow__node span'))).toBe(false)
+  })
+
+  it('rejects a null target', () => {
+    expect(isFolderDropTarget(null)).toBe(false)
   })
 })
 
