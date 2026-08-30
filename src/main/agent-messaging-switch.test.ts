@@ -60,7 +60,7 @@ function baseDeps(
       argv: ['claude'],
       pids: [200]
     }),
-    sendFramedPayload: async (nodeId, payload) => {
+    sendEnvelope: async (nodeId, payload) => {
       sent.push({ nodeId, payload })
       return true
     },

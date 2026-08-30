@@ -88,6 +88,7 @@ import { codexThreadIdentityResolverSh } from '../../codex-thread-identity-sh'
 import { codexThreadIdentityRoot } from '../../codex-identity-proxy'
 import { HOOK_CURL_HEADERS_SH } from '../hook-curl-config-sh'
 import { NODE_TOKEN_READ_SH } from '../node-token-sh'
+import { HOOK_ENDPOINT_FALLBACK_SH } from '../hook-endpoint-failover-sh'
 
 /**
  * Bumped by hand whenever this script's CONTRACT with the server changes. Not a git sha and not a
@@ -234,66 +235,12 @@ export function buildManagedScript(
           '# Hook-reply approvals are claude-only; this script never arms the wait, even when the',
           '# session env inherited NODETERM_PERM_WAIT_SECS from a claude node (issue #409).'
         ]),
-    '# --- Endpoint failover helpers --------------------------------------------------',
-    // How many endpoints we may POST to AFTER the primary failed. See the "Fallback ordering and
-    // bound" block comment above buildManagedScript for the full reasoning; the short version:
-    // the ordered list is (at most 3) LOCAL endpoints followed by the reverse tunnels, only one or
-    // two locals can exist on a real host (the two desktop userData paths are per-OS and mutually
-    // exclusive), so 3 attempts always reaches a live local endpoint AND still leaves a tunnel slot.
-    // The cost ceiling is what bounds it: each dead attempt can burn --max-time 1.5s, because an
-    // sshd-held reverse-tunnel socket ACCEPTS and then never answers.
-    'nt_fallback_max=3',
-    '# Print the candidate endpoint files, ONE PER LINE, most-likely-alive first, skipping the',
-    '# already-tried path ($1) and anything unreadable. Ordering, and why it is not mtime:',
-    '#  1. LOCAL endpoints — the host\'s own Server Edition, then a desktop installed on this host.',
-    '#     They are written by a process running HERE, a different failure domain from the tunnels.',
-    '#  2. The per-project SSH reverse tunnels, freshest first (the old whole-list rule, kept as the',
-    '#     tie-break within this group, because the live project\'s endpoint is rewritten and VERIFIED',
-    '#     on every connect).',
-    '# The tunnels all terminate at the SAME desktop, so they share one fate: when the primary tunnel',
-    '# is dead (closed laptop) its siblings are almost always dead too, and mtime happily ranks those',
-    '# siblings above a local endpoint that is actually listening. That is the whole bug — a host with',
-    '# an always-on Server Edition sat silent while every one of its agents ran.',
-    'nt_candidates() {',
-    '  nt_tried="$1"',
-    '  for nt_c in \\',
-    '    "$HOME/.nodeterm-server/hook-endpoint.env" \\',
-    '    "$HOME/.config/node-terminal/hook-endpoint.env" \\',
-    '    "$HOME/Library/Application Support/node-terminal/hook-endpoint.env"; do',
-    '    [ "$nt_c" = "$nt_tried" ] && continue',
-    '    [ -r "$nt_c" ] || continue',
-    '    printf \'%s\\n\' "$nt_c"',
-    '  done',
-    '  set --',
-    // Unquoted glob (with $HOME itself still quoted): the per-project SSH reverse-tunnel
-    // endpoints. On no match the pattern stays literal and the `-r` test below drops it.
-    '  for nt_c in "$HOME"/.nodeterm/hook-endpoint-*.env; do',
-    '    [ "$nt_c" = "$nt_tried" ] && continue',
-    '    [ -r "$nt_c" ] || continue',
-    '    set -- "$@" "$nt_c"',
-    '  done',
-    '  [ "$#" -gt 0 ] || return 0',
-    '  ls -t "$@" 2>/dev/null',
-    '}',
-    '# Adopt one candidate endpoint file ($1): source it into NODETERM_HOOK_{SOCK,PORT,TOKEN,VERSION}',
-    '# + NODETERM_NODE_TOKEN_DIR. Returns 0 if it was sourced, else 1.',
-    '# SOCK/PORT are cleared first so a primary-vs-fallback transport switch (e.g. dead SOCK →',
-    '# live PORT) never leaves the stale transport winning in the re-POST below — and, now that we',
-    '# may walk several candidates, so one candidate\'s transport never leaks into the next one.',
-    '# NODE_TOKEN_DIR is cleared for the same reason and one more: our token belongs to the instance',
-    '# that MINTED it, so carrying our dir into someone else\'s endpoint would point the read at a',
-    '# directory that server cannot verify. Cleared, the newly sourced file sets its own — we then',
-    '# present THAT instance\'s token for this node, or (if it has none) nothing at all, which is',
-    '# honest `legacy`.',
-    'nt_adopt() {',
-    '  NODETERM_HOOK_SOCK=""',
-    '  NODETERM_HOOK_PORT=""',
-    '  NODETERM_NODE_TOKEN_DIR=""',
-    // stdout swallowed for the same reason as the primary source above (#186): in the perm-wait
-    // branch this runs in the FOREGROUND of a hook whose stdout reaches the agent's context.
-    '  . "$1" >/dev/null 2>&1 || return 1',
-    '  return 0',
-    '}',
+    // The candidate walk + adopt helpers are SHARED with the canvas-control and context-link
+    // shims (hook-endpoint-failover-sh.ts) — issue #445: the shims never learned this walk, so
+    // the same stale endpoint a hook event healed itself around stopped every canvas-control
+    // verb cold. One definition, three clients; the "Fallback ordering and bound" reasoning in
+    // the header comment above still governs it.
+    HOOK_ENDPOINT_FALLBACK_SH,
     '# One request POST against the CURRENT endpoint vars. Returns curl\'s exit status so the',
     '# caller can fail over; returns 1 when there is no transport at all (unset/unreadable',
     '# endpoint) so that case also tries a fallback.',

@@ -303,7 +303,13 @@ previous machine's facts on a real change.
   rule `CLAUDE.md` already sets for remote usage, for the same reason.
 
 **The full sweep never runs on a timer and never from the pill.** The panel is *unmounted* while
-closed and its mount is what triggers the sweep.
+closed and its mount is what triggers the sweep. One additional consumer follows the same rule:
+the welcome screen runs one **local** sweep per appearance (only while "Recently closed" lists
+projects) to badge each closed project with its live `nt-*` session count (issue #442,
+`renderer/lib/projectCloseSessions.ts` `closedSessionCounts`). It calls
+`window.nodeTerminal.sessionMemory.read({ remote: false })` directly — not through
+`state/sessionMemory.ts`, whose module-level scope stamp belongs to the pill/panel pair — and a
+failed sweep (`ok:false` / rejection) renders **no badge**, never "0".
 
 **The pill is icon-only at rest.** It sits on every canvas, always, so a permanent
 `RAM 15.6 GB / 62.5 GB` is a row of numbers nobody asked for — the pill's job is to be findable, not

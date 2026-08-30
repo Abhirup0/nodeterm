@@ -179,11 +179,80 @@ jobs:
             dist/*.deb
             dist/latest-linux.yml
 
-  # Flips the release to a published "latest" only when BOTH platform jobs uploaded their
-  # assets. Until then it stays a prerelease, so /releases/latest (the site + both update
+  # Windows build: UNSIGNED BETA (#454), on a plain GitHub runner. Publishes the NSIS
+  # installer + zip as assets on the same tag's GitHub Release — and NOTHING to the update
+  # feed: `dist:win` stamps the package `nodeTermUpdates=disabled` (see src/main/updater.ts),
+  # so the shipped app's updater is cleanly off — no latest.yml is uploaded anywhere, no 404
+  # polling in the field. Auto-update arrives with code signing; an unsigned auto-update is a
+  # trust downgrade. Users update by downloading the next installer.
+  #
+  # BEST-EFFORT by design: the `publish` promote gate below deliberately does NOT wait on
+  # this job, so a Windows failure never strands the mac+linux release as a prerelease. A
+  # failed run is rerun and uploads into the (possibly already published) release. Uploads
+  # use `gh release upload --clobber` (never softprops) so a late finish can't flip an
+  # already-promoted release back to prerelease by re-writing its fields.
+  release-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # postinstall patches node-pty and rebuilds node-pty + smart-whisper against Electron's
+      # ABI — the same install win-package-smoke.yml and the quality-windows CI job prove green.
+      - name: Install dependencies
+        run: npm ci
+
+      # make-icon + electron-vite build + electron-builder --win --x64 --publish never.
+      # Unsigned: no signing secrets exist for Windows yet; SmartScreen will warn.
+      - name: Build Windows packages (NSIS installer + zip, unsigned)
+        run: npm run dist:win
+
+      # The artifact names are the contract (same check as win-package-smoke.yml): a silent
+      # target/artifactName regression must fail here, before the upload step lies about it.
+      - name: Verify expected artifacts
+        shell: bash
+        run: |
+          ls -la dist
+          version=$(node -p "require('./package.json').version")
+          test -f "dist/nodeterm-Setup-${version}.exe" || { echo "::error::NSIS installer missing"; exit 1; }
+          ls dist/nodeterm-*-win.zip >/dev/null 2>&1 || { echo "::error::win zip missing"; exit 1; }
+
+      # Deliberately narrow globs: only the installer + zip. No *.yml (that would be the
+      # update-feed leg this job must not have) and no *.blockmap (differential updates are
+      # part of the same auto-update story that waits on signing).
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # Another platform job may already have created the release for this tag; tolerate
+          # the race. Created as PRERELEASE for the same reason the mac job does it — a
+          # half-built release must never become "latest"; the `publish` job flips it.
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --verify-tag --prerelease --notes "" || true
+          n=1
+          until gh release upload "$tag" dist/nodeterm-Setup-*.exe dist/nodeterm-*-win.zip --clobber --repo "$GITHUB_REPOSITORY"; do
+            if [ "$n" -ge 5 ]; then
+              echo "::error::asset upload failed after $n attempts"
+              exit 1
+            fi
+            echo "::warning::asset upload attempt $n failed (transient network?); retrying in 30s…"
+            n=$((n + 1))
+            sleep 30
+          done
+
+  # Flips the release to a published "latest" only when BOTH the mac and linux jobs uploaded
+  # their assets. Until then it stays a prerelease, so /releases/latest (the site + both update
   # feeds) keeps serving the previous complete release — a mac-runner sleep or an upload
   # failure can no longer put a partial release in front of users. If one platform job
   # fails, fix/rerun it; this job then runs on the rerun and publishes.
+  # release-win is deliberately NOT in `needs`: the Windows asset is an unsigned beta with no
+  # update feed behind it, and its failure must never hold the mac+linux release hostage.
   publish:
     runs-on: ubuntu-latest
     needs: [release-mac, release-linux]

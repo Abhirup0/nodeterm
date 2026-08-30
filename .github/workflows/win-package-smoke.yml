@@ -7,8 +7,10 @@ name: Windows package smoke
 #
 # BUILD ONLY — this workflow must NEVER publish. `dist:win` passes `--publish never`, nothing
 # here uploads to the update feed or creates a release, and the produced installer is unsigned.
-# Windows is not a shippable target until the session-host phase merges; release wiring (signing,
-# latest.yml on nodeterm.dev/updates, a release.yml job) is a deliberate follow-up.
+# The session-host phase (#305) has merged and release.yml's `release-win` job now ships this
+# same build as an UNSIGNED BETA on every version tag (#454). Still deliberate follow-ups:
+# code signing, and — gated on it — the auto-update leg (latest.yml on nodeterm.dev/updates);
+# an unsigned auto-update is a trust downgrade, so the beta ships with its updater disabled.
 on:
   workflow_dispatch:
 

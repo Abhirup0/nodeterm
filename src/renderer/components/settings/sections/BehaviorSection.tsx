@@ -28,6 +28,10 @@ const ROWS = {
   },
   panHover: { title: 'Pan-hover delay (ms)', keywords: ['pan', 'hover', 'delay', 'focus', 'guard'] },
   doubleClick: { title: 'Double-click to focus', keywords: ['double', 'click', 'focus'] },
+  mdPreview: {
+    title: 'Open Markdown in preview',
+    keywords: ['markdown', 'md', 'preview', 'render', 'editor', 'docs', 'readme', 'file']
+  },
   sidebarCollapse: {
     title: 'Sidebar: collapse inactive by default',
     keywords: ['sidebar', 'sessions', 'collapse', 'expand', 'project', 'switch', 'group', 'tree']
@@ -174,6 +178,19 @@ export function BehaviorSection({ isActive }: { isActive: boolean }): React.JSX.
               checked={settings.doubleClickFocus}
               onChange={(v) => update({ doubleClickFocus: v })}
               ariaLabel="Double-click to focus"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.mdPreview}>
+        <FieldRow
+          label="Open Markdown in preview"
+          description="Markdown files open rendered instead of as editable text. The node's Preview/Edit toggle still switches either way."
+          control={
+            <Switch
+              checked={settings.openMarkdownPreview}
+              onChange={(v) => update({ openMarkdownPreview: v })}
+              ariaLabel="Open Markdown in preview"
             />
           }
         />
