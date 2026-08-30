@@ -185,5 +185,10 @@
     "typescript": "^7.0.2",
     "vite": "^7.3.6",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "monaco-editor": {
+      "dompurify": "^3.4.14"
+    }
   }
 }
