@@ -288,6 +288,7 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
+    '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
     '- `open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
     `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
@@ -413,6 +414,16 @@ export function buildCanvasControlInstructions(shimPath: string): string {
  *  verbatim and the parity test holds the two ends together (issue #367). */
 export const CONTROL_UNREACHABLE_MSG = 'Could not reach nodeterm (control endpoint unreachable).'
 
+/** The verb list `help` prints, DERIVED from the registry rather than re-typed — a verb added to
+ *  `VERBS` is discoverable from the CLI the day it lands, which is the whole point of the verb.
+ *  Names only, deliberately: flags live in the skill body, and a second copy of them here would be
+ *  a second thing to keep in sync. */
+export const helpVerbList = (): string => VERBS.join(' ')
+
+/** The registry, exposed for the `help` test so it asserts against the source of truth rather than
+ *  a copy of the list it is checking. Not for production use — read `VERBS` directly. */
+export const VERBS_FOR_TEST: readonly ControlVerb[] = VERBS
+
 export const CONTROL_SHIM_SCRIPT = `#!/bin/sh
 # nodeterm canvas-control CLI (auto-generated — do not edit).
 
@@ -444,6 +455,23 @@ ${CODEX_SANDBOX_HINT_SH}
 
 nt_verb="list"
 if [ $# -gt 0 ]; then nt_verb="$1"; shift; fi
+
+# \`help\` is answered HERE, not by the server: a bare invocation defaults to \`list\`, so the verb
+# set was undiscoverable from the CLI itself — the one place an agent looks when its skill text is
+# not to hand. Local and free, so it also answers when the app is down.
+if [ "$nt_verb" = "help" ] || [ "$nt_verb" = "--help" ] || [ "$nt_verb" = "-h" ]; then
+  echo "nodeterm canvas control — usage: sh <this script> <verb> [--flag value]"
+  echo
+  echo "Verbs:"
+  echo "  ${helpVerbList()}"
+  echo
+  # Single quotes: a backtick inside a double-quoted echo is command substitution, and the first
+  # word of the verb list is \`list\` — which sh then tried to RUN.
+  echo 'Run with no verb to list the current nodes (same as \`list\`).'
+  echo "Flags take a value: --flag value, or --flag=value when the value starts with '--'."
+  echo "Per-verb flags are documented in the manage-nodeterm-canvas skill / instructions block."
+  exit 0
+fi
 
 # Translate \`--flag value\` pairs — plus the one bare positional the show-image/show-video and
 # write/close/rename/branch/send/reply/sticky forms accept — into curl --data-urlencode arguments. The positional
@@ -612,6 +640,8 @@ value is allowed anywhere on the line, not only at the end.
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
+- \`help\` — print the verb list. The shim answers this itself, without reaching the app, so it
+  is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
 - \`open-claude [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
 - \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
