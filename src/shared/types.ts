@@ -270,7 +270,9 @@ export interface RecycledInfo {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
+// 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
+// spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino' | 'trigger'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -390,6 +392,14 @@ export interface CanvasNodeState {
   commitOid?: string
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
+  /**
+   * trigger-only: the schedule + payload + target this node represents (issue #493). Git-shared
+   * CONTENT — deliberately, the team shares the definition — which is exactly why it is treated
+   * as hostile on every load path (`sanitizeNodeTriggers` in core/workspace-files) and why the
+   * definition alone never fires: execution additionally requires this machine's arm record
+   * (`core/trigger-arm-store.ts`), bound to the spec's exact content. See @shared/trigger.
+   */
+  trigger?: import('./trigger').TriggerSpec
   /**
    * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
    * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
@@ -1214,8 +1224,19 @@ export interface Settings {
   doubleClickFocus: boolean
   /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
    *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
-   *  markdown-toggle chord) still switches either way. Default off: the historical behavior. */
+   *  markdown-toggle chord) still switches either way. Default ON since the release after
+   *  v0.3.3 (maintainer decision on issue #495; a preview is one ⌘M from the editor, so the
+   *  rendered view is the better first sight for docs). A one-shot load migration keyed on
+   *  `openMarkdownPreviewMigrated` (see mergeSettings) forces this ON once for every existing
+   *  file — including one saved by v0.3.3, the one release that defaulted off and whose
+   *  full-snapshot saves materialized `false` for users who never touched the toggle. After
+   *  the migration the user's own opt-out is permanent. */
   openMarkdownPreview: boolean
+  /** One-shot marker for the openMarkdownPreview default flip (#495). Absent = the file
+   *  predates the flip → the load migration sets `openMarkdownPreview: true` and stamps this
+   *  true; present = the migration already ran (or the install was born after it) and the
+   *  stored `openMarkdownPreview` value is the user's own, never touched again. */
+  openMarkdownPreviewMigrated: boolean
   /**
    * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
    * PRIMARY selection and no tmux middle-click habit, so the guard changes nothing visible there).
@@ -1235,6 +1256,11 @@ export interface Settings {
    *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
    *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
+  /** How far one plain wheel click zooms, as a multiplier on the canvas zoom step (0.2–2,
+   *  default 1 = historical feel). Applies only to the `wheelZoom` path — Cmd/Ctrl+wheel and
+   *  pinch keep the fixed step, so tuning a chunky mouse down never slows the trackpad.
+   *  Validated at point of use (canvas/wheel-zoom.ts `clampWheelZoomSpeed`). */
+  wheelZoomSpeed: number
   /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
    *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
    *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
@@ -1494,9 +1520,11 @@ export const DEFAULT_SETTINGS: Settings = {
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
-  openMarkdownPreview: false,
+  openMarkdownPreview: true,
+  openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
+  wheelZoomSpeed: 1,
   trackpadPan: true,
   canvasDragMode: 'select',
   browserMemorySaver: true,

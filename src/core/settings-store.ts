@@ -45,6 +45,18 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
       "speech.dictation": [merged.speech.shortcut],
     };
   }
+  // One-shot markdown-preview default flip (#495, maintainer decision): every file written
+  // before the flip gets `openMarkdownPreview: true` exactly once — INCLUDING one saved by
+  // v0.3.3, the sole release that defaulted off, whose full-snapshot saves materialized `false`
+  // for users who never touched the toggle (indistinguishable from an explicit off, so the
+  // absent-key merge alone could not reach them). The stamped `openMarkdownPreviewMigrated`
+  // is what makes it one-shot: once present, the stored value is the user's own and an opt-out
+  // is permanent. Same shape as the dictation seed above — keyed on the marker's absence in
+  // the SAVED file, never on the merged value.
+  if (!saved?.openMarkdownPreviewMigrated) {
+    merged.openMarkdownPreview = true;
+    merged.openMarkdownPreviewMigrated = true;
+  }
   // Legacy `terminalGpuRendering` was a boolean whose default (true) was merged into every saved
   // file — so a stored `true` is indistinguishable from "never touched" and maps to the new
   // 'auto' (platform-aware) default, while a stored `false` was always an explicit escape-hatch

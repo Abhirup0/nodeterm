@@ -21,7 +21,8 @@ export const NODE_MIN_SIZES: Record<NodeKind, { width: number; height: number }>
   browser: { width: 360, height: 240 },
   subagent: { width: 180, height: 84 },
   loop: { width: 180, height: 84 },
-  dino: { width: 400, height: 160 }
+  dino: { width: 400, height: 160 },
+  trigger: { width: 240, height: 120 }
 }
 
 export interface Rect {
