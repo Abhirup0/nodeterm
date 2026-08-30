@@ -181,6 +181,11 @@ async function fetchViaAppServer(home: string): Promise<ProviderUsage | null> {
     // A missing `codex` binary surfaces here, not as a spawn throw.
     child.on('error', () => finish(null))
     child.on('exit', () => finish(null))
+    // codex can exit before draining a request (an older CLI without `app-server` prints usage
+    // and quits) — the EPIPE from the stdin writes below is an async 'error' EVENT on the pipe,
+    // not a throw at the call site, and unhandled it kills the main process (issue #382's
+    // class). A broken pipe means no reply is coming, so settle instead of waiting the timer out.
+    child.stdin?.on('error', () => finish(null))
 
     let buf = ''
     child.stdout?.on('data', (chunk: Buffer) => {
