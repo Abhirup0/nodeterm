@@ -63,6 +63,16 @@ export function SessionRow({
       draggable={!editing}
       onClick={onClick}
       onContextMenu={onContextMenu}
+      onMouseDown={(e) => {
+        // Middle-click closes the session, same as the × button — but goes through
+        // onClose's confirm dialog rather than skipping it (killing a real tmux
+        // session isn't the same low-stakes action as closing a browser tab).
+        if (e.button === 1) {
+          e.preventDefault()
+          e.stopPropagation()
+          onClose()
+        }
+      }}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
         // Some browsers require data to be set for a drag to start.
@@ -153,7 +163,7 @@ export function SessionRow({
           </button>
           <button
             className="ss-row__close"
-            title="Close session"
+            title="End session"
             onClick={(e) => {
               e.stopPropagation()
               onClose()
