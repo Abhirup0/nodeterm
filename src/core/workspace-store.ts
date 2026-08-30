@@ -10,7 +10,7 @@ import {
 } from '../shared/types'
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, resolveNodes, sameProjectContent,
-  serializeProjectFile, splitWorkspace, validKanban,
+  sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
 import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
@@ -262,9 +262,11 @@ export class WorkspaceStore {
     for (const e of index.entries) {
       if (e.project) {
         // Inline projects are stored verbatim in the index (no fileToProject pass), so apply the
-        // same kanban shape guard here — a v1/hand-edited board would otherwise crash the render.
+        // same kanban shape guard here — a v1/hand-edited board would otherwise crash the render —
+        // and the same trigger shape rule (workspace.json is hand-editable input too).
         const { kanban, ...rest } = e.project
-        built.push({ entry: e, project: validKanban(kanban) ? e.project : rest })
+        const base = validKanban(kanban) ? e.project : rest
+        built.push({ entry: e, project: { ...base, nodes: sanitizeNodeTriggers(base.nodes) } })
       } else if (e.cwd) {
         if (sideline) await sweepStaleTmp(projectFilePath(e.cwd))
         const read = await this.readProjectFile(e.cwd, sideline)

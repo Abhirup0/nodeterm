@@ -10,14 +10,17 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import {
+  COMBINED_PANE_MARKER,
   PANE_OWNER_FMT,
   foregroundArgvArgs,
   foregroundPgid,
   isSafeTty,
   paneOwnerFrom,
+  parseCombinedPaneOwner,
   parseForegroundArgv,
   parsePaneOwner
 } from './pane-owner'
+import { remotePaneOwnerCombinedArgs } from '../remote-ssh/control-master'
 
 describe('PANE_OWNER_FMT', () => {
   it('asks for pid, tty, current command and the pane id in one round-trip', () => {
@@ -282,4 +285,132 @@ describe.skipIf(!tmuxBin)('against a real tmux pane', () => {
     expect(argv).toHaveLength(1)
     expect(argv[0]).toMatch(/(^|\/)-?sh$/)
   }, 30_000)
+})
+
+
+describe('parseCombinedPaneOwner', () => {
+  const REPLY = [
+    `${COMBINED_PANE_MARKER}4242|/dev/pts/9|claude|%17`,
+    '4242 4242 Ss   -bash',
+    '5001 5001 Sl+  claude --resume x',
+    '5002 5001 S+   rg --files'
+  ].join('\n')
+
+  it('routes the marker line through parsePaneOwner and the tail through paneOwnerFrom', () => {
+    expect(parseCombinedPaneOwner(REPLY)).toEqual({
+      panePid: 4242,
+      tty: '/dev/pts/9',
+      command: 'claude',
+      paneId: '%17',
+      argv: ['claude --resume x', 'rg --files'],
+      pids: [5001, 5002]
+    })
+  })
+
+  it('tolerates noise ABOVE the marker (a chatty remote rc file) — the fence is the anchor', () => {
+    expect(parseCombinedPaneOwner(`motd line\n${REPLY}`)?.command).toBe('claude')
+  })
+
+  it('answers null with no marker, an empty read, or identity-only output', () => {
+    expect(parseCombinedPaneOwner(null)).toBeNull()
+    expect(parseCombinedPaneOwner('')).toBeNull()
+    expect(parseCombinedPaneOwner('4242|/dev/pts/9|claude|%17')).toBeNull()
+    // Identity with no ps rows below it — the two-trip contract, kept: no rows, no owner.
+    expect(parseCombinedPaneOwner(`${COMBINED_PANE_MARKER}4242|/dev/pts/9|claude|%17`)).toBeNull()
+  })
+
+  it('refuses an identity whose tty isSafeTty rejects — a reply we do not name a pane with', () => {
+    const hostile = [
+      `${COMBINED_PANE_MARKER}42|/dev/pts/0; curl evil|node|%1`,
+      '42 42 Ss   -bash',
+      '43 43 S+   node'
+    ].join('\n')
+    expect(parseCombinedPaneOwner(hostile)).toBeNull()
+  })
+
+  it('a single-row group parses to one argv and its own pid', () => {
+    const one = [`${COMBINED_PANE_MARKER}7|/dev/pts/1|sh`, '9 9 S+   sleep 5'].join('\n')
+    expect(parseCombinedPaneOwner(one)).toMatchObject({ argv: ['sleep 5'], pids: [9] })
+  })
+})
+
+/**
+ * THE REAL SCRIPT (Global Constraint 9) — `remotePaneOwnerCombinedArgs`'s remote command is
+ * generated shell no compiler checks, so it runs here for REAL: under `/bin/sh`, against a real
+ * tmux server on the `nodeterm-rmt` socket name — inside this suite's own private `TMUX_TMPDIR`,
+ * so the byte-identical script resolves a test server and can never see an SSH project's real
+ * remote socket. The bytes that ship are the bytes judged.
+ */
+describe.skipIf(!tmuxBin)('the combined remote script, under a real /bin/sh + real tmux', () => {
+  const conn = { host: 'h.example.com', user: 'deploy' } as never
+  const scriptFor = (session: string): string =>
+    remotePaneOwnerCombinedArgs(conn, '/s.sock', session).at(-1) as string
+  const rmt = (...args: string[]) =>
+    execFileSync(tmuxBin as string, ['-L', 'nodeterm-rmt', ...args], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: { ...process.env, TMUX_TMPDIR }
+    })
+  const runScript = (session: string): string =>
+    execFileSync('sh', ['-c', scriptFor(session)], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: { ...process.env, TMUX_TMPDIR }
+    })
+
+  afterAll(() => {
+    try {
+      rmt('kill-server')
+    } catch {
+      // never started (skipped) or already gone
+    }
+  })
+
+  it('one round-trip answers identity AND foreground argv, and the parser adopts it', () => {
+    rmt('new-session', '-d', '-s', 'nt-comb', 'sh')
+    rmt('send-keys', '-t', 'nt-comb', 'sleep 412', 'Enter')
+    let owner: ReturnType<typeof parseCombinedPaneOwner> = null
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      owner = parseCombinedPaneOwner(runScript('nt-comb'))
+      if (owner?.argv.some((a) => a.includes('sleep 412'))) break
+    }
+    expect(owner).not.toBeNull()
+    expect(owner!.tty).toMatch(/^\/dev\//)
+    expect(owner!.paneId).toMatch(/^%\d+$/)
+    expect(owner!.argv.join('\n')).toContain('sleep 412')
+    expect(owner!.pids?.length).toBe(owner!.argv.length)
+  }, 30_000)
+
+  it('a MISSING SESSION on a live server parses to null — measured: display-message exits 0', () => {
+    // Measured on tmux 3.4: `display-message -p -t <no-such-session>` does NOT error — the target
+    // resolution is allowed to fail and the format expands with empty fields (stdout `|||`),
+    // exit 0. The `|| exit 9` therefore only fires for a server-level failure; the missing-session
+    // answer is an empty identity, which the parser refuses — the same null the two-trip read gave.
+    let out: string | null = null
+    try {
+      out = runScript('nt-no-such-session')
+    } catch {
+      out = null // an erroring tmux is equally fine: runAsync throws, the caller answers null
+    }
+    if (out !== null) expect(parseCombinedPaneOwner(out)).toBeNull()
+  }, 15_000)
+
+  it('NO SERVER on the socket exits non-zero (the caller answers null) — never a half-answer', () => {
+    const emptyTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nt-comb-none-'))
+    let code = 0
+    try {
+      execFileSync('sh', ['-c', scriptFor('nt-comb')], {
+        encoding: 'utf8',
+        timeout: 10_000,
+        env: { ...process.env, TMUX_TMPDIR: emptyTmp },
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+    } catch (e) {
+      code = (e as { status?: number }).status ?? -1
+    } finally {
+      fs.rmSync(emptyTmp, { recursive: true, force: true })
+    }
+    expect(code).toBe(9)
+  }, 15_000)
 })

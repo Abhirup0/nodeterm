@@ -74,13 +74,14 @@ describe('decideDelivery — one case per refusal', () => {
     expect(retryable(o)).toBe(false)
   })
 
-  it('targetNotAgentPane on an UNKNOWN pane too — an unreadable pane is never admitted', () => {
-    // `unknown` is not a shade of `not-agent` for the predicate, but for DELIVERY both refuse:
-    // the one thing neither may do is write into a pane we could not read.
-    expect(decideDelivery(ready({ pane: 'unknown' }))).toEqual({
-      kind: 'targetNotAgentPane',
-      observed: 'unknown'
-    })
+  it('an UNKNOWN pane refuses as targetPaneUnreadable — never admitted, never called not-agent', () => {
+    // Fail-closed either way (writing into a pane we could not read is the injection this module
+    // exists to prevent), but honestly (issue #460): "we could not look" is not "not an agent",
+    // and the two advise a language model differently — unreadable is retryable behind the
+    // per-pair rate limiter, a kernel-confirmed not-agent is not.
+    const o = decideDelivery(ready({ pane: 'unknown' }))
+    expect(o).toEqual({ kind: 'targetPaneUnreadable' })
+    expect(retryable(o)).toBe(true)
   })
 
   it.each(['working', 'waiting', 'blocked'] as const)('targetBusy for state %s, retryable', (state) => {
@@ -237,7 +238,9 @@ describe('the decision ORDER is load-bearing', () => {
       (p) => ({ ...p, target: { ...p.target!, stateVerified: true, state: undefined } }),
       (p) => ({ ...p, target: { ...p.target!, state: 'working' } }),
       (p) => ({ ...p, target: { ...p.target!, state: 'done' } }),
-      (p) => ({ ...p, pane: 'agent' }),
+      // `pane: 'unknown'` reports unreadable; a READ pane that is not an agent reports not-agent.
+      (p) => ({ ...p, pane: 'not-agent' as const }),
+      (p) => ({ ...p, pane: 'agent' as const }),
       (p) => ({ ...p, pasteAware: true })
     ]
     const walked: string[] = []
@@ -298,7 +301,7 @@ describe('RETRYABLE', () => {
   it('answers for every outcome kind the union declares', () => {
     // Runtime half. The compile-time half is below and is enforced by `npm run typecheck`.
     const kinds = Object.keys(RETRYABLE) as AgentMessageOutcomeKind[]
-    expect(kinds.length).toBe(16)
+    expect(kinds.length).toBe(17)
     for (const k of kinds) expect(typeof RETRYABLE[k]).toBe('boolean')
   })
 

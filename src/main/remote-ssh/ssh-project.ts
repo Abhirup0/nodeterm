@@ -5,7 +5,15 @@ import { spawn, execFile, execFileSync } from 'child_process'
 import { app, ipcMain } from 'electron'
 import { IPC } from '../../shared/ipc'
 import { getMainWindow, sendToMain } from '../main-window'
-import { parseLsDirs, posixQuote, quoteRemotePath, remoteTmuxConf, sshHostKey, type SshConnection } from '../../shared/ssh'
+import {
+  parseLsDirs,
+  posixQuote,
+  quoteRemotePath,
+  remoteTmuxConf,
+  remoteTmuxPathPrologue,
+  sshHostKey,
+  type SshConnection
+} from '../../shared/ssh'
 import type { DownloadResult, SshPassphraseRequest, SshProjectStatusEvent } from '../../shared/types'
 import { candidateName, safeDownloadBasename } from '../../core/download-name'
 import { removeAtomic, renameAtomic } from '../../core/fs-atomic'
@@ -718,7 +726,7 @@ export class SshProjectManager {
             )
             if (w.code === 0) {
               // source-file is best-effort (pushes options into a warm server); ignore its result.
-              await this.r.run(childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
+              await this.r.run(childArgs(conn, controlPath, `${remoteTmuxPathPrologue()}tmux -L ${RMT_TMUX_SOCKET} source-file ${posixQuote(confPath)}`))
               tmuxConfPath = confPath
             }
           } catch {

@@ -29,23 +29,22 @@ import {
   remoteTmuxPtyArgs,
   type RemoteSessionEnv,
   remotePasteDelivery,
-  remoteFramedDelivery,
   remoteCapturePaneArgs,
   remotePaneCommandArgs,
-  remotePaneOwnerArgs,
-  remoteForegroundArgvArgs,
+  remotePaneOwnerCombinedArgs,
   remotePaneProcessArgs,
   remoteTerminateForegroundArgs,
   remotePaneCursorArgs
 } from './remote-ssh/control-master'
 import { probeAgentSockToPin } from './remote-ssh/agent-probe'
 import { parsePaneCursor } from './pane-cursor'
+import { classifyPaneCwd } from './pane-cwd'
 import {
   recordFreshSpawnOwner,
   forgetPaneOwner,
   shouldRecordOwnership
 } from './agents/pane-ownership'
-import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parsePaneOwner } from './agents/pane-owner'
+import { PANE_OWNER_FMT, foregroundArgvArgs, paneOwnerFrom, parseCombinedPaneOwner, parsePaneOwner } from './agents/pane-owner'
 import { binariesFor, isAgentPane, type PaneOwner } from '../shared/agents/pane-owner-predicate'
 import { readSpawnResources, spawnResourceNote } from './spawn-resources'
 import {
@@ -62,7 +61,6 @@ import {
   sessionName,
   isSessionName,
   localPasteDelivery,
-  localFramedDelivery,
   runPasteDelivery
 } from './tmux-naming'
 import { encodeSendKeysHex } from './tmux-control'
@@ -2241,15 +2239,67 @@ export class PtyManager {
     // (`persisted` in spawnSession) — i.e. exactly "this session survives losing its client",
     // which is what the renderer's cache-dispose levers must not assume. See PtyCreateResult.
     const persistent = !!spawned?.persistKey
-    return accountFallback
-      ? {
-          sessionId,
-          fresh,
-          accountFallback,
-          persistent,
-          ...(screen ? { screen } : {})
+    // Stale-cwd probe (issue #464), WARM local-tmux reattach only: `new-session -A` reattached a
+    // session whose shell may sit on a DELETED directory inode (a re-created same-named folder is
+    // a different inode, so the getcwd errors never self-heal). A fresh spawn already validated
+    // its cwd above; a plain shell has no session that outlived anything; an SSH-remote session's
+    // cwd lives on the host (its probe would need a remote round trip — deliberately out of v1).
+    // Failure/unknowable ⇒ absent ⇒ no banner: the flag is only ever raised on tmux's own answer.
+    const staleCwd =
+      !fresh && tmuxBacked && !options.sshRemote && !spawned?.sessionHost && options.persistKey
+        ? await this.paneCwdStale(options.persistKey)
+        : false
+    return {
+      sessionId,
+      fresh,
+      persistent,
+      ...(accountFallback ? { accountFallback } : {}),
+      ...(staleCwd ? { staleCwd: true as const } : {}),
+      ...(screen ? { screen } : {})
+    }
+  }
+
+  /**
+   * Is the live tmux session's working directory GONE (deleted, or deleted and re-created at the
+   * same path — issue #464)? Asks tmux for `#{pane_current_path}` — a format present since 1.7,
+   * so no version hazard — and classifies through the pure `classifyPaneCwd` (see pane-cwd.ts for
+   * the per-platform signals, one measured and one inferred). Exact-match target: `=name:` —
+   * the trailing colon matters, and is MEASURED (tmux 3.4): for a target-PANE a bare `=name`
+   * resolves NOTHING silently (exit 0, every format empty), while `=name:` is "exactly this
+   * session, its active pane". Without `=`, tmux falls back to fnmatch-then-prefix matching and
+   * could answer about a DIFFERENT node whose id extends this one (the same trap the kill path
+   * documents). Any failure answers `false` — no banner on a guess.
+   */
+  private async paneCwdStale(persistKey: string): Promise<boolean> {
+    if (!this.tmuxPath) return false
+    try {
+      const { stdout } = await runAsync(
+        this.tmuxPath,
+        [
+          '-L',
+          TMUX_SOCKET,
+          'display-message',
+          '-p',
+          '-t',
+          `=${sessionName(persistKey)}:`,
+          '#{pane_current_path}'
+        ],
+        { timeout: PROBE_TIMEOUT_MS }
+      )
+      // Strip ONLY the transport's trailing newline — a path may legally end in spaces, and the
+      // Linux " (deleted)" suffix must survive untouched for the classifier to see it.
+      const reported = stdout.replace(/\r?\n$/, '')
+      const dirExists = (p: string): boolean => {
+        try {
+          return fs.statSync(p).isDirectory()
+        } catch {
+          return false
         }
-      : { sessionId, fresh, persistent, ...(screen ? { screen } : {}) }
+      }
+      return classifyPaneCwd(reported, dirExists) === 'stale'
+    } catch {
+      return false
+    }
   }
 
   /** Does the node's remote tmux session exist (over the project's ControlMaster)? Async so the
@@ -4071,14 +4121,16 @@ export class PtyManager {
    * command. Deliberately has NO deadline of its own: the caller bounds it (`probeWithin`), the
    * same way the restart poll bounds `paneCommand`.
    *
-   * Two round-trips, not one: tmux does not know the foreground process group (`#{pane_pid}` is the
-   * shell it forked, which is usually NOT in it), so the tty has to come back before `ps` can be
-   * asked about it. On the SSH leg both ride the same ControlMaster — and both are `ssh` children
-   * that outlive the caller's 2s deadline (they are reaped at `PROC_TIMEOUT_MS`), so a caller that
-   * retries `unknown` on a short timer stacks them. See `agents/pane-probe.ts` for why that needs a
-   * circuit breaker rather than a shorter timeout.
+   * LOCALLY two round-trips, not one: tmux does not know the foreground process group
+   * (`#{pane_pid}` is the shell it forked, which is usually NOT in it), so the tty has to come
+   * back before `ps` can be asked about it — and two local execFiles cost nothing. The SSH leg is
+   * ONE round-trip (`remotePaneOwnerCombinedArgs`, issue #460): there each exec is an `ssh` child
+   * that outlives the caller's 2s deadline (reaped at `PROC_TIMEOUT_MS`) and becomes a full LOGIN
+   * whenever the master cannot serve a channel, so a caller that retries `unknown` on a short
+   * timer stacks them. See `agents/pane-probe.ts` for why that needs a circuit breaker rather
+   * than a shorter timeout.
    *
-   * `remotePaneOwnerArgs` splices the session id unquoted (`-t ${sessionId}`), exactly as every
+   * `remotePaneOwnerCombinedArgs` splices the session id unquoted (`-t ${sessionId}`), exactly as every
    * sibling builder does. That is safe only because `sessionName()` sanitises to `[A-Za-z0-9_-]`
    * before it ever gets here — the guarantee lives THERE, not in this call.
    */
@@ -4088,18 +4140,18 @@ export class PtyManager {
     const sshRemote = live?.sshRemote
     try {
       if (sshRemote) {
+        // ONE round-trip, not two (issue #460): under a saturated or dead ControlMaster every
+        // exec silently falls back to a FULL ssh login, and two sequential fallback logins do not
+        // fit the caller's 2s probe budget — a live agent pane then read as `unknown`,
+        // persistently. The combined script carries both halves; the parser applies the same
+        // grammars the two-trip read used. See `remotePaneOwnerCombinedArgs` for the measurement.
         const ssh = findSsh()
         if (!ssh) return null
-        const first = await runAsync(
+        const out = await runAsync(
           ssh,
-          remotePaneOwnerArgs(sshRemote.conn, sshRemote.controlPath, target)
+          remotePaneOwnerCombinedArgs(sshRemote.conn, sshRemote.controlPath, target)
         )
-        const identity = parsePaneOwner(first.stdout)
-        if (!identity) return null
-        const psArgs = remoteForegroundArgvArgs(sshRemote.conn, sshRemote.controlPath, identity.tty)
-        if (!psArgs) return null
-        const second = await runAsync(ssh, psArgs)
-        return paneOwnerFrom(identity, second.stdout)
+        return parseCombinedPaneOwner(out.stdout)
       }
       // The session host has no tty/tmux identity surface. Do not query an unrelated POSIX tmux
       // merely because one is installed beside this native Windows generation.
@@ -4138,35 +4190,44 @@ export class PtyManager {
    */
 
   /**
-   * Deliver one ALREADY-FRAMED payload — the agent-messaging envelope, composed by
-   * `bracketedInjection` in `deliverAgentMessage` — into a node's pane, local or SSH.
+   * Deliver the agent-messaging envelope — PLAIN text from `deliverAgentMessage` — into a node's
+   * pane, local or SSH, through the SAME plans as `sendText` with the Enter always on: tmux frames
+   * the paste from the pane's real bracketed-paste state (`paste-buffer -p`) and the submit is a
+   * separate `send-keys Enter` in the same tmux command list.
    *
-   * A two-line dispatcher over `localFramedDelivery` / `remoteFramedDelivery`, exactly as
-   * `sendText` is over its plans and for the same reason: the composition (the no-sanitize rule,
-   * the well-formed-frame assertion, the per-call buffer, the failure sweep) lives in the plan
-   * builders, where `agent-message.realtty.test.ts` drives the local one against a real tmux and
-   * a real bash. NOT `sendText`: that path sanitizes structurally, which would strip the ESC
-   * bytes that ARE this payload's frame.
+   * This replaced `sendFramedPayload`, which pushed a JS-composed `ESC[200~…ESC[201~\r` payload
+   * through `paste-buffer` with no `-p`: tmux ≥ 3.7 passes paste-buffer content through vis(3),
+   * which rendered that frame as literal `^[[200~` text in the composer and swallowed the submit
+   * (issue #453 — see the tombstones in tmux-naming.ts and paste-injection.ts). The plans
+   * sanitize the payload structurally (`sanitizePasteText` inside `localPasteDelivery` /
+   * `remotePasteDelivery`), which is now correct for this caller too: the envelope carries no ESC
+   * byte on purpose, and one smuggled in by a body must never reach a paste buffer.
+   *
+   * NOT `sendText` itself, because of the empty-payload contract: `sendText('', {enter:true})`
+   * means "submit whatever is composed", and a lone Enter into an agent's composer is exactly the
+   * accidental submit a messaging delivery must never perform — an empty envelope refuses here.
+   * (`buildEnvelope` can never return '', so this is a guard against a future caller, not a path.)
    */
-  async sendFramedPayload(persistKey: string, payload: string): Promise<boolean> {
+  async sendEnvelope(persistKey: string, envelope: string): Promise<boolean> {
+    if (envelope.length === 0) return false
     const target = sessionName(persistKey)
     const sshRemote = this.sessionByPersistKey(persistKey)?.sshRemote
     try {
       if (sshRemote) {
         const ssh = findSsh()
         if (!ssh) return false
-        const plan = remoteFramedDelivery(sshRemote.conn, sshRemote.controlPath, target, payload)
+        const plan = remotePasteDelivery(sshRemote.conn, sshRemote.controlPath, target, envelope, true)
         if (!plan) return false
         return await runPasteDelivery(plan, (args, input) => runWithStdin(ssh, args, input))
       }
       if (!this.tmuxPath) return false
       const tmuxPath = this.tmuxPath
-      const plan = localFramedDelivery(TMUX_SOCKET, target, payload)
+      const plan = localPasteDelivery(TMUX_SOCKET, target, envelope, true)
       if (!plan) return false
       return await runPasteDelivery(plan, (args, input) => runWithStdin(tmuxPath, args, input))
     } catch {
-      // A builder throwing (unsafe target, an unframed payload) lands here; `runPasteDelivery`
-      // itself answers false rather than throwing, so the buffer sweep is never skipped.
+      // A builder throwing (an unsafe target) lands here; `runPasteDelivery` itself answers false
+      // rather than throwing, so the buffer sweep is never skipped.
       return false
     }
   }

@@ -116,8 +116,9 @@ function escapeRe(s: string): string {
  * express paste structure at all, and the frame markers are defeated by the nonce rather than by
  * filtering. Two separate sanitizers is how one of them ends up wrong.
  *
- * The body's newlines SURVIVE. That is the whole reason this payload must go through the bracketed
- * paste framer (`bracketedInjection`) and never the line composer: see Global Constraint 8, and
+ * The body's newlines SURVIVE. That is the whole reason this payload must be delivered as ONE
+ * bracketed paste (`paste-buffer -p` — tmux draws the frame; the JS framer `bracketedInjection`
+ * is deleted, issue #453) and never through the line composer: see Global Constraint 8, and
  * herdr's shipped bug where a multiline paste was submitted line-by-line as separate turns.
  */
 export function buildEnvelope(p: EnvelopeParts): string {
