@@ -35,6 +35,8 @@ import {
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
 import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
+import { isBrowserRuntime } from '@renderer/bridge/runtime'
+import { WheelZoomBurstLimiter, clampWheelZoomSpeed, nextWheelZoom } from './wheel-zoom'
 import { selectedLocalFilePaths } from './canvas-file-copy'
 import {
   canvasImagePasteArmedAfterKey,
@@ -2216,11 +2218,11 @@ export function Canvas() {
   // projects array is rebuilt on every node serialization, the id set is not. Closed-but-kept
   // projects keep their entries on purpose: closing detaches like a project switch, and the
   // memory saver reaps their pages on its own clock.
-  const projectIdsSig = useProjects((s) => s.projects.map((p) => p.id).join(' '))
+  const projectIdsSig = useProjects((s) => s.projects.map((p) => p.id).join('\0'))
   useEffect(() => {
     useWebviewKeepAlive
       .getState()
-      .prune(new Set(projectIdsSig === '' ? [] : projectIdsSig.split(' ')))
+      .prune(new Set(projectIdsSig === '' ? [] : projectIdsSig.split('\0')))
   }, [projectIdsSig])
 
   /**
@@ -3111,16 +3113,27 @@ export function Canvas() {
   // MacWheelGestureRouter tells them apart (and stays sticky for the length of one physical
   // gesture) and hands trackpad packets back to React Flow's own panOnScroll.
   const wheelZoom = settings.wheelZoom
+  const wheelZoomSpeed = clampWheelZoomSpeed(settings.wheelZoomSpeed)
   // The escape hatch, resolved ONCE: the router and React Flow's panOnScroll below must agree, or
   // a gesture neither of them pans is a gesture that does nothing.
   const trackpadRouting = trackpadRoutingEnabled(isMac, settings.trackpadPan)
   useEffect(() => {
     const wrap = flowWrapRef.current
     if (!wrap) return
-    const wheelRouting = new MacWheelGestureRouter()
+    // Desktop: the main process reports trackpad gestures from the raw input stream, so the
+    // router routes by device FACT instead of delta-shape guessing — a precise-pixel mouse
+    // (MX Master) zooms while the trackpad pans, both settings on. The browser (Server Edition)
+    // has no such stream: reporting stays off and the router keeps its heuristics.
+    const gestureReporting = isMac && !isBrowserRuntime()
+    const wheelRouting = new MacWheelGestureRouter(gestureReporting)
+    const offGesture = gestureReporting
+      ? window.nodeTerminal.onCanvasTrackpadGesture?.((active) => wheelRouting.noteGesture(active))
+      : undefined
+    const wheelLimiter = new WheelZoomBurstLimiter()
     const onWheel = (e: WheelEvent) => {
       if (canvasLocked) return
-      if (!e.ctrlKey && !e.metaKey) {
+      const plainWheel = !e.ctrlKey && !e.metaKey
+      if (plainWheel) {
         // The ancestor walk is the expensive part of this handler at ~120 Hz, so it is memoized
         // per packet AND never run for a packet no guard asks about (a plain wheel with wheelZoom
         // off, which is the default, walks nothing at all).
@@ -3141,16 +3154,23 @@ export function Canvas() {
       const rect = wrap.getBoundingClientRect()
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
-      // Cap a single event's influence so a chunky mouse-wheel tick doesn't jump zoom levels.
-      const d = Math.max(-50, Math.min(50, e.deltaY))
-      const next = Math.min(2, Math.max(0.01, zoom * Math.exp(-d * 0.01)))
+      // Cap a burst's influence so a chunky mouse-wheel click doesn't jump zoom levels: high-res
+      // ratchet wheels (MX Master) deliver ONE detent as several packets, so the cap is a shared
+      // per-burst budget rather than per-event (see wheel-zoom.ts). The speed multiplier is the
+      // user's tune knob and applies only to the plain-wheel opt-in path — modifier zoom and
+      // pinch keep the historical fixed step.
+      const d = wheelLimiter.apply(e.deltaY, e.timeStamp)
+      const next = nextWheelZoom(zoom, d, plainWheel ? wheelZoomSpeed : 1)
       if (next === zoom) return
       const k = next / zoom
       setViewport({ x: px - (px - x) * k, y: py - (py - y) * k, zoom: next })
     }
     wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
-    return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
-  }, [getViewport, setViewport, wheelZoom, trackpadRouting, canvasLocked])
+    return () => {
+      wrap.removeEventListener('wheel', onWheel, { capture: true })
+      offGesture?.()
+    }
+  }, [getViewport, setViewport, wheelZoom, wheelZoomSpeed, trackpadRouting, canvasLocked])
 
   // Double-clicking EMPTY canvas pulls back to the overview zoom — the inverse of the node
   // double-click, which frames one node. A fixed zoom, not "the camera the last focus came from":
@@ -8633,7 +8653,11 @@ export function Canvas() {
                   activePermissionMode(agentId),
                   // Same project the account funnel above resolves from: the canvas the verb runs
                   // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
-                  projStore.activeProjectId
+                  projStore.activeProjectId,
+                  // `--model` is a pass-through: `withAgentModel` re-validates the value at the
+                  // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
+                  // so an unsupported agent's command line stays byte-identical.
+                  args.model
                 ),
                 after ?? [],
                 undefined,
@@ -9057,12 +9081,15 @@ export function Canvas() {
             return
           }
           case 'spawn-team': {
-            let roles: { title?: string; prompt?: string; agent?: string }[]
+            let roles: { title?: string; prompt?: string; agent?: string; model?: string }[]
             try {
               const parsed = JSON.parse(args.team ?? '')
               roles = Array.isArray(parsed) ? parsed : []
             } catch {
-              reply({ ok: false, error: 'spawn-team: --team must be a JSON array of {title?, prompt, agent?}' })
+              reply({
+                ok: false,
+                error: 'spawn-team: --team must be a JSON array of {title?, prompt, agent?, model?}'
+              })
               return
             }
             roles = roles.filter((r) => r && typeof r.prompt === 'string' && r.prompt.trim()).slice(0, 8)
@@ -9093,7 +9120,10 @@ export function Canvas() {
                 sshFor(srcCwd),
                 teamAccount,
                 activePermissionMode(memberAgent),
-                teamStore.activeProjectId
+                teamStore.activeProjectId,
+                // Per-role model, so one team can mix tiers in a single call. A role naming a
+                // model its agent cannot switch simply launches bare (withAgentModel no-ops).
+                typeof r.model === 'string' ? r.model : undefined
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })

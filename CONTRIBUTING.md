@@ -86,6 +86,16 @@ need it too, and wire it in the same change.
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
 
+- **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
+  failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed
+  a flag it doesn't know, an unreachable ssh host), Node re-emits the EPIPE as an async `'error'`
+  EVENT on the stream — a try/catch around the write is inert, and the unhandled event crashes the
+  whole main process with an "Uncaught Exception: write EPIPE" dialog (issue #382's class). Attach
+  `child.stdin.on('error', ...)` before the first write — log via `console.warn` so the debug ring
+  sees it, or settle the pending call; the child's exit code stays the authority on the outcome
+  (see `tmux-control-client.ts` and `pty-manager.ts` `runWithStdin` for the house pattern). A test
+  (`src/core/stream-epipe.guard.test.ts`) scans for this and will fail your PR.
+
 - **Never unmount, move or re-key a browser/web node's element.** An Electron `<webview>`'s guest
   process dies on DOM detach — and a detach includes any `insertBefore`/`appendChild` MOVE of an
   attached element, which React performs whenever a kept child's relative order among kept keyed
