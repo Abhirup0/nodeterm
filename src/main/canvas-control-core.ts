@@ -367,8 +367,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  `model` is per role, so one team can mix tiers — give an expensive model to the role that needs it',
     '  and a cheap one to the rest. Same rule as `--model` below. A role may carry `promptFile`',
     '  (absolute path) instead of `prompt` — same multi-line-brief semantics as `--prompt-file`.',
-    '- `open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]` — create a git worktree',
-    '  wrapped in a bound group frame (terminals inside it run in the worktree). Local projects only.',
+    '- `open-worktree --branch <name> [--base <ref|stationId>] [--path P] [--group <id>]` — create a git',
+    '  worktree wrapped in a bound group frame (terminals inside it run in the worktree). `--base`',
+    '  takes a git ref, or the id of a STATION — a node or group inside a worktree-bound frame — and',
+    '  then resolves to that station\'s branch, so wave two branches off wave one by identity instead',
+    '  of restating the branch name. The base is captured when the worktree is CREATED: to build on',
+    '  a station\'s finished work, create the downstream worktree after that station has committed',
+    '  (or have the downstream agent merge the branch first). Local projects only.',
     '- `close-worktree --group <id> [--mode unbind|remove]` — unbind keeps the directory; remove asks',
     '  the user to confirm deletion.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
@@ -776,10 +781,20 @@ Verbs:
   run its heavy role on a large model and the rest on a cheap one. A role may carry
   \`promptFile\` (absolute path) instead of \`prompt\` — the \`--prompt-file\` semantics per role,
   for members whose brief is structured or multi-line.
-- \`open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]\` — create a git
+- \`open-worktree --branch <name> [--base <ref|stationId>] [--path P] [--group <id>]\` — create a git
   worktree (new branch off base, default: the repo's default branch) and wrap it in a bound
   group frame (or bind it to an existing empty group). Terminals created inside the group
   run in the worktree. Local projects only.
+  \`--base\` also takes the id of a STATION — a node or group inside a worktree-bound frame —
+  and resolves to that station's branch, so "branch off what that station is working on" is
+  said by identity: \`open-worktree --branch wave2 --base <wave1 node or group id>\`. The reply
+  names the branch the id resolved to. Refused explicitly: an id outside any worktree frame, a
+  base that resolves to the branch being created, and a value that is neither a node id nor a
+  valid git ref. NOTE the timing: the base is captured when the worktree is CREATED, so a
+  downstream worktree made at fan-out time starts from the upstream branch AS IT IS THEN
+  (usually empty) — create it after the upstream station has committed (arm the downstream
+  agent with \`--after\` and open its worktree when it fires), or have the downstream agent
+  \`git merge\` the upstream branch as its first step.
 - \`close-worktree --group <id> [--mode unbind|remove]\` — unbind (default) drops the binding
   and keeps the directory; remove asks the user to confirm deleting the worktree.
 - \`branch --node <id>\` — branch a Claude node's conversation: the node stays on the new

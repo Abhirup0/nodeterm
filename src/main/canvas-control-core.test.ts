@@ -316,6 +316,18 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts document --base accepting a station id (issue #530)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The flag surface must show the widened grammar…
+      expect(body).toContain('--base <ref|stationId>')
+      // …and both hard truths beside it: what a station id resolves to, and that the base is
+      // captured at CREATION (the deferred-resolution half of #530 is not built — an agent that
+      // reads this text and assumes lazy capture bases a wave on an empty branch).
+      expect(body.toLowerCase()).toContain('station')
+      expect(body).toMatch(/captured when the worktree is CREATED/i)
+    }
+  })
+
   it('both agent-facing texts document --dry-run, derived from DRY_RUN_VERBS (issue #532)', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('--dry-run')

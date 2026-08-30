@@ -329,6 +329,7 @@ import {
   worktreeFromCreate,
   worktreeFromEntry,
   worktreeRemoveMessage,
+  resolveWorktreeBase,
   type GroupWorktree,
   type WorktreeCreateValue,
   type WorktreeEntry
@@ -9342,7 +9343,35 @@ export function Canvas() {
             // reduce to entries/global exactly as before. An explicit `--base` still wins.
             const pw = projectLaunchInfoNow(project?.id ?? '')?.resolved.worktree
             const projectDefaults = { basePath: pw?.basePath?.value, baseRef: pw?.baseRef?.value }
-            const baseRef = args.base?.trim() || effectiveWorktreeBaseRef(projectDefaults, entries)
+            // `--base` takes a git ref OR a station id (issue #530): an id naming a node/group on
+            // the canvas resolves through its worktree-bound group to that station's BRANCH, so
+            // "branch off what that station is working on" is expressed by identity. The pure
+            // resolver owes the explicit refusals (unbound node, self-base, neither-node-nor-ref).
+            const baseRes = resolveWorktreeBase(
+              args.base,
+              branch,
+              nodesRef.current.map((nd) => ({
+                id: nd.id,
+                parentId: nd.parentId,
+                worktree: nd.data.worktree as GroupWorktree | undefined
+              }))
+            )
+            if (baseRes.kind === 'error') {
+              reply({ ok: false, error: `open-worktree: ${baseRes.error}` })
+              return
+            }
+            const baseRef =
+              baseRes.kind === 'default'
+                ? effectiveWorktreeBaseRef(projectDefaults, entries)
+                : baseRes.ref
+            // Said back in every reply so the resolution is transparent — the caller passed an id
+            // and must see which branch it bought.
+            const baseNote =
+              baseRes.kind === 'station'
+                ? ` (resolved from station ${baseRes.stationId}${
+                    baseRes.groupId !== baseRes.stationId ? ` in group ${baseRes.groupId}` : ''
+                  })`
+                : ''
             // Resolve from this session's repo root, so a relay tab still produces a path on the
             // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
@@ -9363,14 +9392,21 @@ export function Canvas() {
                 ok: true,
                 message: [
                   DRY_RUN_PREFIX,
-                  `open-worktree would create branch "${branch}" off ${baseRef || 'the repo default branch'} at ${wtPath}, ` +
+                  `open-worktree would create branch "${branch}" off ${baseRef || 'the repo default branch'}${baseNote} at ${wtPath}, ` +
                     `bound to ${bindGroupId ? `group ${bindGroupId}` : 'a new group frame'}.`,
-                  'The base ref is not verified against git in a dry run — a bad ref still fails at create time.'
+                  // A station's branch comes from a live binding; a plain ref is only vetted by
+                  // git at create time — say which assurance the caller is getting.
+                  ...(baseRes.kind === 'station'
+                    ? []
+                    : [
+                        'The base ref is not verified against git in a dry run — a bad ref still fails at create time.'
+                      ])
                 ].join('\n'),
                 result: {
                   dryRun: true,
                   branch,
                   baseRef: baseRef || null,
+                  ...(baseRes.kind === 'station' ? { baseStation: baseRes.stationId } : {}),
                   path: wtPath,
                   group: bindGroupId
                 }
@@ -9402,8 +9438,14 @@ export function Canvas() {
             )
             reply({
               ok: true,
-              message: `opened worktree ${branch} at ${wtPath} in group ${groupId}`,
-              result: { groupId, branch, path: wtPath, baseRef }
+              message: `opened worktree ${branch} (off ${baseRef || 'the repo default branch'}${baseNote}) at ${wtPath} in group ${groupId}`,
+              result: {
+                groupId,
+                branch,
+                path: wtPath,
+                baseRef,
+                ...(baseRes.kind === 'station' ? { baseStation: baseRes.stationId } : {})
+              }
             })
             return
           }
