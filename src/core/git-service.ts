@@ -202,6 +202,13 @@ function githubTokenFromGitCredentials(cwd: string): Promise<string | null> {
       const token = line ? line.slice('password='.length).trim() : ''
       resolve(token || null)
     })
+    // `git credential fill` can exit before reading the query (no helper configured, killed by
+    // the timeout above) — the EPIPE arrives as an async 'error' EVENT on the pipe, not a throw
+    // here, and unhandled it kills the main process (issue #382's class). The close handler
+    // already resolves this call; the error never carries the token, so logging the code is safe.
+    child.stdin.on('error', (e: NodeJS.ErrnoException) => {
+      console.warn(`[git] credential-fill stdin write failed (${e.code ?? e})`)
+    })
     child.stdin.write('protocol=https\nhost=github.com\n\n')
     child.stdin.end()
   })
