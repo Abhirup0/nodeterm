@@ -5,12 +5,12 @@ import { renameAtomic, writeFileAtomic } from './fs-atomic'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
-  DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
+  CLOSED_SESSIONS_CAP, DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
   type BridgeLink, type CanvasNodeState, type Project, type Workspace, type WorkspaceV1
 } from '../shared/types'
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, resolveNodes, sameProjectContent,
-  sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validKanban,
+  sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validClosedSessions, validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
 import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
@@ -264,9 +264,27 @@ export class WorkspaceStore {
         // Inline projects are stored verbatim in the index (no fileToProject pass), so apply the
         // same kanban shape guard here — a v1/hand-edited board would otherwise crash the render —
         // and the same trigger shape rule (workspace.json is hand-editable input too).
-        const { kanban, ...rest } = e.project
-        const base = validKanban(kanban) ? e.project : rest
-        built.push({ entry: e, project: { ...base, nodes: sanitizeNodeTriggers(base.nodes) } })
+        // `rest` drops BOTH guarded fields; each is added back below only if it passes its guard.
+        const { kanban, closedSessions, ...rest } = e.project
+        const base = validKanban(kanban) ? { ...rest, kanban } : rest
+        // Same treatment for `closedSessions`, and for the same reason: a malformed value here
+        // reaches `mergeClosedHistory`, which iterates it (a non-array throws and takes the whole
+        // sidebar render down) and hands each entry's node to React Flow. Dropped when it fails
+        // the shape rule, capped like every other path, and each surviving node gets the same
+        // trigger normalization `nodes` gets.
+        const history = validClosedSessions(closedSessions)
+          ? closedSessions
+              .slice(0, CLOSED_SESSIONS_CAP)
+              .map((c) => ({ ...c, node: sanitizeNodeTriggers([c.node])[0] }))
+          : undefined
+        built.push({
+          entry: e,
+          project: {
+            ...base,
+            nodes: sanitizeNodeTriggers(base.nodes),
+            ...(history ? { closedSessions: history } : {})
+          }
+        })
       } else if (e.cwd) {
         if (sideline) await sweepStaleTmp(projectFilePath(e.cwd))
         const read = await this.readProjectFile(e.cwd, sideline)
