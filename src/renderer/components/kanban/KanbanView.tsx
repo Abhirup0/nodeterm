@@ -220,18 +220,20 @@ export const KanbanView = memo(function KanbanView({
     if (latest && latest.updatedAt !== modalIssue.updatedAt) setModalIssue(latest)
   }, [github, modalIssue])
   const customAgents = useSettings((s) => s.settings.customAgents)
+  const disabledAgents = useSettings((s) => s.settings.disabledAgents)
   // "+ New" menu entries: the builtin agents, the user's custom agents, then terminal + sticky
   // (same universe as the dock's add menu, minus canvas-only kinds). Memoized — a fresh array
   // (with fresh icon elements) per render would re-render every memoized column.
+  // Respects Settings → Agents → Enabled/Disabled (like the dock, the pane menu and the palette).
   const createOptions: KanbanCreateOption[] = useMemo(
     () => [
-      ...BUILTIN_AGENT_IDS.map((id) => ({
+      ...BUILTIN_AGENT_IDS.filter((id) => !disabledAgents.includes(id)).map((id) => ({
         key: id,
         label: AGENT_CONFIG[id].label,
         choice: { kind: 'agent', agentId: id } as KanbanCreateChoice,
         icon: <IconAgent />
       })),
-      ...customAgents.map((a) => ({
+      ...customAgents.filter((a) => !disabledAgents.includes(a.id)).map((a) => ({
         key: a.id,
         label: a.label,
         choice: { kind: 'agent', agentId: a.id } as KanbanCreateChoice,
@@ -241,7 +243,7 @@ export const KanbanView = memo(function KanbanView({
       { key: 'browser', label: 'Browser', choice: { kind: 'browser' }, icon: <IconWeb /> },
       { key: 'sticky', label: 'Sticky note', choice: { kind: 'sticky' }, icon: <IconNote /> }
     ],
-    [customAgents]
+    [customAgents, disabledAgents]
   )
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions])
   const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])

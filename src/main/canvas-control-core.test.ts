@@ -292,6 +292,20 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('sticky')).toBe(false)
   })
 
+  it('both agent-facing texts document --model on the open verbs and per-role model on spawn-team', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The flag is the only cost lever an orchestrator has: without it every station it opens
+      // inherits one default model. A body that stops naming it leaves that lever undiscoverable,
+      // which is the state this test was written to end.
+      expect(body).toContain('--model')
+      // Both silent no-ops must be stated, or an agent reads a missing flag as a failed call:
+      // a non-switch-capable agent ignores it, and an unknown id fails in-session, not at open.
+      expect(body.toLowerCase()).toContain('ignore')
+      // Per-role model is what lets ONE spawn-team call mix tiers; the JSON example must show it.
+      expect(body).toContain('"model"')
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')
