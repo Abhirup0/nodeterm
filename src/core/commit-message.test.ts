@@ -60,7 +60,7 @@ describe('runAgent — where the agent is actually spawned', () => {
           const child = {
             stdout: { on: (_e: string, cb: (d: Buffer) => void) => cb(Buffer.from('a message')) },
             stderr: { on: () => {} },
-            stdin: { write: () => {}, end: () => {} },
+            stdin: { write: () => {}, end: () => {}, on: () => {} },
             kill: () => {},
             on: (e: string, cb: (...a: unknown[]) => void) => {
               ;(listeners[e] ??= []).push(cb)
