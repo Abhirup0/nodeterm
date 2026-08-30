@@ -14,6 +14,7 @@ import {
 } from '../core/agents/hook-sandbox-hint-sh'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { PROJECT_TARGETABLE_VERBS } from './project-grants'
+import { DRY_RUN_VERBS } from '../shared/control-verbs'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
@@ -312,6 +313,19 @@ describe('parseControlRequest', () => {
       expect(body.toLowerCase()).toContain('ignore')
       // Per-role model is what lets ONE spawn-team call mix tiers; the JSON example must show it.
       expect(body).toContain('"model"')
+    }
+  })
+
+  it('both agent-facing texts document --dry-run, derived from DRY_RUN_VERBS (issue #532)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('--dry-run')
+      // The verb list is RENDERED from the set (dryRunDocLines) — walk the real set so a verb
+      // added to the gate lands in the text the day it is added, and a removed one reds here.
+      for (const v of DRY_RUN_VERBS) expect(body).toContain(v)
+      // Both hard edges must be stated, or an agent discovers them by losing a call to each:
+      // unsupported verbs refuse, and --project cannot be combined.
+      expect(body.toLowerCase()).toContain('refuses `--dry-run`')
+      expect(body).toContain('cannot be combined with `--project`')
     }
   })
 

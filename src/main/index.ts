@@ -216,6 +216,7 @@ import { buildHandoff, type HandoffRemote } from './handoff'
 import { initContextLink, setNodeTranscript } from '../core/context-link'
 import { transcriptPathOf } from '../core/context-link-core'
 import { initCanvasControl, installCanvasSkillInto } from './canvas-control'
+import { DRY_RUN_VERBS, dryRunRequested, dryRunRefusal } from '../shared/control-verbs'
 import { initTranscriptIndex, searchTranscripts } from '../core/transcript-index'
 import { initTelemetry } from './telemetry'
 import { initClaudeUsage } from './claude-usage'
@@ -3102,6 +3103,15 @@ app.whenReady().then(async () => {
   const projectIdOfNode = (id: string): string | undefined =>
     workspaceStore.persistedCanvases().find((c) => c.nodes.some((n) => n.id === id))?.id
   hookServer.setControlHandler(async ({ verb, nodeId, args, verified }) => {
+    // `--dry-run` (issue #532) is honoured by the spawn verbs only, and this gate runs FIRST —
+    // before the browser intercept, the open-project gates and the renderer forward — because a
+    // verb that cannot dry-run must REFUSE rather than silently perform: a `close --dry-run`
+    // that closes is worse than no flag at all. Supported verbs pass through with the flag
+    // intact; their renderer dispatch case stops before the mutation.
+    if (dryRunRequested(args) && !DRY_RUN_VERBS.has(verb)) {
+      const msg = dryRunRefusal(verb)
+      return { ok: false, error: msg, message: msg }
+    }
     // `browser` is answered in MAIN and never forwarded to the renderer's agent-control dispatch:
     // the debugger handle and the CDP allowlist are main-side, and the renderer is the more
     // attackable half. Every other verb still round-trips to the renderer below.

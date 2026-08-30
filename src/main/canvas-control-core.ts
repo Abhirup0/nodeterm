@@ -185,6 +185,23 @@ const VERBS: ControlVerb[] = [
  * dispatch stop agreeing.
  */
 export { isDestructiveVerb, DESTRUCTIVE_VERBS } from '../shared/control-verbs'
+// Imported (not only re-exported) because the agent-facing bodies RENDER the dry-run verb list
+// from the set — the same derive-don't-retype rule as `messagingGuidanceLines`, so the docs can
+// never name a verb the gate does not honour.
+import { DRY_RUN_VERBS } from '../shared/control-verbs'
+
+/** The `--dry-run` paragraph both agent-facing bodies share, rendered from `DRY_RUN_VERBS`. */
+function dryRunDocLines(): string[] {
+  return [
+    `Add \`--dry-run\` to a spawn verb (${[...DRY_RUN_VERBS].join(', ')}) to validate the call`,
+    'WITHOUT opening anything: it runs the same validation as a real call — ids resolved against',
+    'the live canvas, the team JSON parsed role by role, the worktree path computed — and replies',
+    'with what WOULD happen, or the exact refusal. Use it to vet a `spawn-team` payload, a',
+    '`--group`/`--after` id or a `--prompt-file` path before fanning out: these verbs are cheap to',
+    'call and expensive to undo, and the dry run moves the mistake to the cheap side. Every other',
+    'verb refuses `--dry-run` (nothing is done), and it cannot be combined with `--project`.'
+  ]
+}
 
 /** Validate a raw (verb, args) pair into a ControlCommand, or return an { error }. */
 export function parseControlRequest(
@@ -285,6 +302,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     'Flags take a value: `--flag value`, or `--flag=value`. Use the `=` form when the value itself',
     'starts with `--` (`--cmd=--version`); written as two tokens, a leading `--` is read as the next',
     'flag. A flag with no value is allowed anywhere on the line.',
+    '',
+    ...dryRunDocLines(),
     '',
     'Verbs:',
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
@@ -656,6 +675,8 @@ Flags take a value: \`--flag value\`, or \`--flag=value\`. Use the \`=\` form wh
 starts with \`--\` (\`--cmd=--version\`); written as two tokens, a leading \`--\` is read as the
 next flag, so \`--text --oops\` sends an empty \`--text\` plus a stray \`--oops\`. A flag with no
 value is allowed anywhere on the line, not only at the end.
+
+${dryRunDocLines().join('\n')}
 
 Verbs:
 - \`list\` — list current nodes (id, kind, title). Start here when you need a node id.
