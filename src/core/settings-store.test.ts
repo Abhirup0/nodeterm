@@ -60,6 +60,42 @@ describe('SettingsStore nested-default merge', () => {
     expect(store.get().ptyShadowClients).toBe(false)
   })
 
+  it('turns markdown auto-preview ON for a settings.json that predates the key', () => {
+    // Every pre-v0.3.3 install upgrades with no `openMarkdownPreview` in its file: the shallow
+    // merge plus the one-shot migration deliver the flipped default (#495) to that population.
+    writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ fontSize: 15 }), 'utf-8')
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().openMarkdownPreview).toBe(true)
+    expect(store.get().openMarkdownPreviewMigrated).toBe(true)
+  })
+
+  it('migrates a v0.3.3-materialized openMarkdownPreview:false to ON, exactly once', () => {
+    // v0.3.3 (the sole release that defaulted off) materialized `false` into every file it
+    // saved, indistinguishable from an explicit opt-out — the maintainer call on #495 is that
+    // everyone sees ON at least once, so the un-stamped file is force-flipped and stamped.
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ openMarkdownPreview: false }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().openMarkdownPreview).toBe(true)
+    expect(store.get().openMarkdownPreviewMigrated).toBe(true)
+  })
+
+  it('keeps a post-migration opt-out — a stamped openMarkdownPreview:false is permanent', () => {
+    writeFileSync(
+      path.join(dir, 'settings.json'),
+      JSON.stringify({ openMarkdownPreview: false, openMarkdownPreviewMigrated: true }),
+      'utf-8'
+    )
+    const store = new SettingsStore()
+    store.init()
+    expect(store.get().openMarkdownPreview).toBe(false)
+  })
+
   it('leaves an already-modern speech object alone', () => {
     writeFileSync(
       path.join(dir, 'settings.json'),
