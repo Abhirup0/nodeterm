@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   canvasImagePasteArmedAfterKey,
   canvasImportRefusal,
+  droppedDirectories,
   guardedCanvasImagePlacements,
   isCanvasImageDropTarget,
   isFolderDropTarget
@@ -82,6 +83,48 @@ describe('isFolderDropTarget', () => {
 
   it('rejects a null target', () => {
     expect(isFolderDropTarget(null)).toBe(false)
+  })
+})
+
+describe('droppedDirectories', () => {
+  const fakeItem = (opts: { isDirectory: boolean; file: File | null }): DataTransferItem =>
+    ({
+      kind: 'file',
+      webkitGetAsEntry: () => ({ isDirectory: opts.isDirectory }),
+      getAsFile: () => opts.file
+    }) as unknown as DataTransferItem
+
+  it('returns only directory entries, in order', () => {
+    const dirA = new File([], 'project-a')
+    const fileB = new File(['x'], 'notes.txt')
+    const dirC = new File([], 'project-c')
+    const dt = {
+      items: [
+        fakeItem({ isDirectory: true, file: dirA }),
+        fakeItem({ isDirectory: false, file: fileB }),
+        fakeItem({ isDirectory: true, file: dirC })
+      ]
+    } as unknown as DataTransfer
+    expect(droppedDirectories(dt)).toEqual([dirA, dirC])
+  })
+
+  it('tolerates a directory entry whose getAsFile() returns null', () => {
+    const dt = {
+      items: [fakeItem({ isDirectory: true, file: null })]
+    } as unknown as DataTransfer
+    expect(droppedDirectories(dt)).toEqual([])
+  })
+
+  it('returns an empty array for a null DataTransfer or no items', () => {
+    expect(droppedDirectories(null)).toEqual([])
+    expect(droppedDirectories({ items: [] } as unknown as DataTransfer)).toEqual([])
+  })
+
+  it('ignores non-file items (e.g. a text/plain drag)', () => {
+    const dt = {
+      items: [{ kind: 'string', webkitGetAsEntry: () => null, getAsFile: () => null }]
+    } as unknown as DataTransfer
+    expect(droppedDirectories(dt)).toEqual([])
   })
 })
 

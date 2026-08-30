@@ -24,6 +24,17 @@ export function isFolderDropTarget(target: EventTarget | null): boolean {
   )
 }
 
+/** Directories among a drop's items, via the synchronous webkitGetAsEntry() check — this MUST
+ *  run inside the drop handler itself, before any `await`: DataTransferItem entries are only
+ *  valid for the duration of the originating event. */
+export function droppedDirectories(dt: DataTransfer | null): File[] {
+  if (!dt) return []
+  return Array.from(dt.items)
+    .filter((it) => it.kind === 'file' && it.webkitGetAsEntry()?.isDirectory)
+    .map((it) => it.getAsFile())
+    .filter((f): f is File => !!f)
+}
+
 /**
  * Why a canvas image import cannot proceed, or null when it may. One rule, one message, so the
  * drop path and the paste path cannot disagree about either.
