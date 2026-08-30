@@ -315,6 +315,21 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts document --prompt-file and the one-line --prompt fact (issue #520)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // `assembleLaunchCommand` collapses every whitespace run in a --prompt literal (it rides
+      // argv on a line typed into the pane). An agent that does not know this writes a numbered
+      // brief and gets one paragraph — and the fix, --prompt-file, is useless undocumented.
+      expect(body.toUpperCase()).toContain('ONE LINE')
+      expect(body).toContain('--prompt-file')
+      // The per-role escape on spawn-team must be named too, or teams stay prose-only.
+      expect(body).toContain('promptFile')
+      // The failure that costs a whole station: flattened, a leading slash command swallows the
+      // task as its argument, and the node then reads as idle to `--after`.
+      expect(body.toLowerCase()).toMatch(/begin a prompt with `\/`|start a prompt with `\/`/)
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')

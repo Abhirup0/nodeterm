@@ -290,8 +290,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `list` — current nodes (id, kind, title). Start here when you need a node id.',
     '- `help` — print the verb list. Answered by the shim itself, so it works even if the app is down.',
     '- `open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]` — open N plain terminals.',
-    '- `open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
-    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
+    '- `open-claude [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--project <id>]` — open N Claude sessions.',
+    `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
     '  start until every listed station has gone idle, and is context-linked to them so it can read',
@@ -303,6 +303,14 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  included); or an id `open-project` returned to YOU in this session, which never switches the',
     '  user\'s view. A session opened into a non-active project starts when the user next views that',
     '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
+    '  `--prompt` arrives on ONE LINE: every whitespace run in it, newlines included, is collapsed',
+    '  to a single space (the prompt rides the launch command line typed into the pane). For a',
+    '  structured or multi-line brief use `--prompt-file <abs path>` instead: write the brief to a',
+    '  file, pass the absolute path, and the session starts with the file\'s exact contents —',
+    '  newlines, numbered lists and headings preserved. The file is read when the session LAUNCHES',
+    '  (later than the call for an `--after`-armed node), so leave it in place until the station has',
+    '  started. Never begin a prompt with `/`: the agent reads the whole text as that slash',
+    '  command\'s arguments and your task is never seen — use `--model` to pick a model.',
     '  `--model <id>` picks the model the session launches with, instead of inheriting the',
     '  default. Use it to keep a cheap station cheap: a node whose whole job is editing a README',
     '  does not need the model you give the node rewriting a test suite. Honoured by claude, codex',
@@ -338,7 +346,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `spawn-team --label L --team \'[{"title":"UI","prompt":"...","agent":"claude","model":"..."}]\'` — one agent per',
     '  role (max 8), arranged in a grid, wrapped in a labeled group, each connected + context-linked to you.',
     '  `model` is per role, so one team can mix tiers — give an expensive model to the role that needs it',
-    '  and a cheap one to the rest. Same rule as `--model` below.',
+    '  and a cheap one to the rest. Same rule as `--model` below. A role may carry `promptFile`',
+    '  (absolute path) instead of `prompt` — same multi-line-brief semantics as `--prompt-file`.',
     '- `open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]` — create a git worktree',
     '  wrapped in a bound group frame (terminals inside it run in the worktree). Local projects only.',
     '- `close-worktree --group <id> [--mode unbind|remove]` — unbind keeps the directory; remove asks',
@@ -653,8 +662,8 @@ Verbs:
 - \`help\` — print the verb list. The shim answers this itself, without reaching the app, so it
   is also what to run when you are unsure whether the control endpoint is alive.
 - \`open-terminal [--count N] [--cwd P] [--cmd C] [--group <id>] [--after <id,id>] [--project <id>]\` — open N plain terminals (default 1).
-- \`open-claude [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
-- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
+- \`open-claude [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N Claude sessions (default 1).
+- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open N sessions of any agent CLI.
   \`--group\` parents the node(s) into an existing group frame; a worktree-bound group also
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
@@ -672,6 +681,20 @@ Verbs:
   TARGET project's (its cwd, its default account and permission mode). A session opened into a
   non-active project starts when the user next views that project — do not poll for it; the reply
   says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
+  \`--prompt\` arrives on ONE LINE. Every run of whitespace in it — newlines included — is
+  collapsed to a single space, because the prompt is passed as an argument on the agent CLI's
+  launch command line and that line is typed into the pane. Two consequences:
+  - **A structured brief goes through \`--prompt-file <abs path>\`.** Write the brief (numbered
+    acceptance criteria, file lists, guard clauses — anything multi-line) to a file, pass the
+    absolute path, and the session starts with the file's exact contents: the launch line stays
+    one line and the pane's shell reads the file at execution. The file is read when the session
+    LAUNCHES — for an \`--after\`-armed node that is later than your call — so leave it in place
+    until the station has started. On an SSH project the path is on the host (where you run).
+    Pass either \`--prompt\` or \`--prompt-file\`, not both.
+  - **Never start a prompt with \`/\`.** The agent reads the whole prompt as arguments to that
+    slash command, your task is never seen, and the node then sits at an idle prompt looking
+    healthy — including to \`--after\`, which will arm everything behind it. Use \`--model\` for
+    the model; there is no supported way to run a slash command at launch.
   \`--model <id>\` decides which model the session LAUNCHES with, instead of inheriting the
   project default. This is the lever for cost: a station whose job is editing a README does not
   need the model you give the station rewriting a 1000-line test suite, and without this flag
@@ -729,7 +752,9 @@ Verbs:
   open one agent per role (each prompt starts that member working), arrange them in a grid,
   wrap them in a labeled group, and connect + context-link each to you. Max 8 roles per call.
   \`model\` is optional and per role — the same selector \`--model\` applies, so a single team can
-  run its heavy role on a large model and the rest on a cheap one.
+  run its heavy role on a large model and the rest on a cheap one. A role may carry
+  \`promptFile\` (absolute path) instead of \`prompt\` — the \`--prompt-file\` semantics per role,
+  for members whose brief is structured or multi-line.
 - \`open-worktree --branch <name> [--base <ref>] [--path P] [--group <id>]\` — create a git
   worktree (new branch off base, default: the repo's default branch) and wrap it in a bound
   group frame (or bind it to an existing empty group). Terminals created inside the group
