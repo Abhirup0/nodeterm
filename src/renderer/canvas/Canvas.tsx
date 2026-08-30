@@ -10432,39 +10432,52 @@ export function Canvas() {
     void writeDisk()
   }, [commitActiveToStore, writeDisk])
 
+  /** The dedupe/reopen/adopt/create decision for a folder path, shared by the "Open folder…"
+   *  dialog and the drag-and-drop entry point: a folder maps to one project, and this is the
+   *  ONE place that decides whether to reuse/reopen an already-registered project, adopt an
+   *  existing `.nodeterm/project.json` (git clone, synced copy, another machine's project), or
+   *  create a brand-new one. */
+  const openOrAdoptFolder = useCallback(
+    async (folder: string): Promise<void> => {
+      commitActiveToStore()
+      // A folder maps to one project: reuse the already-registered one first…
+      const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
+      if (existing) {
+        useProjects.getState().openFolderProject(folder)
+        // An `unavailable` placeholder never recovers on its own: a save emits a header-only ref
+        // for it (never a file), so a deleted project.json stays deleted and every later load
+        // re-mints the placeholder. Opening the folder is the deliberate act that breaks that
+        // loop — but only on evidence, since clearing the flag lets the next save write this
+        // empty canvas. See #385.
+        const recovery = unavailableRecovery(existing, await api.workspace.projectFileState(folder))
+        if (recovery === 'clear') {
+          useProjects.getState().setProjectUnavailable(existing.id, false)
+        } else if (recovery === 'rehydrate') {
+          // `present` is a stat, not a parse: a corrupt file stats fine, and probeFolder
+          // answering null there means the placeholder is still the honest state.
+          const back = await api.workspace.probeFolder(folder)
+          if (back) useProjects.getState().replaceProject({ ...back, id: existing.id, closed: false })
+        }
+      } else {
+        // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
+        // another machine's project) — only a virgin folder gets a brand-new project.
+        const probed = await api.workspace.probeFolder(folder)
+        if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
+        else useProjects.getState().openFolderProject(folder)
+      }
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
   /** Returns true when a folder was picked (false on cancel), so callers like the welcome
    *  screen can keep their overlay up until the picker actually resolves. */
   const addProjectFromFolder = useCallback(async (): Promise<boolean> => {
     const folder = await window.nodeTerminal.dialog.selectFolder()
     if (!folder) return false
-    commitActiveToStore()
-    // A folder maps to one project: reuse the already-registered one first…
-    const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
-    if (existing) {
-      useProjects.getState().openFolderProject(folder)
-      // An `unavailable` placeholder never recovers on its own: a save emits a header-only ref for
-      // it (never a file), so a deleted project.json stays deleted and every later load re-mints
-      // the placeholder. Opening the folder is the deliberate act that breaks that loop — but only
-      // on evidence, since clearing the flag lets the next save write this empty canvas. See #385.
-      const recovery = unavailableRecovery(existing, await api.workspace.projectFileState(folder))
-      if (recovery === 'clear') {
-        useProjects.getState().setProjectUnavailable(existing.id, false)
-      } else if (recovery === 'rehydrate') {
-        // `present` is a stat, not a parse: a corrupt file stats fine, and probeFolder answering
-        // null there means the placeholder is still the honest state.
-        const back = await api.workspace.probeFolder(folder)
-        if (back) useProjects.getState().replaceProject({ ...back, id: existing.id, closed: false })
-      }
-    } else {
-      // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
-      // another machine's project) — only a virgin folder gets a brand-new project.
-      const probed = await api.workspace.probeFolder(folder)
-      if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
-      else useProjects.getState().openFolderProject(folder)
-    }
-    void writeDisk()
+    await openOrAdoptFolder(folder)
     return true
-  }, [commitActiveToStore, writeDisk])
+  }, [openOrAdoptFolder])
 
   const renameProject = useCallback(
     (id: string, name: string) => {
