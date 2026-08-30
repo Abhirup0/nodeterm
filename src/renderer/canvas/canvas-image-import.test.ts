@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest'
 import {
   canvasImagePasteArmedAfterKey,
   canvasImportRefusal,
+  droppedDirectories,
   guardedCanvasImagePlacements,
-  isCanvasImageDropTarget
+  isCanvasImageDropTarget,
+  isFolderDropTarget
 } from './canvas-image-import'
 
 describe('canvasImportRefusal', () => {
@@ -41,6 +43,99 @@ describe('isCanvasImageDropTarget', () => {
     const wrap = root.querySelector('.flow-wrap')!
     expect(isCanvasImageDropTarget(root.querySelector('[role="dialog"]'), wrap)).toBe(false)
     expect(isCanvasImageDropTarget(root.querySelector('.sessions-sidebar'), wrap)).toBe(false)
+  })
+})
+
+describe('isFolderDropTarget', () => {
+  it('accepts the canvas pane, the Welcome screen, and general app chrome', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <div class="react-flow__pane"><span>pane</span></div>
+      <div class="welcome"><span>welcome</span></div>
+      <aside class="sessions-sidebar"><span>sidebar</span></aside>
+    `
+    expect(isFolderDropTarget(root.querySelector('.react-flow__pane span'))).toBe(true)
+    expect(isFolderDropTarget(root.querySelector('.welcome span'))).toBe(true)
+    expect(isFolderDropTarget(root.querySelector('.sessions-sidebar span'))).toBe(true)
+  })
+
+  it('accepts a Welcome-screen nav card even though it is a <button>', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <div class="welcome__cards">
+        <button class="welcome__card"><span class="welcome__card-title">Open folder…</span></button>
+      </div>
+    `
+    expect(isFolderDropTarget(root.querySelector('.welcome__card'))).toBe(true)
+    expect(isFolderDropTarget(root.querySelector('.welcome__card-title'))).toBe(true)
+  })
+
+  it('rejects terminals, editors, dialogs, form controls, and node bodies', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <div class="xterm"><span>term</span></div>
+      <div class="monaco-editor"><span>editor</span></div>
+      <div role="dialog"><span>dialog</span></div>
+      <input />
+      <textarea></textarea>
+      <button>btn</button>
+      <div contenteditable="true"><span>editable</span></div>
+      <div class="react-flow__node"><span>node body</span></div>
+    `
+    expect(isFolderDropTarget(root.querySelector('.xterm span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('.monaco-editor span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('[role="dialog"] span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('input'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('textarea'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('button'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('[contenteditable] span'))).toBe(false)
+    expect(isFolderDropTarget(root.querySelector('.react-flow__node span'))).toBe(false)
+  })
+
+  it('rejects a null target', () => {
+    expect(isFolderDropTarget(null)).toBe(false)
+  })
+})
+
+describe('droppedDirectories', () => {
+  const fakeItem = (opts: { isDirectory: boolean; file: File | null }): DataTransferItem =>
+    ({
+      kind: 'file',
+      webkitGetAsEntry: () => ({ isDirectory: opts.isDirectory }),
+      getAsFile: () => opts.file
+    }) as unknown as DataTransferItem
+
+  it('returns only directory entries, in order', () => {
+    const dirA = new File([], 'project-a')
+    const fileB = new File(['x'], 'notes.txt')
+    const dirC = new File([], 'project-c')
+    const dt = {
+      items: [
+        fakeItem({ isDirectory: true, file: dirA }),
+        fakeItem({ isDirectory: false, file: fileB }),
+        fakeItem({ isDirectory: true, file: dirC })
+      ]
+    } as unknown as DataTransfer
+    expect(droppedDirectories(dt)).toEqual([dirA, dirC])
+  })
+
+  it('tolerates a directory entry whose getAsFile() returns null', () => {
+    const dt = {
+      items: [fakeItem({ isDirectory: true, file: null })]
+    } as unknown as DataTransfer
+    expect(droppedDirectories(dt)).toEqual([])
+  })
+
+  it('returns an empty array for a null DataTransfer or no items', () => {
+    expect(droppedDirectories(null)).toEqual([])
+    expect(droppedDirectories({ items: [] } as unknown as DataTransfer)).toEqual([])
+  })
+
+  it('ignores non-file items (e.g. a text/plain drag)', () => {
+    const dt = {
+      items: [{ kind: 'string', webkitGetAsEntry: () => null, getAsFile: () => null }]
+    } as unknown as DataTransfer
+    expect(droppedDirectories(dt)).toEqual([])
   })
 })
 
