@@ -425,6 +425,17 @@ export interface ClosedSessionEntry {
 }
 
 /**
+ * How many closed-session entries one project keeps (newest-first; the rest are dropped).
+ *
+ * ONE definition, because the cap must hold at every point an entry list is produced OR admitted:
+ * the store mutator that records a delete (`recordClosedSessions`), and BOTH sides of the shared
+ * file (`projectToFile`/`fileToProject`). Enforcing it only where WE append is not enforcement at
+ * all — `closedSessions` is git-shared, so an inflated list arrives from outside (a teammate's
+ * file, a hand edit) and would render unbounded rows and be written back in full.
+ */
+export const CLOSED_SESSIONS_CAP = 20
+
+/**
  * A snapshot of one canvas's nodes in the form sent over the remote mirror wire.
  * Reuses the persisted node shape (`CanvasNodeState`) so host and client agree on layout.
  */

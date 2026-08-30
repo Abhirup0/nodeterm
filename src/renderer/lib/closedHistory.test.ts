@@ -67,6 +67,29 @@ describe('stateToReopenSnapshot', () => {
     expect(snap.extent).toBeUndefined()
     expect(snap.data.text).toBe('hi')
   })
+
+  // Belt-and-braces behind validClosedSessions (which is what actually rejects these at the file
+  // boundary). recreateNodeFromSnapshot assigns node.position from one of these two UNGUARDED and
+  // React Flow dereferences position.x, so any path that reaches here with an entry the validator
+  // never saw must land the node at a real point, not white-screen the renderer.
+  it('falls back rather than emitting an undefined position when one point is missing', () => {
+    const node = {
+      id: 'n1', kind: 'terminal', position: { x: 3, y: 4 },
+      size: { width: 1, height: 1 }, title: 't', color: '#fff', group: null
+    }
+    const noAbs = { id: 'e1', closedAt: 1, node } as unknown as ClosedSessionEntry
+    expect(stateToReopenSnapshot(noAbs).absolutePosition).toEqual({ x: 3, y: 4 })
+
+    const { position: _dropped, ...positionless } = node
+    const noPos = {
+      id: 'e1', closedAt: 1, node: positionless, absolutePosition: { x: 7, y: 8 }
+    } as unknown as ClosedSessionEntry
+    expect(stateToReopenSnapshot(noPos).position).toEqual({ x: 7, y: 8 })
+
+    const neither = { id: 'e1', closedAt: 1, node: positionless } as unknown as ClosedSessionEntry
+    expect(stateToReopenSnapshot(neither).position).toEqual({ x: 0, y: 0 })
+    expect(stateToReopenSnapshot(neither).absolutePosition).toEqual({ x: 0, y: 0 })
+  })
 })
 
 describe('mergeClosedHistory', () => {

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { projectToFile, fileToProject, validClosedSessions } from './workspace-files'
+import { CLOSED_SESSIONS_CAP } from '../shared/types'
 import type { ClosedSessionEntry, Project } from '../shared/types'
 
 const closedEntry = (id: string, over: Partial<ClosedSessionEntry['node']> = {}): ClosedSessionEntry => ({
@@ -66,5 +67,54 @@ describe('closedSessions round trip', () => {
     expect(validClosedSessions([{ id: 'e1' }])).toBe(false) // missing closedAt/node
     expect(validClosedSessions('nope')).toBe(false)
     expect(validClosedSessions(undefined)).toBe(false)
+  })
+
+  // recreateNodeFromSnapshot assigns `node.position = reattach ? snapshot.position :
+  // snapshot.absolutePosition` UNGUARDED, and React Flow's adoptUserNodes then dereferences
+  // `position.x`. So an entry missing either point is not a cosmetic defect — it is a white-screen
+  // renderer crash reachable from any committed project.json. Reject it at the boundary.
+  it('validClosedSessions rejects an entry with no absolutePosition', () => {
+    const { absolutePosition: _dropped, ...noAbs } = closedEntry('e1')
+    expect(validClosedSessions([noAbs])).toBe(false)
+    expect(validClosedSessions([{ ...closedEntry('e1'), absolutePosition: { x: 1 } }])).toBe(false)
+    expect(validClosedSessions([{ ...closedEntry('e1'), absolutePosition: 'nope' }])).toBe(false)
+  })
+
+  it('validClosedSessions rejects an entry whose node has no position', () => {
+    const bad = closedEntry('e1')
+    const { position: _dropped, ...node } = bad.node
+    expect(validClosedSessions([{ ...bad, node }])).toBe(false)
+  })
+
+  // A garbage kind reaches buildBase's switch, returns null, and the sidebar row silently consumes
+  // itself and vanishes — the same dead-row failure the `trigger` exclusion was added to prevent.
+  it('validClosedSessions rejects an entry with a missing or empty node kind', () => {
+    expect(validClosedSessions([closedEntry('e1', { kind: '' as never })])).toBe(false)
+    expect(validClosedSessions([closedEntry('e1', { kind: undefined as never })])).toBe(false)
+    expect(validClosedSessions([closedEntry('e1', { kind: 7 as never })])).toBe(false)
+  })
+
+  it('a file whose entry lacks position data loads as no history at all, never a broken entry', () => {
+    const file = projectToFile(project({ closedSessions: [closedEntry('e1')] }), 1, 'now')
+    const { absolutePosition: _dropped, ...maimed } = file.closedSessions![0]
+    const hostile = { ...file, closedSessions: [maimed] } as never
+    expect(fileToProject(hostile, { id: 'p1' }).closedSessions).toBeUndefined()
+  })
+
+  // The cap is enforced where entries are ADMITTED, not only where we append them: the file is
+  // git-shared, so an inflated list arrives from outside and would otherwise render unbounded
+  // sidebar rows and be written back in full.
+  it('caps an oversized closedSessions array on read AND on write', () => {
+    const many = Array.from({ length: CLOSED_SESSIONS_CAP + 12 }, (_, i) => closedEntry(`e${i}`))
+
+    const file = projectToFile(project({ closedSessions: many }), 1, 'now')
+    expect(file.closedSessions).toHaveLength(CLOSED_SESSIONS_CAP)
+
+    // A file that arrived already oversized (hand-edited, or written by a build before the cap).
+    const oversized = { ...file, closedSessions: many } as never
+    const loaded = fileToProject(oversized, { id: 'p1' })
+    expect(loaded.closedSessions).toHaveLength(CLOSED_SESSIONS_CAP)
+    // Newest-first order is preserved — the cap drops the TAIL, never the head.
+    expect(loaded.closedSessions?.[0].id).toBe('e0')
   })
 })

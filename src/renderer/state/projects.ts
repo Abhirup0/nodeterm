@@ -11,6 +11,7 @@ import type {
   Viewport,
   Workspace
 } from '@shared/types'
+import { CLOSED_SESSIONS_CAP } from '@shared/types'
 import { collisionSeed, derivedProjectId } from '@shared/project-id'
 import type { ProjectCapability } from '@shared/project-capabilities'
 import type { ProjectIcon } from '@shared/project-icon'
@@ -146,8 +147,8 @@ interface ProjectsState {
   /** Restores a closed project and makes it active. No-op if the id is unknown. */
   reopenProject(id: string): void
 
-  /** Records freshly deleted sessions into the project's history (newest-first, capped at 20).
-   *  No-op if `entries` is empty or the project no longer exists. */
+  /** Records freshly deleted sessions into the project's history (newest-first, capped at
+   *  `CLOSED_SESSIONS_CAP`). No-op if `entries` is empty or the project no longer exists. */
   recordClosedSessions(projectId: string, entries: ClosedSessionEntry[]): void
   /** Removes and returns the matching closed-session entry, or `undefined` if it's already gone
    *  (e.g. discarded from another surface first). */
@@ -605,7 +606,13 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       projects: s.projects.map((p) =>
         p.id !== projectId
           ? p
-          : { ...p, closedSessions: [...entries, ...(p.closedSessions ?? [])].slice(0, 20) }
+          : {
+              ...p,
+              closedSessions: [...entries, ...(p.closedSessions ?? [])].slice(
+                0,
+                CLOSED_SESSIONS_CAP
+              )
+            }
       )
     }))
   },

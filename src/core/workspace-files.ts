@@ -7,6 +7,7 @@ import {
   stripSharedNodeExec,
   type LocalNodeExecMap
 } from '../shared/node-exec'
+import { CLOSED_SESSIONS_CAP } from '../shared/types'
 import type { BridgeLink, CanvasNodeState, ClosedSessionEntry, NavStop, Project, ProjectKanban, Viewport, Workspace } from '../shared/types'
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
@@ -258,8 +259,11 @@ export function projectToFile(
   const nodes = sanitizeNodeTriggers(
     stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
   )
+  // Capped on the way OUT as well as in (see CLOSED_SESSIONS_CAP): the store mutator guarantees
+  // this in normal operation, but an in-memory list inflated some other way (a hand-edited file
+  // loaded before the cap existed, a future caller) must not be written back uncapped.
   const closedSessions = p.closedSessions?.length
-    ? p.closedSessions.map((e) => ({
+    ? p.closedSessions.slice(0, CLOSED_SESSIONS_CAP).map((e) => ({
         ...e,
         node: sanitizeNodeTriggers(
           stripSharedNodeExec(p.cwd ? toPortableNodes([e.node], p.cwd) : [e.node])
@@ -302,21 +306,40 @@ export function validKanban(k: unknown): k is ProjectKanban {
   )
 }
 
-/** Tolerant-reader guard for `closedSessions`, same shallow-shape rule as `validKanban`: anything
- *  that isn't an array of `{id, closedAt, node}` objects is dropped rather than trusted, so a
- *  legacy/hand-edited file degrades to no history instead of crashing. */
+/** A `{x, y}` point, checked at the boundary because the file is hostile input. */
+function validPoint(p: unknown): p is { x: number; y: number } {
+  return (
+    !!p &&
+    typeof p === 'object' &&
+    typeof (p as { x: unknown }).x === 'number' &&
+    typeof (p as { y: unknown }).y === 'number'
+  )
+}
+
+/**
+ * Tolerant-reader guard for `closedSessions`, same "drop it rather than trust it" rule as
+ * `validKanban`: a legacy/hand-edited/hostile file degrades to no history instead of crashing.
+ *
+ * The POSITION fields are not optional politeness — they are the crash. `recreateNodeFromSnapshot`
+ * assigns `node.position = reattach ? snapshot.position : snapshot.absolutePosition` UNGUARDED, so
+ * an entry missing either one hands React Flow a node with `position: undefined`, and
+ * `adoptUserNodes` dereferences `position.x` — a white-screen renderer crash from a file anyone can
+ * commit. `kind` is checked for the sibling failure: a garbage kind reaches `buildBase`'s switch,
+ * returns null, and the row silently consumes itself and vanishes (`buildBase` already `return
+ * null`s for anything unknown, so a non-empty string is enough here — no NodeKind enum copy).
+ */
 export function validClosedSessions(x: unknown): x is ClosedSessionEntry[] {
   return (
     Array.isArray(x) &&
-    x.every(
-      (e) =>
-        !!e &&
-        typeof e === 'object' &&
-        typeof (e as ClosedSessionEntry).id === 'string' &&
-        typeof (e as ClosedSessionEntry).closedAt === 'number' &&
-        !!(e as ClosedSessionEntry).node &&
-        typeof (e as ClosedSessionEntry).node === 'object'
-    )
+    x.every((e) => {
+      if (!e || typeof e !== 'object') return false
+      const entry = e as ClosedSessionEntry
+      if (typeof entry.id !== 'string' || typeof entry.closedAt !== 'number') return false
+      if (!validPoint(entry.absolutePosition)) return false
+      const node = entry.node as CanvasNodeState | undefined
+      if (!node || typeof node !== 'object') return false
+      return typeof node.kind === 'string' && node.kind.length > 0 && validPoint(node.position)
+    })
   )
 }
 
@@ -381,9 +404,12 @@ export function fileToProject(
     ...readProjectCapabilities(f),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
+    // Capped at the READ boundary, which is the one that matters: the file is git-shared, so an
+    // oversized list arrives from outside and would otherwise render unbounded sidebar rows and be
+    // rewritten in full. See CLOSED_SESSIONS_CAP.
     ...(validClosedSessions(f.closedSessions)
       ? {
-          closedSessions: f.closedSessions.map((e) => ({
+          closedSessions: f.closedSessions.slice(0, CLOSED_SESSIONS_CAP).map((e) => ({
             ...e,
             node: sanitizeNodeTriggers(
               sanitizeBrowserPartitions(

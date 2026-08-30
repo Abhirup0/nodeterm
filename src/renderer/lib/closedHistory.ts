@@ -9,7 +9,8 @@ import { absolutePosition, type FocusableNode } from './nodeFocus'
  * (group/subagent/loop/account-login nodes are excluded from both). `allNodes` must be the FULL
  * live tree from BEFORE the deletion, so parent-chain absolute positions are still resolvable.
  * `now`/`makeId` are injected so this stays a pure, deterministically testable function; call
- * sites pass `Date.now()`/`crypto.randomUUID`.
+ * sites pass `Date.now()` and `uuid` (`lib/uuid.ts`) — NEVER `crypto.randomUUID`, which is absent
+ * outside a secure context and so throws in the Server Edition served over plain HTTP on a LAN.
  */
 export function buildClosedSessionEntries(
   deletedIds: ReadonlySet<string>,
@@ -36,13 +37,21 @@ export function buildClosedSessionEntries(
  * already accepts. `CanvasNodeState` and `NodeData` share field names for everything both
  * track (by construction of `nodeStatesToFlow`/`flowToNodeStates`), so this is a direct field
  * copy, not a lossy remap.
+ *
+ * The position fallbacks are belt-and-braces behind `validClosedSessions`, which is what actually
+ * rejects a positionless entry at the file boundary. They exist because
+ * `recreateNodeFromSnapshot` assigns `node.position` from one of these two UNGUARDED, and React
+ * Flow dereferences `position.x` — so any path that ever reaches here with an entry the validator
+ * did not see (an inline index project, a future caller) lands the node at the origin instead of
+ * white-screening the renderer.
  */
 export function stateToReopenSnapshot(entry: ClosedSessionEntry): ReopenNodeSnapshot {
   const n = entry.node
+  const origin = { x: 0, y: 0 }
   return {
     type: n.kind as RestorableNodeKind,
-    position: n.position,
-    absolutePosition: entry.absolutePosition,
+    position: n.position ?? entry.absolutePosition ?? origin,
+    absolutePosition: entry.absolutePosition ?? n.position ?? origin,
     ...(n.parentId ? { parentId: n.parentId, extent: 'parent' as const } : {}),
     size: n.size,
     data: {

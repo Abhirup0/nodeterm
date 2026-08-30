@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { useProjects } from './projects'
+import { CLOSED_SESSIONS_CAP } from '@shared/types'
 import type { ClosedSessionEntry } from '@shared/types'
 
 const entry = (id: string, closedAt = 1): ClosedSessionEntry => ({
@@ -35,9 +36,11 @@ describe('recordClosedSessions', () => {
     expect(useProjects.getState().getProject('p1')?.closedSessions?.map((e) => e.id)).toEqual(['b', 'a'])
 
     setup()
-    const many = Array.from({ length: 25 }, (_, i) => entry(`e${i}`))
+    const many = Array.from({ length: CLOSED_SESSIONS_CAP + 5 }, (_, i) => entry(`e${i}`))
     useProjects.getState().recordClosedSessions('p1', many)
-    expect(useProjects.getState().getProject('p1')?.closedSessions).toHaveLength(20)
+    expect(useProjects.getState().getProject('p1')?.closedSessions).toHaveLength(
+      CLOSED_SESSIONS_CAP
+    )
   })
 
   it('is a no-op for an unknown project', () => {
