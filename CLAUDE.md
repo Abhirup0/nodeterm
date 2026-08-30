@@ -137,8 +137,11 @@ group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and th
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
 subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
-viz) and never persisted. `trigger` (issue #493, landing in phases — schema only so far, no
-renderer/scheduler yet) is a first-class PERSISTED kind: its spec (`CanvasNodeState.trigger`,
+viz) and never persisted. `trigger` (issue #493, landing in phases — schema + the core
+scheduler so far: `core/trigger-scheduler.ts`, booted by BOTH shells, sweep-service shape,
+fire-time `TriggerArmStore.isArmed` re-ask, no catch-up for missed slots, cron matched by the
+dependency-free `@shared/cron` with the vixie dom/dow OR rule; delivery + renderer still to come)
+is a first-class PERSISTED kind: its spec (`CanvasNodeState.trigger`,
 @shared/trigger) is git-shared CONTENT sanitized as hostile input on every load path
 (`sanitizeNodeTriggers`), and the definition alone never fires — execution consent is the
 machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
