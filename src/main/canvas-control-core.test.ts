@@ -292,6 +292,15 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('sticky')).toBe(false)
   })
 
+  it('both agent-facing texts separate a denial from an unanswered dialog', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The two answers carry opposite guidance — a denial is final, a timeout is retryable — and
+      // a body that names only "may be denied" leaves a caller reading its own timeout as refusal.
+      expect(body).toContain('denied by user')
+      expect(body).toContain('no answer within 120s')
+    }
+  })
+
   it('both agent-facing texts document --model on the open verbs and per-role model on spawn-team', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       // The flag is the only cost lever an orchestrator has: without it every station it opens
