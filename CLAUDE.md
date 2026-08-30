@@ -1888,8 +1888,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
     shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
     keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
-    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
-    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
+    change. Falling through main is not enough: xterm's custom key handler runs before the Canvas
+    dispatcher, whose main-intercepted command cases deliberately have no renderer handlers.
+    `terminalChordBubbles` must therefore refuse every `MAIN_INTERCEPTED_COMMAND_IDS` command; if
+    it returned true for `node.close`, xterm would withhold `^W` while the unclaimed event bubbled
+    to Canvas. One predicate, two main-process consumers are pinned in `keydown-intercept.test.ts`
+    (including a source-level wiring pin, since the menu leg lives against a real Menu in index.ts),
+    and `keybindingOverrides.test.ts` pins the renderer-to-xterm hand-off through
+    `terminalKeyAction`.
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
