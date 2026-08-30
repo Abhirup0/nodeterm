@@ -2320,6 +2320,13 @@ export function initSshProject(
             resolve({ code: err ? ((err as { code?: number }).code ?? 1) : 0, stdout: stdout ?? '' })
         )
         if (stdin !== undefined) {
+          // ssh can die before draining stdin (unreachable host, bad option, instant auth
+          // refusal) — that EPIPE is an async 'error' EVENT on the pipe, not a throw here, and
+          // unhandled it kills the main process (issue #382's class). The execFile callback
+          // above already reports the child's exit; log and stand by.
+          child.stdin?.on('error', (e: NodeJS.ErrnoException) => {
+            console.warn(`[ssh-project] ssh stdin write failed (${e.code ?? e})`)
+          })
           child.stdin?.end(stdin)
         }
       }),

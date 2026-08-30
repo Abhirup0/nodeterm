@@ -466,6 +466,11 @@ export function buildStubApi(): Omit<
     // here (see the note beside createPtyPressureMonitor in src/server/index.ts). The fix itself
     // rejects rather than pretending, so a stray call can never look like it worked.
     onPtyPressure: noopUnsub,
+    // A browser tab has no raw input stream to classify — trackpad-vs-mouse ground truth exists
+    // only under the Electron shell (main/trackpad-gesture.ts). Never fires here; the canvas
+    // wheel router is constructed WITHOUT gesture reporting in this runtime and keeps its
+    // delta-shape heuristics, so the degrade is a kept behavior, not a silent gap.
+    onCanvasTrackpadGesture: noopUnsub,
     raisePtyDeviceLimit: async () => ({
       ok: false as const,
       error: 'Raising the terminal limit must be done on the machine running the server.'
