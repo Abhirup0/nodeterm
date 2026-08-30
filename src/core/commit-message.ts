@@ -184,6 +184,14 @@ function spawnAgent(
       resolve({ code: code ?? 1, stdout, stderr })
     })
     if (stdin !== null) {
+      // The agent CLI can exit before draining the prompt (bad flag, instant auth failure, crash
+      // on boot) — the resulting EPIPE is NOT a throw at the write below but an async 'error'
+      // EVENT on the pipe, and unhandled it takes the whole main process down (issue #382's
+      // class). The close handler above already owns the outcome; log it and let the exit code
+      // plus stderr tell the real story.
+      child.stdin.on('error', (e: NodeJS.ErrnoException) => {
+        console.warn(`[commit-message] agent stdin write failed (${e.code ?? e})`)
+      })
       child.stdin.write(stdin)
       child.stdin.end()
     }
