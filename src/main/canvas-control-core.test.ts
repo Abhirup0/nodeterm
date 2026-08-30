@@ -292,6 +292,19 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('sticky')).toBe(false)
   })
 
+  it('both agent-facing texts warn that --prompt is one line and must not start with a slash', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // `assembleLaunchCommand` collapses every whitespace run in the prompt, because the prompt
+      // rides argv on a line that is typed into the pane. An agent that does not know this writes
+      // a numbered brief and gets one paragraph.
+      expect(body.toLowerCase()).toContain('one line')
+      // The failure that costs a whole station: flattened, a leading slash command swallows the
+      // task as its argument, and the node then reads as idle to `--after`. Silence here is what
+      // let that ship.
+      expect(body).toMatch(/start a prompt with `\/`|begin a prompt with `\/`/i)
+    }
+  })
+
   it('both agent-facing texts separate a denial from an unanswered dialog', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       // The two answers carry opposite guidance — a denial is final, a timeout is retryable — and
