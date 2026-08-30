@@ -54,12 +54,18 @@ export function ClosedHistorySection(props: ClosedHistorySectionProps): JSX.Elem
                   if (e.key === 'Enter' || e.key === ' ') props.onReopenProject(row.projectId)
                 }}
               >
+                {/* Same className the sidebar's own project rows pass (SessionsSidebar's
+                    ss-group__head). ProjectGlyph deliberately carries no box CSS of its own —
+                    "every wired call site passes its own className" — so omitting it renders the
+                    monogram fallback as a bare colored span instead of the 18px circular badge
+                    every other project row shows. `size` is not the substitute: it only sets the
+                    EMOJI font-size and is inert for the monogram variant. */}
                 <ProjectGlyph
                   icon={row.project.icon}
                   color={row.project.color}
                   name={row.project.name}
                   variant="monogram"
-                  size={15}
+                  className="ss-group__monogram"
                 />
                 <span className="sessions-sidebar__history-name">{row.project.name}</span>
                 <span className="sessions-sidebar__history-age">

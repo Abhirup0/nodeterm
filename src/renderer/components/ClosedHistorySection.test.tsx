@@ -63,6 +63,16 @@ describe('ClosedHistorySection', () => {
     expect(host.textContent).toContain('closed-proj')
   })
 
+  it('renders a project row glyph with the sidebar\'s own monogram class', async () => {
+    // ProjectGlyph carries no box CSS of its own — "every wired call site passes its own
+    // className" — so without this the monogram fallback is a bare colored span, not the 18px
+    // circular badge every other project row in this sidebar shows.
+    await render(<ClosedHistorySection {...baseProps} projects={projects} />)
+    const projectRow = Array.from(host.querySelectorAll('.sessions-sidebar__history-item'))
+      .find((el) => el.textContent?.includes('closed-proj'))
+    expect(projectRow?.querySelector('.ss-group__monogram')).toBeTruthy()
+  })
+
   it('calls onReopenSession with projectId+entryId on click', async () => {
     const onReopenSession = vi.fn()
     await render(<ClosedHistorySection {...baseProps} projects={projects} onReopenSession={onReopenSession} />)
