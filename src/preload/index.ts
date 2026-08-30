@@ -731,6 +731,11 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.ptyPressure, handler)
     return () => ipcRenderer.removeListener(IPC.ptyPressure, handler)
   },
+  onCanvasTrackpadGesture: (listener) => {
+    const handler = (_e: unknown, active: boolean) => listener(active)
+    ipcRenderer.on(IPC.canvasTrackpadGesture, handler)
+    return () => ipcRenderer.removeListener(IPC.canvasTrackpadGesture, handler)
+  },
   raisePtyDeviceLimit: () => ipcRenderer.invoke(IPC.ptyRaiseDeviceLimit),
   answerPermission: (payload) => ipcRenderer.invoke(IPC.agentAnswerPermission, payload),
   ackDone: (nodeId) => {

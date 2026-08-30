@@ -1263,7 +1263,10 @@ export interface Settings {
   wheelZoomSpeed: number
   /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
    *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
-   *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
+   *  decides. On the desktop the device is identified from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), so mouse zoom and trackpad pan coexist; the off-switch is the
+   *  remaining recourse for the Server Edition's browser tab, where detection is heuristic and a
+   *  precise-pixel MOUSE still reads as a trackpad. */
   trackpadPan: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map
@@ -2945,6 +2948,13 @@ export interface NodeTerminalApi {
    *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
    *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
   onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Fires when a macOS trackpad gesture (two-finger scroll or pinch) opens or closes on the
+   *  main window — edge transitions from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), a handful per physical gesture. The canvas wheel router uses
+   *  this as ground-truth device identity so a precise-pixel mouse (MX Master) can zoom while the
+   *  trackpad pans. Returns unsubscribe. Server Edition: never fires — a browser tab has no raw
+   *  input stream, and the router keeps its delta-shape heuristics there. */
+  onCanvasTrackpadGesture(listener: (active: boolean) => void): () => void
   /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
    *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
    *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
