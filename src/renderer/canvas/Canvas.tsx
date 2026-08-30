@@ -11792,6 +11792,13 @@ export function Canvas() {
         onProjectContextMenu={onProjectContextMenu}
         onSwitchProject={switchProject}
         onAddToProject={addToProject}
+        onReopenProject={reopenProject}
+        onDeleteProject={requestDeleteClosed}
+        onReopenClosedSession={reopenClosedSessionCommand}
+        onDiscardClosedSession={(projectId, entryId) => {
+          useProjects.getState().discardClosedSession(projectId, entryId)
+          void writeDisk()
+        }}
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
       />
