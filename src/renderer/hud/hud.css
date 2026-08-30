@@ -12,7 +12,7 @@
      SAME surface downward into the session panel. `--bar`, `--notch-width` and `--notch-center-x`
      are pushed from main (notch-hud.ts geometry); the rest are visual tunables. */
   --bar: 32px; /* menu-bar / notch strip height (from main) — the fused top zone */
-  --notch-width: 200px; /* physical notch width (from main) = the capsule's collapsed width */
+  --notch-width: 168px; /* physical notch width (from main) = the capsule's collapsed width */
   --notch-center-x: 50%; /* notch horizontal center in px (from main) — the capsule anchor */
   /* Unused while collapsed (the capsule never exceeds --bar); kept for the expand math only. */
   --capsule-drop: 0px;
@@ -23,7 +23,7 @@
   --capsule-ease: cubic-bezier(0.22, 1, 0.36, 1); /* spring-ish grow */
   --capsule-dur: 0.22s;
   /* Notchless fallback (no physical notch): a standalone floating pill. */
-  --pill-top-gap: 6px; /* gap above the floating pill */
+  --pill-top-gap: 6px; /* gap between the menu-bar strip and the floating pill */
   --pill-radius: 18px; /* all-corner radius of the floating pill */
   --pill-height: 30px; /* collapsed floating-pill height */
 }
@@ -99,13 +99,21 @@ body {
   border-radius: 0 0 var(--capsule-radius) var(--capsule-radius);
 }
 
-/* Notchless display: a standalone floating pill (no notch to fuse with) — a small top gap and
-   all-corner radius so it reads as its own Dynamic-Island-like element, not a black bar at y=0. */
+/* Notchless display: a standalone floating pill (no notch to fuse with) — all-corner radius so it
+   reads as its own Dynamic-Island-like element, not a black bar at y=0.
+
+   LOAD-BEARING: the pill hangs BELOW `--bar`, never inside it. The window's top edge is the
+   display's, so the top `--bar` px are the menu-bar / notch strip; a pill placed there is centred
+   on exactly the coordinates a notch occupies. That made every notch MISdetection invisible rather
+   than merely wrong — issue #508, where scaled resolutions pushed the detector below its threshold
+   and the pill landed behind the notch. Clearing the strip means the fallback layout is safe even
+   when the detector is not, and on a genuine notchless display the pill no longer paints over the
+   menu bar it used to overlap. */
 .notchless .hud-capsule {
   /* No notch to butt against — centre the pill instead of hanging it off the notch's left edge. */
   left: var(--notch-center-x, 50%);
   transform: translateX(-50%);
-  top: var(--pill-top-gap);
+  top: calc(var(--bar) + var(--pill-top-gap));
   max-height: var(--pill-height);
   border-radius: var(--pill-radius);
 }
