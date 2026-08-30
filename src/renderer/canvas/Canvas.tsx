@@ -8633,7 +8633,11 @@ export function Canvas() {
                   activePermissionMode(agentId),
                   // Same project the account funnel above resolves from: the canvas the verb runs
                   // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
-                  projStore.activeProjectId
+                  projStore.activeProjectId,
+                  // `--model` is a pass-through: `withAgentModel` re-validates the value at the
+                  // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
+                  // so an unsupported agent's command line stays byte-identical.
+                  args.model
                 ),
                 after ?? [],
                 undefined,
@@ -9057,12 +9061,15 @@ export function Canvas() {
             return
           }
           case 'spawn-team': {
-            let roles: { title?: string; prompt?: string; agent?: string }[]
+            let roles: { title?: string; prompt?: string; agent?: string; model?: string }[]
             try {
               const parsed = JSON.parse(args.team ?? '')
               roles = Array.isArray(parsed) ? parsed : []
             } catch {
-              reply({ ok: false, error: 'spawn-team: --team must be a JSON array of {title?, prompt, agent?}' })
+              reply({
+                ok: false,
+                error: 'spawn-team: --team must be a JSON array of {title?, prompt, agent?, model?}'
+              })
               return
             }
             roles = roles.filter((r) => r && typeof r.prompt === 'string' && r.prompt.trim()).slice(0, 8)
@@ -9093,7 +9100,10 @@ export function Canvas() {
                 sshFor(srcCwd),
                 teamAccount,
                 activePermissionMode(memberAgent),
-                teamStore.activeProjectId
+                teamStore.activeProjectId,
+                // Per-role model, so one team can mix tiers in a single call. A role naming a
+                // model its agent cannot switch simply launches bare (withAgentModel no-ops).
+                typeof r.model === 'string' ? r.model : undefined
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })
