@@ -353,7 +353,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
-    '  Both ask the user to confirm a dialog and may be denied.',
+    '  Both ask the user to confirm a dialog and may be denied. Read WHICH answer came back:',
+    '  `denied by user` is a decision and is FINAL — never re-ask — while `no answer within 120s`',
+    '  means nobody reached the dialog, which is worth one retry when the user is back.',
     '- `send --node <id> --text "..."` / `reply --node <id> --text "..."` — deliver a message into',
     '  another AGENT node in this project (no confirm dialog: verified-only, gated by the project\'s',
     '  agent-messaging switch — off by default — and rate-limited). A busy target is not interrupted',
@@ -802,6 +804,9 @@ ${browserGuidanceLines().join('\n')}
 
 Notes:
 - \`write\` and \`close\` require the user to approve a confirmation dialog; they may be denied.
+  Two different replies, two different follow-ups: \`denied by user\` is a decision and is FINAL —
+  never re-ask — whereas \`no answer within 120s\` means the dialog was simply not reached in
+  time, which is worth one retry when the user is back at the machine.
 - \`board\` and \`assign\` act on the CURRENTLY OPEN project's board — the same one you see when you
   toggle the kanban view. They need no confirmation.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.
