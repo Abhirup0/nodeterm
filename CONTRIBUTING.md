@@ -64,6 +64,14 @@ The **canvas and the kanban board are two views of the same nodes.** When you ad
 canvas node — a header action, a badge, a menu item — ask whether the board's card and card modal
 need it too, and wire it in the same change.
 
+A board card's **source** is a registry entry, not a branch you add at a call site
+(`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
+(`assignment` = the board's own persisted assignments, `provider` = the provider owns the column),
+in-column `lane` order, whether it is `configured` for a board — and give it its one leaf (a card
+component and the list path feeding it). Columns take lanes and name no source; the drag path
+branches on `placement`. If you find yourself writing `=== 'github'` outside the registry, the
+registry is missing a field.
+
 ## House rules
 
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
