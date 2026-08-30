@@ -386,6 +386,7 @@ import { pushSessionRename } from '../lib/sessionRename'
 import { useReopenHistory, type ReopenEntry } from '../state/reopenHistory'
 import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
 import { buildClosedSessionEntries, stateToReopenSnapshot } from '../lib/closedHistory'
+import { uuid } from '../lib/uuid'
 import { planReopen, type ReopenPlan } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
 import { parseLenses, verifyLensPrompt, verifySynthesisPrompt } from '../lib/verifyPanel'
@@ -4574,12 +4575,12 @@ export function Canvas() {
           })
         }
         const deletedAt = Date.now()
-        const closedEntries = buildClosedSessionEntries(
-          set,
-          nodesRef.current,
-          deletedAt,
-          () => crypto.randomUUID()
-        )
+        // `uuid()`, NOT crypto.randomUUID: the latter exists only in a SECURE context, so it is
+        // undefined in the Server Edition served over plain HTTP on a LAN — and this call sits at
+        // the TOP of deleteNodes, before transport.destroy/setNodes, so a throw here would make
+        // Delete do nothing at all on that surface. See lib/uuid.ts (the same call already broke
+        // "Add agent" once).
+        const closedEntries = buildClosedSessionEntries(set, nodesRef.current, deletedAt, uuid)
         if (closedEntries.length) {
           useProjects.getState().recordClosedSessions(
             useProjects.getState().activeProjectId ?? '',
