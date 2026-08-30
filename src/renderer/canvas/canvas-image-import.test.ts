@@ -59,6 +59,17 @@ describe('isFolderDropTarget', () => {
     expect(isFolderDropTarget(root.querySelector('.sessions-sidebar span'))).toBe(true)
   })
 
+  it('accepts a Welcome-screen nav card even though it is a <button>', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <div class="welcome__cards">
+        <button class="welcome__card"><span class="welcome__card-title">Open folder…</span></button>
+      </div>
+    `
+    expect(isFolderDropTarget(root.querySelector('.welcome__card'))).toBe(true)
+    expect(isFolderDropTarget(root.querySelector('.welcome__card-title'))).toBe(true)
+  })
+
   it('rejects terminals, editors, dialogs, form controls, and node bodies', () => {
     const root = document.createElement('div')
     root.innerHTML = `

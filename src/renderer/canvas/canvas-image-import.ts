@@ -18,6 +18,12 @@ export function isCanvasImageDropTarget(target: EventTarget | null, wrap: Elemen
 export function isFolderDropTarget(target: EventTarget | null): boolean {
   const element = target instanceof Element ? target : null
   if (!element) return false
+  // The Welcome screen's four nav cards (`.welcome__card`) are themselves <button> elements, so
+  // without this carve-out the general `button` exclusion below would silently swallow a folder
+  // dropped straight onto "Open folder…" — defeating the feature's own stated goal of working from
+  // the Welcome screen. Every OTHER button (dialogs, terminal headers, form controls, …) still
+  // falls through to the exclusion unchanged.
+  if (element.closest('.welcome__card')) return true
   return !element.closest(
     'input, textarea, select, button, [contenteditable], [role="dialog"], ' +
       '.monaco-editor, .xterm, .react-flow__node'
