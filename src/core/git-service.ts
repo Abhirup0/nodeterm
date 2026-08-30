@@ -387,7 +387,10 @@ export class GitService {
         git(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
         git(cwd, ['diff', '--cached', '--numstat']),
         git(cwd, ['diff', '--numstat']),
-        git(cwd, ['status', '--porcelain'])
+        // -uall forces git to list every untracked file individually instead of collapsing an
+        // entirely-untracked directory into one `?? dir/` entry (issue: SC panel showed a folder
+        // row that, when clicked, opened a diff node against a directory). Still respects .gitignore.
+        git(cwd, ['status', '--porcelain', '-uall'])
       ])
     const gh = ghAuthedSwr()
 
@@ -426,6 +429,9 @@ export class GitService {
       let p = raw.slice(3)
       if (p.includes(' -> ')) p = p.split(' -> ')[1] // rename: use new path
       const unquoted = p.replace(/^"|"$/g, '')
+      // Defense in depth against -uall: a directory-shaped entry (trailing '/') can never be
+      // opened as a file diff, so drop it here rather than let it reach the diff-node click path.
+      if (unquoted.endsWith('/')) continue
 
       if (x === '?' && y === '?') {
         changes.push({ path: unquoted, status: 'U', added: 0, deleted: 0 })
