@@ -343,13 +343,93 @@ the latch shippable, not the window:
 
 - every token sweep releases the latch (collision refusal, delete/re-create, remote refusal);
 - the clock clamp;
+- the shared token resolver (below), so a client cannot fail to FIND a token that exists;
 - and the escape hatch, which must be reachable **in the UI**, because a stranded user's symptom
   never says "clock" or "collision".
+
+### ⚠ A client that cannot FIND the token is indistinguishable from one that has none — issue #384
+
+The token dir is advertised by ONE thing, the endpoint file, and a session is pinned for life to the
+endpoint **path** it was handed at tmux creation (`buildPtyEnv` / `remoteHookEnvArgs`). So a session
+whose endpoint file does not carry a `NODETERM_NODE_TOKEN_DIR` line presents nothing, forever, while
+its token file sits in the standard place. Three populations, all measured on a real host:
+
+- **A pre-v2 endpoint file that is still LIVE.** SSH hosts used to share one
+  `~/.nodeterm/hook-endpoint.env`; the current build writes per-project
+  `hook-endpoint-<projectId>.env` and never touches the old path again. The old file names
+  `~/.nodeterm/hook-<projectId>.sock` — a path **re-bound on every connect of that project** — so it
+  keeps reaching a current server while advertising no dir. Observed: a `VERSION=1` file a month old
+  pointing at a socket created minutes earlier.
+- **A session whose transport rides the env with no readable endpoint file** — what the phone hands
+  a session it spawns.
+- **A partial read** of an endpoint file being rewritten under the reader.
+
+What made it a *refusal* rather than an unverified call is that the CLIENTS DISAGREED. The managed
+hook script has an endpoint failover: on a failed POST it adopts a live sibling endpoint and re-reads
+the token from **that** endpoint's dir — so the node proves itself and latches. The two sh shims had
+no failover and no fallback, so every canvas-control and context-link call from that session was
+refused with `IDENTITY_REFUSED_NOTE` for the rest of its life. **Proven by one client, refused
+through another.**
+
+The fix is one resolver, `nt_read_node_token`, emitted by `core/agents/node-token-sh.ts` and used by
+all three clients (the codex launcher is deliberately excluded — it refuses outright on an unreadable
+endpoint and reports a named degrade, a different contract). It tries the advertised dir, then
+`<dir of the endpoint file>/node-tokens` — the layout **by construction** on all three surfaces — then
+the same well-known data dirs the hook script already walks for endpoint files.
+
+It is **monotone**, and that is the whole safety argument: the advertised dir is always first, so
+nothing that verifies today changes; the lookup is by node-id FILENAME in every candidate, so a
+session can still only present its own token; and a dir belonging to another instance mints under a
+different secret, so its token carries a foreign `kid` — `legacy`, bit-for-bit what presenting
+nothing already gave, and never `forged`. Each candidate can turn `legacy` into `verified` and
+nothing else.
+
+**The advice was wrong too.** Both notes said "Restart this node (right-click it, *Restart agent*)".
+That action re-launches the CLI **inside the same pane** and deliberately leaves the pty, the tmux
+session and therefore the whole environment untouched (`terminal/agent-restart.ts`) — so it could
+never change what a session presents. They now say *close and reopen the node* (a new tmux session is
+what picks up the current `-e` env), *reconnect the SSH project* (the only thing that rewrites the
+host's endpoint file, shim, hook script and token files), and name the escape hatch.
 
 Known and **not** fixed: two processes on one node id after a re-attach. A shell from an older app
 run, whose shim never learned to send the header, posts nothing while the re-attached session proves
 the node — and is then refused for as long as it lives. It is genuinely indistinguishable from an
 impostor; the only code answer would be giving up the latch. The escape hatch is what that case has.
+
+### ⚠ The same asymmetry one layer down: a stale ENDPOINT — issue #445
+
+#384's shape repeated at the transport level. A session is pinned for life to the endpoint *path*
+it was handed, and that path's FILE can advertise a port nothing listens on: the app quit or
+crashed and has not rewritten it yet, the hook server's `start()` failed and left a previous run's
+file standing, or the path carries a retired project id that is never rewritten again. The managed
+hook script survived all of these — its bounded candidate walk (`nt_candidates`/`nt_adopt`) adopts
+a live sibling endpoint and re-reads the token from the adopted dir — while the two sh shims posted
+once at the dead port and died with "control endpoint unreachable": hook events healed themselves,
+canvas control did not, and the field report was a reviewer launch silently dropped from a live
+worktree session.
+
+Three fixes, all in the same change:
+
+- **The walk is shared** (`core/agents/hook-endpoint-failover-sh.ts`), the same extraction
+  `node-token-sh.ts` performed for the token read: one definition, three clients. Both shims fail
+  over on a dead transport only — an HTTP answer of any code is authoritative and is never re-sent
+  to another instance — and re-read the token from each adopted endpoint (`nt_read_node_token
+  "$candidate"`). The walk is skipped under `CODEX_SANDBOX_NETWORK_DISABLED` (#367: the sandbox
+  denies every connect, so each candidate would burn a doomed curl and the sandbox hint is already
+  the right diagnosis).
+- **Publication reflects listener liveness**: `hookServer.stop()` and a FAILED `start()` now delete
+  `hook-endpoint.env` (the desktop calls `stop()` on quit), and a failed `listen()` no longer
+  wedges the singleton — it used to leave `this.server` assigned, so every later `start()` was a
+  silent no-op at port 0 under a stale advertisement. A crash skips the delete, which is exactly
+  what the client walk exists for.
+- **The refusals name the state**: "no endpoint anywhere" and "an advertised endpoint that is not
+  listening" are different facts with opposite advice, so the shims append `STALE_ENDPOINT_HINT`
+  in the second case instead of leaving one generic sentence covering both.
+
+The safety argument is the walk's own: the node id in the body identifies the session, a foreign
+instance that does not know it answers with its ordinary refusal, and a foreign token dir yields a
+foreign `kid` = `legacy`. Real /bin/sh coverage: `canvas-control-shim.failover.test.ts`,
+`context-link-shim.failover.test.ts`, `hook-server.recovery.test.ts`.
 
 ### The escape hatch
 

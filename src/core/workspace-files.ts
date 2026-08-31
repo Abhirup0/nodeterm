@@ -11,6 +11,7 @@ import type { BridgeLink, CanvasNodeState, NavStop, Project, ProjectKanban, View
 import { projectCapabilityFields, readProjectCapabilities } from '../shared/project-capabilities'
 import { loadedAgentBrowserPartition } from '../shared/browser-partition'
 import { sanitizeProjectIcon, type ProjectIcon } from '../shared/project-icon'
+import { sanitizeTriggerSpec } from '../shared/trigger'
 
 /**
  * Drop a browser node's persisted `partition` unless it is exactly the jar THIS project (its
@@ -26,6 +27,28 @@ function sanitizeBrowserPartitions(nodes: CanvasNodeState[], projectId: string):
     if (safe === n.partition) return n
     const { partition: _dropped, ...rest } = n
     return safe === undefined ? rest : { ...rest, partition: safe }
+  })
+}
+
+/**
+ * The trigger twin of `sanitizeBrowserPartitions`, applied on every path a node array crosses the
+ * shared-file boundary (read AND write): a `trigger` spec is git-shared CONTENT (the team shares
+ * the schedule), but the file is hostile input, so only a spec that passes the strict shape rules
+ * survives — a malformed shape, an oversized payload, a smuggled extra key, or a spec sitting on a
+ * non-trigger node all degrade to an INERT node with no spec, never a crash and never a
+ * half-honored value. Note what this deliberately does NOT decide: whether the trigger may FIRE on
+ * this machine — that is the machine-local arm store's question (`core/trigger-arm-store.ts`), and
+ * a freshly loaded file can never answer it. See @shared/trigger for the trust model.
+ */
+export function sanitizeNodeTriggers(nodes: CanvasNodeState[]): CanvasNodeState[] {
+  return nodes.map((n) => {
+    if (n.trigger === undefined) return n
+    if (n.kind === 'trigger') {
+      const safe = sanitizeTriggerSpec(n.trigger)
+      if (safe) return { ...n, trigger: safe }
+    }
+    const { trigger: _dropped, ...rest } = n
+    return rest
   })
 }
 
@@ -225,7 +248,12 @@ export function projectToFile(
   // The project file is a SHARED document (git, or the remote host). Exec-enabling node fields
   // (`shell`, `ssh.extraArgs`) never leave this machine in it — they ride the machine-local index
   // entry instead (`localNodeExec` / `IndexEntryV3.localExec`). See @shared/node-exec.
-  const nodes = stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
+  // Trigger specs are additionally normalized on the way OUT too, so a malformed spec that
+  // reached the live nodes some other way (a peer mutation, a hand edit) is never written into
+  // the shared file as if it were ours.
+  const nodes = sanitizeNodeTriggers(
+    stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
+  )
   const icon = sanitizeProjectIcon(p.icon)
   return {
     version: 1,
@@ -306,9 +334,11 @@ export function fileToProject(
     // `partition` survives only when it is exactly the one THIS project (base.id, machine-local)
     // would mint — a foreign/cloned/unsafe one drops to un-owned default session. See
     // loadedAgentBrowserPartition; without it a cloned project.json forges another project's jar.
-    nodes: sanitizeBrowserPartitions(
-      applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
-      base.id
+    nodes: sanitizeNodeTriggers(
+      sanitizeBrowserPartitions(
+        applyLocalNodeExec(base.cwd ? resolveNodes(f.nodes, base.cwd) : f.nodes, base.localExec),
+        base.id
+      )
     ),
     ...(f.bridges ? { bridges: f.bridges } : {}),
     ...(f.ropes ? { ropes: f.ropes } : {}),

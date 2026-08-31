@@ -86,4 +86,70 @@ describe('installLogSink', () => {
     expect(splitTag('plain line')).toEqual({ tag: '', rest: 'plain line' })
     expect(splitTag(42)).toEqual({ tag: '', rest: '42' })
   })
+
+  // Issue #382: the terminal an `npm start` was launched from goes away, macOS revokes the tty
+  // fds, and the next console.log kills the main process. The failure is delivered as an 'error'
+  // EVENT on the stream (measured on node 22 — a try/catch at the call site catches nothing), so
+  // these drive it the way node does.
+  describe('a dying stdio stream', () => {
+    const eio = (): NodeJS.ErrnoException => Object.assign(new Error('write EIO'), { code: 'EIO' })
+
+    it("stops forwarding to a stream that emitted 'error' — that stream only — and keeps the ring", () => {
+      const b = new LogBuffer()
+      const out = vi.fn()
+      const err = vi.fn()
+      const origLog = console.log
+      const origError = console.error
+      console.log = out
+      console.error = err
+      const un = installLogSink(b)
+      try {
+        console.log('before')
+        process.stdout.emit('error', eio())
+        console.log('after')
+        console.error('stderr still works')
+      } finally {
+        un()
+        console.log = origLog
+        console.error = origError
+      }
+      expect(out).toHaveBeenCalledTimes(1)
+      expect(err).toHaveBeenCalledTimes(1)
+      const msgs = b.snapshot().map((r) => r.msg)
+      expect(msgs).toContain('before')
+      expect(msgs).toContain('after')
+      expect(msgs).toContain('stderr still works')
+      expect(msgs.some((m) => m.includes('forwarding to stdout disabled') && m.includes('EIO'))).toBe(true)
+    })
+
+    it('swallows a synchronous write failure instead of letting it reach the caller', () => {
+      const b = new LogBuffer()
+      const origLog = console.log
+      let calls = 0
+      console.log = () => {
+        calls++
+        throw eio()
+      }
+      const un = installLogSink(b)
+      try {
+        expect(() => console.log('boom')).not.toThrow()
+        console.log('again')
+      } finally {
+        un()
+        console.log = origLog
+      }
+      // Latched after the first failure: the second call never reached the broken original.
+      expect(calls).toBe(1)
+      expect(b.snapshot().map((r) => r.msg)).toContain('again')
+    })
+
+    it('removes its stream listeners on uninstall', () => {
+      const b = new LogBuffer()
+      const before = process.stdout.listenerCount('error')
+      const un = installLogSink(b)
+      expect(process.stdout.listenerCount('error')).toBe(before + 1)
+      un()
+      expect(process.stdout.listenerCount('error')).toBe(before)
+    })
+  })
 })

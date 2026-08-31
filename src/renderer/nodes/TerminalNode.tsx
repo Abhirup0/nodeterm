@@ -27,6 +27,7 @@ import { parseOsc52 } from '../terminal/osc52'
 import { activateUnicode11 } from '../terminal/unicode-width'
 import {
   createFileLinkProvider,
+  createOsc8LinkHandler,
   createUrlLinkProvider,
   installLinkClickFallback,
   makeDirListingLookup
@@ -183,6 +184,7 @@ import { hintLabel, isWindowsPlatform, isMacPlatform } from '@shared/platform-ut
 import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
+import { MaximizeButton } from './MaximizeButton'
 import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -789,13 +791,24 @@ interface CoState {
    * nobody.
    */
   spawnError: string | null
+  /**
+   * A WARM reattach found the session's live working directory GONE (`PtyCreateResult.staleCwd`,
+   * issue #464): the folder was deleted — or deleted and re-created, which is a different inode,
+   * so the shell keeps printing `getcwd` errors forever. NOT an overlay state: the terminal is
+   * alive and possibly mid-work, so this only raises a slim banner offering an EXPLICIT
+   * recycle-and-respawn ("Restart in folder") plus a dismiss. Nothing is typed into the pane and
+   * nothing restarts on its own. Overwritten by every create result for this node, so a clean
+   * respawn clears it.
+   */
+  staleCwd: boolean
 }
 const NO_CO: CoState = {
   letterbox: false,
   closed: null,
   ended: false,
   offline: false,
-  spawnError: null
+  spawnError: null,
+  staleCwd: false
 }
 const coStates = new Map<string, CoState>()
 const coSubs = new Map<string, (s: CoState) => void>()
@@ -926,11 +939,18 @@ function setCo(key: string, patch: Partial<CoState>): void {
   const next = { ...prev, ...patch }
   // A no-op write must stay a no-op: applyFit clears the letterbox on every fit, and handing the
   // node a fresh object each time would re-render it for nothing (and, solo, on every resize tick).
+  //
+  // EVERY field must be compared, not a hand-kept subset. The list used to stop at `offline`, so a
+  // patch that changed ONLY `spawnError` was swallowed here — the "terminal could not be started"
+  // overlay silently never rendered from a bare `{ spawnError }` write, and the new `staleCwd`
+  // banner would have been born with the same fault. If you add a CoState field, add it here.
   if (
     next.letterbox === prev.letterbox &&
     next.closed === prev.closed &&
     next.ended === prev.ended &&
-    next.offline === prev.offline
+    next.offline === prev.offline &&
+    next.spawnError === prev.spawnError &&
+    next.staleCwd === prev.staleCwd
   )
     return
   coStates.set(key, next)
@@ -1600,6 +1620,22 @@ export function TerminalNode({
       respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
     }))
   }
+
+  // "Restart in folder" (CoState.staleCwd, issue #464): the warm-reattached shell sits on a
+  // DELETED directory inode, which no `cd` we could inject would be allowed to fix (text into a
+  // pane is injection) and which re-creating the folder can never heal. The recovery is the same
+  // recycle-then-respawn the model switch and "restart shell" use: core ends the tmux session
+  // (reserving the replacement for this client), the respawn re-validates `data.cwd` and starts a
+  // fresh shell in the re-created folder. Explicit user action only — the session may hold live
+  // work, which is exactly why nothing here runs on its own.
+  const restartInFolder = (): void => {
+    setCo(termKey, { staleCwd: false })
+    transport.recycle(id)
+    updateNodeData(id, (n) => ({
+      respawnNonce: ((n.data.respawnNonce as number | undefined) ?? 0) + 1
+    }))
+  }
+  const dismissStaleCwd = (): void => setCo(termKey, { staleCwd: false })
 
   // "Not connected" (CoState.offline): the host was unreachable, so this node has no session
   // anywhere. Ask the coordinator to re-establish the project's master NOW — it flushes the
@@ -2460,6 +2496,11 @@ export function TerminalNode({
       term.registerLinkProvider(
         createUrlLinkProvider(term, (uri) => window.nodeTerminal.shell.openExternal(uri))
       )
+      // Not in xtermOptionsFromSettings: the handler closes over the shell bridge, which the
+      // pure options builder must not know.
+      term.options.linkHandler = createOsc8LinkHandler((uri) =>
+        window.nodeTerminal.shell.openExternal(uri)
+      )
       const projectFs = (): { fs: FsApi; ssh: boolean } => {
         const st = useProjects.getState()
         const project = st.projects.find((p) => p.id === st.activeProjectId)
@@ -2689,6 +2730,7 @@ export function TerminalNode({
           sessionId: sid,
           fresh,
           accountFallback: fellBack,
+          staleCwd,
           closed,
           screen,
           cursor,
@@ -2737,6 +2779,9 @@ export function TerminalNode({
         // Published for the mount-stable observer effect, which cannot see this closure.
         sessionPersistentRef.current = sessionPersistent
         if (fellBack) setAccountFallback(true)
+        // Truthful on EVERY result, not only when set: a clean respawn ("Restart in folder", or
+        // any refresh that landed on a healthy session) must take the banner down with it.
+        setCo(termKey, { staleCwd: !!staleCwd })
         // Catch up a size change that landed while the spawn was in flight (applyFit skips the
         // IPC until sessionId is set, and the observer won't re-fire without another change).
         applyFit()
@@ -3880,19 +3925,18 @@ export function TerminalNode({
     // honestly keyed on what its closure captures.
   }, [termKey])
 
-  /**
-   * Remove transient subagent render overrides when this React node leaves the active canvas.
-   * Live agent status deliberately survives the unmount: selecting a session in another project
-   * swaps the whole active canvas, but the session we left is still alive and must remain Running
-   * or Waiting in the cross-project sidebar. Real node deletion removes the status explicitly in
-   * `Canvas.deleteNodes`; a later hook/session event owns every other state transition.
-   */
-  useEffect(
-    () => () => {
-      useAgentNodes.getState().clearForParent(id)
-    },
-    [id]
-  )
+  // There is deliberately NO unmount-scoped store cleanup here (issue #402). Live agent status
+  // survives the unmount — selecting a session in another project swaps the whole active canvas,
+  // but the session we left is still alive and must remain Running or Waiting in the cross-project
+  // sidebar. The subagent fan-out survives for the same reason: an unmount says the COMPONENT went
+  // away, not that the work did, and a still-running subagent's card cleared here could never come
+  // back (`start` only fires from live hook events, and a subagent already past its PreToolUse
+  // emits no second one — the card was gone for the rest of its run). Canvas's ephemeral-node memo
+  // skips cards whose parent is not on the active canvas, so a kept entry renders nothing while
+  // away and simply reappears on switch-back. Clearing is owned by the signals that actually mean
+  // "this fan-out is over": a genuine new turn / `sessionPhase === 'end'` in Canvas's status
+  // listener, and every permanent-removal path (`deleteNodes`, cross-project `closeSession`,
+  // `deleteProject`), which must call `clearForParent` explicitly now that unmount does not.
 
   // glyphgrid origin sync. React Flow rewrites these two props per frame while the node is
   // dragged; `setOrigin` is change-gated inside the engine, and a drag is exactly the gesture the
@@ -4740,6 +4784,9 @@ export function TerminalNode({
               </button>
             </Tooltip>
           )}
+        {!collapsed && !isHidden('maximize', hiddenHeaderButtons) && (
+          <MaximizeButton id={id} maximized={!!data.premaxRect} />
+        )}
         <button
           className="term-node__close"
           title="Close (ends the session)"
@@ -4844,6 +4891,33 @@ export function TerminalNode({
             </span>
             <button className="term-node__reopen" onClick={reconnectOffline}>
               Reconnect
+            </button>
+          </div>
+        )}
+        {/* Stale working directory (issue #464): a slim TOP banner, never an overlay — the
+            terminal underneath is alive and may be mid-work. Top edge on purpose: every shell
+            and agent CLI writes its input line at the BOTTOM, and covering the prompt would be
+            worse than covering the oldest visible output row. */}
+        {!co.closed && !co.ended && !co.spawnError && !co.offline && co.staleCwd && !offscreenDown && (
+          <div className="term-node__stalecwd nodrag">
+            <span className="term-node__stalecwd-text">
+              This terminal&apos;s folder was deleted (or replaced) — the shell&apos;s working
+              directory no longer exists.
+            </span>
+            <button
+              className="term-node__stalecwd-restart"
+              onClick={restartInFolder}
+              title={`End this shell and start a fresh one in ${(data.cwd as string) || 'the project folder'}. Anything still running in this terminal will end.`}
+            >
+              Restart in folder
+            </button>
+            <button
+              className="term-node__stalecwd-dismiss"
+              onClick={dismissStaleCwd}
+              title="Dismiss"
+              aria-label="Dismiss"
+            >
+              ×
             </button>
           </div>
         )}

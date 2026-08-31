@@ -64,6 +64,14 @@ The **canvas and the kanban board are two views of the same nodes.** When you ad
 canvas node — a header action, a badge, a menu item — ask whether the board's card and card modal
 need it too, and wire it in the same change.
 
+A board card's **source** is a registry entry, not a branch you add at a call site
+(`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
+(`assignment` = the board's own persisted assignments, `provider` = the provider owns the column),
+in-column `lane` order, whether it is `configured` for a board — and give it its one leaf (a card
+component and the list path feeding it). Columns take lanes and name no source; the drag path
+branches on `placement`. If you find yourself writing `=== 'github'` outside the registry, the
+registry is missing a field.
+
 ## House rules
 
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
@@ -85,6 +93,26 @@ need it too, and wire it in the same change.
   including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+
+- **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
+  failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed
+  a flag it doesn't know, an unreachable ssh host), Node re-emits the EPIPE as an async `'error'`
+  EVENT on the stream — a try/catch around the write is inert, and the unhandled event crashes the
+  whole main process with an "Uncaught Exception: write EPIPE" dialog (issue #382's class). Attach
+  `child.stdin.on('error', ...)` before the first write — log via `console.warn` so the debug ring
+  sees it, or settle the pending call; the child's exit code stays the authority on the outcome
+  (see `tmux-control-client.ts` and `pty-manager.ts` `runWithStdin` for the house pattern). A test
+  (`src/core/stream-epipe.guard.test.ts`) scans for this and will fail your PR.
+
+- **Never unmount, move or re-key a browser/web node's element.** An Electron `<webview>`'s guest
+  process dies on DOM detach — and a detach includes any `insertBefore`/`appendChild` MOVE of an
+  attached element, which React performs whenever a kept child's relative order among kept keyed
+  children changes. That is why webview-hosting nodes render in one stable pool region at the tail
+  of the `<ReactFlow>` nodes prop (`renderer/lib/webviewKeepAlive.ts` — read its header before
+  touching the merge, the node array swap in Canvas's load effect, or anything that reorders
+  nodes), and why a background project's pages stay mounted as hidden ghosts instead of
+  unmounting. `display:none` is safe (measured: state, scroll and viewport size survive); a reorder
+  or unmount reloads the user's page and loses their in-page state.
 
 These are the ones that come up in review most often. Each exists because its absence caused a real
 bug.
@@ -120,6 +148,16 @@ three times.
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.
 
+**A spawn-env write does not reach a tmux session on its own.** The shared tmux server takes each
+new session's env from its own GLOBAL env (inherited from whichever client *started* the server) —
+the creating client's process env only matters for names listed in `update-environment` (or passed
+as non-secret `-e` pairs). Setting `env.FOO` in `pty-manager` therefore works for the plain-shell
+fallback and for the one client that happens to start the server, and silently does nothing (or
+worse, leaks the server-starter's value into everyone else) after that. That is how issue #419
+shipped: managed-account `CLAUDE_CONFIG_DIR` leaked into system-account sessions. New per-session
+env either joins `ACCOUNT_SCOPE_UPDATE_ENV` / the gateway list, or rides `-e` — and gets a
+real-tmux test (`account-env.realtmux.test.ts` is the pattern).
+
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,
 ⌘, — are still handled above the page, so your `keydown` branch simply never runs: steal the chord
@@ -133,6 +171,23 @@ here has: not while the kanban board covers it, not while the user is typing.
 **Comments explain WHY, and name the failure they prevent.** The codebase is deliberately dense with
 reasoning. A comment that restates the code is noise; one that says "do not simplify this back,
 here is what broke" is the point.
+
+**A generated sh client reads its node token through the one resolver.** Every POSIX-sh client we
+emit (the managed hook script, `nodeterm.sh`, `context.sh`) presents this node's per-node identity by
+calling `nt_read_node_token` from `core/agents/node-token-sh.ts` — never by re-typing
+`head -n 1 "$NODETERM_NODE_TOKEN_DIR/$NODETERM_NODE_ID"`. That copy was issue #384: a session is
+pinned for life to the endpoint FILE path it got at tmux creation, so a client that trusts only what
+that file advertises presents nothing forever when the file is old or unreadable — and because the
+hook script alone could heal itself, the same node proved itself through one client and was refused
+through another for the life of the session.
+
+**A stream error is not a throw you can catch.** When a write to `process.stdout`/`stderr` fails —
+`EPIPE` down a closed pipe, `EIO` after macOS revokes a closed terminal's tty — node reports it by
+emitting `'error'` on the stream a tick later, and the default for an unhandled `'error'` event is
+to kill the process. The stack it carries was captured at the write, so the crash *reads* as if it
+happened synchronously at your `console.log`, and wrapping that call in `try/catch` changes nothing
+(measured on node 22). If you write to a stream that can go away, attach an `'error'` listener and
+latch the writer off — `installLogSink` (`src/core/log-sink.ts`) is the worked example. Issue #382.
 
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and

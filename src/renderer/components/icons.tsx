@@ -336,3 +336,24 @@ export const IconCanvasView = () => (
     <rect x="3.5" y="9.5" width="5.5" height="5" rx="1" />
   </svg>
 )
+
+/** Fullscreen expand — outward diagonal arrows: the maximize toggle's "will fill the viewport"
+ *  state (issue #399). Pairs with IconRestoreSize; the two states must not share a glyph. */
+export const IconMaximize = () => (
+  <svg {...S}>
+    <path d="M14 4h6v6" />
+    <path d="M20 4l-6 6" />
+    <path d="M10 20H4v-6" />
+    <path d="M4 20l6-6" />
+  </svg>
+)
+
+/** Fullscreen restore — the same arrows pointing back inward: the maximize toggle's second click. */
+export const IconRestoreSize = () => (
+  <svg {...S}>
+    <path d="M20 10h-6V4" />
+    <path d="M20 4l-6 6" />
+    <path d="M4 14h6v6" />
+    <path d="M4 20l6-6" />
+  </svg>
+)

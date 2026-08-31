@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { readLocal, writeLocal } from '../lib/localStore'
 
 // Which view each project shows (canvas or kanban) — PERSONAL, per machine: persisted in
 // localStorage, deliberately never in the git-shared .nodeterm/project.json (spec rule).
@@ -26,7 +27,7 @@ export function parseViewMap(raw: string | null): Record<string, ProjectView> {
 
 function save(v: Record<string, ProjectView>): void {
   try {
-    localStorage.setItem(PROJECT_VIEW_KEY, JSON.stringify(v))
+    writeLocal(PROJECT_VIEW_KEY, JSON.stringify(v))
   } catch {
     /* quota/private-mode: the view choice is a nicety, never fail the UI */
   }
@@ -58,10 +59,7 @@ export function viewFor(s: Pick<ViewModeState, 'viewByProject' | 'defaultView'>,
 }
 
 export const useViewMode = create<ViewModeState>((set) => ({
-  // localStorage guard: this module is also imported by node-environment vitest suites.
-  viewByProject: parseViewMap(
-    typeof localStorage === 'undefined' ? null : localStorage.getItem(PROJECT_VIEW_KEY)
-  ),
+  viewByProject: parseViewMap(readLocal(PROJECT_VIEW_KEY)),
   defaultView: 'canvas',
   setDefaultView: (v) => set((s) => (s.defaultView === v ? s : { defaultView: v })),
   requestedCardNodeId: null,
@@ -75,7 +73,7 @@ export const useViewMode = create<ViewModeState>((set) => ({
         ...s.viewByProject,
         [projectId]: cur === 'kanban' ? 'canvas' : 'kanban'
       }
-      if (typeof localStorage !== 'undefined') save(next)
+      save(next)
       // Leaving the board (or entering it) drops any unconsumed request — it belonged to the view
       // the user just left, and firing it later would pop a card out of nowhere.
       return { viewByProject: next, requestedCardNodeId: null }

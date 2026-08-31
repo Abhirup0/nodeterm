@@ -12,6 +12,9 @@ import {
   type HideableRow
 } from '@renderer/lib/ui-visibility'
 import { cn } from '@renderer/ui/cn'
+import { Select } from '@renderer/ui/Select'
+import { isBrowserRuntime } from '@renderer/bridge/runtime'
+import { UI_SCALE_CHOICES, resolveUiScale, uiScaleLabel } from '@shared/ui-scale'
 import { SectionReset } from '../SectionReset'
 import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
 
@@ -20,7 +23,29 @@ const ROWS = {
     title: 'Appearance',
     keywords: ['appearance', 'theme', 'light', 'dark', 'mode', 'colour', 'color', 'chrome']
   },
+  uiScale: {
+    title: 'UI scale',
+    keywords: ['ui', 'scale', 'zoom', 'size', 'text', 'bigger', 'larger', '4k', 'hidpi', 'dpi', 'display', 'readability']
+  },
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
+  windowTitle: {
+    title: 'Window title',
+    keywords: [
+      'window',
+      'title',
+      'session',
+      'tab',
+      'tracker',
+      'time',
+      'activitywatch',
+      'focused',
+      'native'
+    ]
+  },
+  resumeCard: {
+    title: 'Resume card',
+    keywords: ['resume', 'where you left off', 'breadcrumb', 'card', 'popup', 'trail']
+  },
   menuItems: {
     title: 'Node menu items',
     keywords: ['menu', 'context', 'right click', 'items', 'hide']
@@ -77,11 +102,61 @@ function VisibilityToggles({
   )
 }
 
+/** UI scale (issue #299) — page zoom for the whole app chrome; see shared/ui-scale.ts for the
+ *  mechanism decision. The row stays visible but DISABLED on the Server Edition (a hidden row
+ *  teaches nothing — the house rule the SSH-worktree affordances follow): a browser page cannot
+ *  set its own page zoom, and the browser's Cmd/Ctrl+± already does the identical thing. */
+function UiScaleRow(): React.JSX.Element {
+  const uiScale = useSettings((s) => s.settings.uiScale)
+  const update = useSettings((s) => s.update)
+  const inBrowser = isBrowserRuntime()
+  const resolved = resolveUiScale(uiScale)
+  // A hand-edited between-step value (1.15, say) is honoured by the applier, so the select must
+  // show it rather than silently displaying the nearest preset it would overwrite on next change.
+  const choices: number[] = UI_SCALE_CHOICES.includes(resolved as (typeof UI_SCALE_CHOICES)[number])
+    ? [...UI_SCALE_CHOICES]
+    : [...UI_SCALE_CHOICES, resolved].sort((a, b) => a - b)
+  return (
+    <FieldRow
+      label="UI scale"
+      htmlFor="ui-scale"
+      description={
+        'Scales the whole application UI — menus, node headers, dialogs, sidebars — like a ' +
+        "browser's page zoom. Terminal text scales with it too: the terminal font size " +
+        '(Settings → Terminal) is multiplied by this, so lower it there if you want terminal ' +
+        'text to stay as it is.'
+      }
+      note={
+        inBrowser
+          ? "In the browser, use your browser's own page zoom (Cmd/Ctrl and + / −) — it does the same thing and the browser remembers it per site."
+          : undefined
+      }
+      control={
+        <Select
+          id="ui-scale"
+          value={String(resolved)}
+          disabled={inBrowser}
+          aria-label="UI scale"
+          onChange={(e) => update({ uiScale: Number(e.target.value) })}
+        >
+          {choices.map((c) => (
+            <option key={c} value={String(c)}>
+              {uiScaleLabel(c)}
+            </option>
+          ))}
+        </Select>
+      }
+    />
+  )
+}
+
 export function AppearanceSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const appTheme = useSettings((s) => s.settings.appTheme)
   const accent = useSettings((s) => s.settings.accent)
   const hiddenNodeMenuItems = useSettings((s) => s.settings.hiddenNodeMenuItems)
   const hiddenHeaderButtons = useSettings((s) => s.settings.hiddenHeaderButtons)
+  const showResumeCard = useSettings((s) => s.settings.showResumeCard)
+  const windowTitleActiveSession = useSettings((s) => s.settings.windowTitleActiveSession)
   const update = useSettings((s) => s.update)
   return (
     <SettingsSection
@@ -108,6 +183,9 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
           }
         />
       </SearchableRow>
+      <SearchableRow {...ROWS.uiScale}>
+        <UiScaleRow />
+      </SearchableRow>
       <SearchableRow {...ROWS.accent}>
         <div className="flex items-center justify-between gap-4 py-2.5">
           <span className="text-[13px] text-text">Accent</span>
@@ -127,6 +205,37 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
             ))}
           </div>
         </div>
+      </SearchableRow>
+      <SearchableRow {...ROWS.windowTitle}>
+        <FieldRow
+          label="Show active session in window title"
+          description={
+            'Sets the native window title (and the browser tab, on the Server Edition) to the ' +
+            'focused node and project — "api server — myrepo — node-terminal" — so ' +
+            'window-title-based time trackers like ActivityWatch can tell sessions apart. ' +
+            'Off keeps the static title.'
+          }
+          control={
+            <Switch
+              checked={windowTitleActiveSession}
+              onChange={(v) => update({ windowTitleActiveSession: v })}
+              ariaLabel="Show the active session in the window title"
+            />
+          }
+        />
+      </SearchableRow>
+      <SearchableRow {...ROWS.resumeCard}>
+        <FieldRow
+          label="Resume card"
+          description='Offer a "Resume where you left off" card when a project is activated, listing your last few node landings. Cmd+[ / Cmd+] and the Dock arrows walk the same trail either way.'
+          control={
+            <Switch
+              checked={showResumeCard}
+              onChange={(v) => update({ showResumeCard: v })}
+              ariaLabel="Show the resume card on project activation"
+            />
+          }
+        />
       </SearchableRow>
       {/* One wrapper element per row: the section body puts a divider and its own padding around
           every direct child, so a heading + caption + list must arrive as a single node. */}

@@ -529,6 +529,35 @@ than a generic failure, see above), full **two-master flow-control coordination*
 a single actuator with the renderer), and the web folder picker's **hardcoded start
 directory**.
 
+### Managed Claude accounts
+
+Managed Claude accounts (several logged-in Claude identities side by side, each with its own
+`CLAUDE_CONFIG_DIR`) **work in the browser**. Selecting one always did — env injection, the
+transcript readers, the usage rows and the account pickers are all `src/core` — but the
+*lifecycle* was welded to `ipcMain`, so a browser-only deployment could pick an account it had no
+way to create (issue #313).
+
+- **The lifecycle is core.** `src/core/claude-accounts-service.ts` owns the four
+  `claude-accounts:*` channels (add / wait-login / cancel-wait / remove) and registers them
+  through the platform seam, so **both shells serve them**: `src/main/claude-accounts.ts` is now a
+  thin desktop wrapper, and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`.
+  The browser reaches them through a real `buildClaudeAccountsApi` in the ws-bridge instead of the
+  old `E_UNSUPPORTED` stub. `waitLogin` is a straight passthrough of a poll that runs up to five
+  minutes — safe because the WS RpcClient has no request timeout, so a pending request rejects
+  only when the socket drops.
+- **Per-account hooks are installed at boot and at add.** A managed account carries its own
+  `settings.json` (Claude Code resolves it relative to `CLAUDE_CONFIG_DIR`), so the managed status
+  hook has to be written there too or that account reports no agent status at all. `startServer`
+  runs the same per-account loop the desktop does right after `installManagedAgentHooks()`, and
+  `add` installs into the fresh dir up front.
+- **The canvas skill is desktop-only.** Canvas control is not wired on this edition at all (the
+  hook server answers `control unavailable` by name), so the service takes the skill installer as
+  an optional dep and the server passes none — a per-account `SKILL.md` here would point at
+  nothing.
+- **No remote (SSH) accounts.** The Server Edition has no SSH-project manager, so an account
+  context carrying a `projectId` takes the **local** path — the same degrade the desktop takes
+  before its manager exists.
+
 ### Managed Codex accounts (S6)
 
 The Server Edition **arms the Codex record-signing secret** but does **not** host the
@@ -549,6 +578,15 @@ account-management IPC — that surface is desktop-driven over SSH.
 - **Fail-closed, both ways.** With no secret armed (unwritable key file), the record layer throws
   rather than writing anything unsigned, and Codex nodes keep working bare. A machine with **no** managed
   accounts is byte-for-byte the pre-S6 layout (a bare-root record per thread).
+- **A browser-only deployment therefore cannot manage Codex accounts** — the case issue #313 is
+  about. Managed **Claude** accounts moved into core (above); Codex did not follow, and the reason
+  is not effort: its switch verbs (`switchThread` / `commitSwitch` / `finishSwitch` /
+  `rollbackSwitch`) authorize the owning window by Electron **WebContents id**, which has no
+  meaning over a WS connection where every browser tab is an equally anonymous socket. Hosting
+  them headless needs a connection-identity redesign first, not a handler port. Until then the
+  `codexAccounts` namespace stays an `E_UNSUPPORTED` stub in the bridge and the Settings section
+  says so by name rather than failing silently — an unhandled rejection there previously stopped
+  the spinner and showed nothing.
 
 ## Manual browser smoke checklist
 

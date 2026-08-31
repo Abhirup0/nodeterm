@@ -46,6 +46,7 @@ import {
   type RevocationTargets
 } from './browser-revocation'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { TrackpadGestureLedger } from './trackpad-gesture'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -181,6 +182,7 @@ import { createSubagentTail } from '../core/subagent-tail'
 import { createContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
+import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
@@ -242,7 +244,7 @@ import {
   isSafeRemoteTranscriptPath,
   remoteAccountConfigDirAbs
 } from '../core/claude-accounts-core'
-import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from '../core/agents/hooks/claude'
+import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -975,6 +977,20 @@ function createWindow(): BrowserWindow {
   // (both projects, every terminal). Bounded by the policy so a boot-path crash can't loop;
   // past the budget the user decides. The tmux sessions all live in this process, so a reload
   // costs nothing but the canvas re-hydrating from the workspace store.
+  // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
+  // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
+  // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
+  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
+  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
+  // canvas/wheel-gesture.ts for the two halves of the contract.
+  const trackpadLedger = new TrackpadGestureLedger()
+  win.webContents.on('input-event', (_event, input) => {
+    const active = trackpadLedger.observe(input.type)
+    if (active !== null && !win.isDestroyed()) {
+      win.webContents.send(IPC.canvasTrackpadGesture, active)
+    }
+  })
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
@@ -1598,7 +1614,7 @@ app.whenReady().then(async () => {
   // src/main/agent-messaging.ts for the whole map.
   const messagingDeps: AgentMessagingDeps = {
     paneOwner: (id) => ptyManager.paneOwner(id),
-    sendFramedPayload: (id, payload) => ptyManager.sendFramedPayload(id, payload),
+    sendEnvelope: (id, envelope) => ptyManager.sendEnvelope(id, envelope),
     hasLiveSession: (id) => ptyManager.hasLiveSession(id),
     projects: () => workspaceStore.persistedCanvases(),
     isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
@@ -2096,8 +2112,10 @@ app.whenReady().then(async () => {
   // would mean changing `ContextTail.track(sessionId, path)` and the four call sites that depend on
   // it. The poller (offset reads, torn-line carry, change-gated push) is written once in
   // createContextTail; only the token keys differ, so only `parse` differs. Neither gets
-  // onTaskNotification/onToolResult: both are claude transcript features (subagent cards, the
-  // declined-ask rescue), and neither agent is in SUBAGENT_CAPABLE.
+  // onTaskNotification/onToolResult: both are claude transcript features (the task-notification
+  // sniff exists because claude's hooks never send the async subagent's real end; codex's
+  // SubagentStop hook IS the real end, so its subagent cards need no transcript sniffing —
+  // and the declined-ask rescue is claude-only too).
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
   // Hand the gemini session-name reader its path authority (declared above the handlers that use
   // it, assigned here where the tail exists).
@@ -2325,21 +2343,10 @@ app.whenReady().then(async () => {
   installManagedAgentHooks()
   // Managed accounts each carry their own settings.json AND skills/ (Claude Code resolves both
   // relative to CLAUDE_CONFIG_DIR) — re-install the hook + canvas skill there too (idempotent),
-  // so an app update's new versions reach every account dir. Best-effort: one failing account
-  // must never block launch (match installManagedAgentHooks' fail-open).
-  for (const acct of settingsStore.get().claudeAccounts ?? []) {
-    if (acct.host) continue // remote accounts live on another host; nothing to install locally
-    try {
-      installClaudeHooksInto(claudeConfigDirFor(acct.id))
-      installCanvasSkillInto(claudeConfigDirFor(acct.id))
-      // Ensure fullscreen TUI in this account dir (write-if-absent, version-gated). Off the
-      // critical path: it awaits the memoized CLI probe, then writes fail-open. (The system
-      // ~/.claude is handled by installManagedAgentHooks above, which covers Server Edition too.)
-      void ensureClaudeFullscreenTuiInto(claudeConfigDirFor(acct.id))
-    } catch (e) {
-      console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
-    }
-  }
+  // so an app update's new versions reach every account dir. The loop is shared with the Server
+  // Edition's boot (src/core/claude-accounts-service.ts); the canvas skill is the desktop's own
+  // addition, because canvas control is not wired on that shell at all.
+  installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [], installCanvasSkillInto)
   // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
@@ -2615,14 +2622,45 @@ app.whenReady().then(async () => {
     // jailed by the same `safeTranscriptPath` claude uses (widened to those two agents' transcript
     // roots), because a forged POST could otherwise aim a file read at an arbitrary local path.
     if (agentId === 'gemini' || agentId === 'codex') {
-      const p = payload as { session_id?: string; transcript_path?: string; hook_event_name?: string }
+      const p = payload as {
+        session_id?: string
+        transcript_path?: string
+        hook_event_name?: string
+        agent_id?: string
+      }
       // A REMOTE (SSH) node's transcript lives on the HOST, and these tails read the LOCAL disk —
       // a host path like `~/.gemini/tmp/…` clears the local jail, so without this we would meter
       // whatever same-named file happens to exist on THIS machine. Remote meters for these agents
       // are out of scope (remote-context-tail.ts is that path), so skip rather than report the
       // wrong machine's numbers. The Server Edition needs no counterpart: it has no SSH projects,
       // which is why its copy of this branch is otherwise identical but lacks these two lines.
+      // (A remote codex node's subagent CARDS still work — normalize is machine-agnostic — it is
+      // only the live-activity tail that has no remote leg yet.)
       if (nodeId && ptyManager.sshRemoteForNode(nodeId)) return
+      // Codex subagent events (spawn_agent), BEFORE the meter track: every agent_id-tagged event
+      // carries the PARENT's session_id with the CHILD's rollout as transcript_path (measured,
+      // codex-cli 0.146.0 — SubagentStart and the child's own tool events alike), so falling
+      // through would re-point the parent's context meter at the child's rollout. The tail is the
+      // shared subagentTail instance: releaseNodeTails/SessionEnd cleanup then covers codex ids
+      // through the same nodeSubagents bookkeeping claude uses.
+      if (agentId === 'codex' && p.agent_id) {
+        if (p.hook_event_name === 'SubagentStart') {
+          subagentTail.trackFile(
+            p.agent_id,
+            safeTranscriptPath(p.transcript_path),
+            createCodexSubagentFormatter
+          )
+          if (nodeId) {
+            const set = nodeSubagents.get(nodeId) ?? new Set<string>()
+            set.add(p.agent_id)
+            nodeSubagents.set(nodeId, set)
+          }
+        } else if (p.hook_event_name === 'SubagentStop') {
+          subagentTail.finish(p.agent_id)
+          if (nodeId) nodeSubagents.get(nodeId)?.delete(p.agent_id)
+        }
+        return
+      }
       const transcriptPath = safeTranscriptPath(p.transcript_path)
       const tail = agentId === 'gemini' ? geminiContextTail : codexContextTail
       if (p.session_id && transcriptPath) tail.track(p.session_id, transcriptPath)
@@ -2782,7 +2820,9 @@ app.whenReady().then(async () => {
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
   // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
-  // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.
+  // requestId) bridges the two async hops; both the reply and the timeout below clear the entry.
+  // The window is generous because a confirm-gated verb waits on a human, not on the renderer.
+  const CONTROL_REQUEST_TIMEOUT_MS = 120_000
   const pendingControl = new Map<
     string,
     {
@@ -3112,8 +3152,15 @@ app.whenReady().then(async () => {
     const result = await new Promise<{ ok: boolean; message?: string; result?: unknown; error?: string }>((resolve) => {
       const timer = setTimeout(() => {
         pendingControl.delete(requestId)
-        resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
-      }, 120_000)
+        // Name the timeout and say it is retryable. A DENIAL is a different answer with different
+        // guidance (`denied by user`, final, never retried), and the old wording — "no response /
+        // not confirmed" — read as though it covered both, so a caller that had merely waited out
+        // an unanswered dialog treated it as a refusal and gave up.
+        resolve({
+          ok: false,
+          error: `no answer within ${CONTROL_REQUEST_TIMEOUT_MS / 1000}s — the confirmation dialog may still be open; safe to retry`
+        })
+      }, CONTROL_REQUEST_TIMEOUT_MS)
       pendingControl.set(requestId, { resolve, timer })
       target.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
     })
@@ -3276,6 +3323,16 @@ app.whenReady().then(async () => {
       projectId: string,
       node: { id: string; title?: string; agentId?: string; accountId?: string }
     ) => workspaceStore.appendRemoteNode(projectId, node),
+    // "End session" from the phone (`pty.destroy`): the SAME two steps the desktop × performs —
+    // kill the tmux session on every socket it could live on (the sweep may have seen it on either
+    // — see the session-memory panel's kill rule), then take the node off its project's canvas
+    // (written as an outside edit, so the watcher broadcasts it and the canvas drops the node
+    // live). Node removal is best-effort by design: an unregistered phone session or an inline
+    // project has no file entry to remove, and that must not fail a destroy that already landed.
+    destroyNode: async (nodeId: string) => {
+      await ptyManager.destroySession(null, nodeId, { everySocket: true })
+      await workspaceStore.removeRemoteNode(nodeId).catch(() => false)
+    },
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
@@ -3430,7 +3487,10 @@ app.whenReady().then(async () => {
     // path, and the result is cached (the artifact never changes within an app run). A missing
     // artifact resolves to '' — `installRemoteCodexRuntime` treats an empty bundle as "no runtime"
     // and never fails a plain SSH connect over it.
-    loadCodexRelayBundle
+    loadCodexRelayBundle,
+    // Lead-pane width (issue #119) for the remote tmux conf, read at connect time so the host
+    // carries the value the user last saved. 0 (the default) keeps the conf byte-identical.
+    () => settingsStore.get().tmuxLeadPaneWidth
   )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,
@@ -3601,6 +3661,12 @@ app.on('before-quit', (e) => {
     // And the askpass relay's socket file: close() is what unlinks a unix socket (process exit
     // does not), and a lingering file is one more thing the next start() has to clear.
     askpassServer.stop()
+    // Hook server last among the closers, and on THIS pass so the flush window above could still
+    // receive hook POSTs: stopping unlinks its socket AND its endpoint file (issue #445), so a
+    // graceful quit never leaves an advertisement pointing at a dead port for the tmux sessions
+    // that outlive the app. The next launch rewrites both; a crash skips this, which is what the
+    // generated clients' endpoint failover exists for.
+    hookServer.stop()
     // A SIGTERM quit (dev runners, `kill`, logout) arrives through Chromium's shutdown
     // detector, and this pass's re-issued app.quit() cannot resume the OS-initiated
     // termination the first pass preventDefault'ed: both passes run, but will-quit never

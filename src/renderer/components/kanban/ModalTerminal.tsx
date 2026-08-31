@@ -17,6 +17,11 @@ import { useTerminalSearch } from '../../terminal/useTerminalSearch'
 import { LocalTransport } from '../../terminal/local-transport'
 import { clipboardImages, droppedPaths, pasteHasText, pastedFiles } from '../../terminal/file-drop'
 import { guardMiddleClickPaste } from '../../terminal/middle-click'
+import {
+  createOsc8LinkHandler,
+  createUrlLinkProvider,
+  installLinkClickFallback
+} from '../../terminal/file-links'
 import { parseOsc52 } from '../../terminal/osc52'
 import { activateUnicode11 } from '../../terminal/unicode-width'
 import { useCopyFeedback } from '../../terminal/useCopyFeedback'
@@ -161,6 +166,11 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     // view of one session, and a card that renders it in different colours reads as a different
     // terminal. (It used to hardcode its own background, which is exactly what happened.)
     const term = new Terminal(xtermOptionsFromSettings(s))
+    // Without a handler xterm answers an OSC 8 click with a window.confirm — the one surface
+    // where this session's links would prompt instead of opening like the canvas node's.
+    term.options.linkHandler = createOsc8LinkHandler((uri) =>
+      window.nodeTerminal.shell.openExternal(uri)
+    )
     // The modal is a second view of the SAME tmux session, so it has to measure characters the way
     // the canvas node does. Two views on two width tables would disagree about where the columns
     // are — and the pty runs at the SMALLEST subscriber's grid, so the disagreement would be live.
@@ -182,6 +192,28 @@ export function ModalTerminal({ nodeId, spawn, searchOpen, onCloseSearch }: Moda
     let sessionId: string | null = null
     let dead = false
     const cleanups: Array<() => void> = []
+
+    // MIRROR TerminalNode's link wiring, minus file links. The provider handles Cmd/Ctrl+click on
+    // URL text when mouse-reporting is off (plain-shell sessions); the capture-phase fallback is
+    // what works under tmux/agent mouse-reporting — the norm, and the only path on which the OSC 8
+    // linkHandler above can ever fire in a tmux-backed session (xterm's own link activation is
+    // swallowed by the mouse report, see installLinkClickFallback). File links stay a canvas-node
+    // affordance: the modal has no project-fs/dialect routing, and resolving a path against the
+    // wrong machine is worse than not linking it — hence fileEnabled: false, not stub deps that
+    // pretend to resolve.
+    const openUrl = (uri: string): void => window.nodeTerminal.shell.openExternal(uri)
+    term.registerLinkProvider(createUrlLinkProvider(term, openUrl))
+    if (term.element) {
+      cleanups.push(
+        installLinkClickFallback(term, term.element, {
+          getCwd: () => undefined,
+          lookup: () => Promise.resolve({ exists: false, dir: false }),
+          activateFile: () => {},
+          openUrl,
+          fileEnabled: () => false
+        }).dispose
+      )
+    }
 
     // MIRROR TerminalNode "WRITE-ONLY — `parseOsc52` returns null" — the OSC 52 clipboard-write path.
     // tmux's mouse is ON, so a drag-select in copy-mode emits OSC 52 to this client; this handler

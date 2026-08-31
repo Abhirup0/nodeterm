@@ -124,6 +124,12 @@ export const IPC = {
    *  so the renderer should run its reclaim levers now (hidden WebGL contexts, parked terminals).
    *  Payload: `'warning' | 'critical'`. Re-fired at most once a minute — see core/memory-pressure. */
   appMemoryPressure: 'app:memory-pressure',
+  /** Main → renderer: a macOS trackpad gesture (two-finger scroll or pinch) opened or closed on
+   *  the main window — edge transitions from main/trackpad-gesture.ts, a handful per physical
+   *  gesture. Payload: `boolean` (active). The canvas wheel router uses this as ground-truth
+   *  device identity, replacing delta-shape guessing on the desktop. Desktop only — the Server
+   *  Edition's browser tab has no raw input stream and keeps the heuristics. */
+  canvasTrackpadGesture: 'canvas:trackpad-gesture',
   agentStatus: 'agent:status',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
@@ -269,6 +275,9 @@ export const IPC = {
   workspaceLoad: 'workspace:load',
   workspaceSave: 'workspace:save',
   workspaceProbeFolder: 'workspace:probe-folder',
+  /** Is a folder's .nodeterm/project.json present / absent / unreadable — the distinction
+   *  `probeFolder`'s null collapses. Recovery of an `unavailable` project needs it (issue #385). */
+  workspaceProjectFileState: 'workspace:project-file-state',
   projectSettingsRead: 'project-settings:read',
   projectSettingsWriteShared: 'project-settings:write-shared',
   projectSettingsUpdateLocal: 'project-settings:update-local',

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { readLocal, writeLocal } from '../lib/localStore'
 
 // Whether the kanban card modal opens with its comments & activity panel expanded — PERSONAL,
 // per machine: persisted in localStorage, deliberately never in the git-shared
@@ -17,7 +18,7 @@ export function parseCardPanelOpen(raw: string | null): boolean {
 
 function save(open: boolean): void {
   try {
-    localStorage.setItem(CARD_PANEL_KEY, open ? 'true' : 'false')
+    writeLocal(CARD_PANEL_KEY, open ? 'true' : 'false')
   } catch {
     /* quota/private-mode: the panel state is a nicety, never fail the UI */
   }
@@ -30,12 +31,9 @@ interface CardPanelState {
 }
 
 export const useCardPanel = create<CardPanelState>((set, get) => ({
-  // localStorage guard: this module is also imported by node-environment vitest suites.
-  open: parseCardPanelOpen(
-    typeof localStorage === 'undefined' ? null : localStorage.getItem(CARD_PANEL_KEY)
-  ),
+  open: parseCardPanelOpen(readLocal(CARD_PANEL_KEY)),
   setOpen: (open) => {
-    if (typeof localStorage !== 'undefined') save(open)
+    save(open)
     set({ open })
   },
   toggle: () => get().setOpen(!get().open)

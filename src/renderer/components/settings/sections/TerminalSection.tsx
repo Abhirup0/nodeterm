@@ -9,6 +9,7 @@ import { SectionReset } from '../SectionReset'
 import { Switch } from '@renderer/ui/Switch'
 import { Select } from '@renderer/ui/Select'
 import { NumberField } from '@renderer/ui/NumberField'
+import { Input } from '@renderer/ui/Input'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { TERMINAL_RESET_KEYS } from '@renderer/lib/settingsReset'
 import {
@@ -61,6 +62,10 @@ const ROWS = {
   middleClickPaste: {
     title: 'Middle-click paste',
     keywords: ['middle', 'click', 'mouse', 'paste', 'primary', 'selection', 'x11', 'linux', 'wheel']
+  },
+  wordSeparator: {
+    title: 'Word selection',
+    keywords: ['word', 'separator', 'selection', 'double click', 'identifier', 'hyphen']
   },
   boldBright: {
     title: 'Bold text uses bright colours',
@@ -306,7 +311,7 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
           <GroupHeading>Advanced</GroupHeading>
           <FieldRow
             label="Middle click pastes the selection"
-            description="Linux only. Off by default: the paste comes from the browser rather than from the terminal, so it ignores the desktop's own middle-click setting and can drop text into a running agent's prompt by accident. tmux's own middle-click paste is unaffected either way."
+            description="Linux only. Off by default — and off makes the middle button do nothing at all inside a terminal, tmux's own middle-click paste included: the paste happens beyond the app (tmux, or the running program reading the selection), so the only way to stop it is to swallow the click before the terminal forwards it. On, a stray middle click can drop whatever was last selected into a running agent's prompt."
             control={
               <Switch
                 checked={settings.terminalMiddleClickPaste}
@@ -316,6 +321,21 @@ export function TerminalSection({ isActive }: { isActive: boolean }): React.JSX.
             }
           />
         </div>
+      </SearchableRow>
+
+      <SearchableRow {...ROWS.wordSeparator}>
+        <FieldRow
+          label="Word separators"
+          description="Characters that end a word when you double-click terminal text. Remove a character to keep it inside selections; for example, leave hyphen out to select a full issue ID."
+          control={
+            <Input
+              className="w-48 font-mono"
+              value={settings.terminalWordSeparator}
+              onChange={(e) => update({ terminalWordSeparator: e.target.value })}
+              aria-label="Terminal word separators"
+            />
+          }
+        />
       </SearchableRow>
 
       <SearchableRow {...ROWS.boldBright}>

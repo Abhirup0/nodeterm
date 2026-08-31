@@ -68,6 +68,7 @@ export type AgentMessageOutcome =
   | { kind: 'targetStatusUnverified'; note: string } // no token file — needs a human. NOT retryable.
   | { kind: 'targetStatusStale' } // token file exists, no verified event yet. Retryable.
   | { kind: 'targetHookScriptStale'; note: string; observedRevision?: number } // Finding F2. NOT retryable.
+  | { kind: 'targetPaneUnreadable' } // the pane probe failed/timed out — says NOTHING about the pane
   | { kind: 'targetNotAgentPane'; observed: string }
   | { kind: 'targetNotPasteAware' }
   | { kind: 'targetGone' }
@@ -100,6 +101,7 @@ export const RETRYABLE: Record<AgentMessageOutcomeKind, boolean> = {
   targetStatusUnverified: false,
   targetStatusStale: true,
   targetHookScriptStale: false,
+  targetPaneUnreadable: true,
   targetNotAgentPane: false,
   targetNotPasteAware: false,
   targetGone: false,
@@ -122,6 +124,7 @@ export const DECISION_ORDER = [
   'targetStatusStale',
   'targetNotIdleUnknown',
   'targetBusy',
+  'targetPaneUnreadable',
   'targetNotAgentPane',
   'targetNotPasteAware'
 ] as const
@@ -355,21 +358,27 @@ export function decidePreProbe(
 export function decideDelivery(f: DeliveryFacts): AgentMessageOutcome | Proceed {
   const cheap = decidePreProbe(f)
   if (cheap) return cheap
-  // Gate 1. `unknown` is NOT a shade of `not-agent` — but for DELIVERY both refuse, because the one
-  // thing neither may do is admit a pane we could not read.
+  // Gate 1, in two honest halves — and BOTH refuse, because the one thing neither may do is admit
+  // a pane we could not read. This gate must stay FAIL-CLOSED: `sendEnvelope` types bytes plus an
+  // Enter into whatever owns the pane, and an unverified pane can be a bare shell — delivering
+  // there EXECUTES the message body ("text into a pane is injection"; the herdr-shaped incidents
+  // this module's history records). A probe outage may therefore delay a delivery, never widen it.
   //
-  // ── DO NOT RETRY AN `unknown` VERDICT ON A FIXED SHORT TIMER WITHOUT A CIRCUIT BREAKER ────────
-  //
-  // Measured: `probeWithin` answers at 2s, but the `ssh` child it started lives until `runAsync`'s
-  // own 15s reap, so a 2s retry loop stacks ~7 overlapping children per pane. And `childArgs`
-  // carries `-o ControlMaster=auto`, so against a DEAD master each of those children does not
-  // multiplex — it opens a full connection, i.e. a REAL LOGIN. A pane that is unreadable *because*
-  // its master died is therefore the worst case, and it is the same shape this repo already lived
-  // through at 72k logins/day (memory: ssh-controlmaster-fallback). `targetNotAgentPane` is marked
-  // NOT retryable in `RETRYABLE` partly for this reason: the honest advice to a language model
-  // holding an unreadable pane is not "try again in a moment".
+  // `unknown` is NOT a shade of `not-agent`, and since issue #460 it is not REPORTED as one
+  // either: the field failure was a live, idle claude pane refused as "not running its agent
+  // (observed: unknown)" for as long as the host link stayed saturated — a probe that could not
+  // answer in its 2s budget (each ssh exec silently becomes a full LOGIN when the master cannot
+  // serve a channel; measured in `remotePaneOwnerCombinedArgs`). Telling a language model the
+  // pane is "not an agent" when the truth is "we could not look" teaches it a wrong, sticky fact.
+  // `targetPaneUnreadable` says the true thing, and it IS retryable — the per-pair rate limiter
+  // sits in front of every delivery, so a retry is bounded, and the probe itself is now ONE
+  // round-trip, so a retry in the degraded state costs one fallback login, not two. That bound is
+  // what the old DO-NOT-RETRY note (a 2s loop stacking ~7 ssh children per pane — the 72k-logins
+  // shape, memory: ssh-controlmaster-fallback) was protecting; the limiter + the halved probe are
+  // what make honesty affordable now.
+  if (f.pane === 'unknown') return { kind: 'targetPaneUnreadable' }
   if (f.pane !== 'agent')
-    return { kind: 'targetNotAgentPane', observed: f.paneObserved ?? (f.pane === 'unknown' ? 'unknown' : 'not-agent') }
+    return { kind: 'targetNotAgentPane', observed: f.paneObserved ?? 'not-agent' }
   // Last, and only when everything else passed: the pane must have ASKED for bracketed paste.
   // herdr :260 — a multi-line envelope on the unframed fallback would be submitted line-by-line as
   // separate turns. It is refused, never sent and hoped for.

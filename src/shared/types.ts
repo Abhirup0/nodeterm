@@ -157,6 +157,19 @@ export interface PtyCreateResult {
    *  system account. The renderer flags the account chip (folder-missing warning) when true. */
   accountFallback?: boolean
   /**
+   * WARM reattach only (local tmux): the reattached session's live working directory no longer
+   * exists — the folder was deleted (or deleted and re-created, which is a DIFFERENT inode, so the
+   * shell inside keeps printing `getcwd: cannot access parent directories`; issue #464). `tmux
+   * new-session -A` ignores the cwd we pass on a reattach, so this is the only moment the fact is
+   * knowable cheaply. The renderer shows a dismissible banner with an explicit
+   * recycle-and-respawn action — NOTHING is typed into the pane and nothing restarts on its own
+   * (the pane may be mid-work, and text into a pane is injection).
+   *
+   * Absent = fine or unknowable (fresh spawn, plain shell, SSH-remote session, probe failed, or a
+   * core older than this field over the relay) — the banner never shows on a guess.
+   */
+  staleCwd?: boolean
+  /**
    * The CURRENT SCREEN of a session this create JOINED (co-attach), captured from tmux — write it
    * into the fresh xterm before the live stream starts.
    *
@@ -257,7 +270,9 @@ export interface RecycledInfo {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
+// 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
+// spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino' | 'trigger'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -377,6 +392,22 @@ export interface CanvasNodeState {
   commitOid?: string
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
+  /**
+   * trigger-only: the schedule + payload + target this node represents (issue #493). Git-shared
+   * CONTENT — deliberately, the team shares the definition — which is exactly why it is treated
+   * as hostile on every load path (`sanitizeNodeTriggers` in core/workspace-files) and why the
+   * definition alone never fires: execution additionally requires this machine's arm record
+   * (`core/trigger-arm-store.ts`), bound to the spec's exact content. See @shared/trigger.
+   */
+  trigger?: import('./trigger').TriggerSpec
+  /**
+   * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
+   * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
+   * Absent = not maximized. Persisted so the restore survives a reload. Root-space on purpose:
+   * maximizing a grouped node re-fits (and thereby moves) its frame, so a parent-relative rect
+   * would restore a few px off — and root-space also survives the frame being ungrouped meanwhile.
+   */
+  premaxRect?: { x: number; y: number; width: number; height: number }
 }
 
 /**
@@ -840,6 +871,9 @@ export interface WorkspaceApi {
   save(workspace: Workspace): Promise<void>
   /** Reads <folder>/.nodeterm/project.json and returns the assembled Project (cwd resolved), or null. */
   probeFolder(folder: string): Promise<Project | null>
+  /** Whether <folder>/.nodeterm/project.json is `present`, definitely `absent`, or `unreadable`
+   *  (any non-ENOENT error). Never guesses absence from a failed read — see issue #385. */
+  projectFileState(folder: string): Promise<'present' | 'absent' | 'unreadable'>
   /** Fired once after an on-disk migration: `v2` = a v2→v3 migration wrote .nodeterm/ dirs into the
    *  project folders; `exec` = the custom shell / advanced ssh args of already-open projects moved
    *  out of the shared project file into this machine's own workspace index (@shared/node-exec). */
@@ -1100,11 +1134,28 @@ export type TerminalCursorInactiveStyle = TerminalCursorStyle | 'outline' | 'non
 export interface Settings {
   fontSize: number
   fontFamily: string
+  /** Characters that end a word during xterm double-click selection. */
+  terminalWordSeparator: string
   cursorBlink: boolean
   /** Appearance of the APP chrome (tab bar, panels, node headers, menus). `auto` (the default)
    *  takes it from the terminal colour theme, so picking a light terminal theme doesn't leave a
    *  black window framing it; `dark`/`light` pin it. See renderer/lib/appTheme.ts. */
   appTheme: 'auto' | 'dark' | 'light'
+  /** Scale factor for the whole application UI (1 = 100%; issue #299, 4K readability). Applied as
+   *  PAGE ZOOM (`webFrame.setZoomFactor`) on desktop, so menus, node headers, dialogs — and
+   *  terminal glyphs — all scale together: the terminal font-size setting stays in CSS px, so its
+   *  effective size is fontSize × uiScale (the Settings row says so). Hand-editable; every reader
+   *  resolves it through `resolveUiScale` (shared/ui-scale.ts), which clamps to [0.5, 2] and maps
+   *  garbage to 1. Server Edition: intentionally inert — the browser owns page zoom (Cmd/Ctrl+±). */
+  uiScale: number
+  /** Reflect the active session in the NATIVE window title ("<node> — <project> — node-terminal"),
+   *  so window-title-based time trackers (ActivityWatch et al.) can tell sessions apart — the same
+   *  thing iTerm2 / Windows Terminal do per tab (issue #414). Opt-in and OFF by default: the title
+   *  is OS-visible surface area (window switchers, screen sharing), so an update must not start
+   *  broadcasting session names for users who never asked. Renderer-only (`document.title` —
+   *  Electron mirrors page-title changes onto the BrowserWindow, and the Server Edition gets the
+   *  browser tab title through the identical write), so there is no bridge member to stub. */
+  windowTitleActiveSession: boolean
   /** Terminal colour scheme — an id from `renderer/terminal/themes.ts`. Resolution is tolerant
    *  (settings.json is hand-editable): an unknown id falls back to the default theme, whose
    *  colours reproduce the pre-feature hardcoded `#1e1e1e`/`#e6e6e6` exactly. */
@@ -1171,28 +1222,51 @@ export interface Settings {
   /** ms to dwell over a terminal before it takes pointer focus (pan-across guard). */
   panHoverDelay: number
   doubleClickFocus: boolean
+  /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
+   *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
+   *  markdown-toggle chord) still switches either way. Default ON since the release after
+   *  v0.3.3 (maintainer decision on issue #495; a preview is one ⌘M from the editor, so the
+   *  rendered view is the better first sight for docs). A one-shot load migration keyed on
+   *  `openMarkdownPreviewMigrated` (see mergeSettings) forces this ON once for every existing
+   *  file — including one saved by v0.3.3, the one release that defaulted off and whose
+   *  full-snapshot saves materialized `false` for users who never touched the toggle. After
+   *  the migration the user's own opt-out is permanent. */
+  openMarkdownPreview: boolean
+  /** One-shot marker for the openMarkdownPreview default flip (#495). Absent = the file
+   *  predates the flip → the load migration sets `openMarkdownPreview: true` and stamps this
+   *  true; present = the migration already ran (or the install was born after it) and the
+   *  stored `openMarkdownPreview` value is the user's own, never touched again. */
+  openMarkdownPreviewMigrated: boolean
   /**
-   * Let a MIDDLE CLICK inside a terminal paste the X PRIMARY selection (Linux only — macOS and
-   * Windows have no PRIMARY, so this changes nothing there).
+   * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
+   * PRIMARY selection and no tmux middle-click habit, so the guard changes nothing visible there).
    *
-   * OFF by default, and that is a deliberate reversal of what the app shipped. The paste was never
-   * ours: Chromium performs it on the hidden textarea xterm keeps under the cursor, which means it
-   * ignored the desktop's own `gtk-enable-primary-paste` (Chromium applies that only to its Views
-   * widgets, not to web content) and the user had NO way to switch it off — issue #84. It fires
-   * hardest inside agent TUIs, whose input box sits exactly where the pointer is, so a stray click
-   * drops whatever was last selected anywhere on the machine into a live agent prompt.
-   *
-   * tmux's own middle-click paste is UNAFFECTED either way: that one is a tmux root binding pasting
-   * tmux's buffer, and it never reached the browser.
+   * OFF by default, and OFF means the middle button is fully INERT inside a terminal — tmux's own
+   * middle-click paste included. That is a consequence of the real mechanism (issue #84, measured
+   * on the reporting machine): the paste never happens in the browser. xterm forwards a mouse
+   * report for the middle button and something DOWNSTREAM of the pty consumes it — tmux's root
+   * `MouseDown2Pane` binding pastes tmux's buffer at a shell prompt, and an agent TUI reads the X
+   * PRIMARY selection itself. There is no browser default action to cancel, so the guard swallows
+   * the event before xterm can forward it (`guardMiddleClickPaste`), and tmux's paste necessarily
+   * goes with it. The default stays off because the paste fires hardest inside agent TUIs: a stray
+   * click drops whatever was last selected anywhere on the machine into a live agent prompt.
    */
   terminalMiddleClickPaste: boolean
   /** Plain mouse wheel zooms the canvas (no Cmd/Ctrl needed). On macOS a two-finger trackpad
    *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
    *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
+  /** How far one plain wheel click zooms, as a multiplier on the canvas zoom step (0.2–2,
+   *  default 1 = historical feel). Applies only to the `wheelZoom` path — Cmd/Ctrl+wheel and
+   *  pinch keep the fixed step, so tuning a chunky mouse down never slows the trackpad.
+   *  Validated at point of use (canvas/wheel-zoom.ts `clampWheelZoomSpeed`). */
+  wheelZoomSpeed: number
   /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
    *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
-   *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
+   *  decides. On the desktop the device is identified from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), so mouse zoom and trackpad pan coexist; the off-switch is the
+   *  remaining recourse for the Server Edition's browser tab, where detection is heuristic and a
+   *  precise-pixel MOUSE still reads as a trackpad. */
   trackpadPan: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map
@@ -1239,6 +1313,14 @@ export interface Settings {
    *  renderer. See `resolveTerminalRenderer` (shared/webgl.ts) for the full history. */
   terminalGpuRendering: 'auto' | 'on' | 'off' | 'shared'
   tmuxScrollback: number
+  /** OPT-IN lead-pane width for Claude Code agent teams (issue #119). 0 = off (default): the
+   *  generated tmux confs stay byte-identical to their pre-feature output — no `set-hook` at all.
+   *  40–90 = emit guarded after-resize-pane / after-split-window hooks (shared/tmux-lead-pane.ts)
+   *  that keep the lead pane at this % of the node width when CC's team backend re-applies its
+   *  hardcoded 70/30 split. Hand-editable; re-validated at the conf-generation site
+   *  (`sanitizeLeadPaneWidth`). Honest side effect while on: a manual 50/50 split in a plain
+   *  terminal node is nudged to the target too. */
+  tmuxLeadPaneWidth: number
   /** Minutes a terminal may sit fully offscreen before its xterm+PTY client is torn down in
    *  place (tmux keeps the session; re-approach reattaches and redraws). 0 = never. */
   offscreenTerminalMinutes: number
@@ -1298,6 +1380,10 @@ export interface Settings {
   /** Ids of terminal node header buttons the user has hidden; empty = everything visible. Gated by
    *  HIDEABLE_HEADER_BUTTONS the same way. */
   hiddenHeaderButtons: string[]
+  /** Whether project activation offers the "Resume where you left off" card (breadcrumb trail's
+   *  once-per-app-run popup). OFF by default — it interrupts every project switch, so it is
+   *  opt-in. Cmd+[ / Cmd+] and the Dock buttons walk the trail regardless of this. */
+  showResumeCard: boolean
   /** Whether usage percentages render as consumed ("32% used"), remaining ("68% left"), or raw
    *  token counts ("48k/200k tokens" — context-window surfaces only; provider quota surfaces
    *  have no token counts and fall back to 'used' display). 'remaining' is the historical
@@ -1404,6 +1490,8 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+  // Keep hyphens, underscores, slashes and dots inside words so identifiers and paths select whole.
+  terminalWordSeparator: " ()[]{}',\"",
   cursorBlink: true,
   // Every appearance default below reproduces the pre-feature look bit-for-bit: the default theme
   // carries the old hardcoded background/foreground, and block/outline/1/0 are xterm's own
@@ -1411,6 +1499,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // Follows the terminal theme, whose own default is dark — so an install that never touches
   // either setting keeps the dark chrome it has always had.
   appTheme: 'auto',
+  uiScale: 1,
+  windowTitleActiveSession: false,
   terminalTheme: 'nodeterm-dark',
   fontWeight: 400,
   fontWeightBold: 700,
@@ -1433,8 +1523,11 @@ export const DEFAULT_SETTINGS: Settings = {
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
+  openMarkdownPreview: true,
+  openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
+  wheelZoomSpeed: 1,
   trackpadPan: true,
   canvasDragMode: 'select',
   browserMemorySaver: true,
@@ -1443,6 +1536,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ptyShadowClients: true,
   terminalGpuRendering: 'auto',
   tmuxScrollback: 50000,
+  tmuxLeadPaneWidth: 0,
   offscreenTerminalMinutes: 10,
   commitAgent: 'claude',
   commitAgentCommand: '',
@@ -1470,6 +1564,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // Nothing hidden out of the box, so existing users see the menu and header they already know.
   hiddenNodeMenuItems: [],
   hiddenHeaderButtons: [],
+  // Opt-in: the resume card pops over the canvas on every qualifying project activation, which
+  // reads as noise to users who navigate by the trail chords/Dock buttons instead.
+  showResumeCard: false,
   usagePercentMode: 'remaining',
   defaultAgent: 'claude',
   // Sessions start in auto mode out of the box. Existing users pick this up on hydrate
@@ -2822,6 +2919,12 @@ export interface NodeTerminalApi {
   focusWindow(): void
   /** Set the macOS Dock badge to the unread-message count (0 clears it). */
   setBadgeCount(count: number): void
+  /** Apply the UI-scale setting as page zoom for THIS window (desktop: `webFrame.setZoomFactor`).
+   *  The preload re-clamps through `resolveUiScale` — the value originates in hand-editable
+   *  settings.json, and the boundary must not trust the caller to have done it. Server Edition:
+   *  documented no-op — a browser page cannot set its own page zoom, and the browser already owns
+   *  the identical mechanism (Cmd/Ctrl+±). */
+  setUiZoomFactor(factor: number): void
   /** Absolute filesystem path for a dropped/picked File (for drag-into-terminal). */
   getPathForFile(file: File): string
   /** Absolute writable base dir (Electron userData) for app-managed files like default worktrees. */
@@ -2845,6 +2948,13 @@ export interface NodeTerminalApi {
    *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
    *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
   onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Fires when a macOS trackpad gesture (two-finger scroll or pinch) opens or closes on the
+   *  main window — edge transitions from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), a handful per physical gesture. The canvas wheel router uses
+   *  this as ground-truth device identity so a precise-pixel mouse (MX Master) can zoom while the
+   *  trackpad pans. Returns unsubscribe. Server Edition: never fires — a browser tab has no raw
+   *  input stream, and the router keeps its delta-shape heuristics there. */
+  onCanvasTrackpadGesture(listener: (active: boolean) => void): () => void
   /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
    *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
    *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
