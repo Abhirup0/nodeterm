@@ -66,6 +66,7 @@ import { useXtermVisualSettings } from '../terminal/useXtermVisualSettings'
 import { ensureProjectLaunchInfo } from '../state/projectLaunchInfo'
 import { loseWebglContexts, registerWebglClient, type WebglClientHandle } from '../terminal/webgl-budget'
 import { quantizeCharSize } from '../terminal/char-size-quantize'
+import { resyncDomRendererSpacing } from '../terminal/dom-renderer-spacing'
 import {
   PARK_MAX,
   armParkExpiry,
@@ -2050,6 +2051,11 @@ export function TerminalNode({
      */
     const applyFit = () => {
       try {
+        // A DOM renderer built while this node was unmeasurable — the park (its cleanup releases
+        // the webgl grant AFTER React detached the element) or a display:none wrapper — measured a
+        // 0-wide 'W' and baked a full extra cell into its row spacing. This is the first moment it
+        // can be re-derived; a no-op whenever the spacing already agrees. See the helper.
+        if (resyncDomRendererSpacing(term)) fullRepaint()
         // Board up → this canvas terminal is hidden behind the overlay. Report "not viewing" (null)
         // so a card-modal viewer of the same session drives the grid instead of being clamped to our
         // (possibly zoomed-tiny) canvas size. No modal viewer → no size vote at all → the pty simply

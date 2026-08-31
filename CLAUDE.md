@@ -395,6 +395,16 @@ Lifecycle, by intent:
   and `handle.dispose()`s on unmount (which releases + cancels timers). A parked terminal is
   off-screen so it holds no context. Permanent-delete paths call `disposeTerminalOnUnmount(id)` so a
   deleted node disposes instead of parking.
+  **A renderer released while the node is unmeasurable mismeasures its own row spacing**
+  (`terminal/dom-renderer-spacing.ts`): `WebglAddon.dispose()` is also the back-to-DOM-renderer
+  path, and it runs from the lifecycle effect's CLEANUP — after React detached the element — so the
+  fresh DOM renderer derives `letter-spacing` from a width cache whose `offsetWidth` is **0** and
+  bakes in a whole extra cell per character. That is the "letters drift apart for a split second
+  after a project switch": the adopting mount paints wide until the WebGL grant lands 150 ms later.
+  Focus mode's `display:none` wrapper is the same shape. xterm re-derives the spacing on a char-size
+  / dpr / options change and **not on a resize**, so nothing in the reattach path heals it —
+  `applyFit` calls the change-gated `resyncDomRendererSpacing(term)`, which bails while the
+  measurement is still 0 rather than re-baking the wrong number.
   **Which renderer a terminal uses** is `settings.terminalGpuRendering`, resolved by the single
   resolver `resolveTerminalRenderer(value)` (`src/shared/webgl.ts`) to `dom | webgl | shared`:
   `'off'` = xterm's DOM renderer, `'on'` = one budgeted WebGL context per terminal (everything the
