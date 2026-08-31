@@ -209,6 +209,22 @@ describe('refitMaximizedNode', () => {
     expect(refitMaximizedNode(maxed, 'a', NARROWER)).not.toBe(maxed)
   })
 
+  it('treats a sub-pixel difference as already fitted', () => {
+    // React Flow repopulates `measured` from the DOM (device-pixel-snapped), and a grouped node's
+    // rect round-trips through rootPosition in floats — at fractional zoom neither lands exactly
+    // on the computed rect. Without the tolerance every panel toggle would rewrite the node.
+    const maxed = maximizeNodeToRect([term('a', { x: 40, y: 60 })], 'a', MAXED)
+    const drift = {
+      x: MAXED.x + 0.2,
+      y: MAXED.y - 0.3,
+      width: MAXED.width + 0.4,
+      height: MAXED.height - 0.1
+    }
+    expect(refitMaximizedNode(maxed, 'a', drift)).toBe(maxed)
+    // A real move still lands.
+    expect(refitMaximizedNode(maxed, 'a', { ...MAXED, x: MAXED.x + 8 })).not.toBe(maxed)
+  })
+
   it('leaves a node that is not maximized alone', () => {
     // A hand-placed or zone-snapped node is a placement the user owns.
     const plain = [term('a', { x: 40, y: 60 })]

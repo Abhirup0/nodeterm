@@ -249,7 +249,7 @@ import {
   type FocusableNode
 } from '../lib/nodeFocus'
 import { NODE_MAXIMIZE_MARGIN_PX, maximizeTargetRect } from '../lib/nodeMaximize'
-import { measurePinnedInsets } from '../lib/pinnedInsets'
+import { measurePinnedInsets, type ScreenInsets } from '../lib/pinnedInsets'
 import { ZONE_GUTTER_PX, ZONES, zoneTargetRect, type ZoneId } from '../lib/nodeZones'
 import {
   recordBreadcrumb,
@@ -6436,24 +6436,28 @@ export function Canvas() {
    * Maximize is a MODE, not a one-shot placement — a zone snap is the one-shot kind and stays
    * where it was put. While maximize is on the node claims the whole usable canvas, so pinning a
    * panel (the node would slide under it), unpinning one (the node would sit short of the space it
-   * just gained), or a panel simply changing width (`uiScale`, the drawer's wide variant) has to
-   * move it.
+   * just gained), or a panel changing width (`uiScale`, the drawer's wide variant) has to move it.
    *
-   * A ResizeObserver rather than the pin flags alone: the explorer drawer animates in over 160ms
-   * (`nt-drawer-in`), so measuring one frame after the state change catches it mid-slide. The
-   * observer fires again as it settles. `refitMaximizedNode` is idempotent, so the extra ticks
-   * cost nothing and the workspace is only marked dirty when a node actually moved.
+   * Gated on the INSETS changing, not on the flags: `explorerOpen` is also true for the unpinned
+   * overlay explorer, and without the gate opening that overlay would recompute the rect from the
+   * CURRENT viewport and teleport a maximized node into view — panning and window resizes
+   * deliberately do not re-fit, and an unpinned panel must not either.
    */
+  const lastInsetsRef = useRef<ScreenInsets | null>(null)
   const fitMaximizedToUsableArea = useCallback(() => {
-    if (!nodesRef.current.some((n) => n.data.premaxRect)) return
     const wrap = flowWrapRef.current?.getBoundingClientRect()
     if (!wrap) return
+    const insets = measurePinnedInsets(wrap)
+    const prev = lastInsetsRef.current
+    lastInsetsRef.current = insets
+    if (prev && prev.left === insets.left && prev.right === insets.right) return
+    if (!nodesRef.current.some((n) => n.data.premaxRect)) return
     const rect = maximizeTargetRect(
       getViewport(),
       wrap.width,
       wrap.height,
       NODE_MAXIMIZE_MARGIN_PX,
-      measurePinnedInsets(wrap)
+      insets
     )
     if (!rect) return
     const current = nodesRef.current
@@ -6462,20 +6466,41 @@ export function Canvas() {
       current
     )
     if (fitted === current) return
-    setNodes((ns) => ns.reduce((acc, n) => (n.data.premaxRect ? refitMaximizedNode(acc, n.id, rect) : acc), ns))
+    setNodes((ns) =>
+      ns.reduce((acc, n) => (n.data.premaxRect ? refitMaximizedNode(acc, n.id, rect) : acc), ns)
+    )
     markDirty()
   }, [getViewport, setNodes, markDirty])
 
   useEffect(() => {
     fitMaximizedToUsableArea()
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(() => fitMaximizedToUsableArea())
-    for (const el of document.querySelectorAll('.sessions-sidebar--pinned, .drawer--pinned')) {
-      observer.observe(el)
+    const panels = Array.from(
+      document.querySelectorAll('.sessions-sidebar--pinned, .drawer--pinned')
+    )
+    // A ResizeObserver covers width changes (`uiScale`, the drawer's wide variant) but NOT the
+    // drawer's entry animation, which is opacity + transform — a transform never fires it, so the
+    // panel is measured ~10px off its settled position. `animationend` closes exactly that gap.
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => fitMaximizedToUsableArea())
+    const onSettled = (): void => fitMaximizedToUsableArea()
+    for (const el of panels) {
+      observer?.observe(el)
+      // `animationcancel` too: an animation cut short (the panel re-toggled mid-slide) never fires
+      // `animationend`, and would leave the node measured against the halfway position.
+      el.addEventListener('animationend', onSettled)
+      el.addEventListener('animationcancel', onSettled)
     }
-    return () => observer.disconnect()
-    // The pin/open flags mount and unmount the panels, so they decide WHAT to observe; the
-    // observer then covers every size change of whatever is docked.
+    return () => {
+      observer?.disconnect()
+      for (const el of panels) {
+        el.removeEventListener('animationend', onSettled)
+        el.removeEventListener('animationcancel', onSettled)
+      }
+    }
+    // The pin/open flags mount and unmount the panels, so they decide WHAT to observe; the gate
+    // inside the callback decides whether an observation is worth acting on.
   }, [sessionsPinned, sessionsDismissed, explorerOpen, explorer.pinned, fitMaximizedToUsableArea])
 
   /**
