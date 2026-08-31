@@ -644,14 +644,25 @@ const NO_EPHEMERAL: { ephemeralNodes: CanvasNode[]; ephemeralEdges: Edge[] } = {
  * inherits the agent's `parentId`), which is the whole point of storing an offset — grouping or
  * ungrouping the agent flips that space between absolute and group-relative, and a stored
  * position would then teleport the card by the group's own x/y.
+ *
+ * `snap` (0 = off) rounds the LAID-OUT default onto the grid: React Flow's `snapToGrid` only
+ * constrains a drag, so a fan-out card landed off-grid and only jumped into place once the user
+ * nudged it. A DRAGGED offset is left alone — it was already snapped at drag time if the mode was
+ * on, and re-rounding it here would move cards the user placed by hand while it was off.
  */
 const offsetFrom = (
   parent: { position: { x: number; y: number } },
   stored: { x: number; y: number } | undefined,
-  fallback: { x: number; y: number }
+  fallback: { x: number; y: number },
+  snap = 0
 ): { x: number; y: number } => {
   const off = stored ?? fallback
-  return { x: parent.position.x + off.x, y: parent.position.y + off.y }
+  const x = parent.position.x + off.x
+  const y = parent.position.y + off.y
+  if (stored || !snap) {
+    return { x, y }
+  }
+  return { x: Math.round(x / snap) * snap, y: Math.round(y / snap) * snap }
 }
 
 // Delivering an armed node's held launch (canvas-control `--after`) can lose the race against
@@ -1606,6 +1617,8 @@ export function Canvas() {
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes), owned by
   // the agent-nodes store so the cards themselves can set it — see `selectable: false` below.
   const ephSelId = useAgentNodes((s) => s.selectedId)
+  // Grid the laid-out fan-out cards round onto (0 = snap off) — see offsetFrom.
+  const ephSnap = settings.snapToGrid ? settings.gridSize || GRID : 0
   const { ephemeralNodes, ephemeralEdges } = useMemo(() => {
     // Common case: no /loop running and no subagents → return a stable empty result so
     // this memo (which depends on `nodes`, i.e. recomputes every drag frame) stays cheap
@@ -1644,7 +1657,7 @@ export function Canvas() {
         // with the group). Deliberately no extent:'parent' — the fan-out may hang below the
         // frame border without being clamped into it.
         ...(parent.parentId ? { parentId: parent.parentId } : {}),
-        position: offsetFrom(parent, ephemeralPos[lid], { x: -250, y: ph + 60 }),
+        position: offsetFrom(parent, ephemeralPos[lid], { x: -250, y: ph + 60 }, ephSnap),
         draggable: true,
         // NOT selectable: React Flow's rubber band would otherwise sweep a whole fan-out of cards
         // into the selection alongside the real nodes, and every selection action (Group,
@@ -1694,10 +1707,15 @@ export function Canvas() {
           type: 'subagent',
           // Same coordinate-space rule as the loop card above: inherit the agent's group.
           ...(parent.parentId ? { parentId: parent.parentId } : {}),
-          position: offsetFrom(parent, ephemeralPos[cid], {
-            x: (i % COLS) * COL_W,
-            y: ph + 60 + Math.floor(i / COLS) * ROW_H
-          }),
+          position: offsetFrom(
+            parent,
+            ephemeralPos[cid],
+            {
+              x: (i % COLS) * COL_W,
+              y: ph + 60 + Math.floor(i / COLS) * ROW_H
+            },
+            ephSnap
+          ),
           draggable: true,
           selectable: false, // see the loop card above
           selected: ephSelId === cid,
@@ -1728,7 +1746,7 @@ export function Canvas() {
     }
     return { ephemeralNodes: eNodes, ephemeralEdges: eEdges }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- loopSig stands in for the byId read
-  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSelId, nodes])
+  }, [agentById, loopSig, ephemeralPos, ephSizes, ephExpanded, ephSelId, ephSnap, nodes])
 
   // Merge the persisted nodes with the ephemeral ones and the webview keep-alive pool once per
   // change (not per render), so React Flow's array-identity short-circuit holds while
