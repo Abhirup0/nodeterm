@@ -275,7 +275,11 @@ import {
   type BulkRestartPlan,
   type RestartOutcome
 } from '../terminal/agent-restart'
-import { planHibernation, HIBERNATE_SWEEP_MS } from '../terminal/hibernation-policy'
+import {
+  planHibernation,
+  shouldAutoWake,
+  HIBERNATE_SWEEP_MS
+} from '../terminal/hibernation-policy'
 import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
@@ -7861,9 +7865,12 @@ export function Canvas() {
     // not hibernated (the node re-reads the flag itself). `paused` is excluded — same rule as
     // the mount-timer and visibility-edge auto-triggers: a paused node must not auto-resume on
     // ANY reveal, the card modal included, or "only an explicit Resume brings it back" would be
-    // false the moment the user opens the card. The modal shows the PAUSED chip; Resume is still
-    // reachable from the node menu.
-    if (id && !useAgentStatus.getState().byId[id]?.paused) wakeHibernatedNode(id)
+    // false the moment the user opens the card (`shouldAutoWake`). The modal shows its own
+    // clickable PAUSED chip for that case (CardModal.tsx); the node menu's Resume works too.
+    if (id) {
+      const st = useAgentStatus.getState().byId[id]
+      if (shouldAutoWake(st?.hibernated, st?.paused)) wakeHibernatedNode(id)
+    }
   }, [])
 
   const onPaletteQuery = useCallback((q: string) => {

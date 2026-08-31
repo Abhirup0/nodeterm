@@ -124,6 +124,7 @@ import {
   type PauseOutcome,
   type ResumePhaseOutcome
 } from '../terminal/agent-restart'
+import { shouldAutoWake, shouldColdResume } from '../terminal/hibernation-policy'
 import { WakeInputBuffer } from '../terminal/wake-input-buffer'
 import { FindBar } from '../components/FindBar'
 import { IconSearch, IconChat, IconMic, IconReload, IconEye, IconEyeOff, IconGrid } from '../components/icons'
@@ -1528,8 +1529,9 @@ export function TerminalNode({
     const t = setTimeout(() => {
       // A `paused` node never auto-wakes, mount included — the trigger published above (and the
       // chip's own click) remain the explicit way back. `hibernated`-only nodes are unaffected:
-      // this is the everyday Eco auto-resume-on-view path.
-      if (isNodeWatched(id) && !useAgentStatus.getState().byId[id]?.paused) wakeRef.current()
+      // this is the everyday Eco auto-resume-on-view path. See `shouldAutoWake`.
+      const stMount = useAgentStatus.getState().byId[id]
+      if (isNodeWatched(id) && shouldAutoWake(stMount?.hibernated, stMount?.paused)) wakeRef.current()
     }, WAKE_MOUNT_DELAY_MS)
     return () => {
       clearTimeout(t)
@@ -3072,7 +3074,7 @@ export function TerminalNode({
         if (data.initialCommand) {
           writeWhenShellReady(data.initialCommand)
           updateNodeData(id, { initialCommand: undefined })
-        } else if (fresh && agentId && canResume(agentId) && !pausedNow) {
+        } else if (fresh && agentId && canResume(agentId) && shouldColdResume(pausedNow)) {
           // Cold restart of an agent node: the live agent is gone, so re-launch it. Resume the
           // prior conversation by its session id when we have one; otherwise start the agent
           // fresh. Plain terminals get nothing here — just the restored shell.
@@ -3893,8 +3895,10 @@ export function TerminalNode({
         // …and the wake edge: a hibernated node the user has just panned back to gets its
         // conversation resumed before they can reach for the chip. No-op (one map lookup) for a
         // node that is not hibernated, which is every node in the default case. A `paused` node is
-        // excluded — see the mount-timer trigger above for why.
-        if (visible && !wasVisible && !useAgentStatus.getState().byId[id]?.paused) wakeRef.current()
+        // excluded — see the mount-timer trigger above for why (`shouldAutoWake`).
+        const stVisible = useAgentStatus.getState().byId[id]
+        if (visible && !wasVisible && shouldAutoWake(stVisible?.hibernated, stVisible?.paused))
+          wakeRef.current()
         // A visible node is not in an offscreen stretch at all — the next hidden edge starts a
         // fresh clock for the Eco deferral's cap.
         if (visible) offscreenSinceRef.current = null
