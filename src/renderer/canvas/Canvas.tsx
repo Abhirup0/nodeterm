@@ -242,7 +242,8 @@ import {
   nextFreePosition,
   armForColdOpen,
   projectTargetFlagRefusal,
-  clearAttachConsent
+  clearAttachConsent,
+  folderName
 } from '../lib/projectOpen'
 import {
   FIT_NODE_OPTIONS,
@@ -10028,7 +10029,7 @@ export function Canvas() {
     const contextFor = (nodeId: string): string => {
       const node = nodesRef.current.find((n) => n.id === nodeId)
       const cwd = (node?.data.cwd as string) || ''
-      const folder = cwd.replace(/\/+$/, '').split('/').filter(Boolean).pop()
+      const folder = folderName(cwd)
       const title = node?.data.title as string | undefined
       return folder || (title && title !== 'Claude Code' ? title : '') || 'workspace'
     }
