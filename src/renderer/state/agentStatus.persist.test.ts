@@ -247,6 +247,22 @@ describe('loop persistence (cron/schedule survive an app restart)', () => {
     }
   })
 
+  it('the LIVE-state self-heal drops `hibernatedPane` alongside a paused-only flag (deep pause), but NOT when `hibernated` still owns it', async () => {
+    const { useAgentStatus } = await import('./agentStatus')
+    // paused-only (the deep "pause & end session" shape): the pane record goes with it.
+    useAgentStatus.getState().setPaused('n30', true)
+    useAgentStatus.getState().setHibernatedPane('n30', 'nu')
+    useAgentStatus.getState().setState('n30', 'working', 'claude')
+    expect(useAgentStatus.getState().byId['n30'].hibernatedPane).toBeUndefined()
+    // hibernated AND paused together (shallow pause): the shared `hibernated` clear already drops
+    // it — this is not a NEW case, just confirming the paused-only branch doesn't double-clear.
+    useAgentStatus.getState().setHibernated('n31', true)
+    useAgentStatus.getState().setPaused('n31', true)
+    useAgentStatus.getState().setHibernatedPane('n31', 'nu')
+    useAgentStatus.getState().setState('n31', 'working', 'claude')
+    expect(useAgentStatus.getState().byId['n31'].hibernatedPane).toBeUndefined()
+  })
+
   it('keeps `paused` through a `done` event — same as `hibernated`, and through a cold restart (this store never clears it on its own)', async () => {
     vi.stubGlobal('localStorage', memStorage())
     const { useAgentStatus } = await import('./agentStatus')

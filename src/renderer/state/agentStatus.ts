@@ -436,7 +436,15 @@ export function createAgentStatusSession(
         // Same self-heal, same reasoning: a live hook event is proof the CLI is running, whatever
         // brought it back (our own resume, or the user typing the launch line by hand) — a standing
         // `paused` would be wrong, and (unlike a cold restart) this IS evidence, not a guess.
-        if (alive && prev.paused) next.paused = undefined
+        if (alive && prev.paused) {
+          next.paused = undefined
+          // Goes with the flag, UNLESS `hibernated` still owns it (shallow pause clears both flags
+          // together above, in which case this is already undefined) — the deep-pause case has no
+          // `hibernated` to protect it, so without this an in-memory record describing a pane that
+          // is now demonstrably running something else would linger, and stand as permission for
+          // the next deep pause to be typed into recognizing a pane it never measured.
+          if (!next.hibernated) next.hibernatedPane = undefined
+        }
         const byId = { ...s.byId, [id]: next }
         // `state` itself is transient, so a plain transition writes nothing — but dropping a
         // PERSISTED flag has to reach disk, or a relaunch would restore a hibernated/paused node

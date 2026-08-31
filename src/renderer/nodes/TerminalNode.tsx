@@ -3363,6 +3363,12 @@ export function TerminalNode({
         // Read at CALL time — a local project can BECOME an SSH project long after this mount.
         if (offscreenRemoteRef.current) return 'not-eligible'
         const st = useAgentStatus.getState().byId[id]
+        // Already paused (shallow OR deep — deep has `hibernated` unset, so this is the only
+        // thing that catches it): the plan already excludes this via `HibernationCandidate.paused`,
+        // but a dropped SessionEnd hook POST could otherwise leave a deep-paused node reading as
+        // an ordinary idle `done` candidate between the plan and this fire-time re-ask. The pane is
+        // already bare — see `alreadyExited` in the manual pause closure for the same rule.
+        if (st?.paused) return 'not-eligible'
         const agentSessionId = st?.sessionId
         // Re-asked here, not trusted from the plan: a node that started working between the sweep's
         // decision and its turn must keep its turn (BUSY_STATES — an exit line typed into a
@@ -3472,12 +3478,13 @@ export function TerminalNode({
       })
     })
 
-    // Manual "Pause session" (node context menu — shared by the canvas right-click and the
-    // sessions sidebar row menu, which reuses this same `selectionItems` builder; no command
-    // palette entry or kanban-card-modal button yet, deliberately deferred): quit the CLI
-    // and mark the node PAUSED so it does NOT auto-resume on the next reveal or cold restart — an
-    // explicit Resume (which reuses `agentHibernateFns(id).resume()` above, unchanged) is the only
-    // way back. Deliberately its OWN closure rather than a call into `agentHibernateFns(id).exit()`:
+    // Manual "Pause session" (the PAUSE action: node context menu only — shared by the canvas
+    // right-click and the sessions sidebar row menu, which reuses this same `selectionItems`
+    // builder; no command palette entry, no kanban-card pause button, deliberately deferred): quit
+    // the CLI and mark the node PAUSED so it does NOT auto-resume on the next reveal or cold
+    // restart — an explicit Resume (which reuses `agentHibernateFns(id).resume()` above, and now
+    // has a THIRD surface too — `CardModal`'s own clickable PAUSED chip) is the only way back.
+    // Deliberately its OWN closure rather than a call into `agentHibernateFns(id).exit()`:
     // that one refuses a node the user is currently WATCHING (`isNodeWatched`) — exactly right for
     // Eco's own sweep, exactly wrong for a manual pause of the node the user is looking at right now.
     const unregisterPause = registerAgentPause(id, {

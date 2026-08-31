@@ -5550,14 +5550,24 @@ export function Canvas() {
     )
   }, [setNodes, markDirty])
 
-  // Manual "Pause session" (node context menu — canvas right-click and the sessions sidebar row
-  // menu, which reuses the same `selectionItems` builder; no command palette entry or kanban-card
-  // button yet, deliberately deferred): quit the CLI
-  // (and, when `deep`, also recycle the tmux session) and mark the node PAUSED — see
-  // `registerAgentPause` for why this is its own closure rather than `agentHibernateFns.exit()`.
+  // Manual "Pause session" (the PAUSE action itself: node context menu only — canvas right-click
+  // and the sessions sidebar row menu, which reuses the same `selectionItems` builder; no command
+  // palette entry, no kanban-card pause button, deliberately deferred. RESUME is wider — see
+  // `resumeAgentNode` below and `CardModal`'s own clickable PAUSED chip): quit the CLI (and, when
+  // `deep`, also recycle the tmux session) and mark the node PAUSED — see `registerAgentPause` for
+  // why this is its own closure rather than `agentHibernateFns.exit()`.
   const pauseAgentNode = useCallback(async (nodeId: string, deep: boolean) => {
     const fns = agentPauseFns(nodeId)
-    if (!fns) return // node unmounted between opening the menu and clicking
+    if (!fns) {
+      // Same "not attached" case `resumeAgentNode` covers — most often an offscreen-RELEASED node
+      // (its lifecycle effect torn down the registration in place, but the row is still reachable
+      // from the sidebar menu). A silent no-op here reads as a broken button.
+      setNotice({
+        kind: 'error',
+        text: 'Pause skipped: this terminal is not attached right now.'
+      })
+      return
+    }
     let outcome: Awaited<ReturnType<typeof fns.pause>>
     try {
       outcome = await fns.pause(deep)
@@ -7108,10 +7118,17 @@ export function Canvas() {
                         },
                         {
                           label: 'Pause & end session',
-                          disabled: !!pauseWhy,
+                          // The deep depth recycles the tmux session, which — like the "Restart
+                          // agent and shell" recycle it shares the mechanism with — the closure
+                          // refuses on a relay session's core (the shell env belongs to the HOST).
+                          // Named here rather than left to the closure's generic "busy / not
+                          // attached" notice, which would be a wrong reason for a right refusal.
+                          disabled: !!pauseWhy || session.source === 'relay',
                           hint:
                             pauseWhy ??
-                            'Quits the CLI and ends its tmux session too, for a fuller memory reclaim. Resume starts a fresh session with the same conversation.',
+                            (session.source === 'relay'
+                              ? 'Ends the tmux session on the machine hosting this relay session, not here.'
+                              : 'Quits the CLI and ends its tmux session too, for a fuller memory reclaim. Resume starts a fresh session with the same conversation.'),
                           onClick: () => void pauseAgentNode(ids[0], true)
                         }
                       ]

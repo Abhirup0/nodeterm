@@ -14,6 +14,7 @@ const base = (id: string, over: object = {}) => ({
   wired: true,
   offscreen: true,
   hibernated: false,
+  paused: false,
   remote: false,
   recurring: false,
   liveSubagents: false,
@@ -108,6 +109,14 @@ describe('planHibernation', () => {
     expect(planHibernation([base('a', { wired: false })], NOW, cfg)).toEqual([])
     expect(planHibernation([base('a', { offscreen: false })], NOW, cfg)).toEqual([])
     expect(planHibernation([base('a', { hibernated: true })], NOW, cfg)).toEqual([])
+  })
+
+  it('excludes an already-PAUSED node even with `hibernated` unset — the deep "pause & end session" case, whose tmux was recycled rather than merely exited', () => {
+    // `hibernated: false` here on purpose: this is exactly the shape a deep-paused node has, and
+    // `!c.hibernated` alone would still admit it — `paused` is the only field that catches it.
+    expect(
+      planHibernation([base('a', { hibernated: false, paused: true })], NOW, cfg)
+    ).toEqual([])
   })
 
   it('excludes REMOTE sessions here, not only at the exit — the batch is a slice', () => {

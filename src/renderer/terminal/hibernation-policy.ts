@@ -85,6 +85,17 @@ export interface HibernationCandidate {
   liveBackgroundTask: boolean
   /** When this node's last hook event landed. Absent = never seen ⇒ never eligible. */
   lastEventAt?: number
+  /**
+   * Already `paused` (agentStatus.paused). Excluded for the same reason `hibernated` is: nothing
+   * left to reclaim — but ALSO because a deep "pause & end session" node has `hibernated` UNSET
+   * (its tmux session was recycled, not merely exited), so `!c.hibernated` alone would still admit
+   * it. Without this field, an offscreen deep-paused node whose SessionEnd hook POST was dropped
+   * (a server hiccup, a downed tunnel) could sit at `state: 'done'` with a stale `lastEventAt`,
+   * pass every other filter, and have Eco's sweep KILL_LINE + `/exit` typed into its already-bare
+   * shell — the exact class of mistake `alreadyExited` (the manual pause closure's own skip) exists
+   * to prevent, reachable here through the automatic sweep instead.
+   */
+  paused: boolean
 }
 
 export interface HibernationConfig {
@@ -145,6 +156,7 @@ export function planHibernation(
     .filter(
       (c) =>
         !c.hibernated &&
+        !c.paused &&
         !c.remote &&
         c.wired &&
         c.offscreen &&
