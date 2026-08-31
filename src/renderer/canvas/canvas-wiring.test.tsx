@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Two things Canvas.tsx wires that nothing else could see it stop wiring.
+// Three things Canvas.tsx wires that nothing else could see it stop wiring.
 //
 // Canvas is a monolith with no render harness, so the pieces below are pinned where they live: the
 // chrome opt-in by RENDERING the cluster that carries it and asking `chromeObstacles` for it, and
@@ -261,5 +261,70 @@ describe('node creation resolves its project LIVE and only onto a matching canva
     const liveRecordReads =
       CANVAS_SRC.match(/const project = useProjects\.getState\(\)\.getProject\(targetProjectId\)/g) ?? []
     expect(liveRecordReads.length).toBe(4)
+  })
+})
+
+/** The source of `name`'s useCallback, from its declaration to the parenthesis that closes the
+ *  `useCallback(` call. Delimited by BALANCING the parens rather than by searching for a closing
+ *  line: the two callbacks below are formatted differently (one ends `  }, [deps])`, the other
+ *  `    },\n    [deps]\n  )`), and any textual delimiter matches the wrong one for at least one of
+ *  them — which silently widens the slice into the NEXT callback and makes these assertions pass
+ *  on the very regression they exist to catch. */
+function callbackBody(name: string): string {
+  const decl = `const ${name} = useCallback(`
+  const start = CANVAS_SRC.indexOf(decl)
+  expect(start, `${name} not found in Canvas.tsx`).toBeGreaterThan(-1)
+  let depth = 0
+  for (let i = start + decl.length - 1; i < CANVAS_SRC.length; i++) {
+    const ch = CANVAS_SRC[i]
+    if (ch === '(') depth++
+    else if (ch === ')') {
+      depth--
+      if (depth === 0) return CANVAS_SRC.slice(start, i)
+    }
+  }
+  throw new Error(`${name}: unbalanced useCallback(`)
+}
+
+/** Index of `needle` in `haystack`, asserted to exist first — a bare `indexOf` returns -1 when
+ *  the call is GONE, and `-1 < anything` would let the ordering assertions pass on the very
+ *  regression they exist to catch. */
+function indexOfPresent(haystack: string, needle: string): number {
+  const at = haystack.indexOf(needle)
+  expect(at, `missing: ${needle}`).toBeGreaterThan(-1)
+  return at
+}
+describe('navigating from the sidebar dismisses the start screen', () => {
+  // The start screen (`WelcomeScreen`, opened by "+" over existing projects) is `position:absolute;
+  // inset:0` with an opaque canvas background at z 5, and `.sessions-sidebar` is z 12 — so the
+  // sidebar stays clickable OVER it and its clicks reach these two callbacks with the screen still
+  // mounted. Every project create/reopen path already cleared `welcomeOpen`; these two navigation
+  // paths did not, so the node was framed and given keyboard focus behind an opaque screen and the
+  // click read as dead. Pinned as a source read for the reason this file exists: Canvas has no
+  // render harness, and a deleted line here is invisible to every other test.
+  it('switchProject clears welcomeOpen', () => {
+    expect(callbackBody('switchProject')).toContain('setWelcomeOpen(false)')
+  })
+
+  it('switchProject clears it BEFORE the same-project early return', () => {
+    const body = callbackBody('switchProject')
+    // Clicking the already-active project is still "take me back to my canvas", and that path
+    // returns before touching any state — so the order is the whole point.
+    expect(indexOfPresent(body, 'setWelcomeOpen(false)')).toBeLessThan(
+      indexOfPresent(body, '=== useProjects.getState().activeProjectId')
+    )
+  })
+
+  it('focusNodeById clears welcomeOpen', () => {
+    expect(callbackBody('focusNodeById')).toContain('setWelcomeOpen(false)')
+  })
+
+  it('focusNodeById clears it before the kanban branch returns', () => {
+    const body = callbackBody('focusNodeById')
+    // The board branch returns early; a node focused from the sidebar while the board is open must
+    // still leave the start screen behind.
+    expect(indexOfPresent(body, 'setWelcomeOpen(false)')).toBeLessThan(
+      indexOfPresent(body, 'requestCard(')
+    )
   })
 })
