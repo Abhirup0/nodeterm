@@ -14,8 +14,8 @@ const SHELL_QUIET_CAP_MS = 1_500
 const POST_LAUNCH_READY_CAP_MS = 5_000
 const LAUNCH_READINESS_POLL_MS = 100
 const VERIFY_TIMEOUT_MS = 2_000
+const ECHO_EDGE_CHARS = 24
 const DELIVERY_ATTEMPTS = 3
-const ECHO_TAIL_CHARS = 24
 const KILL_LINE = '\x15'
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 // eslint-disable-next-line no-control-regex
@@ -581,7 +581,15 @@ export class HostSession {
       dataSub = this.proc.onData((chunk) => {
         if (done) return
         echoed = (echoed + cleanEcho(chunk)).slice(-Math.max(command.length + 256, 512))
-        if (echoed.includes(command.slice(-ECHO_TAIL_CHARS))) submit()
+        // BOTH ends, not just the tail — see echoedIntact in the renderer's command-delivery for
+        // why a tail match let a head-truncated command through (#556), and why requiring the
+        // whole command contiguously would be too strict on this leg in particular: the retry
+        // exhaustion below REFUSES the launch rather than failing open.
+        if (
+          echoed.includes(command.slice(0, ECHO_EDGE_CHARS)) &&
+          echoed.includes(command.slice(-ECHO_EDGE_CHARS))
+        )
+          submit()
       })
       exitSub = this.proc.onExit(() =>
         finish(new Error('session-host terminal exited during launch delivery'))

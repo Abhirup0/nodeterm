@@ -3,16 +3,13 @@
 // rc/ZLE setup resets the tty with a FLUSH that can eat part of the queued line, and a
 // mangled line submitted anyway strands the shell at `quote>` (field report: 3 spawned
 // team agents, none started, each needed a manual `'` + Enter). So: write WITHOUT Enter,
-// wait until the shell has echoed the tail of the line back, THEN submit. A verify timeout
+// wait until the shell has echoed both ENDS of the line back, THEN submit. A verify timeout
 // kills the pending line (Ctrl-U) and rewrites; the LAST attempt submits unverified —
 // fail-open, a terminal whose echo we can't recognize must never block the launch (that
 // worst case is exactly the pre-fix behavior).
 
 export const VERIFY_TIMEOUT_MS = 2000
 export const DELIVERY_ATTEMPTS = 3
-/** Long enough to be unambiguous in the echo stream, short enough that a ZLE wrap/redraw
- *  sequence interleaved mid-line rarely lands inside the matched window. */
-export const ECHO_TAIL_CHARS = 24
 /** Ctrl-U — clear the pending input line before a rewrite. Exported because the in-place restart
  *  choreography clears the line the same way before typing its exit command (agent-restart.ts). */
 export const KILL_LINE = '\x15'
@@ -28,9 +25,33 @@ export function cleanEcho(chunk: string): string {
   return chunk.replace(ESC_SEQ, '').replace(/[\r\n]/g, '')
 }
 
-/** Has the shell echoed the full line? Tail-match: the head is polluted by the prompt. */
+/** Long enough to be unambiguous in the echo stream, short enough that a ZLE wrap/redraw
+ *  sequence interleaved mid-line rarely lands inside either matched window. */
+export const ECHO_EDGE_CHARS = 24
+
+/**
+ * Has the shell echoed the line? BOTH ENDS must appear, each as its own substring match.
+ *
+ * Tail-only (the original) was blind to a lost HEAD: an rc file that reads the same tty during
+ * startup swallows leading characters — oh-my-zsh's update prompt does exactly this — and the
+ * shell then echoes a line whose tail is fully intact, so verification passed and Enter
+ * submitted a mangled command the shell ran as garbage (#556).
+ *
+ * Requiring the WHOLE command contiguously would catch that, but it is too strict: a ZLE
+ * redraw can interleave printable prompt text inside the echoed line, so the cleaned stream
+ * need not contain the command in one piece. That matters asymmetrically — the renderer would
+ * merely stall and fail open, but the session-host leg clears the line and REFUSES the launch,
+ * turning a cosmetic false negative into a node that never starts.
+ *
+ * Two edge windows keep both properties: a truncated head or tail fails, while junk in the
+ * middle (or before the line) is tolerated. Commands shorter than 2×ECHO_EDGE_CHARS simply
+ * compare as a whole, which is the strictest form and safe at that length.
+ */
 export function echoedIntact(cleanedSoFar: string, cmd: string): boolean {
-  return cleanedSoFar.includes(cmd.slice(-ECHO_TAIL_CHARS))
+  return (
+    cleanedSoFar.includes(cmd.slice(0, ECHO_EDGE_CHARS)) &&
+    cleanedSoFar.includes(cmd.slice(-ECHO_EDGE_CHARS))
+  )
 }
 
 export interface DeliveryIo {
