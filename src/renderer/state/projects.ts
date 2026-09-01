@@ -18,6 +18,7 @@ import type { ProjectIcon } from '@shared/project-icon'
 import { recordCapabilityAck, type CapabilityAnswer } from '@shared/project-capability-consent'
 import { applyCanvasMutation, createProject, reorderGroupWithinParent } from './workspace'
 import { markWorkspaceDirty } from './workspaceDirty'
+import { folderName } from '../lib/projectOpen'
 
 interface ProjectsState {
   projects: Project[]
@@ -309,7 +310,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       get().reopenProject(existing.id)
       return existing
     }
-    const name = folder.split('/').filter(Boolean).pop() || 'Project'
+    const name = folderName(folder) || 'Project'
     const project = get().addProject(name, folder)
     set({ activeProjectId: project.id })
     return project
@@ -685,7 +686,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       set((s) => ({ projects: [...s.projects, adopted] }))
       return { project: adopted, created: false, adopted: true }
     }
-    const fallbackName = cwd.split('/').filter(Boolean).pop() || 'Project'
+    const fallbackName = folderName(cwd) || 'Project'
     const project = {
       ...createProject(get().projects.length, name ?? fallbackName, cwd),
       ...(color ? { color } : {})
