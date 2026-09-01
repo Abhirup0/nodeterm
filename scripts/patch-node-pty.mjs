@@ -85,7 +85,7 @@ const ISSUE_URL = 'https://github.com/microsoft/node-pty/issues/950';
 const EXPECTED_VERSION = '1.1.0';
 
 /** Anchor -> replacement. Every anchor must match exactly once. */
-const EDITS = [
+export const EDITS = [
   {
     name: 'error-path fd cleanup (master/slave)',
     find: `  *master = posix_openpt(O_RDWR);
@@ -512,42 +512,67 @@ function fail(msg) {
   process.exit(1);
 }
 
-/** Apply one file's edits; returns false when the marker shows they are already applied. */
+/** Apply one file's edits; returns false when the marker shows they are already applied.
+ * The path is resolved exactly ONCE (`open`), and the read, the marker check and the write all
+ * go through that same descriptor — there is no exists/stat probe for the file to change under
+ * (CodeQL js/file-system-race). A missing source is the open's own ENOENT. */
 function patchOne(file, marker, edits) {
-  if (!fs.existsSync(file)) {
-    fail(`required node-pty source is missing:\n  ${file}`);
-  }
-  const original = fs.readFileSync(file, 'utf8');
-  if (original.includes(marker)) {
-    return false;
-  }
-
-  let patched = original;
-  for (const edit of edits) {
-    const occurrences = patched.split(edit.find).length - 1;
-    if (occurrences !== 1) {
-      fail(`anchor "${edit.name}" matched ${occurrences} times (expected exactly 1) in\n  ${file}`);
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r+');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      fail(`required node-pty source is missing:\n  ${file}`);
     }
-    patched = patched.replace(edit.find, edit.replace);
+    fail(`cannot open node-pty source for patching (${e?.code ?? e}):\n  ${file}`);
   }
-  fs.writeFileSync(file, patched, 'utf8');
-  return true;
+  try {
+    const original = fs.readFileSync(fd, 'utf8');
+    if (original.includes(marker)) {
+      return false;
+    }
+
+    let patched = original;
+    for (const edit of edits) {
+      const occurrences = patched.split(edit.find).length - 1;
+      if (occurrences !== 1) {
+        fail(
+          `anchor "${edit.name}" matched ${occurrences} times (expected exactly 1) in\n  ${file}`
+        );
+      }
+      patched = patched.replace(edit.find, edit.replace);
+    }
+
+    // Rewrite through the SAME descriptor. `writeFileSync(fd, …)` writes at the CURRENT position
+    // (end-of-file after the read above), so it cannot be used here; truncate then write from an
+    // explicit offset 0, looping because a sync write on a regular file may still be partial.
+    const bytes = Buffer.from(patched, 'utf8');
+    fs.ftruncateSync(fd, 0);
+    let offset = 0;
+    while (offset < bytes.length) {
+      offset += fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
+    }
+    return true;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function main() {
-  if (!fs.existsSync(ptyDir)) {
-    // node-pty is optional in some install shapes (e.g. docs-only CI installs).
-    console.log('[patch-node-pty] node-pty sources not present, nothing to patch.');
-    return;
-  }
-
+  // No exists() probe (CodeQL js/file-system-race): whether node-pty is installed at all is
+  // answered by the package.json read's own ENOENT — node-pty is optional in some install
+  // shapes (e.g. docs-only CI installs), and an install without a package.json cannot exist.
   let installedVersion = 'unknown';
   try {
     installedVersion = JSON.parse(
       fs.readFileSync(path.join(ptyDir, 'package.json'), 'utf8')
     ).version;
-  } catch {
-    /* fall through — the anchor check below is the real guard */
+  } catch (e) {
+    if (e && e.code === 'ENOENT') {
+      console.log('[patch-node-pty] node-pty sources not present, nothing to patch.');
+      return;
+    }
+    /* unreadable/unparsable for another reason — fall through; the anchor check is the guard */
   }
 
   if (installedVersion !== EXPECTED_VERSION) {
