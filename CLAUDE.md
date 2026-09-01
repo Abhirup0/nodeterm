@@ -2476,13 +2476,16 @@ latest.yml anywhere, no 404 polling; users update by downloading the next instal
 add `*.yml`/`*.blockmap` to that job's upload globs — that IS the auto-update leg, and it waits
 on signing. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
-winget hints (it never installs machine-wide tools itself, and refuses to run elevated) and runs
-`npm ci`. `.github/workflows/win-package-smoke.yml` is a **workflow_dispatch-only** packaging
-smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** code signing,
-then Windows auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev
-feed — blocked
-on signing: an unsigned auto-update is a downgrade in trust), and the
-fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
+winget hints (it never installs machine-wide tools itself, and the full bootstrap refuses to run
+elevated) and runs `npm ci`. Its `--check-vs-build-tools` mode is the narrow exception used by
+`quality-windows`: it branches before the elevation refusal, runs only the VS C++ probe, and exits
+before the Node / Python / `npm ci` steps. Fixture injection additionally requires the explicit
+`NODETERM_BOOTSTRAP_TESTING=1` sentinel. `.github/workflows/win-package-smoke.yml` is a
+**workflow_dispatch-only** packaging smoke on windows-latest — build only, never publishes.
+**Follow-ups, in order:** code signing, then Windows auto-update wiring (electron-updater NSIS leg
++ `latest.yml` on the nodeterm.dev feed — blocked on signing: an unsigned auto-update is a
+downgrade in trust), and the fork's PE-identity polish (electron-builder leaves `OriginalFilename`
+empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 
 **macOS permission prompts are declared in `build.mac.extendInfo`, and a missing one denies
