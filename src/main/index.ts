@@ -1,7 +1,6 @@
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { TriggerArmStore } from '../core/trigger-arm-store'
-import { createTriggerScheduler, triggerRowsFromCanvases } from '../core/trigger-scheduler'
+import { startTriggerService } from '../core/trigger-service'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
 import { readFile, realpath as fsRealpath, lstat as fsLstat, writeFile as fsWriteFile } from 'fs/promises'
 import { existsSync, statSync, openSync, fstatSync, readFileSync, closeSync } from 'fs'
@@ -1780,19 +1779,17 @@ app.whenReady().then(async () => {
     // get it wrong, and getting it wrong is invisible — the wrong list silently skips an agent's
     // nodes with every test still green.
   })
-  // Trigger nodes (issue #493, phase 2): the host-side scheduler. Same wiring as the Server
-  // Edition's (src/server/index.ts) — the trigger list, the arm gate and the sweep all live in
-  // core; this shell only supplies the seams. `fire` is a stub until the delivery phase lands,
-  // and since nothing can ARM a trigger yet (no arm IPC/UI), a production trigger cannot reach
-  // it — the stub exists so a due+armed trigger in a dev build records an honest failure
-  // instead of pretending to run.
-  const triggerArms = new TriggerArmStore(app.getPath('userData'))
-  const triggerScheduler = createTriggerScheduler({
-    listTriggers: () => triggerRowsFromCanvases(workspaceStore.persistedCanvases()),
-    isArmed: (projectId, nodeId, spec) => triggerArms.isArmed(projectId, nodeId, spec),
-    fire: async () => ({ ok: false, detail: 'delivery not wired yet (trigger phase 3)' })
+  // Trigger nodes (issue #493): the whole host-side machine — arm store, scheduler, delivery with
+  // its deliver-on-idle queue, and the mirror's idle signal — composed ONCE in core
+  // (`startTriggerService`); this shell only supplies its seams. Identical call in
+  // src/server/index.ts. Arming still has no IPC/UI (phase 4), so nothing fires in production yet.
+  startTriggerService({
+    userDataDir: app.getPath('userData'),
+    listCanvases: () => workspaceStore.persistedCanvases(),
+    getNode: (nodeId) => workspaceStore.getNode(nodeId),
+    sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId)
   })
-  void triggerArms.load().finally(() => triggerScheduler.start())
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
   //
