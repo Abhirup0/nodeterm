@@ -9,6 +9,38 @@ export function isCanvasImageDropTarget(target: EventTarget | null, wrap: Elemen
   )
 }
 
+/** True for anywhere a folder-drop should be handled: canvas background, the Welcome screen,
+ *  general app chrome (sidebar/dock backgrounds, tab strip empty area) — anywhere that isn't a
+ *  more specific drop target (a terminal, an editor, a dialog, a form control, or a node body).
+ *  Unlike isCanvasImageDropTarget this is NOT restricted to `.react-flow__pane`, because a
+ *  folder drop must also work with no project open yet (the Welcome screen is an overlay, not
+ *  necessarily inside the pane). */
+export function isFolderDropTarget(target: EventTarget | null): boolean {
+  const element = target instanceof Element ? target : null
+  if (!element) return false
+  // The Welcome screen's four nav cards (`.welcome__card`) are themselves <button> elements, so
+  // without this carve-out the general `button` exclusion below would silently swallow a folder
+  // dropped straight onto "Open folder…" — defeating the feature's own stated goal of working from
+  // the Welcome screen. Every OTHER button (dialogs, terminal headers, form controls, …) still
+  // falls through to the exclusion unchanged.
+  if (element.closest('.welcome__card')) return true
+  return !element.closest(
+    'input, textarea, select, button, [contenteditable], [role="dialog"], ' +
+      '.monaco-editor, .xterm, .react-flow__node'
+  )
+}
+
+/** Directories among a drop's items, via the synchronous webkitGetAsEntry() check — this MUST
+ *  run inside the drop handler itself, before any `await`: DataTransferItem entries are only
+ *  valid for the duration of the originating event. */
+export function droppedDirectories(dt: DataTransfer | null): File[] {
+  if (!dt) return []
+  return Array.from(dt.items)
+    .filter((it) => it.kind === 'file' && it.webkitGetAsEntry()?.isDirectory)
+    .map((it) => it.getAsFile())
+    .filter((f): f is File => !!f)
+}
+
 /**
  * Why a canvas image import cannot proceed, or null when it may. One rule, one message, so the
  * drop path and the paste path cannot disagree about either.

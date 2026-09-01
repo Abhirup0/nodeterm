@@ -46,6 +46,7 @@ import {
   type RevocationTargets
 } from './browser-revocation'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { TrackpadGestureLedger } from './trackpad-gesture'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -976,6 +977,20 @@ function createWindow(): BrowserWindow {
   // (both projects, every terminal). Bounded by the policy so a boot-path crash can't loop;
   // past the budget the user decides. The tmux sessions all live in this process, so a reload
   // costs nothing but the canvas re-hydrating from the workspace store.
+  // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
+  // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
+  // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
+  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
+  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
+  // canvas/wheel-gesture.ts for the two halves of the contract.
+  const trackpadLedger = new TrackpadGestureLedger()
+  win.webContents.on('input-event', (_event, input) => {
+    const active = trackpadLedger.observe(input.type)
+    if (active !== null && !win.isDestroyed()) {
+      win.webContents.send(IPC.canvasTrackpadGesture, active)
+    }
+  })
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
@@ -2805,7 +2820,9 @@ app.whenReady().then(async () => {
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
   // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
-  // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.
+  // requestId) bridges the two async hops; both the reply and the timeout below clear the entry.
+  // The window is generous because a confirm-gated verb waits on a human, not on the renderer.
+  const CONTROL_REQUEST_TIMEOUT_MS = 120_000
   const pendingControl = new Map<
     string,
     {
@@ -3135,8 +3152,15 @@ app.whenReady().then(async () => {
     const result = await new Promise<{ ok: boolean; message?: string; result?: unknown; error?: string }>((resolve) => {
       const timer = setTimeout(() => {
         pendingControl.delete(requestId)
-        resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
-      }, 120_000)
+        // Name the timeout and say it is retryable. A DENIAL is a different answer with different
+        // guidance (`denied by user`, final, never retried), and the old wording — "no response /
+        // not confirmed" — read as though it covered both, so a caller that had merely waited out
+        // an unanswered dialog treated it as a refusal and gave up.
+        resolve({
+          ok: false,
+          error: `no answer within ${CONTROL_REQUEST_TIMEOUT_MS / 1000}s — the confirmation dialog may still be open; safe to retry`
+        })
+      }, CONTROL_REQUEST_TIMEOUT_MS)
       pendingControl.set(requestId, { resolve, timer })
       target.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
     })

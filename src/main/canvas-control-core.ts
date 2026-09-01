@@ -303,6 +303,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  included); or an id `open-project` returned to YOU in this session, which never switches the',
     '  user\'s view. A session opened into a non-active project starts when the user next views that',
     '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
+    '  `--prompt` arrives on ONE LINE: every run of whitespace in it, newlines included, is',
+    '  collapsed to a single space before the session starts. Write the task as continuous prose',
+    '  and use sentences where you would have used bullets — a numbered list arrives as one',
+    '  paragraph. Never begin a prompt with `/`: once flattened, the agent reads the whole prompt',
+    '  as arguments to that slash command, your task is never seen, and the node then sits idle',
+    '  looking healthy. To pick a model use `--model`, not a leading `/model`. To send a long or',
+    '  structured brief, open the node and follow up with `send --node <id> --text "..."`.',
     '  `--model <id>` picks the model the session launches with, instead of inheriting the',
     '  default. Use it to keep a cheap station cheap: a node whose whole job is editing a README',
     '  does not need the model you give the node rewriting a test suite. Honoured by claude, codex',
@@ -346,7 +353,9 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
-    '  Both ask the user to confirm a dialog and may be denied.',
+    '  Both ask the user to confirm a dialog and may be denied. Read WHICH answer came back:',
+    '  `denied by user` is a decision and is FINAL — never re-ask — while `no answer within 120s`',
+    '  means nobody reached the dialog, which is worth one retry when the user is back.',
     '- `send --node <id> --text "..."` / `reply --node <id> --text "..."` — deliver a message into',
     '  another AGENT node in this project (no confirm dialog: verified-only, gated by the project\'s',
     '  agent-messaging switch — off by default — and rate-limited). A busy target is not interrupted',
@@ -670,6 +679,19 @@ Verbs:
   TARGET project's (its cwd, its default account and permission mode). A session opened into a
   non-active project starts when the user next views that project — do not poll for it; the reply
   says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
+  \`--prompt\` arrives on ONE LINE. Every run of whitespace in it — newlines included — is
+  collapsed to a single space before the session starts, because the prompt is passed as an
+  argument on the agent CLI's launch command line and that line is typed into the pane. So write
+  the task as continuous prose: a numbered list or a markdown heading arrives as one paragraph,
+  and indentation is lost. Two consequences worth planning around:
+  - **Never start a prompt with \`/\`.** Flattened, \`/model sonnet\` followed by your task reads
+    to the agent as one slash command whose argument is the entire rest of the prompt. The
+    command fails, your task is never seen, and the node then sits at an idle prompt looking
+    perfectly healthy — including to \`--after\`, which will arm everything behind it. Use
+    \`--model\` for the model; there is no supported way to run a slash command at launch.
+  - **For a long or structured brief, split it.** Open the node with a short \`--prompt\` (or
+    none), then deliver the body with \`send --node <id> --text "..."\`, which preserves the text
+    as written.
   \`--model <id>\` decides which model the session LAUNCHES with, instead of inheriting the
   project default. This is the lever for cost: a station whose job is editing a README does not
   need the model you give the station rewriting a 1000-line test suite, and without this flag
@@ -782,6 +804,9 @@ ${browserGuidanceLines().join('\n')}
 
 Notes:
 - \`write\` and \`close\` require the user to approve a confirmation dialog; they may be denied.
+  Two different replies, two different follow-ups: \`denied by user\` is a decision and is FINAL —
+  never re-ask — whereas \`no answer within 120s\` means the dialog was simply not reached in
+  time, which is worth one retry when the user is back at the machine.
 - \`board\` and \`assign\` act on the CURRENTLY OPEN project's board — the same one you see when you
   toggle the kanban view. They need no confirmation.
 - If the CLI says canvas control is unavailable, you are not in a controllable nodeterm session — do not retry.

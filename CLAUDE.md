@@ -1888,8 +1888,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
     shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
     keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
-    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
-    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
+    change. Falling through main is not enough: xterm's custom key handler runs before the Canvas
+    dispatcher, whose main-intercepted command cases deliberately have no renderer handlers.
+    `terminalChordBubbles` must therefore refuse every `MAIN_INTERCEPTED_COMMAND_IDS` command; if
+    it returned true for `node.close`, xterm would withhold `^W` while the unclaimed event bubbled
+    to Canvas. One predicate, two main-process consumers are pinned in `keydown-intercept.test.ts`
+    (including a source-level wiring pin, since the menu leg lives against a real Menu in index.ts),
+    and `keybindingOverrides.test.ts` pins the renderer-to-xterm hand-off through
+    `terminalKeyAction`.
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -2125,7 +2131,23 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   issues (`GitHubIssueCardView` via `state/githubIssues.ts`, opened through
   `GitHubIssueSummaryModal`, a column move that closes/reopens the issue confirms first). A
   **source filter** (`KanbanSourceFilter`: All / GitHub / Sessions) and a transient per-board
-  **label filter** narrow what shows. **Labels** are a per-project palette (`ProjectKanban` labels,
+  **label filter** narrow what shows.
+  **Where a card comes from is a registry, not a branch per call site** (`renderer/lib/kanbanSources.ts`,
+  2026-08-30 — the same membership-plus-one-leaf discipline `AGENT_CONFIG` uses): each entry declares
+  its filter `label`, its `placement` (`assignment` = the board's own persisted assignments,
+  reorderable within a column; `provider` = the provider reports the column, the board persists
+  nothing and a move is the provider's write), its in-column `lane` order and whether it is
+  `configured` for a given board. Two orders live there deliberately: **declaration order is the
+  source filter's button order** (All · GitHub · Sessions), **`lane` is the in-column stacking order**
+  (sessions above issues) — they genuinely differ, and pinning both is what stops either being
+  re-spelled elsewhere. `KanbanColumn` therefore takes ONE `lanes` prop (`{sourceId, cards, footer?,
+  count}`) instead of a `cards` + eight `github*` props, places them via `byLane` and names no source;
+  the board builds each source's leaf, and the drag union branches on `placement` (`isProviderDrag`)
+  rather than on the string `'github'`. A lane's `count` is passed rather than derived from
+  `cards.length` because a provider reports a server-side total larger than the page fetched so far.
+  What deliberately did NOT move into the registry: the virtual **Ungrouped** column (board
+  semantics, not a source's concern) and `validKanban`, which stays the single shape gate on every
+  load path — a registry entry must never grow its own parallel validation. **Labels** are a per-project palette (`ProjectKanban` labels,
   edited inline via the Notion-style `LabelPicker`: create/assign/rename/recolor/delete through the
   pure `lib/kanban.ts` transforms) plus each GitHub issue's own labels, both filterable. The canvas stays MOUNTED under the opaque overlay (agent-status
   listeners live in Canvas.tsx; `display:none` would 0×0-resize every terminal into a tmux
