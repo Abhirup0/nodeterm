@@ -499,6 +499,36 @@ export function agentHibernateFns(nodeId: string): AgentHibernateFns | undefined
   return hibernateFns.get(nodeId)
 }
 
+/** The exit half's outcome, plus `'paused'` for a manual pause that actually took. Registered
+ *  separately from `hibernateFns.exit`: Eco's exit refuses a node the user is currently watching
+ *  (`isNodeWatched`) — the whole point of the sweep — but a MANUAL pause is the user acting on the
+ *  node they are looking at right now, so it must not carry that refusal. The resume half is
+ *  intentionally NOT duplicated here: `agentHibernateFns(id).resume()` already works for a paused
+ *  node whichever depth paused it (a warm hibernated pane, or a freshly recycled shell after the
+ *  deeper "pause & end session") — it only asks whether the pane is a shell right now, not why. */
+export type PauseOutcome = ExitPhaseOutcome | 'paused'
+
+export interface AgentPauseFns {
+  /** Ask the CLI to quit and mark the node PAUSED (see `agentStatus.paused`) so it does not
+   *  auto-resume on the next reveal or cold restart. `deep` additionally recycles the tmux session
+   *  for a fuller memory reclaim — the caller decides per node, at pause time. */
+  pause: (deep: boolean) => Promise<PauseOutcome>
+}
+
+const pauseFns = new Map<string, AgentPauseFns>()
+
+/** Register a node's pause closure; returns an unregister that is inert if superseded. */
+export function registerAgentPause(nodeId: string, fns: AgentPauseFns): () => void {
+  pauseFns.set(nodeId, fns)
+  return () => {
+    if (pauseFns.get(nodeId) === fns) pauseFns.delete(nodeId)
+  }
+}
+
+export function agentPauseFns(nodeId: string): AgentPauseFns | undefined {
+  return pauseFns.get(nodeId)
+}
+
 /** TEST ONLY (house pattern: webgl-budget's `__resetWebglBudgetForTests`): the maps above are
  *  module-global, so a test that leaves a restart in flight would otherwise refuse the next
  *  test's restart of the same node id. */
@@ -506,6 +536,7 @@ export function __resetAgentRestartForTests(): void {
   inFlight.clear()
   restartFns.clear()
   hibernateFns.clear()
+  pauseFns.clear()
 }
 
 // ── Bulk run: who gets restarted, and how the run is summed up ──────────────────────────
