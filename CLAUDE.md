@@ -1461,6 +1461,23 @@ else, and its context links must keep classifying across restarts).
     the project-default account), and validation runs against `accountsForProject`, not the raw
     list, so a **pending** account or one **pinned to another machine's host** is never stamped
     onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
+  - **Account default node color (`ClaudeAccount.color` / `CodexAccount.color`, optional)** — a
+    per-account default node color (Settings → Accounts) that beats the agent's own brand color in
+    `createAgentNode`, so a second login is recognizable on the canvas. Read off the SAME
+    `boundAccountId` that stamps `data.accountId`, so the color and the binding cannot drift.
+    Applied **at creation** and baked into `data.color` like any other node color: a hand-picked
+    node color is never overwritten and editing the account later repaints nothing. Unset / stale
+    id / an agent that takes no managed account ⇒ the agent's color, unchanged.
+    **Which list answers is `agentAccountColor`'s alone** (`shared/agents/account-color.ts`, one
+    definition shared by `createAgentNode` and the phone-registered node path in `src/main`):
+    claude reads `claudeAccounts`, codex reads `codexAccounts`, everything else reads nothing. The
+    two lists are keyed **independently** — nothing stops the same id appearing in both — so a node
+    colored from the other list would be repainted from a stranger's row; the swatch UI is one
+    component (`AccountColorSwatches`) rendered by both row kinds for the same reason.
+    The value is **re-validated as a string** at the read: the account lists come out of a
+    hand-editable settings.json that nothing checks field-by-field on load, and a `"color": 123`
+    would throw on `.trim()` INSIDE `createAgentNode` — stopping every new node under that account
+    from opening, with nothing pointing back at the edited file.
   - **Env injection** — `pty-manager` sets `CLAUDE_CONFIG_DIR` in the spawn env AND as a tmux `-e`
     (local); for a remote node it emits an **absolute-path** remote tmux `-e` built from the
     connection-cached `remoteHome` (skipped **fail-open** if home is unresolved). `AUTH_ENV_STRIP`
