@@ -21,8 +21,10 @@ npm test           # vitest, unit + integration
 
 **If `src/main/node-pty-patch.test.ts` is red, your `node_modules` is unpatched — not your code.**
 Run `npm run rebuild`. node-pty 1.1.0 leaks a pty device per spawn on macOS
-([node-pty#950](https://github.com/microsoft/node-pty/issues/950)); we patch its source before
-`electron-rebuild` compiles it, and that test guards the patch surviving upgrades.
+([node-pty#950](https://github.com/microsoft/node-pty/issues/950)) and, on Windows, leaves a
+conhost alive per killed session (its exit thread deletes the ConPTY baton without closing the
+HPCON); we patch both sources before `electron-rebuild` compiles them, and that test guards the
+patches surviving upgrades.
 
 ## Where code goes
 
@@ -91,6 +93,14 @@ lane unaffected.
   core that owns the files, and keep an unobserved host unknown rather than guessing. Conversely,
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
+
+- **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
+  it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
+  silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while
+  the stored command still carried `\`, so nodeterm stopped recognizing its own hook entries and
+  appended a fresh copy of all nine on every launch — nine hook processes per event, nine
+  concurrent 45 s permission waits racing one prompt. Write the normalizer once, use it on both
+  sides, and pin it with a `C:\`-shaped test.
 
 - **Never publish a file with a bare `fs.rename`.** Use `renameAtomic` or `writeFileAtomic` from
   `src/core/fs-atomic.ts`. On Windows a rename fails with `EPERM` whenever anything has the
