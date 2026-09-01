@@ -187,6 +187,7 @@ import { codexContextParse } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { agentAccountColor } from '../shared/agents/account-color'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
 import {
@@ -276,7 +277,7 @@ import {
   allowMediaPath,
   writeAgentHtml
 } from './media-protocol'
-import { initPlatform } from '../core/platform'
+import { initPlatform, platform } from '../core/platform'
 import { electronPlatform } from './platform-electron'
 import { wirePeerRegistry } from './peer-registry'
 import { WEBGL_CONTEXT_CAP_DESKTOP } from '../shared/webgl'
@@ -1789,7 +1790,8 @@ app.whenReady().then(async () => {
     listCanvases: () => workspaceStore.persistedCanvases(),
     getNode: (nodeId) => workspaceStore.getNode(nodeId),
     sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
-    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId)
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+    handle: (channel, handler) => platform().handle(channel, handler)
   })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
@@ -3345,7 +3347,20 @@ app.whenReady().then(async () => {
     registerNode: (
       projectId: string,
       node: { id: string; title?: string; agentId?: string; accountId?: string }
-    ) => workspaceStore.appendRemoteNode(projectId, node),
+    ) =>
+      workspaceStore.appendRemoteNode(
+        projectId,
+        node,
+        new Date(),
+        // Host-derived, exactly as on the canvas: the account's default color beats the agent's,
+        // so a phone-started session under a colored account is recognizable in the same way. The
+        // agent decides WHICH account list answers (agentAccountColor) — the phone supplies both
+        // ids, and the two lists are keyed independently.
+        agentAccountColor(node.agentId, node.accountId, {
+          claude: settingsStore.get().claudeAccounts ?? [],
+          codex: settingsStore.get().codexAccounts ?? []
+        })
+      ),
     // "End session" from the phone (`pty.destroy`): the SAME two steps the desktop × performs —
     // kill the tmux session on every socket it could live on (the sweep may have seen it on either
     // — see the session-memory panel's kill rule), then take the node off its project's canvas

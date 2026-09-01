@@ -149,14 +149,14 @@ separate store mirroring node state — earlier dual-source designs caused sync 
 `src/renderer/state/workspace.ts` holds only pure helpers: the color palette, the node
 factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agentId, …)`,
 `createAccountLoginNode`, `createStickyNode`, `createGroupNode`, `createEditorNode`,
-`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createDinoNode`), the
+`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createDinoNode`,
+`createTriggerNode`), the
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
 subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
-viz) and never persisted. `trigger` (issue #493, landing in phases — schema + the core
-scheduler + DELIVERY so far; the renderer/arming UI is the remaining phase, so nothing can arm a
-trigger yet and nothing fires in production) is a first-class PERSISTED kind. The whole host-side
+viz) and never persisted. `trigger` (issue #493, all four
+phases landed) is a first-class PERSISTED kind. The whole host-side
 machine is composed ONCE in `core/trigger-service.ts` (`startTriggerService`) and booted
 identically by BOTH shells: `core/trigger-scheduler.ts` (sweep-service shape, no catch-up for
 missed slots, cron via the dependency-free `@shared/cron` with the vixie dom/dow OR rule) decides
@@ -229,6 +229,16 @@ Persistence has two layers:
   (`markUnmirrored`); pending mirrors are flushed before the ControlMasters die at quit; and the
   SSH dialog **dedupes by endpoint+remoteCwd** (`openSshProject`, same contract as
   `openFolderProject`) instead of minting a fresh empty project for a folder that already has one.
+  **The reconciler also recognizes its own writes** (the SSH twin of the watcher's `isSelfWrite`):
+  the 15 s poll and the connect-time refresh read the very file the mirror writes, so
+  `recentMirrorHashes` remembers the last few payloads handed to `remoteIO.write` and a read that
+  returns those exact bytes decides "nothing new" — never an adopt/broadcast (which raised the
+  Reload/Keep-mine conflict bar over the store's own autosave), and never a rescue of an OLDER own
+  write still sitting under the 5 s throttle (which resurrected just-deleted nodes). Exact bytes
+  only, so a phone append or another machine's save still reads as external. And
+  `refreshSshProject` runs ON `saveChain`: off the chain a poll snapshotting the pre-save entry
+  could complete its slow ssh read after the save's mirror landed and "adopt" the store's own
+  write on rev alone.
 - **Live terminal sessions** (tmux): terminals continue where they left off across node
   remounts *and* full app restarts, including running processes. See below.
 
@@ -493,12 +503,39 @@ Lifecycle, by intent:
   process. (2) **Fire-time re-asks**: still-offscreen, remote, eligibility — a plan-time verdict
   is stale by seconds. (3) `hibernated` **self-heals** on live hook states + SessionStart (never
   on `done` — a late Stop POST must not undo a just-performed hibernate); cold restore (`fresh`)
-  clears it and lets the normal auto-resume own the node. (4) **Ordering with offscreen release**:
+  clears `hibernated` UNCONDITIONALLY and normally lets auto-resume own the node — **`paused` (see
+  below) is what makes that auto-resume itself conditional**, the one deliberate exception: the
+  flag it gates is still cleared, only the relaunch is skipped. (4) **Ordering with offscreen
+  release**:
   Eco defers the Phase-2 viewer release until the node hibernates (hard cap idle+offscreen), but
   ONLY when the idle clock is known (`idleKnown` — `lastEventAt` is transient, so after an app
   restart nothing can hibernate and deferring would make Eco a memory regression). Eco is
   structurally inert for sessions with no turn in the current app run — documented follow-up.
+  The deferral is also unaware of `paused`: a deep-paused node's freshly recycled shell keeps its
+  xterm alive until the hard cap, waiting for a hibernation that (being already exited, or having
+  no CLI to exit) can never come — a second documented follow-up.
   Device checklist (8 items) in PR #130 — owed before recommending Eco to anyone.
+- **"Pause session"** (manual, or via Eco when `settings.agentHibernationPersistAcrossRestart` is
+  on) → `agentStatus.paused`, a persisted flag alongside `hibernated` with ONE job: stop a node
+  from coming back on its own. Two depths, chosen per node: shallow — identical to an Eco exit
+  (`registerAgentPause`'s `pause` closure reuses `performExitPhase`), plus `paused` — or "pause &
+  end session" — the same recycle `restartAgentNode(…, restartShell: true)` uses
+  (`transport.recycle` + a `respawnNonce` bump), so the node comes back `fresh` next time, with no
+  live tmux session to hold memory. Two pure predicates in `terminal/hibernation-policy.ts` pin the
+  contract: `shouldColdResume` (a `fresh` mount must not auto-relaunch a paused node — see Cold
+  restore above) and `shouldAutoWake` (the mount-timer, visibility-edge, and kanban-card-modal-open
+  auto-wake triggers must not fire for a paused node, hibernated or not — only an explicit Resume,
+  which reuses the SAME `wakeHibernatedNode` trigger the SLEEPING/PAUSED chip's click uses, so it
+  gets the same `WakeInputBuffer` splice protection and retry budget). Pausing an already-hibernated
+  node skips the exit phase entirely (`alreadyExited` in the closure) — asking an idle CLI-less
+  shell to quit would type `/exit` into it as a real command. `paused` is ALSO excluded from Eco's
+  own candidate plan and its exit closure's fire-time re-ask (`HibernationCandidate.paused`,
+  `hibernationCandidates.ts`) — a deep-paused node has `hibernated` unset (its tmux was recycled,
+  not exited), so `!hibernated` alone would still admit it to a sweep whose dropped SessionEnd hook
+  POST left a stale `done` behind: the same `/exit`-into-a-bare-shell mistake `alreadyExited` closes
+  on the manual path, closed here on the automatic one. Node menu only today (canvas right-click +
+  the sessions sidebar row menu, which shares the same `selectionItems` builder, plus a read-only
+  kanban card badge and a clickable one in the card modal); no command palette entry.
 
 The node id is the `persistKey` (passed to `transport.create`), so it must stay stable.
 If tmux is unavailable, `PtyManager` falls back to a plain shell (no cross-restart
@@ -530,7 +567,11 @@ session (you can't keep a live OS process across a reboot):
   renderer re-launches the agent CLI: `resumeCommand(agentId, sessionId)` (from the session id
   persisted in `agentStatus` localStorage — `claude --resume`, `codex resume`, `gemini
   --resume`) when known, else the bare `launchCmd`. The one-shot `data.initialCommand` still wins
-  on the very first open, so the agent is never double-launched.
+  on the very first open, so the agent is never double-launched. **The one exception: a `paused`
+  node** (see "Pause session" below) skips this auto-relaunch — that is the entire point of the
+  flag — and instead records the pane its fresh shell settled on (`agentStatus.hibernatedPane`),
+  so a later explicit Resume can recognize it even for a default shell outside the wake's
+  `isShellCommand` allowlist.
 
 ### We have our own VT emulator — check it before asking tmux
 
@@ -758,6 +799,18 @@ session.
   surface backs the kanban card modal's browser popup.
 - **dino** (`DinoNode.tsx`) — a small self-contained T-Rex-style runner on a canvas (no PTY);
   high score persists via `data.highScore`.
+- **trigger** (`TriggerNode.tsx`) — a canvas-owned schedule (cron / interval / once) that
+  delivers a payload into a connected terminal/agent node when due (issue #493 — the inverse of
+  the ephemeral loop/cron cards, which visualize AGENT-initiated recurrence). The card shows the
+  schedule + next-run countdown, the target (a derived, never-persisted edge — same rule as the
+  pending-launch dep edges), the payload, an honest ARMED/DISARMED/CHANGED/SET-UP chip with the
+  "definitions travel with the repo, consent never does" narrative, Run-now, and the last runs
+  (fired / delivered-late / queued / missed / failed / expired). Arming passes a ConfirmDialog
+  showing the exact schedule+payload+target being consented to; all decisions are the pure,
+  tested `lib/triggerCard.ts`, all state is host-side over `window.nodeTerminal.triggers`
+  (arm/disarm/status/runNow — `startTriggerService` registers the handlers in BOTH shells;
+  `runNow` deliberately takes no spec: a caller chooses WHEN, never WHAT). The relay stub
+  refuses and the card says triggers are managed on the host. Mobile: N/A (no canvas).
 - **subagent** / **loop** (`SubagentNode.tsx` / `LoopNode.tsx`) — render-only, hook-driven viz
   nodes, **never persisted**. `subagent` visualizes a subagent the Claude session spawned (type +
   task + live timer, expand for its live transcript — subagents have no PTY); `loop` shows a
@@ -1461,6 +1514,23 @@ else, and its context links must keep classifying across restarts).
     the project-default account), and validation runs against `accountsForProject`, not the raw
     list, so a **pending** account or one **pinned to another machine's host** is never stamped
     onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
+  - **Account default node color (`ClaudeAccount.color` / `CodexAccount.color`, optional)** — a
+    per-account default node color (Settings → Accounts) that beats the agent's own brand color in
+    `createAgentNode`, so a second login is recognizable on the canvas. Read off the SAME
+    `boundAccountId` that stamps `data.accountId`, so the color and the binding cannot drift.
+    Applied **at creation** and baked into `data.color` like any other node color: a hand-picked
+    node color is never overwritten and editing the account later repaints nothing. Unset / stale
+    id / an agent that takes no managed account ⇒ the agent's color, unchanged.
+    **Which list answers is `agentAccountColor`'s alone** (`shared/agents/account-color.ts`, one
+    definition shared by `createAgentNode` and the phone-registered node path in `src/main`):
+    claude reads `claudeAccounts`, codex reads `codexAccounts`, everything else reads nothing. The
+    two lists are keyed **independently** — nothing stops the same id appearing in both — so a node
+    colored from the other list would be repainted from a stranger's row; the swatch UI is one
+    component (`AccountColorSwatches`) rendered by both row kinds for the same reason.
+    The value is **re-validated as a string** at the read: the account lists come out of a
+    hand-editable settings.json that nothing checks field-by-field on load, and a `"color": 123`
+    would throw on `.trim()` INSIDE `createAgentNode` — stopping every new node under that account
+    from opening, with nothing pointing back at the edited file.
   - **Env injection** — `pty-manager` sets `CLAUDE_CONFIG_DIR` in the spawn env AND as a tmux `-e`
     (local); for a remote node it emits an **absolute-path** remote tmux `-e` built from the
     connection-cached `remoteHome` (skipped **fail-open** if home is unresolved). `AUTH_ENV_STRIP`
@@ -1494,7 +1564,18 @@ else, and its context links must keep classifying across restarts).
     guessing "not codex" would let `codex login` write into the system `~/.codex`. A dispatch with
     no listener is a silent no-op, which is how the Codex half shipped inert (#346) — pinned now by
     `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
-    never heard.
+    never heard. **All THREE login factories take a `cwd`** (`createAccountLoginNode`,
+    `createCodexAccountLoginNode`, `createSystemLoginNode`), and every call site passes the active
+    project's — a login node with none starts in `$HOME`, and an agent CLI whose trust check is
+    keyed on the cwd (Claude Code's is) then asks the user to trust their entire home directory,
+    SSH keys and cloud credentials included, before an OAuth round trip that touches no files
+    (issue #553; a persisted "yes" there grants that workspace for good). It is not a promise the
+    prompt disappears — an untrusted project still prompts — it makes it the exception rather than
+    the rule, without nodeterm writing another tool's trust config on the user's behalf. A
+    **remote** login ignores the local path: `createTerminalNode` prefers `ssh.remoteCwd`, which is
+    the only cwd that means anything for a session running on the host. An SSH project has no local
+    `cwd`, so a LOCAL account added from one still opens in `$HOME` — the honest answer, since that
+    project owns no local directory.
   - **The lifecycle is CORE, and both shells register it** (issue #313) —
     `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
     / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
@@ -2379,6 +2460,20 @@ feed — blocked
 on signing: an unsigned auto-update is a downgrade in trust), and the
 fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
+
+**macOS permission prompts are declared in `build.mac.extendInfo`, and a missing one denies
+SILENTLY.** On macOS 15+ a connection to the user's own subnet is gated by Local Network privacy,
+and it is attributed to the **responsible process** — for everything nodeterm spawns (the tmux
+server, the shell, an agent CLI, the `node` it runs) that is nodeterm.app, not the child. With no
+`NSLocalNetworkUsageDescription` there is no string to prompt with, so the system never asks and
+**no row appears** under System Settings → Privacy & Security → Local Network for the user to
+grant: an agent gets `EHOSTUNREACH` on a LAN address while `/usr/bin/curl` (Apple-signed, exempt)
+reaches the same host in the same second — a permission failure wearing a network outage's error
+(issue #589). `NSBonjourServices` is the trap that travels with it: it is required only to *browse*
+mDNS services, which this app does not do, and declaring service types we never browse is a false
+claim to the user and to review — unicast LAN access needs the usage description alone. The key is
+what makes the denial grantable; it is not itself proof anyone's access came back. Guarded as an
+allowlist-with-reasons by `src/main/info-plist.test.ts`, the sibling of the entitlements guard.
 
 Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(onBeforeRestart?)` from `index.ts`):
 runs **only when `app.isPackaged`** (dev = no-op), checks on launch + every 6h, auto-downloads,
