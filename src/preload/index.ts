@@ -476,6 +476,12 @@ const api: NodeTerminalApi = {
     read: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemory, q),
     host: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemoryHost, q)
   },
+  triggers: {
+    arm: (projectId, nodeId, spec) => ipcRenderer.invoke(IPC.triggersArm, { projectId, nodeId, spec }),
+    disarm: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersDisarm, { projectId, nodeId }),
+    status: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersStatus, { projectId, nodeId }),
+    runNow: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersRunNow, { projectId, nodeId })
+  },
   context: {
     onUpdate: (listener) => {
       const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)

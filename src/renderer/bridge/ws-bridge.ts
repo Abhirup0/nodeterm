@@ -763,6 +763,33 @@ function buildUsageApi(client: RpcClient): Pick<NodeTerminalApi, 'usage'> {
  * which are the service's own words for "the sweep could not run" and "RAM unreadable". The panel
  * shows a failed request as a failed request.
  */
+/**
+ * The `triggers` namespace over an RpcClient — REAL on the Server Edition: the arm store, the
+ * scheduler and the delivery all run in the server shell (`startTriggerService` registers these
+ * handlers there exactly as desktop main does), so arming a trigger from the browser arms it on
+ * the machine that will fire it. The relay deliberately keeps the refusing stub (stubs.ts):
+ * another machine's arm store is not the guest's to write.
+ */
+export function buildTriggersApi(client: RpcClient): Pick<NodeTerminalApi, 'triggers'> {
+  return {
+    triggers: {
+      arm: (projectId, nodeId, spec) =>
+        client.request(IPC.triggersArm, { projectId, nodeId, spec }) as Promise<boolean>,
+      disarm: (projectId, nodeId) =>
+        client.request(IPC.triggersDisarm, { projectId, nodeId }) as Promise<void>,
+      status: (projectId, nodeId) =>
+        client.request(IPC.triggersStatus, { projectId, nodeId }) as Promise<
+          import('@shared/trigger').TriggerNodeStatus
+        >,
+      runNow: (projectId, nodeId) =>
+        client.request(IPC.triggersRunNow, { projectId, nodeId }) as Promise<{
+          outcome: 'fired' | 'missed' | 'failed' | 'queued'
+          detail?: string
+        }>
+    }
+  }
+}
+
 export function buildSessionMemoryApi(client: RpcClient): Pick<NodeTerminalApi, 'sessionMemory'> {
   return {
     sessionMemory: {
@@ -995,6 +1022,7 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildSpeechApi(client),
     ...buildUsageApi(client),
     ...buildSessionMemoryApi(client),
+    ...buildTriggersApi(client),
     ...buildGitHubApi(client),
     ...buildClaudeAccountsApi(client),
     codex: buildCodexApi(client),

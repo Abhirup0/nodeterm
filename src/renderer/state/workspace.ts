@@ -983,6 +983,27 @@ export function createStickyNode(index: number, center?: { x: number; y: number 
   }
 }
 
+/**
+ * Creates a new trigger node (issue #493). Born with NO spec — `data.trigger` stays undefined
+ * until the card's editor saves a valid one, so a fresh trigger is inert by construction (an
+ * invalid/absent spec schedules nothing and cannot be armed).
+ */
+export function createTriggerNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  return {
+    id: nextId('trigger'),
+    type: 'trigger',
+    position: placeAt(center, index, TRIGGER_SIZE.width, TRIGGER_SIZE.height),
+    width: TRIGGER_SIZE.width,
+    height: TRIGGER_SIZE.height,
+    style: { width: TRIGGER_SIZE.width, height: TRIGGER_SIZE.height },
+    data: {
+      title: 'Trigger',
+      color: '#e6a23c',
+      group: null
+    }
+  }
+}
+
 /** Creates a new dino (T-Rex Runner) game node, seeded with the project's record. */
 export function createDinoNode(
   index: number,
