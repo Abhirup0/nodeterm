@@ -3344,8 +3344,16 @@ app.whenReady().then(async () => {
     // (written as an outside edit, so the watcher broadcasts it and the canvas drops the node
     // live). Node removal is best-effort by design: an unregistered phone session or an inline
     // project has no file entry to remove, and that must not fail a destroy that already landed.
+    //
+    // The kill is VERIFIED before the node comes off the canvas (issue #581): destroySession
+    // swallows its per-step failures by design, so it can resolve having ended nothing — and
+    // removing the node then would strand a live session with no canvas entry pointing at it.
+    // The throw also rides back to the phone as the verb's honest error.
     destroyNode: async (nodeId: string) => {
       await ptyManager.destroySession(null, nodeId, { everySocket: true })
+      if (await ptyManager.sessionExists(nodeId).catch(() => true)) {
+        throw new Error('The session is still running — the host could not end it.')
+      }
       await workspaceStore.removeRemoteNode(nodeId).catch(() => false)
     },
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
