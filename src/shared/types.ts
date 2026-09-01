@@ -2984,6 +2984,20 @@ export interface NodeTerminalApi {
   onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
+  /** Report a node's Eco hibernation flag to the core (the renderer owns the flag; the core only
+   *  mirrors it into the agent-status file so the phone can render SLEEPING). Fire-and-forget;
+   *  called on every `setHibernated` change and replayed for the persisted set at boot. */
+  reportHibernated(nodeId: string, on: boolean): void
+  /** Fires when the core asks this renderer to WAKE a hibernated node NOW (a phone viewer just
+   *  attached to its session over the relay). A nudge with `wakeHibernatedNode`'s exact contract:
+   *  re-read the flag, no-op when not hibernated or not mounted. Returns unsubscribe.
+   *  Desktop-only signal (the relay host lives in the desktop main process); the ws-bridge
+   *  subscribes to nothing and returns a no-op unsubscribe. */
+  onAgentWake(listener: (nodeId: string) => void): () => void
+  /** Fires with the CURRENT set of node ids that have a live relay (phone) viewer attached — the
+   *  full set each change, never a delta. Feeds `isNodeWatched` so Eco cannot hibernate a session
+   *  someone is watching from a phone. Desktop-only signal, like `onAgentWake`. */
+  onRemoteViewers(listener: (nodeIds: string[]) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

@@ -31,6 +31,7 @@ import {
   isNodeRemote,
   isNodeWatched,
   setWatchedNode,
+  setRemotelyViewedNodes,
   wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
@@ -329,6 +330,7 @@ import {
   worktreeFromCreate,
   worktreeFromEntry,
   worktreeRemoveMessage,
+  resolveWorktreeBase,
   type GroupWorktree,
   type WorktreeCreateValue,
   type WorktreeEntry
@@ -366,6 +368,8 @@ import {
   type AgentPermissionMode
 } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
+import { promptFilePathError } from '@shared/agents/launch'
+import { parseTeamSpec } from '../lib/teamSpec'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
@@ -435,7 +439,7 @@ import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@sh
 // The dispatch below is the CONSUMER of the confirm-gated set. Before this import the set named
 // write/close as "the confirm-gated pair" from inside `src/main` — which this project cannot see —
 // while the gating lived in two hand-written blocks here, so the set decided nothing.
-import { isDestructiveVerb } from '@shared/control-verbs'
+import { isDestructiveVerb, dryRunRequested } from '@shared/control-verbs'
 import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
@@ -4729,6 +4733,38 @@ export function Canvas() {
     return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
   }, [setNodes, markDirty, deleteNodes])
 
+  // Eco × phone ("hibernation isn't phone-compatible"). Three wires, all nudges:
+  //  - `agent:wake`: a phone viewer just attached over the relay to a node's session — ask the
+  //    node to resume its hibernated CLI. Same contract as every other wake asker: the node
+  //    re-reads the flag itself, so this is a no-op for a non-hibernated node, and a no-op for an
+  //    UNMOUNTED one (inactive project) — the phone then still sees the SLEEPING chip and an
+  //    honest shell, never a resume typed into a pane nothing verified.
+  //  - `agent:remote-viewers`: the full set of phone-watched node ids, fed into `isNodeWatched`
+  //    so the sweep cannot `/exit` a session someone is reading on their phone.
+  //  - boot replay: the hibernated flag is persisted in THIS renderer's localStorage, and main's
+  //    mirror starts empty every launch — re-report the persisted set once so the phone's
+  //    SLEEPING chips survive a desktop restart.
+  useEffect(() => {
+    const unsubWake = window.nodeTerminal.onAgentWake?.((nodeId) => wakeHibernatedNode(nodeId))
+    const unsubViewers = window.nodeTerminal.onRemoteViewers?.((ids) =>
+      setRemotelyViewedNodes(ids)
+    )
+    for (const [id, st] of Object.entries(useAgentStatus.getState().byId)) {
+      if (st?.hibernated) {
+        try {
+          window.nodeTerminal.reportHibernated?.(id, true)
+        } catch {
+          /* mirror side-channel only */
+        }
+      }
+    }
+    return () => {
+      unsubWake?.()
+      unsubViewers?.()
+      setRemotelyViewedNodes([])
+    }
+  }, [])
+
   // Cmd/Ctrl+W (forwarded from main) closes the selected node(s) immediately, like the
   // node's × button. With nothing selected it falls back to closing the window.
   useEffect(() => {
@@ -7911,6 +7947,12 @@ export function Canvas() {
     return api.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
       const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) =>
         api.sendAgentControlResult({ requestId, ...r })
+      // `--dry-run` (issue #532): validate + report, mutate nothing. Only DRY_RUN_VERBS reach
+      // this process with the flag set — main's setControlHandler refuses it for every other
+      // verb before forwarding — so the per-case branches below are the whole renderer story:
+      // each runs the SAME validation as a real call and stops just before the mutation.
+      const dryRun = dryRunRequested(args)
+      const DRY_RUN_PREFIX = 'DRY RUN — nothing was opened or changed.'
 
       // ── Agent messaging (`send`/`reply`) — handled BEFORE the source-routing machinery ──────
       // These are STORE_ANSWERED_VERBS (lib/controlRouting): routing by source must never travel
@@ -8079,6 +8121,13 @@ export function Canvas() {
         (verb === 'open-terminal' || verb === 'open-claude' || verb === 'open-agent') &&
         args.project !== undefined
       ) {
+        // `--dry-run` validates against the LIVE canvas; a `--project` open lands in another
+        // project's serialized store through a different code path, and a "validate only" copy of
+        // that path is exactly the rot #532 warns about. Refused, not silently run.
+        if (dryRun) {
+          reply({ ok: false, error: `${verb}: --dry-run cannot be combined with --project` })
+          return
+        }
         const targetId = args.project
         // v1 excludes the flags that name ids inside another project (spec §2.2). The decision is
         // the PURE projectTargetFlagRefusal — red-capable in projectOpen.test.ts (review #363
@@ -8592,6 +8641,27 @@ export function Canvas() {
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
             const termCwd = args.cwd || groupCwd || srcCwd
+            if (dryRun) {
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `open-terminal would open ${count} terminal(s)` +
+                    (intoGroupId ? ` in group ${intoGroupId}` : '') +
+                    (termCwd ? `, cwd ${termCwd}` : '') +
+                    (args.cmd ? `, running: ${args.cmd}` : ''),
+                  ...(after?.length ? [`armed to wait for: ${after.join(', ')}`] : [])
+                ].join('\n'),
+                result: {
+                  dryRun: true,
+                  count,
+                  group: intoGroupId ?? null,
+                  cwd: termCwd ?? null,
+                  after: after ?? []
+                }
+              })
+              return
+            }
             const make = (i: number): CanvasNode =>
               armAfter(
                 createTerminalNode(
@@ -8641,7 +8711,74 @@ export function Canvas() {
             )
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
+            // `--prompt-file` (issue #520): a multi-line brief travels as a FILE the new node's
+            // shell reads at launch (`"$(cat …)"` in the assembler), because `--prompt` rides a
+            // command line typed into the pane and is collapsed to one line. Validated here — the
+            // path shape by the pure rule, existence against the filesystem the node will read it
+            // from (the HOST's on an SSH project). A missing file would launch the agent with an
+            // EMPTY prompt (the substitution expands to nothing), which is the silent failure the
+            // check exists to catch; a check that itself errors fails OPEN, since the pane shows
+            // cat's own error where a wrongly-refused open shows nothing.
+            const promptFile = (args['prompt-file'] ?? '').trim() || undefined
+            if (promptFile && args.prompt) {
+              reply({ ok: false, error: `${verb}: pass either --prompt or --prompt-file, not both` })
+              return
+            }
+            if (promptFile) {
+              const pfErr = promptFilePathError(promptFile)
+              if (pfErr) {
+                reply({ ok: false, error: `${verb}: --prompt-file ${pfErr}` })
+                return
+              }
+              const pfFs = ctlSsh && ctlProject ? sshFs(ctlProject.id) : api.fs
+              const pfExists = await pfFs.exists(promptFile).catch(() => true)
+              if (!pfExists) {
+                reply({ ok: false, error: `${verb}: --prompt-file not found: ${promptFile}` })
+                return
+              }
+            }
             const agentCwd = args.cwd || groupCwd || srcCwd
+            if (dryRun) {
+              // The dry run is deliberately STRICTER than the real open here: an unknown agent id
+              // today opens a node whose launch command is the typo, failing only inside its pane
+              // — precisely the "validated by running it" cost #532 names. Catch it when asked.
+              const dryKnownAgent =
+                !!agentConfig(agentId) ||
+                useSettings.getState().settings.customAgents.some((c) => c.id === agentId)
+              if (!dryKnownAgent) {
+                reply({
+                  ok: false,
+                  error: `${verb}: unknown agent "${agentId}" — pass a builtin id or a custom agent id from Settings`
+                })
+                return
+              }
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `${verb} would open ${count} ${agentId} session(s)` +
+                    (intoGroupId ? ` in group ${intoGroupId}` : '') +
+                    (agentCwd ? `, cwd ${agentCwd}` : '') +
+                    (args.model ? `, model ${args.model}` : '') +
+                    (promptFile
+                      ? `, prompt from file ${promptFile}`
+                      : args.prompt
+                        ? `, prompt: "${args.prompt.slice(0, 80)}${args.prompt.length > 80 ? '…' : ''}"`
+                        : ''),
+                  ...(after?.length ? [`armed to wait for: ${after.join(', ')}`] : []),
+                  'Each session would be connected + context-linked to you.'
+                ].join('\n'),
+                result: {
+                  dryRun: true,
+                  agent: agentId,
+                  count,
+                  group: intoGroupId ?? null,
+                  cwd: agentCwd ?? null,
+                  after: after ?? []
+                }
+              })
+              return
+            }
             const make = (i: number): CanvasNode =>
               armAfter(
                 createAgentNode(
@@ -8659,7 +8796,8 @@ export function Canvas() {
                   // `--model` is a pass-through: `withAgentModel` re-validates the value at the
                   // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
                   // so an unsupported agent's command line stays byte-identical.
-                  args.model
+                  args.model,
+                  promptFile
                 ),
                 after ?? [],
                 undefined,
@@ -9083,20 +9221,52 @@ export function Canvas() {
             return
           }
           case 'spawn-team': {
-            let roles: { title?: string; prompt?: string; agent?: string; model?: string }[]
-            try {
-              const parsed = JSON.parse(args.team ?? '')
-              roles = Array.isArray(parsed) ? parsed : []
-            } catch {
-              reply({
-                ok: false,
-                error: 'spawn-team: --team must be a JSON array of {title?, prompt, agent?, model?}'
-              })
+            // Parse + validate through the ONE pure parser (lib/teamSpec.ts) the dry run shares —
+            // named refusals for bad JSON, a role missing its prompt, a ninth role, an unknown
+            // agent id — instead of the old silent filter-and-slice, where a role without a
+            // prompt simply vanished and a typo'd agent opened a broken node (issue #532).
+            const teamKnownAgents = new Set<string>([
+              ...BUILTIN_AGENT_IDS,
+              ...useSettings.getState().settings.customAgents.map((c) => c.id)
+            ])
+            const teamSpec = parseTeamSpec(args.team ?? '', teamKnownAgents)
+            if (!teamSpec.ok) {
+              reply({ ok: false, error: `spawn-team: ${teamSpec.error}` })
               return
             }
-            roles = roles.filter((r) => r && typeof r.prompt === 'string' && r.prompt.trim()).slice(0, 8)
-            if (roles.length === 0) {
-              reply({ ok: false, error: 'spawn-team: --team needs at least one role with a prompt' })
+            const roles = teamSpec.roles
+            // Per-role `promptFile` existence — the same contract as `--prompt-file` on the open
+            // verbs (issue #520): checked against the filesystem the new node reads it from,
+            // missing refused (an empty `$(cat …)` would silently start the member with no task),
+            // a check that errors fails open. Path SHAPE is the parser's job.
+            for (const [ri, r] of roles.entries()) {
+              if (!r.promptFile) continue
+              const rName = r.title ? `"${r.title}"` : `#${ri + 1}`
+              const rfFs = ctlSsh && ctlProject ? sshFs(ctlProject.id) : api.fs
+              const rfExists = await rfFs.exists(r.promptFile).catch(() => true)
+              if (!rfExists) {
+                reply({
+                  ok: false,
+                  error: `spawn-team: role ${rName} promptFile not found: ${r.promptFile}`
+                })
+                return
+              }
+            }
+            if (dryRun) {
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `spawn-team would open ${roles.length} member(s) in a new group "${args.label || 'Team'}", each connected + context-linked to you:`,
+                  ...roles.map((r, i) => {
+                    const brief = r.promptFile
+                      ? `prompt from file ${r.promptFile}`
+                      : `prompt: "${(r.prompt ?? '').slice(0, 80)}${(r.prompt ?? '').length > 80 ? '…' : ''}"`
+                    return `  ${i + 1}. ${r.title ?? r.agent} — agent ${r.agent}${r.model ? `, model ${r.model}` : ''} — ${brief}`
+                  })
+                ].join('\n'),
+                result: { dryRun: true, label: args.label || 'Team', roles }
+              })
               return
             }
             const live = nodesRef.current as CanvasNode[]
@@ -9112,7 +9282,8 @@ export function Canvas() {
             const members = roles.map((r, i) => {
               // Roles may name different agents, so the mode is resolved PER member: claude's
               // `auto` version gate must not decide what a grok teammate launches with.
-              const memberAgent = (r.agent ?? 'claude') as AgentId
+              // (`agent` is parser-defaulted to 'claude' and validated against the known set.)
+              const memberAgent = r.agent as AgentId
               const node = createAgentNode(
                 memberAgent,
                 live.length + i,
@@ -9125,7 +9296,10 @@ export function Canvas() {
                 teamStore.activeProjectId,
                 // Per-role model, so one team can mix tiers in a single call. A role naming a
                 // model its agent cannot switch simply launches bare (withAgentModel no-ops).
-                typeof r.model === 'string' ? r.model : undefined
+                r.model,
+                // Per-role promptFile (parser-validated + existence-checked above); wins over
+                // `prompt` in the assembler.
+                r.promptFile
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })
@@ -9202,7 +9376,35 @@ export function Canvas() {
             // reduce to entries/global exactly as before. An explicit `--base` still wins.
             const pw = projectLaunchInfoNow(project?.id ?? '')?.resolved.worktree
             const projectDefaults = { basePath: pw?.basePath?.value, baseRef: pw?.baseRef?.value }
-            const baseRef = args.base?.trim() || effectiveWorktreeBaseRef(projectDefaults, entries)
+            // `--base` takes a git ref OR a station id (issue #530): an id naming a node/group on
+            // the canvas resolves through its worktree-bound group to that station's BRANCH, so
+            // "branch off what that station is working on" is expressed by identity. The pure
+            // resolver owes the explicit refusals (unbound node, self-base, neither-node-nor-ref).
+            const baseRes = resolveWorktreeBase(
+              args.base,
+              branch,
+              nodesRef.current.map((nd) => ({
+                id: nd.id,
+                parentId: nd.parentId,
+                worktree: nd.data.worktree as GroupWorktree | undefined
+              }))
+            )
+            if (baseRes.kind === 'error') {
+              reply({ ok: false, error: `open-worktree: ${baseRes.error}` })
+              return
+            }
+            const baseRef =
+              baseRes.kind === 'default'
+                ? effectiveWorktreeBaseRef(projectDefaults, entries)
+                : baseRes.ref
+            // Said back in every reply so the resolution is transparent — the caller passed an id
+            // and must see which branch it bought.
+            const baseNote =
+              baseRes.kind === 'station'
+                ? ` (resolved from station ${baseRes.stationId}${
+                    baseRes.groupId !== baseRes.stationId ? ` in group ${baseRes.groupId}` : ''
+                  })`
+                : ''
             // Resolve from this session's repo root, so a relay tab still produces a path on the
             // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
@@ -9216,6 +9418,32 @@ export function Canvas() {
             })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
+              return
+            }
+            if (dryRun) {
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `open-worktree would create branch "${branch}" off ${baseRef || 'the repo default branch'}${baseNote} at ${wtPath}, ` +
+                    `bound to ${bindGroupId ? `group ${bindGroupId}` : 'a new group frame'}.`,
+                  // A station's branch comes from a live binding; a plain ref is only vetted by
+                  // git at create time — say which assurance the caller is getting.
+                  ...(baseRes.kind === 'station'
+                    ? []
+                    : [
+                        'The base ref is not verified against git in a dry run — a bad ref still fails at create time.'
+                      ])
+                ].join('\n'),
+                result: {
+                  dryRun: true,
+                  branch,
+                  baseRef: baseRef || null,
+                  ...(baseRes.kind === 'station' ? { baseStation: baseRes.stationId } : {}),
+                  path: wtPath,
+                  group: bindGroupId
+                }
+              })
               return
             }
             const res = await api.git
@@ -9243,8 +9471,14 @@ export function Canvas() {
             )
             reply({
               ok: true,
-              message: `opened worktree ${branch} at ${wtPath} in group ${groupId}`,
-              result: { groupId, branch, path: wtPath, baseRef }
+              message: `opened worktree ${branch} (off ${baseRef || 'the repo default branch'}${baseNote}) at ${wtPath} in group ${groupId}`,
+              result: {
+                groupId,
+                branch,
+                path: wtPath,
+                baseRef,
+                ...(baseRes.kind === 'station' ? { baseStation: baseRes.stationId } : {})
+              }
             })
             return
           }
