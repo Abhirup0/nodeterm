@@ -109,11 +109,36 @@ function NodeIconPicker({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
-  useDialogStack()
+  const isTop = useDialogStack()
 
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
+
+  /**
+   * Escape belongs to the dialog, not to its text input.
+   *
+   * It was handled only in the input's `onKeyDown`, so the moment focus moved anywhere else — the
+   * emoji grid, "Choose image…", a swatch the user had just clicked — Escape did nothing and the
+   * dialog could only be dismissed with the mouse. `useDialogStack()` was already called; its
+   * answer was simply discarded.
+   *
+   * `isTop()` is the ONLY gate, deliberately matching `confirmKeyAction`: there, `inDialog` guards
+   * Enter and never Escape. The asymmetry is the point — Enter is the affirmative key and must be
+   * aimed at the dialog, while Escape is the safe direction, and requiring focus to be inside the
+   * box would reproduce exactly the bug this fixes for a user whose focus sits on the body. Being
+   * top is what keeps it honest: with a dialog stacked above, the key is not ours, and we must not
+   * `preventDefault` it either or we would swallow it from the dialog the user can see.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key !== 'Escape' || !isTop()) return
+      e.preventDefault()
+      onDone(undefined)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isTop, onDone])
 
   const commitTyped = (raw: string): void => {
     // The same validator the persisted file goes through, so what the picker accepts and what a
@@ -212,12 +237,12 @@ function NodeIconPicker({
             spellCheck={false}
             onChange={(e) => setTyped(e.target.value)}
             onKeyDown={(e) => {
+              // Escape is deliberately NOT handled here: the window listener above owns it for
+              // the whole dialog, and a second handler on one press is the double-answer the
+              // dialog stack exists to prevent.
               if (e.key === 'Enter') {
                 e.preventDefault()
                 commitTyped(typed)
-              } else if (e.key === 'Escape') {
-                e.preventDefault()
-                onDone(undefined)
               }
             }}
           />

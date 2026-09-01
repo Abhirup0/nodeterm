@@ -18,6 +18,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NodeIconDialogHost, nodeIconDialog, type NodeIconChoice } from './NodeIconPicker'
 import { useProjects } from '../state/projects'
+import { popDialog, pushDialog, resetDialogStack } from './dialog-stack'
 
 // React refuses act() outside a configured test environment without this flag.
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -127,5 +128,83 @@ describe('NodeIconPicker image pick', () => {
       type: 'image',
       path: 'C:\\Users\\me\\AppData\\nodeterm\\canvas-images\\logo.png'
     })
+  })
+})
+
+// Escape, which was reachable only while the text input had focus — `useDialogStack()` was called
+// and its answer thrown away. The gate matches `confirmKeyAction`: top-of-stack only, with no
+// focus requirement, because Escape is the safe direction and Enter is the affirmative one.
+describe('NodeIconPicker escape', () => {
+  let root: Root | undefined
+  let host: HTMLElement
+
+  // The pending choice is returned WRAPPED. An async function returning a promise flattens it, so
+  // `await open()` would wait for the dialog's own promise — which nothing has dismissed yet.
+  const open = async (): Promise<{ choice: Promise<NodeIconChoice> }> => {
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    useProjects.setState({ activeProjectId: 'p1', getProject: () => PROJECT } as never)
+    const choice = nodeIconDialog({ nodeId: 'n1', title: 'Build' })
+    root = createRoot(host)
+    await act(async () => {
+      root!.render(<NodeIconDialogHost />)
+    })
+    return { choice }
+  }
+
+  const pressEscape = async (target: EventTarget): Promise<void> => {
+    await act(async () => {
+      target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+  }
+
+  afterEach(async () => {
+    await act(async () => root?.unmount())
+    root = undefined
+    host?.remove()
+    resetDialogStack()
+  })
+
+  it('closes when the press lands outside the input — the reported bug', async () => {
+    const { choice } = await open()
+    // Focus is NOT in the text input: a swatch is the realistic case, since clicking one is how
+    // most people arrive here.
+    const swatch = document.querySelector('.node-icon-dialog__swatch')
+    expect(swatch).toBeTruthy()
+    await pressEscape(swatch!)
+    // `undefined` is CANCEL, distinct from `null` (remove the icon). Collapsing the two is how a
+    // dismissed dialog silently clears an icon the user wanted to keep.
+    await expect(choice).resolves.toBeUndefined()
+  })
+
+  it('still closes from the input, and from the document body', async () => {
+    for (const pick of [
+      () => document.querySelector('.node-icon-dialog__input')!,
+      () => document.body
+    ]) {
+      const { choice } = await open()
+      await pressEscape(pick())
+      await expect(choice).resolves.toBeUndefined()
+      await act(async () => root?.unmount())
+      host.remove()
+    }
+  })
+
+  it('ignores Escape while another dialog is stacked on top of it', async () => {
+    const { choice } = await open()
+    let settled = false
+    void choice.then(() => {
+      settled = true
+    })
+
+    pushDialog('dialog-above')
+    await pressEscape(document.body)
+    await act(async () => {})
+    expect(settled).toBe(false)
+
+    // ...and takes it back once that dialog closes.
+    popDialog('dialog-above')
+    await pressEscape(document.body)
+    await expect(choice).resolves.toBeUndefined()
   })
 })
