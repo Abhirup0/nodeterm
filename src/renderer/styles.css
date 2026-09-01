@@ -8643,6 +8643,51 @@ button.group-node__setup:disabled {
 .github-issue-state--closed {
   color: #a371f7;
 }
+.kanban-card--pull {
+  /* Read-only: no drag affordance, so no grab cursor either. */
+  border-left-color: rgba(163, 113, 247, 0.7);
+  cursor: pointer;
+}
+.github-pull-state {
+  width: 9px;
+  height: 9px;
+  margin-top: 4px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.github-pull-state--open {
+  color: #3fb950;
+}
+.github-pull-state--draft {
+  color: rgba(var(--tint-rgb), 0.45);
+}
+.github-pull-state--merged {
+  color: #a371f7;
+}
+.github-pull-state--closed {
+  color: #f85149;
+}
+.github-pull-badge {
+  margin-left: 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 0 5px;
+  font-size: 9px;
+  font-weight: 600;
+}
+.github-pull-badge--open {
+  color: #3fb950;
+}
+.github-pull-badge--draft {
+  color: rgba(var(--tint-rgb), 0.5);
+}
+.github-pull-badge--merged {
+  color: #a371f7;
+}
+.github-pull-badge--closed {
+  color: #f85149;
+}
 .github-issue-source {
   flex: 0 0 auto;
   border: 1px solid rgba(var(--tint-rgb), 0.15);
