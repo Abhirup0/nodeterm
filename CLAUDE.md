@@ -503,12 +503,39 @@ Lifecycle, by intent:
   process. (2) **Fire-time re-asks**: still-offscreen, remote, eligibility — a plan-time verdict
   is stale by seconds. (3) `hibernated` **self-heals** on live hook states + SessionStart (never
   on `done` — a late Stop POST must not undo a just-performed hibernate); cold restore (`fresh`)
-  clears it and lets the normal auto-resume own the node. (4) **Ordering with offscreen release**:
+  clears `hibernated` UNCONDITIONALLY and normally lets auto-resume own the node — **`paused` (see
+  below) is what makes that auto-resume itself conditional**, the one deliberate exception: the
+  flag it gates is still cleared, only the relaunch is skipped. (4) **Ordering with offscreen
+  release**:
   Eco defers the Phase-2 viewer release until the node hibernates (hard cap idle+offscreen), but
   ONLY when the idle clock is known (`idleKnown` — `lastEventAt` is transient, so after an app
   restart nothing can hibernate and deferring would make Eco a memory regression). Eco is
   structurally inert for sessions with no turn in the current app run — documented follow-up.
+  The deferral is also unaware of `paused`: a deep-paused node's freshly recycled shell keeps its
+  xterm alive until the hard cap, waiting for a hibernation that (being already exited, or having
+  no CLI to exit) can never come — a second documented follow-up.
   Device checklist (8 items) in PR #130 — owed before recommending Eco to anyone.
+- **"Pause session"** (manual, or via Eco when `settings.agentHibernationPersistAcrossRestart` is
+  on) → `agentStatus.paused`, a persisted flag alongside `hibernated` with ONE job: stop a node
+  from coming back on its own. Two depths, chosen per node: shallow — identical to an Eco exit
+  (`registerAgentPause`'s `pause` closure reuses `performExitPhase`), plus `paused` — or "pause &
+  end session" — the same recycle `restartAgentNode(…, restartShell: true)` uses
+  (`transport.recycle` + a `respawnNonce` bump), so the node comes back `fresh` next time, with no
+  live tmux session to hold memory. Two pure predicates in `terminal/hibernation-policy.ts` pin the
+  contract: `shouldColdResume` (a `fresh` mount must not auto-relaunch a paused node — see Cold
+  restore above) and `shouldAutoWake` (the mount-timer, visibility-edge, and kanban-card-modal-open
+  auto-wake triggers must not fire for a paused node, hibernated or not — only an explicit Resume,
+  which reuses the SAME `wakeHibernatedNode` trigger the SLEEPING/PAUSED chip's click uses, so it
+  gets the same `WakeInputBuffer` splice protection and retry budget). Pausing an already-hibernated
+  node skips the exit phase entirely (`alreadyExited` in the closure) — asking an idle CLI-less
+  shell to quit would type `/exit` into it as a real command. `paused` is ALSO excluded from Eco's
+  own candidate plan and its exit closure's fire-time re-ask (`HibernationCandidate.paused`,
+  `hibernationCandidates.ts`) — a deep-paused node has `hibernated` unset (its tmux was recycled,
+  not exited), so `!hibernated` alone would still admit it to a sweep whose dropped SessionEnd hook
+  POST left a stale `done` behind: the same `/exit`-into-a-bare-shell mistake `alreadyExited` closes
+  on the manual path, closed here on the automatic one. Node menu only today (canvas right-click +
+  the sessions sidebar row menu, which shares the same `selectionItems` builder, plus a read-only
+  kanban card badge and a clickable one in the card modal); no command palette entry.
 
 The node id is the `persistKey` (passed to `transport.create`), so it must stay stable.
 If tmux is unavailable, `PtyManager` falls back to a plain shell (no cross-restart
@@ -540,7 +567,11 @@ session (you can't keep a live OS process across a reboot):
   renderer re-launches the agent CLI: `resumeCommand(agentId, sessionId)` (from the session id
   persisted in `agentStatus` localStorage — `claude --resume`, `codex resume`, `gemini
   --resume`) when known, else the bare `launchCmd`. The one-shot `data.initialCommand` still wins
-  on the very first open, so the agent is never double-launched.
+  on the very first open, so the agent is never double-launched. **The one exception: a `paused`
+  node** (see "Pause session" below) skips this auto-relaunch — that is the entire point of the
+  flag — and instead records the pane its fresh shell settled on (`agentStatus.hibernatedPane`),
+  so a later explicit Resume can recognize it even for a default shell outside the wake's
+  `isShellCommand` allowlist.
 
 ### We have our own VT emulator — check it before asking tmux
 
