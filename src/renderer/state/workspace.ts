@@ -8,12 +8,14 @@ import type {
   Project,
   Settings
 } from '@shared/types'
+import { DEFAULT_SETTINGS } from '@shared/types'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { agentAccountColor } from '@shared/agents/account-color'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
+import { snapNodeToGrid } from '../lib/nodeSizing'
 import { claudeCliCapsNow } from './permissionMode'
 import { projectLaunchInfoNow } from './projectLaunchInfo'
 import { isAgentEnabled, launchableDefaultAgent } from './agentAvailability'
@@ -223,6 +225,36 @@ function placeAt(center: { x: number; y: number } | undefined, index: number, w:
 }
 
 /**
+ * Where a new node starts and how big it is, on the grid when snapping is on.
+ *
+ * Neither input is grid-aligned to begin with: `placeAt` centers the node on the cursor, half a
+ * width off whatever the pointer hit, and a terminal's size comes from a hand-editable setting.
+ * So every new node landed off-grid, and because React Flow resizes by adding a grid MULTIPLE to
+ * the start size (see lib/resizeSnap.ts), it could never be resized onto the grid either.
+ */
+function placeNode(
+  kind: NodeKind,
+  center: { x: number; y: number } | undefined,
+  index: number,
+  w: number,
+  h: number
+): Pick<CanvasNode, 'position' | 'width' | 'height' | 'style'> {
+  const { snapToGrid, gridSize } = useSettings.getState().settings
+  const at = placeAt(center, index, w, h)
+  const grid = snapToGrid ? gridSize || DEFAULT_SETTINGS.gridSize : 0
+  const box = grid
+    ? snapNodeToGrid(grid, kind, { x: at.x, y: at.y, width: w, height: h })
+    : { ...at, width: w, height: h }
+  return {
+    // `+ 0` normalizes the -0 that rounding a small negative coordinate produces.
+    position: { x: box.x + 0, y: box.y + 0 },
+    width: box.width,
+    height: box.height,
+    style: { width: box.width, height: box.height }
+  }
+}
+
+/**
  * Default size for NEW terminal/agent nodes: the user's setting (Settings → Canvas), clamped
  * to sane canvas bounds — settings.json is hand-editable, and a 0×0 or NaN node would be
  * unclickable/ungrabbable forever. Falls back to the historical 600×400.
@@ -273,10 +305,7 @@ export function createTerminalNode(
   return {
     id: nextId('term'),
     type: 'terminal',
-    position: placeAt(center, index, size.width, size.height),
-    width: size.width,
-    height: size.height,
-    style: { width: size.width, height: size.height },
+    ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: `Terminal ${index + 1}`,
       color: NODE_COLORS[index % NODE_COLORS.length],
@@ -302,10 +331,7 @@ export function createSshTerminalNode(
   return {
     id: nextId('ssh'),
     type: 'terminal',
-    position: placeAt(center, index, size.width, size.height),
-    width: size.width,
-    height: size.height,
-    style: { width: size.width, height: size.height },
+    ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: server.label,
       color: NODE_COLORS[index % NODE_COLORS.length],
@@ -687,10 +713,7 @@ export function createAgentNode(
   return {
     id: nextId('term'),
     type: 'terminal',
-    position: placeAt(center, index, size.width, size.height),
-    width: size.width,
-    height: size.height,
-    style: { width: size.width, height: size.height },
+    ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: label,
       // Adopt the agent's own session name into the title until the user renames it by hand.
@@ -883,10 +906,7 @@ export function createEditorNode(
   return {
     id: nextId('editor'),
     type: 'editor',
-    position: placeAt(center, index, EDITOR_SIZE.width, EDITOR_SIZE.height),
-    width: EDITOR_SIZE.width,
-    height: EDITOR_SIZE.height,
-    style: { width: EDITOR_SIZE.width, height: EDITOR_SIZE.height },
+    ...placeNode('editor', center, index, EDITOR_SIZE.width, EDITOR_SIZE.height),
     data: {
       title: filePath.split('/').pop() || 'untitled',
       color: '#6ac4dc',
@@ -918,10 +938,7 @@ export function createVideoNode(
   return {
     id: nextId('video'),
     type: 'video',
-    position: placeAt(center, index, VIDEO_SIZE.width, VIDEO_SIZE.height),
-    width: VIDEO_SIZE.width,
-    height: VIDEO_SIZE.height,
-    style: { width: VIDEO_SIZE.width, height: VIDEO_SIZE.height },
+    ...placeNode('video', center, index, VIDEO_SIZE.width, VIDEO_SIZE.height),
     data: {
       title: filePath.split('/').pop() || 'video',
       color: '#bf5af2',
@@ -944,10 +961,7 @@ export function createWebNode(
   return {
     id: nextId('web'),
     type: 'web',
-    position: placeAt(center, index, WEB_SIZE.width, WEB_SIZE.height),
-    width: WEB_SIZE.width,
-    height: WEB_SIZE.height,
-    style: { width: WEB_SIZE.width, height: WEB_SIZE.height },
+    ...placeNode('web', center, index, WEB_SIZE.width, WEB_SIZE.height),
     data: {
       title,
       color: '#6ac4dc',
@@ -977,10 +991,7 @@ export function createBrowserNode(
   return {
     id: nextId('browser'),
     type: 'browser',
-    position: placeAt(center, index, BROWSER_SIZE.width, BROWSER_SIZE.height),
-    width: BROWSER_SIZE.width,
-    height: BROWSER_SIZE.height,
-    style: { width: BROWSER_SIZE.width, height: BROWSER_SIZE.height },
+    ...placeNode('browser', center, index, BROWSER_SIZE.width, BROWSER_SIZE.height),
     data: {
       title,
       color: '#0a84ff',
@@ -1003,10 +1014,7 @@ export function createDiffNode(
   return {
     id: nextId('diff'),
     type: 'diff',
-    position: placeAt(center, index, DIFF_SIZE.width, DIFF_SIZE.height),
-    width: DIFF_SIZE.width,
-    height: DIFF_SIZE.height,
-    style: { width: DIFF_SIZE.width, height: DIFF_SIZE.height },
+    ...placeNode('diff', center, index, DIFF_SIZE.width, DIFF_SIZE.height),
     data: {
       title: `${relPath.split('/').pop() || relPath} (${commitOid ? commitOid.slice(0, 7) : 'diff'})`,
       color: '#e0af68',
@@ -1024,10 +1032,7 @@ export function createStickyNode(index: number, center?: { x: number; y: number 
   return {
     id: nextId('sticky'),
     type: 'sticky',
-    position: placeAt(center, index, STICKY_SIZE.width, STICKY_SIZE.height),
-    width: STICKY_SIZE.width,
-    height: STICKY_SIZE.height,
-    style: { width: STICKY_SIZE.width, height: STICKY_SIZE.height },
+    ...placeNode('sticky', center, index, STICKY_SIZE.width, STICKY_SIZE.height),
     data: {
       title: 'Note',
       color: '#ffd60a',
@@ -1067,10 +1072,7 @@ export function createDinoNode(
   return {
     id: nextId('dino'),
     type: 'dino',
-    position: placeAt(center, index, DINO_SIZE.width, DINO_SIZE.height),
-    width: DINO_SIZE.width,
-    height: DINO_SIZE.height,
-    style: { width: DINO_SIZE.width, height: DINO_SIZE.height },
+    ...placeNode('dino', center, index, DINO_SIZE.width, DINO_SIZE.height),
     data: {
       title: 'Dino',
       color: '#a2a2a2',
