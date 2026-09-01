@@ -270,6 +270,7 @@ import { transport } from '../terminal/local-transport'
 import { sshFs } from '../terminal/ssh-fs'
 import {
   agentHibernateFns,
+  agentPauseFns,
   agentRestartFn,
   guardConcurrentRestart,
   planBulkRestart,
@@ -280,7 +281,11 @@ import {
   type BulkRestartPlan,
   type RestartOutcome
 } from '../terminal/agent-restart'
-import { planHibernation, HIBERNATE_SWEEP_MS } from '../terminal/hibernation-policy'
+import {
+  planHibernation,
+  shouldAutoWake,
+  HIBERNATE_SWEEP_MS
+} from '../terminal/hibernation-policy'
 import { buildHibernationCandidates } from '../lib/hibernationCandidates'
 import { applyLoopDismiss } from '../lib/loopCard'
 import { prepareQuickOpenFiles, type QuickOpenIndexedFile } from '../lib/quickOpenSearch'
@@ -5635,6 +5640,84 @@ export function Canvas() {
     )
   }, [setNodes, markDirty])
 
+  // Manual "Pause session" (the PAUSE action itself: node context menu only — canvas right-click
+  // and the sessions sidebar row menu, which reuses the same `selectionItems` builder; no command
+  // palette entry, no kanban-card pause button, deliberately deferred. RESUME is wider — see
+  // `resumeAgentNode` below and `CardModal`'s own clickable PAUSED chip): quit the CLI (and, when
+  // `deep`, also recycle the tmux session) and mark the node PAUSED — see `registerAgentPause` for
+  // why this is its own closure rather than `agentHibernateFns.exit()`.
+  const pauseAgentNode = useCallback(async (nodeId: string, deep: boolean) => {
+    const fns = agentPauseFns(nodeId)
+    if (!fns) {
+      // Same "not attached" case `resumeAgentNode` covers — most often an offscreen-RELEASED node
+      // (its lifecycle effect torn down the registration in place, but the row is still reachable
+      // from the sidebar menu). A silent no-op here reads as a broken button.
+      setNotice({
+        kind: 'error',
+        text: 'Pause skipped: this terminal is not attached right now.'
+      })
+      return
+    }
+    let outcome: Awaited<ReturnType<typeof fns.pause>>
+    try {
+      outcome = await fns.pause(deep)
+    } catch {
+      setNotice({
+        kind: 'error',
+        text: 'Pause failed: this session could not be reached. Check the pane before retrying.'
+      })
+      return
+    }
+    setNotice(
+      outcome === 'paused'
+        ? {
+            kind: 'info',
+            text: deep
+              ? 'Session paused and ended — reopen or click Resume to bring it back.'
+              : 'Session paused — click Resume to bring it back.'
+          }
+        : outcome === 'exit-timeout'
+          ? {
+              kind: 'error',
+              text:
+                'Pause failed: the pane did not return to a shell in time, so nothing was paused. ' +
+                'Nothing was killed — check the pane.'
+            }
+          : {
+              kind: 'error',
+              text:
+                'Pause skipped: this session is busy, already restarting, not attached, or has ' +
+                'nothing to resume. Nothing was written to the pane.'
+            }
+    )
+  }, [])
+
+  // Bring a paused (or ordinarily hibernated) node's conversation back. Routed through the SAME
+  // `wakeHibernatedNode` trigger the SLEEPING/PAUSED chip and the mount/visibility auto-wakes use
+  // — NOT a direct `agentHibernateFns(id).resume()` call — because that trigger is what brackets
+  // the delivery with `WakeInputBuffer` (holds/flushes whatever the user types during the
+  // echo-verified delivery, so it can't splice into `claude --resume <sid>`) and retries a timing
+  // `'not-eligible'` a few times (`WAKE_ATTEMPTS`) instead of giving up on the first ask. A menu
+  // click reaching straight into the closure got neither, and the node is typically ON SCREEN and
+  // focusable at exactly the moment the user chooses Resume — the worst possible pane to miss that
+  // protection on.
+  const resumeAgentNode = useCallback((nodeId: string) => {
+    if (!agentHibernateFns(nodeId)) {
+      // Same "not attached" case the Restart row's `why` covers via `agentRestartFn` — an
+      // offscreen-RELEASED node (lifecycle torn down in place, still listed in the sidebar) has no
+      // registration to wake, and silently doing nothing here reads as a broken button.
+      setNotice({
+        kind: 'error',
+        text: 'Resume skipped: this terminal is not attached right now.'
+      })
+      return
+    }
+    wakeHibernatedNode(nodeId)
+    // The trigger is fire-and-forget (it owns its own retries and clears `hibernated`/`paused` on
+    // a confirmed resume), so this is deliberately a status line, not a result.
+    setNotice({ kind: 'info', text: 'Resuming…' })
+  }, [])
+
   // S6 §3.5 — originate an owner-authorized Codex account SWITCH for a running node, then recycle
   // its pane onto the target account. The renderer is NOT the security boundary: PR 5's three-phase
   // handler is owner-authorized (only the WebContents that reserved may commit/finish) and refuses a
@@ -7103,6 +7186,21 @@ export function Canvas() {
                   // not run per menu RENDER. Both reach the user through `restartAgentNode`'s skip
                   // notice, which names them, rather than through a hint this row cannot compute.
                   undefined
+            // Pause/Resume have their OWN eligibility, computed on `st?.sessionId` alone — NOT
+            // `sessionId` above, which also falls back to `n?.data.agentSessionId` (the id
+            // nodeterm minted at node creation, for a node whose hooks never landed). The `pause`/
+            // `resume` closures registered on the node gate on the live `st?.sessionId` only (see
+            // `registerAgentPause` / the hibernate `resume` closure), so a menu row lit by the
+            // fallback would enable here and then refuse in the closure with a generic "busy /
+            // not attached" notice about a node that is actually just idle with no reported id
+            // yet. Using the same narrower fact keeps what the row PROMISES in sync with what the
+            // closure can actually do.
+            const pauseGate = restartEligibility(sourceAgentId, st?.state, st?.sessionId)
+            const pauseWhy = !pauseGate.ok
+              ? pauseGate.reason === 'working'
+                ? 'This session is busy — try again once its turn (or permission prompt) is done.'
+                : 'Nothing to resume yet — this session has not reported an id.'
+              : undefined
             return [
               {
                 label: 'Restart agent',
@@ -7239,7 +7337,53 @@ export function Canvas() {
                       }
                     ] as MenuItem[]
                   })()
-                : [])
+                : []),
+              // Pause session: quit the CLI (and, for the deeper choice, also end the tmux
+              // session) so it does NOT auto-resume on the next reveal or reopen — only an
+              // explicit Resume brings it back. Same eligibility as Restart above (`why`): a node
+              // this app cannot quit-and-resume has nothing for pause to do either. Already-paused
+              // shows Resume instead — the two never appear together.
+              ...(st?.paused
+                ? ([
+                    {
+                      label: 'Resume session',
+                      icon: <IconPower />,
+                      hint: 'Brings the conversation back.',
+                      onClick: () => void resumeAgentNode(ids[0])
+                    }
+                  ] as MenuItem[])
+                : ([
+                    {
+                      type: 'submenu',
+                      label: 'Pause session',
+                      icon: <IconPower />,
+                      children: [
+                        {
+                          label: 'Pause',
+                          disabled: !!pauseWhy,
+                          hint:
+                            pauseWhy ??
+                            'Quits the CLI; the tmux session stays so Resume is fast. Frees most of the memory.',
+                          onClick: () => void pauseAgentNode(ids[0], false)
+                        },
+                        {
+                          label: 'Pause & end session',
+                          // The deep depth recycles the tmux session, which — like the "Restart
+                          // agent and shell" recycle it shares the mechanism with — the closure
+                          // refuses on a relay session's core (the shell env belongs to the HOST).
+                          // Named here rather than left to the closure's generic "busy / not
+                          // attached" notice, which would be a wrong reason for a right refusal.
+                          disabled: !!pauseWhy || session.source === 'relay',
+                          hint:
+                            pauseWhy ??
+                            (session.source === 'relay'
+                              ? 'Ends the tmux session on the machine hosting this relay session, not here.'
+                              : 'Quits the CLI and ends its tmux session too, for a fuller memory reclaim. Resume starts a fresh session with the same conversation.'),
+                          onClick: () => void pauseAgentNode(ids[0], true)
+                        }
+                      ]
+                    }
+                  ] as MenuItem[]))
             ] as MenuItem[]
           })()
         : []),
@@ -7259,6 +7403,8 @@ export function Canvas() {
     toggleMarkdown,
     reloadTerminals,
     restartAgentNode,
+    pauseAgentNode,
+    resumeAgentNode,
     switchCodexAccountNode,
     connectedProjectIdForHost,
     deleteNodes,
@@ -7980,11 +8126,18 @@ export function Canvas() {
     // `isNodeWatched`, so the modal clause cannot go missing from one of them.
     setWatchedNode(id)
     // Opening a card IS opening the session — the second way in, and the one the canvas
-    // visibility observer says nothing about. A hibernated node reached this way resumes its
-    // conversation just as it would on a pan-back, instead of showing the bare shell it was
-    // exited to with nothing on screen to explain it. No-op for every node that is not
-    // hibernated (the node re-reads the flag itself).
-    if (id) wakeHibernatedNode(id)
+    // visibility observer says nothing about. A hibernated (but NOT paused) node reached this
+    // way resumes its conversation just as it would on a pan-back, instead of showing the bare
+    // shell it was exited to with nothing on screen to explain it. No-op for every node that is
+    // not hibernated (the node re-reads the flag itself). `paused` is excluded — same rule as
+    // the mount-timer and visibility-edge auto-triggers: a paused node must not auto-resume on
+    // ANY reveal, the card modal included, or "only an explicit Resume brings it back" would be
+    // false the moment the user opens the card (`shouldAutoWake`). The modal shows its own
+    // clickable PAUSED chip for that case (CardModal.tsx); the node menu's Resume works too.
+    if (id) {
+      const st = useAgentStatus.getState().byId[id]
+      if (shouldAutoWake(st?.hibernated, st?.paused)) wakeHibernatedNode(id)
+    }
   }, [])
 
   const onPaletteQuery = useCallback((q: string) => {
@@ -10587,6 +10740,11 @@ export function Canvas() {
             // which would let a late Stop POST undo a hibernation we just performed. The setter
             // bails when the flag is already unset, so this is free for every other session start.
             cs.setHibernated(e.nodeId, false)
+            // Same self-heal, same reason, for the deep "pause & end session" case: that depth
+            // recycles the tmux session instead of leaving `hibernated` set, so this SessionStart
+            // (the cold-restore's own resume, or a hand-launched relaunch) is the only live proof
+            // that node was watching for.
+            cs.setPaused(e.nodeId, false)
           }
           if (e.sessionPhase === 'end') {
             cs.setState(e.nodeId, undefined, e.agentId)
@@ -10669,6 +10827,11 @@ export function Canvas() {
           enabled: s.agentHibernationEnabled,
           idleMinutes: s.agentHibernationIdleMinutes
         })
+        // "Keep paused after closing" (settings.agentHibernationPersistAcrossRestart): an Eco
+        // exit ALSO marks the node paused, so it survives a project/app reopen instead of the
+        // ordinary auto-resume-on-reveal. Read once per pass, not per node — a mid-pass toggle
+        // should not split one batch across two behaviors.
+        const persistAcrossRestart = s.agentHibernationPersistAcrossRestart
         // Sequential, like the bulk restart: each exit is a real conversation being asked to quit
         // in a real pane, and the cap keeps the pass short.
         for (const nodeId of ids) {
@@ -10678,13 +10841,16 @@ export function Canvas() {
           try {
             if ((await fns.exit()) === 'exited') {
               useAgentStatus.getState().setHibernated(nodeId, true)
+              if (persistAcrossRestart) useAgentStatus.getState().setPaused(nodeId, true)
               // A batch can take ~12 s, and the user may have arrived during it. The node's own
               // exit closure re-checks visibility before writing anything, but the pan can also
               // land in the window between that check and this line — and by then the visible
               // EDGE has passed, so no wake trigger is left and the node would sit SLEEPING in
               // front of the user. Nudge it: the node re-reads the flag itself, so this is a
-              // no-op wherever the user did not arrive.
-              if (isNodeWatched(nodeId)) wakeHibernatedNode(nodeId)
+              // no-op wherever the user did not arrive. Skipped when this pass just paused the
+              // node — the setting's whole point is "no auto-resume", live-arrival edge case
+              // included; the SLEEPING/PAUSED chip is still right there to click.
+              if (!persistAcrossRestart && isNodeWatched(nodeId)) wakeHibernatedNode(nodeId)
             }
             // 'exit-timeout' / 'not-eligible': the CLI is still running and NOTHING is recorded —
             // marking it hibernated would put a SLEEPING chip on a live session and suppress the
