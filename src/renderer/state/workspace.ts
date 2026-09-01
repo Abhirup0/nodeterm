@@ -11,6 +11,7 @@ import type {
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
+import { agentAccountColor } from '@shared/agents/account-color'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
@@ -24,6 +25,7 @@ import { useSettings } from './settings'
 // single implementation lives in src/shared and is shared with the relay host + the canvas-sync
 // reflector.
 export { applyCanvasMutation } from '@shared/canvas-mutations'
+export { accountNodeColor, agentAccountColor } from '@shared/agents/account-color'
 import { sanitizeInboundNode } from '@shared/node-exec'
 
 /** Preset color palette — macOS system colors (dark mode). */
@@ -596,7 +598,28 @@ export function createAgentNode(
    *  every existing caller is unchanged. */
   promptFile?: string
 ): CanvasNode {
-  const { label, color } = resolveAgent(agentId)
+  const { label, color: agentColor } = resolveAgent(agentId)
+  // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another builtin,
+  // and never to a custom agent even when it inherits one of those bases. A custom agent inheriting
+  // claude/codex is still its own agent; account binding stays with the builtin the account picker
+  // offered it for. The Codex spawn side honours `data.accountId` (resolveCodexSessionScope), the
+  // same field Claude uses. Extracted to one local so the stamped binding below and the account
+  // color resolved from it cannot drift apart.
+  const boundAccountId =
+    accountId && (agentId === 'claude' || agentId === 'codex') ? accountId : undefined
+  // A managed account's default node color (Settings → Accounts) replaces the agent's brand color,
+  // so a second login of either builtin is recognizable on the canvas at a glance. `agentAccountColor`
+  // asks the list that OWNS this agent's accounts — the two are keyed independently, so a Claude
+  // account must never color a Codex node that happens to share its id.
+  // `?? []` on both lists, matching the phone path in `src/main`: `mergeSettings` merges without
+  // checking, so a hand-edited `"claudeAccounts": null` survives load and would throw on `.find`
+  // one level ABOVE the `typeof color` guard — i.e. the very failure that guard exists to prevent.
+  const settings = useSettings.getState().settings
+  const color =
+    agentAccountColor(agentId, boundAccountId, {
+      claude: settings.claudeAccounts ?? [],
+      codex: settings.codexAccounts ?? []
+    }) ?? agentColor
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
   // Agents → Launch commands — see `agentLaunchOverride`) replaces the bare CLI in the assembled
   // command. Threaded into the shared assembler below as `launchCmdOverride` so fresh launch,
@@ -676,12 +699,8 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another
-      // builtin, and never to a custom agent even when it inherits one of those bases. A custom
-      // agent inheriting claude/codex is still its own agent; account binding stays with the
-      // builtin the account picker offered it for. The Codex spawn side honours `data.accountId`
-      // (resolveCodexSessionScope), the same field Claude uses.
-      ...(accountId && (agentId === 'claude' || agentId === 'codex') ? { accountId } : {}),
+      // See `boundAccountId` above for why this is claude/codex-only.
+      ...(boundAccountId ? { accountId: boundAccountId } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
@@ -1014,6 +1033,27 @@ export function createStickyNode(index: number, center?: { x: number; y: number 
       color: '#ffd60a',
       group: null,
       text: ''
+    }
+  }
+}
+
+/**
+ * Creates a new trigger node (issue #493). Born with NO spec — `data.trigger` stays undefined
+ * until the card's editor saves a valid one, so a fresh trigger is inert by construction (an
+ * invalid/absent spec schedules nothing and cannot be armed).
+ */
+export function createTriggerNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  return {
+    id: nextId('trigger'),
+    type: 'trigger',
+    position: placeAt(center, index, TRIGGER_SIZE.width, TRIGGER_SIZE.height),
+    width: TRIGGER_SIZE.width,
+    height: TRIGGER_SIZE.height,
+    style: { width: TRIGGER_SIZE.width, height: TRIGGER_SIZE.height },
+    data: {
+      title: 'Trigger',
+      color: '#e6a23c',
+      group: null
     }
   }
 }
@@ -1374,6 +1414,45 @@ function withNodeRect(
       : n
   )
   return fitAncestorChain(next, node.parentId)
+}
+
+/** Sub-pixel tolerance for "the node is already there". Exact equality is not available: a grouped
+ *  node's rect round-trips through `rootPosition` in floats, and `nodeW` prefers React Flow's
+ *  `measured` width, which it repopulates from the DOM device-pixel-snapped — at fractional zoom
+ *  that never equals `innerW / zoom` exactly. Without the tolerance every re-measure would rewrite
+ *  the node and bump the workspace rev, which on a shared SSH/git project is a commit per toggle. */
+const SAME_PX = 0.5
+const samePx = (a: number, b: number): boolean => Math.abs(a - b) <= SAME_PX
+
+/**
+ * Re-fit an ALREADY maximized node to a new frame, keeping its restore rect.
+ *
+ * Maximize is a MODE, not a one-shot placement: while it is on, the node claims the whole usable
+ * canvas. Pinning or unpinning a side panel changes what "whole" means, so the node follows.
+ * A node that is not maximized is left alone — that one was put where it is by hand or by a zone
+ * verb, and those are placements the user owns.
+ */
+export function refitMaximizedNode(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  const premaxRect = node?.data.premaxRect
+  if (!node || !premaxRect) return nodes
+  // Idempotent: the caller re-measures on every panel change, and most of those land on the rect
+  // the node already has. Returning the same array keeps the workspace out of the dirty/save path
+  // and lets the caller decide by identity whether anything actually moved.
+  const root = rootPosition(node, nodes)
+  if (
+    samePx(root.x, rect.x) &&
+    samePx(root.y, rect.y) &&
+    samePx(nodeW(node) || (node.style?.width as number) || 0, rect.width) &&
+    samePx(nodeH(node) || (node.style?.height as number) || 0, rect.height)
+  ) {
+    return nodes
+  }
+  return withNodeRect(nodes, node, rect, { premaxRect })
 }
 
 /**
