@@ -17,6 +17,7 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
+import { guestContextMenuTemplate } from './webview-context-menu'
 import { BrowserControlLedger } from './browser-control-ledger'
 import {
   recordOpenProjectGrant,
@@ -1158,6 +1159,44 @@ app.whenReady().then(async () => {
         sendToMain(IPC.browserNewWindow, { url, sourceNodeId })
       }
       return { action: 'deny' }
+    })
+    // Electron ships no context menu for web content, so a right-click inside a guest page did
+    // nothing at all. Passing `frame` is what turns on macOS's own AutoFill, Writing Tools and
+    // Services submenus (off by default in Electron): that is the "AutoFill > Passwords..." row
+    // on a password field. Template and its refusals: webview-context-menu.ts.
+    contents.on('context-menu', (_e, params) => {
+      const template = guestContextMenuTemplate(
+        {
+          linkURL: params.linkURL,
+          srcURL: params.srcURL,
+          mediaType: params.mediaType,
+          hasImageContents: params.hasImageContents,
+          isEditable: params.isEditable,
+          selectionText: params.selectionText,
+          misspelledWord: params.misspelledWord,
+          dictionarySuggestions: params.dictionarySuggestions,
+          editFlags: params.editFlags,
+          canGoBack: contents.navigationHistory.canGoBack(),
+          canGoForward: contents.navigationHistory.canGoForward()
+        },
+        {
+          back: () => contents.navigationHistory.goBack(),
+          forward: () => contents.navigationHistory.goForward(),
+          reload: () => contents.reload(),
+          // Same route a popup takes: a new browser node, never a real window.
+          openLinkInNode: (url) => {
+            const sourceNodeId = browserGuests.get(contents.id)?.nodeId
+            if (sourceNodeId) sendToMain(IPC.browserNewWindow, { url, sourceNodeId })
+          },
+          copyText: (text) => clipboard.writeText(text),
+          copyImage: () => contents.copyImageAt(params.x, params.y),
+          replaceMisspelling: (word) => contents.replaceMisspelling(word),
+          inspect: () => contents.inspectElement(params.x, params.y)
+        }
+      )
+      // `frame` is null once the frame navigated away or died; the menu still opens, just without
+      // the AppKit additions.
+      Menu.buildFromTemplate(template).popup(params.frame ? { frame: params.frame } : {})
     })
   })
 
