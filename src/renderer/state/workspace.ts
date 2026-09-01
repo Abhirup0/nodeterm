@@ -734,14 +734,24 @@ export function systemAccountDisplay(label: string | undefined, email?: string |
  * In an SSH project, pass the project's `ssh` binding: the node then runs in REMOTE tmux (Task 12),
  * so `CLAUDE_CONFIG_DIR` resolves to the account dir ON THE HOST and `claude /login` writes the
  * remote `.claude.json` (the main process polls it over ssh). For a local account, omit `ssh`.
+ *
+ * `cwd` is the directory the login shell starts in, and it is not cosmetic: Claude Code's trust
+ * check is keyed on the cwd, so a login node with none lands in `$HOME` and asks the user to trust
+ * their entire home directory — SSH keys and cloud credentials included — before an OAuth round
+ * trip that touches no files at all (issue #553). Callers pass the active project's directory:
+ * a workspace the user is already in is the one they are most likely to have trusted. The trailing
+ * position keeps every existing call byte-identical. On an SSH project `createTerminalNode` prefers
+ * `ssh.remoteCwd`, so a REMOTE login roots itself on the host and a local path can never override
+ * it — which is the only resolution that means anything for a session running over there.
  */
 export function createAccountLoginNode(
   accountId: string,
   index: number,
   center?: { x: number; y: number },
-  ssh?: Project['ssh']
+  ssh?: Project['ssh'],
+  cwd?: string
 ): CanvasNode {
-  const node = createTerminalNode(index, undefined, center, undefined, ssh)
+  const node = createTerminalNode(index, cwd, center, undefined, ssh)
   node.data = {
     ...node.data,
     title: 'Claude login',
@@ -762,13 +772,18 @@ export function createAccountLoginNode(
  * A plain terminal (not an agent node), like the Claude one: no session-name tracking, and the
  * agent-less shape is what keeps the node out of the Codex AGENT paths while still being scoped.
  * Local only — `codexAccounts.add()` mints on THIS machine, so there is no ssh binding to pass.
+ * `cwd` carries the same weight as it does on the Claude sibling above (issue #553): a login node
+ * with none starts in `$HOME`, and a CLI whose trust check is keyed on the cwd then asks about the
+ * whole home directory. Being local-only, the caller must pass a LOCAL directory — the active
+ * project's cwd, which an SSH project does not have.
  */
 export function createCodexAccountLoginNode(
   accountId: string,
   index: number,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  cwd?: string
 ): CanvasNode {
-  const node = createTerminalNode(index, undefined, center)
+  const node = createTerminalNode(index, cwd, center)
   node.data = {
     ...node.data,
     title: 'Codex login',
@@ -796,10 +811,23 @@ export function createCodexAccountLoginNode(
  * this node is an inert plain terminal, not a login prompt nobody requested.
  *
  * Local only, on purpose: on an SSH project a system login would rewrite THAT host's ~/.claude,
- * so the popover does not offer the action there (see UsageIndicator).
+ * so the popover does not offer the action there (see UsageIndicator). `cwd` must therefore be a
+ * LOCAL directory — the active project's, which an SSH project does not have (its terminals are
+ * rooted at `ssh.remoteCwd`, a path that means nothing on this machine).
+ *
+ * Issue #553: this node is where the missing cwd was first noticed. `claude /login` is an OAuth
+ * round trip that touches no files, but Claude Code's trust check is keyed on the cwd, so starting
+ * in `$HOME` made the button cost a "do you trust /Users/<me>?" answer whose persisted `yes` grants
+ * a trusted workspace over everything the user owns. A project directory is not a guaranteed
+ * escape (an untrusted project still prompts) — it makes the prompt the exception rather than the
+ * rule, without nodeterm writing another tool's trust config on the user's behalf.
  */
-export function createSystemLoginNode(index: number, center?: { x: number; y: number }): CanvasNode {
-  const node = createTerminalNode(index, undefined, center)
+export function createSystemLoginNode(
+  index: number,
+  center?: { x: number; y: number },
+  cwd?: string
+): CanvasNode {
+  const node = createTerminalNode(index, cwd, center)
   node.data = {
     ...node.data,
     title: 'Switch Claude account',

@@ -1484,7 +1484,18 @@ else, and its context links must keep classifying across restarts).
     guessing "not codex" would let `codex login` write into the system `~/.codex`. A dispatch with
     no listener is a silent no-op, which is how the Codex half shipped inert (#346) — pinned now by
     `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
-    never heard.
+    never heard. **All THREE login factories take a `cwd`** (`createAccountLoginNode`,
+    `createCodexAccountLoginNode`, `createSystemLoginNode`), and every call site passes the active
+    project's — a login node with none starts in `$HOME`, and an agent CLI whose trust check is
+    keyed on the cwd (Claude Code's is) then asks the user to trust their entire home directory,
+    SSH keys and cloud credentials included, before an OAuth round trip that touches no files
+    (issue #553; a persisted "yes" there grants that workspace for good). It is not a promise the
+    prompt disappears — an untrusted project still prompts — it makes it the exception rather than
+    the rule, without nodeterm writing another tool's trust config on the user's behalf. A
+    **remote** login ignores the local path: `createTerminalNode` prefers `ssh.remoteCwd`, which is
+    the only cwd that means anything for a session running on the host. An SSH project has no local
+    `cwd`, so a LOCAL account added from one still opens in `$HOME` — the honest answer, since that
+    project owns no local directory.
   - **The lifecycle is CORE, and both shells register it** (issue #313) —
     `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
     / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
