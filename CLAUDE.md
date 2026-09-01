@@ -149,14 +149,14 @@ separate store mirroring node state — earlier dual-source designs caused sync 
 `src/renderer/state/workspace.ts` holds only pure helpers: the color palette, the node
 factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agentId, …)`,
 `createAccountLoginNode`, `createStickyNode`, `createGroupNode`, `createEditorNode`,
-`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createDinoNode`), the
+`createDiffNode`, `createVideoNode`, `createWebNode`, `createBrowserNode`, `createDinoNode`,
+`createTriggerNode`), the
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
 subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
-viz) and never persisted. `trigger` (issue #493, landing in phases — schema + the core
-scheduler + DELIVERY so far; the renderer/arming UI is the remaining phase, so nothing can arm a
-trigger yet and nothing fires in production) is a first-class PERSISTED kind. The whole host-side
+viz) and never persisted. `trigger` (issue #493, all four
+phases landed) is a first-class PERSISTED kind. The whole host-side
 machine is composed ONCE in `core/trigger-service.ts` (`startTriggerService`) and booted
 identically by BOTH shells: `core/trigger-scheduler.ts` (sweep-service shape, no catch-up for
 missed slots, cron via the dependency-free `@shared/cron` with the vixie dom/dow OR rule) decides
@@ -799,6 +799,18 @@ session.
   surface backs the kanban card modal's browser popup.
 - **dino** (`DinoNode.tsx`) — a small self-contained T-Rex-style runner on a canvas (no PTY);
   high score persists via `data.highScore`.
+- **trigger** (`TriggerNode.tsx`) — a canvas-owned schedule (cron / interval / once) that
+  delivers a payload into a connected terminal/agent node when due (issue #493 — the inverse of
+  the ephemeral loop/cron cards, which visualize AGENT-initiated recurrence). The card shows the
+  schedule + next-run countdown, the target (a derived, never-persisted edge — same rule as the
+  pending-launch dep edges), the payload, an honest ARMED/DISARMED/CHANGED/SET-UP chip with the
+  "definitions travel with the repo, consent never does" narrative, Run-now, and the last runs
+  (fired / delivered-late / queued / missed / failed / expired). Arming passes a ConfirmDialog
+  showing the exact schedule+payload+target being consented to; all decisions are the pure,
+  tested `lib/triggerCard.ts`, all state is host-side over `window.nodeTerminal.triggers`
+  (arm/disarm/status/runNow — `startTriggerService` registers the handlers in BOTH shells;
+  `runNow` deliberately takes no spec: a caller chooses WHEN, never WHAT). The relay stub
+  refuses and the card says triggers are managed on the host. Mobile: N/A (no canvas).
 - **subagent** / **loop** (`SubagentNode.tsx` / `LoopNode.tsx`) — render-only, hook-driven viz
   nodes, **never persisted**. `subagent` visualizes a subagent the Claude session spawned (type +
   task + live timer, expand for its live transcript — subagents have no PTY); `loop` shows a

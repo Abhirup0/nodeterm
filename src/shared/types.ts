@@ -2900,6 +2900,23 @@ export interface ShortcutsApi {
   setTerminalFocused(focused: boolean): void
 }
 
+/**
+ * Trigger nodes (issue #493): the card's IPC surface. `arm` binds this machine's consent to the
+ * exact spec the user was shown (content-bound — see @shared/trigger); `runNow` chooses only WHEN,
+ * never WHAT (the payload is resolved core-side from the node's persisted content). Real on
+ * desktop and the Server Edition; the relay stub refuses (another machine's arm store is not ours
+ * to write).
+ */
+export interface TriggersApi {
+  arm(projectId: string, nodeId: string, spec: import('./trigger').TriggerSpec): Promise<boolean>
+  disarm(projectId: string, nodeId: string): Promise<void>
+  status(projectId: string, nodeId: string): Promise<import('./trigger').TriggerNodeStatus>
+  runNow(
+    projectId: string,
+    nodeId: string
+  ): Promise<{ outcome: 'fired' | 'missed' | 'failed' | 'queued'; detail?: string }>
+}
+
 export interface NodeTerminalApi {
   pty: PtyApi
   workspace: WorkspaceApi
@@ -2929,6 +2946,7 @@ export interface NodeTerminalApi {
   githubControl: import('./github-issues').GitHubControlApi
   usage: UsageApi
   sessionMemory: SessionMemoryApi
+  triggers: TriggersApi
   context: ContextApi
   canvas: CanvasApi
   codex: CodexApi
