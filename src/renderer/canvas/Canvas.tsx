@@ -31,6 +31,7 @@ import {
   isNodeRemote,
   isNodeWatched,
   setWatchedNode,
+  setRemotelyViewedNodes,
   wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
@@ -4728,6 +4729,38 @@ export function Canvas() {
     window.addEventListener('nodeterm:account-removed', onAccountRemoved)
     return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
   }, [setNodes, markDirty, deleteNodes])
+
+  // Eco × phone ("hibernation isn't phone-compatible"). Three wires, all nudges:
+  //  - `agent:wake`: a phone viewer just attached over the relay to a node's session — ask the
+  //    node to resume its hibernated CLI. Same contract as every other wake asker: the node
+  //    re-reads the flag itself, so this is a no-op for a non-hibernated node, and a no-op for an
+  //    UNMOUNTED one (inactive project) — the phone then still sees the SLEEPING chip and an
+  //    honest shell, never a resume typed into a pane nothing verified.
+  //  - `agent:remote-viewers`: the full set of phone-watched node ids, fed into `isNodeWatched`
+  //    so the sweep cannot `/exit` a session someone is reading on their phone.
+  //  - boot replay: the hibernated flag is persisted in THIS renderer's localStorage, and main's
+  //    mirror starts empty every launch — re-report the persisted set once so the phone's
+  //    SLEEPING chips survive a desktop restart.
+  useEffect(() => {
+    const unsubWake = window.nodeTerminal.onAgentWake?.((nodeId) => wakeHibernatedNode(nodeId))
+    const unsubViewers = window.nodeTerminal.onRemoteViewers?.((ids) =>
+      setRemotelyViewedNodes(ids)
+    )
+    for (const [id, st] of Object.entries(useAgentStatus.getState().byId)) {
+      if (st?.hibernated) {
+        try {
+          window.nodeTerminal.reportHibernated?.(id, true)
+        } catch {
+          /* mirror side-channel only */
+        }
+      }
+    }
+    return () => {
+      unsubWake?.()
+      unsubViewers?.()
+      setRemotelyViewedNodes([])
+    }
+  }, [])
 
   // Cmd/Ctrl+W (forwarded from main) closes the selected node(s) immediately, like the
   // node's × button. With nothing selected it falls back to closing the window.
