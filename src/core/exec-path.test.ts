@@ -52,12 +52,12 @@ describe('executableCandidates', () => {
 
 describe('unquotePathEntry', () => {
   it('strips the quotes Windows tolerates around a PATH entry', () => {
-    expect(unquotePathEntry('"C:\Program Files\GitHub CLI"')).toBe('C:\Program Files\GitHub CLI')
+    expect(unquotePathEntry('"C:\\Program Files\\GitHub CLI"')).toBe('C:\\Program Files\\GitHub CLI')
   })
 
   it('leaves an unquoted entry and a lone quote untouched', () => {
     expect(unquotePathEntry('/usr/bin')).toBe('/usr/bin')
-    expect(unquotePathEntry('"C:\half')).toBe('"C:\half')
+    expect(unquotePathEntry('"C:\\half')).toBe('"C:\\half')
   })
 })
 
