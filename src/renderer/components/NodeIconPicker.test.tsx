@@ -30,6 +30,15 @@ const readBinary = vi.fn<(path: string) => Promise<string | null>>()
 const saveCanvasImage =
   vi.fn<(projectId: string, name: string, b64: string) => Promise<string | null>>()
 
+// The downscale is stubbed to a pass-through: its own behaviour is covered in
+// nodeIconThumbnail.test.ts against injected deps, and the REAL one here would reach for
+// `new Image()` — which jsdom never settles, so the picker would simply hang. What is under test
+// on this side is the WIRING: that the picker saves what the downscale handed back.
+vi.mock('../lib/nodeIconThumbnail', () => ({
+  browserThumbnailDeps: {},
+  downscaleIconImage: async (picked: { base64: string; name: string }) => picked
+}))
+
 vi.mock('../session/session', () => ({
   sessionForProject: () => ({
     api: {

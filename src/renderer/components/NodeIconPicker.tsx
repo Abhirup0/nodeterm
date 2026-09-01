@@ -33,6 +33,7 @@ import {
   portableIconPath
 } from '@shared/node-icon'
 import { canvasImportRefusal } from '../canvas/canvas-image-import'
+import { browserThumbnailDeps, downscaleIconImage } from '../lib/nodeIconThumbnail'
 import { useProjects } from '../state/projects'
 import { sessionForProject } from '../session/session'
 import { useDialogStack } from './dialog-stack'
@@ -186,7 +187,12 @@ function NodeIconPicker({
       // `C:\\Users\\me\\logo.png`, which `split('/')` returned whole — so the copy was named after
       // the entire path and `safeUploadName` then had to salvage it.
       const name = iconFileName(picked) || 'icon.png'
-      const saved = await api.files.saveCanvasImage(project.id, name, b64)
+      // Shrunk BEFORE the write, not after: what goes into `.nodeterm/images/` is committed and
+      // cloned by everyone on the repo, and it draws at 13-16px. Fails open — a decode or encode
+      // that does not work hands back the original bytes, because losing the user's pick to save
+      // some disk is the wrong trade.
+      const small = await downscaleIconImage({ base64: b64, name }, browserThumbnailDeps)
+      const saved = await api.files.saveCanvasImage(project.id, small.name, small.base64)
       if (!saved) {
         setError('Could not save the image — check that this project’s folder is writable.')
         return
