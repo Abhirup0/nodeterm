@@ -1122,7 +1122,17 @@ else, and its context links must keep classifying across restarts).
   *healed*, not preserved, on both the local and the SSH path). The per-event **`matcher`** the grok
   installer needs is why events are typed `ManagedHookEvent` (`string | {event, matcher}`): grok's
   tool matcher is a REGEX and must be `.*` — a bare `*` is invalid and silently stops tool events
-  firing. Plain-string events keep their byte-identical output for every other agent.
+  firing. Plain-string events keep their byte-identical output for every other agent. **Both
+  sides of the managed-entry match go through `normalizeHookCommand`** — the marker used to be
+  folded to `/` while the stored command was compared raw, so on Windows nodeterm never recognized
+  its OWN entry and appended a fresh set every launch (#558: nine copies of nine events, nine
+  `claude.sh` processes per Stop, nine 45 s `PermissionRequest` waits racing one prompt). Because
+  `mergeManagedHook` drops every managed entry before pushing one fresh, the corrected match IS the
+  repair for a file already ruined — it runs at boot via `installManagedAgentHooks` and, being the
+  ONE shared merge, heals claude/gemini/grok, every managed Claude account dir and all three SSH
+  remote installers at once; a second repair mechanism would be exactly the duplicated rule this
+  file warns about. It strips only OUR handler out of a definition, so a hook a user hand-merged
+  beside ours survives.
 - **Per-node hook identity** (`src/core/agents/node-auth-*.ts`, `node-token-*.ts`,
   `node-identity-policy.ts` — full write-up in **`docs/node-identity.md`**) — the shared bearer proves
   "a session on this machine", never *which* session, so every node also gets a capability derived

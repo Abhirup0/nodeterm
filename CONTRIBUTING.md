@@ -86,6 +86,14 @@ registry is missing a field.
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
 
+- **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
+  it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
+  silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while
+  the stored command still carried `\`, so nodeterm stopped recognizing its own hook entries and
+  appended a fresh copy of all nine on every launch — nine hook processes per event, nine
+  concurrent 45 s permission waits racing one prompt. Write the normalizer once, use it on both
+  sides, and pin it with a `C:\`-shaped test.
+
 - **Never publish a file with a bare `fs.rename`.** Use `renameAtomic` or `writeFileAtomic` from
   `src/core/fs-atomic.ts`. On Windows a rename fails with `EPERM` whenever anything has the
   destination open — Defender scanning the file you just wrote, the search indexer, OneDrive — so
