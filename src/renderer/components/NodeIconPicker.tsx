@@ -26,6 +26,7 @@ import { createPortal } from 'react-dom'
 import { create } from 'zustand'
 import {
   iconFileName,
+  localIconCwd,
   type NodeIcon,
   nodeIconMime,
   normalizeNodeIcon,
@@ -193,7 +194,9 @@ function NodeIconPicker({
       // An SSH project writes app-locally (its cwd is on another machine), so `portableIconPath`
       // is handed the LOCAL cwd only — for an SSH project that is undefined and the path stays
       // absolute, which is exactly the non-travelling icon that case can honestly offer.
-      const stored = portableIconPath(saved, project.ssh ? undefined : project.cwd)
+      // `localIconCwd` is that rule, and the READ side asks the same function: written twice, the
+      // two copies drifted and the read side resolved a remote-rooted path against the local fs.
+      const stored = portableIconPath(saved, localIconCwd(project))
       const next = normalizeNodeIcon({ type: 'image', path: stored })
       if (!next) {
         // The extension was already accepted above, so this is no longer "wrong file type" — it

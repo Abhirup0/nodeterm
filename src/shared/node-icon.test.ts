@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   iconFileName,
+  localIconCwd,
   nodeIconMime,
   normalizeNodeIcon,
   portableIconPath,
@@ -263,5 +264,31 @@ describe('iconFileName', () => {
   it('is what lets nodeIconMime read a Windows path', () => {
     expect(nodeIconMime('C:\\Users\\me\\logo.PNG')).toBe('image/png')
     expect(nodeIconMime('C:\\dir.with.dots\\README')).toBeUndefined()
+  })
+})
+
+// The read side and the write side must agree about which cwd a `./` icon may resolve against.
+// They disagreed: the picker excluded an SSH project, `useNodeIconSrc` did not — so a `./` icon
+// authored by someone with the repo checked out locally resolved, on the SSH client, to the same
+// relative path under a REMOTE root and was then read through the LOCAL fs.
+describe('localIconCwd', () => {
+  it('gives a local project its own cwd', () => {
+    expect(localIconCwd({ cwd: '/repo' })).toBe('/repo')
+  })
+
+  it('refuses an SSH project’s cwd — that path is on the host, the read is not', () => {
+    expect(localIconCwd({ cwd: '/srv/repo', ssh: { server: {}, remoteCwd: '/srv/repo' } })).toBeUndefined()
+    // ...which makes a `./` icon simply not draw, rather than read an unrelated local file.
+    expect(
+      resolveIconPath('./images/a.png', localIconCwd({ cwd: '/srv/repo', ssh: {} }))
+    ).toBeUndefined()
+    // An absolute path is unaffected — and absolute is what the write side stores for SSH.
+    expect(resolveIconPath('/appdata/canvas-images/a.png', localIconCwd({ cwd: '/srv/repo', ssh: {} })))
+      .toBe('/appdata/canvas-images/a.png')
+  })
+
+  it('answers undefined for a cwd-less or unknown project rather than guessing', () => {
+    expect(localIconCwd({})).toBeUndefined()
+    expect(localIconCwd(undefined)).toBeUndefined()
   })
 })

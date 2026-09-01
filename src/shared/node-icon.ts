@@ -271,3 +271,26 @@ export function resolveIconPath(storedPath: string, projectCwd?: string): string
   // two entries for one file.
   return `${root}/${rel.replace(/\\/g, '/')}`
 }
+
+/**
+ * The cwd a `./` icon path may be resolved against, given a project — or undefined when there
+ * isn't one it can honestly use.
+ *
+ * This exists because the rule was written TWICE and the two copies drifted, which is the failure
+ * this repo warns about elsewhere. The picker's write side already said
+ * `project.ssh ? undefined : project.cwd`; the read side said only `project.cwd`. For an SSH
+ * project those are different facts: `cwd` is a path on the REMOTE host, while the icon is read
+ * through the LOCAL `api.fs` (an SSH project runs on the local session — only a RELAY tab's api
+ * belongs to another machine). So a `./` icon written by someone who has that repo checked out
+ * locally resolved, on the SSH client, to the same relative path under a remote root — and asked
+ * this machine to read it. That is a local file that has nothing to do with the icon, and it is
+ * shown if it happens to exist.
+ *
+ * Answering undefined means the icon does not draw, which is the honest outcome: that file is on
+ * a machine whose filesystem this reader cannot see. Absolute paths are unaffected, and absolute
+ * is exactly what the write side stores for an SSH project.
+ */
+export function localIconCwd(project: { cwd?: string; ssh?: unknown } | undefined): string | undefined {
+  if (!project || project.ssh) return undefined
+  return project.cwd
+}

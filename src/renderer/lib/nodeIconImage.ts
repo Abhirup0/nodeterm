@@ -20,7 +20,7 @@
  */
 import { useEffect, useState } from 'react'
 import type { FsApi } from '@shared/types'
-import { type NodeIcon, nodeIconMime, resolveIconPath } from '@shared/node-icon'
+import { localIconCwd, type NodeIcon, nodeIconMime, resolveIconPath } from '@shared/node-icon'
 import { sessionForProject } from '../session/session'
 import { useProjects } from '../state/projects'
 
@@ -84,7 +84,11 @@ export function useNodeIconSrc(icon: NodeIcon | undefined, projectId?: string): 
   const activeProjectId = useProjects((s) => s.activeProjectId)
   const pid = projectId ?? activeProjectId
   const storedPath = icon?.type === 'image' ? icon.path : null
-  const cwd = useProjects((s) => (pid ? s.getProject(pid)?.cwd : undefined))
+  // `localIconCwd`, not `project.cwd` — the single definition of "which cwd may a `./` icon be
+  // resolved against", shared with the picker's write side so the two cannot drift again. Selected
+  // down to ONE primitive here on purpose: the project object is rebuilt on every node
+  // serialization, so returning it would re-run this effect on every canvas edit.
+  const cwd = useProjects((s) => (pid ? localIconCwd(s.getProject(pid)) : undefined))
   const [src, setSrc] = useState<string | null>(null)
 
   useEffect(() => {
