@@ -9,20 +9,27 @@ import { absolutePosition, type FocusableNode } from './nodeFocus'
  * (group/subagent/loop/account-login nodes are excluded from both). `allNodes` must be the FULL
  * live tree from BEFORE the deletion, so parent-chain absolute positions are still resolvable.
  * `now`/`makeId` are injected so this stays a pure, deterministically testable function; call
- * sites pass `Date.now()` and `uuid` (`lib/uuid.ts`) — NEVER `crypto.randomUUID`, which is absent
- * outside a secure context and so throws in the Server Edition served over plain HTTP on a LAN.
+ * sites pass `Date.now()` and a `uuid` (`lib/uuid.ts`)-backed minter — NEVER `crypto.randomUUID`,
+ * which is absent outside a secure context and so throws in the Server Edition served over plain
+ * HTTP on a LAN.
+ *
+ * `makeId` is handed the SOURCE node's id (not called bare) so the caller (`deleteNodes`) can
+ * record which minted entry id belongs to which node — that correlation is what lets a ⇧⌘T
+ * snapshot and its persisted twin consume each other on reopen (see
+ * `ReopenNodeSnapshot.closedSessionId`). Correlating by node id rather than by array position
+ * keeps the two histories' independent filtering passes from ever silently misaligning.
  */
 export function buildClosedSessionEntries(
   deletedIds: ReadonlySet<string>,
   allNodes: readonly CanvasNode[],
   now: number,
-  makeId: () => string
+  makeId: (nodeId: string) => string
 ): ClosedSessionEntry[] {
   return allNodes
     .filter((n) => deletedIds.has(n.id))
     .filter((n) => snapshotNode(n, allNodes as readonly FocusableNode[]) !== null)
     .map((n) => ({
-      id: makeId(),
+      id: makeId(n.id),
       closedAt: now,
       node: flowToNodeStates([n])[0],
       absolutePosition: absolutePosition(

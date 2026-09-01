@@ -4562,30 +4562,45 @@ export function Canvas() {
     (ids: string[], opts?: { record?: boolean }) => {
       const set = new Set(ids)
       if (opts?.record !== false) {
-        const snapshots = nodesRef.current
-          .filter((n) => set.has(n.id))
-          .map((n) => snapshotNode(n, nodesRef.current))
-          .filter((s): s is NonNullable<typeof s> => s !== null)
-        if (snapshots.length) {
-          useReopenHistory.getState().push({
-            kind: 'nodes',
-            projectId: useProjects.getState().activeProjectId ?? '',
-            closedAt: Date.now(),
-            nodes: snapshots
-          })
-        }
         const deletedAt = Date.now()
+        // Keyed by node id, not by array position: `closedEntries` and `snapshots` below each run
+        // their OWN independent filter over `nodesRef.current` (both via `snapshotNode`), and a
+        // node-id map is what lets the two stay correlated even if those filters ever drift apart,
+        // rather than relying on the two passes producing the same order.
+        const closedSessionIdByNode = new Map<string, string>()
         // `uuid()`, NOT crypto.randomUUID: the latter exists only in a SECURE context, so it is
         // undefined in the Server Edition served over plain HTTP on a LAN — and this call sits at
         // the TOP of deleteNodes, before transport.destroy/setNodes, so a throw here would make
         // Delete do nothing at all on that surface. See lib/uuid.ts (the same call already broke
         // "Add agent" once).
-        const closedEntries = buildClosedSessionEntries(set, nodesRef.current, deletedAt, uuid)
+        const closedEntries = buildClosedSessionEntries(set, nodesRef.current, deletedAt, (nodeId) => {
+          const id = uuid()
+          closedSessionIdByNode.set(nodeId, id)
+          return id
+        })
         if (closedEntries.length) {
           useProjects.getState().recordClosedSessions(
             useProjects.getState().activeProjectId ?? '',
             closedEntries
           )
+        }
+        // The two ledgers must agree on which node minted which persisted entry, so ⇧⌘T's restore
+        // can drop the persisted twin and the sidebar's reopen can drop this snapshot — see
+        // `ReopenNodeSnapshot.closedSessionId`.
+        const snapshots = nodesRef.current
+          .filter((n) => set.has(n.id))
+          .map((n) => {
+            const snap = snapshotNode(n, nodesRef.current)
+            return snap ? { ...snap, closedSessionId: closedSessionIdByNode.get(n.id) } : snap
+          })
+          .filter((s): s is NonNullable<typeof s> => s !== null)
+        if (snapshots.length) {
+          useReopenHistory.getState().push({
+            kind: 'nodes',
+            projectId: useProjects.getState().activeProjectId ?? '',
+            closedAt: deletedAt,
+            nodes: snapshots
+          })
         }
       }
       nodesRef.current.forEach((n) => {
@@ -6258,6 +6273,20 @@ export function Canvas() {
       const entry = useReopenHistory.getState().popNext()
       if (!entry) return false
 
+      // The persisted twin of this batch (the sidebar's "Recently closed" rows the SAME delete
+      // recorded) must be consumed too — whether this entry ends up restored or skipped as stale,
+      // the ⇧⌘T stack is done with it either way, and leaving the sidebar row behind would let a
+      // later click there restore a duplicate. `writeDisk` runs unconditionally because
+      // `entry.projectId` may not be the active project, whose autosave debounce wouldn't cover it.
+      if (entry.kind === 'nodes') {
+        for (const n of entry.nodes) {
+          if (n.closedSessionId) {
+            useProjects.getState().discardClosedSession(entry.projectId, n.closedSessionId)
+          }
+        }
+        void writeDisk()
+      }
+
       const { projects, activeProjectId } = useProjects.getState()
       const project = projects.find((p) => p.id === entry.projectId)
       const accounts = useSettings.getState().settings.claudeAccounts
@@ -6278,7 +6307,7 @@ export function Canvas() {
       if (plan.action === 'skip') continue
       return executeReopenPlan(plan)
     }
-  }, [executeReopenPlan])
+  }, [executeReopenPlan, writeDisk])
 
   /** Reopens ONE entry from a project's persisted `closedSessions` (the sidebar's "Recently
    *  closed" section) — the browsable counterpart to `Cmd+Shift+T`. Consumes the entry
@@ -6293,6 +6322,9 @@ export function Canvas() {
     (projectId: string, entryId: string): boolean => {
       const consumed = useProjects.getState().consumeClosedSession(projectId, entryId)
       if (!consumed) return false
+      // The ⇧⌘T-stack twin of this entry (if the SAME delete also pushed one) must go too, or a
+      // later Cmd+Shift+T could restore this same closed session a second time.
+      useReopenHistory.getState().dropByClosedSessionId(projectId, entryId)
       void writeDisk()
 
       const { projects, activeProjectId } = useProjects.getState()

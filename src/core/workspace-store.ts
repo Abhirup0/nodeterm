@@ -5,12 +5,13 @@ import { renameAtomic, writeFileAtomic } from './fs-atomic'
 import { IPC } from '../shared/ipc'
 import { platform } from './platform'
 import {
-  CLOSED_SESSIONS_CAP, DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
+  DEFAULT_PROJECT_ID, EMPTY_WORKSPACE,
   type BridgeLink, type CanvasNodeState, type Project, type Workspace, type WorkspaceV1
 } from '../shared/types'
 import {
   PROJECT_DIR, PROJECT_FILE, fileToProject, projectToFile, resolveNodes, sameProjectContent,
-  sanitizeNodeTriggers, serializeProjectFile, splitWorkspace, validClosedSessions, validKanban,
+  sanitizeLoadedClosedSessions, sanitizeNodeTriggers, serializeProjectFile, splitWorkspace,
+  validKanban,
   type IndexEntryV3, type ProjectFileV1, type WorkspaceIndexV3
 } from './workspace-files'
 import { readProjectSettingsFile, writeProjectSettingsFile } from './project-settings-files'
@@ -256,7 +257,14 @@ export class WorkspaceStore {
   }
 
   private async loadV3(index: WorkspaceIndexV3, sideline: boolean): Promise<Workspace> {
-    for (const entry of index.entries) entry.localApprovalId ||= randomUUID()
+    for (const entry of index.entries) {
+      entry.localApprovalId ||= randomUUID()
+      // Same "workspace.json is hand-editable input too" treatment as the inline-project branch
+      // below, for a REF'd project's own closed-session history: validate shape, cap, and
+      // re-normalize each snapshot's trigger spec. Sanitized ONCE here so every downstream reader
+      // of `e.closedSessions` (fileToProject, readLocalRef, the ssh reconcile paths) can trust it.
+      entry.closedSessions = sanitizeLoadedClosedSessions(entry.closedSessions)
+    }
     this.index = index
     const built: LoadedEntry[] = []
     for (const e of index.entries) {
@@ -267,16 +275,11 @@ export class WorkspaceStore {
         // `rest` drops BOTH guarded fields; each is added back below only if it passes its guard.
         const { kanban, closedSessions, ...rest } = e.project
         const base = validKanban(kanban) ? { ...rest, kanban } : rest
-        // Same treatment for `closedSessions`, and for the same reason: a malformed value here
-        // reaches `mergeClosedHistory`, which iterates it (a non-array throws and takes the whole
-        // sidebar render down) and hands each entry's node to React Flow. Dropped when it fails
-        // the shape rule, capped like every other path, and each surviving node gets the same
-        // trigger normalization `nodes` gets.
-        const history = validClosedSessions(closedSessions)
-          ? closedSessions
-              .slice(0, CLOSED_SESSIONS_CAP)
-              .map((c) => ({ ...c, node: sanitizeNodeTriggers([c.node])[0] }))
-          : undefined
+        // Same treatment for `closedSessions` as the ref'd-project entries above, and for the
+        // same reason: a malformed value here reaches `mergeClosedHistory`, which iterates it (a
+        // non-array throws and takes the whole sidebar render down) and hands each entry's node
+        // to React Flow.
+        const history = sanitizeLoadedClosedSessions(closedSessions)
         built.push({
           entry: e,
           project: {
@@ -306,6 +309,7 @@ export class WorkspaceStore {
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
               breadcrumbs: e.breadcrumbs,
+              closedSessions: e.closedSessions,
               capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, p)
             })
@@ -327,6 +331,7 @@ export class WorkspaceStore {
               viewport: e.viewport,
               defaultAccountId: e.defaultAccountId,
               breadcrumbs: e.breadcrumbs,
+              closedSessions: e.closedSessions,
               capabilityAck: e.capabilityAck,
               localExec: this.execOverlay(e, e.cache)
             })
@@ -856,6 +861,10 @@ export class WorkspaceStore {
         if (old?.viewport) e.viewport = old.viewport
         if (old?.defaultAccountId) e.defaultAccountId = old.defaultAccountId
         if (old?.breadcrumbs) e.breadcrumbs = old.breadcrumbs
+        // Same rule: a placeholder's project carries no closedSessions (it has no nodes to have
+        // deleted), so without this an unavailable window would silently forget the user's trash
+        // can the moment splitWorkspace rebuilds the index.
+        if (old?.closedSessions) e.closedSessions = old.closedSessions
         // The clone-notice acknowledgment must also survive an unavailable window: forgetting it
         // would re-raise a notice the user already answered the moment the folder remounts.
         if (old?.capabilityAck) e.capabilityAck = old.capabilityAck
@@ -1013,6 +1022,7 @@ export class WorkspaceStore {
       viewport: e.viewport,
       defaultAccountId: e.defaultAccountId,
       breadcrumbs: e.breadcrumbs,
+      closedSessions: e.closedSessions,
       capabilityAck: e.capabilityAck,
       localExec: e.localExec
     })
@@ -1332,6 +1342,7 @@ export class WorkspaceStore {
           viewport: e.viewport,
           defaultAccountId: e.defaultAccountId,
           breadcrumbs: e.breadcrumbs,
+          closedSessions: e.closedSessions,
           capabilityAck: e.capabilityAck,
           localExec: e.localExec
         })
@@ -1389,6 +1400,7 @@ export class WorkspaceStore {
             viewport: e.viewport,
             defaultAccountId: e.defaultAccountId,
             breadcrumbs: e.breadcrumbs,
+            closedSessions: e.closedSessions,
             capabilityAck: e.capabilityAck,
             localExec: e.localExec
           })
@@ -1454,6 +1466,7 @@ export class WorkspaceStore {
     return fileToProject(e.cache, {
       id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
       viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
+      closedSessions: e.closedSessions,
       capabilityAck: e.capabilityAck, localExec: e.localExec
     })
   }
@@ -1561,6 +1574,7 @@ export class WorkspaceStore {
       return fileToProject(adopted, {
         id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
         viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
+        closedSessions: e.closedSessions,
         capabilityAck: e.capabilityAck, localExec: e.localExec
       })
     }
@@ -1576,6 +1590,7 @@ export class WorkspaceStore {
         merged = fileToProject(e.cache, {
           id: e.id, ssh: e.ssh, closed: e.closed, closedAt: e.closedAt,
           viewport: e.viewport, defaultAccountId: e.defaultAccountId, breadcrumbs: e.breadcrumbs,
+          closedSessions: e.closedSessions,
           capabilityAck: e.capabilityAck, localExec: e.localExec
         })
       }
@@ -1628,7 +1643,17 @@ function migrateLegacy(parsed: unknown): Workspace {
     const active = ws.projects.some((p) => p.id === ws.activeProjectId)
       ? (ws.activeProjectId as string)
       : (ws.projects[0]?.id ?? '')
-    return { version: 2, activeProjectId: active, projects: ws.projects }
+    // A pre-v3 workspace.json is hand-editable input too, same as an inline v3 entry — and this
+    // path skips loadV3 entirely (the first save() is what actually migrates it), so without this
+    // a malformed `closedSessions` reaches `mergeClosedHistory`'s `for...of` before that save ever
+    // runs and takes the sidebar render down on the very first load.
+    const projects = ws.projects.map((p) => {
+      const history = sanitizeLoadedClosedSessions(p.closedSessions)
+      if (history === p.closedSessions) return p
+      const { closedSessions: _dropped, ...rest } = p
+      return history ? { ...rest, closedSessions: history } : rest
+    })
+    return { version: 2, activeProjectId: active, projects }
   }
   if (ws?.version === 1 && Array.isArray(ws.nodes)) {
     return {

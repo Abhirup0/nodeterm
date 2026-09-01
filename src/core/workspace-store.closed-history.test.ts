@@ -6,7 +6,7 @@ import { initPlatform, resetPlatformForTests } from './platform'
 import { fakePlatform } from './platform-fake'
 import { WorkspaceStore } from './workspace-store'
 import { CLOSED_SESSIONS_CAP } from '../shared/types'
-import type { Project, Workspace } from '../shared/types'
+import type { ClosedSessionEntry, Project, Workspace } from '../shared/types'
 
 let userData: string
 let projRoot: string
@@ -28,6 +28,52 @@ afterEach(async () => {
   resetPlatformForTests()
   await fs.rm(userData, { recursive: true, force: true })
   await fs.rm(projRoot, { recursive: true, force: true })
+})
+
+/**
+ * A pre-v3 (v2) workspace.json skips loadV3 entirely — `migrateLegacy` assembles it in memory and
+ * the first save() is what actually migrates it to v3. Without its OWN sanitize pass, a malformed
+ * `closedSessions` on a hand-edited legacy file reaches `mergeClosedHistory` (a `for...of` over a
+ * non-array throws) on the very FIRST load, before any save ever runs.
+ */
+describe('a legacy (v2) workspace.json sanitizes closedSessions on migration', () => {
+  it('drops a malformed closedSessions rather than crashing the sidebar render', async () => {
+    await fs.writeFile(
+      path.join(userData, 'workspace.json'),
+      JSON.stringify({
+        version: 2,
+        activeProjectId: 'p1',
+        projects: [{
+          id: 'p1', name: 'foo', color: '#7aa2f7', viewport: { x: 0, y: 0, zoom: 1 }, nodes: [],
+          closedSessions: { not: 'an array' }
+        }]
+      }),
+      'utf-8'
+    )
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].closedSessions).toBeUndefined()
+  })
+
+  it('keeps a well-formed legacy closedSessions entry', async () => {
+    await fs.writeFile(
+      path.join(userData, 'workspace.json'),
+      JSON.stringify({
+        version: 2,
+        activeProjectId: 'p1',
+        projects: [{
+          id: 'p1', name: 'foo', color: '#7aa2f7', viewport: { x: 0, y: 0, zoom: 1 }, nodes: [],
+          closedSessions: [{
+            id: 'e1', closedAt: 1, absolutePosition: { x: 0, y: 0 },
+            node: { id: 'n1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, title: 't', color: '#fff', group: null }
+          }]
+        }]
+      }),
+      'utf-8'
+    )
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].closedSessions).toHaveLength(1)
+    expect(loaded.projects[0].closedSessions?.[0].id).toBe('e1')
+  })
 })
 
 describe('closedAt round trip (machine-local index)', () => {
@@ -52,6 +98,73 @@ describe('closedAt round trip (machine-local index)', () => {
     await store.save(ws([project({ cwd: projRoot })]))
     const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
     expect(index.entries[0].closedAt).toBeUndefined()
+  })
+})
+
+/**
+ * The maintainer's own storage-move requirement (PR #510 review): closed-session history is a
+ * per-machine fact, like `viewport`/`breadcrumbs` — a REF'D (cwd) project's history must live in
+ * the machine-local `workspace.json` index entry, never in the git-shared `.nodeterm/project.json`
+ * a teammate would also see. This is the round trip nothing else exercises end-to-end: every other
+ * test covers one layer (`projectToFile`/`fileToProject` in isolation, or the inline-project path,
+ * which is ALREADY machine-local by construction and so proves nothing about this move).
+ */
+describe('a ref\'d project\'s closedSessions rides the machine-local index, never the shared file', () => {
+  const entry = (id: string, closedAt: number): ClosedSessionEntry => ({
+    id, closedAt,
+    node: { id: 'term-1', kind: 'terminal', position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, title: 't', color: '#fff', group: null },
+    absolutePosition: { x: 0, y: 0 }
+  })
+
+  it('lands in workspace.json but never in .nodeterm/project.json, and survives a reload', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot, closedSessions: [entry('e1', 1), entry('e2', 2)] })]))
+
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].closedSessions?.map((e: { id: string }) => e.id)).toEqual(['e1', 'e2'])
+
+    const file = JSON.parse(await fs.readFile(path.join(projRoot, '.nodeterm/project.json'), 'utf-8'))
+    expect(file.closedSessions).toBeUndefined()
+    expect(JSON.stringify(file)).not.toContain('closedSessions')
+
+    // A fresh store instance, so this is a genuine reload off disk, not the same in-memory index.
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].closedSessions?.map((e) => e.id)).toEqual(['e1', 'e2'])
+  })
+
+  it('survives an unavailable window (folder briefly unreadable) via the old-entry restore', async () => {
+    const store = new WorkspaceStore()
+    await store.save(ws([project({ cwd: projRoot, closedSessions: [entry('e1', 1)] })]))
+
+    // The folder becomes unreadable — save() must not let splitWorkspace's header-only placeholder
+    // erase the machine-local history it can't currently see.
+    await store.save(ws([project({ cwd: projRoot, unavailable: true })]))
+    const index = JSON.parse(await fs.readFile(path.join(userData, 'workspace.json'), 'utf-8'))
+    expect(index.entries[0].closedSessions?.map((e: { id: string }) => e.id)).toEqual(['e1'])
+  })
+
+  it('caps and re-sanitizes a hand-edited oversized/hostile index entry on load', async () => {
+    await fs.writeFile(
+      path.join(userData, 'workspace.json'),
+      JSON.stringify({
+        version: 3,
+        activeProjectId: 'p1',
+        entries: [{
+          id: 'p1', name: 'foo', color: '#7aa2f7', cwd: projRoot,
+          closedSessions: Array.from({ length: CLOSED_SESSIONS_CAP + 5 }, (_, i) => entry(`e${i}`, i))
+        }]
+      }),
+      'utf-8'
+    )
+    await fs.mkdir(path.join(projRoot, '.nodeterm'), { recursive: true })
+    await fs.writeFile(
+      path.join(projRoot, '.nodeterm/project.json'),
+      JSON.stringify({ version: 1, rev: 1, savedAt: 'now', name: 'foo', color: '#7aa2f7', nodes: [] }),
+      'utf-8'
+    )
+    const loaded = await new WorkspaceStore().load()
+    expect(loaded.projects[0].closedSessions).toHaveLength(CLOSED_SESSIONS_CAP)
+    expect(loaded.projects[0].closedSessions?.[0].id).toBe('e0')
   })
 })
 

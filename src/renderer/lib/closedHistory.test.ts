@@ -13,7 +13,7 @@ const node = (over: Partial<CanvasNode> = {}): CanvasNode =>
 describe('buildClosedSessionEntries', () => {
   it('builds one entry per deleted, restorable node', () => {
     const nodes = [node({ id: 'n1' }), node({ id: 'n2' })]
-    const entries = buildClosedSessionEntries(new Set(['n1']), nodes, 999, () => 'fresh-id')
+    const entries = buildClosedSessionEntries(new Set(['n1']), nodes, 999, (_nodeId) => 'fresh-id')
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatchObject({ id: 'fresh-id', closedAt: 999 })
     expect(entries[0].node.id).toBe('n1')
@@ -32,6 +32,16 @@ describe('buildClosedSessionEntries', () => {
     const nodes = [node({ id: 'n1' }), node({ id: 'n2' })]
     const entries = buildClosedSessionEntries(new Set(['n2']), nodes, 1, () => 'x')
     expect(entries.map((e) => e.node.id)).toEqual(['n2'])
+  })
+
+  it('hands makeId the SOURCE node id, not called bare — the correlation deleteNodes relies on', () => {
+    const nodes = [node({ id: 'n1' }), node({ id: 'n2' })]
+    const seen: string[] = []
+    buildClosedSessionEntries(new Set(['n1', 'n2']), nodes, 1, (nodeId) => {
+      seen.push(nodeId)
+      return `id-for-${nodeId}`
+    })
+    expect(seen).toEqual(['n1', 'n2'])
   })
 })
 

@@ -124,8 +124,8 @@ export interface ProjectFileV1 {
   agentMessaging?: boolean
   dinoHighScore?: number
   kanban?: ProjectKanban
-  /** Git-shared closed-session history — see `Project.closedSessions`. */
-  closedSessions?: ClosedSessionEntry[]
+  // NOTE: closedSessions is deliberately NOT here — see `Project.closedSessions` /
+  // `IndexEntryV3.closedSessions`. It is machine-local, like `viewport`/`breadcrumbs`.
 }
 
 /** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
@@ -162,6 +162,15 @@ export interface IndexEntryV3 {
   /** MACHINE-LOCAL camera navigation history for a ref'd project. Same rule as `viewport`: this
    *  user's "where was I" is not something a repo shares. See NavStop. */
   breadcrumbs?: NavStop[]
+  /**
+   * MACHINE-LOCAL closed-session history for a ref'd project (folder or ssh) — see
+   * `Project.closedSessions`. Whose trash can holds what deleted nodes is a per-machine fact, not
+   * shared content: a delete's full node-state blob would otherwise churn a committed,
+   * teammate-visible `.nodeterm/project.json` on every one. Validated/capped/trigger-sanitized on
+   * every load (`sanitizeLoadedClosedSessions`) exactly like an inline project's embedded
+   * `closedSessions` — this file is hand-editable input too.
+   */
+  closedSessions?: ClosedSessionEntry[]
   cwd?: string
   ssh?: Project['ssh']
   cache?: ProjectFileV1
@@ -259,17 +268,6 @@ export function projectToFile(
   const nodes = sanitizeNodeTriggers(
     stripSharedNodeExec(p.cwd ? toPortableNodes(p.nodes, p.cwd) : p.nodes)
   )
-  // Capped on the way OUT as well as in (see CLOSED_SESSIONS_CAP): the store mutator guarantees
-  // this in normal operation, but an in-memory list inflated some other way (a hand-edited file
-  // loaded before the cap existed, a future caller) must not be written back uncapped.
-  const closedSessions = p.closedSessions?.length
-    ? p.closedSessions.slice(0, CLOSED_SESSIONS_CAP).map((e) => ({
-        ...e,
-        node: sanitizeNodeTriggers(
-          stripSharedNodeExec(p.cwd ? toPortableNodes([e.node], p.cwd) : [e.node])
-        )[0]
-      }))
-    : undefined
   const icon = sanitizeProjectIcon(p.icon)
   return {
     version: 1,
@@ -289,8 +287,7 @@ export function projectToFile(
     // the acknowledgment is machine-local (IndexEntryV3.capabilityAck) and must never travel.
     ...projectCapabilityFields(p),
     ...(p.dinoHighScore ? { dinoHighScore: p.dinoHighScore } : {}),
-    ...(p.kanban ? { kanban: p.kanban } : {}),
-    ...(closedSessions ? { closedSessions } : {})
+    ...(p.kanban ? { kanban: p.kanban } : {})
   }
 }
 
@@ -344,6 +341,24 @@ export function validClosedSessions(x: unknown): x is ClosedSessionEntry[] {
 }
 
 /**
+ * The tolerant reader for closed-session history wherever it is admitted from disk: an
+ * `IndexEntryV3.closedSessions` (ref'd project) or an inline `IndexEntryV3.project.closedSessions`
+ * — both live in workspace.json, which is hand-editable input exactly like a git-shared
+ * `.nodeterm/project.json`. Validates shape (`validClosedSessions`), caps at `CLOSED_SESSIONS_CAP`
+ * (newest-first — the cap drops the tail), and re-normalizes each snapshot's trigger spec, same as
+ * a live node. No exec-strip / browser-partition treatment here: unlike the shared project file,
+ * this data never leaves this machine, so a node's own `shell`/`ssh.extraArgs` survive a reopen
+ * intact — there is nothing to re-attach from a separate machine-local map. Returns `undefined`
+ * for anything that fails the shape guard or has nothing to admit, never `[]`.
+ */
+export function sanitizeLoadedClosedSessions(x: unknown): ClosedSessionEntry[] | undefined {
+  if (!validClosedSessions(x)) return undefined
+  const capped = x.slice(0, CLOSED_SESSIONS_CAP)
+  if (!capped.length) return undefined
+  return capped.map((e) => ({ ...e, node: sanitizeNodeTriggers([e.node])[0] }))
+}
+
+/**
  * The shared file plus this machine's own half of the project.
  *
  * `base.id` is REQUIRED and never defaulted from the file: identity comes from the index entry
@@ -369,6 +384,9 @@ export function fileToProject(
     capabilityAck?: import('../shared/project-capability-consent').CapabilityAckMap
     /** This machine's navigation history for this entry (never from the file). */
     breadcrumbs?: NavStop[]
+    /** This machine's closed-session history for this entry (never from the file) — already
+     *  validated/capped/trigger-sanitized by the caller (`sanitizeLoadedClosedSessions`). */
+    closedSessions?: ClosedSessionEntry[]
     /** This machine's own exec values for these nodes (from the local index entry). A file read
      *  WITHOUT them — an adopted/cloned folder, a probe — gets the safe defaults, never the file's
      *  own `shell`/`ssh.extraArgs`. */
@@ -404,25 +422,6 @@ export function fileToProject(
     ...readProjectCapabilities(f),
     ...(f.dinoHighScore ? { dinoHighScore: f.dinoHighScore } : {}),
     ...(validKanban(f.kanban) ? { kanban: f.kanban } : {}),
-    // Capped at the READ boundary, which is the one that matters: the file is git-shared, so an
-    // oversized list arrives from outside and would otherwise render unbounded sidebar rows and be
-    // rewritten in full. See CLOSED_SESSIONS_CAP.
-    ...(validClosedSessions(f.closedSessions)
-      ? {
-          closedSessions: f.closedSessions.slice(0, CLOSED_SESSIONS_CAP).map((e) => ({
-            ...e,
-            node: sanitizeNodeTriggers(
-              sanitizeBrowserPartitions(
-                applyLocalNodeExec(
-                  base.cwd ? resolveNodes([e.node], base.cwd) : [e.node],
-                  base.localExec
-                ),
-                base.id
-              )
-            )[0]
-          }))
-        }
-      : {}),
     ...(base.cwd ? { cwd: base.cwd } : {}),
     ...(base.ssh ? { ssh: base.ssh } : {}),
     ...(base.closed ? { closed: true } : {}),
@@ -432,7 +431,10 @@ export function fileToProject(
     ...(base.capabilityAck ? { capabilityAck: base.capabilityAck } : {}),
     // Machine-local, from the index entry ONLY: a file field named `breadcrumbs` is a forgery
     // attempt (the shared file cannot carry this machine's navigation history) and is never read.
-    ...(base.breadcrumbs?.length ? { breadcrumbs: base.breadcrumbs } : {})
+    ...(base.breadcrumbs?.length ? { breadcrumbs: base.breadcrumbs } : {}),
+    // Machine-local, from the index entry ONLY, same rule as `breadcrumbs`: a file field named
+    // `closedSessions` is never read here — the shared file cannot carry this machine's trash can.
+    ...(base.closedSessions?.length ? { closedSessions: base.closedSessions } : {})
   }
 }
 
@@ -526,7 +528,13 @@ export function splitWorkspace(
       // The clone-notice acknowledgment rides the machine-local entry, never the shared file
       // (projectToFile does not emit it — pinned by project-capability-consent.test.ts).
       ...(p.capabilityAck ? { capabilityAck: p.capabilityAck } : {}),
-      ...(p.breadcrumbs?.length ? { breadcrumbs: p.breadcrumbs } : {})
+      ...(p.breadcrumbs?.length ? { breadcrumbs: p.breadcrumbs } : {}),
+      // Same rule: whose trash can holds what is machine-local, capped on the way OUT as well as
+      // in (see CLOSED_SESSIONS_CAP) — an in-memory list inflated some other way must not be
+      // written back uncapped.
+      ...(p.closedSessions?.length
+        ? { closedSessions: p.closedSessions.slice(0, CLOSED_SESSIONS_CAP) }
+        : {})
     }
     if (p.unavailable) {
       // Placeholder (folder missing / server unreachable at load): its nodes:[] is not real

@@ -428,10 +428,11 @@ export interface ClosedSessionEntry {
  * How many closed-session entries one project keeps (newest-first; the rest are dropped).
  *
  * ONE definition, because the cap must hold at every point an entry list is produced OR admitted:
- * the store mutator that records a delete (`recordClosedSessions`), and BOTH sides of the shared
- * file (`projectToFile`/`fileToProject`). Enforcing it only where WE append is not enforcement at
- * all — `closedSessions` is git-shared, so an inflated list arrives from outside (a teammate's
- * file, a hand edit) and would render unbounded rows and be written back in full.
+ * the store mutator that records a delete (`recordClosedSessions`), and every load path that
+ * admits `IndexEntryV3.closedSessions` (a ref'd project's machine-local history) or an inline
+ * project's embedded one. Enforcing it only where WE append is not enforcement at all —
+ * workspace.json is hand-editable input too, so an inflated list can arrive from outside (a
+ * pre-cap build's file, a hand edit) and would render unbounded rows and be written back in full.
  */
 export const CLOSED_SESSIONS_CAP = 20
 
@@ -727,9 +728,12 @@ export interface Project {
   closedAt?: number
   /**
    * Sessions (terminal/agent/sticky/…) deleted from this project, most-recent-first, capped at
-   * 20. Git-shared like `nodes`/`kanban` — reopening a teammate's deleted session is intentional.
-   * A fresh id per entry; recreating a node from one always mints a new node id/session, never
-   * reuses the original (see `recreateNodeFromSnapshot`).
+   * 20. MACHINE-LOCAL, same rule as `closedAt`/`breadcrumbs` — see `IndexEntryV3.closedSessions`,
+   * never written into the shared project file (a delete's full node-state blob — title, cwd,
+   * position — would otherwise churn a committed, teammate-visible document on every one). Whose
+   * trash can holds what is a per-machine fact, not shared content. A fresh id per entry;
+   * recreating a node from one always mints a new node id/session, never reuses the original
+   * (see `recreateNodeFromSnapshot`).
    */
   closedSessions?: ClosedSessionEntry[]
   /**

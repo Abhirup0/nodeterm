@@ -169,11 +169,14 @@ describe('breadcrumb wiring the CLAUDE.md bullet calls load-bearing', () => {
 })
 
 describe('deleteNodes also records persisted closed-session history', () => {
-  it('builds entries from the full pre-delete tree and the same "now"/ids used for reopenHistory', () => {
+  it('builds entries from the full pre-delete tree and the same "now" used for reopenHistory', () => {
     expect(CANVAS_SRC).toContain('const deletedAt = Date.now()')
     expect(CANVAS_SRC).toContain(
-      'buildClosedSessionEntries(set, nodesRef.current, deletedAt, uuid)'
+      'buildClosedSessionEntries(set, nodesRef.current, deletedAt, (nodeId) => {'
     )
+    // The reopenHistory push reuses the SAME `deletedAt`, not a second `Date.now()` call — the
+    // two ledgers must agree on when this batch closed, not just approximately.
+    expect(CANVAS_SRC).toContain('closedAt: deletedAt')
   })
 
   it('mints entry ids with lib/uuid, never crypto.randomUUID', () => {
@@ -184,6 +187,15 @@ describe('deleteNodes also records persisted closed-session history', () => {
     // The CALL form, so the explanatory comment beside the fixed line can keep naming it.
     expect(CANVAS_SRC).not.toContain('crypto.randomUUID(')
     expect(CANVAS_SRC).toContain("import { uuid } from '../lib/uuid'")
+  })
+
+  it('correlates each minted entry id back to its source node, so the two ledgers can consume each other', () => {
+    // The bug this pins: correlating the ⇧⌘T snapshot and its persisted twin by ARRAY POSITION
+    // (two independently-filtered lists happening to line up) instead of by node id would silently
+    // misalign the moment either filter changed.
+    expect(CANVAS_SRC).toContain('const closedSessionIdByNode = new Map<string, string>()')
+    expect(CANVAS_SRC).toContain('closedSessionIdByNode.set(nodeId, id)')
+    expect(CANVAS_SRC).toContain('closedSessionId: closedSessionIdByNode.get(n.id)')
   })
 
   it('records into the store only when entries were actually built', () => {
@@ -222,23 +234,39 @@ describe('reopening a persisted closed-session entry shares reopenLastClosed\'s 
 
   it('reopenLastClosedCommand delegates to it instead of inlining the switch', () => {
     const fnStart = CANVAS_SRC.indexOf('const reopenLastClosedCommand = useCallback(')
-    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 950)
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1700)
     expect(fnBody).toContain('return executeReopenPlan(plan)')
     expect(fnBody).not.toContain('switch (plan.action)')
+  })
+
+  it('reopenLastClosedCommand discards the persisted twin of a popped node-batch entry', () => {
+    // The bug this pins: restoring via ⇧⌘T without consuming the matching sidebar row would let a
+    // later sidebar click restore the same closed session a second time.
+    const fnStart = CANVAS_SRC.indexOf('const reopenLastClosedCommand = useCallback(')
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1700)
+    expect(fnBody).toContain("if (entry.kind === 'nodes') {")
+    expect(fnBody).toContain('.discardClosedSession(entry.projectId, n.closedSessionId)')
+    expect(fnBody).toContain('void writeDisk()')
   })
 
   it('consumes the entry before doing anything else, so a stale double-click cannot reopen it twice', () => {
     const fnStart = CANVAS_SRC.indexOf('const reopenClosedSessionCommand = useCallback(')
     expect(fnStart).toBeGreaterThan(-1)
-    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 260)
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 520)
     expect(fnBody).toContain('.consumeClosedSession(projectId, entryId)')
     expect(fnBody).toContain('if (!consumed) return false')
     expect(fnBody).toContain('void writeDisk()')
   })
 
+  it('drops the matching ⇧⌘T-stack entry so the two histories cannot both reopen the same delete', () => {
+    const fnStart = CANVAS_SRC.indexOf('const reopenClosedSessionCommand = useCallback(')
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 520)
+    expect(fnBody).toContain('useReopenHistory.getState().dropByClosedSessionId(projectId, entryId)')
+  })
+
   it('wraps the consumed entry as a synthetic ReopenEntry and reuses the pure planReopen', () => {
     const fnStart = CANVAS_SRC.indexOf('const reopenClosedSessionCommand = useCallback(')
-    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1200)
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1500)
     expect(fnBody).toContain("kind: 'nodes'")
     expect(fnBody).toContain('nodes: [stateToReopenSnapshot(consumed)]')
     expect(fnBody).toContain('const plan = planReopen(')
@@ -248,7 +276,7 @@ describe('reopening a persisted closed-session entry shares reopenLastClosed\'s 
 
   it('resolves permission mode and account against the TARGET project, same as reopenLastClosedCommand', () => {
     const fnStart = CANVAS_SRC.indexOf('const reopenClosedSessionCommand = useCallback(')
-    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1200)
+    const fnBody = CANVAS_SRC.slice(fnStart, fnStart + 1500)
     expect(fnBody).toContain('resolveAccountId: (id) => resolveNewNodeAccount(id, project, accounts)')
     expect(fnBody).toContain('permissionModeFor: (agentId) => projectPermissionMode(project, agentId)')
   })

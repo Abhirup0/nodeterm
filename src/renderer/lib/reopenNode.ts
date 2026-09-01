@@ -29,6 +29,16 @@ export interface ReopenNodeSnapshot {
   extent?: 'parent'
   size?: { width: number; height: number }
   data: NodeData
+  /**
+   * The id of the matching entry this same delete also recorded in the persisted
+   * `Project.closedSessions` history, when one was recorded — set only by `deleteNodes` (Canvas),
+   * never by `stateToReopenSnapshot`'s reverse direction. Lets the two ledgers consume each
+   * other: reopening this ⇧⌘T snapshot drops the persisted twin (`reopenLastClosedCommand`), and
+   * reopening the persisted twin from the sidebar drops this snapshot out of the ⇧⌘T stack
+   * (`reopenClosedSessionCommand` → `useReopenHistory.dropByClosedSessionId`) — so a single delete
+   * can never be reopened twice into two duplicate nodes.
+   */
+  closedSessionId?: string
 }
 
 type SnapshotSource = {
