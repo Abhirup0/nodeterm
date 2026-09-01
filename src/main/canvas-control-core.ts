@@ -380,6 +380,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  the user to confirm deletion.',
     '- `branch --node <id>` — branch a Claude node\'s conversation (Claude nodes only).',
     '- `rename --node <id> --title "New Name"` — rename any node (terminals, groups, stickies…).',
+    '  Renaming to the title the node ALREADY has is a no-op: nothing is typed into its agent',
+    '  session, and the reply says `already named`. Re-assert your own name as often as you like.',
     '- `write --node <id> --text "..."` / `close --node <id>` — type into / close a node.',
     '  Both ask the user to confirm a dialog and may be denied. Read WHICH answer came back:',
     '  `denied by user` is a decision and is FINAL — never re-ask — while `no answer within 120s`',
@@ -805,6 +807,8 @@ Verbs:
 - \`branch --node <id>\` — branch a Claude node's conversation: the node stays on the new
   branch and a new node opens resuming the original. Target must be a Claude agent node.
 - \`rename --node <id> --title "New Name"\` — rename any node (terminals, groups, stickies…).
+  Renaming to the title the node ALREADY has is a no-op: nothing is typed into its agent
+  session, and the reply says \`already named\`. Re-assert your own name as often as you like.
 - \`write --node <id> --text "..."\` — type text into a terminal node. (Asks the user to confirm.)
 - \`close --node <id>\` — close a node. (Asks the user to confirm.)
 - \`send --node <id> --text "..."\` — deliver a message INTO another agent node's session, in this

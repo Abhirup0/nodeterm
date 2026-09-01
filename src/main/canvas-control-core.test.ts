@@ -376,6 +376,17 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts say an unchanged rename types nothing into the session', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // Issues #582 / #569 §2. An orchestrator that re-asserts its node's name on startup and
+      // after every context reset was previously paying a `/rename` injection into the working
+      // session each time — one reporter worked around it by reading the title first. The verb
+      // now compares, so the text has to say so, or callers keep building that workaround.
+      expect(body.toLowerCase()).toContain('already named')
+      expect(body.toLowerCase()).toContain('no-op')
+    }
+  })
+
   it('both agent-facing texts document the messaging verbs and the outermost-frame convention', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       for (const frag of ['`send --node', '`reply --node', '`notify --node']) {
