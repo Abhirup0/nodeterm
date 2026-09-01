@@ -10,24 +10,25 @@ describe('executableCandidates', () => {
     expect(executableCandidates('gh', 'linux', '.EXE')).toEqual(['gh'])
   })
 
-  it('appends PATHEXT on win32, bare name first', () => {
+  it('appends PATHEXT on win32, extensions first and the bare name last', () => {
     // The regression this closes: `gh` on Windows is `gh.exe`, so a bare-name-only walk found
-    // nothing and every caller fell through to its POSIX fallbacks.
+    // nothing and every caller fell through to its POSIX fallbacks. The ORDER is load-bearing too
+    // — see the shim test below.
     expect(executableCandidates('gh', 'win32', '.COM;.EXE;.CMD')).toEqual([
-      'gh',
       'gh.COM',
       'gh.EXE',
-      'gh.CMD'
+      'gh.CMD',
+      'gh'
     ])
   })
 
   it('falls back to the stock PATHEXT when the variable is missing or empty', () => {
     expect(executableCandidates('ssh', 'win32', undefined)).toEqual([
-      'ssh',
       'ssh.COM',
       'ssh.EXE',
       'ssh.BAT',
-      'ssh.CMD'
+      'ssh.CMD',
+      'ssh'
     ])
     expect(executableCandidates('ssh', 'win32', '')).toEqual(
       executableCandidates('ssh', 'win32', undefined)
@@ -36,9 +37,9 @@ describe('executableCandidates', () => {
 
   it('tolerates whitespace and empty entries in PATHEXT', () => {
     expect(executableCandidates('gh', 'win32', ' .EXE ; ; .CMD ')).toEqual([
-      'gh',
       'gh.EXE',
-      'gh.CMD'
+      'gh.CMD',
+      'gh'
     ])
   })
 
@@ -122,11 +123,24 @@ describe('findInPathString (real filesystem)', () => {
       expectPath(findInPathString('nt-cmd-only', dir), path.join(dir, 'nt-cmd-only.cmd'))
     })
 
-    it('prefers an extensionless file when one exists, and still finds a name given in full', () => {
-      writeBin('nt-both')
-      writeBin('nt-both.exe')
-      expectPath(findInPathString('nt-both', dir), path.join(dir, 'nt-both'))
-      expectPath(findInPathString('nt-both.exe', dir), path.join(dir, 'nt-both.exe'))
+    it('prefers the PATHEXT match over an extensionless shim in the same directory', () => {
+      // Exactly what npm lays down for a global CLI on Windows: `<name>` is a POSIX shell shim for
+      // Git Bash and `<name>.cmd` is the one cmd/CreateProcess can actually run. Preferring the
+      // bare name here returns a file that exists and cannot be spawned.
+      writeBin('nt-shim')
+      writeBin('nt-shim.cmd')
+      expectPath(findInPathString('nt-shim', dir), path.join(dir, 'nt-shim.cmd'))
+    })
+
+    it('falls back to an extensionless file when nothing matches PATHEXT', () => {
+      // An extensionless PE is executable, so it stays a last resort rather than being ignored.
+      writeBin('nt-bare-only')
+      expectPath(findInPathString('nt-bare-only', dir), path.join(dir, 'nt-bare-only'))
+    })
+
+    it('still finds a name given in full', () => {
+      writeBin('nt-full.exe')
+      expectPath(findInPathString('nt-full.exe', dir), path.join(dir, 'nt-full.exe'))
     })
   })
 })

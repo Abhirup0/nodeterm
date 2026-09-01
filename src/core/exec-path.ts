@@ -80,9 +80,13 @@ const DEFAULT_PATHEXT = '.COM;.EXE;.BAT;.CMD'
  * `null` for every lookup on Windows — and, downstream, no `gh`, no `ssh`, and a claude
  * capability probe that never ran.
  *
- * The bare name stays FIRST so an extensionless executable still wins where one exists, and a
- * `bin` that already carries a PATHEXT suffix is returned untouched rather than growing a second
- * one (`gh.exe.EXE`).
+ * PATHEXT entries come FIRST and the bare name LAST, which is the order Windows itself resolves in
+ * — and the order matters more than it looks. npm installs a global CLI as BOTH `<name>` (a POSIX
+ * shell shim, for Git Bash) and `<name>.cmd` (for cmd) in the same directory. Trying the bare name
+ * first hands back the shim, which `CreateProcess` cannot run: the spawn fails with a file that
+ * plainly exists. The bare name is kept as a last resort because an extensionless PE is executable,
+ * just not the thing to prefer. A `bin` that already carries a PATHEXT suffix is returned untouched
+ * rather than growing a second one (`gh.exe.EXE`).
  *
  * The extension is appended with PATHEXT's OWN casing, which is conventionally upper case — so a
  * hit on `gh.exe` comes back as `...\gh.EXE`. That is the same file (Windows paths are
@@ -105,7 +109,7 @@ export function executableCandidates(
     .filter(Boolean)
   const lower = bin.toLowerCase()
   if (exts.some((e) => lower.endsWith(e.toLowerCase()))) return [bin]
-  return [bin, ...exts.map((e) => bin + e)]
+  return [...exts.map((e) => bin + e), bin]
 }
 
 /** Strip the quotes Windows tolerates around a PATH entry ("C:\Program Files\..."). `where.exe`
