@@ -530,6 +530,13 @@ export class HostSession {
       let done = false
       let attempt = 0
       let echoed = ''
+      // The head is STICKY, because `echoed` below is a bounded window. A tail match is safe under
+      // that truncation by construction — the tail is what the window keeps — but a head is not:
+      // once a window's worth of bytes has arrived after it, the head is evicted and the two
+      // substrings need never coexist in the buffer even though both were genuinely echoed. This
+      // leg REFUSES on exhausted retries rather than failing open, so an evicted head would not
+      // merely retry, it would stop the node from starting.
+      let sawHead = false
       let timer: ReturnType<typeof setTimeout> | undefined
       let dataSub: { dispose(): void } | undefined
       let exitSub: { dispose(): void } | undefined
@@ -563,6 +570,7 @@ export class HostSession {
         if (done) return
         attempt++
         echoed = ''
+        sawHead = false
         timer = setTimeout(() => {
           if (done) return
           if (attempt >= DELIVERY_ATTEMPTS) {
@@ -580,16 +588,16 @@ export class HostSession {
       }
       dataSub = this.proc.onData((chunk) => {
         if (done) return
-        echoed = (echoed + cleanEcho(chunk)).slice(-Math.max(command.length + 256, 512))
         // BOTH ends, not just the tail — see echoedIntact in the renderer's command-delivery for
         // why a tail match let a head-truncated command through (#556), and why requiring the
         // whole command contiguously would be too strict on this leg in particular: the retry
         // exhaustion below REFUSES the launch rather than failing open.
-        if (
-          echoed.includes(command.slice(0, ECHO_EDGE_CHARS)) &&
-          echoed.includes(command.slice(-ECHO_EDGE_CHARS))
-        )
-          submit()
+        const merged = echoed + cleanEcho(chunk)
+        // Tested BEFORE the window is trimmed, so a head that arrived in an earlier chunk still
+        // counts once it has scrolled out. Same memory bound as before.
+        sawHead ||= merged.includes(command.slice(0, ECHO_EDGE_CHARS))
+        echoed = merged.slice(-Math.max(command.length + 256, 512))
+        if (sawHead && echoed.includes(command.slice(-ECHO_EDGE_CHARS))) submit()
       })
       exitSub = this.proc.onExit(() =>
         finish(new Error('session-host terminal exited during launch delivery'))
