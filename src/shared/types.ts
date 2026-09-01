@@ -1108,6 +1108,10 @@ export interface ClaudeAccount {
   host?: string
   /** True until `claude /login` completes in the account dir and the email is captured. */
   pending?: boolean
+  /** Optional default node color for nodes opened under this account (Settings → Accounts);
+   *  unset = the agent's own brand color. Read through `accountNodeColor`, which re-validates it
+   *  as a string — this file is hand-editable and nothing checks it field-by-field on load. */
+  color?: string
   createdAt: number
 }
 
