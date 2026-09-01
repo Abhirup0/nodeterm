@@ -2017,6 +2017,42 @@ or browser nodes means adding the draw and the set together, in one change.
   the bytes only ever become an `<img>` under a `'self'` CSP with no network, so the reachable
   outcome is "an icon fails to draw". A `./` path may not traverse (same rule as
   `isSafeQuickOpenRelPath`).
+- **Two dialects in, one dialect out — and the traversal guard splits on BOTH separators, always.**
+  The value is written by one machine and read by another, so `normalizeNodeIcon` ACCEPTS a Windows
+  absolute (`C:\…`, `C:/…`) and a POSIX one wherever the check runs, while everything STORED is
+  POSIX-separated. Both halves are load-bearing. Refuse `C:\…` on a mac and a mac user merely
+  opening the shared canvas and saving it **silently strips a Windows teammate's icons** from
+  `project.json` — such a path does not resolve on a mac, but not-drawing is a degrade and a degrade
+  is not a reason to destroy the value on the way past. Store `.\a\b.png` and it means a file
+  called `a\b.png` on POSIX and `b.png` inside `a` on Windows, so a relative path is canonicalized
+  to `./` with forward slashes (the same way an emoji is canonicalized to its first grapheme).
+  **`isSafeRelIconPath` splits on `[\\/]` on every platform**, because splitting on `/` alone made
+  `./a\..\..\secret.png` ONE segment — neither `''`, `.` nor `..` — so it passed the guard
+  everywhere and escaped the project root the moment a Windows reader resolved it; a segment may
+  also not contain `:` (a drive qualifier, or an NTFS alternate data stream). **UNC is refused**,
+  matching `renderer/terminal/file-links.ts`, which consumes UNC specifically so it can refuse it:
+  reading one reaches another machine over SMB.
+- **`localIconCwd` is the ONE definition of which cwd a `./` icon may resolve against**, asked by
+  the picker's write side and by `useNodeIconSrc`'s read side. It was written twice and drifted: an
+  SSH project's `cwd` is a path on the REMOTE host while the icon is read through the LOCAL `api.fs`
+  (an SSH project runs on the local session — only a RELAY tab's api belongs to another machine), so
+  the read side resolved a remote-rooted `./` path against this machine's filesystem and drew
+  whatever happened to sit there. Undefined = the icon does not draw, which is the honest answer for
+  a file on a filesystem this reader cannot see; absolute paths are unaffected, and absolute is what
+  the write side stores for SSH.
+- **A picked image is downscaled before it is written** (`lib/nodeIconThumbnail.ts`, 256 px long
+  edge = 16× the drawn size). What lands in `.nodeterm/images/` is committed and cloned by everyone
+  on the repo, and it draws at 13–16 px. SVG is passed through (rasterizing it would make it worse
+  at every size, not merely smaller), as is anything already small in both dimensions and bytes (a
+  canvas round-trip can make a hand-made 32 px PNG *bigger*) and any re-encode that came out larger.
+  An animated GIF becomes a static PNG. The decision (`thumbnailPlan`) is pure so it tests under
+  vitest's default `node` environment — jsdom has no canvas — and the browser half's decode/encode
+  is injected. It **fails open in every direction**, including a decode that never settles
+  (`DECODE_TIMEOUT_MS`): `chooseImage` awaits it before writing, so a hanging promise would leave
+  the button stuck on "Copying…".
+- **The extension is checked BEFORE the copy.** `dialog.selectFile` applies no filter, so an
+  unsupported file is one click away — and validating after `saveCanvasImage` left an orphan file in
+  the user's git-shared folder on every refusal, which nothing later removes.
 - **The bytes are COPIED, not referenced.** The picker reads the chosen file and writes it through
   `files.saveCanvasImage` — the same seam canvas image nodes use — so it lands in the project's
   git-shared `.nodeterm/images/`. A path inside the project cwd is then stored `./`-relative
@@ -2026,6 +2062,11 @@ or browser nodes means adding the draw and the set together, in one change.
   with the repo while the node naming it does not — an existing gap, not one this introduced.
   A cwd-less canvas, an SSH project (its cwd is on the host; the image is written app-locally) and
   the app-local fallback all keep an absolute path and simply do not travel. Not an error.
+- **The picker owns Escape while it is the top dialog** (`useDialogStack()`'s answer, which was
+  previously discarded). The gate is `isTop()` ALONE, matching `confirmKeyAction`, where `inDialog`
+  guards Enter and never Escape: Enter is the affirmative key and must be aimed at the dialog, while
+  requiring focus inside the box for Escape reproduces the original bug for a user whose focus sits
+  on the body.
 - **A relay tab is refused** (`canvasImportRefusal`, the same message and the same reason as canvas
   image import): the write is this machine's preload while the read is the peer's core, so the node
   would name a file only this machine has. Reads otherwise go through the PROJECT's session api, not

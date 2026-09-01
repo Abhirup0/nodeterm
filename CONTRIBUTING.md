@@ -224,6 +224,20 @@ inherit a builtin harness, so add the capability and its one shared leaf (`src/s
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
 eventually drifts.
 
+**Never put a raw NUL byte in a source file — write `\x00`.** Git classifies a file containing one
+as *binary*, so it renders as "Binary files differ" in every diff surface (the PR page, `git diff`,
+`git log -p`) and `git grep` skips it. It still compiles and its tests still pass, so nothing fails
+— the file just becomes invisible to review, which is the worst way for this to go wrong. A
+separator or sentinel is a fine reason to want the byte; the escape is the same byte and keeps the
+file text. `src/shared/source-hygiene.test.ts` enforces this across every tracked `.ts`/`.tsx`.
+
+**Paths cross machines, so treat `\` as a separator wherever you split one.** A value persisted in
+`.nodeterm/project.json` is written by one machine and validated on another, so a guard that reads
+`\` as an ordinary filename character is simply wrong about the machine that will resolve it. This
+has already produced a real hole: a traversal check that split on `/` alone saw `./a\..\..\x.png`
+as a single harmless segment on *every* platform. Split on `[\\/]`, and prefer accepting both
+dialects while storing only one (see **Node icons** in CLAUDE.md for the worked example).
+
 ## Testing
 
 `npm test` must pass, and `npm run typecheck` is the fastest gate.
