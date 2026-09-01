@@ -588,7 +588,13 @@ export function createAgentNode(
    *  agent, so passing a model for one is harmless — it's simply not appended). Persisted as
    *  `data.agentModel` so cold-restore and later restarts keep the model. Trails `projectId`: every
    *  existing caller passes that ninth argument, so the model is the one that had to move. */
-  model?: string
+  model?: string,
+  /** Absolute path to a file holding the first prompt (canvas-control `--prompt-file`). Wins over
+   *  `initialPrompt`; composed by the assembler as a `"$(cat …)"` substitution so a multi-line
+   *  brief survives the single-line typed delivery. Validated by the caller
+   *  (`promptFilePathError` + an existence check) — the factory trusts it. Trailing/optional so
+   *  every existing caller is unchanged. */
+  promptFile?: string
 ): CanvasNode {
   const { label, color } = resolveAgent(agentId)
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
@@ -625,6 +631,7 @@ export function createAgentNode(
       agentId,
       customAgent,
       initialPrompt,
+      promptFile,
       permissionMode,
       sessionId: mintedSessionId,
       sessionIdFlagSupported,

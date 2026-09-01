@@ -1,8 +1,7 @@
 import fs from 'fs'
 import { readAgentSessionName } from '../core/agent-session-name'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
-import { TriggerArmStore } from '../core/trigger-arm-store'
-import { createTriggerScheduler, triggerRowsFromCanvases } from '../core/trigger-scheduler'
+import { startTriggerService } from '../core/trigger-service'
 import path from 'path'
 import http from 'http'
 
@@ -73,6 +72,7 @@ import {
   type MirrorSettings,
   type MirrorServer,
   setNodeSessionName,
+  setNodeHibernated,
   sessionNameSweepEntries,
   nodeSessionName
 } from '../core/agent-status-mirror'
@@ -379,17 +379,18 @@ export async function startServer(
     // No `supports`: core's `supportsTitleRead` (TITLE_READ_CAPABLE) is the rule, and duplicating
     // it here is how the two shells drift — see the note in core/session-name-sweep.ts.
   })
-  // Trigger nodes (issue #493, phase 2): the host-side scheduler — the reason it lives in core is
-  // exactly this shell: a headless Server Edition with no browser tab open must still fire. Same
-  // wiring as desktop main's; `fire` is a stub until the delivery phase, and with no arm IPC/UI
-  // yet nothing can arm a trigger, so the stub is unreachable in production.
-  const triggerArms = new TriggerArmStore(config.dataDir)
-  const triggerScheduler = createTriggerScheduler({
-    listTriggers: () => triggerRowsFromCanvases(workspaceStore.persistedCanvases()),
-    isArmed: (projectId, nodeId, spec) => triggerArms.isArmed(projectId, nodeId, spec),
-    fire: async () => ({ ok: false, detail: 'delivery not wired yet (trigger phase 3)' })
+  // Trigger nodes (issue #493): the whole host-side machine — arm store, scheduler, delivery with
+  // its deliver-on-idle queue, and the mirror's idle signal — composed ONCE in core
+  // (`startTriggerService`); the reason it lives in core is exactly this shell: a headless Server
+  // Edition with no browser tab open must still fire. Identical call in src/main/index.ts. Arming
+  // still has no IPC/UI (phase 4), so nothing fires in production yet.
+  startTriggerService({
+    userDataDir: config.dataDir,
+    listCanvases: () => workspaceStore.persistedCanvases(),
+    getNode: (nodeId) => workspaceStore.getNode(nodeId),
+    sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId)
   })
-  void triggerArms.load().finally(() => triggerScheduler.start())
   // Advertise launch settings to the mobile companion through the mirror (same provider the
   // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local
   // provider applies. The provider is consulted at every flush (heartbeat ≤60s), so a settings
@@ -458,6 +459,12 @@ export async function startServer(
   // Live Activity. Fire-and-forget; no-op with no unresolved done.
   platform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
+  })
+  // Eco hibernation report (parity with desktop's ipcMain.on(IPC.agentHibernated)): the browser
+  // renderer owns the flag; the mirror carries it so the phone's SSH browse renders SLEEPING.
+  platform.handle(IPC.agentHibernated, (msg: { nodeId?: unknown; on?: unknown }) => {
+    if (typeof msg?.nodeId !== 'string' || !msg.nodeId) return
+    setNodeHibernated(msg.nodeId, msg.on === true)
   })
   // Phone→host read-acks: the phone drops `~/.nodeterm/acks/<nodeId>.seen` on this host when it READS
   // a finished session. Sweep it (15s cadence, cheap dir-mtime gate) and for each ack: `ackDone`
