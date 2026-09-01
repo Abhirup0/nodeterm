@@ -95,7 +95,8 @@
         }
       ],
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "nodeterm uses the microphone so you can dictate into your terminals."
+        "NSMicrophoneUsageDescription": "nodeterm uses the microphone so you can dictate into your terminals.",
+        "NSLocalNetworkUsageDescription": "Terminals and agents you run may connect to devices and servers on your local network."
       },
       "target": [
         {
