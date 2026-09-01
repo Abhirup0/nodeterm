@@ -114,7 +114,7 @@ Hold `⌘⌥` and say it. On-device **Whisper** transcribes locally — review t
 then **Send** (nothing auto-submits). Your voice never leaves the machine.
 
 </td>
-<td><img src="docs/assets/dictation-tour.webp" alt="Dictation — hold cmd-shift-D, speak, review, send into the terminal" /></td>
+<td><img src="docs/assets/dictation-tour.webp" alt="Dictation — hold ⌘⌥, speak, review, send into the terminal" /></td>
 </tr>
 </table>
 
@@ -132,7 +132,6 @@ GitHub Copilot / opencode / Grok / custom) · 📝 **Sticky note** (link to an a
   agent sessions (`claude --resume`). The macOS app **ships its own tmux**, so this works
   with nothing installed; a tmux already on your system is always used in preference to it,
   and terminals opened before an upgrade stay as they were until you refresh the node.
-- **Talk to your terminal** — on-device Whisper dictation (hold ⌘⌥): speak, review, send.
 - **Agent superpowers** — **context links** so agent nodes read each other's transcripts
   on demand; Claude-only **branch a conversation** and **managed accounts** for several
   logged-in Claude identities side by side; agents can drive the canvas (open nodes,

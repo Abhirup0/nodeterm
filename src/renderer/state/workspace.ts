@@ -47,6 +47,7 @@ export const WORKTREE_GROUP_SIZE = { width: 760, height: 540 }
 const EDITOR_SIZE = { width: 660, height: 460 }
 const DIFF_SIZE = { width: 860, height: 500 }
 const DINO_SIZE = { width: 600, height: 200 }
+const TRIGGER_SIZE = { width: 300, height: 170 }
 const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
 const BROWSER_SIZE = { width: 800, height: 560 }
@@ -164,6 +165,12 @@ export interface NodeData {
    * SSH-project editor still routes to the remote fs after reopen.
    */
   sshFs?: boolean
+  /**
+   * trigger-only: the schedule + payload + target of a trigger node (issue #493). Persisted as
+   * git-shared content and sanitized on every load path; whether it may FIRE on this machine is
+   * the machine-local arm store's question, never this field's. See @shared/trigger.
+   */
+  trigger?: import('@shared/trigger').TriggerSpec
   [key: string]: unknown
 }
 
@@ -581,7 +588,13 @@ export function createAgentNode(
    *  agent, so passing a model for one is harmless — it's simply not appended). Persisted as
    *  `data.agentModel` so cold-restore and later restarts keep the model. Trails `projectId`: every
    *  existing caller passes that ninth argument, so the model is the one that had to move. */
-  model?: string
+  model?: string,
+  /** Absolute path to a file holding the first prompt (canvas-control `--prompt-file`). Wins over
+   *  `initialPrompt`; composed by the assembler as a `"$(cat …)"` substitution so a multi-line
+   *  brief survives the single-line typed delivery. Validated by the caller
+   *  (`promptFilePathError` + an existence check) — the factory trusts it. Trailing/optional so
+   *  every existing caller is unchanged. */
+  promptFile?: string
 ): CanvasNode {
   const { label, color } = resolveAgent(agentId)
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
@@ -618,6 +631,7 @@ export function createAgentNode(
       agentId,
       customAgent,
       initialPrompt,
+      promptFile,
       permissionMode,
       sessionId: mintedSessionId,
       sessionIdFlagSupported,
@@ -1735,7 +1749,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
-        worktree: n.worktree
+        worktree: n.worktree,
+        trigger: n.trigger
       }
     }
   })
@@ -1761,7 +1776,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
                   ? WEB_SIZE
                   : kind === 'dino'
                     ? DINO_SIZE
-                    : TERMINAL_SIZE
+                    : kind === 'trigger'
+                      ? TRIGGER_SIZE
+                      : TERMINAL_SIZE
   return nodes
     .map((n) => {
       const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
@@ -1806,6 +1823,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
         worktree: n.data.worktree,
+        trigger: n.data.trigger,
         premaxRect: n.data.premaxRect
       }
     })

@@ -270,7 +270,9 @@ export interface RecycledInfo {
 }
 
 // 'subagent' and 'loop' are render-only (ephemeral hook-driven viz) and never persisted.
-export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino'
+// 'trigger' is a first-class PERSISTED kind (issue #493) — the canvas-owned schedule node; its
+// spec rides `CanvasNodeState.trigger` and is sanitized on every load path (@shared/trigger).
+export type NodeKind = 'terminal' | 'sticky' | 'group' | 'editor' | 'diff' | 'video' | 'web' | 'browser' | 'subagent' | 'loop' | 'dino' | 'trigger'
 
 /** Persisted state of a single canvas node (terminal, sticky note, group frame, or editor). */
 /**
@@ -390,6 +392,14 @@ export interface CanvasNodeState {
   commitOid?: string
   /** group-only: when bound, the git worktree this group works in. */
   worktree?: GroupWorktree
+  /**
+   * trigger-only: the schedule + payload + target this node represents (issue #493). Git-shared
+   * CONTENT — deliberately, the team shares the definition — which is exactly why it is treated
+   * as hostile on every load path (`sanitizeNodeTriggers` in core/workspace-files) and why the
+   * definition alone never fires: execution additionally requires this machine's arm record
+   * (`core/trigger-arm-store.ts`), bound to the spec's exact content. See @shared/trigger.
+   */
+  trigger?: import('./trigger').TriggerSpec
   /**
    * Set while the node is maximized to fill the viewport (issue #399): the rect to give back on
    * the toggle's second click — the node's ROOT-space (absolute canvas) position plus its size.
@@ -1214,8 +1224,19 @@ export interface Settings {
   doubleClickFocus: boolean
   /** Open Markdown files (.md, .markdown, …) in rendered preview instead of the code editor.
    *  Only picks the view an editor node OPENS in — the node's Preview/Edit toggle (and the
-   *  markdown-toggle chord) still switches either way. Default off: the historical behavior. */
+   *  markdown-toggle chord) still switches either way. Default ON since the release after
+   *  v0.3.3 (maintainer decision on issue #495; a preview is one ⌘M from the editor, so the
+   *  rendered view is the better first sight for docs). A one-shot load migration keyed on
+   *  `openMarkdownPreviewMigrated` (see mergeSettings) forces this ON once for every existing
+   *  file — including one saved by v0.3.3, the one release that defaulted off and whose
+   *  full-snapshot saves materialized `false` for users who never touched the toggle. After
+   *  the migration the user's own opt-out is permanent. */
   openMarkdownPreview: boolean
+  /** One-shot marker for the openMarkdownPreview default flip (#495). Absent = the file
+   *  predates the flip → the load migration sets `openMarkdownPreview: true` and stamps this
+   *  true; present = the migration already ran (or the install was born after it) and the
+   *  stored `openMarkdownPreview` value is the user's own, never touched again. */
+  openMarkdownPreviewMigrated: boolean
   /**
    * Let a MIDDLE CLICK inside a terminal paste (Linux in practice — macOS and Windows have no
    * PRIMARY selection and no tmux middle-click habit, so the guard changes nothing visible there).
@@ -1235,9 +1256,17 @@ export interface Settings {
    *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
    *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
+  /** How far one plain wheel click zooms, as a multiplier on the canvas zoom step (0.2–2,
+   *  default 1 = historical feel). Applies only to the `wheelZoom` path — Cmd/Ctrl+wheel and
+   *  pinch keep the fixed step, so tuning a chunky mouse down never slows the trackpad.
+   *  Validated at point of use (canvas/wheel-zoom.ts `clampWheelZoomSpeed`). */
+  wheelZoomSpeed: number
   /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
    *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
-   *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
+   *  decides. On the desktop the device is identified from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), so mouse zoom and trackpad pan coexist; the off-switch is the
+   *  remaining recourse for the Server Edition's browser tab, where detection is heuristic and a
+   *  precise-pixel MOUSE still reads as a trackpad. */
   trackpadPan: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map
@@ -1494,9 +1523,11 @@ export const DEFAULT_SETTINGS: Settings = {
   worktreePathTemplate: DEFAULT_WORKTREE_PATH_TEMPLATE,
   panHoverDelay: 600,
   doubleClickFocus: true,
-  openMarkdownPreview: false,
+  openMarkdownPreview: true,
+  openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
+  wheelZoomSpeed: 1,
   trackpadPan: true,
   canvasDragMode: 'select',
   browserMemorySaver: true,
@@ -2917,6 +2948,13 @@ export interface NodeTerminalApi {
    *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
    *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
   onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Fires when a macOS trackpad gesture (two-finger scroll or pinch) opens or closes on the
+   *  main window — edge transitions from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), a handful per physical gesture. The canvas wheel router uses
+   *  this as ground-truth device identity so a precise-pixel mouse (MX Master) can zoom while the
+   *  trackpad pans. Returns unsubscribe. Server Edition: never fires — a browser tab has no raw
+   *  input stream, and the router keeps its delta-shape heuristics there. */
+  onCanvasTrackpadGesture(listener: (active: boolean) => void): () => void
   /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
    *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
    *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
@@ -2942,6 +2980,20 @@ export interface NodeTerminalApi {
   onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
+  /** Report a node's Eco hibernation flag to the core (the renderer owns the flag; the core only
+   *  mirrors it into the agent-status file so the phone can render SLEEPING). Fire-and-forget;
+   *  called on every `setHibernated` change and replayed for the persisted set at boot. */
+  reportHibernated(nodeId: string, on: boolean): void
+  /** Fires when the core asks this renderer to WAKE a hibernated node NOW (a phone viewer just
+   *  attached to its session over the relay). A nudge with `wakeHibernatedNode`'s exact contract:
+   *  re-read the flag, no-op when not hibernated or not mounted. Returns unsubscribe.
+   *  Desktop-only signal (the relay host lives in the desktop main process); the ws-bridge
+   *  subscribes to nothing and returns a no-op unsubscribe. */
+  onAgentWake(listener: (nodeId: string) => void): () => void
+  /** Fires with the CURRENT set of node ids that have a live relay (phone) viewer attached — the
+   *  full set each change, never a delta. Feeds `isNodeWatched` so Eco cannot hibernate a session
+   *  someone is watching from a phone. Desktop-only signal, like `onAgentWake`. */
+  onRemoteViewers(listener: (nodeIds: string[]) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

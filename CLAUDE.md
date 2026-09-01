@@ -53,16 +53,33 @@ npm run rebuild    # re-run electron-rebuild for node-pty if you hit ABI/native 
 ```
 
 **`rebuild` and `postinstall` both run `scripts/patch-node-pty.mjs` first, and that is not
-optional.** node-pty 1.1.0's darwin `pty_posix_spawn` leaks a ptmx device on every SUCCESSFUL spawn
-(an off-by-one in the low-fd cleanup) and master+slave on every FAILED one; on this app's spawn
-churn that exhausts `kern.tty.ptmx_max` within hours, and terminals then simply stop opening. The
-script rewrites `node_modules/node-pty/src/unix/pty.cc` before electron-rebuild compiles it.
+optional.** It carries TWO version-pinned native patches for node-pty 1.1.0, one per platform leg:
+- **darwin** — `pty_posix_spawn` leaks a ptmx device on every SUCCESSFUL spawn (an off-by-one in
+  the low-fd cleanup) and master+slave on every FAILED one; on this app's spawn churn that
+  exhausts `kern.tty.ptmx_max` within hours, and terminals then simply stop opening
+  (microsoft/node-pty#950). Rewrites `node_modules/node-pty/src/unix/pty.cc`.
+- **Windows** — the native exit thread deletes its `pty_baton` without closing the HPCON the baton
+  owns, so the session host's taskkill-first kill path (src/session-host/host.ts) leaves a
+  host-parented conhost alive for the life of the long-lived session-host process, one per killed
+  session, and `conpty.kill(id)` reports nothing. The patch serializes baton access, closes the
+  exact HPCON before every baton deletion, and makes `kill(id)` return `true` only as positive
+  proof — the contract `src/session-host/windows-conpty.ts` was ALREADY written against (it
+  shipped with #305 expecting a patched node-pty that did not exist until this patch; do not
+  wire `closeExactWindowsConpty` into the ordinary kill path — after taskkill the exit thread
+  usually wins the race, has already closed the HPCON itself under the patch, and the primitive
+  would then report `false`; it exists for a pre-first-output teardown that bypasses the exit
+  thread). Rewrites `node_modules/node-pty/src/win/conpty.cc` on every host — the file only
+  compiles for the win32 native target, so patching on mac/Linux is harmless and keeps packaged
+  rebuilds honest.
 
-`src/main/node-pty-patch.test.ts` asserts the marker is present in those sources, so a node-pty
-upgrade that silently drops the patch fails loudly. **If that test is red, your `node_modules` is
-unpatched, not your code** — run `npm run rebuild`. It deliberately does not measure descriptors
-(that is environment-dependent); it checks the source the native module is built from. Upstream:
-microsoft/node-pty#950 — if the fix lands there, delete the script, its wiring and that test.
+Both patches run before electron-rebuild compiles the module.
+
+`src/main/node-pty-patch.test.ts` asserts both markers are present in those sources, so a node-pty
+upgrade that silently drops either patch fails loudly. **If that test is red, your `node_modules`
+is unpatched, not your code** — run `npm run rebuild`. It deliberately does not measure descriptors
+or handles (that is environment-dependent); it checks the source the native module is built from.
+Upstream: the darwin leg tracks microsoft/node-pty#950; the Windows leg has no upstream issue yet.
+When a leg's fix lands upstream, delete that leg (and the whole script + test once both are gone).
 ```
 ```
 
@@ -136,8 +153,23 @@ factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agent
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
-subagent | loop | dino` — `subagent` and `loop` are render-only (ephemeral hook-driven viz) and
-never persisted. A node's `data`
+subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
+viz) and never persisted. `trigger` (issue #493, landing in phases — schema + the core
+scheduler + DELIVERY so far; the renderer/arming UI is the remaining phase, so nothing can arm a
+trigger yet and nothing fires in production) is a first-class PERSISTED kind. The whole host-side
+machine is composed ONCE in `core/trigger-service.ts` (`startTriggerService`) and booted
+identically by BOTH shells: `core/trigger-scheduler.ts` (sweep-service shape, no catch-up for
+missed slots, cron via the dependency-free `@shared/cron` with the vixie dom/dow OR rule) decides
+WHEN, and `core/trigger-delivery.ts` decides WHETHER — the `sendText` paste path, an agent target
+only on a mirror-verified idle `done` (busy/blocked/unknown → the messaging `DeliveryQueue`, own
+instance, flushed by the mirror's `done` edge via `onNodeStateChange`, with FULL flush-time
+re-validation: a trigger disarmed or spec-edited while queued is dropped), a plain-terminal target
+only into a SHELL pane and never queued, a dead target an honest `missed` and never a cold start.
+Fire-time `TriggerArmStore.isArmed` re-ask everywhere; every rule test-pinned. The kind's spec: its spec (`CanvasNodeState.trigger`,
+@shared/trigger) is git-shared CONTENT sanitized as hostile input on every load path
+(`sanitizeNodeTriggers`), and the definition alone never fires — execution consent is the
+machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
+reads as disarmed until armed on this machine). A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
 initialCommand, filePath, diffStaged`, `agentId` (which agent CLI a terminal node runs —
 persisted), and `accountId` (which managed Claude account a terminal node runs under — immutable,
@@ -1883,8 +1915,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
     shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
     keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
-    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
-    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
+    change. Falling through main is not enough: xterm's custom key handler runs before the Canvas
+    dispatcher, whose main-intercepted command cases deliberately have no renderer handlers.
+    `terminalChordBubbles` must therefore refuse every `MAIN_INTERCEPTED_COMMAND_IDS` command; if
+    it returned true for `node.close`, xterm would withhold `^W` while the unclaimed event bubbled
+    to Canvas. One predicate, two main-process consumers are pinned in `keydown-intercept.test.ts`
+    (including a source-level wiring pin, since the menu leg lives against a real Menu in index.ts),
+    and `keybindingOverrides.test.ts` pins the renderer-to-xterm hand-off through
+    `terminalKeyAction`.
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -2120,7 +2158,23 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   issues (`GitHubIssueCardView` via `state/githubIssues.ts`, opened through
   `GitHubIssueSummaryModal`, a column move that closes/reopens the issue confirms first). A
   **source filter** (`KanbanSourceFilter`: All / GitHub / Sessions) and a transient per-board
-  **label filter** narrow what shows. **Labels** are a per-project palette (`ProjectKanban` labels,
+  **label filter** narrow what shows.
+  **Where a card comes from is a registry, not a branch per call site** (`renderer/lib/kanbanSources.ts`,
+  2026-08-30 — the same membership-plus-one-leaf discipline `AGENT_CONFIG` uses): each entry declares
+  its filter `label`, its `placement` (`assignment` = the board's own persisted assignments,
+  reorderable within a column; `provider` = the provider reports the column, the board persists
+  nothing and a move is the provider's write), its in-column `lane` order and whether it is
+  `configured` for a given board. Two orders live there deliberately: **declaration order is the
+  source filter's button order** (All · GitHub · Sessions), **`lane` is the in-column stacking order**
+  (sessions above issues) — they genuinely differ, and pinning both is what stops either being
+  re-spelled elsewhere. `KanbanColumn` therefore takes ONE `lanes` prop (`{sourceId, cards, footer?,
+  count}`) instead of a `cards` + eight `github*` props, places them via `byLane` and names no source;
+  the board builds each source's leaf, and the drag union branches on `placement` (`isProviderDrag`)
+  rather than on the string `'github'`. A lane's `count` is passed rather than derived from
+  `cards.length` because a provider reports a server-side total larger than the page fetched so far.
+  What deliberately did NOT move into the registry: the virtual **Ungrouped** column (board
+  semantics, not a source's concern) and `validKanban`, which stays the single shape gate on every
+  load path — a registry entry must never grow its own parallel validation. **Labels** are a per-project palette (`ProjectKanban` labels,
   edited inline via the Notion-style `LabelPicker`: create/assign/rename/recolor/delete through the
   pure `lib/kanban.ts` transforms) plus each GitHub issue's own labels, both filterable. The canvas stays MOUNTED under the opaque overlay (agent-status
   listeners live in Canvas.tsx; `display:none` would 0×0-resize every terminal into a tmux
