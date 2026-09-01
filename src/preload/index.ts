@@ -751,6 +751,17 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.agentStatus, handler)
     return () => ipcRenderer.removeListener(IPC.agentStatus, handler)
   },
+  reportHibernated: (nodeId, on) => ipcRenderer.send(IPC.agentHibernated, { nodeId, on }),
+  onAgentWake: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentWake, handler)
+    return () => ipcRenderer.removeListener(IPC.agentWake, handler)
+  },
+  onRemoteViewers: (listener) => {
+    const handler = (_e: unknown, nodeIds: string[]) => listener(nodeIds)
+    ipcRenderer.on(IPC.agentRemoteViewers, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRemoteViewers, handler)
+  },
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentSubagentActivity, handler)
