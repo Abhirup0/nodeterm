@@ -731,6 +731,11 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.ptyPressure, handler)
     return () => ipcRenderer.removeListener(IPC.ptyPressure, handler)
   },
+  onCanvasTrackpadGesture: (listener) => {
+    const handler = (_e: unknown, active: boolean) => listener(active)
+    ipcRenderer.on(IPC.canvasTrackpadGesture, handler)
+    return () => ipcRenderer.removeListener(IPC.canvasTrackpadGesture, handler)
+  },
   raisePtyDeviceLimit: () => ipcRenderer.invoke(IPC.ptyRaiseDeviceLimit),
   answerPermission: (payload) => ipcRenderer.invoke(IPC.agentAnswerPermission, payload),
   ackDone: (nodeId) => {
@@ -745,6 +750,17 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentStatus, handler)
     return () => ipcRenderer.removeListener(IPC.agentStatus, handler)
+  },
+  reportHibernated: (nodeId, on) => ipcRenderer.send(IPC.agentHibernated, { nodeId, on }),
+  onAgentWake: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentWake, handler)
+    return () => ipcRenderer.removeListener(IPC.agentWake, handler)
+  },
+  onRemoteViewers: (listener) => {
+    const handler = (_e: unknown, nodeIds: string[]) => listener(nodeIds)
+    ipcRenderer.on(IPC.agentRemoteViewers, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRemoteViewers, handler)
   },
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
