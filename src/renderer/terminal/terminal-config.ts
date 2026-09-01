@@ -779,12 +779,15 @@ export type TerminalKeyAction = CopyKeyAction | 'shift-enter' | 'bubble'
  * `ownsProjectJump` is the Cmd/Ctrl+1-9 "jump to the Nth project" decision, made by the caller
  * (`liveProjectJumpTarget` in `lib/projectJump.ts`) and passed in — this module deliberately does
  * NOT re-derive it. There is exactly one matcher for that chord, because it has to agree with the
- * Canvas handler that performs the switch. When it is true the key must be swallowed HERE: xterm's
- * own handler runs first (via `attachCustomKeyEventHandler`), and by the time Canvas's bubble-phase
- * listener calls `preventDefault()` the control byte has already gone to the pty (on Linux/Windows
- * Ctrl+2..Ctrl+8 are `^@ ^[ ^\ ^] ^^ ^_`).
+ * Canvas handler that performs the switch. When it is true we return `'bubble'`: xterm's own
+ * handler runs first (via `attachCustomKeyEventHandler`), so we must suppress xterm's control-byte
+ * write (on Linux/Windows Ctrl+2..Ctrl+8 are `^@ ^[ ^\ ^] ^^ ^_`) without calling
+ * `preventDefault()` — a swallowed event is marked `defaultPrevented` and the window's bubble-phase
+ * dispatcher bails, which is why the jump stopped working from a focused terminal. `'bubble'`
+ * returns `false` from the xterm handler (skips the keymap) while the untouched event still bubbles
+ * to `Canvas.projectJumpGesture` which performs the actual switch.
  *
- * It defaults to `false` = never swallow = the byte-identical pre-feature behavior, which is also
+ * It defaults to `false` = never intercept = the byte-identical pre-feature behavior, which is also
  * what the Server Edition wants: browsers reserve the chord, so nothing there can act on it.
  */
 export function terminalKeyAction(
@@ -802,7 +805,13 @@ export function terminalKeyAction(
     !e.altKey
   )
     return 'shift-enter'
-  if (ownsProjectJump) return 'swallow'
+  // `ownsProjectJump` is a bubble, not a swallow: it must reach the window dispatcher
+  // that performs the actual project switch (see `lib/projectJump.ts` + Canvas
+  // `projectJumpGesture`), while still preventing xterm's control-byte write (Ctrl+2..8 are
+  // ^@ ^[ etc.). Swallowing with preventDefault would mark the event handled and the
+  // dispatcher bails on defaultPrevented — which is why Cmd+1 from a focused terminal
+  // (canvas or kanban modal) stopped switching.
+  if (ownsProjectJump) return 'bubble'
   const base = copyKeyAction(e, hasSelection)
   if (base !== 'pass') return base
   // `registryOwns` — decided by the caller via `terminalChordBubbles`, the same live-registry
