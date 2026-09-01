@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { DEFAULT_SETTINGS } from '@shared/types'
 import { matchesShortcut, type ShortcutKeyEvent } from '@shared/shortcut'
+import { terminalKeyAction } from '../terminal/terminal-config'
 import { useSettings } from '../state/settings'
 import {
   activeKeybindingOverrides, effectiveBindings, commandKeys, commandTooltip, chipFor,
@@ -245,6 +246,19 @@ describe('terminalChordBubbles', () => {
     expect(
       terminalChordBubbles(bubbleEv({ ctrlKey: true, shiftKey: true, key: 'F1' }), false)
     ).toBe(false)
+  })
+
+  it('keeps Ctrl+W in xterm when main stands down for a focused terminal', () => {
+    setKb({ 'node.close': ['Ctrl+W'] })
+    const event = {
+      ...bubbleEv({ ctrlKey: true, key: 'w' }),
+      type: 'keydown',
+      code: 'KeyW'
+    }
+    const bubbles = terminalChordBubbles(event, false)
+
+    expect(bubbles).toBe(false)
+    expect(terminalKeyAction(event, false, false, bubbles)).toBe('pass')
   })
 
   it('false for a chord nothing resolves', () => {

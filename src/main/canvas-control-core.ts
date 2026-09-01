@@ -322,14 +322,16 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  included); or an id `open-project` returned to YOU in this session, which never switches the',
     '  user\'s view. A session opened into a non-active project starts when the user next views that',
     '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
-    '  `--prompt` arrives on ONE LINE: every whitespace run in it, newlines included, is collapsed',
-    '  to a single space (the prompt rides the launch command line typed into the pane). For a',
-    '  structured or multi-line brief use `--prompt-file <abs path>` instead: write the brief to a',
-    '  file, pass the absolute path, and the session starts with the file\'s exact contents —',
-    '  newlines, numbered lists and headings preserved. The file is read when the session LAUNCHES',
-    '  (later than the call for an `--after`-armed node), so leave it in place until the station has',
-    '  started. Never begin a prompt with `/`: the agent reads the whole text as that slash',
-    '  command\'s arguments and your task is never seen — use `--model` to pick a model.',
+    '  `--prompt` arrives on ONE LINE: every run of whitespace in it, newlines included, is',
+    '  collapsed to a single space before the session starts (the prompt rides the launch command',
+    '  line typed into the pane). For a structured or multi-line brief use `--prompt-file <abs',
+    '  path>` instead: write the brief to a file, pass the absolute path, and the session starts',
+    '  with the file\'s exact contents — newlines, numbered lists and headings preserved. The file',
+    '  is read when the session LAUNCHES (later than the call for an `--after`-armed node), so',
+    '  leave it in place until the station has started. Never begin a prompt with `/`: once',
+    '  flattened, the agent reads the whole prompt as arguments to that slash command, your task',
+    '  is never seen, and the node then sits idle looking healthy. To pick a model use `--model`,',
+    '  not a leading `/model`.',
     '  `--model <id>` picks the model the session launches with, instead of inheriting the',
     '  default. Use it to keep a cheap station cheap: a node whose whole job is editing a README',
     '  does not need the model you give the node rewriting a test suite. Honoured by claude, codex',
@@ -708,8 +710,9 @@ Verbs:
   non-active project starts when the user next views that project — do not poll for it; the reply
   says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
   \`--prompt\` arrives on ONE LINE. Every run of whitespace in it — newlines included — is
-  collapsed to a single space, because the prompt is passed as an argument on the agent CLI's
-  launch command line and that line is typed into the pane. Two consequences:
+  collapsed to a single space before the session starts, because the prompt is passed as an
+  argument on the agent CLI's launch command line and that line is typed into the pane. Two
+  consequences worth planning around:
   - **A structured brief goes through \`--prompt-file <abs path>\`.** Write the brief (numbered
     acceptance criteria, file lists, guard clauses — anything multi-line) to a file, pass the
     absolute path, and the session starts with the file's exact contents: the launch line stays
@@ -717,10 +720,12 @@ Verbs:
     LAUNCHES — for an \`--after\`-armed node that is later than your call — so leave it in place
     until the station has started. On an SSH project the path is on the host (where you run).
     Pass either \`--prompt\` or \`--prompt-file\`, not both.
-  - **Never start a prompt with \`/\`.** The agent reads the whole prompt as arguments to that
-    slash command, your task is never seen, and the node then sits at an idle prompt looking
-    healthy — including to \`--after\`, which will arm everything behind it. Use \`--model\` for
-    the model; there is no supported way to run a slash command at launch.
+  - **Never start a prompt with \`/\`.** Flattened, \`/model sonnet\` followed by your task reads
+    to the agent as one slash command whose argument is the entire rest of the prompt. The
+    command fails, your task is never seen, and the node then sits at an idle prompt looking
+    perfectly healthy — including to \`--after\`, which will arm everything behind it. Use
+    \`--model\` for the model; there is no supported way to run a slash command at launch.
+
   \`--model <id>\` decides which model the session LAUNCHES with, instead of inheriting the
   project default. This is the lever for cost: a station whose job is editing a README does not
   need the model you give the station rewriting a 1000-line test suite, and without this flag

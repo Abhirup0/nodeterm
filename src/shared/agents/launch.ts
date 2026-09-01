@@ -187,13 +187,15 @@ export function assembleLaunchCommand(
   // (`writeWhenShellReady` → `deliverCommand`, which echo-verifies the line before submitting).
   // A raw newline inside it would submit the half-typed line and fail that verification, so:
   // - `initialPrompt` (a literal) has every whitespace run collapsed to a single space —
-  //   load-bearing for the delivery path, not tidying (issue #520 / PR #516's finding).
-  // - `promptFile` keeps structure WITHOUT putting it on the typed line: the argument is a
-  //   `"$(cat '<path>')"` command substitution, so the pane's shell reads the file at execution
-  //   and hands the CLI its exact contents as ONE argv element. The double quotes make the
-  //   substitution a single word and keep its RESULT data — file content is never re-parsed as
-  //   shell syntax. On an SSH project the path (and the `cat`) are on the host, which is exactly
-  //   where the node runs. Only the PATH is interpolated, and it is single-quoted.
+  //   load-bearing for the delivery path, not tidying (PR #516's finding). Callers that let a
+  //   user or an agent supply the prompt must say the text arrives on one line — see
+  //   `buildCanvasSkillBody` / `buildCanvasControlInstructions`.
+  // - `promptFile` (issue #520) keeps structure WITHOUT putting it on the typed line: the
+  //   argument is a `"$(cat '<path>')"` command substitution, so the pane's shell reads the file
+  //   at execution and hands the CLI its exact contents as ONE argv element. The double quotes
+  //   make the substitution a single word and keep its RESULT data — file content is never
+  //   re-parsed as shell syntax. On an SSH project the path (and the `cat`) are on the host,
+  //   which is exactly where the node runs. Only the PATH is interpolated, single-quoted.
   const promptArg = inputs.promptFile
     ? `"$(cat ${shellSingleQuote(inputs.promptFile.trim())})"`
     : inputs.initialPrompt
