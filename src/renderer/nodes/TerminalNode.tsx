@@ -889,19 +889,37 @@ function setNodeOffscreen(nodeId: string, offscreen: boolean): void {
 }
 
 /**
+ * Node ids with a live relay (phone) viewer attached — fed by Canvas from `agent:remote-viewers`
+ * (main sends the full set each change, never a delta, so a dropped event cannot strand a stale
+ * entry). A phone viewer is a THIRD way to be watched, invisible to both of `isNodeWatched`'s
+ * older eyes (the canvas observer and the kanban modal) — before this, Eco could `/exit` a CLI
+ * someone was actively reading on their phone.
+ */
+const remotelyViewedNodes = new Set<string>()
+
+/** Replace the remotely-viewed set (Canvas's `agent:remote-viewers` listener is the one caller). */
+export function setRemotelyViewedNodes(nodeIds: readonly string[]): void {
+  remotelyViewedNodes.clear()
+  for (const id of nodeIds) remotelyViewedNodes.add(id)
+}
+
+/**
  * "Is the user looking at this session RIGHT NOW?" — the one predicate behind every hibernation
  * decision that turns on attention: the sweep's plan, the exit closure's fire-time re-ask, and the
  * post-mark nudge. It has to be ONE function: the first version of this feature asked the question
  * three times, and the fire-time copy was missing the modal clause — so a card modal opened
  * mid-batch could still have `/exit` typed into it.
  *
- * Two ways to be watched, and the second is not visible to any observer: the node is on screen, or
- * its kanban card modal is open (see `watchedNodeId`). Unknown answers WATCHED — a node whose
- * observer has not delivered yet must never be read as "nobody is looking", which is the direction
- * that quits a session out from under someone.
+ * Three ways to be watched, and only the first is visible to any observer: the node is on screen,
+ * its kanban card modal is open (see `watchedNodeId`), or a phone viewer is attached to its
+ * session over the relay (`remotelyViewedNodes`). Unknown answers WATCHED — a node whose observer
+ * has not delivered yet must never be read as "nobody is looking", which is the direction that
+ * quits a session out from under someone.
  */
 export function isNodeWatched(nodeId: string): boolean {
-  return !offscreenNodes.has(nodeId) || watchedNodeId === nodeId
+  return (
+    !offscreenNodes.has(nodeId) || watchedNodeId === nodeId || remotelyViewedNodes.has(nodeId)
+  )
 }
 
 /**

@@ -454,6 +454,14 @@ export function createAgentStatusSession(
       set((s) => {
         const prev = s.byId[id] ?? EMPTY
         if (!!prev.hibernated === on) return s
+        // The renderer owns this flag; the core only mirrors it (agent-status mirror → SLEEPING on
+        // the phone). Reported on the same edge the store changes, guarded because tests (and any
+        // non-preload context) run this store without a bridge.
+        try {
+          window.nodeTerminal?.reportHibernated?.(id, on)
+        } catch {
+          /* the mirror is a side-channel; a failed report must never break the store */
+        }
         // Cleared by dropping the key, not by storing `false`: `save` skips entries that carry
         // nothing durable, so a woken node leaves no residue behind in localStorage.
         // The recorded pane belongs to THIS hibernation: it goes with the flag, in both
