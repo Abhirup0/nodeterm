@@ -278,7 +278,7 @@ import {
   allowMediaPath,
   writeAgentHtml
 } from './media-protocol'
-import { initPlatform } from '../core/platform'
+import { initPlatform, platform } from '../core/platform'
 import { electronPlatform } from './platform-electron'
 import { wirePeerRegistry } from './peer-registry'
 import { WEBGL_CONTEXT_CAP_DESKTOP } from '../shared/webgl'
@@ -1829,7 +1829,8 @@ app.whenReady().then(async () => {
     listCanvases: () => workspaceStore.persistedCanvases(),
     getNode: (nodeId) => workspaceStore.getNode(nodeId),
     sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
-    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId)
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+    handle: (channel, handler) => platform().handle(channel, handler)
   })
   // macOS Notch HUD (docs/notch-hud.md): walking agent mascots by the notch. darwin + setting only;
   // reads the same agent-status seams the mirror does. Live-toggled via settings below.
