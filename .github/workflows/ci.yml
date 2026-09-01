@@ -2,6 +2,9 @@ name: CI
 
 # Verify typecheck, tests, and the production build on every PR and push to main.
 on:
+  # Merge-queue runs: required checks must also report on the queue's synthetic
+  # merge commits, or every queued PR times out waiting for them.
+  merge_group:
   pull_request:
     branches: [main]
   push:
