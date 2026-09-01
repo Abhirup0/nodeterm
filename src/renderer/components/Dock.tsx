@@ -25,6 +25,7 @@ interface DockProps {
   /** Opens the Spawn-a-team dialog (issue #78) — the conductor lands at the Dock's default spot. */
   onSpawnTeam: () => void
   onAddDino: () => void
+  onAddTrigger: () => void
   onAddAgent: (agentId: AgentId, accountId?: string) => void
   onOpenFile: () => void
   onAddRemote: () => void
@@ -64,6 +65,7 @@ export function Dock({
   onAddSticky,
   onSpawnTeam,
   onAddDino,
+  onAddTrigger,
   onAddAgent,
   onOpenFile,
   onAddRemote,
@@ -155,6 +157,7 @@ export function Dock({
     sticky: onAddSticky,
     spawnTeam: onSpawnTeam,
     dino: onAddDino,
+    trigger: onAddTrigger,
     openFile: onOpenFile,
     newFile: onNewFile,
     worktree: onAddWorktree
