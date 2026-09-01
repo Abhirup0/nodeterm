@@ -39,7 +39,8 @@ const EXIT_SEQUENCES: Record<string, string> = {
   codex: '/quit',
   grok: '/quit',
   gemini: '/quit',
-  copilot: '/exit'
+  copilot: '/exit',
+  opencode: '/exit'
 }
 
 export function exitSequence(agentId: string): string | null {
@@ -206,7 +207,20 @@ export async function performExitPhase(d: {
   // something else this becomes one stray keystroke before the exit command — no worse than
   // today's blind write. Belongs in the manual test matrix.
   d.io.write(KILL_LINE)
-  d.io.write(exit + '\r')
+  // opencode's TUI does not submit when text and CR arrive in the same input burst
+  // (batched-input handling). Measured on 1.18.18-1.18.25, Linux, tmux, isolated socket:
+  // one-burst `/exit\r` leaves `/exit` in the composer with popup armed and times out
+  // at 6s; splitting CR by 100ms exits in ~500ms. The resume half already uses
+  // echo-verified delivery (command-delivery.ts) for this shape; for exit we keep
+  // the minimal split so the other agents' blind-write contract stays unchanged.
+  if (d.agentId === 'opencode') {
+    d.io.write(exit)
+    await new Promise((r) => setTimeout(r, 150))
+    if (gone()) return 'not-eligible'
+    d.io.write('\r')
+  } else {
+    d.io.write(exit + '\r')
+  }
   const deadline = Date.now() + timeoutMs
   let last: string | null = null
   for (;;) {
