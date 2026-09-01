@@ -36,7 +36,7 @@ function harness(fireImpl?: (row: TriggerRow) => Promise<TriggerFireResult>): Ha
     fireImpl ??
       (async (row: TriggerRow) => {
         fires.push(row)
-        return { ok: true }
+        return { outcome: 'fired' as const }
       })
   )
   const scheduler = createTriggerScheduler({
@@ -178,7 +178,7 @@ describe('createTriggerScheduler', () => {
     let call = 0
     const h = harness(async () => {
       call++
-      if (call === 1) return { ok: false, detail: 'target not running' }
+      if (call === 1) return { outcome: 'missed' as const, detail: 'target not running' }
       throw new Error('boom')
     })
     h.armed.add('project-1/trigger-a-1')
@@ -189,7 +189,7 @@ describe('createTriggerScheduler', () => {
     h.clock.t = T0 + 10 * MIN
     await h.scheduler.sweepOnce()
     const runs = h.scheduler.runsFor('project-1', 'trigger-a-1')
-    expect(runs.map((r) => r.outcome)).toEqual(['failed', 'failed'])
+    expect(runs.map((r) => r.outcome)).toEqual(['missed', 'failed'])
     expect(runs[0].detail).toBe('target not running')
     expect(runs[1].detail).toBe('boom')
     expect(h.scheduler.nextFireAt('project-1', 'trigger-a-1')).toBe(T0 + 15 * MIN)
@@ -200,7 +200,7 @@ describe('createTriggerScheduler', () => {
     const h = harness(
       () =>
         new Promise<TriggerFireResult>((resolve) => {
-          release = () => resolve({ ok: true })
+          release = () => resolve({ outcome: 'fired' })
         })
     )
     h.armed.add('project-1/trigger-a-1')
@@ -245,7 +245,7 @@ describe('createTriggerScheduler', () => {
         return rows
       },
       isArmed: () => true,
-      fire: async () => ({ ok: true }),
+      fire: async () => ({ outcome: 'fired' as const }),
       now: () => clock.t
     })
     await scheduler.sweepOnce()
