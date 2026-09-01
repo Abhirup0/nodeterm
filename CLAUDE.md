@@ -212,6 +212,16 @@ Persistence has two layers:
   (`markUnmirrored`); pending mirrors are flushed before the ControlMasters die at quit; and the
   SSH dialog **dedupes by endpoint+remoteCwd** (`openSshProject`, same contract as
   `openFolderProject`) instead of minting a fresh empty project for a folder that already has one.
+  **The reconciler also recognizes its own writes** (the SSH twin of the watcher's `isSelfWrite`):
+  the 15 s poll and the connect-time refresh read the very file the mirror writes, so
+  `recentMirrorHashes` remembers the last few payloads handed to `remoteIO.write` and a read that
+  returns those exact bytes decides "nothing new" — never an adopt/broadcast (which raised the
+  Reload/Keep-mine conflict bar over the store's own autosave), and never a rescue of an OLDER own
+  write still sitting under the 5 s throttle (which resurrected just-deleted nodes). Exact bytes
+  only, so a phone append or another machine's save still reads as external. And
+  `refreshSshProject` runs ON `saveChain`: off the chain a poll snapshotting the pre-save entry
+  could complete its slow ssh read after the save's mirror landed and "adopt" the store's own
+  write on rev alone.
 - **Live terminal sessions** (tmux): terminals continue where they left off across node
   remounts *and* full app restarts, including running processes. See below.
 
