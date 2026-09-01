@@ -69,10 +69,18 @@ need it too, and wire it in the same change.
 A board card's **source** is a registry entry, not a branch you add at a call site
 (`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
 (`assignment` = the board's own persisted assignments, `provider` = the provider owns the column),
-in-column `lane` order, whether it is `configured` for a board — and give it its one leaf (a card
-component and the list path feeding it). Columns take lanes and name no source; the drag path
-branches on `placement`. If you find yourself writing `=== 'github'` outside the registry, the
-registry is missing a field.
+in-column `lane` order, whether it is `configured` for a board, whether it is `readOnly` (the
+board never writes it: no drag, no move control) — and give it its one leaf (a card component and
+the list path feeding it). Columns take lanes and name no source; the drag path branches on
+`placement`. If you find yourself writing `=== 'github'` outside the registry, the registry is
+missing a field.
+
+Before adding a GitHub read, check what the existing poll already fetches. Pull request cards
+needed no new request at all: `/repos/{repo}/issues` returns pull requests, and the client used to
+discard them. `/repos/{repo}/pulls` looks like the obvious endpoint and is the expensive one — it
+**ignores `since`**, so it can reuse none of the incremental machinery, and its items are ~3.5× the
+bytes. CLAUDE.md's kanban section has the measurements and the eviction rule that keeps the issue
+lane unaffected.
 
 ## House rules
 
