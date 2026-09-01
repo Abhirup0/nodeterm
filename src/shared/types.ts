@@ -411,6 +411,32 @@ export interface CanvasNodeState {
 }
 
 /**
+ * One entry in `Project.closedSessions` — everything needed to recreate a fresh node in the same
+ * spot a deleted one used to occupy. `node` is the exact shape a live node is already persisted
+ * as (`CanvasNodeState`); `absolutePosition` is captured at delete time because `node.position`
+ * is relative-to-parent when `node.parentId` is set, and that parent group may not exist by the
+ * time this entry is reopened.
+ */
+export interface ClosedSessionEntry {
+  id: string
+  closedAt: number
+  node: CanvasNodeState
+  absolutePosition: { x: number; y: number }
+}
+
+/**
+ * How many closed-session entries one project keeps (newest-first; the rest are dropped).
+ *
+ * ONE definition, because the cap must hold at every point an entry list is produced OR admitted:
+ * the store mutator that records a delete (`recordClosedSessions`), and every load path that
+ * admits `IndexEntryV3.closedSessions` (a ref'd project's machine-local history) or an inline
+ * project's embedded one. Enforcing it only where WE append is not enforcement at all —
+ * workspace.json is hand-editable input too, so an inflated list can arrive from outside (a
+ * pre-cap build's file, a hand edit) and would render unbounded rows and be written back in full.
+ */
+export const CLOSED_SESSIONS_CAP = 20
+
+/**
  * A snapshot of one canvas's nodes in the form sent over the remote mirror wire.
  * Reuses the persisted node shape (`CanvasNodeState`) so host and client agree on layout.
  */
@@ -695,6 +721,21 @@ export interface Project {
    * list. Absent/false = an open tab. A closed project never becomes `activeProjectId`.
    */
   closed?: boolean
+  /** Set alongside `closed: true` — when this project was closed, for sorting "recently closed"
+   *  history newest-first. Machine-local (see `IndexEntryV3.closedAt`) — never written into the
+   *  shared project file, same rule as `closed` itself. Absent on a project closed before this
+   *  field existed; such entries sort last. */
+  closedAt?: number
+  /**
+   * Sessions (terminal/agent/sticky/…) deleted from this project, most-recent-first, capped at
+   * 20. MACHINE-LOCAL, same rule as `closedAt`/`breadcrumbs` — see `IndexEntryV3.closedSessions`,
+   * never written into the shared project file (a delete's full node-state blob — title, cwd,
+   * position — would otherwise churn a committed, teammate-visible document on every one). Whose
+   * trash can holds what is a per-machine fact, not shared content. A fresh id per entry;
+   * recreating a node from one always mints a new node id/session, never reuses the original
+   * (see `recreateNodeFromSnapshot`).
+   */
+  closedSessions?: ClosedSessionEntry[]
   /**
    * Set at load time when the project's .nodeterm/project.json could not be read
    * (folder missing, server unreachable, corrupt file). Runtime-only — never persisted.
