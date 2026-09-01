@@ -4053,9 +4053,19 @@ export function Canvas() {
         if (!project) return // defensive: mismatched/disconnected remote login — never spawn locally
         ssh = project.ssh
       }
+      // Start the login shell in the active project's directory rather than `$HOME` (issue #553):
+      // Claude Code's trust check is keyed on the cwd, so a home-rooted login asks the user to
+      // trust everything they own before an OAuth round trip that touches no files. Read live, at
+      // fire time, like the ssh binding above. A REMOTE login ignores this local path —
+      // `createAccountLoginNode` hands it to `createTerminalNode`, which prefers `ssh.remoteCwd`
+      // — which is correct: the session runs on the host, where a local path names nothing. An
+      // SSH project has no `cwd` of its own, so a LOCAL account added from one still starts in
+      // `$HOME`; there is no local directory that project could honestly offer.
+      const { getProject, activeProjectId: pid } = useProjects.getState()
+      const cwd = getProject(pid)?.cwd
       setNodes((ns) => [
         ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createAccountLoginNode(accountId, ns.length, viewCenter(), ssh), selected: true }
+        { ...createAccountLoginNode(accountId, ns.length, viewCenter(), ssh, cwd), selected: true }
       ])
       markDirty()
       // The event fires from the full-screen Settings overlay — close it so the user actually
@@ -4078,9 +4088,14 @@ export function Canvas() {
     const onAddCodexAccountLogin = (ev: Event): void => {
       const accountId = (ev as CustomEvent<{ accountId?: string }>).detail?.accountId
       if (!accountId) return
+      // Same cwd reasoning as the Claude branch above (issue #553). Local only, so `project.cwd`
+      // is the only field that can be read here — an SSH project's `remoteCwd` names a directory
+      // on the host and would send this local shell somewhere that does not exist.
+      const { getProject, activeProjectId: pid } = useProjects.getState()
+      const cwd = getProject(pid)?.cwd
       setNodes((ns) => [
         ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createCodexAccountLoginNode(accountId, ns.length, viewCenter()), selected: true }
+        { ...createCodexAccountLoginNode(accountId, ns.length, viewCenter(), cwd), selected: true }
       ])
       markDirty()
       // Same reason as the Claude branch: the event fires from the full-screen Settings overlay,
@@ -4100,15 +4115,19 @@ export function Canvas() {
   // the only machine whose ~/.claude the action claims to switch.
   useEffect(() => {
     const onSwitchSystemAccount = (): void => {
+      // The reported case of issue #553: this login started in `$HOME` and Claude Code asked the
+      // user to trust their whole home directory. Local by construction (see above), so the local
+      // `project.cwd` is the only cwd that applies.
+      const { getProject, activeProjectId: pid } = useProjects.getState()
+      const cwd = getProject(pid)?.cwd
       setNodes((ns) => [
         ...ns.map((n) => ({ ...n, selected: false })),
-        { ...createSystemLoginNode(ns.length, viewCenter()), selected: true }
+        { ...createSystemLoginNode(ns.length, viewCenter(), cwd), selected: true }
       ])
       markDirty()
       // The popover is reachable from over the kanban board too (`overBoard`) — leave the board
       // so the user actually sees the login node they must interact with. Same rationale as the
       // Settings-overlay close in the add-account listeners above.
-      const pid = useProjects.getState().activeProjectId
       if (pid && isKanbanOpen(pid)) useViewMode.getState().toggle(pid)
     }
     window.addEventListener('nodeterm:switch-system-account', onSwitchSystemAccount)
