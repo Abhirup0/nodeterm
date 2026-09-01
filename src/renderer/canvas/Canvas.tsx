@@ -154,7 +154,9 @@ import { transferConversationItems } from '../lib/transferItems'
 import { reopenVariants } from '../lib/reopenVariants'
 import { modelsForAgent } from '@shared/agents/model-gateway'
 import { useModelGateway } from '../state/modelGateway'
-import { viewportAtZoom1 } from '../lib/zoomReset'
+import { viewportAtZoom } from '../lib/zoomReset'
+import { zoomFromPct } from '../lib/zoomPresets'
+import { CANVAS_MAX_ZOOM, CANVAS_MIN_ZOOM } from './zoom-limits'
 import { isSpaceRelease, spacePanKeydown } from '../lib/spacePan'
 import {
   FLOW_NODE_CLASS,
@@ -1340,16 +1342,24 @@ export function Canvas() {
    * The anchor is the viewport CENTRE rather than the origin: zooming about the corner throws the
    * user's work off screen, which is what makes a reset feel like a jump rather than a correction.
    */
-  const zoomTo100 = useCallback(() => {
-    const wrap = flowWrapRef.current
-    const current = getViewport()
-    const next = viewportAtZoom1(current, {
-      x: (wrap?.clientWidth ?? 0) / 2,
-      y: (wrap?.clientHeight ?? 0) / 2
-    })
-    if (next === current) return
-    void setViewport(next, { duration: 200 })
-  }, [getViewport, setViewport])
+  const zoomToScale = useCallback(
+    (target: number) => {
+      const wrap = flowWrapRef.current
+      const current = getViewport()
+      const next = viewportAtZoom(current, {
+        x: (wrap?.clientWidth ?? 0) / 2,
+        y: (wrap?.clientHeight ?? 0) / 2
+      }, target)
+      if (next === current) return
+      void setViewport(next, { duration: 200 })
+    },
+    [getViewport, setViewport]
+  )
+
+  const zoomTo100 = useCallback(() => zoomToScale(1), [zoomToScale])
+
+  /** The dock's preset menu: an exact percentage, centre-anchored like every other zoom command. */
+  const zoomToPct = useCallback((pct: number) => zoomToScale(zoomFromPct(pct)), [zoomToScale])
 
   const activeProjectId = useProjects((s) => s.activeProjectId)
   // Project-level worktree defaults (basePath/baseRef) for the active project, read from the warmed
@@ -12146,8 +12156,8 @@ export function Canvas() {
           onNodeContextMenu={onNodeContextMenu}
           onSelectionContextMenu={onSelectionContextMenu}
           onNodeDoubleClick={onNodeDoubleClick}
-          minZoom={0.01}
-          maxZoom={2}
+          minZoom={CANVAS_MIN_ZOOM}
+          maxZoom={CANVAS_MAX_ZOOM}
           proOptions={{ hideAttribution: true }}
           deleteKeyCode={null}
           // 'pan' drag mode (Miro-style, opt-in): left-drag on empty canvas pans (React Flow
@@ -12766,6 +12776,7 @@ export function Canvas() {
         onFitView={fitAll}
         onZoomIn={() => zoomIn({ duration: 150 })}
         onZoomOut={() => zoomOut({ duration: 150 })}
+        onZoomTo={zoomToPct}
         onDictate={toggleDictation}
         dictateActive={dictationOpen}
       />

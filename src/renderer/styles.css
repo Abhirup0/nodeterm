@@ -585,12 +585,78 @@ body,
   height: 30px;
 }
 
+.dock-zoom-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
 .dock-zoom {
-  min-width: 46px;
+  min-width: 52px;
+  padding: 5px 6px;
   text-align: center;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
   color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
   user-select: none;
+  cursor: pointer;
+}
+
+.dock-zoom:hover {
+  background: var(--panel-header);
+  color: var(--text);
+}
+
+.dock-zoom.active {
+  background: var(--panel-header);
+  color: var(--text);
+}
+
+/* Zoom presets, anchored to the readout instead of the dock's left edge like the add-menu. */
+.dock-zoom-menu {
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 168px;
+}
+
+.dock-zoom-menu button {
+  gap: 8px;
+  padding: 7px 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The generic `.dock-menu svg` rule paints every menu glyph muted; the tick is a state marker,
+   not a leading icon, so it keeps the accent that says "this is where you are". */
+.dock-zoom-menu .dock-menu__check svg {
+  color: inherit;
+}
+
+.dock-zoom-menu button.is-current {
+  color: var(--accent);
+}
+
+.dock-menu__check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.dock-menu__chord {
+  margin-left: auto;
+  padding-left: 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.dock-menu__rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
 }
 
 .dock-dirty {
