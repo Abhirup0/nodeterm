@@ -157,6 +157,7 @@ import {
   isEventUnresolved,
   type MirrorSettings,
   setNodeSessionName,
+  setNodeHibernated,
   sessionNameSweepEntries,
   nodeState,
   nodeSessionName,
@@ -3363,11 +3364,48 @@ app.whenReady().then(async () => {
       }
       await workspaceStore.removeRemoteNode(nodeId).catch(() => false)
     },
+    // Relay-viewer presence (Eco × phone): a COUNT per node id, shared by the interactive host and
+    // every standing-host pool session (several phones can watch at once, and one phone switching
+    // sessions overlaps its old and new streams). Two consumers, both renderer-side:
+    //  - `agent:remote-viewers` carries the full watched SET each change, so Eco's `isNodeWatched`
+    //    stops hibernating a session someone is watching from a phone (the phone viewer used to be
+    //    invisible to every attention predicate — the kanban-modal gap, one surface further out);
+    //  - `agent:wake` fires on each attach, so a hibernated node someone just opened on their
+    //    phone resumes its CLI — the same nudge contract as `wakeHibernatedNode` (re-reads the
+    //    flag, no-ops when not hibernated or not mounted).
+    remoteViewer: (() => {
+      const counts = new Map<string, number>()
+      const toRenderer = (channel: string, payload: unknown): void => {
+        if (!win.isDestroyed()) win.webContents.send(channel, payload)
+      }
+      const broadcast = (): void => toRenderer(IPC.agentRemoteViewers, [...counts.keys()])
+      return {
+        attached(nodeId: string) {
+          counts.set(nodeId, (counts.get(nodeId) ?? 0) + 1)
+          broadcast()
+          toRenderer(IPC.agentWake, nodeId)
+        },
+        detached(nodeId: string) {
+          const n = (counts.get(nodeId) ?? 0) - 1
+          if (n <= 0) counts.delete(nodeId)
+          else counts.set(nodeId, n)
+          broadcast()
+        }
+      }
+    })(),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
     workspaceRoots: () => workspaceStore.localProjectCwds()
   }
+  // The renderer owns the Eco hibernation flag (persisted in ITS localStorage) and main only
+  // mirrors it — same direction as `terminalFocused`. Feeds the agent-status mirror so the phone
+  // renders SLEEPING (and re-fed at renderer boot from the persisted store, so a desktop restart
+  // does not blank the phone's view of a still-hibernated session).
+  ipcMain.on(IPC.agentHibernated, (_e, msg: { nodeId?: unknown; on?: unknown } = {}) => {
+    if (typeof msg?.nodeId !== 'string' || !msg.nodeId) return
+    setNodeHibernated(msg.nodeId, msg.on === true)
+  })
   initRemoteHost(win, ptyManager, listProjectsOutput, hostBridge)
   // NEW interactive relay host (Stage 4): a connecting peer desktop becomes a first-class
   // CorePlatform client of this desktop after mutual SAS approval. Runs BESIDE initRemoteHost (the

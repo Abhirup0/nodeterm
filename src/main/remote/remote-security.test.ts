@@ -522,3 +522,65 @@ describe('pty.destroy ends the session through the injected destroyNode', () => 
     expect(writeMock).not.toHaveBeenCalled()
   })
 })
+
+// --- relay-viewer presence (Eco × phone) --------------------------------------
+
+// `remoteViewer` tells the desktop who is WATCHING a session from a phone: `attached` fires at
+// stream-reserve time, and every stream drop — kill, destroy, closeAll — funnels through one
+// `detached`, so the calls stay balanced per stream. The desktop turns this into the
+// `agent:remote-viewers` set (Eco must not /exit a phone-watched session) and the attach edge
+// into an `agent:wake` nudge.
+describe('remoteViewer presence reporting', () => {
+  function viewerFakes() {
+    const events: string[] = []
+    const remoteViewer = {
+      attached: (id: string) => events.push(`+${id}`),
+      detached: (id: string) => events.push(`-${id}`)
+    }
+    return { events, remoteViewer }
+  }
+  const make = (base: ReturnType<typeof makeHostFakes>, rv: { attached(id: string): void; detached(id: string): void }) =>
+    createHostHandlers(
+      base.pty, base.socket, base.fs, () => [], async () => '', () => null,
+      undefined, undefined, undefined, rv
+    )
+
+  it('attach reports the viewer; kill reports the departure — balanced per stream', async () => {
+    const base = makeHostFakes()
+    const { events, remoteViewer } = viewerFakes()
+    const handlers = make(base, remoteViewer)
+    await attachStream(handlers, 'node-a')
+    expect(events).toEqual(['+node-a'])
+    handlers.onRpc({ id: 'k', method: 'pty.kill', params: { streamId: 1 } })
+    expect(events).toEqual(['+node-a', '-node-a'])
+  })
+
+  it('closeAll reports every departure (relay dropped mid-view)', async () => {
+    const base = makeHostFakes()
+    const { events, remoteViewer } = viewerFakes()
+    const handlers = make(base, remoteViewer)
+    await attachStream(handlers, 'node-a')
+    await attachStream(handlers, 'node-b')
+    handlers.closeAll()
+    expect(events.sort()).toEqual(['+node-a', '+node-b', '-node-a', '-node-b'])
+  })
+
+  it('a throwing callback breaks neither the attach nor the teardown', async () => {
+    const base = makeHostFakes()
+    const remoteViewer = {
+      attached: () => {
+        throw new Error('bookkeeping boom')
+      },
+      detached: () => {
+        throw new Error('bookkeeping boom')
+      }
+    }
+    const handlers = make(base, remoteViewer)
+    await attachStream(handlers, 'node-a')
+    // The stream is live despite the throwing callback: input still routes.
+    handlers.onFrame(inputFrame(1, 'echo ok\n'))
+    expect(base.pty.write).toHaveBeenCalledWith(null, 'sess', 'echo ok\n')
+    handlers.onRpc({ id: 'k', method: 'pty.kill', params: { streamId: 1 } })
+    expect(base.responses.at(-1)).toMatchObject({ id: 'k', ok: true })
+  })
+})
