@@ -6405,6 +6405,10 @@ export function Canvas() {
   // "used before its declaration".
   const switchProject = useCallback(
     (id: string) => {
+      // Navigating dismisses the start screen. Before the same-project guard on purpose: clicking
+      // the ALREADY active project in the sidebar is still "take me back to my canvas", and that
+      // path returns early without touching any state.
+      setWelcomeOpen(false)
       if (id === useProjects.getState().activeProjectId) return
       commitActiveToStore()
       useProjects.getState().setActive(id)
@@ -8019,6 +8023,13 @@ export function Canvas() {
     (nodeId: string) => {
       const node = nodesRef.current.find((n) => n.id === nodeId)
       if (node) {
+        // Same reason the board branch below exists, for the OTHER full-page overlay: the start
+        // screen ("+" over existing projects) paints over the canvas, so framing a node behind it
+        // is invisible and the click reads as dead — while the node really did take keyboard
+        // focus, which is worse than nothing. The sidebar sits above the screen (z 12 over z 5),
+        // so its clicks arrive here with the screen still up. Unconditional: a no-op when it is
+        // closed, which is every other caller.
+        setWelcomeOpen(false)
         // The board is a full-page overlay: framing the node on the canvas underneath it is
         // invisible, which is why the notch's Go (and every other "go to node" path) read as
         // broken there. On the board, "go to" means OPEN THE CARD.
