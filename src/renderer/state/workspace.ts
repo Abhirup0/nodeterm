@@ -1388,6 +1388,45 @@ function withNodeRect(
   return fitAncestorChain(next, node.parentId)
 }
 
+/** Sub-pixel tolerance for "the node is already there". Exact equality is not available: a grouped
+ *  node's rect round-trips through `rootPosition` in floats, and `nodeW` prefers React Flow's
+ *  `measured` width, which it repopulates from the DOM device-pixel-snapped — at fractional zoom
+ *  that never equals `innerW / zoom` exactly. Without the tolerance every re-measure would rewrite
+ *  the node and bump the workspace rev, which on a shared SSH/git project is a commit per toggle. */
+const SAME_PX = 0.5
+const samePx = (a: number, b: number): boolean => Math.abs(a - b) <= SAME_PX
+
+/**
+ * Re-fit an ALREADY maximized node to a new frame, keeping its restore rect.
+ *
+ * Maximize is a MODE, not a one-shot placement: while it is on, the node claims the whole usable
+ * canvas. Pinning or unpinning a side panel changes what "whole" means, so the node follows.
+ * A node that is not maximized is left alone — that one was put where it is by hand or by a zone
+ * verb, and those are placements the user owns.
+ */
+export function refitMaximizedNode(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  const premaxRect = node?.data.premaxRect
+  if (!node || !premaxRect) return nodes
+  // Idempotent: the caller re-measures on every panel change, and most of those land on the rect
+  // the node already has. Returning the same array keeps the workspace out of the dirty/save path
+  // and lets the caller decide by identity whether anything actually moved.
+  const root = rootPosition(node, nodes)
+  if (
+    samePx(root.x, rect.x) &&
+    samePx(root.y, rect.y) &&
+    samePx(nodeW(node) || (node.style?.width as number) || 0, rect.width) &&
+    samePx(nodeH(node) || (node.style?.height as number) || 0, rect.height)
+  ) {
+    return nodes
+  }
+  return withNodeRect(nodes, node, rect, { premaxRect })
+}
+
 /**
  * The toggle's second click: give the node back the rect `maximizeNodeToRect` remembered — the
  * exact canvas spot it occupied, converted from root-space into wherever its parent chain sits
