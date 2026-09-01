@@ -2440,6 +2440,20 @@ on signing: an unsigned auto-update is a downgrade in trust), and the
 fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 
+**macOS permission prompts are declared in `build.mac.extendInfo`, and a missing one denies
+SILENTLY.** On macOS 15+ a connection to the user's own subnet is gated by Local Network privacy,
+and it is attributed to the **responsible process** — for everything nodeterm spawns (the tmux
+server, the shell, an agent CLI, the `node` it runs) that is nodeterm.app, not the child. With no
+`NSLocalNetworkUsageDescription` there is no string to prompt with, so the system never asks and
+**no row appears** under System Settings → Privacy & Security → Local Network for the user to
+grant: an agent gets `EHOSTUNREACH` on a LAN address while `/usr/bin/curl` (Apple-signed, exempt)
+reaches the same host in the same second — a permission failure wearing a network outage's error
+(issue #589). `NSBonjourServices` is the trap that travels with it: it is required only to *browse*
+mDNS services, which this app does not do, and declaring service types we never browse is a false
+claim to the user and to review — unicast LAN access needs the usage description alone. The key is
+what makes the denial grantable; it is not itself proof anyone's access came back. Guarded as an
+allowlist-with-reasons by `src/main/info-plist.test.ts`, the sibling of the entitlements guard.
+
 Auto-update uses **electron-updater** (`src/main/updater.ts`, `initUpdater(onBeforeRestart?)` from `index.ts`):
 runs **only when `app.isPackaged`** (dev = no-op), checks on launch + every 6h, auto-downloads,
 forwards the lifecycle (`update-available` / `download-progress` / `update-downloaded` / errors)
