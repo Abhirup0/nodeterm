@@ -2130,8 +2130,32 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   `agentStatus` store (click = back to canvas + `focusNodeById`); GITHUB cards are the repo's
   issues (`GitHubIssueCardView` via `state/githubIssues.ts`, opened through
   `GitHubIssueSummaryModal`, a column move that closes/reopens the issue confirms first). A
-  **source filter** (`KanbanSourceFilter`: All / GitHub / Sessions) and a transient per-board
-  **label filter** narrow what shows.
+  **source filter** (`KanbanSourceFilter`: All / Issues / Pull requests / Sessions) and a transient
+  per-board **label filter** narrow what shows.
+  **PULL REQUEST cards are harvested from the issue poll, not fetched** (2026-09-01, read-only):
+  `/repos/{repo}/issues` returns pull requests too — `client.listIssues` used to `continue` past
+  them — so keeping them costs ZERO extra requests and inherits the incremental `since` watermark,
+  the ETags, the 60 s poll and the cache snapshot the issue lane already has. The alternative was
+  measured and rejected: **`/repos/{repo}/pulls` IGNORES `since`** (a day-old `since` returned the
+  same 100 items as none), each item is ~25 KB against ~7 KB, and it would be a second
+  ETag/paging/cache lineage — for `head`/`base` and nothing else (mergeable, reviews and checks are
+  per-PR legs either way). The harvest's fields are `draft` and `pull_request.merged_at` (**the only
+  thing separating merged from closed** — both report `state: 'closed'`), plus the labels/assignees
+  the issue shape already carries. There is **no `head`** in that payload: `GitHubPullMeta.head`
+  stays undefined until something asks per branch (`/repos/{repo}/pulls?head=owner:branch`), which
+  is one request per question rather than a field on every poll.
+  Three rules the harvest brought with it: **(1)** one snapshot now holds both kinds, so
+  `GitHubIssueQuery.kind` (absent = `'issue'`) is what keeps the issue lane's items and counts
+  byte-identical to before — and `moveIssue` refuses a PR by number (`invalid-target`) because the
+  two share a number space and its membership check alone would hand one to a write path that
+  cannot serve it. **(2)** `MAX_ISSUES` / the 64 MB bound are shared, so an overflow **evicts pull
+  requests first, oldest-updated first** (`evictPullsToFit`) and marks the snapshot
+  `pullsTruncated`; the existing `incomplete` read-only path fires only if the issues ALONE still
+  miss the bound. A repository large enough to overflow degrades in the new half, never in the
+  board it already had. An incremental pass carries the flag forward — it never re-fetches what it
+  dropped, so only a full reconciliation may clear it. **(3)** the `pulls` source is `readOnly` in
+  the registry: no drag, no move control, and its page reports `readOnly: true` on the wire rather
+  than trusting every consumer to remember.
   **Where a card comes from is a registry, not a branch per call site** (`renderer/lib/kanbanSources.ts`,
   2026-08-30 — the same membership-plus-one-leaf discipline `AGENT_CONFIG` uses): each entry declares
   its filter `label`, its `placement` (`assignment` = the board's own persisted assignments,
