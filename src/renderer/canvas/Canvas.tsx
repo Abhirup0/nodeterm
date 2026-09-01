@@ -77,6 +77,7 @@ import { StickyNode } from '../nodes/StickyNode'
 import { GroupNode, setWorktreeActionHandler } from '../nodes/GroupNode'
 import { LazyEditorNode, LazyDiffNode } from '../nodes/lazyMonacoNodes'
 import { DinoNode } from '../nodes/DinoNode'
+import { TriggerNode } from '../nodes/TriggerNode'
 import BrowserNode from '../nodes/BrowserNode'
 import { normalizeAddress } from '../nodes/browserUrl'
 import VideoNode from '../nodes/VideoNode'
@@ -395,6 +396,7 @@ import {
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
+import { triggerEdges } from '../lib/triggerCard'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
 import { useReopenHistory, type ReopenEntry } from '../state/reopenHistory'
@@ -467,6 +469,7 @@ import {
   createAgentNode,
   createBrowserNode,
   createDinoNode,
+  createTriggerNode,
   createDiffNode,
   createEditorNode,
   createGroupNode,
@@ -1471,6 +1474,7 @@ export function Canvas() {
       subagent: withNodeBoundary(SubagentNode),
       loop: withNodeBoundary(LoopNode),
       dino: withNodeBoundary(DinoNode),
+      trigger: withNodeBoundary(TriggerNode),
       video: withNodeBoundary(VideoNode),
       web: withNodeBoundary(WebNode),
       browser: withNodeBoundary(BrowserNode)
@@ -1781,6 +1785,24 @@ export function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depEdgeSig IS the ref's signature
     [depEdgeSig]
   )
+  // Trigger→target edges (issue #493) — derived, never persisted, same signature discipline as
+  // depEdges: the per-frame pass reduces `nodes` to a signature (which trigger points where), and
+  // the styled objects only rebuild when that set actually changes, not on every drag frame.
+  const trigPairsRef = useRef<ReturnType<typeof triggerEdges>>([])
+  const trigEdgeSig = useMemo(() => {
+    if (!nodes.some((n) => n.type === 'trigger')) {
+      trigPairsRef.current = []
+      return ''
+    }
+    const pairs = triggerEdges(nodes as never, accent)
+    trigPairsRef.current = pairs
+    return pairs.map((e) => `${e.source}>${e.target}`).join('|')
+  }, [nodes, accent])
+  const trigEdges = useMemo(
+    () => trigPairsRef.current,
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- trigEdgeSig IS the ref's signature
+    [trigEdgeSig]
+  )
   // Which browser nodes are being DRIVEN (Task 6.2) — for the rope highlight only. Membership comes
   // from the ownership-backed lease store; a rope whose target is NOT here is never highlighted, so a
   // hostile pre-declared rope (a cloned project.json can ship one) lights up nothing. Rendering-only:
@@ -1854,11 +1876,11 @@ export function Canvas() {
     // durable relation and stays. Built above (depEdges), keyed on the dependency signature so a
     // drag frame does not rebuild it.
     const extra =
-      ephemeralEdges.length || ropes.length || depEdges.length
-        ? [...ephemeralEdges, ...ropes, ...depEdges]
+      ephemeralEdges.length || ropes.length || depEdges.length || trigEdges.length
+        ? [...ephemeralEdges, ...ropes, ...depEdges, ...trigEdges]
         : []
     return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges, drivenLeaseEntries])
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges, trigEdges, drivenLeaseEntries])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -3964,6 +3986,14 @@ export function Canvas() {
       markDirty()
     },
     [setNodes, markDirty, viewCenter, activeProjectId]
+  )
+
+  const addTrigger = useCallback(
+    (center?: { x: number; y: number }) => {
+      setNodes((ns) => [...ns, createTriggerNode(ns.length, center ?? viewCenter())])
+      markDirty()
+    },
+    [setNodes, markDirty, viewCenter]
   )
 
   const addWebView = useCallback(
@@ -7694,6 +7724,7 @@ export function Canvas() {
       web: (at) => void addWebView(at),
       sticky: (at) => addSticky(at),
       dino: (at) => addDino(at),
+      trigger: (at) => addTrigger(at),
       openFile: (at) => void openFileDialog(at),
       newFile: (at) => void newProjectFile(at),
       spawnTeam: (at) => setSpawnTeamDialog({ at }),
@@ -7706,6 +7737,7 @@ export function Canvas() {
       addWebView,
       addSticky,
       addDino,
+      addTrigger,
       openFileDialog,
       newProjectFile,
       openWorktreeDialog
@@ -12690,6 +12722,7 @@ export function Canvas() {
         onAddSticky={addSticky}
         onSpawnTeam={() => setSpawnTeamDialog({})}
         onAddDino={addDino}
+        onAddTrigger={addTrigger}
         onAddAgent={(aid, accountId) => addAgentNode(aid, undefined, undefined, accountId)}
         onOpenFile={() => void openFileDialog()}
         onAddRemote={() => openRemotePicker({ x: window.innerWidth / 2, y: window.innerHeight / 2 })}
