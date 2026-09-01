@@ -138,10 +138,17 @@ group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and th
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
 subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
 viz) and never persisted. `trigger` (issue #493, landing in phases — schema + the core
-scheduler so far: `core/trigger-scheduler.ts`, booted by BOTH shells, sweep-service shape,
-fire-time `TriggerArmStore.isArmed` re-ask, no catch-up for missed slots, cron matched by the
-dependency-free `@shared/cron` with the vixie dom/dow OR rule; delivery + renderer still to come)
-is a first-class PERSISTED kind: its spec (`CanvasNodeState.trigger`,
+scheduler + DELIVERY so far; the renderer/arming UI is the remaining phase, so nothing can arm a
+trigger yet and nothing fires in production) is a first-class PERSISTED kind. The whole host-side
+machine is composed ONCE in `core/trigger-service.ts` (`startTriggerService`) and booted
+identically by BOTH shells: `core/trigger-scheduler.ts` (sweep-service shape, no catch-up for
+missed slots, cron via the dependency-free `@shared/cron` with the vixie dom/dow OR rule) decides
+WHEN, and `core/trigger-delivery.ts` decides WHETHER — the `sendText` paste path, an agent target
+only on a mirror-verified idle `done` (busy/blocked/unknown → the messaging `DeliveryQueue`, own
+instance, flushed by the mirror's `done` edge via `onNodeStateChange`, with FULL flush-time
+re-validation: a trigger disarmed or spec-edited while queued is dropped), a plain-terminal target
+only into a SHELL pane and never queued, a dead target an honest `missed` and never a cold start.
+Fire-time `TriggerArmStore.isArmed` re-ask everywhere; every rule test-pinned. The kind's spec: its spec (`CanvasNodeState.trigger`,
 @shared/trigger) is git-shared CONTENT sanitized as hostile input on every load path
 (`sanitizeNodeTriggers`), and the definition alone never fires — execution consent is the
 machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
