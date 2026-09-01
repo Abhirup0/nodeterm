@@ -254,8 +254,9 @@ import {
   viewportForRect,
   type FocusableNode
 } from '../lib/nodeFocus'
-import { maximizeTargetRect } from '../lib/nodeMaximize'
-import { ZONES, zoneTargetRect, type ZoneId } from '../lib/nodeZones'
+import { NODE_MAXIMIZE_MARGIN_PX, maximizeTargetRect } from '../lib/nodeMaximize'
+import { measurePinnedInsets, type ScreenInsets } from '../lib/pinnedInsets'
+import { ZONE_GUTTER_PX, ZONES, zoneTargetRect, type ZoneId } from '../lib/nodeZones'
 import {
   recordBreadcrumb,
   stepBreadcrumb,
@@ -495,6 +496,7 @@ import {
   sshAccountsHint,
   ungroupNodes,
   maximizeNodeToRect,
+  refitMaximizedNode,
   restoreMaximizedNode,
   placeNodeInRect,
   type CanvasNode
@@ -6683,12 +6685,93 @@ export function Canvas() {
     }
     if (target.data.collapsed) return false
     const wrap = flowWrapRef.current?.getBoundingClientRect()
-    const rect = wrap ? maximizeTargetRect(getViewport(), wrap.width, wrap.height) : null
+    const rect = wrap
+      ? maximizeTargetRect(
+          getViewport(),
+          wrap.width,
+          wrap.height,
+          NODE_MAXIMIZE_MARGIN_PX,
+          measurePinnedInsets(wrap)
+        )
+      : null
     if (!rect) return false
     setNodes((ns) => maximizeNodeToRect(ns, target.id, rect))
     markDirty()
     return true
   }, [placementTargetNode, setNodes, markDirty, getViewport])
+
+  /**
+   * Keep a maximized node fitted to the area the pinned side panels leave over.
+   *
+   * Maximize is a MODE, not a one-shot placement — a zone snap is the one-shot kind and stays
+   * where it was put. While maximize is on the node claims the whole usable canvas, so pinning a
+   * panel (the node would slide under it), unpinning one (the node would sit short of the space it
+   * just gained), or a panel changing width (`uiScale`, the drawer's wide variant) has to move it.
+   *
+   * Gated on the INSETS changing, not on the flags: `explorerOpen` is also true for the unpinned
+   * overlay explorer, and without the gate opening that overlay would recompute the rect from the
+   * CURRENT viewport and teleport a maximized node into view — panning and window resizes
+   * deliberately do not re-fit, and an unpinned panel must not either.
+   */
+  const lastInsetsRef = useRef<ScreenInsets | null>(null)
+  const fitMaximizedToUsableArea = useCallback(() => {
+    const wrap = flowWrapRef.current?.getBoundingClientRect()
+    if (!wrap) return
+    const insets = measurePinnedInsets(wrap)
+    const prev = lastInsetsRef.current
+    lastInsetsRef.current = insets
+    if (prev && prev.left === insets.left && prev.right === insets.right) return
+    if (!nodesRef.current.some((n) => n.data.premaxRect)) return
+    const rect = maximizeTargetRect(
+      getViewport(),
+      wrap.width,
+      wrap.height,
+      NODE_MAXIMIZE_MARGIN_PX,
+      insets
+    )
+    if (!rect) return
+    const current = nodesRef.current
+    const fitted = current.reduce(
+      (acc, n) => (n.data.premaxRect ? refitMaximizedNode(acc, n.id, rect) : acc),
+      current
+    )
+    if (fitted === current) return
+    setNodes((ns) =>
+      ns.reduce((acc, n) => (n.data.premaxRect ? refitMaximizedNode(acc, n.id, rect) : acc), ns)
+    )
+    markDirty()
+  }, [getViewport, setNodes, markDirty])
+
+  useEffect(() => {
+    fitMaximizedToUsableArea()
+    const panels = Array.from(
+      document.querySelectorAll('.sessions-sidebar--pinned, .drawer--pinned')
+    )
+    // A ResizeObserver covers width changes (`uiScale`, the drawer's wide variant) but NOT the
+    // drawer's entry animation, which is opacity + transform — a transform never fires it, so the
+    // panel is measured ~10px off its settled position. `animationend` closes exactly that gap.
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => fitMaximizedToUsableArea())
+    const onSettled = (): void => fitMaximizedToUsableArea()
+    for (const el of panels) {
+      observer?.observe(el)
+      // `animationcancel` too: an animation cut short (the panel re-toggled mid-slide) never fires
+      // `animationend`, and would leave the node measured against the halfway position.
+      el.addEventListener('animationend', onSettled)
+      el.addEventListener('animationcancel', onSettled)
+    }
+    return () => {
+      observer?.disconnect()
+      for (const el of panels) {
+        el.removeEventListener('animationend', onSettled)
+        el.removeEventListener('animationcancel', onSettled)
+      }
+    }
+    // The pin/open flags mount and unmount the panels, so they decide WHAT to observe; the gate
+    // inside the callback decides whether an observation is worth acting on.
+  }, [sessionsPinned, sessionsDismissed, explorerOpen, explorer.pinned, fitMaximizedToUsableArea])
 
   /**
    * Zone snap (issue #394 v1): place `nodeId` (or the placement target, for the keyboard chords)
@@ -6702,7 +6785,17 @@ export function Canvas() {
         : placementTargetNode()
       if (!target || target.type === 'group' || target.data.collapsed) return false
       const wrap = flowWrapRef.current?.getBoundingClientRect()
-      const rect = wrap ? zoneTargetRect(getViewport(), wrap.width, wrap.height, zone) : null
+      const rect = wrap
+        ? zoneTargetRect(
+            getViewport(),
+            wrap.width,
+            wrap.height,
+            zone,
+            NODE_MAXIMIZE_MARGIN_PX,
+            ZONE_GUTTER_PX,
+            measurePinnedInsets(wrap)
+          )
+        : null
       if (!rect) return false
       setNodes((ns) => placeNodeInRect(ns, target.id, rect))
       markDirty()
