@@ -292,6 +292,42 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('sticky')).toBe(false)
   })
 
+  it('both agent-facing texts warn that --prompt is one line and must not start with a slash', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // `assembleLaunchCommand` collapses every whitespace run in the prompt, because the prompt
+      // rides argv on a line that is typed into the pane. An agent that does not know this writes
+      // a numbered brief and gets one paragraph.
+      expect(body.toLowerCase()).toContain('one line')
+      // The failure that costs a whole station: flattened, a leading slash command swallows the
+      // task as its argument, and the node then reads as idle to `--after`. Silence here is what
+      // let that ship.
+      expect(body).toMatch(/start a prompt with `\/`|begin a prompt with `\/`/i)
+    }
+  })
+
+  it('both agent-facing texts separate a denial from an unanswered dialog', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The two answers carry opposite guidance — a denial is final, a timeout is retryable — and
+      // a body that names only "may be denied" leaves a caller reading its own timeout as refusal.
+      expect(body).toContain('denied by user')
+      expect(body).toContain('no answer within 120s')
+    }
+  })
+
+  it('both agent-facing texts document --model on the open verbs and per-role model on spawn-team', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The flag is the only cost lever an orchestrator has: without it every station it opens
+      // inherits one default model. A body that stops naming it leaves that lever undiscoverable,
+      // which is the state this test was written to end.
+      expect(body).toContain('--model')
+      // Both silent no-ops must be stated, or an agent reads a missing flag as a failed call:
+      // a non-switch-capable agent ignores it, and an unknown id fails in-session, not at open.
+      expect(body.toLowerCase()).toContain('ignore')
+      // Per-role model is what lets ONE spawn-team call mix tiers; the JSON example must show it.
+      expect(body).toContain('"model"')
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')

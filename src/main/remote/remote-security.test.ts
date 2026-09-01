@@ -371,3 +371,115 @@ describe('R4: a killed stream stops accepting input in the same turn', () => {
     expect(writeMock).not.toHaveBeenCalled()
   })
 })
+
+// --- pty.kill honesty + pty.destroy (issue #374) ------------------------------
+
+// `pty.kill` used to answer `true` unconditionally — including when no stream matched — so every
+// failure on that path was invisible to the client. And no relay method could END a session at
+// all: `pty.kill` only drops the viewer (tmux keeps running, by design), while the desktop's
+// "End session" is `destroySession(…, {everySocket:true})` + node removal. `pty.destroy` now
+// reaches that path through an injected `destroyNode`, honestly refused when un-wired.
+
+describe('pty.kill answers honestly', () => {
+  it('an unknown streamId is an error, not a silent success', () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => ['/work'])
+    handlers.onRpc({ id: '1', method: 'pty.kill', params: { streamId: 99 } })
+    expect(pty.kill).not.toHaveBeenCalled()
+    expect(responses).toEqual([
+      { id: '1', ok: false, body: { message: expect.stringContaining('Unknown streamId') } }
+    ])
+  })
+
+  it('a live stream still kills the viewer and answers ok', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => ['/work'])
+    await attachStream(handlers, 'node-a')
+    handlers.onRpc({ id: 'k', method: 'pty.kill', params: { streamId: 1 } })
+    expect(pty.kill).toHaveBeenCalledWith(null, 'sess')
+    expect(responses.at(-1)).toMatchObject({ id: 'k', ok: true })
+  })
+})
+
+describe('pty.destroy ends the session through the injected destroyNode', () => {
+  it('is honestly refused when no destroyNode is wired (old/partial hosts)', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const handlers = createHostHandlers(pty, socket, fs, () => ['/work'])
+    await attachStream(handlers, 'node-a')
+    handlers.onRpc({ id: 'd', method: 'pty.destroy', params: { streamId: 1 } })
+    expect(responses.at(-1)).toEqual({
+      id: 'd',
+      ok: false,
+      body: { message: expect.stringContaining('not served') }
+    })
+    // The refusal must not have touched the stream either.
+    expect(pty.kill).not.toHaveBeenCalled()
+  })
+
+  it('destroys the STREAM’s node (never a client-sent id) and answers ok', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const destroyNode = vi.fn(async () => {})
+    const handlers = createHostHandlers(
+      pty, socket, fs, () => ['/work'], async () => '', () => null, undefined, undefined, destroyNode
+    )
+    await attachStream(handlers, 'node-a')
+    // A hostile nodeId param rides along — it must be ignored in favor of the stream's own key.
+    handlers.onRpc({ id: 'd', method: 'pty.destroy', params: { streamId: 1, nodeId: 'victim' } })
+    await vi.waitFor(() => expect(responses.at(-1)).toMatchObject({ id: 'd', ok: true }))
+    expect(destroyNode).toHaveBeenCalledTimes(1)
+    expect(destroyNode).toHaveBeenCalledWith('node-a')
+    // The viewer is dropped like pty.kill does — the destroy ends the underlying session.
+    expect(pty.kill).toHaveBeenCalledWith(null, 'sess')
+  })
+
+  it('an unknown streamId is refused without calling destroyNode', () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const destroyNode = vi.fn(async () => {})
+    const handlers = createHostHandlers(
+      pty, socket, fs, () => ['/work'], async () => '', () => null, undefined, undefined, destroyNode
+    )
+    handlers.onRpc({ id: 'd', method: 'pty.destroy', params: { streamId: 42 } })
+    expect(destroyNode).not.toHaveBeenCalled()
+    expect(responses).toEqual([
+      { id: 'd', ok: false, body: { message: expect.stringContaining('Unknown streamId') } }
+    ])
+  })
+
+  it('a failed destroy is an honest error carrying the reason', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const destroyNode = vi.fn(async () => {
+      throw new Error('tmux kill-session failed')
+    })
+    const handlers = createHostHandlers(
+      pty, socket, fs, () => ['/work'], async () => '', () => null, undefined, undefined, destroyNode
+    )
+    await attachStream(handlers, 'node-a')
+    handlers.onRpc({ id: 'd', method: 'pty.destroy', params: { streamId: 1 } })
+    await vi.waitFor(() =>
+      expect(responses.at(-1)).toEqual({
+        id: 'd',
+        ok: false,
+        body: { message: 'tmux kill-session failed' }
+      })
+    )
+  })
+
+  it('R4 adjacency: a late Input frame after pty.destroy is dropped, even while destroy is in flight', async () => {
+    const { socket, fs, pty } = makeHostFakes()
+    const writeMock = pty.write as ReturnType<typeof vi.fn>
+    // A destroyNode that never resolves inside the test window — the drop must not wait for it.
+    const destroyNode = vi.fn(() => new Promise<void>(() => {}))
+    const handlers = createHostHandlers(
+      pty, socket, fs, () => ['/work'], async () => '', () => null, undefined, undefined, destroyNode
+    )
+    await attachStream(handlers, 'node-a')
+    handlers.onFrame(inputFrame(1, 'echo live\n'))
+    expect(writeMock).toHaveBeenCalledWith(null, 'sess', 'echo live\n')
+    writeMock.mockClear()
+
+    const late = Promise.resolve().then(() => handlers.onFrame(inputFrame(1, 'echo late\n')))
+    handlers.onRpc({ id: 'd', method: 'pty.destroy', params: { streamId: 1 } })
+    await late
+    expect(writeMock).not.toHaveBeenCalled()
+  })
+})

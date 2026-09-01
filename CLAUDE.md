@@ -136,8 +136,13 @@ factories (`createTerminalNode`, `createSshTerminalNode`, `createAgentNode(agent
 group transforms (`groupSelectedNodes`, `ungroupNodes`, `duplicateNode`), and the
 `nodeStatesToFlow` / `flowToNodeStates` serializers. Node kinds (`NodeKind` in
 `src/shared/types.ts`): `terminal | sticky | group | editor | diff | video | web | browser |
-subagent | loop | dino` — `subagent` and `loop` are render-only (ephemeral hook-driven viz) and
-never persisted. A node's `data`
+subagent | loop | dino | trigger` — `subagent` and `loop` are render-only (ephemeral hook-driven
+viz) and never persisted. `trigger` (issue #493, landing in phases — schema only so far, no
+renderer/scheduler yet) is a first-class PERSISTED kind: its spec (`CanvasNodeState.trigger`,
+@shared/trigger) is git-shared CONTENT sanitized as hostile input on every load path
+(`sanitizeNodeTriggers`), and the definition alone never fires — execution consent is the
+machine-local, content-bound `core/trigger-arm-store.ts` (a spec that arrives or CHANGES via git
+reads as disarmed until armed on this machine). A node's `data`
 carries `title, color, group, tags, collapsed, expandedHeight, shell, cwd, text,
 initialCommand, filePath, diffStaged`, `agentId` (which agent CLI a terminal node runs —
 persisted), and `accountId` (which managed Claude account a terminal node runs under — immutable,
@@ -247,7 +252,27 @@ project's nodes only.** The contract:
   nodes, which reattach warm or cold-restore). `hasProjects` counts only **open** projects, so
   closing the last open one shows the welcome screen. **Permanent** deletion (`deleteProject`:
   `transport.destroy(nodeId)` per terminal + drop agent status + SSH teardown) now only happens
-  via the `×` on a "Recently closed" entry.
+  via the `×` on a "Recently closed" entry. **Closing now SAYS what it parks** (issue #442 —
+  "close" read like cleanup while meaning "hide, and keep running"): a project with terminal
+  nodes gets a confirm naming the count, with an opt-in **"end its sessions too"** checkbox
+  (default OFF — parking stays the rule; checked flips the confirm to danger). The pure half is
+  `renderer/lib/projectCloseSessions.ts`: **one definition of N** — the project's terminal-kind
+  nodes, exactly the set the action addresses (`transport.destroy` is idempotent on a dead
+  session), never a liveness-verified count that could disagree with the action; the END happens
+  at confirm time against the re-resolved node set (agents spawn nodes on their own). A relay tab
+  or a 0-terminal project closes silently (byte-identical old path). `endProjectSessions` mirrors
+  `deleteProject`'s teardown EXCEPT it keeps agent status (the persisted sessionId is what lets a
+  reopen cold-restore `--resume`) and never disconnects SSH masters (close never managed the
+  connection). The `×` also confirms now, via `deleteConfirmCopy` — a relay tab gets "removes
+  only this machine's view; reconnecting brings it back" with no danger styling (deleting the
+  view is what turns the next connect into a first-connect re-adopt), local/SSH get the session
+  count + "the folder (incl. .nodeterm/project.json) is not deleted". And "Recently closed" rows
+  show a **live-session badge** (`closedSessionCounts` over ONE on-demand local
+  `sessionMemory.read` per welcome-screen appearance — never a timer; `ok:false` ⇒ no badge,
+  never "0"; an SSH project's host-side sessions are deliberately not claimed by the local
+  count). Server Edition: all renderer-side; the ws-bridge `sessionMemory` is real, so badges
+  describe the server machine; the `sshProject` legs only run for `project.ssh`, which that
+  shell never has.
 - A project's `cwd` (folder picker, `dialog:select-folder`) is passed to terminal/Claude
   node factories so new terminals open there. **Folder ↔ project is deduped:** "Open folder…"
   reuses the existing project with that `cwd` (and its nodes) instead of creating a duplicate.
@@ -261,6 +286,18 @@ interferes; status bar off, **mouse on**, 50k history, `set-clipboard on` + `ter
 ",*:clipboard"`, and the copy-mode mouse bindings). Because the tmux *server* outlives the app,
 sessions survive when no client is attached. `src/shared/ssh.ts`'s `remoteTmuxConf` is the same
 config for an SSH project's remote tmux.
+
+**Every REMOTE tmux invocation starts with `remoteTmuxPathPrologue()`** (`shared/ssh.ts` — PATH
+**append**: `/opt/homebrew/bin`, `/usr/local/bin`, `/opt/local/bin`, `$HOME/.local/bin`): an ssh
+exec channel gets a non-login shell, and on a macOS host Homebrew's `shellenv` lives in
+`~/.zprofile`, so a host whose own terminal runs tmux fine answered
+`zsh:1: command not found: tmux` to every command of ours (issue #449 — the same class as the
+remote claude probe's login-shell + PATH fix). Append, never prepend: a PATH that already resolves
+tmux keeps exactly that binary, so nothing re-pairs a long-lived tmux server with a different
+client build. When tmux is genuinely absent the interactive spawn (`tmuxOrExplain`,
+`control-master.ts`) prints what is missing, how to install it and what a tmux-less remote loses,
+then degrades to a plain login shell — mirroring the local plain-shell fallback; the raw
+`command not found` line must never be the user-facing error again.
 
 **tmux owns the mouse — scrolling, selection, and the alternate screen are all its job.** This is
 the native behavior, and it is deliberate:
@@ -712,6 +749,58 @@ Monaco is wired in `renderer/editor/monaco-setup.ts` (language workers bundled v
 `?worker` — no CDN; CSP `worker-src` allows them). Markdown rendering is shared in
 `renderer/lib/markdown.ts` (`marked` + DOMPurify sanitize).
 
+### Webview keep-alive across project switches (browser/web nodes)
+
+Issue #301: a project switch used to reload every browser node's page — SPA state, forms, scroll,
+websockets gone — because the load effect swaps the whole React Flow node array and an Electron
+`<webview>`'s guest process dies on DOM detach (a webview cannot be parked like xterm). The fix
+keeps the ELEMENT mounted instead of trying to preserve anything through a remount. The facts it
+rests on are measured (Electron 42.x probes + in-app verification, 2026-08-26):
+
+- A guest **survives** sibling insert/remove around its element (React reconciliation of kept,
+  order-stable keyed children never touches them), and **survives `display:none`** of itself or an
+  ancestor — state intact, viewport size and scroll kept (the guest is NOT resized to 0), repaint
+  pixel-identical on reveal, timers running throttled like a background tab.
+- A guest **dies** on any DOM *move* (`insertBefore`/`appendChild` of an attached element detaches
+  first), taking a full page reload with it. React moves a kept child exactly when its RELATIVE
+  ORDER among kept children changes (`lastPlacedIndex`), and React Flow renders nodes in
+  prop-array order keyed by id (`adoptUserNodes` rebuilds `nodeLookup` in array order) — so the
+  merged prop's order discipline IS the feature.
+
+Mechanics (`renderer/lib/webviewKeepAlive.ts` pure + tested, `state/webviewKeepAlive.ts` store,
+merged in Canvas exactly like the ephemeral subagent cards — Canvas state, persistence, undo and
+the wire never see any of it):
+
+- Every webview-hosting node (`browser`/`web`) renders in ONE stable **pool region** at the tail
+  of the `<ReactFlow>` nodes prop, ordered by the pool's entries; entry order never changes while
+  an entry lives (append/remove only — `webviewKeepAlive.test.ts` pins the order-stability
+  invariant, `webview-keepalive-reconcile.test.tsx` pins the no-detach consequence against real
+  React). Visible cost of the hoist: an unselected browser/web node paints above other unselected
+  z-0 nodes it overlaps (selection's z 1000 still wins).
+- On switch-away the outgoing project's pages become **ghosts**: same node id, `display:none`,
+  non-interactive, parked at the origin, `data.ghost` telling the surfaces to route facts at the
+  pool (`updateGhostData`) instead of `updateNodeData`. On return the SAME element goes live
+  again; `overlayKeepAliveData` folds ghost-time navigations into the loaded nodes inside the one
+  `setNodes`, so the `url` prop never moves under the surviving surface (which would navigate it).
+- **The merge is keyed on the MOUNTED project (`keepAliveFromRef`), never `activeProjectId`, and a
+  mounted entry whose node is missing falls back to its ghost.** Both exist because the pool store
+  (zustand/useSyncExternalStore), the ref and `setNodes` do not land in one commit: a switch renders
+  interleavings where the id would otherwise drop out of the merged list for one commit — and one
+  absent commit is an unmount, i.e. a dead guest ([MEASURED]: the ghost→live direction remounted
+  every returning page until the fallback; live→ghost never did). A genuinely deleted node's entry
+  is dropped at the deletion funnels (handleNodesChange's `remove`, `deleteNodes`, the peer-mutation
+  remove, project deletion/prune), with the next retire as backstop — never by the merge.
+- **Memory bounds** (same posture as park/WebGL: a lever must not end live work): a ghost is
+  hidden, so the existing Browser Memory Saver discards its guest after `BROWSER_DISCARD_MS`
+  unless loading/audible/agent-driven — `onGuestDiscarded` then drops the entry (a husk would hold
+  a cap slot). `BACKGROUND_WEBVIEW_MAX` (8) hard-caps live background guests, evicting
+  longest-retired first; `activateProject` runs BEFORE `retireProject` on every switch so a
+  returning page sheds its background clock before that eviction can pick it.
+- E2E-verified under Xvfb (CDP): same webContents across Alpha→Beta→Alpha, typed form text + JS
+  state + tick counter continuous, zero reloads; wrapper + webview DOM elements identity-stable in
+  both directions. Server Edition: inert (no `<webview>` in a plain browser — ghosts are empty
+  husks, nothing to preserve). Mobile: N/A (no canvas).
+
 ## Agent support (Claude / Codex / Gemini / Copilot / opencode / Grok / custom)
 
 The app is a pluggable multi-agent system: Claude Code is one builtin of
@@ -987,6 +1076,24 @@ else, and its context links must keep classifying across restarts).
     layout by construction on all three surfaces) and then the well-known data dirs; it is monotone
     — advertised dir first, keyed by node-id filename in every candidate, and a foreign instance's
     dir yields a foreign `kid` = `legacy` = exactly what presenting nothing already gave.
+  - **Every generated sh client walks the SAME endpoint failover** (`nt_candidates`/`nt_adopt`,
+    `core/agents/hook-endpoint-failover-sh.ts`) — issue #445, the endpoint-level twin of #384: a
+    session is pinned for life to the endpoint PATH it got at tmux creation, so an app
+    quit/restart (or a retired project id) leaves it POSTing at a dead port while a live endpoint
+    file sits right next to it. The managed hook script had the bounded candidate walk (locals
+    before tunnels, `nt_fallback_max` 3, token re-read from the ADOPTED endpoint's dir); the two
+    shims did not, so hook events healed themselves while every canvas-control verb died with
+    "control endpoint unreachable" — in the field, a reviewer launch silently dropped. Now shared,
+    one definition. Two server-side halves in `hook-server.ts`: a FAILED `listen()` un-wedges the
+    singleton (it used to leave `this.server` set, making every retry a silent no-op at port 0)
+    and both `stop()` and the failed-start path delete `hook-endpoint.env` — publication reflects
+    listener liveness; a crash skips that, which is exactly what the client walk exists for. An
+    HTTP answer of any code is authoritative: only a dead transport (curl 000/'') fails over, so a
+    403/400 is never re-sent to another instance. The walk is skipped under
+    `CODEX_SANDBOX_NETWORK_DISABLED` (#367 — the sandbox denies every connect, the hint is the
+    right diagnosis) and the final error now distinguishes "no endpoint anywhere" from "an
+    advertised endpoint that is not listening" (`STALE_ENDPOINT_HINT`). Desktop quit calls
+    `hookServer.stop()` on the second before-quit pass, after the flush window.
 
   Enforcement is dated (`NODE_IDENTITY_STRICT_AFTER`, 2026-10-13, read through `isStrictInstant` so a
   clock years ahead cannot enter strict mode early) with a `settings.hookIdentityStrict` escape hatch
@@ -1311,8 +1418,12 @@ else, and its context links must keep classifying across restarts).
     (`resolveNewNodeAccount`: explicit submenu pick → `project.defaultAccountId` → system default
     `~/.claude`), then **immutable** and **persisted** (serializers). `undefined` = system default
     = **bit-for-bit legacy behavior** (no env touched). Inherited by **Branch** (the
-    terminal→chat fork it also fed is gone — the SDK chat node was removed 2026-07). A pending
-    (not-yet-logged-in) account resolves to `undefined` until it completes.
+    terminal→chat fork it also fed is gone — the SDK chat node was removed 2026-07). Two #419
+    rules inside the resolver: the submenu's **System row passes `null`** (an EXPLICIT system
+    pick that skips the project default — before that, the row wearing the system email launched
+    the project-default account), and validation runs against `accountsForProject`, not the raw
+    list, so a **pending** account or one **pinned to another machine's host** is never stamped
+    onto a node it cannot run on (both used to reach the missing-dir fallback at spawn).
   - **Account default node color (`ClaudeAccount.color` / `CodexAccount.color`, optional)** — a
     per-account default node color (Settings → Accounts) that beats the agent's own brand color in
     `createAgentNode`, so a second login is recognizable on the canvas. Read off the SAME
@@ -1335,9 +1446,22 @@ else, and its context links must keep classifying across restarts).
     connection-cached `remoteHome` (skipped **fail-open** if home is unresolved). `AUTH_ENV_STRIP`
     (`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN`) is deleted from the
     child env so a stray env key can't shadow the account. A **missing** account dir → warn +
-    silent system fallback.
+    silent system fallback. **The account-scope names ride the LOCAL conf's `update-environment`
+    (`ACCOUNT_SCOPE_UPDATE_ENV`, issue #419)** — the shared tmux server inherits the env of the
+    client that STARTS it, so a server started by a managed-account node used to leak that
+    account's `CLAUDE_CONFIG_DIR` (and any un-stripped auth key) into every session created
+    without a `-e` override: system nodes, plain terminals and the missing-dir fallback silently
+    ran as that account ("the system account is entangled with the next account in the list").
+    Listing the names makes tmux copy each from the creating client's env and **strip it when the
+    client lacks it** (proven against a real tmux in `account-env.realtmux.test.ts`, seeded-server
+    case included; `ensureUpdateEnvKeys` retrofits a long-lived pre-fix server). The same listing
+    is what makes codex's explicit system-scope overwrite (`CODEX_HOME` /
+    `NODETERM_CODEX_ACCOUNT_ID`) actually reach sessions on a shared server. **LOCAL conf only**
+    — the remote conf must NOT get these names: a remote attach client's env is the login
+    shell's, and the copy/strip would run against that wrong environment (pinned in
+    `ssh.test.ts`).
   - **Login flow** — Settings → Accounts → **Add** creates a `pending` account and drops a canvas
-    **login node** that runs `claude /login` under the account dir. Main polls the dir's
+    **login node** that runs `claude /login` under the account dir. Core polls the dir's
     `.claude.json` (`LOGIN_POLL_MS` 2 s, up to `LOGIN_TIMEOUT_MS` 5 min) for `oauthAccount.email`;
     on capture the account flips out of `pending` with its email as the default label. Account
     removal cancels any pending wait + `markDirty`. **Codex accounts have the same two halves** —
@@ -1351,9 +1475,31 @@ else, and its context links must keep classifying across restarts).
     no listener is a silent no-op, which is how the Codex half shipped inert (#346) — pinned now by
     `renderer/lib/nodeterm-events.test.ts`, which fails on any `nodeterm:*` event that is sent but
     never heard.
+  - **The lifecycle is CORE, and both shells register it** (issue #313) —
+    `core/claude-accounts-service.ts` owns the four `claude-accounts:*` channels (add / wait-login
+    / cancel-wait / remove) behind `platform().handle`; `main/claude-accounts.ts` is a thin desktop
+    wrapper and `registerCoreHandlers` calls the same `registerClaudeAccountsIpc()`. Two optional
+    deps carry everything core cannot reach: `installSkill` (desktop passes `installCanvasSkillInto`
+    — the server passes none, because **canvas control is not wired on that shell at all**, so a
+    per-account SKILL.md would point at nothing) and `remote`, a **thunk** resolving the SSH legs
+    (desktop's manager is created after the registration, and the server has none — in both cases
+    an `AccountCtx` carrying a `projectId` degrades to the LOCAL path, which is the pre-existing
+    behavior this preserves). **Three surfaces:** Desktop unchanged (same channels, same shapes,
+    same remote fallbacks); **Server Edition** now full — real `buildClaudeAccountsApi` over the
+    ws-bridge (the 5-min `waitLogin` is a straight passthrough because RpcClient has no request
+    timeout), minus SSH accounts and the canvas skill; **Mobile: N/A** — the phone launches with
+    the accounts the agent-status mirror advertises and never mints one. **Managed CODEX accounts
+    stay desktop-only** and their bridge namespace stays an `E_UNSUPPORTED` stub: the switch verbs
+    authorize the owning window by Electron WebContents id, which has no meaning over a WS
+    connection. The Settings section now *names* that refusal instead of leaving an unhandled
+    promise rejection — a spinner that stops and says nothing reads as a dead button.
   - **Hook install** — the managed hook is merged into **each account dir's** `settings.json` at
     add-account **and** at app launch (local, shared `install-helper.ts`) / via
-    `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status.
+    `RemoteHooks.installIntoAccountDir` (remote), so every identity reports agent status. The
+    launch-time loop is ONE function (`installHooksIntoLocalAccounts`, beside the service) that
+    both shells call — the desktop passing the canvas skill as its `extra`. A second copy is the
+    drift this file warns about elsewhere: the Server Edition shipped without the per-account leg
+    entirely, so a managed account there reported no agent status at all.
   - **Account-aware readers** — transcript resolution is scoped per account (`transcriptRootFor`
     picks the account dir's `projects/`, composite cache key includes `accountId`); the same
     threading runs through the session-name poll, restart handoff, and `ChatPanel` (the ⌘M
@@ -1610,7 +1756,10 @@ about which machine they describe. Reading + parsing is `core/session-memory.ts`
   and one per panel open / `⟳`. Same rule this file already sets for **Remote usage**, for the same
   reason: every remote read is an ssh exec plus a `ps` of somebody else's whole process table. The
   full sweep runs on the panel's MOUNT (it is unmounted while closed) and on `⟳` — never on a timer,
-  never from the pill.
+  never from the pill. One more consumer, same discipline: the welcome screen runs ONE **local**
+  sweep per appearance (only while "Recently closed" is non-empty) for its per-project
+  live-session badges (issue #442), bypassing the panel's store on purpose — it must not disturb
+  `state/sessionMemory.ts`'s module-level scope stamp, and its scope is always THIS machine.
 - **The pill is the single owner of the store's `startHostPoll` / `stopHostPoll`** — the timer and the
   active-scope stamp are MODULE SINGLETONS. The panel must never call them: a `stopHostPoll` on
   unmount would clear the pill's interval with nothing left to restart it, and the number would
@@ -1756,8 +1905,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     fall through UNTOUCHED and `syncMenuForStandDown` disables the Close menu item on top of the
     shared list. mac's ⌘W is deliberately unaffected (not a shell key), and ⌘/Ctrl+M and ⌘/Ctrl+0
     keep firing — this is one chord whose terminal meaning outranks its app meaning, not a policy
-    change. One predicate, two consumers, pinned in `keydown-intercept.test.ts` (including a
-    source-level wiring pin, since the menu leg lives against a real Menu in index.ts).
+    change. Falling through main is not enough: xterm's custom key handler runs before the Canvas
+    dispatcher, whose main-intercepted command cases deliberately have no renderer handlers.
+    `terminalChordBubbles` must therefore refuse every `MAIN_INTERCEPTED_COMMAND_IDS` command; if
+    it returned true for `node.close`, xterm would withhold `^W` while the unclaimed event bubbled
+    to Canvas. One predicate, two main-process consumers are pinned in `keydown-intercept.test.ts`
+    (including a source-level wiring pin, since the menu leg lives against a real Menu in index.ts),
+    and `keybindingOverrides.test.ts` pins the renderer-to-xterm hand-off through
+    `terminalKeyAction`.
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -1993,7 +2148,23 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   issues (`GitHubIssueCardView` via `state/githubIssues.ts`, opened through
   `GitHubIssueSummaryModal`, a column move that closes/reopens the issue confirms first). A
   **source filter** (`KanbanSourceFilter`: All / GitHub / Sessions) and a transient per-board
-  **label filter** narrow what shows. **Labels** are a per-project palette (`ProjectKanban` labels,
+  **label filter** narrow what shows.
+  **Where a card comes from is a registry, not a branch per call site** (`renderer/lib/kanbanSources.ts`,
+  2026-08-30 — the same membership-plus-one-leaf discipline `AGENT_CONFIG` uses): each entry declares
+  its filter `label`, its `placement` (`assignment` = the board's own persisted assignments,
+  reorderable within a column; `provider` = the provider reports the column, the board persists
+  nothing and a move is the provider's write), its in-column `lane` order and whether it is
+  `configured` for a given board. Two orders live there deliberately: **declaration order is the
+  source filter's button order** (All · GitHub · Sessions), **`lane` is the in-column stacking order**
+  (sessions above issues) — they genuinely differ, and pinning both is what stops either being
+  re-spelled elsewhere. `KanbanColumn` therefore takes ONE `lanes` prop (`{sourceId, cards, footer?,
+  count}`) instead of a `cards` + eight `github*` props, places them via `byLane` and names no source;
+  the board builds each source's leaf, and the drag union branches on `placement` (`isProviderDrag`)
+  rather than on the string `'github'`. A lane's `count` is passed rather than derived from
+  `cards.length` because a provider reports a server-side total larger than the page fetched so far.
+  What deliberately did NOT move into the registry: the virtual **Ungrouped** column (board
+  semantics, not a source's concern) and `validKanban`, which stays the single shape gate on every
+  load path — a registry entry must never grow its own parallel validation. **Labels** are a per-project palette (`ProjectKanban` labels,
   edited inline via the Notion-style `LabelPicker`: create/assign/rename/recolor/delete through the
   pure `lib/kanban.ts` transforms) plus each GitHub issue's own labels, both filterable. The canvas stays MOUNTED under the opaque overlay (agent-status
   listeners live in Canvas.tsx; `display:none` would 0×0-resize every terminal into a tmux
@@ -2162,20 +2333,30 @@ the same script hand-packs `build/icon.icns` (size-checked frames — issue #369
 zip, `--publish never`). Production release signing/notarization and the update-feed hosting are
 handled outside this repo.
 
-**Windows packaging is GROUNDWORK, not a shippable app** (extracted from external PR #276; a
-Windows build is unusable until the session-host phase merges). Deliberate decisions: the target
+**Windows ships as an UNSIGNED BETA** (extracted from external PR #276; the session-host phase
+#305 merged 2026-08-20, and the decision to release without signing is #454 — CI-green, but no
+real-device daily-use verification yet, and that is a stated risk, not an oversight). Deliberate
+decisions: the target
 is **NSIS via electron-builder** — the fork switched to Squirrel.Windows
 (`electron-builder-squirrel-windows` + an 800-line `windows-installer.mjs` wrapper + its own
 update feed), but our pipeline is electron-builder end-to-end and NSIS is built in, needs no
 extra dependency, and is what electron-updater's generic provider expects on Windows — so
 Squirrel was not adopted. Builds are **unsigned** (no Windows cert; electron-builder skips
-signing when no cert env is present). `bootstrap-windows.bat` (repo root) takes a fresh Windows
+signing when no cert env is present; SmartScreen warns on install). Release wiring is
+`release.yml`'s `release-win` job: on every version tag it uploads the NSIS installer + zip as
+GitHub Release assets — **best-effort by design** (the `publish` promote gate does not wait on
+it, so a Windows failure never strands the mac+linux release) and with **no update-feed leg**:
+`dist:win` stamps `nodeTermUpdates=disabled`, so the shipped app's updater is cleanly off (no
+latest.yml anywhere, no 404 polling; users update by downloading the next installer). Do not
+add `*.yml`/`*.blockmap` to that job's upload globs — that IS the auto-update leg, and it waits
+on signing. `bootstrap-windows.bat` (repo root) takes a fresh Windows
 machine to a built checkout: it verifies Node ≥ 20 / VS Build Tools C++ / Python 3 with exact
 winget hints (it never installs machine-wide tools itself, and refuses to run elevated) and runs
 `npm ci`. `.github/workflows/win-package-smoke.yml` is a **workflow_dispatch-only** packaging
-smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** Windows
-auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev feed — blocked
-on signing: an unsigned auto-update is a downgrade in trust), a release.yml Windows job, and the
+smoke on windows-latest — build only, never publishes. **Follow-ups, in order:** code signing,
+then Windows auto-update wiring (electron-updater NSIS leg + `latest.yml` on the nodeterm.dev
+feed — blocked
+on signing: an unsigned auto-update is a downgrade in trust), and the
 fork's PE-identity polish (electron-builder leaves `OriginalFilename` empty; the fork's
 `resedit`-based afterSign hook fixes it — cosmetic for NSIS, load-bearing only for Squirrel).
 

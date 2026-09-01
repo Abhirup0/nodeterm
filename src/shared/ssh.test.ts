@@ -13,6 +13,7 @@ import {
   sshConnectionIdForProject,
   sshHostKey
 } from './ssh'
+import { leadPaneHookLines } from './tmux-lead-pane'
 
 describe('sshHostKey', () => {
   it('is user@host', () => {
@@ -265,6 +266,7 @@ describe('remoteTmuxConf', () => {
     // label text — a link whose URL is not also printed can then never be opened.
     expect(c).toContain('set -as terminal-features ",*:hyperlinks"')
   })
+
   it('clears the override/feature arrays a long-lived server accumulated from older versions', () => {
     // A tmux server outlives the app and keeps every entry ever sourced into it; the stale
     // smcup@/rmcup@/indn@ entries would otherwise keep breaking scrolling forever. Measured:
@@ -282,6 +284,29 @@ describe('remoteTmuxConf', () => {
   it('floors history-limit at 1000', () => {
     expect(remoteTmuxConf(10)).toContain('set -g history-limit 1000')
     expect(remoteTmuxConf(50000)).toContain('set -g history-limit 50000')
+  })
+  it('lead-pane width OFF (default/0/invalid) is byte-identical and carries no set-hook (issue #119)', () => {
+    // The opt-in guarantee: nodeterm ships no tmux hooks unless the user turned the setting on,
+    // and the off path must be bit-for-bit the pre-feature conf.
+    expect(remoteTmuxConf(50000, 0)).toBe(c)
+    expect(remoteTmuxConf(50000, NaN)).toBe(c)
+    expect(c).not.toContain('set-hook')
+  })
+  it('lead-pane width ON only APPENDS the shared guarded hook pair', () => {
+    const on = remoteTmuxConf(50000, 72)
+    expect(on.startsWith(c)).toBe(true)
+    expect(on).toContain(leadPaneHookLines(72))
+  })
+  it('does NOT list the account-scope names in update-environment (they are LOCAL-conf only)', () => {
+    // A remote session's account env arrives via `-e` on the ssh-exec'd create; the attaching
+    // client's own env is the remote LOGIN SHELL's, which never carries our account dirs. Listing
+    // the names here would make every reattach copy/strip against that wrong environment —
+    // stripping a managed remote account's CLAUDE_CONFIG_DIR out of its own session. The local
+    // conf lists them (ACCOUNT_SCOPE_UPDATE_ENV in pty-manager, issue #419); this pin is what
+    // keeps a future "unify the two confs" cleanup from exporting the fix to the wrong side.
+    for (const name of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NODETERM_CODEX_ACCOUNT_ID']) {
+      expect(c).not.toContain(name)
+    }
   })
 })
 

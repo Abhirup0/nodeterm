@@ -46,6 +46,7 @@ import {
   type RevocationTargets
 } from './browser-revocation'
 import { registerFsHandlers } from '../core/fs-handlers'
+import { TrackpadGestureLedger } from './trackpad-gesture'
 import { LogBuffer } from '../core/log-buffer'
 import { installLogSink, splitTag } from '../core/log-sink'
 import { registerLogHandlers } from '../core/log-handlers'
@@ -244,7 +245,7 @@ import {
   isSafeRemoteTranscriptPath,
   remoteAccountConfigDirAbs
 } from '../core/claude-accounts-core'
-import { installClaudeHooksInto, ensureClaudeFullscreenTuiInto } from '../core/agents/hooks/claude'
+import { installHooksIntoLocalAccounts } from '../core/claude-accounts-service'
 import { createPairingService } from './pairing-service'
 import {
   initRemoteHost,
@@ -977,6 +978,20 @@ function createWindow(): BrowserWindow {
   // (both projects, every terminal). Bounded by the policy so a boot-path crash can't loop;
   // past the budget the user decides. The tmux sessions all live in this process, so a reload
   // costs nothing but the canvas re-hydrating from the workspace store.
+  // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
+  // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
+  // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
+  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
+  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
+  // canvas/wheel-gesture.ts for the two halves of the contract.
+  const trackpadLedger = new TrackpadGestureLedger()
+  win.webContents.on('input-event', (_event, input) => {
+    const active = trackpadLedger.observe(input.type)
+    if (active !== null && !win.isDestroyed()) {
+      win.webContents.send(IPC.canvasTrackpadGesture, active)
+    }
+  })
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
@@ -1600,7 +1615,7 @@ app.whenReady().then(async () => {
   // src/main/agent-messaging.ts for the whole map.
   const messagingDeps: AgentMessagingDeps = {
     paneOwner: (id) => ptyManager.paneOwner(id),
-    sendFramedPayload: (id, payload) => ptyManager.sendFramedPayload(id, payload),
+    sendEnvelope: (id, envelope) => ptyManager.sendEnvelope(id, envelope),
     hasLiveSession: (id) => ptyManager.hasLiveSession(id),
     projects: () => workspaceStore.persistedCanvases(),
     isRemoteNode: (id) => !!ptyManager.sshRemoteForNode(id),
@@ -2329,21 +2344,10 @@ app.whenReady().then(async () => {
   installManagedAgentHooks()
   // Managed accounts each carry their own settings.json AND skills/ (Claude Code resolves both
   // relative to CLAUDE_CONFIG_DIR) — re-install the hook + canvas skill there too (idempotent),
-  // so an app update's new versions reach every account dir. Best-effort: one failing account
-  // must never block launch (match installManagedAgentHooks' fail-open).
-  for (const acct of settingsStore.get().claudeAccounts ?? []) {
-    if (acct.host) continue // remote accounts live on another host; nothing to install locally
-    try {
-      installClaudeHooksInto(claudeConfigDirFor(acct.id))
-      installCanvasSkillInto(claudeConfigDirFor(acct.id))
-      // Ensure fullscreen TUI in this account dir (write-if-absent, version-gated). Off the
-      // critical path: it awaits the memoized CLI probe, then writes fail-open. (The system
-      // ~/.claude is handled by installManagedAgentHooks above, which covers Server Edition too.)
-      void ensureClaudeFullscreenTuiInto(claudeConfigDirFor(acct.id))
-    } catch (e) {
-      console.warn(`[agent-hooks] account ${acct.id} hook install failed`, e)
-    }
-  }
+  // so an app update's new versions reach every account dir. The loop is shared with the Server
+  // Edition's boot (src/core/claude-accounts-service.ts); the canvas skill is the desktop's own
+  // addition, because canvas control is not wired on that shell at all.
+  installHooksIntoLocalAccounts(settingsStore.get().claudeAccounts ?? [], installCanvasSkillInto)
   // Fan a normalized agent event to BOTH consumers: the renderer's agentStatus store (canvas badge)
   // and the mobile-facing mirror. Named so the deterministic-approval answer handler below can reuse
   // it for the optimistic flip.
@@ -2817,7 +2821,9 @@ app.whenReady().then(async () => {
   corePlatform.on(IPC.ptyRecycle, (nodeId: string) => releaseNodeTails(nodeId))
   // Agent canvas control: the spawned agent's `nodeterm` CLI POSTs a verb to the hook server,
   // which we forward to the renderer and await a reply. A pending-request map (keyed by a random
-  // requestId) bridges the two async hops; both the reply and the 120s timeout clear the entry.
+  // requestId) bridges the two async hops; both the reply and the timeout below clear the entry.
+  // The window is generous because a confirm-gated verb waits on a human, not on the renderer.
+  const CONTROL_REQUEST_TIMEOUT_MS = 120_000
   const pendingControl = new Map<
     string,
     {
@@ -3147,8 +3153,15 @@ app.whenReady().then(async () => {
     const result = await new Promise<{ ok: boolean; message?: string; result?: unknown; error?: string }>((resolve) => {
       const timer = setTimeout(() => {
         pendingControl.delete(requestId)
-        resolve({ ok: false, error: 'timed out (no response / not confirmed)' })
-      }, 120_000)
+        // Name the timeout and say it is retryable. A DENIAL is a different answer with different
+        // guidance (`denied by user`, final, never retried), and the old wording — "no response /
+        // not confirmed" — read as though it covered both, so a caller that had merely waited out
+        // an unanswered dialog treated it as a refusal and gave up.
+        resolve({
+          ok: false,
+          error: `no answer within ${CONTROL_REQUEST_TIMEOUT_MS / 1000}s — the confirmation dialog may still be open; safe to retry`
+        })
+      }, CONTROL_REQUEST_TIMEOUT_MS)
       pendingControl.set(requestId, { resolve, timer })
       target.webContents.send(IPC.agentControl, { requestId, sourceNodeId: nodeId, verb, args })
     })
@@ -3324,6 +3337,16 @@ app.whenReady().then(async () => {
           codex: settingsStore.get().codexAccounts ?? []
         })
       ),
+    // "End session" from the phone (`pty.destroy`): the SAME two steps the desktop × performs —
+    // kill the tmux session on every socket it could live on (the sweep may have seen it on either
+    // — see the session-memory panel's kill rule), then take the node off its project's canvas
+    // (written as an outside edit, so the watcher broadcasts it and the canvas drops the node
+    // live). Node removal is best-effort by design: an unregistered phone session or an inline
+    // project has no file entry to remove, and that must not fail a destroy that already landed.
+    destroyNode: async (nodeId: string) => {
+      await ptyManager.destroySession(null, nodeId, { everySocket: true })
+      await workspaceStore.removeRemoteNode(nodeId).catch(() => false)
+    },
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).
@@ -3478,7 +3501,10 @@ app.whenReady().then(async () => {
     // path, and the result is cached (the artifact never changes within an app run). A missing
     // artifact resolves to '' — `installRemoteCodexRuntime` treats an empty bundle as "no runtime"
     // and never fails a plain SSH connect over it.
-    loadCodexRelayBundle
+    loadCodexRelayBundle,
+    // Lead-pane width (issue #119) for the remote tmux conf, read at connect time so the host
+    // carries the value the user last saved. 0 (the default) keeps the conf byte-identical.
+    () => settingsStore.get().tmuxLeadPaneWidth
   )
   // Wake-from-sleep: re-validate every SSH master NOW instead of letting ServerAlive discover the
   // dead TCP ~60s later — until it does, every remote terminal looks alive and is dead (no echo,
@@ -3649,6 +3675,12 @@ app.on('before-quit', (e) => {
     // And the askpass relay's socket file: close() is what unlinks a unix socket (process exit
     // does not), and a lingering file is one more thing the next start() has to clear.
     askpassServer.stop()
+    // Hook server last among the closers, and on THIS pass so the flush window above could still
+    // receive hook POSTs: stopping unlinks its socket AND its endpoint file (issue #445), so a
+    // graceful quit never leaves an advertisement pointing at a dead port for the tmux sessions
+    // that outlive the app. The next launch rewrites both; a crash skips this, which is what the
+    // generated clients' endpoint failover exists for.
+    hookServer.stop()
     // A SIGTERM quit (dev runners, `kill`, logout) arrives through Chromium's shutdown
     // detector, and this pass's re-issued app.quit() cannot resume the OS-initiated
     // termination the first pass preventDefault'ed: both passes run, but will-quit never

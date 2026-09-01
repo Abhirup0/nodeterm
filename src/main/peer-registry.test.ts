@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { mkdtempSync } from 'fs'
+import os from 'os'
+import path from 'path'
 import {
   registerPeerSink,
   unregisterPeerSink,
@@ -32,7 +35,9 @@ function fakeSink(buffered = () => 0) {
 function fakePlatformWithPeers(wc: { sent: Array<{ id: number; channel: string; args: any[] }> }) {
   const wcIds = [1]
   const p: CorePlatform = {
-    userDataDir: '/tmp/ud',
+    // mkdtemp, not a '/tmp/ud' literal: registered via initPlatform below, so a fixed temp path
+    // taints every platform().userDataDir write as js/insecure-temporary-file (see platform-fake.ts).
+    userDataDir: mkdtempSync(path.join(os.tmpdir(), 'nodeterm-peer-registry-')),
     appVersion: '0.0.0',
     isPackaged: false,
     handle: () => {},

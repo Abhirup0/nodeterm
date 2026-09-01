@@ -57,7 +57,24 @@ export function sanitizePasteText(text: string): string {
   return text.replace(/[\x1b\u009b]/g, '')
 }
 
-/** The single-write injection body for a bracketed-paste-aware target. */
-export function bracketedInjection(text: string, enter: boolean): string {
-  return PASTE_START + sanitizePasteText(text) + PASTE_END + (enter ? '\r' : '')
-}
+/**
+ * DELETED: `bracketedInjection` (the JS-side paste framer).
+ *
+ * It composed `ESC[200~ + sanitized text + ESC[201~ + \r` for the agent-messaging envelope, which
+ * `sendFramedPayload` then pushed through `paste-buffer` WITHOUT `-p`. That worked on tmux ≤ 3.6,
+ * where a paste buffer's bytes reach the pane verbatim. tmux 3.7 changed the contract (CHANGES:
+ * "Pass paste buffer through vis(3) when pasting to prevent buffers containing for example the
+ * bracket end sequence causing issues"): every pasted byte now goes through
+ * `utf8_stravisx(VIS_SAFE|VIS_NOSLASH)`, which rewrites the ESC byte into the two PRINTABLE
+ * characters `^[`. Measured on tmux 3.7b (the exact version the macOS app bundles): the pane's app
+ * received literal `^[[200~ … ^[[201~` TEXT — no frame, so the message sat unsubmitted in the
+ * composer (issue #453). The `-S` flag that disables vis(3) is itself new in 3.7, so it cannot be
+ * the fix on older servers.
+ *
+ * The rule that replaces it is the one `sendText` already followed: WE never put an ESC byte into
+ * a paste buffer — tmux inserts the frame itself (`paste-buffer -p`, honoured since tmux 1.7,
+ * vis(3) is applied to the buffer CONTENT only, never to tmux's own markers) and the submit is a
+ * separate `send-keys Enter` in the same command list. See `localPasteDelivery` (tmux-naming.ts)
+ * and `PtyManager.sendEnvelope`. Do not reintroduce a JS-side framer: on every tmux ≥ 3.7 its
+ * output is mangled into visible text before the pane's app ever sees it.
+ */

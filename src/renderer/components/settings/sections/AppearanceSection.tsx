@@ -12,6 +12,9 @@ import {
   type HideableRow
 } from '@renderer/lib/ui-visibility'
 import { cn } from '@renderer/ui/cn'
+import { Select } from '@renderer/ui/Select'
+import { isBrowserRuntime } from '@renderer/bridge/runtime'
+import { UI_SCALE_CHOICES, resolveUiScale, uiScaleLabel } from '@shared/ui-scale'
 import { SectionReset } from '../SectionReset'
 import { APPEARANCE_RESET_KEYS } from '@renderer/lib/settingsReset'
 
@@ -19,6 +22,10 @@ const ROWS = {
   appTheme: {
     title: 'Appearance',
     keywords: ['appearance', 'theme', 'light', 'dark', 'mode', 'colour', 'color', 'chrome']
+  },
+  uiScale: {
+    title: 'UI scale',
+    keywords: ['ui', 'scale', 'zoom', 'size', 'text', 'bigger', 'larger', '4k', 'hidpi', 'dpi', 'display', 'readability']
   },
   accent: { title: 'Accent', keywords: ['accent', 'color', 'theme', 'appearance'] },
   windowTitle: {
@@ -95,6 +102,54 @@ function VisibilityToggles({
   )
 }
 
+/** UI scale (issue #299) — page zoom for the whole app chrome; see shared/ui-scale.ts for the
+ *  mechanism decision. The row stays visible but DISABLED on the Server Edition (a hidden row
+ *  teaches nothing — the house rule the SSH-worktree affordances follow): a browser page cannot
+ *  set its own page zoom, and the browser's Cmd/Ctrl+± already does the identical thing. */
+function UiScaleRow(): React.JSX.Element {
+  const uiScale = useSettings((s) => s.settings.uiScale)
+  const update = useSettings((s) => s.update)
+  const inBrowser = isBrowserRuntime()
+  const resolved = resolveUiScale(uiScale)
+  // A hand-edited between-step value (1.15, say) is honoured by the applier, so the select must
+  // show it rather than silently displaying the nearest preset it would overwrite on next change.
+  const choices: number[] = UI_SCALE_CHOICES.includes(resolved as (typeof UI_SCALE_CHOICES)[number])
+    ? [...UI_SCALE_CHOICES]
+    : [...UI_SCALE_CHOICES, resolved].sort((a, b) => a - b)
+  return (
+    <FieldRow
+      label="UI scale"
+      htmlFor="ui-scale"
+      description={
+        'Scales the whole application UI — menus, node headers, dialogs, sidebars — like a ' +
+        "browser's page zoom. Terminal text scales with it too: the terminal font size " +
+        '(Settings → Terminal) is multiplied by this, so lower it there if you want terminal ' +
+        'text to stay as it is.'
+      }
+      note={
+        inBrowser
+          ? "In the browser, use your browser's own page zoom (Cmd/Ctrl and + / −) — it does the same thing and the browser remembers it per site."
+          : undefined
+      }
+      control={
+        <Select
+          id="ui-scale"
+          value={String(resolved)}
+          disabled={inBrowser}
+          aria-label="UI scale"
+          onChange={(e) => update({ uiScale: Number(e.target.value) })}
+        >
+          {choices.map((c) => (
+            <option key={c} value={String(c)}>
+              {uiScaleLabel(c)}
+            </option>
+          ))}
+        </Select>
+      }
+    />
+  )
+}
+
 export function AppearanceSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const appTheme = useSettings((s) => s.settings.appTheme)
   const accent = useSettings((s) => s.settings.accent)
@@ -127,6 +182,9 @@ export function AppearanceSection({ isActive }: { isActive: boolean }): React.JS
             />
           }
         />
+      </SearchableRow>
+      <SearchableRow {...ROWS.uiScale}>
+        <UiScaleRow />
       </SearchableRow>
       <SearchableRow {...ROWS.accent}>
         <div className="flex items-center justify-between gap-4 py-2.5">

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 
-import { tmuxConf } from './pty-manager'
+import { ACCOUNT_SCOPE_UPDATE_ENV, tmuxConf } from './pty-manager'
+import { leadPaneHookLines } from '../shared/tmux-lead-pane'
 
 describe('tmuxConf', () => {
   const c = tmuxConf(50000)
@@ -53,5 +54,38 @@ describe('tmuxConf', () => {
   it('floors history-limit at 1000', () => {
     expect(tmuxConf(10)).toContain('set -g history-limit 1000')
     expect(c).toContain('set -g history-limit 50000')
+  })
+
+  it('lead-pane width OFF (default/0/invalid) is byte-identical and carries no set-hook (issue #119)', () => {
+    // The opt-in guarantee enes set for the feature: with the setting off, the generated conf is
+    // bit-for-bit the pre-feature output — nodeterm ships no tmux hooks unless asked to.
+    expect(tmuxConf(50000, 0)).toBe(c)
+    expect(tmuxConf(50000, NaN)).toBe(c)
+    expect(tmuxConf(50000, -3)).toBe(c)
+    expect(c).not.toContain('set-hook')
+  })
+
+  it('lead-pane width ON only APPENDS the shared guarded hook pair — nothing above changes', () => {
+    const on = tmuxConf(50000, 72)
+    expect(on.startsWith(c)).toBe(true)
+    expect(on).toContain(leadPaneHookLines(72))
+    // Same builder as remoteTmuxConf, so the local and SSH sockets cannot drift.
+    expect(on).toContain('set-hook -g after-resize-pane')
+    expect(on).toContain('set-hook -g after-split-window')
+  })
+
+  it('lists every account-scope env name in update-environment (issue #419)', () => {
+    // The REMOVAL half of update-environment's contract is the fix: the shared server's global
+    // env is inherited from whichever client STARTED it, so without these names a server seeded
+    // by a managed-account client leaked that account's CLAUDE_CONFIG_DIR into every session
+    // created without a `-e` override — system-account nodes silently ran as a managed account.
+    const line = c.split('\n').find((l) => l.startsWith('set -g update-environment '))
+    expect(line).toBeDefined()
+    for (const name of ACCOUNT_SCOPE_UPDATE_ENV) expect(line).toContain(name)
+    // Deduped: the overlap names (ANTHROPIC_AUTH_TOKEN is in the gateway list AND the claude
+    // auth strip; OPENAI_API_KEY likewise) must appear exactly once.
+    for (const dup of ['ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY']) {
+      expect(line!.split(dup).length - 1).toBe(1)
+    }
   })
 })

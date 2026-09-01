@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { readLocal, writeLocal } from '../lib/localStore'
 
 // Remembered size of the kanban card modal — PERSONAL, per machine (localStorage), never in the
 // git-shared .nodeterm/project.json (same rule as the view mode and the comments panel). The modal
@@ -82,7 +83,7 @@ export function parseCardModalSize(raw: string | null): CardModalSize {
 
 function save(size: CardModalSize): void {
   try {
-    localStorage.setItem(CARD_MODAL_SIZE_KEY, JSON.stringify(size))
+    writeLocal(CARD_MODAL_SIZE_KEY, JSON.stringify(size))
   } catch {
     /* quota/private-mode: a remembered size is a nicety, never fail the UI */
   }
@@ -95,16 +96,15 @@ interface CardModalSizeState extends CardModalSize {
 }
 
 export const useCardModalSize = create<CardModalSizeState>((set, get) => ({
-  // localStorage guard: this module is also imported by node-environment vitest suites.
-  ...parseCardModalSize(typeof localStorage === 'undefined' ? null : localStorage.getItem(CARD_MODAL_SIZE_KEY)),
+  ...parseCardModalSize(readLocal(CARD_MODAL_SIZE_KEY)),
   remember: (width, height) => {
     const next = { width, height, maximized: false }
-    if (typeof localStorage !== 'undefined') save(next)
+    save(next)
     set(next)
   },
   setMaximized: (maximized) => {
     const next = { width: get().width, height: get().height, maximized }
-    if (typeof localStorage !== 'undefined') save(next)
+    save(next)
     set({ maximized })
   }
 }))

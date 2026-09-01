@@ -34,6 +34,7 @@ export const TERMINAL_RESET_KEYS = [
 /** The appearance settings the Appearance section owns. */
 export const APPEARANCE_RESET_KEYS = [
   'appTheme',
+  'uiScale',
   'accent',
   'hiddenNodeMenuItems',
   'hiddenHeaderButtons',

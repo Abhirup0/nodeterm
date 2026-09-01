@@ -11,6 +11,10 @@ vi.mock('electron', () => ({
 }))
 
 import { SshProjectManager } from './ssh-project'
+import { remoteTmuxPathPrologue } from '../../shared/ssh'
+
+/** The PATH-append prologue every remote tmux line now starts with (issue #449). */
+const TP = remoteTmuxPathPrologue()
 
 const conn = { host: 'h.example.com', user: 'deploy', port: 22 }
 
@@ -44,8 +48,8 @@ describe('SshProjectManager.killSessions', () => {
     const { mgr, runs } = managerWithConn()
     await mgr.killSessions('p1', ['abc'], { everySocket: true })
     expect(commands(runs)).toEqual([
-      'tmux -L node-terminal kill-session -t =nt-abc',
-      'tmux -L nodeterm-rmt kill-session -t =nt-abc'
+      `${TP}tmux -L node-terminal kill-session -t =nt-abc`,
+      `${TP}tmux -L nodeterm-rmt kill-session -t =nt-abc`
     ])
   })
 
@@ -54,13 +58,13 @@ describe('SshProjectManager.killSessions', () => {
     // that host belongs to a nodeterm running ON it, so a delete must not speculate there.
     const { mgr, runs } = managerWithConn()
     await mgr.killSessions('p1', ['abc'])
-    expect(commands(runs)).toEqual(['tmux -L nodeterm-rmt kill-session -t =nt-abc'])
+    expect(commands(runs)).toEqual([`${TP}tmux -L nodeterm-rmt kill-session -t =nt-abc`])
   })
 
   it('demands a literal true — the flag comes off the wire', async () => {
     const { mgr, runs } = managerWithConn()
     await mgr.killSessions('p1', ['abc'], { everySocket: 'yes' as unknown as boolean })
-    expect(commands(runs)).toEqual(['tmux -L nodeterm-rmt kill-session -t =nt-abc'])
+    expect(commands(runs)).toEqual([`${TP}tmux -L nodeterm-rmt kill-session -t =nt-abc`])
   })
 
   it('is best-effort: a socket that refuses does not spare the others', async () => {
@@ -75,10 +79,10 @@ describe('SshProjectManager.killSessions', () => {
     const { mgr, runs } = managerWithConn()
     await mgr.killSessions('p1', ['a', 'b'], { everySocket: true })
     expect(commands(runs)).toEqual([
-      'tmux -L node-terminal kill-session -t =nt-a',
-      'tmux -L node-terminal kill-session -t =nt-b',
-      'tmux -L nodeterm-rmt kill-session -t =nt-a',
-      'tmux -L nodeterm-rmt kill-session -t =nt-b'
+      `${TP}tmux -L node-terminal kill-session -t =nt-a`,
+      `${TP}tmux -L node-terminal kill-session -t =nt-b`,
+      `${TP}tmux -L nodeterm-rmt kill-session -t =nt-a`,
+      `${TP}tmux -L nodeterm-rmt kill-session -t =nt-b`
     ])
   })
 

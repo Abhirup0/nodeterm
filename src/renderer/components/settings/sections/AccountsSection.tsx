@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ClaudeAccount } from '@shared/types'
 import type { CodexAccount } from '@shared/codex-account'
+import { E_UNSUPPORTED } from '@shared/rpc'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
@@ -39,6 +40,11 @@ const ROWS = {
   }
 }
 const ENTRIES = Object.values(ROWS)
+
+/** The bridge's "this shell registers no such handler" rejection (renderer/bridge/stubs.ts). It is
+ *  a fact about the SURFACE, not about this account — worth a different sentence than a failure. */
+const isUnsupported = (e: unknown): boolean =>
+  !!e && typeof e === 'object' && (e as { code?: string }).code === E_UNSUPPORTED
 
 /** One machine's card in the accounts UI: a connectivity dot, the machine label, a Local/SSH pill,
  *  and (for a remote machine) its `user@host` subtitle. Children are the provider account rows. */
@@ -227,6 +233,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   }, [])
   const [pendingRemoveCodex, setPendingRemoveCodex] = useState<CodexAccount | null>(null)
   const [addingCodex, setAddingCodex] = useState(false)
+  const [codexAddError, setCodexAddError] = useState<string | null>(null)
 
   // The reachable machines: this Mac first, then every saved SSH server unioned with the active
   // project's own server (deduped by host key). Accounts partition onto them by `host`.
@@ -289,6 +296,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const onAddCodexAccount = async (): Promise<void> => {
     if (addingCodex) return
     setAddingCodex(true)
+    setCodexAddError(null)
     try {
       const added = await window.nodeTerminal.codexAccounts.add()
       const account: CodexAccount = { id: added.id, label: 'New Codex account', pending: true }
@@ -302,6 +310,16 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           applyResolvedCodexAccounts(accs, [{ id: added.id, email: captured.email }])
         )
       }
+    } catch (e) {
+      // Without this the browser's E_UNSUPPORTED rejection was an UNHANDLED promise rejection: the
+      // spinner stopped and nothing else happened, which reads as a dead button. Managed Claude
+      // accounts now work in the browser, so a user who just added one has every reason to expect
+      // the button beneath it to work too — say why it does not.
+      setCodexAddError(
+        isUnsupported(e)
+          ? 'Managed Codex accounts are not available in the browser yet — manage them from the desktop app.'
+          : 'Could not set up the Codex account.'
+      )
     } finally {
       setAddingCodex(false)
     }
@@ -453,14 +471,19 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     let added: { id: string; versionSupported: boolean }
     try {
       added = await window.nodeTerminal.claudeAccounts.add(projectId ? { projectId } : undefined)
-    } catch {
+    } catch (e) {
       // The remote path does not reject on a failed setup (it answers with an empty configDir and
       // lets the login node report the connection error), so reaching here means the call itself
       // never landed. Say so: after a spinner, silence is the one outcome that teaches nothing.
+      // E_UNSUPPORTED is a separate sentence because it is a fact about the surface, not this
+      // account: the Server Edition serves these channels now, but a relay tab still refuses them
+      // and so does a server binary older than that change.
       setAddError(
-        host
-          ? `Could not set up an account on ${host}. Is the project still connected?`
-          : 'Could not set up the account.'
+        isUnsupported(e)
+          ? 'Managed Claude accounts are not available on this surface — manage them from the desktop app or the Server Edition directly.'
+          : host
+            ? `Could not set up an account on ${host}. Is the project still connected?`
+            : 'Could not set up the account.'
       )
       return
     } finally {
@@ -730,6 +753,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                       'Add Codex account'
                     )}
                   </Button>
+                  {codexAddError ? (
+                    <p className="text-[12px] text-[color:var(--danger)]">{codexAddError}</p>
+                  ) : null}
                 </div>
               ) : (
                 <p className="text-[12px] leading-relaxed text-muted">

@@ -49,6 +49,7 @@ export const WORKTREE_GROUP_SIZE = { width: 760, height: 540 }
 const EDITOR_SIZE = { width: 660, height: 460 }
 const DIFF_SIZE = { width: 860, height: 500 }
 const DINO_SIZE = { width: 600, height: 200 }
+const TRIGGER_SIZE = { width: 300, height: 170 }
 const VIDEO_SIZE = { width: 640, height: 420 }
 const WEB_SIZE = { width: 720, height: 520 }
 const BROWSER_SIZE = { width: 800, height: 560 }
@@ -119,6 +120,14 @@ export interface NodeData {
    * through persistence untouched on Server Edition / mobile, where a browser node has no <webview>.
    */
   partition?: string
+  /**
+   * browser/web-only, NEVER persisted: this node object is a background KEEP-ALIVE GHOST — a
+   * `display:none` stand-in merged into the `<ReactFlow>` prop so the `<webview>` of a project the
+   * user switched away from stays mounted (its guest process dies on DOM detach). Ghosts live only
+   * in `state/webviewKeepAlive.ts` pool entries; Canvas state, persistence, undo and the wire never
+   * hold one. The surfaces read it to route their callbacks at the pool instead of React Flow.
+   */
+  ghost?: boolean
   diffStaged?: boolean
   commitOid?: string
   /** dino-only: best score reached in the T-Rex Runner game. */
@@ -158,6 +167,12 @@ export interface NodeData {
    * SSH-project editor still routes to the remote fs after reopen.
    */
   sshFs?: boolean
+  /**
+   * trigger-only: the schedule + payload + target of a trigger node (issue #493). Persisted as
+   * git-shared content and sanitized on every load path; whether it may FIRE on this machine is
+   * the machine-local arm store's question, never this field's. See @shared/trigger.
+   */
+  trigger?: import('@shared/trigger').TriggerSpec
   [key: string]: unknown
 }
 
@@ -526,15 +541,32 @@ export function sshAccountsHint(
     : null
 }
 
-/** Account for a NEW Claude node: explicit pick, else the project default, else system. */
+/**
+ * Account for a NEW Claude node: explicit pick, else the project default, else system.
+ *
+ * `explicit === null` is an EXPLICIT "System account" pick and short-circuits past the project
+ * default. Before it existed, the submenu row wearing the user's system email launched the
+ * PROJECT DEFAULT account — the clearest "picked X, ran as Y" in issue #419 — because "no
+ * account passed" and "system picked" were the same value.
+ *
+ * Validation runs against the accounts ELIGIBLE for this project (`accountsForProject`), not the
+ * raw list, mirroring what every picker offers. The raw list also holds `pending` rows (their dir
+ * exists but no login lives in it yet) and accounts pinned to ANOTHER machine's host (their dir
+ * exists only over there) — a `defaultAccountId` pointing at either used to be stamped onto the
+ * node, whose spawn then fell into the missing/empty-dir fallback and silently ran under a
+ * different identity (#419 again). Ineligible ⇒ undefined ⇒ the honest system default.
+ */
 export function resolveNewNodeAccount(
-  explicit: string | undefined,
-  project: { defaultAccountId?: string } | undefined,
+  explicit: string | null | undefined,
+  project:
+    | { defaultAccountId?: string; ssh?: { server: { host: string; user: string } } }
+    | undefined,
   accounts: ClaudeAccount[]
 ): string | undefined {
+  if (explicit === null) return undefined
   const id = explicit ?? project?.defaultAccountId
   // A stale default (account since removed) must not stamp dead ids onto new nodes.
-  return id && accounts.some((a) => a.id === id) ? id : undefined
+  return id && accountsForProject(accounts, project).some((a) => a.id === id) ? id : undefined
 }
 
 /**
@@ -754,6 +786,36 @@ export function createCodexAccountLoginNode(
     title: 'Codex login',
     accountId,
     initialCommand: 'codex login'
+  }
+  return node
+}
+
+/**
+ * Terminal node that SWITCHES the system (~/.claude) Claude identity — the usage popover's
+ * "Switch account" action (issue #420). Runs `claude /login` with NO `accountId`, so the spawn
+ * env is bit-for-bit the plain-terminal one and the OAuth writes the system `~/.claude` —
+ * which is the point: every system-scope session follows the new org, exactly as a hand-typed
+ * `claude /login` would make them. Deliberately a SEPARATE factory from
+ * `createAccountLoginNode`: that one REQUIRES an accountId because config-dir scoping is its
+ * purpose, and its 'Claude login' title is the durable signature `isAccountLoginNode` keys on
+ * to destroy login nodes together with their removed account — a sweep this node must never be
+ * caught by (both destroy paths also gate on accountId equality, and this node has none).
+ *
+ * The docblock hazard on `isAccountLoginNode` — a respawned `claude /login` overwriting the
+ * system identity — is only a hazard when it happens UNASKED. Here the overwrite is the feature,
+ * and "once" is structural rather than promised: `initialCommand` is consumed on first mount and
+ * never serialized (`flowToNodeStates` drops it), so after an app restart or a machine reboot
+ * this node is an inert plain terminal, not a login prompt nobody requested.
+ *
+ * Local only, on purpose: on an SSH project a system login would rewrite THAT host's ~/.claude,
+ * so the popover does not offer the action there (see UsageIndicator).
+ */
+export function createSystemLoginNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  const node = createTerminalNode(index, undefined, center)
+  node.data = {
+    ...node.data,
+    title: 'Switch Claude account',
+    initialCommand: 'claude /login'
   }
   return node
 }
@@ -1660,7 +1722,8 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         ssh: n.ssh,
         sshRemoteTmux: n.sshRemoteTmux,
         sshFs: n.sshFs,
-        worktree: n.worktree
+        worktree: n.worktree,
+        trigger: n.trigger
       }
     }
   })
@@ -1686,7 +1749,9 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
                   ? WEB_SIZE
                   : kind === 'dino'
                     ? DINO_SIZE
-                    : TERMINAL_SIZE
+                    : kind === 'trigger'
+                      ? TRIGGER_SIZE
+                      : TERMINAL_SIZE
   return nodes
     .map((n) => {
       const kind: NodeKind = (n.type as NodeKind) ?? 'terminal'
@@ -1731,6 +1796,7 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         sshRemoteTmux: n.data.sshRemoteTmux,
         sshFs: n.data.sshFs,
         worktree: n.data.worktree,
+        trigger: n.data.trigger,
         premaxRect: n.data.premaxRect
       }
     })

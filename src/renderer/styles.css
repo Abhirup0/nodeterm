@@ -2206,6 +2206,57 @@ body,
   background: rgba(var(--tint-rgb), 0.12);
 }
 
+/* Stale working directory (issue #464): the project folder was deleted (or replaced) while this
+   node's tmux session kept running, so the shell sits on a dead inode. A slim TOP banner — never
+   a covering overlay, the terminal underneath is alive — offering the explicit recycle-respawn
+   ("Restart in folder") plus a dismiss. Top edge: shells and agent CLIs write their input line at
+   the bottom, and covering the prompt would be worse than covering the oldest output row. */
+.term-node__stalecwd {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: 11px;
+  color: #ffd9a8;
+  background: rgba(120, 70, 10, 0.92);
+  border-bottom: 1px solid rgba(255, 180, 80, 0.35);
+}
+.term-node__stalecwd-text {
+  flex: 1;
+  min-width: 0;
+}
+.term-node__stalecwd-restart {
+  padding: 2px 10px;
+  border: 1px solid rgba(255, 200, 120, 0.45);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.term-node__stalecwd-restart:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+.term-node__stalecwd-dismiss {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.term-node__stalecwd-dismiss:hover {
+  opacity: 1;
+}
+
 /* "Reconnect" in the SSH connection banner. The banner paints its own dark-red background, so this
    sits on a light translucent fill rather than the card tint the node buttons use. */
 .ssh-banner__retry {
@@ -2831,6 +2882,19 @@ body,
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
+}
+
+/* Live-session badge on a "Recently closed" row (issue #442): a closed project keeps its tmux
+   sessions running, and this is the one place that says so. Green = the RUNNING vocabulary. */
+.welcome__recent-sessions {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--success);
+  background: rgba(48, 209, 88, 0.14);
 }
 
 .welcome__recent-del {
@@ -6397,6 +6461,28 @@ button.group-node__setup:disabled {
   white-space: nowrap;
 }
 .usage-account__use:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* Popover-footer action (issue #420): opens the system-scoped `claude /login` terminal. A quiet
+   full-width row, styled with the same tint/accent tokens as `.usage-account__use` so it reads
+   in both themes. */
+.usage-popover__switch {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-align: left;
+  color: rgba(var(--tint-rgb), 0.55);
+  background: rgba(var(--tint-rgb), 0.06);
+  cursor: pointer;
+}
+.usage-popover__switch:hover {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
