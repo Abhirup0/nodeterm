@@ -154,6 +154,14 @@ export function assembleLaunchCommand(
   const { fragment: argsFragment, missing: m2 } = expandedArgs(inputs.customAgent?.args ?? '', env)
   const baseCmd = argsFragment ? `${program} ${argsFragment}` : program
 
+  // The prompt becomes a POSITIONAL ARGUMENT on a command line that is then typed into the pane
+  // (`writeWhenShellReady` -> `deliverCommand`, which echo-verifies the line before submitting it).
+  // A newline inside it would submit the half-typed line and fail that verification, so every run
+  // of whitespace is collapsed to a single space. Load-bearing for this delivery path, not tidying:
+  // preserving structure means delivering the prompt as a MESSAGE after launch (sendText, which
+  // frames multi-line text through tmux `paste-buffer -p`) rather than as argv. Callers that let a
+  // user or an agent supply the prompt must say the text arrives on one line -- see
+  // `buildCanvasSkillBody` / `buildCanvasControlInstructions`.
   const promptArg = inputs.initialPrompt
     ? shellSingleQuote(inputs.initialPrompt.replace(/\s+/g, ' ').trim())
     : null

@@ -7,7 +7,7 @@
  */
 import {
   getEffectiveBindings, sanitizeKeybindingOverrides, normalizeTerminalShortcutPolicy,
-  resolveCommandForKeyEvent, COMMANDS_BY_ID,
+  resolveCommandForKeyEvent, COMMANDS_BY_ID, MAIN_INTERCEPTED_COMMAND_IDS,
   type CommandId, type KeybindingOverrides, type TerminalShortcutPolicy
 } from '@shared/keybindings'
 import type { ShortcutKeyEvent } from '@shared/shortcut'
@@ -119,7 +119,10 @@ export function terminalShortcutPolicy(): TerminalShortcutPolicy {
  *  refuses non-terminal-scope commands (the chord stays with the shell), an unbound/remapped
  *  chord follows the live overrides, and `kanbanOpen` refuses canvas-scope commands so a modal
  *  terminal over the board keeps its bytes. Terminal-SCOPE commands are excluded — their local
- *  listeners own them and this helper must not reroute their chords. */
+ *  listeners own them and this helper must not reroute their chords. Main-intercepted commands
+ *  are excluded too: the window dispatcher deliberately has no handlers for them. If the main
+ *  process stands down (notably Ctrl+W in a focused Linux/Windows terminal), xterm must retain the
+ *  chord so the control byte reaches the pty. */
 export function terminalChordBubbles(e: ShortcutKeyEvent, kanbanOpen: boolean): boolean {
   const id = resolveCommandForKeyEvent(
     e,
@@ -132,7 +135,7 @@ export function terminalChordBubbles(e: ShortcutKeyEvent, kanbanOpen: boolean): 
     activeKeybindingOverrides(),
     isMacPlatform()
   )
-  if (id === null) return false
+  if (id === null || MAIN_INTERCEPTED_COMMAND_IDS.includes(id)) return false
   return COMMANDS_BY_ID.get(id)?.scope !== 'terminal'
 }
 

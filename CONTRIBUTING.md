@@ -64,6 +64,14 @@ The **canvas and the kanban board are two views of the same nodes.** When you ad
 canvas node — a header action, a badge, a menu item — ask whether the board's card and card modal
 need it too, and wire it in the same change.
 
+A board card's **source** is a registry entry, not a branch you add at a call site
+(`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
+(`assignment` = the board's own persisted assignments, `provider` = the provider owns the column),
+in-column `lane` order, whether it is `configured` for a board — and give it its one leaf (a card
+component and the list path feeding it). Columns take lanes and name no source; the drag path
+branches on `placement`. If you find yourself writing `=== 'github'` outside the registry, the
+registry is missing a field.
+
 ## House rules
 
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
@@ -85,6 +93,16 @@ need it too, and wire it in the same change.
   including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+
+- **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
+  failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed
+  a flag it doesn't know, an unreachable ssh host), Node re-emits the EPIPE as an async `'error'`
+  EVENT on the stream — a try/catch around the write is inert, and the unhandled event crashes the
+  whole main process with an "Uncaught Exception: write EPIPE" dialog (issue #382's class). Attach
+  `child.stdin.on('error', ...)` before the first write — log via `console.warn` so the debug ring
+  sees it, or settle the pending call; the child's exit code stays the authority on the outcome
+  (see `tmux-control-client.ts` and `pty-manager.ts` `runWithStdin` for the house pattern). A test
+  (`src/core/stream-epipe.guard.test.ts`) scans for this and will fail your PR.
 
 - **Never unmount, move or re-key a browser/web node's element.** An Electron `<webview>`'s guest
   process dies on DOM detach — and a detach includes any `insertBefore`/`appendChild` MOVE of an
