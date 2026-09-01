@@ -1,4 +1,5 @@
 import path from 'path'
+import { healPathAsName } from '../shared/project-name'
 import type { AgentPermissionMode } from '../shared/agents/config'
 import { collisionSeed, derivedProjectId, legacyFileId } from '../shared/project-id'
 import {
@@ -324,7 +325,12 @@ export function fileToProject(
   const icon = sanitizeProjectIcon(f.icon)
   return {
     id: base.id,
-    name: f.name,
+    // A project whose stored name IS its own path is one this machine (or a teammate's) created
+    // before the basename fix, when a Windows cwd yielded the whole path instead of the folder.
+    // Heal it on read: a name equal to the cwd carries no information the cwd does not already
+    // carry, so re-deriving it cannot lose a name the user chose. Anything else is left ALONE —
+    // a deliberate rename that happens to look path-ish stays exactly as typed.
+    name: healPathAsName(f.name, base.cwd),
     color: f.color,
     ...(icon ? { icon } : {}),
     viewport: base.viewport ?? f.viewport ?? framingViewport(f.nodes),

@@ -30,23 +30,10 @@ export function normalizeProjectCwd(resolvedCwd: string): string {
   return stripped === '' || /^[A-Za-z]:$/.test(stripped) ? resolvedCwd : stripped
 }
 
-/**
- * The folder name a path ends in — the ONE basename for project naming, shared by every site that
- * used to inline `split('/')`.
- *
- * That inline version only split on forward slashes, so on Windows a path like
- * `C:\\Users\\me\\code\\my-app` came back as ONE segment: the whole path. Every project
- * there was named after its absolute path, in the sidebar, in the tab bar, and — because `name` is
- * git-shared through `project.json` — for every teammate who pulled that file too.
- *
- * Backslashes are folded to `/` before splitting, the way `session-host/host.ts` and
- * `session-host/session.ts` already do it, so one implementation answers on both platforms. A path
- * that is nothing but separators (or empty) has no folder name and yields `''`; callers keep their
- * own fallback, since `'Project'` is right for a project and wrong for a notification label.
- */
-export function folderName(p: string): string {
-  return p.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? ''
-}
+// `folderName` lives in shared/ so the core-side project loader can use the same rule; it stays
+// exported from here too, because that is where every renderer caller already imports it from.
+import { folderName } from '@shared/project-name'
+export { folderName }
 
 export function findProjectByCwd<T extends { cwd?: string }>(
   projects: readonly T[],
