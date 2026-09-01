@@ -64,6 +64,27 @@ describe('mergeManagedHook', () => {
     )
     expect(out.hooks!.Stop).toEqual([{ hooks: [{ type: 'command', command: cmd }] }])
   })
+  it('is idempotent on Windows — drops prior managed entry when path uses backslashes', () => {
+    const winCmd = buildManagedHookCommand('C:\\Users\\dev\\.nodeterm\\agent-hooks\\claude.sh')
+    const once = mergeManagedHook({}, winCmd, ['Stop'])
+    const twice = mergeManagedHook(once, winCmd, ['Stop'])
+    expect(twice.hooks!.Stop).toEqual([{ hooks: [{ type: 'command', command: winCmd }] }])
+  })
+
+  it('collapses accumulated duplicate Windows managed entries down to one', () => {
+    const winCmd = buildManagedHookCommand('C:\\Users\\dev\\.nodeterm\\agent-hooks\\claude.sh')
+    const accumulated = {
+      hooks: {
+        Stop: [
+          { hooks: [{ type: 'command', command: winCmd }] },
+          { hooks: [{ type: 'command', command: winCmd }] },
+          { hooks: [{ type: 'command', command: winCmd }] }
+        ]
+      }
+    }
+    const out = mergeManagedHook(accumulated, winCmd, ['Stop'])
+    expect(out.hooks!.Stop).toEqual([{ hooks: [{ type: 'command', command: winCmd }] }])
+  })
 })
 
 describe('mergeManagedHook — repair sweep', () => {
@@ -81,6 +102,17 @@ describe('mergeManagedHook — repair sweep', () => {
     }
     const out = mergeManagedHook(before, cmd, ['Stop'])
     expect(out.hooks!.Stop).toEqual([{ hooks: [{ type: 'command', command: cmd }] }])
+    expect(out.hooks!.SubagentStop).toBeUndefined()
+  })
+
+  it('drops stale managed entries with Windows backslash paths from unmanaged events', () => {
+    const staleWin = buildManagedHookCommand('C:\\Users\\dev\\.nodeterm\\agent-hooks\\claude.sh')
+    const before = {
+      hooks: {
+        SubagentStop: [{ hooks: [{ type: 'command', command: staleWin }] }]
+      }
+    }
+    const out = mergeManagedHook(before, cmd, ['Stop'])
     expect(out.hooks!.SubagentStop).toBeUndefined()
   })
 
@@ -111,3 +143,46 @@ describe('mergeManagedHook — matcher support is opt-in per event', () => {
     expect(out.hooks!.PreToolUse[0]).toEqual({ matcher: '.*', hooks: [{ type: 'command', command: 'CMD' }] })
   })
 })
+
+describe('removeHooksFrom', () => {
+  it('removes managed hook entries with Windows backslash paths while preserving other hooks', async () => {
+    const { removeHooksFrom } = await import('./install-helper')
+    const { mkdtempSync, readFileSync, writeFileSync, rmSync } = await import('fs')
+    const { tmpdir } = await import('os')
+    const path = await import('path')
+
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'nt-remove-hooks-'))
+    const cfgPath = path.join(tempDir, 'settings.json')
+    const winCmd = buildManagedHookCommand('C:\\Users\\dev\\.nodeterm\\agent-hooks\\claude.sh')
+    const foreignHook = { type: 'command', command: '/bin/sh /custom/my-hook.sh' }
+
+    try {
+      writeFileSync(
+        cfgPath,
+        JSON.stringify({
+          hooks: {
+            Stop: [
+              { hooks: [{ type: 'command', command: winCmd }] },
+              { hooks: [foreignHook] }
+            ],
+            SessionStart: [{ hooks: [{ type: 'command', command: winCmd }] }]
+          }
+        }),
+        'utf8'
+      )
+
+      removeHooksFrom({
+        configPath: cfgPath,
+        events: ['Stop', 'SessionStart'],
+        scriptFileName: 'claude.sh'
+      })
+
+      const updated = JSON.parse(readFileSync(cfgPath, 'utf8'))
+      expect(updated.hooks.Stop).toEqual([{ hooks: [foreignHook] }])
+      expect(updated.hooks.SessionStart).toBeUndefined()
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+})
+

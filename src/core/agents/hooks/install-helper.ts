@@ -96,7 +96,7 @@ const matcherOf = (e: ManagedHookEvent): string | undefined => (typeof e === 'st
 /** A managed entry: matches OUR script under `agent-hooks/` or the legacy `claude-signals` marker. */
 function isManaged(d: HookDef, marker: string): boolean {
   return !!d.hooks?.some(
-    (h) => h.command.includes(marker) || h.command.includes('claude-signals')
+    (h) => h.command.replaceAll('\\', '/').includes(marker) || h.command.includes('claude-signals')
   )
 }
 
@@ -189,7 +189,9 @@ export function removeHooksFrom(opts: RemoveHooksOptions): void {
   for (const e of events) {
     const ev = eventNameOf(e)
     if (!config.hooks[ev]) continue
-    config.hooks[ev] = config.hooks[ev].filter((d) => !d.hooks?.some((h) => h.command.includes(marker)))
+    config.hooks[ev] = config.hooks[ev].filter(
+      (d) => !d.hooks?.some((h) => h.command.replaceAll('\\', '/').includes(marker))
+    )
     if (config.hooks[ev].length === 0) delete config.hooks[ev]
   }
   try {
