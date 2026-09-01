@@ -433,6 +433,7 @@ import type { KanbanCreateChoice, KanbanSession } from '../components/kanban/Kan
 import { assignNode, assignedTo, defaultKanban, labelsForCard, migrateProjectTags, resolveColumnRef, unassigned } from '../lib/kanban'
 import { registerWorkspaceDirty } from '../state/workspaceDirty'
 import { snapNodeToGrid } from '../lib/nodeSizing'
+import { snapResizeChanges } from '../lib/resizeSnap'
 import { canClearDirty, canCommitCanvas, canCreateOnCanvas } from '../state/persistGuards'
 import { isHidden } from '../lib/ui-visibility'
 import { boardLogEvents } from '../lib/boardLogDiff'
@@ -2945,8 +2946,14 @@ export function Canvas() {
         }
         return true
       })
-      onNodesChange(managed)
-      if (managed.some((c) => c.type !== 'select')) markDirty()
+      // Re-snap what the resizer proposes before it is applied, so a resize tracks the grid
+      // during the drag instead of correcting itself on release (see lib/resizeSnap.ts).
+      const settings = useSettings.getState().settings
+      const snapped = settings.snapToGrid
+        ? snapResizeChanges(managed, nodesRef.current, settings.gridSize || GRID)
+        : managed
+      onNodesChange(snapped)
+      if (snapped.some((c) => c.type !== 'select')) markDirty()
     },
     [onNodesChange, markDirty, ephParentPosition]
   )

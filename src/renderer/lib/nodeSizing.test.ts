@@ -51,6 +51,23 @@ describe('snapNodeToGrid', () => {
     expect(r.height).toBe(216)
   })
 
+  // What the resize wiring needs: React Flow adds a grid-multiple DELTA to whatever width the
+  // node started at, so an off-grid node can never reach a multiple by resizing. One snap has to
+  // land it there from any start, or the correction only moves the problem.
+  it('lands any off-grid box on grid multiples in one step', () => {
+    for (let width = 263; width < 420; width += 7) {
+      const r = snapNodeToGrid(20, 'terminal', { x: 13, y: 7, width, height: width - 90 })
+
+      expect([r.x % 20, r.y % 20, r.width % 20, r.height % 20]).toEqual([0, 0, 0, 0])
+    }
+  })
+
+  it('is idempotent, so the next resize starts from a clean base', () => {
+    const once = snapNodeToGrid(20, 'terminal', { x: 13, y: 7, width: 331, height: 199 })
+
+    expect(snapNodeToGrid(20, 'terminal', once)).toEqual(once)
+  })
+
   it('every kind has a positive min-size entry', () => {
     const kinds: NodeKind[] = [
       'terminal', 'sticky', 'group', 'editor', 'diff',
