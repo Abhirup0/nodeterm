@@ -31,16 +31,21 @@ import {
   isNodeRemote,
   isNodeWatched,
   setWatchedNode,
+  setRemotelyViewedNodes,
   wakeHibernatedNode
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
 import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
+import { isBrowserRuntime } from '@renderer/bridge/runtime'
+import { WheelZoomBurstLimiter, clampWheelZoomSpeed, nextWheelZoom } from './wheel-zoom'
 import { selectedLocalFilePaths } from './canvas-file-copy'
 import {
   canvasImagePasteArmedAfterKey,
   canvasImportRefusal,
+  droppedDirectories,
   guardedCanvasImagePlacements,
-  isCanvasImageDropTarget
+  isCanvasImageDropTarget,
+  isFolderDropTarget
 } from './canvas-image-import'
 import {
   SharedGlyphLayer,
@@ -330,6 +335,7 @@ import {
   worktreeFromCreate,
   worktreeFromEntry,
   worktreeRemoveMessage,
+  resolveWorktreeBase,
   type GroupWorktree,
   type WorktreeCreateValue,
   type WorktreeEntry
@@ -367,6 +373,8 @@ import {
   type AgentPermissionMode
 } from '@shared/agents/config'
 import { withPermissionMode } from '@shared/agents/approval-mode'
+import { promptFilePathError } from '@shared/agents/launch'
+import { parseTeamSpec } from '../lib/teamSpec'
 import { relativeTime } from '../lib/relativeTime'
 import { AgentIcon } from '../lib/agentIcons'
 import { branchClaudeSession } from '../lib/claudeBranch'
@@ -436,7 +444,7 @@ import { chordHeld, isHoldChord, isModifierEventKey, matchesShortcut } from '@sh
 // The dispatch below is the CONSUMER of the confirm-gated set. Before this import the set named
 // write/close as "the confirm-gated pair" from inside `src/main` — which this project cannot see —
 // while the gating lived in two hand-written blocks here, so the set decided nothing.
-import { isDestructiveVerb } from '@shared/control-verbs'
+import { isDestructiveVerb, dryRunRequested } from '@shared/control-verbs'
 import { canvasSyncTarget } from './collab-sync'
 import {
   applyCanvasMutation,
@@ -2221,11 +2229,11 @@ export function Canvas() {
   // projects array is rebuilt on every node serialization, the id set is not. Closed-but-kept
   // projects keep their entries on purpose: closing detaches like a project switch, and the
   // memory saver reaps their pages on its own clock.
-  const projectIdsSig = useProjects((s) => s.projects.map((p) => p.id).join(' '))
+  const projectIdsSig = useProjects((s) => s.projects.map((p) => p.id).join('\0'))
   useEffect(() => {
     useWebviewKeepAlive
       .getState()
-      .prune(new Set(projectIdsSig === '' ? [] : projectIdsSig.split(' ')))
+      .prune(new Set(projectIdsSig === '' ? [] : projectIdsSig.split('\0')))
   }, [projectIdsSig])
 
   /**
@@ -3116,16 +3124,27 @@ export function Canvas() {
   // MacWheelGestureRouter tells them apart (and stays sticky for the length of one physical
   // gesture) and hands trackpad packets back to React Flow's own panOnScroll.
   const wheelZoom = settings.wheelZoom
+  const wheelZoomSpeed = clampWheelZoomSpeed(settings.wheelZoomSpeed)
   // The escape hatch, resolved ONCE: the router and React Flow's panOnScroll below must agree, or
   // a gesture neither of them pans is a gesture that does nothing.
   const trackpadRouting = trackpadRoutingEnabled(isMac, settings.trackpadPan)
   useEffect(() => {
     const wrap = flowWrapRef.current
     if (!wrap) return
-    const wheelRouting = new MacWheelGestureRouter()
+    // Desktop: the main process reports trackpad gestures from the raw input stream, so the
+    // router routes by device FACT instead of delta-shape guessing — a precise-pixel mouse
+    // (MX Master) zooms while the trackpad pans, both settings on. The browser (Server Edition)
+    // has no such stream: reporting stays off and the router keeps its heuristics.
+    const gestureReporting = isMac && !isBrowserRuntime()
+    const wheelRouting = new MacWheelGestureRouter(gestureReporting)
+    const offGesture = gestureReporting
+      ? window.nodeTerminal.onCanvasTrackpadGesture?.((active) => wheelRouting.noteGesture(active))
+      : undefined
+    const wheelLimiter = new WheelZoomBurstLimiter()
     const onWheel = (e: WheelEvent) => {
       if (canvasLocked) return
-      if (!e.ctrlKey && !e.metaKey) {
+      const plainWheel = !e.ctrlKey && !e.metaKey
+      if (plainWheel) {
         // The ancestor walk is the expensive part of this handler at ~120 Hz, so it is memoized
         // per packet AND never run for a packet no guard asks about (a plain wheel with wheelZoom
         // off, which is the default, walks nothing at all).
@@ -3146,16 +3165,23 @@ export function Canvas() {
       const rect = wrap.getBoundingClientRect()
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
-      // Cap a single event's influence so a chunky mouse-wheel tick doesn't jump zoom levels.
-      const d = Math.max(-50, Math.min(50, e.deltaY))
-      const next = Math.min(2, Math.max(0.01, zoom * Math.exp(-d * 0.01)))
+      // Cap a burst's influence so a chunky mouse-wheel click doesn't jump zoom levels: high-res
+      // ratchet wheels (MX Master) deliver ONE detent as several packets, so the cap is a shared
+      // per-burst budget rather than per-event (see wheel-zoom.ts). The speed multiplier is the
+      // user's tune knob and applies only to the plain-wheel opt-in path — modifier zoom and
+      // pinch keep the historical fixed step.
+      const d = wheelLimiter.apply(e.deltaY, e.timeStamp)
+      const next = nextWheelZoom(zoom, d, plainWheel ? wheelZoomSpeed : 1)
       if (next === zoom) return
       const k = next / zoom
       setViewport({ x: px - (px - x) * k, y: py - (py - y) * k, zoom: next })
     }
     wrap.addEventListener('wheel', onWheel, { capture: true, passive: false })
-    return () => wrap.removeEventListener('wheel', onWheel, { capture: true })
-  }, [getViewport, setViewport, wheelZoom, trackpadRouting, canvasLocked])
+    return () => {
+      wrap.removeEventListener('wheel', onWheel, { capture: true })
+      offGesture?.()
+    }
+  }, [getViewport, setViewport, wheelZoom, wheelZoomSpeed, trackpadRouting, canvasLocked])
 
   // Double-clicking EMPTY canvas pulls back to the overview zoom — the inverse of the node
   // double-click, which frames one node. A fixed zoom, not "the camera the last focus came from":
@@ -4711,6 +4737,38 @@ export function Canvas() {
     window.addEventListener('nodeterm:account-removed', onAccountRemoved)
     return () => window.removeEventListener('nodeterm:account-removed', onAccountRemoved)
   }, [setNodes, markDirty, deleteNodes])
+
+  // Eco × phone ("hibernation isn't phone-compatible"). Three wires, all nudges:
+  //  - `agent:wake`: a phone viewer just attached over the relay to a node's session — ask the
+  //    node to resume its hibernated CLI. Same contract as every other wake asker: the node
+  //    re-reads the flag itself, so this is a no-op for a non-hibernated node, and a no-op for an
+  //    UNMOUNTED one (inactive project) — the phone then still sees the SLEEPING chip and an
+  //    honest shell, never a resume typed into a pane nothing verified.
+  //  - `agent:remote-viewers`: the full set of phone-watched node ids, fed into `isNodeWatched`
+  //    so the sweep cannot `/exit` a session someone is reading on their phone.
+  //  - boot replay: the hibernated flag is persisted in THIS renderer's localStorage, and main's
+  //    mirror starts empty every launch — re-report the persisted set once so the phone's
+  //    SLEEPING chips survive a desktop restart.
+  useEffect(() => {
+    const unsubWake = window.nodeTerminal.onAgentWake?.((nodeId) => wakeHibernatedNode(nodeId))
+    const unsubViewers = window.nodeTerminal.onRemoteViewers?.((ids) =>
+      setRemotelyViewedNodes(ids)
+    )
+    for (const [id, st] of Object.entries(useAgentStatus.getState().byId)) {
+      if (st?.hibernated) {
+        try {
+          window.nodeTerminal.reportHibernated?.(id, true)
+        } catch {
+          /* mirror side-channel only */
+        }
+      }
+    }
+    return () => {
+      unsubWake?.()
+      unsubViewers?.()
+      setRemotelyViewedNodes([])
+    }
+  }, [])
 
   // Cmd/Ctrl+W (forwarded from main) closes the selected node(s) immediately, like the
   // node's × button. With nothing selected it falls back to closing the window.
@@ -8042,6 +8100,12 @@ export function Canvas() {
     return api.onAgentControl(async ({ requestId, sourceNodeId, verb, args }) => {
       const reply = (r: { ok: boolean; message?: string; result?: unknown; error?: string }) =>
         api.sendAgentControlResult({ requestId, ...r })
+      // `--dry-run` (issue #532): validate + report, mutate nothing. Only DRY_RUN_VERBS reach
+      // this process with the flag set — main's setControlHandler refuses it for every other
+      // verb before forwarding — so the per-case branches below are the whole renderer story:
+      // each runs the SAME validation as a real call and stops just before the mutation.
+      const dryRun = dryRunRequested(args)
+      const DRY_RUN_PREFIX = 'DRY RUN — nothing was opened or changed.'
 
       // ── Agent messaging (`send`/`reply`) — handled BEFORE the source-routing machinery ──────
       // These are STORE_ANSWERED_VERBS (lib/controlRouting): routing by source must never travel
@@ -8210,6 +8274,13 @@ export function Canvas() {
         (verb === 'open-terminal' || verb === 'open-claude' || verb === 'open-agent') &&
         args.project !== undefined
       ) {
+        // `--dry-run` validates against the LIVE canvas; a `--project` open lands in another
+        // project's serialized store through a different code path, and a "validate only" copy of
+        // that path is exactly the rot #532 warns about. Refused, not silently run.
+        if (dryRun) {
+          reply({ ok: false, error: `${verb}: --dry-run cannot be combined with --project` })
+          return
+        }
         const targetId = args.project
         // v1 excludes the flags that name ids inside another project (spec §2.2). The decision is
         // the PURE projectTargetFlagRefusal — red-capable in projectOpen.test.ts (review #363
@@ -8723,6 +8794,27 @@ export function Canvas() {
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
             const termCwd = args.cwd || groupCwd || srcCwd
+            if (dryRun) {
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `open-terminal would open ${count} terminal(s)` +
+                    (intoGroupId ? ` in group ${intoGroupId}` : '') +
+                    (termCwd ? `, cwd ${termCwd}` : '') +
+                    (args.cmd ? `, running: ${args.cmd}` : ''),
+                  ...(after?.length ? [`armed to wait for: ${after.join(', ')}`] : [])
+                ].join('\n'),
+                result: {
+                  dryRun: true,
+                  count,
+                  group: intoGroupId ?? null,
+                  cwd: termCwd ?? null,
+                  after: after ?? []
+                }
+              })
+              return
+            }
             const make = (i: number): CanvasNode =>
               armAfter(
                 createTerminalNode(
@@ -8772,7 +8864,74 @@ export function Canvas() {
             )
             const after = resolveAfter()
             if (after === null) return // bad --after, already replied
+            // `--prompt-file` (issue #520): a multi-line brief travels as a FILE the new node's
+            // shell reads at launch (`"$(cat …)"` in the assembler), because `--prompt` rides a
+            // command line typed into the pane and is collapsed to one line. Validated here — the
+            // path shape by the pure rule, existence against the filesystem the node will read it
+            // from (the HOST's on an SSH project). A missing file would launch the agent with an
+            // EMPTY prompt (the substitution expands to nothing), which is the silent failure the
+            // check exists to catch; a check that itself errors fails OPEN, since the pane shows
+            // cat's own error where a wrongly-refused open shows nothing.
+            const promptFile = (args['prompt-file'] ?? '').trim() || undefined
+            if (promptFile && args.prompt) {
+              reply({ ok: false, error: `${verb}: pass either --prompt or --prompt-file, not both` })
+              return
+            }
+            if (promptFile) {
+              const pfErr = promptFilePathError(promptFile)
+              if (pfErr) {
+                reply({ ok: false, error: `${verb}: --prompt-file ${pfErr}` })
+                return
+              }
+              const pfFs = ctlSsh && ctlProject ? sshFs(ctlProject.id) : api.fs
+              const pfExists = await pfFs.exists(promptFile).catch(() => true)
+              if (!pfExists) {
+                reply({ ok: false, error: `${verb}: --prompt-file not found: ${promptFile}` })
+                return
+              }
+            }
             const agentCwd = args.cwd || groupCwd || srcCwd
+            if (dryRun) {
+              // The dry run is deliberately STRICTER than the real open here: an unknown agent id
+              // today opens a node whose launch command is the typo, failing only inside its pane
+              // — precisely the "validated by running it" cost #532 names. Catch it when asked.
+              const dryKnownAgent =
+                !!agentConfig(agentId) ||
+                useSettings.getState().settings.customAgents.some((c) => c.id === agentId)
+              if (!dryKnownAgent) {
+                reply({
+                  ok: false,
+                  error: `${verb}: unknown agent "${agentId}" — pass a builtin id or a custom agent id from Settings`
+                })
+                return
+              }
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `${verb} would open ${count} ${agentId} session(s)` +
+                    (intoGroupId ? ` in group ${intoGroupId}` : '') +
+                    (agentCwd ? `, cwd ${agentCwd}` : '') +
+                    (args.model ? `, model ${args.model}` : '') +
+                    (promptFile
+                      ? `, prompt from file ${promptFile}`
+                      : args.prompt
+                        ? `, prompt: "${args.prompt.slice(0, 80)}${args.prompt.length > 80 ? '…' : ''}"`
+                        : ''),
+                  ...(after?.length ? [`armed to wait for: ${after.join(', ')}`] : []),
+                  'Each session would be connected + context-linked to you.'
+                ].join('\n'),
+                result: {
+                  dryRun: true,
+                  agent: agentId,
+                  count,
+                  group: intoGroupId ?? null,
+                  cwd: agentCwd ?? null,
+                  after: after ?? []
+                }
+              })
+              return
+            }
             const make = (i: number): CanvasNode =>
               armAfter(
                 createAgentNode(
@@ -8786,7 +8945,12 @@ export function Canvas() {
                   activePermissionMode(agentId),
                   // Same project the account funnel above resolves from: the canvas the verb runs
                   // on, whose `.nodeterm/settings.json` launch command applies to what it opens.
-                  projStore.activeProjectId
+                  projStore.activeProjectId,
+                  // `--model` is a pass-through: `withAgentModel` re-validates the value at the
+                  // interpolation site and emits nothing for an agent outside MODEL_SWITCH_CAPABLE,
+                  // so an unsupported agent's command line stays byte-identical.
+                  args.model,
+                  promptFile
                 ),
                 after ?? [],
                 undefined,
@@ -9210,17 +9374,52 @@ export function Canvas() {
             return
           }
           case 'spawn-team': {
-            let roles: { title?: string; prompt?: string; agent?: string }[]
-            try {
-              const parsed = JSON.parse(args.team ?? '')
-              roles = Array.isArray(parsed) ? parsed : []
-            } catch {
-              reply({ ok: false, error: 'spawn-team: --team must be a JSON array of {title?, prompt, agent?}' })
+            // Parse + validate through the ONE pure parser (lib/teamSpec.ts) the dry run shares —
+            // named refusals for bad JSON, a role missing its prompt, a ninth role, an unknown
+            // agent id — instead of the old silent filter-and-slice, where a role without a
+            // prompt simply vanished and a typo'd agent opened a broken node (issue #532).
+            const teamKnownAgents = new Set<string>([
+              ...BUILTIN_AGENT_IDS,
+              ...useSettings.getState().settings.customAgents.map((c) => c.id)
+            ])
+            const teamSpec = parseTeamSpec(args.team ?? '', teamKnownAgents)
+            if (!teamSpec.ok) {
+              reply({ ok: false, error: `spawn-team: ${teamSpec.error}` })
               return
             }
-            roles = roles.filter((r) => r && typeof r.prompt === 'string' && r.prompt.trim()).slice(0, 8)
-            if (roles.length === 0) {
-              reply({ ok: false, error: 'spawn-team: --team needs at least one role with a prompt' })
+            const roles = teamSpec.roles
+            // Per-role `promptFile` existence — the same contract as `--prompt-file` on the open
+            // verbs (issue #520): checked against the filesystem the new node reads it from,
+            // missing refused (an empty `$(cat …)` would silently start the member with no task),
+            // a check that errors fails open. Path SHAPE is the parser's job.
+            for (const [ri, r] of roles.entries()) {
+              if (!r.promptFile) continue
+              const rName = r.title ? `"${r.title}"` : `#${ri + 1}`
+              const rfFs = ctlSsh && ctlProject ? sshFs(ctlProject.id) : api.fs
+              const rfExists = await rfFs.exists(r.promptFile).catch(() => true)
+              if (!rfExists) {
+                reply({
+                  ok: false,
+                  error: `spawn-team: role ${rName} promptFile not found: ${r.promptFile}`
+                })
+                return
+              }
+            }
+            if (dryRun) {
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `spawn-team would open ${roles.length} member(s) in a new group "${args.label || 'Team'}", each connected + context-linked to you:`,
+                  ...roles.map((r, i) => {
+                    const brief = r.promptFile
+                      ? `prompt from file ${r.promptFile}`
+                      : `prompt: "${(r.prompt ?? '').slice(0, 80)}${(r.prompt ?? '').length > 80 ? '…' : ''}"`
+                    return `  ${i + 1}. ${r.title ?? r.agent} — agent ${r.agent}${r.model ? `, model ${r.model}` : ''} — ${brief}`
+                  })
+                ].join('\n'),
+                result: { dryRun: true, label: args.label || 'Team', roles }
+              })
               return
             }
             const live = nodesRef.current as CanvasNode[]
@@ -9236,7 +9435,8 @@ export function Canvas() {
             const members = roles.map((r, i) => {
               // Roles may name different agents, so the mode is resolved PER member: claude's
               // `auto` version gate must not decide what a grok teammate launches with.
-              const memberAgent = (r.agent ?? 'claude') as AgentId
+              // (`agent` is parser-defaulted to 'claude' and validated against the known set.)
+              const memberAgent = r.agent as AgentId
               const node = createAgentNode(
                 memberAgent,
                 live.length + i,
@@ -9246,7 +9446,13 @@ export function Canvas() {
                 sshFor(srcCwd),
                 teamAccount,
                 activePermissionMode(memberAgent),
-                teamStore.activeProjectId
+                teamStore.activeProjectId,
+                // Per-role model, so one team can mix tiers in a single call. A role naming a
+                // model its agent cannot switch simply launches bare (withAgentModel no-ops).
+                r.model,
+                // Per-role promptFile (parser-validated + existence-checked above); wins over
+                // `prompt` in the assembler.
+                r.promptFile
               )
               return r.title ? { ...node, data: { ...node.data, title: r.title, titleAuto: false } } : node
             })
@@ -9323,7 +9529,35 @@ export function Canvas() {
             // reduce to entries/global exactly as before. An explicit `--base` still wins.
             const pw = projectLaunchInfoNow(project?.id ?? '')?.resolved.worktree
             const projectDefaults = { basePath: pw?.basePath?.value, baseRef: pw?.baseRef?.value }
-            const baseRef = args.base?.trim() || effectiveWorktreeBaseRef(projectDefaults, entries)
+            // `--base` takes a git ref OR a station id (issue #530): an id naming a node/group on
+            // the canvas resolves through its worktree-bound group to that station's BRANCH, so
+            // "branch off what that station is working on" is expressed by identity. The pure
+            // resolver owes the explicit refusals (unbound node, self-base, neither-node-nor-ref).
+            const baseRes = resolveWorktreeBase(
+              args.base,
+              branch,
+              nodesRef.current.map((nd) => ({
+                id: nd.id,
+                parentId: nd.parentId,
+                worktree: nd.data.worktree as GroupWorktree | undefined
+              }))
+            )
+            if (baseRes.kind === 'error') {
+              reply({ ok: false, error: `open-worktree: ${baseRes.error}` })
+              return
+            }
+            const baseRef =
+              baseRes.kind === 'default'
+                ? effectiveWorktreeBaseRef(projectDefaults, entries)
+                : baseRes.ref
+            // Said back in every reply so the resolution is transparent — the caller passed an id
+            // and must see which branch it bought.
+            const baseNote =
+              baseRes.kind === 'station'
+                ? ` (resolved from station ${baseRes.stationId}${
+                    baseRes.groupId !== baseRes.stationId ? ` in group ${baseRes.groupId}` : ''
+                  })`
+                : ''
             // Resolve from this session's repo root, so a relay tab still produces a path on the
             // same host/filesystem where the `api.git` operation below runs.
             const wtPath = await resolveWorktreePath({
@@ -9337,6 +9571,32 @@ export function Canvas() {
             })
             if (!wtPath) {
               reply({ ok: false, error: 'open-worktree: could not derive a worktree path — pass --path' })
+              return
+            }
+            if (dryRun) {
+              reply({
+                ok: true,
+                message: [
+                  DRY_RUN_PREFIX,
+                  `open-worktree would create branch "${branch}" off ${baseRef || 'the repo default branch'}${baseNote} at ${wtPath}, ` +
+                    `bound to ${bindGroupId ? `group ${bindGroupId}` : 'a new group frame'}.`,
+                  // A station's branch comes from a live binding; a plain ref is only vetted by
+                  // git at create time — say which assurance the caller is getting.
+                  ...(baseRes.kind === 'station'
+                    ? []
+                    : [
+                        'The base ref is not verified against git in a dry run — a bad ref still fails at create time.'
+                      ])
+                ].join('\n'),
+                result: {
+                  dryRun: true,
+                  branch,
+                  baseRef: baseRef || null,
+                  ...(baseRes.kind === 'station' ? { baseStation: baseRes.stationId } : {}),
+                  path: wtPath,
+                  group: bindGroupId
+                }
+              })
               return
             }
             const res = await api.git
@@ -9364,8 +9624,14 @@ export function Canvas() {
             )
             reply({
               ok: true,
-              message: `opened worktree ${branch} at ${wtPath} in group ${groupId}`,
-              result: { groupId, branch, path: wtPath, baseRef }
+              message: `opened worktree ${branch} (off ${baseRef || 'the repo default branch'}${baseNote}) at ${wtPath} in group ${groupId}`,
+              result: {
+                groupId,
+                branch,
+                path: wtPath,
+                baseRef,
+                ...(baseRes.kind === 'station' ? { baseStation: baseRes.stationId } : {})
+              }
             })
             return
           }
@@ -10060,21 +10326,22 @@ export function Canvas() {
       // Transfer) place beside the source — the same as the row's existing Transfer behavior.
       //
       // The canvas menu ends in a destructive "Delete" (deleteNodes). The session row's analogue
-      // is non-destructive "Close" (closeSession — hides the tab, keeps the tmux session), so the
-      // trailing Delete is swapped for Close rather than offered beside it.
+      // is "End session" (closeSession — stops the tmux session and removes the node too, just
+      // confirmed via its own dialog rather than the canvas's shared confirm), so the trailing
+      // Delete is swapped for End session rather than offered beside it.
       const body: MenuItem[] =
         projectId === activeProjectId
           ? (() => {
               const full = selectionItems([id])
               // Drop the canvas menu's trailing "Delete" (destructive deleteNodes) and any
-              // separator left dangling before it, then append the session row's non-destructive
-              // "Close". Found by label rather than fixed index so this stays correct if the canvas
+              // separator left dangling before it, then append the session row's "End session".
+              // Found by label rather than fixed index so this stays correct if the canvas
               // menu's tail changes — Delete is the only 'Delete'-labelled row.
               const withoutDelete = full.filter((it) => !('label' in it && it.label === 'Delete'))
               return [
                 ...tidySeparators(withoutDelete),
                 { type: 'separator' },
-                { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+                { label: 'End session', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
               ]
             })()
           : [
@@ -10090,7 +10357,7 @@ export function Canvas() {
                 }
               },
               { type: 'separator' },
-              { label: 'Close', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
+              { label: 'End session', icon: <IconTrash />, danger: true, onClick: () => closeSession(projectId, id) }
             ]
       setMenu({ x: e.clientX, y: e.clientY, items: [...head, ...body] })
     },
@@ -10598,39 +10865,88 @@ export function Canvas() {
     void writeDisk()
   }, [commitActiveToStore, writeDisk])
 
+  /** The dedupe/reopen/adopt/create decision for a folder path, shared by the "Open folder…"
+   *  dialog and the drag-and-drop entry point: a folder maps to one project, and this is the
+   *  ONE place that decides whether to reuse/reopen an already-registered project, adopt an
+   *  existing `.nodeterm/project.json` (git clone, synced copy, another machine's project), or
+   *  create a brand-new one. */
+  const openOrAdoptFolder = useCallback(
+    async (folder: string): Promise<void> => {
+      commitActiveToStore()
+      // A folder maps to one project: reuse the already-registered one first…
+      const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
+      if (existing) {
+        useProjects.getState().openFolderProject(folder)
+        // An `unavailable` placeholder never recovers on its own: a save emits a header-only ref
+        // for it (never a file), so a deleted project.json stays deleted and every later load
+        // re-mints the placeholder. Opening the folder is the deliberate act that breaks that
+        // loop — but only on evidence, since clearing the flag lets the next save write this
+        // empty canvas. See #385.
+        const recovery = unavailableRecovery(existing, await api.workspace.projectFileState(folder))
+        if (recovery === 'clear') {
+          useProjects.getState().setProjectUnavailable(existing.id, false)
+        } else if (recovery === 'rehydrate') {
+          // `present` is a stat, not a parse: a corrupt file stats fine, and probeFolder
+          // answering null there means the placeholder is still the honest state.
+          const back = await api.workspace.probeFolder(folder)
+          if (back) useProjects.getState().replaceProject({ ...back, id: existing.id, closed: false })
+        }
+      } else {
+        // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
+        // another machine's project) — only a virgin folder gets a brand-new project.
+        const probed = await api.workspace.probeFolder(folder)
+        if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
+        else useProjects.getState().openFolderProject(folder)
+      }
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
   /** Returns true when a folder was picked (false on cancel), so callers like the welcome
    *  screen can keep their overlay up until the picker actually resolves. */
   const addProjectFromFolder = useCallback(async (): Promise<boolean> => {
     const folder = await window.nodeTerminal.dialog.selectFolder()
     if (!folder) return false
-    commitActiveToStore()
-    // A folder maps to one project: reuse the already-registered one first…
-    const existing = useProjects.getState().projects.find((p) => p.cwd === folder)
-    if (existing) {
-      useProjects.getState().openFolderProject(folder)
-      // An `unavailable` placeholder never recovers on its own: a save emits a header-only ref for
-      // it (never a file), so a deleted project.json stays deleted and every later load re-mints
-      // the placeholder. Opening the folder is the deliberate act that breaks that loop — but only
-      // on evidence, since clearing the flag lets the next save write this empty canvas. See #385.
-      const recovery = unavailableRecovery(existing, await api.workspace.projectFileState(folder))
-      if (recovery === 'clear') {
-        useProjects.getState().setProjectUnavailable(existing.id, false)
-      } else if (recovery === 'rehydrate') {
-        // `present` is a stat, not a parse: a corrupt file stats fine, and probeFolder answering
-        // null there means the placeholder is still the honest state.
-        const back = await api.workspace.probeFolder(folder)
-        if (back) useProjects.getState().replaceProject({ ...back, id: existing.id, closed: false })
-      }
-    } else {
-      // …else adopt the folder's own .nodeterm/project.json (git clone, synced copy,
-      // another machine's project) — only a virgin folder gets a brand-new project.
-      const probed = await api.workspace.probeFolder(folder)
-      if (probed) useProjects.getState().adoptProject({ ...probed, closed: false })
-      else useProjects.getState().openFolderProject(folder)
-    }
-    void writeDisk()
+    await openOrAdoptFolder(folder)
     return true
-  }, [commitActiveToStore, writeDisk])
+  }, [openOrAdoptFolder])
+
+  // Drop a folder anywhere in the app (canvas background, Welcome screen, general chrome) → open
+  // or continue that project, using the exact same dedupe/reopen/adopt/create rules as the
+  // "Open folder…" dialog (openOrAdoptFolder). Registered on `window`, gated by isFolderDropTarget
+  // so terminals, editors, dialogs and form controls keep their own drop behavior untouched — a
+  // folder dropped on a terminal still pastes its path as text via terminal/file-drop.ts.
+  useEffect(() => {
+    const onDragOver = (event: DragEvent) => {
+      if (!isFolderDropTarget(event.target)) return
+      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    }
+    const onDrop = (event: DragEvent) => {
+      if (!isFolderDropTarget(event.target)) return
+      const dirs = droppedDirectories(event.dataTransfer)
+      if (!dirs.length) return // no directories in this drop — let image-drop/terminal-drop handle it
+      event.preventDefault()
+      event.stopPropagation()
+      const paths = dirs
+        .map((f) => window.nodeTerminal.getPathForFile(f))
+        .filter((p): p is string => !!p)
+      // Sequential, not Promise.all: each folder's commitActiveToStore/writeDisk must not race
+      // the next folder's. The last resolved folder ends up active (openFolderProject's existing
+      // single-folder activation semantics).
+      void (async () => {
+        for (const folder of paths) await openOrAdoptFolder(folder)
+      })()
+    }
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [openOrAdoptFolder])
 
   const renameProject = useCallback(
     (id: string, name: string) => {

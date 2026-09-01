@@ -1256,9 +1256,17 @@ export interface Settings {
    *  scroll keeps panning independently (see canvas/wheel-gesture.ts), so mouse and trackpad
    *  coexist; elsewhere this still trades away scroll-to-pan, so it stays opt-in. */
   wheelZoom: boolean
+  /** How far one plain wheel click zooms, as a multiplier on the canvas zoom step (0.2–2,
+   *  default 1 = historical feel). Applies only to the `wheelZoom` path — Cmd/Ctrl+wheel and
+   *  pinch keep the fixed step, so tuning a chunky mouse down never slows the trackpad.
+   *  Validated at point of use (canvas/wheel-zoom.ts `clampWheelZoomSpeed`). */
+  wheelZoomSpeed: number
   /** macOS only: a two-finger trackpad scroll pans the canvas, independently of `wheelZoom`
    *  (see canvas/wheel-gesture.ts). Off restores the pre-router behavior — `wheelZoom` alone
-   *  decides — which is also the recourse for a precise-pixel MOUSE that reads as a trackpad. */
+   *  decides. On the desktop the device is identified from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), so mouse zoom and trackpad pan coexist; the off-switch is the
+   *  remaining recourse for the Server Edition's browser tab, where detection is heuristic and a
+   *  precise-pixel MOUSE still reads as a trackpad. */
   trackpadPan: boolean
   /** What a left-drag on EMPTY canvas does. 'select' (default) rubber-band selects, like
    *  Figma's move tool — pan stays on middle-drag / two-finger scroll. 'pan' drags the map
@@ -1526,6 +1534,7 @@ export const DEFAULT_SETTINGS: Settings = {
   openMarkdownPreviewMigrated: true,
   terminalMiddleClickPaste: false,
   wheelZoom: false,
+  wheelZoomSpeed: 1,
   trackpadPan: true,
   canvasDragMode: 'select',
   browserMemorySaver: true,
@@ -2947,6 +2956,13 @@ export interface NodeTerminalApi {
    *  minutes; `level: 'none'` means the banner should come down. Returns unsubscribe.
    *  Server Edition: never fires — the reaper leg runs host-side only (see src/server/index.ts). */
   onPtyPressure(listener: (reading: PtyPressure) => void): () => void
+  /** Fires when a macOS trackpad gesture (two-finger scroll or pinch) opens or closes on the
+   *  main window — edge transitions from the main process's raw input stream
+   *  (main/trackpad-gesture.ts), a handful per physical gesture. The canvas wheel router uses
+   *  this as ground-truth device identity so a precise-pixel mouse (MX Master) can zoom while the
+   *  trackpad pans. Returns unsubscribe. Server Edition: never fires — a browser tab has no raw
+   *  input stream, and the router keeps its delta-shape heuristics there. */
+  onCanvasTrackpadGesture(listener: (active: boolean) => void): () => void
   /** Raise this Mac's pty-device ceiling (`kern.tty.ptmx_max`) now AND across reboots, behind
    *  macOS's own administrator-password dialog. Called ONLY from the banner's explicit
    *  "Fix automatically…" click — never on the app's initiative. macOS only; a dismissed password
@@ -2972,6 +2988,20 @@ export interface NodeTerminalApi {
   onUnreadClear(listener: (nodeId: string) => void): () => void
   /** Fires on each normalized agent hook event (working/done/waiting/subagent/…). Returns unsubscribe. */
   onAgentStatus(listener: (e: NormalizedAgentEvent) => void): () => void
+  /** Report a node's Eco hibernation flag to the core (the renderer owns the flag; the core only
+   *  mirrors it into the agent-status file so the phone can render SLEEPING). Fire-and-forget;
+   *  called on every `setHibernated` change and replayed for the persisted set at boot. */
+  reportHibernated(nodeId: string, on: boolean): void
+  /** Fires when the core asks this renderer to WAKE a hibernated node NOW (a phone viewer just
+   *  attached to its session over the relay). A nudge with `wakeHibernatedNode`'s exact contract:
+   *  re-read the flag, no-op when not hibernated or not mounted. Returns unsubscribe.
+   *  Desktop-only signal (the relay host lives in the desktop main process); the ws-bridge
+   *  subscribes to nothing and returns a no-op unsubscribe. */
+  onAgentWake(listener: (nodeId: string) => void): () => void
+  /** Fires with the CURRENT set of node ids that have a live relay (phone) viewer attached — the
+   *  full set each change, never a delta. Feeds `isNodeWatched` so Eco cannot hibernate a session
+   *  someone is watching from a phone. Desktop-only signal, like `onAgentWake`. */
+  onRemoteViewers(listener: (nodeIds: string[]) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

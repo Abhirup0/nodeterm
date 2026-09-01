@@ -124,6 +124,12 @@ export const IPC = {
    *  so the renderer should run its reclaim levers now (hidden WebGL contexts, parked terminals).
    *  Payload: `'warning' | 'critical'`. Re-fired at most once a minute — see core/memory-pressure. */
   appMemoryPressure: 'app:memory-pressure',
+  /** Main → renderer: a macOS trackpad gesture (two-finger scroll or pinch) opened or closed on
+   *  the main window — edge transitions from main/trackpad-gesture.ts, a handful per physical
+   *  gesture. Payload: `boolean` (active). The canvas wheel router uses this as ground-truth
+   *  device identity, replacing delta-shape guessing on the desktop. Desktop only — the Server
+   *  Edition's browser tab has no raw input stream and keeps the heuristics. */
+  canvasTrackpadGesture: 'canvas:trackpad-gesture',
   agentStatus: 'agent:status',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
@@ -138,6 +144,22 @@ export const IPC = {
    *  renderer clears unread WITHOUT re-acking (external clear — see agentStatus.clearUnread's
    *  `external` opt). See core/ack-sweep.ts. */
   agentUnreadClear: 'agent:unread-clear',
+  /** Renderer → main/server: a node's Eco hibernation flag changed (the renderer owns the flag —
+   *  `agentStatus.setHibernated` — and main only mirrors it, like `terminalFocused`). Arg:
+   *  `{ nodeId: string, on: boolean }`. Fire-and-forget cast; feeds the agent-status mirror so the
+   *  phone can render SLEEPING, and gives main the `isHibernated` signal the delivery queue's
+   *  hibernated leg was recorded as missing (agent-messaging.ts). */
+  agentHibernated: 'agent:hibernated',
+  /** main → renderer: ask the renderer to wake a hibernated node NOW (a phone viewer attached to
+   *  its session over the relay). A nudge, never an assertion: the renderer re-reads the flag and
+   *  no-ops for a non-hibernated or unmounted node — same contract as `wakeHibernatedNode`. Arg:
+   *  `nodeId: string`. */
+  agentWake: 'agent:wake',
+  /** main → renderer: the CURRENT set of node ids with a live relay viewer attached (a phone
+   *  watching the session). Arg: `string[]` — the full set each change, so a dropped event cannot
+   *  strand a stale entry. Feeds `isNodeWatched`: a session someone is watching from a phone must
+   *  not be hibernated out from under them. */
+  agentRemoteViewers: 'agent:remote-viewers',
   agentSubagentActivity: 'agent:subagent-activity',
   /** macOS Notch HUD (docs/notch-hud.md). main → hud: push the current row array. */
   hudRows: 'hud:rows',
