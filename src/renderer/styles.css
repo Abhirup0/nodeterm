@@ -1576,6 +1576,14 @@ body,
   gap: 4px;
 }
 
+/* …and the same chip once the delivery loop has something to report about that launch: it has been
+   ready to run for a long time with no terminal to run in, or its delivery was refused for good.
+   Amber rather than the NEEDS-YOU red: nothing is broken in the user's work, but the session they
+   were told would start has not, and that must not be discoverable only in a console.warn. */
+.term-node__status--queued-warn {
+  color: #ffb340;
+}
+
 /* Copy receipt (1.6 s) — green like the base chip, and deliberately quieter than RUNNING /
    NEEDS YOU: this is a receipt, not an alert. */
 .term-node__queued-run {

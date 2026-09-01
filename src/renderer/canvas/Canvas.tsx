@@ -32,7 +32,9 @@ import {
   isNodeWatched,
   setWatchedNode,
   setRemotelyViewedNodes,
-  wakeHibernatedNode
+  wakeHibernatedNode,
+  isSessionReady,
+  subscribeSessionReady
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
 import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
@@ -310,6 +312,7 @@ import {
 } from '../lib/explorerPinHint'
 import { useProjects } from '../state/projects'
 import { useAgentStatus } from '../state/agentStatus'
+import { useLaunchDelivery } from '../state/launchDelivery'
 import { useBrowserLease, drivingNodeIds } from '../state/browserLease'
 import { useTerminalFocus } from '../state/terminalFocus'
 import { useCodexIdentity, codexFallbackText } from '../state/codexIdentity'
@@ -388,7 +391,14 @@ import {
   type RelayTab,
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
-import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
+import {
+  dependencyEdges,
+  launchesToFire,
+  launchRetryDelay,
+  unmetDeps,
+  LAUNCH_STALL_MS,
+  type ArmedNode
+} from '../lib/pendingLaunch'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename } from '../lib/sessionRename'
 import { useReopenHistory } from '../state/reopenHistory'
@@ -639,11 +649,6 @@ const offsetFrom = (
   return { x: parent.position.x + off.x, y: parent.position.y + off.y }
 }
 
-// Delivering an armed node's held launch (canvas-control `--after`) can lose the race against
-// that node's own PTY coming up, and a dropped launch is exactly the thing its dependency was
-// waiting for — so a refused delivery is retried a few times instead of vanishing.
-const LAUNCH_DELIVERY_ATTEMPTS = 5
-const LAUNCH_RETRY_MS = 400
 
 // A canvas-control request whose source node lives in another project switches that project in
 // first, and the active-project effect hydrates React Flow ASYNCHRONOUSLY — so the handler waits
@@ -1536,13 +1541,44 @@ export function Canvas() {
     }
     return sig
   })
-  // Bumped to re-run the launch effect after a refused delivery (see LAUNCH_RETRY_MS).
-  const [launchRetry, setLaunchRetry] = useState(0)
+  // Bumped to re-run the launch effect: after a refused delivery's backoff, and when a node
+  // reports its session ready (`subscribeSessionReady` below).
+  const [launchNudge, setLaunchNudge] = useState(0)
   // Ids whose held launch has been handed to the pty. An id stays here FOREVER once delivery
   // succeeded — clearing `pendingLaunch` is a state update that can lag a re-render, and this
   // action is irreversible, so the set (not the node data) is what guarantees exactly-once.
   const launchInFlight = useRef<Set<string>>(new Set())
   const launchAttempts = useRef<Map<string, number>>(new Map())
+  // Per-node "the gate is open but nothing has come up to deliver into" timers — the source of the
+  // visible `stalled` warning. One per armed node, armed once and cleared the moment the node
+  // becomes ready, is delivered, or stops being armed.
+  const launchStallTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const clearStallTimer = useCallback((nodeId: string) => {
+    const t = launchStallTimers.current.get(nodeId)
+    if (t === undefined) return
+    clearTimeout(t)
+    launchStallTimers.current.delete(nodeId)
+  }, [])
+  // A node whose session just came up is the ONE event the launch loop was missing. Filtered by
+  // id on the way in: a canvas of forty terminals publishes forty times on load, and re-rendering
+  // this component for each of them (for the sake of the one node that is armed) is exactly the
+  // churn `armedDepSig` and `loopSig` exist to avoid.
+  useEffect(
+    () =>
+      subscribeSessionReady((nodeId) => {
+        if (nodesRef.current.some((n) => n.id === nodeId && n.data.pendingLaunch))
+          setLaunchNudge((v) => v + 1)
+      }),
+    []
+  )
+  // Nothing must outlive the component: a pending stall timer would fire into an unmounted tree.
+  useEffect(
+    () => () => {
+      for (const t of launchStallTimers.current.values()) clearTimeout(t)
+      launchStallTimers.current.clear()
+    },
+    []
+  )
   // Fire armed nodes whose upstream stations have all gone idle. This is the edge that makes
   // the canvas a graph rather than a fan-out: the dependent starts itself, with no orchestrator
   // sitting in a poll loop burning context.
@@ -1554,7 +1590,50 @@ export function Canvas() {
       live,
       setupDoneForGroup
     ).filter((f) => !launchInFlight.current.has(f.id))
+    // Anything we were reporting on that is no longer an armed node — delivered, run by hand with
+    // ▶, or deleted — stops being reported. Timers go with it: a stall warning for a node that has
+    // already started is a lie with a countdown on it.
+    const delivery = useLaunchDelivery.getState()
+    for (const id of Object.keys(delivery.byId)) {
+      if (!nodes.some((n) => n.id === id && n.data.pendingLaunch)) {
+        delivery.clear(id)
+        clearStallTimer(id)
+      }
+    }
     for (const f of ready) {
+      // THE gate this whole loop turns on. Every dependency is satisfied, but that says nothing
+      // about whether there is a terminal to deliver into: a cold project switch loads the canvas,
+      // mounts the node, spawns tmux and settles a shell, and the old flat 2 s retry budget was
+      // spent long before any of that finished — the launch was then abandoned in a console.warn
+      // and the node sat on QUEUED until somebody clicked ▶ (#569 item 1).
+      //
+      // So we WAIT instead of burning attempts, and we say we are waiting. This is not a deadline:
+      // a session that comes up ten minutes later (an SSH host reconnecting, a checkout behind a
+      // slow setup script) still fires, because `subscribeSessionReady` brings us straight back.
+      if (!isSessionReady(f.id)) {
+        if (!launchStallTimers.current.has(f.id)) {
+          launchStallTimers.current.set(
+            f.id,
+            setTimeout(() => {
+              launchStallTimers.current.delete(f.id)
+              // Re-ask at fire time: the plan is 45 s old and the node may have started, been
+              // delivered or been deleted since.
+              if (
+                !isSessionReady(f.id) &&
+                nodesRef.current.some((n) => n.id === f.id && n.data.pendingLaunch)
+              )
+                useLaunchDelivery.getState().markStalled(f.id)
+            }, LAUNCH_STALL_MS)
+          )
+        }
+        continue
+      }
+      clearStallTimer(f.id)
+      // There IS a terminal now, so a standing "has not started yet" warning is out of date. A
+      // `failed` record is not withdrawn here — that one is about this session refusing the
+      // launch, and only a delivery that lands (or the manual ▶) retires it.
+      if (useLaunchDelivery.getState().byId[f.id]?.kind === 'stalled')
+        useLaunchDelivery.getState().clear(f.id)
       launchInFlight.current.add(f.id)
       const attempt = (launchAttempts.current.get(f.id) ?? 0) + 1
       launchAttempts.current.set(f.id, attempt)
@@ -1563,21 +1642,29 @@ export function Canvas() {
           setNodes((ns) =>
             ns.map((n) => (n.id === f.id ? { ...n, data: { ...n.data, pendingLaunch: undefined } } : n))
           )
+          useLaunchDelivery.getState().clear(f.id)
           markDirty()
           return
         }
-        // Refused: the node's tmux session is most likely still coming up. Let it back out of
-        // flight and re-run shortly — a launch that silently vanishes is worse than a late one.
+        // Refused although the session reported ready — a narrow residual race now, not the
+        // whole cold-start window. Let it back out of flight and re-run after the backoff; a
+        // launch that silently vanishes is worse than a late one.
         launchInFlight.current.delete(f.id)
-        if (attempt < LAUNCH_DELIVERY_ATTEMPTS) {
-          setTimeout(() => setLaunchRetry((v) => v + 1), LAUNCH_RETRY_MS)
-        } else {
-          console.warn('[pending-launch] gave up delivering held launch for', f.id)
+        const delay = launchRetryDelay(attempt)
+        if (delay !== null) {
+          setTimeout(() => setLaunchNudge((v) => v + 1), delay)
+          return
         }
+        // Out of attempts against a session that IS up. Nothing else will retry this, so it is
+        // reported where the person looking at the node can see it — the QUEUED badge turns into
+        // a warning pointing at the manual ▶. The log line stays for a bug report; it is no
+        // longer the only place the failure exists.
+        useLaunchDelivery.getState().markFailed(f.id, attempt)
+        console.warn('[pending-launch] gave up delivering held launch for', f.id)
       })
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedSetupSig/launchRetry are the triggers
-  }, [nodes, armedDepSig, armedSetupSig, launchRetry])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- armedDepSig/armedSetupSig/launchNudge are the triggers
+  }, [nodes, armedDepSig, armedSetupSig, launchNudge])
 
   // Selection state for ephemeral nodes (they live outside React Flow's managed nodes), owned by
   // the agent-nodes store so the cards themselves can set it — see `selectable: false` below.
@@ -8233,7 +8320,8 @@ export function Canvas() {
             reply({
               ok: true,
               message: `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')})`,
-              result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+              // The target is on screen, so these started normally — nothing is queued.
+              result: { ids: tgIds, id: tgIds[0], projectId: target.id, queued: false, queuedIds: [] }
             })
             return
           }
@@ -8254,8 +8342,17 @@ export function Canvas() {
             ok: true,
             message:
               `opened ${tgCount} ${tgWhat} session(s) in "${target.name}" (${tgIds.join(', ')}) — ` +
-              'starts when that project is next viewed',
-            result: { ids: tgIds, id: tgIds[0], projectId: target.id }
+              'queued; starts when that project is next viewed',
+            // Every node on this branch is armed by `armForColdOpen`, so the whole batch is
+            // QUEUED. Said in the reply as a field, not only in the sentence, so an orchestrator
+            // does not have to report a session as started when it is not (#569 item 1).
+            result: {
+              ids: tgIds,
+              id: tgIds[0],
+              projectId: target.id,
+              queued: true,
+              queuedIds: tgIds
+            }
           })
           return
         }
@@ -8662,8 +8759,15 @@ export function Canvas() {
               })
               return
             }
-            const make = (i: number): CanvasNode =>
-              armAfter(
+            // Which of the nodes we are about to open are actually ARMED — i.e. QUEUED rather
+            // than running. `armAfter` decides that per node (deps already satisfied leave the
+            // command as an ordinary `initialCommand`), so the answer is recorded as it builds
+            // them rather than inferred from the flags; `setNodes` has not landed by reply time,
+            // so the canvas cannot be asked either. Reported so a caller can tell "started" from
+            // "will start later" instead of assuming the first — see #569 item 1.
+            const queuedIds: string[] = []
+            const make = (i: number): CanvasNode => {
+              const node = armAfter(
                 createTerminalNode(
                   nodesRef.current.length + i,
                   termCwd,
@@ -8675,6 +8779,9 @@ export function Canvas() {
                 undefined,
                 intoGroupId
               )
+              if (node.data.pendingLaunch) queuedIds.push(node.id)
+              return node
+            }
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
@@ -8683,7 +8790,13 @@ export function Canvas() {
               message:
                 `opened ${count} terminal(s): ${ids.join(', ')}` +
                 (after?.length ? `\nwaiting for ${after.join(', ')} before running` : ''),
-              result: { ids, id: ids[0], after: after ?? [] }
+              result: {
+                ids,
+                id: ids[0],
+                after: after ?? [],
+                queued: queuedIds.length > 0,
+                queuedIds
+              }
             })
             return
           }
@@ -8779,8 +8892,11 @@ export function Canvas() {
               })
               return
             }
-            const make = (i: number): CanvasNode =>
-              armAfter(
+            // See the same list in open-terminal: which of these nodes end up ARMED is
+            // `armAfter`'s per-node decision, recorded as it builds them.
+            const queuedIds: string[] = []
+            const make = (i: number): CanvasNode => {
+              const node = armAfter(
                 createAgentNode(
                   agentId,
                   nodesRef.current.length + i,
@@ -8803,6 +8919,9 @@ export function Canvas() {
                 undefined,
                 intoGroupId
               )
+              if (node.data.pendingLaunch) queuedIds.push(node.id)
+              return node
+            }
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
@@ -8831,7 +8950,13 @@ export function Canvas() {
                   ? `\nwaiting for ${after.join(', ')} before running` +
                     (depLinked.length ? ` (and linked to read them)` : '')
                   : ''),
-              result: { ids, linked: bridged, after: after ?? [] }
+              result: {
+                ids,
+                linked: bridged,
+                after: after ?? [],
+                queued: queuedIds.length > 0,
+                queuedIds
+              }
             })
             return
           }

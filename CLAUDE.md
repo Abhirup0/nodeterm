@@ -1369,14 +1369,47 @@ else, and its context links must keep classifying across restarts).
   arming would hand delivery to the canvas effect, which races the node's PTY into existence.
   (4) Delivery is **exactly-once via `launchInFlight`** (an id stays in the set forever once
   `sendText` resolved true — clearing `pendingLaunch` is a state update that can lag a re-render),
-  and a **refused** `sendText` retries (`LAUNCH_DELIVERY_ATTEMPTS`) instead of vanishing.
+  and a **refused** `sendText` retries (`launchRetryDelay`'s backoff) instead of vanishing.
   (5) `pendingLaunch` **is persisted** (unlike `initialCommand`), but agent state is not — so after
   a restart nothing will ever report `done` and the node carries a manual ▶ **run-now** escape in
-  its QUEUED badge. (6) Canvas subscribes to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
+  its QUEUED badge (which disarms only on a delivery that LANDED — dropping it unconditionally
+  threw the command away in exactly the state the button exists to rescue). (6) Canvas subscribes
+  to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
   the same discipline as `loopSig`; the full map re-renders the canvas on every hook event.
   Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested); the dashed dep→node
   edges are **derived, never persisted** (a pending dependency is a state that ends when the launch
   fires — the durable relation is the context bridge `--after` also draws).
+  **(7) Delivery waits for the node's PTY, and never fails silently** (issue #569 item 1, 2026-09).
+  A satisfied dependency says nothing about whether there is a terminal to type into, and the
+  original loop conflated the two: a flat 5 × 400 ms budget started when the CANVAS held the node
+  and was spent on loading the canvas, mounting it and spawning tmux — so on a cold project switch
+  the launch was abandoned before its session existed, in a `console.warn`, and the node read
+  QUEUED forever with only the manual ▶ left. `TerminalNode` therefore publishes a **session-ready**
+  signal (`isSessionReady` / `subscribeSessionReady`, module-level like `offscreenNodes`): true for
+  an ADOPTED park (already typeable, and its create continuation ran on a previous mount) and, for
+  a fresh spawn, at the SAME `whenShellSettled` moment `writeWhenShellReady` delivers an
+  `initialCommand` — both write a CLI command line, and a line delivered across zsh's rc-file tty
+  flush comes out mangled. A **park keeps it** (a parked tmux session is still addressable by name);
+  only a real teardown clears it. The loop then WAITS instead of burning attempts, and the backoff
+  (`launchRetryDelay`, ~12 s over five attempts) covers only the residual race after readiness.
+  Because a wait with no end is the failure mode this replaces, both give-up states are **visible**
+  in the transient `state/launchDelivery.ts` and rendered by the QUEUED badge's amber ⚠ + tooltip
+  (`launchTooltip`, pure): `stalled` = gate open, no terminal yet, **still held** (raised by a
+  `LAUNCH_STALL_MS` timer with a fire-time re-ask; the launch still fires whenever the session
+  finally comes up — an SSH host reconnecting takes this path) and `failed` = the session came up
+  and refused every attempt, so nothing will retry it. Neither is ever inferred from silence, and
+  the tooltip names no cause it did not measure (the node's own overlay owns the diagnosis).
+  The open verbs' replies carry the same fact for callers OUTSIDE the app: `result.queued` +
+  `result.queuedIds` on `open-terminal`/`open-claude`/`open-agent`, always true for the
+  `--project` cold-open branch — an orchestrator was previously told "opened" either way and
+  routed work to a session that did not exist. Agent-facing copy is generated in
+  `canvas-control-core.ts` and pinned in its test, per the sync rule above.
+  **(8) An armed node must not cold-start its own agent** (found while fixing (7)). The mount-time
+  cold-restore relaunch (`fresh && agentId && canResume(...)`) is now also gated on
+  `!data.pendingLaunch`: a first open is `fresh` by definition, so every `--after` / `verify` node
+  was launching a bare CLI on mount — the session the hold exists to prevent — and the held launch
+  then arrived as TEXT typed into it rather than as the command it is. The delivery race used to
+  mask it; gating delivery on the shell settling would have made it deterministic.
   **Review panel (`verify`, 2026-07):** `verify --node <id> [--lenses …] [--focus …] [--agent …]
   [--synthesis off]` opens one reviewer per LENS, each armed behind the target (`--after`) and
   bridged to it, wrapped in a `Verify: <title>` group, plus a judge armed behind the whole panel.

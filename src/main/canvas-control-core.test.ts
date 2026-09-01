@@ -369,6 +369,23 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts say the open reply reports `queued` (issue #569 item 1)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The field itself, and the list that says WHICH ids — a caller that cannot name the queued
+      // nodes cannot act on the answer.
+      expect(body).toContain('queued')
+      expect(body).toContain('queuedIds')
+      // The consequence is the whole point of the field: an armed node has no process, so an
+      // orchestrator must not route work to it. Without this sentence the flag reads as trivia.
+      expect(body.toLowerCase()).toContain('no process')
+      // And the three ways a node ends up armed must all be named, or a caller learns the third
+      // one by reporting a --project session as started when it has not begun.
+      expect(body).toContain('--after')
+      expect(body).toContain('--project')
+      expect(body.toLowerCase()).toMatch(/setup script/)
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')
