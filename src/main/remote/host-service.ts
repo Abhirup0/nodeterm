@@ -494,6 +494,13 @@ export function createHostHandlers(
    *   rule): a late Input frame must never be written into a session on its way out.
    * - The answer is honest. `destroyNode` absent, an unknown streamId, or a failed destroy all
    *   respond `ok:false` with a message the phone can show — never an unconditional success.
+   * - The answer is VERIFIED (issue #581). The destroy chain deliberately swallows per-step
+   *   failures ("session may not exist on this socket" is a normal case for its kill fan-out), so
+   *   `destroyNode` resolving proves only that nothing threw — measured: with tmux unresolved the
+   *   whole kill block is skipped and the verb answered success over a session still running. So
+   *   the OUTCOME is probed: `sessionExists` after the destroy must say gone. Its fail-safe
+   *   direction (unprobeable ⇒ exists) is exactly right here — a destructive verb must not report
+   *   success on uncertainty (the `confirmedTmuxSessionExists` rule, applied one layer up).
    */
   function handleDestroy(req: RpcRequest): void {
     if (!destroyNode) {
@@ -516,7 +523,17 @@ export function createHostHandlers(
     pty.kill(null, stream.sessionId)
     dropStream(streamId)
     void destroyNode(nodeId)
-      .then(() => socket.respond(req.id, true, {}))
+      .then(async () => {
+        // Verify the user-visible outcome, not the chain's plumbing: is the session GONE?
+        const stillThere = await pty.sessionExists(nodeId).catch(() => true)
+        if (stillThere) {
+          socket.respond(req.id, false, {
+            message: 'The session is still running — the host could not end it.'
+          })
+          return
+        }
+        socket.respond(req.id, true, {})
+      })
       .catch((err: unknown) =>
         socket.respond(req.id, false, {
           message: (err as Error)?.message ?? 'Could not end the session.'

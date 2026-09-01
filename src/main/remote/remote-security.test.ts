@@ -416,9 +416,12 @@ describe('pty.destroy ends the session through the injected destroyNode', () => 
     expect(pty.kill).not.toHaveBeenCalled()
   })
 
-  it('destroys the STREAM’s node (never a client-sent id) and answers ok', async () => {
+  it('destroys the STREAM’s node (never a client-sent id) and answers a VERIFIED ok', async () => {
     const { socket, responses, fs, pty } = makeHostFakes()
-    const destroyNode = vi.fn(async () => {})
+    // The destroy actually lands: after it, the session no longer exists.
+    const destroyNode = vi.fn(async () => {
+      ;(pty.sessionExists as ReturnType<typeof vi.fn>).mockResolvedValue(false)
+    })
     const handlers = createHostHandlers(
       pty, socket, fs, () => ['/work'], async () => '', () => null, undefined, undefined, destroyNode
     )
@@ -430,6 +433,42 @@ describe('pty.destroy ends the session through the injected destroyNode', () => 
     expect(destroyNode).toHaveBeenCalledWith('node-a')
     // The viewer is dropped like pty.kill does — the destroy ends the underlying session.
     expect(pty.kill).toHaveBeenCalledWith(null, 'sess')
+  })
+
+  // Issue #581: `destroyNode` resolving proves only that nothing threw — every per-step failure
+  // inside the destroy chain is swallowed by design, so a chain that quietly ended NOTHING used to
+  // answer success, and the app (which surfaces failures in an alert) had nothing to show over a
+  // session that kept running. The verb now verifies the outcome itself.
+  it('a destroy that resolves while the session still exists answers an honest error, not success', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const destroyNode = vi.fn(async () => {}) // resolves — and ends nothing (sessionExists stays true)
+    const handlers = createHostHandlers(
+      pty, socket, fs, () => ['/work'], async () => '', () => null, undefined, undefined, destroyNode
+    )
+    await attachStream(handlers, 'node-a')
+    handlers.onRpc({ id: 'd', method: 'pty.destroy', params: { streamId: 1 } })
+    await vi.waitFor(() =>
+      expect(responses.at(-1)).toEqual({
+        id: 'd',
+        ok: false,
+        body: { message: expect.stringContaining('still running') }
+      })
+    )
+  })
+
+  it('an unprobeable outcome is a failure too — never success on uncertainty', async () => {
+    const { socket, responses, fs, pty } = makeHostFakes()
+    const destroyNode = vi.fn(async () => {
+      ;(pty.sessionExists as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('tmux wedged'))
+    })
+    const handlers = createHostHandlers(
+      pty, socket, fs, () => ['/work'], async () => '', () => null, undefined, undefined, destroyNode
+    )
+    await attachStream(handlers, 'node-a')
+    handlers.onRpc({ id: 'd', method: 'pty.destroy', params: { streamId: 1 } })
+    await vi.waitFor(() =>
+      expect(responses.at(-1)).toMatchObject({ id: 'd', ok: false })
+    )
   })
 
   it('an unknown streamId is refused without calling destroyNode', () => {
