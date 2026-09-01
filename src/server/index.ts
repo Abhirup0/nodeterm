@@ -72,6 +72,7 @@ import {
   type MirrorSettings,
   type MirrorServer,
   setNodeSessionName,
+  setNodeHibernated,
   sessionNameSweepEntries,
   nodeSessionName
 } from '../core/agent-status-mirror'
@@ -460,6 +461,12 @@ export async function startServer(
   // Live Activity. Fire-and-forget; no-op with no unresolved done.
   platform.handle(IPC.agentAckDone, (nodeId: string) => {
     ackDone(nodeId)
+  })
+  // Eco hibernation report (parity with desktop's ipcMain.on(IPC.agentHibernated)): the browser
+  // renderer owns the flag; the mirror carries it so the phone's SSH browse renders SLEEPING.
+  platform.handle(IPC.agentHibernated, (msg: { nodeId?: unknown; on?: unknown }) => {
+    if (typeof msg?.nodeId !== 'string' || !msg.nodeId) return
+    setNodeHibernated(msg.nodeId, msg.on === true)
   })
   // Phone→host read-acks: the phone drops `~/.nodeterm/acks/<nodeId>.seen` on this host when it READS
   // a finished session. Sweep it (15s cadence, cheap dir-mtime gate) and for each ack: `ackDone`

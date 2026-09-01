@@ -630,10 +630,27 @@ export function buildAgentApi(
   client: RpcClient
 ): Pick<
   NodeTerminalApi,
-  'onAgentStatus' | 'onSubagentActivity' | 'onUnreadClear' | 'answerPermission' | 'ackDone'
+  | 'onAgentStatus'
+  | 'onSubagentActivity'
+  | 'onUnreadClear'
+  | 'answerPermission'
+  | 'ackDone'
+  | 'reportHibernated'
+  | 'onAgentWake'
+  | 'onRemoteViewers'
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
+    // REAL forward: the Server Edition writes its own agent-status mirror, and the phone reads it
+    // over its SSH browse path — a browser canvas hibernating a node must reach that file too.
+    reportHibernated: (nodeId, on) => {
+      void client.request(IPC.agentHibernated, { nodeId, on }).catch(() => undefined)
+    },
+    // Deliberate no-op subscriptions, not stubs-by-accident: both signals originate in the phone
+    // RELAY host, which lives only in the desktop main process — the Server Edition serves no
+    // relay, so there is nothing to subscribe to and nothing silently degrades.
+    onAgentWake: () => () => undefined,
+    onRemoteViewers: () => () => undefined,
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>

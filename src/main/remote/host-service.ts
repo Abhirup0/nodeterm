@@ -200,7 +200,13 @@ export function createHostHandlers(
   // "End session" (`pty.destroy`), reaching the SAME path as the desktop ×
   // (`destroySession(…, {everySocket:true})` + node removal). Absent ⇒ `pty.destroy` is not
   // served, which is what an un-wired context (and every pre-feature test fake) should say.
-  destroyNode?: (nodeId: string) => Promise<void>
+  destroyNode?: (nodeId: string) => Promise<void>,
+  // A relay stream attached to / detached from a node id — "a phone viewer is (no longer) watching
+  // this session". Every stream drop funnels through `dropStream`, so attached/detached calls are
+  // balanced per stream (kill, destroy, PTY exit, closeAll, an attach superseded mid-flight).
+  // The desktop uses it to (a) wake a hibernated node someone just opened on their phone and
+  // (b) keep Eco from hibernating a session a phone is actively watching. Absent ⇒ no tracking.
+  remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -208,7 +214,17 @@ export function createHostHandlers(
   let streamCounter = 0
 
   function dropStream(streamId: number): void {
+    const stream = streams.get(streamId)
     streams.delete(streamId)
+    // Report AFTER the delete: `detached` may consult the live viewer set via its own bookkeeping,
+    // and a callback that throws must not leave the stream registered.
+    if (stream) {
+      try {
+        remoteViewer?.detached(stream.persistKey)
+      } catch {
+        /* viewer bookkeeping must never break the stream teardown */
+      }
+    }
   }
 
   // Build the output/exit sinks for a new stream: pipe PTY output into OP.Output frames (with
@@ -284,6 +300,13 @@ export function createHostHandlers(
     // Reserve the stream, then respond so the client can route Input/Resize frames; the snapshot
     // + live attach then proceed. Capturing the screen is async (a tmux side-call).
     streams.set(streamId, stream)
+    // A phone viewer is now watching this node's session (reported at RESERVE time, balanced by
+    // `dropStream`): the desktop wakes a hibernated node for it and shields it from Eco.
+    try {
+      remoteViewer?.attached(nodeId)
+    } catch {
+      /* viewer bookkeeping must never break the attach */
+    }
 
     // `fresh` — did this attach CREATE the session, or join a live one? It has to be asked BEFORE
     // `attachDetached`, whose `tmux new-session -A` creates when the session is gone; afterwards
@@ -615,10 +638,21 @@ export function createHostHandlers(
       }
     },
     closeAll() {
-      for (const stream of streams.values()) {
+      // Kill every viewer first (the R4 adjacency the tests pin: `streams.clear()` in the same
+      // synchronous turn), then report the departures — dropStream would interleave callbacks
+      // between kills, and a callback must never widen that window.
+      const closing = [...streams.values()]
+      for (const stream of closing) {
         pty.kill(null, stream.sessionId)
       }
       streams.clear()
+      for (const stream of closing) {
+        try {
+          remoteViewer?.detached(stream.persistKey)
+        } catch {
+          /* viewer bookkeeping must never break the teardown */
+        }
+      }
     }
   }
 }
@@ -805,6 +839,9 @@ export interface HostSessionOptions {
   /** Permanently ends a node's session + removes the node (`pty.destroy`). Optional: absent ⇒
    *  the verb answers with an honest "not served" error. */
   destroyNode?: (nodeId: string) => Promise<void>
+  /** Relay-viewer presence per node (attach/detach, balanced per stream) — see createHostHandlers.
+   *  Optional: absent ⇒ no tracking. */
+  remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
   /** Extra fs/git jail roots beyond the shared canvas's node cwds — production passes the
    *  workspace's local project cwds: the phone browses EVERY project over `projects.list`, so a
    *  canvas-only jail denied whichever project the desktop didn't happen to have focused. */
@@ -926,7 +963,8 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     opts.getClientId ?? (() => null),
     opts.git,
     opts.registerNode,
-    opts.destroyNode
+    opts.destroyNode,
+    opts.remoteViewer
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -949,6 +987,9 @@ export interface HostBridgeDeps {
   /** The phone's "End session" (`pty.destroy`): destroy the tmux session on every socket it could
    *  live on + take the node off its project's canvas — the desktop ×'s two steps. */
   destroyNode?: (nodeId: string) => Promise<void>
+  /** Relay-viewer presence per node — wakes a hibernated node a phone just opened and shields a
+   *  phone-watched session from Eco (see main/index.ts's counter). */
+  remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
   /** Workspace-level jail roots (local project cwds) merged with the canvas node cwds. */
   workspaceRoots?: () => string[]
 }
@@ -1020,6 +1061,7 @@ export function initRemoteHost(
       git: bridge.git,
       registerNode: bridge.registerNode,
       destroyNode: bridge.destroyNode,
+      remoteViewer: bridge.remoteViewer,
       extraRoots: bridge.workspaceRoots,
       // Typing attribution: this session's input frames are this phone's keystrokes.
       getClientId: () => phone.id(),
