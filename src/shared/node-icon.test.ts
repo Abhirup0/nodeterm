@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  iconFileName,
   nodeIconMime,
   normalizeNodeIcon,
   portableIconPath,
@@ -173,5 +174,94 @@ describe('portable round trip', () => {
       expect(icon).toBeDefined()
       expect(resolveIconPath((icon as { path: string }).path, cwd)).toBe(abs)
     }
+  })
+})
+
+// The path seams, on a machine that is not the one that wrote the value. `.nodeterm/project.json`
+// is git-shared, so a Windows teammate's icon reaches a mac's serializer and back; and a hostile
+// value written for Windows is CHECKED here, wherever "here" happens to be. Both directions are
+// pinned, because getting either wrong is silent: one deletes a colleague's icons, the other
+// leaves the project root escapable.
+describe('path dialects', () => {
+  it('keeps a Windows drive-absolute path, so a mac save does not strip a colleague’s icon', () => {
+    for (const path of ['C:\\Users\\me\\proj\\.nodeterm\\images\\a.png', 'D:/work/b.jpg']) {
+      expect(normalizeNodeIcon({ type: 'image', path })).toEqual({ type: 'image', path })
+    }
+  })
+
+  it('refuses a UNC path — reading one reaches another machine over the network', () => {
+    for (const path of ['\\\\host\\share\\a.png', '//host/share/a.png']) {
+      expect(normalizeNodeIcon({ type: 'image', path })).toBeUndefined()
+    }
+  })
+
+  it('refuses a drive-RELATIVE path, which has no root of its own to resolve against', () => {
+    expect(normalizeNodeIcon({ type: 'image', path: 'C:a.png' })).toBeUndefined()
+  })
+
+  // The one that was broken: `\` was not a separator here, so this was a single segment that was
+  // neither '', '.' nor '..' — it passed on every platform and escaped the project on Windows.
+  it('refuses a relative path that traverses out via BACKSLASH separators', () => {
+    for (const path of [
+      './a\\..\\..\\secret.png',
+      '.\\..\\..\\secret.png',
+      './sub\\..\\..\\..\\etc\\passwd.png'
+    ]) {
+      expect(normalizeNodeIcon({ type: 'image', path })).toBeUndefined()
+    }
+  })
+
+  it('refuses a relative segment carrying a drive qualifier or an NTFS data stream', () => {
+    expect(normalizeNodeIcon({ type: 'image', path: './C:/Windows/a.png' })).toBeUndefined()
+    expect(normalizeNodeIcon({ type: 'image', path: './icon.png:payload.png' })).toBeUndefined()
+  })
+
+  it('canonicalizes a relative path to one stored dialect, so its next reader is not guessing', () => {
+    expect(normalizeNodeIcon({ type: 'image', path: '.\\images\\a.png' })).toEqual({
+      type: 'image',
+      path: './images/a.png'
+    })
+  })
+
+  it('relativizes under a Windows project root, and stores it POSIX-separated', () => {
+    expect(portableIconPath('C:\\proj\\.nodeterm\\images\\a.png', 'C:\\proj')).toBe(
+      './.nodeterm/images/a.png'
+    )
+    // A trailing separator on the root is not a reason to give up on portability.
+    expect(portableIconPath('C:\\proj\\images\\a.png', 'C:\\proj\\')).toBe('./images/a.png')
+  })
+
+  it('leaves a Windows path outside the project absolute', () => {
+    expect(portableIconPath('C:\\other\\a.png', 'C:\\proj')).toBe('C:\\other\\a.png')
+  })
+
+  it('resolves a ./ path against a Windows root', () => {
+    expect(resolveIconPath('./images/a.png', 'C:\\proj')).toBe('C:\\proj/images/a.png')
+  })
+
+  it('survives store -> normalize -> resolve on Windows', () => {
+    const abs = 'C:\\proj\\.nodeterm\\images\\a.png'
+    const cwd = 'C:\\proj'
+    const stored = portableIconPath(abs, cwd)
+    const icon = normalizeNodeIcon({ type: 'image', path: stored })
+    expect(icon).toBeDefined()
+    // Same FILE as `abs`; Node accepts forward slashes on Windows, so the spelling differs and
+    // the target does not.
+    expect(resolveIconPath((icon as { path: string }).path, cwd)).toBe(
+      'C:\\proj/.nodeterm/images/a.png'
+    )
+  })
+})
+
+describe('iconFileName', () => {
+  it('answers the last segment in either dialect', () => {
+    expect(iconFileName('/a/b/c.png')).toBe('c.png')
+    expect(iconFileName('C:\\Users\\me\\logo.png')).toBe('logo.png')
+    expect(iconFileName('logo.png')).toBe('logo.png')
+  })
+
+  it('is what lets nodeIconMime read a Windows path', () => {
+    expect(nodeIconMime('C:\\Users\\me\\logo.PNG')).toBe('image/png')
+    expect(nodeIconMime('C:\\dir.with.dots\\README')).toBeUndefined()
   })
 })

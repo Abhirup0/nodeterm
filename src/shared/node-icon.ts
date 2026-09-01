@@ -24,7 +24,25 @@
  *
  *  3. **A relative path may not traverse.** `./` paths are resolved against the project cwd (see
  *     below), so a `./..`-prefixed one would walk straight out of the project. Same rule, and the
- *     same reasoning, as `isSafeQuickOpenRelPath` on the remote quick-open index.
+ *     same reasoning, as `isSafeQuickOpenRelPath` on the remote quick-open index. **Both `/` and
+ *     `\\` count as separators when that rule is applied, on every platform** — see
+ *     `isSafeRelIconPath`.
+ *
+ * **Two dialects in, one dialect out.** The value is written by one machine and read by another,
+ * so validation ACCEPTS a Windows path (`C:\\...`) and a POSIX one (`/...`) regardless of where
+ * the check runs, while everything this module STORES is POSIX-separated. Both halves are
+ * load-bearing:
+ *
+ *  • Accepting both everywhere is what stops a mac's `flowToNodeStates` from silently deleting a
+ *    Windows teammate's icons: refuse `C:\\...` on mac and a mac user merely opening the shared
+ *    canvas and saving it strips them from `project.json`. A Windows absolute path on a mac does
+ *    not RESOLVE, of course — it just does not draw, exactly as a POSIX absolute path from someone
+ *    else's machine already does not. That is a degrade, and a degrade is not a reason to destroy
+ *    the value on the way past.
+ *  • Storing one dialect is what makes the `./` form portable at all. A stored `.\\a\\b.png` would
+ *    mean "a file called `a\\b.png`" on POSIX and "`b.png` inside `a`" on Windows. So
+ *    `normalizeNodeIcon` canonicalizes a relative path to `./` with forward slashes, the same way
+ *    it canonicalizes an emoji to its first grapheme.
  *
  * **Portability.** An icon image lives beside the canvas that names it, in the project's own
  * git-shared `.nodeterm/images/` (see core/canvas-images.ts). A path stored absolutely would
@@ -80,9 +98,52 @@ interface GraphemeSegmenter {
   segment(input: string): Iterable<{ segment: string }>
 }
 
+/**
+ * A path separator. BOTH are separators everywhere, never "`\` only on Windows": the value is
+ * written by one machine and validated on another, so a check that reads `\` as an ordinary
+ * filename character on the validating machine is simply wrong about the machine that will read
+ * it. Applying the strict rule on every platform costs a POSIX user only the ability to name an
+ * icon file with a literal backslash in it.
+ */
+const SEP_RE = /[\\/]/
+
+/** `./` or `.\` — the marker for a path stored relative to the project root. */
+const REL_PREFIX_RE = /^\.[\\/]/
+
+/**
+ * A drive-qualified absolute path: `C:\...` or `C:/...`. The separator is REQUIRED, because
+ * `C:x.png` is drive-RELATIVE — it resolves against whatever directory that drive happens to be
+ * sitting on in the reading process, which is precisely the guess this module refuses to make.
+ */
+const DRIVE_ABS_RE = /^[A-Za-z]:[\\/]/
+
+/**
+ * A UNC path: `\\host\share\...` or `//host/share/...`. Refused, matching the decision already
+ * made for terminal file links (`renderer/terminal/file-links.ts`, which consumes UNC
+ * specifically so it can refuse it). Reading one reaches ANOTHER MACHINE over SMB, which is a
+ * long way outside "an icon beside the canvas" and is exactly the reach the extension gate exists
+ * to keep narrow. Note this also refuses a POSIX `//foo/bar`, where a leading `//` is
+ * implementation-defined anyway — no real icon path is lost.
+ */
+const UNC_RE = /^(?:\\\\|\/\/)/
+
+/** Absolute in EITHER dialect, and not a network path. The one predicate all three exported
+ *  functions ask, so they cannot disagree about what "absolute" means. */
+function isAbsoluteIconPath(path: string): boolean {
+  if (UNC_RE.test(path)) return false
+  return path.startsWith('/') || DRIVE_ABS_RE.test(path)
+}
+
+/** The final segment of a path in either dialect — `C:\a\b.png` and `/a/b.png` both give
+ *  `b.png`. Exported because the picker needs the same answer when it names the copied file. */
+export function iconFileName(path: string): string {
+  const segments = path.split(SEP_RE)
+  return segments[segments.length - 1] ?? ''
+}
+
 /** The MIME type for an icon image path, or undefined when the extension is not an image one. */
 export function nodeIconMime(path: string): string | undefined {
-  const name = path.split('/').pop() ?? ''
+  const name = iconFileName(path)
   // A name with no dot has no extension: `.split('.').pop()` would return the whole name, so
   // `README` would resolve as an extension and only miss by luck.
   if (!name.includes('.')) return undefined
@@ -110,9 +171,24 @@ function firstGrapheme(raw: string): string {
   return clean.slice(0, EMOJI_MAX_UNITS)
 }
 
-/** True when a `./`-relative icon path stays inside the project root. */
+/**
+ * True when a `./`-relative icon path stays inside the project root.
+ *
+ * Splitting on BOTH separators is the whole point, and it is not a Windows nicety. Splitting on
+ * `/` alone, `./a\..\..\secret.png` is ONE segment — not `''`, not `.`, not `..` — so it passed
+ * this guard on every platform and then walked two directories out of the project the moment a
+ * Windows reader resolved it. One machine writes this value and another reads it, so the rule has
+ * to hold where it is CHECKED, not only where it happens to be dangerous.
+ *
+ * A segment may also not contain `:`. On Windows that is either a drive qualifier (`./C:/Windows`)
+ * or an NTFS alternate data stream (`./icon.png:payload`), and a project-relative icon path has no
+ * business expressing either.
+ */
 function isSafeRelIconPath(rel: string): boolean {
-  return rel.split('/').every((seg) => seg !== '' && seg !== '..' && seg !== '.')
+  const segments = rel.split(SEP_RE)
+  return segments.every(
+    (seg) => seg !== '' && seg !== '.' && seg !== '..' && !seg.includes(':')
+  )
 }
 
 /**
@@ -132,13 +208,19 @@ export function normalizeNodeIcon(raw: unknown): NodeIcon | undefined {
     if (typeof v.path !== 'string') return undefined
     const path = v.path.trim()
     if (!path || hasControl(path) || !nodeIconMime(path)) return undefined
-    if (path.startsWith('./')) {
-      return isSafeRelIconPath(path.slice(2)) ? { type: 'image', path } : undefined
+    if (REL_PREFIX_RE.test(path)) {
+      const rel = path.slice(2)
+      if (!isSafeRelIconPath(rel)) return undefined
+      // Canonicalize to the one stored dialect. A hand-edited `.\a\b.png` means two different
+      // files on the two platforms; rewriting it here (the same way an emoji is rewritten to its
+      // first grapheme) is what keeps the shared file unambiguous for its next reader.
+      return { type: 'image', path: `./${rel.replace(/\\/g, '/')}` }
     }
-    // Anything else must be an absolute POSIX path: a bare `foo.png` has no root to resolve
+    // Anything else must be absolute, in either dialect: a bare `foo.png` has no root to resolve
     // against, and resolving it against the cwd of whatever process happens to be running is
-    // precisely the kind of guess this module refuses to make.
-    return path.startsWith('/') ? { type: 'image', path } : undefined
+    // precisely the kind of guess this module refuses to make. An absolute path is kept BYTE FOR
+    // BYTE — it belongs to one machine's filesystem and is not ours to rewrite.
+    return isAbsoluteIconPath(path) ? { type: 'image', path } : undefined
   }
   return undefined
 }
@@ -150,9 +232,22 @@ export function normalizeNodeIcon(raw: unknown): NodeIcon | undefined {
  */
 export function portableIconPath(absPath: string, projectCwd?: string): string {
   if (!projectCwd) return absPath
-  const root = projectCwd.replace(/\/+$/, '')
-  if (!root || !absPath.startsWith(`${root}/`)) return absPath
-  const rel = absPath.slice(root.length + 1)
+  const root = projectCwd.replace(/[\\/]+$/, '')
+  if (!root) return absPath
+  // The prefix test is separator-INSENSITIVE: `saveCanvasImage` builds its answer with the host's
+  // own `path.join`, so on Windows it comes back `C:\proj\.nodeterm\images\x.png` while
+  // `project.cwd` may carry either separator. Comparing raw strings there simply never matched,
+  // and the icon silently stayed absolute — travelling nowhere, with nothing said about it.
+  //
+  // The comparison stays CASE-sensitive even though Windows filesystems usually are not: both
+  // sides come from the same `project.cwd` in practice, so they match exactly, and a
+  // case-insensitive test would wrongly relativize on a case-sensitive filesystem. Not matching
+  // costs only portability; matching wrongly costs correctness.
+  const toPosix = (p: string): string => p.replace(/\\/g, '/')
+  const posixRoot = toPosix(root)
+  const posixAbs = toPosix(absPath)
+  if (!posixAbs.startsWith(`${posixRoot}/`)) return absPath
+  const rel = posixAbs.slice(posixRoot.length + 1)
   return rel && isSafeRelIconPath(rel) ? `./${rel}` : absPath
 }
 
@@ -162,9 +257,17 @@ export function portableIconPath(absPath: string, projectCwd?: string): string {
  * means the icon does not draw; it must never mean "read something else".
  */
 export function resolveIconPath(storedPath: string, projectCwd?: string): string | undefined {
-  if (!storedPath.startsWith('./')) return storedPath.startsWith('/') ? storedPath : undefined
+  // Re-asked rather than assumed: this is exported, and the next caller may not have come through
+  // `normalizeNodeIcon` (the same reasoning `loadNodeIconSrc` gives for re-checking the MIME).
+  if (!REL_PREFIX_RE.test(storedPath)) {
+    return isAbsoluteIconPath(storedPath) ? storedPath : undefined
+  }
   const rel = storedPath.slice(2)
   if (!isSafeRelIconPath(rel)) return undefined
-  const root = projectCwd?.replace(/\/+$/, '')
-  return root ? `${root}/${rel}` : undefined
+  const root = projectCwd?.replace(/[\\/]+$/, '')
+  if (!root) return undefined
+  // Joined with `/` even when `root` is a Windows path: Node's fs accepts forward slashes on
+  // Windows, and one deterministic spelling keeps `nodeIconImage`'s per-path cache from holding
+  // two entries for one file.
+  return `${root}/${rel.replace(/\\/g, '/')}`
 }
