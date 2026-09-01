@@ -188,6 +188,7 @@ import { codexContextParse } from '../core/codex-session'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { grokRawFields, isAsyncSubagentLaunch, type NormalizedAgentEvent } from '../shared/agents/normalize'
+import { agentAccountColor } from '../shared/agents/account-color'
 import { grokSessionDir, grokSessionsDir } from '../core/agents/grok-paths'
 import { forgetGrokSession, rememberGrokSessionDir } from '../core/grok-session'
 import {
@@ -3384,7 +3385,20 @@ app.whenReady().then(async () => {
     registerNode: (
       projectId: string,
       node: { id: string; title?: string; agentId?: string; accountId?: string }
-    ) => workspaceStore.appendRemoteNode(projectId, node),
+    ) =>
+      workspaceStore.appendRemoteNode(
+        projectId,
+        node,
+        new Date(),
+        // Host-derived, exactly as on the canvas: the account's default color beats the agent's,
+        // so a phone-started session under a colored account is recognizable in the same way. The
+        // agent decides WHICH account list answers (agentAccountColor) — the phone supplies both
+        // ids, and the two lists are keyed independently.
+        agentAccountColor(node.agentId, node.accountId, {
+          claude: settingsStore.get().claudeAccounts ?? [],
+          codex: settingsStore.get().codexAccounts ?? []
+        })
+      ),
     // "End session" from the phone (`pty.destroy`): the SAME two steps the desktop × performs —
     // kill the tmux session on every socket it could live on (the sweep may have seen it on either
     // — see the session-memory panel's kill rule), then take the node off its project's canvas
