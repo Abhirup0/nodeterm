@@ -1449,6 +1449,13 @@ export interface Settings {
   agentHibernationEnabled: boolean
   /** How long a session must be idle + offscreen before "Eco" hibernates it (minutes). */
   agentHibernationIdleMinutes: number
+  /** When Eco hibernates a session, also mark it PAUSED (see `AgentNodeStatus.paused`) so it does
+   *  NOT auto-resume the next time the project or app reopens — only an explicit Resume brings it
+   *  back. Off by default: ordinary Eco already resumes automatically on the next reveal, and this
+   *  opts a hibernated session OUT of that for good, trading convenience for a colder, smaller
+   *  footprint across restarts. Independent of manual "Pause session", which always persists this
+   *  way regardless of this setting. */
+  agentHibernationPersistAcrossRestart: boolean
   /** Send anonymous usage data (version/OS) to the telemetry backend. Opt-OUT (default on):
    *  version/OS only, nothing personal, client IP never stored. Turn it off in Settings → Privacy
    *  (or hard-disable with DO_NOT_TRACK / NODETERM_TELEMETRY_DISABLED). Note: a lighter anonymous
@@ -1621,6 +1628,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // is deliberately long — shorter windows exit sessions the user is between turns on.
   agentHibernationEnabled: false,
   agentHibernationIdleMinutes: 30,
+  agentHibernationPersistAcrossRestart: false,
   // Opt-out (default on). Existing users pick this up on hydrate ONLY if their settings.json has
   // no telemetryEnabled key yet; anyone who already saved settings keeps their stored value.
   telemetryEnabled: true,
