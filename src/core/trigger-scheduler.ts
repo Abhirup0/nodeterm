@@ -65,7 +65,19 @@ export function triggerRowsFromCanvases(
   return rows
 }
 
-export type TriggerRunOutcome = 'fired' | 'failed' | 'missed'
+/**
+ * `fired`/`missed`/`failed` come straight back from a fire attempt; `queued` means the target was
+ * busy and the payload waits in the deliver-on-idle queue, whose LATE outcomes —
+ * `delivered-late` / `expired` (plus a `missed` for a target that went away, or a trigger
+ * disarmed/edited while queued) — arrive through `recordExternalRun`.
+ */
+export type TriggerRunOutcome =
+  | 'fired'
+  | 'failed'
+  | 'missed'
+  | 'queued'
+  | 'delivered-late'
+  | 'expired'
 
 export interface TriggerRun {
   at: number
@@ -73,8 +85,10 @@ export interface TriggerRun {
   detail?: string
 }
 
+/** What one fire attempt reports back, recorded verbatim as the run. `queued` is not `fired`:
+ *  the bytes have not reached the pane yet — the queue's flush/expiry reports the ending. */
 export interface TriggerFireResult {
-  ok: boolean
+  outcome: 'fired' | 'missed' | 'failed' | 'queued'
   detail?: string
 }
 
@@ -126,6 +140,12 @@ export interface TriggerScheduler {
   runsFor: (projectId: string, nodeId: string) => TriggerRun[]
   /** The computed next due time, or null — phase 4's card reads this for its countdown. */
   nextFireAt: (projectId: string, nodeId: string) => number | null
+  /**
+   * Record a run that ended OUTSIDE a fire attempt — the deliver-on-idle queue's late outcomes
+   * (`delivered-late`, `expired`, a flush-time drop). Same ring, same `onRun`, so the card shows
+   * one history however the run ended.
+   */
+  recordExternalRun: (projectId: string, nodeId: string, run: TriggerRun) => void
 }
 
 export function createTriggerScheduler(deps: TriggerSchedulerDeps): TriggerScheduler {
@@ -201,7 +221,7 @@ export function createTriggerScheduler(deps: TriggerSchedulerDeps): TriggerSched
         const result = await deps.fire(row)
         record(row.projectId, row.nodeId, {
           at: now(),
-          outcome: result.ok ? 'fired' : 'failed',
+          outcome: result.outcome,
           ...(result.detail ? { detail: result.detail } : {})
         })
       } catch (e) {
@@ -234,6 +254,7 @@ export function createTriggerScheduler(deps: TriggerSchedulerDeps): TriggerSched
     },
     sweepOnce,
     runsFor: (projectId, nodeId) => [...(runs.get(keyOf(projectId, nodeId)) ?? [])],
-    nextFireAt: (projectId, nodeId) => states.get(keyOf(projectId, nodeId))?.nextAt ?? null
+    nextFireAt: (projectId, nodeId) => states.get(keyOf(projectId, nodeId))?.nextAt ?? null,
+    recordExternalRun: record
   }
 }
