@@ -23,6 +23,8 @@ hidden tabs.
        '[.[].assets[] | select(.name|test("\\.(dmg|AppImage|deb|exe)$")) | .download_count] | add' -->
 [![Downloads](https://img.shields.io/badge/downloads-1.2k-brightgreen)](https://github.com/eneskirca/nodeterm/releases)
 
+<a href="https://trendshift.io/repositories/103825?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-103825" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/103825" alt="eneskirca%2Fnodeterm | Trendshift" width="250" height="55"/></a>
+
 [Download](#-download) · [Docs](https://nodeterm.dev/docs) · [Features](#-features) · [Build from source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
 
 </div>
