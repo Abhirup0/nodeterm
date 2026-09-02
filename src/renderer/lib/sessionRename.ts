@@ -26,6 +26,24 @@ export function renameCommand(name: string): string {
   return `/rename ${oneLine(name)}`
 }
 
+/**
+ * Would `/rename <next>` be the line this session was already given?
+ *
+ * Compared AFTER `oneLine`, i.e. after exactly the normalization `renameCommand` applies, because
+ * that is what decides whether the pane would receive a byte-identical line. Two titles that
+ * differ only by a control character compose the same command, so a raw `!==` would answer "this
+ * is a new name" and push a duplicate.
+ *
+ * The unchanged case is not cosmetic. Every `/rename` claude receives lands in the transcript as a
+ * `local_command`, its `Session renamed to: …` stdout, AND a `<system-reminder>` that tells the
+ * model *the user* just named this session — so a re-sent identical name spends the session's
+ * context to assert an intent nobody expressed. Issue #582 measured 32 of them in six hours, all
+ * carrying the same title; issue #569 §2 is the same push from the orchestrator's side.
+ */
+export function sessionNameUnchanged(next: string, current: string): boolean {
+  return oneLine(next) === oneLine(current)
+}
+
 export interface RenamePushIo {
   paneCommand(persistKey: string): Promise<string | null>
   sendText(persistKey: string, text: string): Promise<boolean>
@@ -47,12 +65,24 @@ export interface RenamePushIo {
  * So: probe the pane, and when we cannot DEMONSTRATE that a non-shell owns it, write nothing. A
  * probe that errors counts as "not demonstrated" — the asymmetry is deliberate, because an
  * unsynced session name is cosmetic while a destroyed launch is not.
+ *
+ * `current` is the name the node carries BEFORE this rename, and it is REQUIRED rather than
+ * optional on purpose: a rename that changes nothing must reach the pane with nothing (see
+ * `sessionNameUnchanged`), and an optional argument is one a call site forgets. Every caller
+ * already holds the node it is renaming, so the type is what enforces the gate — neither
+ * `Canvas.tsx` nor `TerminalNode.tsx` is unit-rendered in this repo, so the compiler is the only
+ * reviewer that sees every site.
+ *
+ * Returns false both for "nothing to push" and for "the agent never took the pane"; the callers
+ * are one-way mirrors and act on neither.
  */
 export async function pushSessionRename(
   io: RenamePushIo,
   nodeId: string,
-  name: string
+  name: string,
+  current: string
 ): Promise<boolean> {
+  if (sessionNameUnchanged(name, current)) return false
   const sleep = io.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   for (let i = 0; i < RENAME_PUSH_ATTEMPTS; i++) {
     if (i > 0) await sleep(RENAME_PUSH_RETRY_MS)

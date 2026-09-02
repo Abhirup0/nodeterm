@@ -401,7 +401,7 @@ import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNoteP
 import { dependencyEdges, launchesToFire, unmetDeps, type ArmedNode } from '../lib/pendingLaunch'
 import { triggerEdges } from '../lib/triggerCard'
 import { freeSpot } from '../lib/placement'
-import { pushSessionRename } from '../lib/sessionRename'
+import { pushSessionRename, sessionNameUnchanged } from '../lib/sessionRename'
 import { useReopenHistory, type ReopenEntry } from '../state/reopenHistory'
 import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
 import { buildClosedSessionEntries, stateToReopenSnapshot } from '../lib/closedHistory'
@@ -9970,6 +9970,12 @@ export function Canvas() {
               reply({ ok: false, error: `rename: no node with id ${id}` })
               return
             }
+            // The name the node carries BEFORE this call — read here, before the setNodes below,
+            // because a re-rename to the SAME title must reach the pane with nothing (#582,
+            // #569 §2). Orchestrators re-assert their node's name on startup and after every
+            // context reset, and each identical `/rename` costs the session a transcript entry
+            // plus a `<system-reminder>` claiming the USER just renamed it.
+            const prevTitle = (target.data.title as string) ?? ''
             // Same semantics as renameSession: an explicit rename takes ownership of the
             // name (titleAuto off) and mirrors it into a rename-capable agent's session.
             setNodes((ns) =>
@@ -9978,11 +9984,18 @@ export function Canvas() {
             markDirty()
             const agentId = target.data.agentId as AgentId | undefined
             if (agentId && canRename(agentId) && title) {
-              // Gated: an agent that opens a node and renames it in the same breath would
-              // otherwise splice this line into the launch command still being typed.
-              void pushSessionRename(api.pty, id, title)
+              // Gated twice: on the pane's owner (an agent that opens a node and renames it in the
+              // same breath would otherwise splice this line into the launch command still being
+              // typed) and, inside, on the name actually changing.
+              void pushSessionRename(api.pty, id, title, prevTitle)
             }
-            reply({ ok: true, message: `renamed ${id} to "${title}"` })
+            reply(
+              // Say which of the two happened: the caller cannot see the pane, and "already named"
+              // is the answer that lets an orchestrator stop re-asserting a name it already set.
+              title && sessionNameUnchanged(title, prevTitle)
+                ? { ok: true, message: `${id} is already named "${title}"` }
+                : { ok: true, message: `renamed ${id} to "${title}"` }
+            )
             return
           }
           case 'sticky': {
@@ -10388,6 +10401,15 @@ export function Canvas() {
 
   const renameSession = useCallback(
     (projectId: string, id: string, title: string) => {
+      // Both facts about the node are read BEFORE the rename lands: `renameNode` mutates the
+      // store synchronously, so reading the previous title afterwards would compare the new name
+      // against itself and push a duplicate `/rename` on every no-op rename (#582).
+      const liveNode = nodesRef.current.find((n) => n.id === id)
+      const storedNode = useProjects
+        .getState()
+        .projects.find((p) => p.id === projectId)
+        ?.nodes.find((n) => n.id === id)
+      const prevTitle = (liveNode?.data.title as string | undefined) ?? storedNode?.title ?? ''
       if (projectId === activeProjectId) {
         // An explicit rename takes ownership of the name → stop auto-tracking the session.
         setNodes((ns) =>
@@ -10400,15 +10422,14 @@ export function Canvas() {
       }
       // Mirror the new name into a rename-capable agent's live session (tmux send-keys works
       // whether or not the node is currently mounted). Same one-way push as the node header's ✦.
-      const liveAgent = nodesRef.current.find((n) => n.id === id)?.data.agentId as AgentId | undefined
-      const storedAgent = useProjects
-        .getState()
-        .projects.find((p) => p.id === projectId)
-        ?.nodes.find((n) => n.id === id)?.agentId
-      const agentId = liveAgent ?? storedAgent
+      // The unchanged-name gate inside `pushSessionRename` is defence in depth for the callers
+      // that already compare (the header's rename box): this funnel is also reached by the ✦
+      // AI-name and by the kanban/sidebar rename boxes, which can hand back the name the node
+      // already has.
+      const agentId = (liveNode?.data.agentId as AgentId | undefined) ?? storedNode?.agentId
       const name = title.trim()
       if (agentId && canRename(agentId) && name) {
-        void pushSessionRename(api.pty, id, name)
+        void pushSessionRename(api.pty, id, name, prevTitle)
       }
     },
     [activeProjectId, setNodes, markDirty, writeDisk]
