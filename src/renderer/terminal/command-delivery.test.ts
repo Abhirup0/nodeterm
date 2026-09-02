@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   DELIVERY_ATTEMPTS,
+  KILL_LINE,
   VERIFY_TIMEOUT_MS,
   cleanEcho,
   deliverCommand,
@@ -64,6 +65,15 @@ describe('echoedIntact', () => {
   it('does not match a truncated echo (flush ate the tail)', () => {
     expect(echoedIntact(CMD.slice(0, -6), CMD)).toBe(false)
   })
+  it('does not match an echo that lost its head (rc file read ate the first chars)', () => {
+    expect(echoedIntact(`% ${CMD.slice(1)}`, CMD)).toBe(false)
+  })
+  it('tolerates redraw text interleaved mid-line — the command need not be contiguous', () => {
+    // A ZLE re-wrap can splice printable prompt text into the echoed line. Both ENDS are still
+    // there, so this must verify: on the session-host leg a false negative refuses the launch.
+    const mid = Math.floor(CMD.length / 2)
+    expect(echoedIntact(`% ${CMD.slice(0, mid)}% ${CMD.slice(mid)}`, CMD)).toBe(true)
+  })
 })
 
 describe('deliverCommand', () => {
@@ -78,6 +88,19 @@ describe('deliverCommand', () => {
     f.emit('\x1b[32m% \x1b[0m' + CMD.slice(0, 40) + '\r\n')
     f.emit(CMD.slice(40))
     expect(f.writes).toEqual([CMD, '\r'])
+  })
+
+  it('does not submit a line whose head the shell never echoed (#556)', () => {
+    const f = fakeIo()
+    deliverCommand(f.io, CMD)
+    // An rc file reading the same tty during startup (oh-my-zsh's update prompt) swallows the
+    // first character, so the echo is missing its head while the TAIL is fully intact.
+    f.emit(`% ${CMD.slice(1)}`)
+    expect(f.writes).toEqual([CMD]) // no '\r': submitting here runs a mangled command
+    // The rewrite lands after the rc prompt consumed its answer, and then verifies.
+    vi.advanceTimersByTime(VERIFY_TIMEOUT_MS)
+    f.emit(`% ${CMD}`)
+    expect(f.writes).toEqual([CMD, KILL_LINE, CMD, '\r'])
   })
 
   it('kills the line and rewrites when the echo never completes, then succeeds', () => {

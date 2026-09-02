@@ -542,3 +542,74 @@ describe('HostSession emulator output watermarks', () => {
     await expect(session.serialize()).resolves.toBe('good')
   })
 })
+
+describe('HostSession launch echo verification', () => {
+  // The launch line this leg actually carries: long enough that head and tail windows
+  // (ECHO_EDGE_CHARS = 24 each) do not overlap.
+  const COMMAND = 'claude --permission-mode auto --session-id 0f9a1c3e-5b7d-4e21-9a86-1d2c3b4a5e6f'
+
+  function deliveryProc(): { value: IPty; written: string[]; emit: (chunk: string) => void } {
+    let sink: ((d: string) => void) | undefined
+    const written: string[] = []
+    return {
+      value: {
+        pid: 42,
+        pause: vi.fn(),
+        resume: vi.fn(),
+        resize: vi.fn(),
+        write: (d: string) => {
+          written.push(d)
+        },
+        onData: (cb: (d: string) => void) => {
+          sink = cb
+          return { dispose: vi.fn() }
+        },
+        onExit: () => ({ dispose: vi.fn() })
+      } as unknown as IPty,
+      written,
+      emit: (chunk: string) => sink?.(chunk)
+    }
+  }
+
+  function deliver(session: HostSession, command: string): Promise<void> {
+    return (
+      session as unknown as { deliverVerifiedCommand(c: string): Promise<void> }
+    ).deliverVerifiedCommand(command)
+  }
+
+  it('submits when the head scrolled out of the bounded window before the tail arrived', async () => {
+    const proc = deliveryProc()
+    const session = new HostSession('echo-window', SPAWN, 100, {
+      proc: proc.value,
+      term: inertTerm()
+    })
+    const delivered = deliver(session, COMMAND)
+
+    // The shell echoes the head, then a full-line ZLE redraw pushes more than the window
+    // (max(command.length + 256, 512)) of visible characters through before the tail lands.
+    // Without a sticky head the two substrings never coexist in `echoed`, all three attempts
+    // fail, and this leg REFUSES the launch — the node never starts.
+    proc.emit(COMMAND.slice(0, 32))
+    proc.emit('x'.repeat(700))
+    proc.emit(COMMAND.slice(-32))
+
+    await expect(delivered).resolves.toBeUndefined()
+    expect(proc.written.at(-1)).toBe('\r')
+  })
+
+  it('still requires the head: a tail-only echo does not submit', async () => {
+    const proc = deliveryProc()
+    const session = new HostSession('echo-tail-only', SPAWN, 100, {
+      proc: proc.value,
+      term: inertTerm()
+    })
+    // Left pending on purpose: this asserts the NON-event, and the retry timer is unref'd.
+    void deliver(session, COMMAND).catch(() => {})
+
+    proc.emit('x'.repeat(700))
+    proc.emit(COMMAND.slice(-32))
+
+    // submit() is synchronous inside the data handler, so its absence is observable now.
+    expect(proc.written).not.toContain('\r')
+  })
+})
