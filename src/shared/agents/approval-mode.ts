@@ -23,6 +23,7 @@ import {
   type AgentPermissionMode,
   type BuiltinAgentId
 } from './config'
+import { argvHasFlag } from '../shell-quote'
 
 /** One agent's approval dialect: the flag it spells, and the values it accepts. ONE fact per agent —
  *  a flag and a table maintained separately is how a third agent added to the table silently emits
@@ -130,10 +131,33 @@ export function approvalFlags(agentId: AgentId, mode: AgentPermissionMode): stri
  * WHERE the flag lands is decided one layer up, by `createAgentNode`: with no `argvPromptSeparator`
  * (claude, gemini, codex) it goes LAST, keeping those command lines byte-identical; with one
  * (grok's `--`) it must go BEFORE the separator, because `--` is end-of-options.
+ *
+ * **A flag the command already carries is left alone (issue #601).** `cmd` is not always ours:
+ * `settings.agentLaunchCommands` lets the user replace the program part with a wrapper, and a
+ * wrapper may spell the approval flag itself. Appending regardless produced
+ * `claude --permission-mode bypassPermissions --permission-mode auto` — a duplicate the settings
+ * field still displayed as exactly what the user typed, so whichever occurrence the CLI honoured,
+ * they had no way to tell which one was in force.
+ *
+ * The contract this settles is "program only, minus what you spelled yourself", not "the override
+ * owns the whole command". The whole-command reading cannot work: the settings copy already
+ * promises that `--resume` and friends are appended, and a wrapper has no way to know the session id
+ * a cold restore is resuming — so nodeterm has to keep appending. What it must not do is append a
+ * SECOND opinion about a flag the user has already stated one about; theirs is the more specific and
+ * the more explicit, and it wins.
+ *
+ * Deliberately not extended to `withAgentModel`: a model switch is a per-node action the user just
+ * took, and letting a global launch-command override veto it would silently strand that node on the
+ * wrapper's model. Different specificity, opposite answer.
+ *
+ * A command with no override cannot reach the suppression — nodeterm builds it and never puts the
+ * flag in twice — so every existing launch line is byte-identical.
  */
 export function withPermissionMode(cmd: string, id: AgentId, mode: AgentPermissionMode): string {
   const flags = approvalFlags(id, mode)
-  return flags.length ? `${cmd} ${flags.join(' ')}` : cmd
+  if (!flags.length) return cmd
+  if (argvHasFlag(cmd, flags[0])) return cmd
+  return `${cmd} ${flags.join(' ')}`
 }
 
 // ---------------------------------------------------------------------------------------------

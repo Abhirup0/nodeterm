@@ -35,6 +35,32 @@ export function shellQuoteIfNeeded(s: string): string {
  * (see launch.ts), so a resolved value containing spaces or metacharacters stays one argument by
  * construction — the token boundary is fixed before any environment value enters the string.
  */
+/**
+ * Does this command line already carry `flag` as an OPTION of its own?
+ *
+ * Issue #601: nodeterm appends its managed flags to a launch command it did not necessarily write —
+ * `settings.agentLaunchCommands` lets the user replace the program part with a wrapper, and a
+ * wrapper is entitled to spell an option nodeterm also spells. Appending blindly produced
+ * `claude --permission-mode bypassPermissions --permission-mode auto`: a duplicate the field still
+ * displayed as what the user typed, so whichever occurrence the CLI honoured, they had no way to
+ * tell which.
+ *
+ * Both spellings count (`--flag value` and `--flag=value`), and the answer is computed from TOKENS
+ * rather than from a substring search, which is the whole reason this lives beside `shellSplit`: an
+ * override like `claude --append-system-prompt 'mind --permission-mode'` mentions the flag inside a
+ * quoted argument, and a substring match there would suppress nodeterm's real flag over a sentence.
+ *
+ * Scanning stops at a bare `--`, because everything after end-of-options is a positional argument —
+ * a word there is the CLI's data, not an option it will act on.
+ */
+export function argvHasFlag(cmd: string, flag: string): boolean {
+  for (const token of shellSplit(cmd)) {
+    if (token === '--') return false
+    if (token === flag || token.startsWith(`${flag}=`)) return true
+  }
+  return false
+}
+
 export function shellSplit(input: string): string[] {
   const tokens: string[] = []
   let buf = ''
