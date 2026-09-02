@@ -17,12 +17,18 @@ describe('borderExit — where the centre-to-centre line leaves a rectangle', ()
   it('exits the TOP toward a point above', () => {
     expect(borderExit(box(0, 0), { x: 50, y: -500 })).toEqual({ x: 50, y: 0, position: Position.Top })
   })
-  it('a diagonal target exits the side the line actually crosses (wide box → left/right)', () => {
-    // centre (50,25); toward (250,125): dx=200, dy=100 → |dx|/w=4 > |dy|/h=4? equal → right wins.
+  it('a diagonal target picks the side the centre line crosses (|dx|/hw vs |dy|/hh; tie → left/right)', () => {
+    // centre (50,25); toward (250,125): dx=200, dy=100 → |dx|·hh = |dy|·hw → right wins.
     const e = borderExit(box(0, 0), { x: 250, y: 125 })
     expect(e.position).toBe(Position.Right)
-    expect(e.x).toBe(100)
-    expect(e.y).toBeCloseTo(50)
+    // The point is the side's MIDPOINT, not the crossing: every edge leaving a side leaves from
+    // one place, so arrows converge instead of fanning along the border.
+    expect({ x: e.x, y: e.y }).toEqual({ x: 100, y: 25 })
+  })
+  it('restricted to the horizontal sides (context links use the left/right bridge handles), a target above still exits left or right', () => {
+    expect(borderExit(box(0, 0), { x: 50, y: -500 }, 'horizontal')).toEqual({ x: 100, y: 25, position: Position.Right })
+    expect(borderExit(box(0, 0), { x: -300, y: -500 }, 'horizontal')).toEqual({ x: 0, y: 25, position: Position.Left })
+    expect(borderExit(box(0, 0), { x: 300, y: 500 }, 'horizontal')).toEqual({ x: 100, y: 25, position: Position.Right })
   })
   it('a coincident centre (overlapping nodes) degrades to the right side, never NaN', () => {
     const e = borderExit(box(0, 0), { x: 50, y: 25 })
@@ -48,8 +54,12 @@ describe('floatingEdgeParams — both ends, facing each other', () => {
     const p = floatingEdgeParams(box(1000, 1000), box(0, 0))
     expect([Position.Left, Position.Top]).toContain(p.sourcePosition)
     expect([Position.Right, Position.Bottom]).toContain(p.targetPosition)
-    // The exact point, not just the side: the vertical branch interpolates x by HALF THE HEIGHT
-    // over |dy|, and a swapped half-extent still lands on the right side while missing the corner.
-    expect({ x: p.sx, y: p.sy }).toEqual({ x: 1025, y: 1000 })
+    // The exact point is the TOP side's midpoint (the centre line crosses the top: |dy|·hw > |dx|·hh).
+    expect({ x: p.sx, y: p.sy }).toEqual({ x: 1050, y: 1000 })
+    expect({ x: p.tx, y: p.ty }).toEqual({ x: 50, y: 50 })
+  })
+  it('horizontal-only params: a node ABOVE another still connects right → left at the handle heights', () => {
+    const p = floatingEdgeParams(box(0, 0), box(0, 300), 'horizontal')
+    expect(p).toEqual({ sx: 100, sy: 25, sourcePosition: Position.Right, tx: 100, ty: 325, targetPosition: Position.Right })
   })
 })

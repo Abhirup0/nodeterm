@@ -16,6 +16,12 @@ describe('canvas edge model (source pins)', () => {
     expect(src).not.toMatch(/targetHandle:\s*'/)
   })
 
+  it('context and note links anchor on the bridge handles (left/right), ropes on any side', () => {
+    expect(src).toContain("data: { anchor: 'horizontal' }")
+    // Exactly the one family: ropes and card edges keep the four-side choice.
+    expect((src.match(/anchor: 'horizontal'/g) ?? []).length).toBe(1)
+  })
+
   it('the separate "waits for" family is gone; the waiting look is the rope\'s, from the model', () => {
     expect(src).not.toContain('dependencyEdges')
     expect(src).not.toContain('depEdges')

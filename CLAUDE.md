@@ -1624,8 +1624,10 @@ else, and its context links must keep classifying across restarts).
   node that has none at **project load**: `pendingLaunch` is persisted and the rope is not, so a node
   armed by any other path — or by a build older than this one — would otherwise hold a launch with
   no arrow saying what for. All edges route through the single `floating` edge type
-  (`canvas/FloatingEdge.tsx`, a bezier between the nearest borders of the two node rectangles; an
-  unmeasured node draws nothing rather than a path to the origin) — no family sets a handle side;
+  (`canvas/FloatingEdge.tsx`, a bezier between the MIDPOINTS of the two nodes' facing sides — one
+  anchor per side, so a hub's arrows converge instead of fanning along its border; context and note
+  links are restricted to the left/right sides, where the bridge handles sit; an unmeasured node
+  draws nothing rather than a path to the origin) — no family sets a handle side;
   and a node whose eye is closed (`hideFanout`) hides every edge touching it as well as its cards
   (2026-09-02 edge model, spec in docs/superpowers/specs).
   **(7) Delivery waits for the node's PTY, and never fails silently** (issue #569 item 1, 2026-09).
@@ -2440,9 +2442,12 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
 - **Add menu** = bottom dock (`Dock.tsx`) `+`, mirrored by the pane menu and command palette.
 - **Edges** are all one React Flow type, `floating` (`canvas/FloatingEdge.tsx` over the pure
   `lib/floatingEdge.ts`): every family — ropes, context bridges, note links, subagent/loop card
-  edges, trigger edges — is drawn between the two nodes' nearest borders instead of fixed handle
-  sides, so an edge to a node placed left of or above its source takes the short way round rather
-  than looping across the canvas. A terminal node's **eye** (`hide-fanout`, "Hide cards &
+  edges, trigger edges — is drawn between the midpoints of the two nodes' facing sides instead of
+  fixed handle sides, so an edge to a node placed left of or above its source takes the short way
+  round rather than looping across the canvas, and every edge using a side meets the node at ONE
+  point (2026-09-03: enes's first try showed a hub with entries fanned along its whole top edge).
+  Context and note links are the exception in one respect: they anchor only on the left/right
+  sides (`data.anchor: 'horizontal'`), where the `link-out`/`link-in` drag handles are drawn. A terminal node's **eye** (`hide-fanout`, "Hide cards &
   connections") hides its subagent/loop cards AND every edge touching that node — display only:
   the links still authorise reads and an `--after` still waits. See the `--after` bullet under
   Canvas control for the rope model the eye hides.

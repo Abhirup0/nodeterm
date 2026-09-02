@@ -1972,6 +1972,9 @@ export function Canvas() {
       return {
         ...e,
         type: 'floating',
+        // Context and note links meet the node at its bridge handles (left/right dots) — the point
+        // the user dragged from — never at the top or bottom.
+        data: { anchor: 'horizontal' },
         label: sel ? `${baseLabel} — ⌫ to remove` : baseLabel,
         labelStyle: { fill: stroke, fontSize: 11, fontWeight: 600 },
         ...labelBg,
@@ -8592,7 +8595,7 @@ export function Canvas() {
 
   // A browser guest's new-window (target=_blank / window.open) request → open another browser node
   // (never a real popup; main denies the real one) roped below/right of the source. Reads the
-  // latest nodes via nodesRef so the deps stay []. Rope is display-only (controlEdges, not persisted).
+  // latest nodes via nodesRef so the deps stay []. Rope is display-only lineage (controlEdges, persisted as `ropes`).
   useEffect(() => {
     return window.nodeTerminal.browser.onBrowserNewWindow(({ url, sourceNodeId }) => {
       const src = nodesRef.current.find((n) => n.id === sourceNodeId)
