@@ -130,7 +130,17 @@ export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
 export const SUBAGENT_CAPABLE = ['claude', 'codex'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
-export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
+// grok joins with NO installer of its own: it scans `~/.claude/skills` for Claude Code
+// compatibility, which is exactly where `get-linked-context` is already written — the same
+// argument `CANVAS_CONTROL_CAPABLE` makes below. That premise used to be marked unverified;
+// MEASURED on 1.0.13 (2026-09-01): `grok inspect --json` lists the skill with
+// `vendor: 'claude', compatibilityStatus: 'enabled'`, and `externalCompat.cells` reports
+// `{surface:'skills', enabled:true, source:'default'}`.
+// Two user settings can switch that off — `[compat.claude] skills = false` in
+// `~/.grok/config.toml`, and `GROK_CLAUDE_SKILLS_ENABLED=false`. Then the skill is undiscoverable
+// however this list reads, and the same `inspect` cell is what says so (`enabled:false`, a
+// non-default `source`) rather than leaving support to guess.
+export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 // Agents whose per-node context meter we can fill. Each needs BOTH numbers: a used count and a
 // TRUSTWORTHY window.
 //  - claude: used from its transcript's assistant usage, window INFERRED from the model family

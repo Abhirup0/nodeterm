@@ -7,6 +7,7 @@
 // local logic.
 //
 // This module must import nothing from electron or `../main` (see no-electron.test.ts).
+import { grokHomeDir } from '../core/agents/grok-paths'
 import { resolve } from 'path'
 import { homedir } from 'os'
 import { hookServer } from '../core/agents/hook-server'
@@ -162,7 +163,11 @@ export function wireAgentStatus(
     const abs = resolve(tp)
     // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
     // before) would otherwise fail the jail and its meter would silently never fill.
-    return isSafeLocalTranscriptPath(abs, homedir(), platform.userDataDir, codexHome())
+    // grokHomeDir() honors $GROK_HOME for the same reason and with the same failure shape: closed,
+    // so a relocated grok home would silently never resolve a context link. BOTH shells pass it
+    // (invariant 11) — a jail widened in one shell only is a feature the Server Edition lacks with
+    // nothing to say so.
+    return isSafeLocalTranscriptPath(abs, homedir(), platform.userDataDir, codexHome(), grokHomeDir())
       ? abs
       : undefined
   }
