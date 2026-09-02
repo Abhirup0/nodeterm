@@ -16,8 +16,9 @@ import { SESSION_ID_RE } from '../../core/transcript-reader'
 import { renderClaudeTranscript } from './render-claude'
 import { renderCodexTranscript } from './render-codex'
 import { renderGeminiTranscript } from './render-gemini'
+import { renderGrokTranscript } from './render-grok'
 import { budgetHandoff } from './budget'
-import { locateClaude, locateCodex, locateGemini } from '../../core/handoff/locate'
+import { locateClaude, locateCodex, locateGemini, locateGrok } from '../../core/handoff/locate'
 
 export type HandoffResult = { filePath: string } | { error: string }
 
@@ -27,13 +28,15 @@ type Locator = (sessionId: string, accountId?: string) => Promise<string | undef
 const RENDERERS: Record<string, Renderer> = {
   claude: renderClaudeTranscript,
   codex: renderCodexTranscript,
-  gemini: renderGeminiTranscript
+  gemini: renderGeminiTranscript,
+  grok: renderGrokTranscript
 }
 
 const LOCATORS: Record<string, Locator> = {
   claude: locateClaude,
   codex: locateCodex,
-  gemini: locateGemini
+  gemini: locateGemini,
+  grok: locateGrok
 }
 
 /** Filesystem-safe handoff filename for a node + ISO-ish timestamp. Node ids are

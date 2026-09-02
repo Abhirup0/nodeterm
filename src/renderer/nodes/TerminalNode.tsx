@@ -5180,6 +5180,7 @@ export function TerminalNode({
                 sessionId={status?.sessionId}
                 cwd={data.cwd as string | undefined}
                 accountId={data.accountId}
+                agentId={agentId}
               />
             </Suspense>
           ) : (

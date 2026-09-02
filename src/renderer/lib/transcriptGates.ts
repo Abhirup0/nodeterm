@@ -1,4 +1,4 @@
-import { canChat, type AgentId } from '@shared/agents/config'
+import { readsClaudeShapedTranscript, type AgentId } from '@shared/agents/config'
 
 /**
  * Does this node's conversation live in a file **claude's** transcript readers can locate and parse?
@@ -18,9 +18,13 @@ import { canChat, type AgentId } from '@shared/agents/config'
  * session's messages as its own hits. Even wired to the right file the reader would be wrong: it
  * parses claude's JSONL shape, which a codex rollout is not.
  *
- * `CHAT_CAPABLE` already states exactly the fact being asked for — "we can read and render this
- * agent's transcript ourselves" — so it is reused here rather than adding a fourth capability list
- * that would mean the same thing.
+ * This used to read `CHAT_CAPABLE`, on the reasoning that it "already states exactly the fact being
+ * asked for" and a separate list "would mean the same thing". That was true only while claude was
+ * CHAT_CAPABLE's only member. Grok joined it in 2026-09 — we render grok's conversation ourselves
+ * with `linesFromGrok` — while grok's file is neither shaped like claude's nor under claude's tree,
+ * so the two facts came apart and the shared list became the very bug described above, pointed at a
+ * new agent. The gate now reads `CLAUDE_TRANSCRIPT_READABLE`, which asks the narrower question this
+ * function's name has always asked.
  *
  * The meter itself stays on `hasUsage` and spans three agents: it is fed by the per-agent context
  * tails in the shells (`geminiContextParse` / `codexContextParse`), which need no resolver because
@@ -33,5 +37,5 @@ import { canChat, type AgentId } from '@shared/agents/config'
  * `locateGemini` by sessionId) and to route to the matching tail — a real feature, not a gate.
  */
 export function readsClaudeTranscript(agentId: AgentId | undefined): boolean {
-  return !!agentId && canChat(agentId)
+  return !!agentId && readsClaudeShapedTranscript(agentId)
 }

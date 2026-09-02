@@ -2363,16 +2363,22 @@ export interface ChatTranscriptResult {
 
 export interface ChatApi {
   /**
-   * Reads a Claude session transcript as structured chat messages.
+   * Reads an agent session transcript as structured chat messages.
    * Resolves the transcript like `ClaudeApi.readTranscript` (sessionId → cwd), then
    * reconstructs ordered bubbles + tool calls. `nodeId` lets an SSH-project node be resolved
    * on its HOST even when no hook event has registered its transcript in this app run.
+   *
+   * `agentId` picks the reader. Omitted (or `claude`) keeps the historical claude path exactly as
+   * it was. It is NOT optional in spirit: without it a grok node falls into claude's resolver, whose
+   * cwd fallback returns the newest CLAUDE transcript for that directory — someone else's
+   * conversation. `CHAT_CAPABLE` decides who may ask; this decides who answers.
    */
   readTranscript(
     sessionId: string | undefined,
     cwd: string | undefined,
     accountId?: string,
-    nodeId?: string
+    nodeId?: string,
+    agentId?: string
   ): Promise<ChatTranscriptResult>
 }
 

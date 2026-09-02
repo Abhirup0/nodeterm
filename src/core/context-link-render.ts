@@ -224,7 +224,7 @@ export function linesFromOpencodeExport(raw: string): string[] | null {
  * A malformed line is skipped but NOT in silence: `linesFromGrok.skipped(buf)` counts them, so a
  * caller can say "3 lines were unreadable" instead of quietly rendering a shorter transcript.
  */
-interface GrokChatLine {
+export interface GrokChatLine {
   type?: string
   content?: unknown
   tool_calls?: { id?: string; name?: string; arguments?: unknown }[]
@@ -233,7 +233,9 @@ interface GrokChatLine {
   kind?: { tool_type?: string; action?: { type?: string; query?: string } }
 }
 
-function grokParse(buf: string): { lines: GrokChatLine[]; skipped: number } {
+/** Exported so the ⌘M chat reader can build structured messages from the SAME shape knowledge
+ *  instead of re-deriving grok's line vocabulary a second time and drifting from it. */
+export function grokParse(buf: string): { lines: GrokChatLine[]; skipped: number } {
   const lines: GrokChatLine[] = []
   let skipped = 0
   for (const raw of buf.split('\n')) {
