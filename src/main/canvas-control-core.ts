@@ -934,7 +934,8 @@ across Nodeterm sessions), be the orchestration chef — plan the kitchen, then 
    user to relay it. Then do the work only you can do: reconcile the streams against each
    other, name the conflicts and the leftovers, and report ONE synthesis. A station you never
    read is a station whose work you cannot vouch for — say so rather than assuming it went
-   fine. Stations you did not open are not linked; \`link --to <id>\` them first.
+   fine. Stations you neither opened nor named in \`--after\` are not linked; \`link --to <id>\`
+   them first.
 6. Verify before you report. When a station's work matters — anything touching money, auth, data
    migration or a public API — run \`verify --node <stationId>\` instead of re-reading it yourself.
    You cannot independently check work you were part of planning; a panel of reviewers who each
