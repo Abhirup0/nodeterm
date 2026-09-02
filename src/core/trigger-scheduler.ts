@@ -37,8 +37,17 @@
  */
 
 import type { CanvasNodeState } from '../shared/types'
-import { sanitizeTriggerSpec, type TriggerSpec } from '../shared/trigger'
+import {
+  sanitizeTriggerSpec,
+  type TriggerRun,
+  type TriggerRunOutcome,
+  type TriggerSpec
+} from '../shared/trigger'
 import { nextCronFire, parseCron } from '../shared/cron'
+
+// The run types moved to @shared/trigger (the card renders what the core records); re-exported so
+// every phase-2/3 import path keeps working.
+export type { TriggerRun, TriggerRunOutcome }
 
 export interface TriggerRow {
   projectId: string
@@ -63,26 +72,6 @@ export function triggerRowsFromCanvases(
     }
   }
   return rows
-}
-
-/**
- * `fired`/`missed`/`failed` come straight back from a fire attempt; `queued` means the target was
- * busy and the payload waits in the deliver-on-idle queue, whose LATE outcomes —
- * `delivered-late` / `expired` (plus a `missed` for a target that went away, or a trigger
- * disarmed/edited while queued) — arrive through `recordExternalRun`.
- */
-export type TriggerRunOutcome =
-  | 'fired'
-  | 'failed'
-  | 'missed'
-  | 'queued'
-  | 'delivered-late'
-  | 'expired'
-
-export interface TriggerRun {
-  at: number
-  outcome: TriggerRunOutcome
-  detail?: string
 }
 
 /** What one fire attempt reports back, recorded verbatim as the run. `queued` is not `fired`:
