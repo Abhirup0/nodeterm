@@ -47,10 +47,31 @@ describe('where readiness is published (source pins)', () => {
   it('only a REAL teardown clears it — a park keeps the session typeable by name', () => {
     // The park branch returns before this line; a parked tmux session is still addressable by
     // `sendText`, so clearing there would strand a launch that could have been delivered.
-    expect(src).toMatch(/life\.dead = true[\s\S]{0,600}?setSessionReady\(id, false\)/)
+    expect(src).toMatch(/life\.dead = true[\s\S]{0,1800}?setSessionReady\(id, false\)/)
     // Exactly three publish sites: mount (adopt-or-not), settle, teardown. A fourth means
     // somebody has taught another path to claim readiness it cannot vouch for.
     expect(src.match(/setSessionReady\(/g)?.length).toBe(4) // 3 call sites + the definition
+  })
+})
+
+describe('an offscreen release keeps a tmux-backed session READY (source pins)', () => {
+  it('the teardown clears readiness only when the session itself is going away', () => {
+    // MEASURED (2026-09-02, scratch Server Edition, hook POSTs): an armed node released offscreen
+    // — PTY client detached, tmux session alive and typeable by name — reported not-ready, so its
+    // dependency going `done` delivered nothing, the badge claimed the terminal "has not started
+    // yet", and only a camera travel (revive) ever fired the launch. The release is a viewer
+    // teardown, not a session teardown, so it must not withdraw the fact the gate asks about.
+    expect(src).toMatch(
+      /life\.dead = true[\s\S]{0,1800}?if \(!\(offscreenDownRef\.current && sessionPersistent\)\) setSessionReady\(id, false\)/
+    )
+  })
+
+  it('a PLAIN-SHELL armed node is not released at all — there the release kills the shell', () => {
+    // Fifth lever behind issue #126's rule: the pure predicate decides, the node only asks it, on
+    // the same retry cadence the live-work deferral uses.
+    expect(src).toMatch(
+      /shouldDeferReleaseForHeldLaunch\(\{[\s\S]{0,200}?tmuxBacked: sessionPersistentRef\.current,[\s\S]{0,120}?armed: armedRef\.current/
+    )
   })
 })
 

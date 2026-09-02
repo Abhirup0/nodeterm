@@ -9,6 +9,7 @@ import {
   offscreenCoreIsRemote,
   planOffscreenVisibility,
   shouldDeferReleaseForEco,
+  shouldDeferReleaseForHeldLaunch,
   shouldDeferReleaseForLiveWork
 } from './offscreen-policy'
 
@@ -217,5 +218,20 @@ describe('releaseStillEnabled — the fire-time re-ask of the setting itself', (
     expect(releaseStillEnabled(undefined)).toBe(true) // unset = the default window, still on
     expect(releaseStillEnabled(0)).toBe(false)
     expect(releaseStillEnabled(-5)).toBe(false)
+  })
+})
+
+describe('shouldDeferReleaseForHeldLaunch — the fifth kill lever: an armed node holds a launch', () => {
+  it('defers a PLAIN-SHELL node that is still armed — the release would kill the shell the launch needs', () => {
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: false, armed: true })).toBe(true)
+  })
+
+  it('never defers a TMUX-BACKED armed node — its session stays typeable by name through a release', () => {
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: true, armed: true })).toBe(false)
+  })
+
+  it('never defers a node that is not armed, on either backend', () => {
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: false, armed: false })).toBe(false)
+    expect(shouldDeferReleaseForHeldLaunch({ tmuxBacked: true, armed: false })).toBe(false)
   })
 })
