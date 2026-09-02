@@ -28,6 +28,7 @@ import { randomUUID } from 'crypto'
 import { renameAtomicSync } from '../../fs-atomic'
 import { buildManagedScript } from './managed-script'
 import { normalizeHookCommand } from './install-helper'
+import { buildCodexWindowsWrapper, CODEX_WINDOWS_WRAPPER_FILE } from './codex-windows-wrapper'
 import {
   computeTrustedHash,
   getCodexCanonicalTrustPath,
@@ -105,7 +106,18 @@ function isManagedCommand(command: string | undefined): boolean {
   // Separator folding comes from install-helper so the two installers can never disagree about
   // what makes an entry ours — the drift that made the JSON-settings agents duplicate on Windows
   // (#558). Only the normalizer is shared; codex's merge stays its own (the trust hash).
-  return normalizeHookCommand(command).includes(`agent-hooks/${SCRIPT_FILE_NAME}`)
+  //
+  // BOTH leaves, always, on every platform. The Windows command names `codex-hook.cmd` while every
+  // pre-#567 Windows install (and every POSIX one) names `codex.sh`, so matching only the leaf THIS
+  // platform writes would fail to recognize an entry we ourselves put there — and `mergeManagedHook`
+  // logic here would keep it and append a second one, which is #558 all over again. Matching both is
+  // also what REPAIRS a Windows hooks.json that already carries the unrunnable POSIX command: it is
+  // stripped before the fresh one is pushed, so the next app launch heals the file.
+  const c = normalizeHookCommand(command)
+  return (
+    c.includes(`agent-hooks/${SCRIPT_FILE_NAME}`) ||
+    c.includes(`agent-hooks/${CODEX_WINDOWS_WRAPPER_FILE}`)
+  )
 }
 
 function definitionHasManagedCommand(def: HookDefinition): boolean {
@@ -128,15 +140,35 @@ function removeManagedFromDefinitions(defs: HookDefinition[]): HookDefinition[] 
   })
 }
 
-// Why: form the POSIX command the SAME way for hooks.json AND the trust entry —
-// the trust hash is computed over this exact byte string, so any divergence
-// makes Codex reject the hook. The POSIX wrapper's
-// `[ -x ... ]` guard makes a missing/non-executable script a silent no-op so a
-// broken install never poisons the session with exit-127 noise.
-export function buildManagedCommand(script: string): string {
+/**
+ * The hook command, formed the SAME way for hooks.json AND the trust entry — the trust hash is
+ * computed over this exact byte string, so any divergence makes Codex reject the hook. The POSIX
+ * form's `[ -x ... ]` guard makes a missing/non-executable script a silent no-op, so a broken
+ * install never poisons the session with exit-127 noise.
+ *
+ * `platform` is the platform of the machine that will RUN codex, not the one generating the string,
+ * and it is a parameter for exactly that reason: `RemoteHooks.installCodexRemote` writes this into
+ * an SSH host's `~/.codex/hooks.json`, and that host is POSIX whatever the desktop is. A default of
+ * `process.platform` would make a Windows desktop install a `.cmd` command on a Linux server.
+ */
+export function buildManagedCommand(
+  script: string,
+  platform: NodeJS.Platform | string = process.platform
+): string {
+  if (platform === 'win32') {
+    // Codex hands this to `cmd.exe /C`, which cannot parse an `sh` one-liner (issue #567). Point it
+    // at the batch wrapper written beside the script; the wrapper finds a POSIX shell and runs the
+    // very same `codex.sh`. Quoted as one token: cmd strips a single surrounding pair, and the path
+    // routinely contains spaces (`C:\Users\First Last\...`).
+    const dir = script.slice(0, Math.max(script.lastIndexOf('\\'), script.lastIndexOf('/')) + 1)
+    return `"${dir}${CODEX_WINDOWS_WRAPPER_FILE}"`
+  }
   // POSIX single-quote escape so $, `, ", \ in the path are taken literally.
   const quoted = `'${script.replaceAll("'", "'\\''")}'`
-  return `if [ -x ${quoted} ]; then /bin/sh ${quoted}; fi`
+  // The `else` branch DRAINS stdin. Codex writes the hook payload there, so a bail that never reads
+  // it can EPIPE the writer mid-payload — the same reason install-helper's command carries it
+  // (#186/#187). This was the one managed command missing it.
+  return `if [ -x ${quoted} ]; then /bin/sh ${quoted}; else cat >/dev/null 2>&1 || :; fi`
 }
 
 // Pure core of the codex install: given the CURRENT parsed hooks.json (or {} for
@@ -258,10 +290,35 @@ function writeManagedScript(file: string): void {
   }
 }
 
+/** The batch entry point beside the script — Windows only; nothing else ever reads it. */
+function writeWindowsWrapper(script: string): void {
+  const dir = path.dirname(script)
+  const file = path.join(dir, CODEX_WINDOWS_WRAPPER_FILE)
+  mkdirSync(dir, { recursive: true })
+  const tmp = path.join(dir, `.${Date.now()}-${randomUUID()}.tmp`)
+  let renamed = false
+  try {
+    writeFileSync(tmp, buildCodexWindowsWrapper(), 'utf8')
+    renameAtomicSync(tmp, file)
+    renamed = true
+  } finally {
+    if (!renamed && existsSync(tmp)) {
+      try {
+        unlinkSync(tmp)
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+}
+
 export function installCodexHooks(): void {
   const script = scriptPath()
   try {
     writeManagedScript(script)
+    // Order matters: the wrapper must exist before hooks.json points codex at it, or the first
+    // events after an install land on a missing file.
+    if (process.platform === 'win32') writeWindowsWrapper(script)
   } catch (e) {
     console.warn('[agent-hooks] codex script write failed', e)
     return
