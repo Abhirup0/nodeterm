@@ -495,6 +495,14 @@ Lifecycle, by intent:
   landed. The predicate is deliberately the narrowest one that closes it — a tmux-backed session is
   never protected (the kill costs a redraw), and neither is a plain terminal, a finished agent or
   an unknown state (nothing is running to lose). **A fifth lever owes the same gate.**
+  The fifth is the offscreen release of an ARMED node (`--after`, `shouldDeferReleaseForHeldLaunch`,
+  2026-09-02): the held launch is delivered by session NAME, so with tmux underneath the release is
+  harmless and the node stays `sessionReady` (the teardown keeps the flag for an offscreen release
+  of a tmux-backed session); on the plain-shell fallback the release would destroy the very pane
+  the launch is typed into, so it is deferred while armed. MEASURED before the fix: a released
+  QUEUED node held its launch through its dependency going `done`, the badge claimed the terminal
+  "has not started yet", and only a camera travel (revive) ever fired it — "the chain works when I
+  look at it" was this.
 - **Node unmount (project switch)** → the RENDERER **parks** the terminal (`TerminalNode.tsx`
   `parkedTerminals`): the xterm instance + its attached PTY stay alive with the `.xterm` element
   detached from the DOM, so a remount within `TERM_PARK_MS` (5 min) re-adopts them — instant, and

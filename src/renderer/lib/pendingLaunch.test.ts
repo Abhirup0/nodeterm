@@ -58,6 +58,37 @@ describe('launchesToFire', () => {
   it('fires immediately when there are no deps left to wait on', () => {
     expect(launchesToFire([armed('c', [])], {}, live)).toEqual([{ id: 'c', command: 'echo c' }])
   })
+
+  it('walks a chain A → B → C one station at a time', () => {
+    const chain = [armed('b', ['a']), armed('c', ['b'])]
+    // Nothing has reported: nothing fires.
+    expect(launchesToFire(chain, {}, live)).toEqual([])
+    // A done releases B only — C waits on B, which has not even started.
+    expect(launchesToFire(chain, { a: { state: 'done' } }, live)).toEqual([{ id: 'b', command: 'echo b' }])
+    // B running is still not B done.
+    expect(launchesToFire(chain, { a: { state: 'done' }, b: { state: 'working' } }, live)).toEqual([
+      { id: 'b', command: 'echo b' }
+    ])
+    // B done releases C. (B is still listed here because the caller, not this function, retires a
+    // delivered launch by clearing its pendingLaunch — exactly-once lives in `launchInFlight`.)
+    expect(launchesToFire(chain, { a: { state: 'done' }, b: { state: 'done' } }, live)).toEqual([
+      { id: 'b', command: 'echo b' },
+      { id: 'c', command: 'echo c' }
+    ])
+  })
+
+  it('after a restart (empty status map) a persisted arming holds — nothing will report, ▶ is the escape', () => {
+    // Agent state is transient; a live dep that reported `done` before the restart is unknown now,
+    // and unknown is NOT satisfied. The manual run-now on the badge exists for exactly this.
+    expect(launchesToFire([armed('c', ['a'])], {}, live)).toEqual([])
+    expect(unmetDeps(armed('c', ['a']), {}, live)).toEqual(['a'])
+  })
+
+  it('a dep deleted mid-chain releases what waited on it, but not what waits further down', () => {
+    const chain = [armed('b', ['a']), armed('c', ['b'])]
+    const liveWithoutA = new Set(['b', 'c'])
+    expect(launchesToFire(chain, {}, liveWithoutA)).toEqual([{ id: 'b', command: 'echo b' }])
+  })
 })
 
 describe('launchesToFire — awaitSetupGroup (a worktree whose setup script must land first)', () => {

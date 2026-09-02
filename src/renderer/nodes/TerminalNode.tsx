@@ -82,6 +82,7 @@ import {
   planOffscreenVisibility,
   releaseStillEnabled,
   shouldDeferReleaseForEco,
+  shouldDeferReleaseForHeldLaunch,
   shouldDeferReleaseForLiveWork,
   OFFSCREEN_DEFER_RETRY_MS,
   OFFSCREEN_DISPOSE_MS_DEFAULT
@@ -855,9 +856,10 @@ const restartSubs = new Map<string, () => void>()
  *
  * ABSENT = not ready, which is the safe direction: it holds the launch (visibly — see
  * `useLaunchDelivery`) instead of burning it against a session that is not there. Published by the
- * node itself, since nothing else can see the spawn resolve. A PARKED session stays ready — it is
- * still a live tmux session addressable by name — and only a real teardown (respawn, offscreen
- * dispose, delete) clears it.
+ * node itself, since nothing else can see the spawn resolve. A PARKED session stays ready, and so
+ * does one whose viewer was RELEASED offscreen while tmux is underneath — both are still a live
+ * tmux session addressable by name; only a teardown that ends the session (respawn, delete, or the
+ * release of a plain-shell session) clears it.
  */
 const sessionReadyNodes = new Set<string>()
 const sessionReadySubs = new Set<(nodeId: string) => void>()
@@ -1351,6 +1353,10 @@ export function TerminalNode({
   // with — it can be off-screen mid-drag or right after a ⌘K jump — so it is never taken down.
   const selectedRef = useRef(selected)
   selectedRef.current = selected
+  // Is this node holding a `--after` launch? Read at release FIRE time (see `fireRelease`) — the
+  // hold ends when the launch fires, and a plan made at arm time would not know.
+  const armedRef = useRef(!!data.pendingLaunch)
+  armedRef.current = !!data.pendingLaunch
   // --- glyphgrid (experimental shared renderer) ---
   // This node's registered grid, published by the lifecycle effect so the position effect can push
   // an origin without re-running (and therefore respawning) the terminal. Null for every terminal
@@ -3957,10 +3963,17 @@ export function TerminalNode({
       // EARLIER effect (this terminal may have been adopted from a park) sees the session die here
       // and tears down instead of wiring listeners onto it; `killSession` keeps the kill single.
       life.dead = true
-      // A real teardown (respawn, offscreen dispose, delete) ends the session this node published
-      // as ready. A PARK does not, and returns above without reaching here — a parked session is
-      // still a live tmux session addressable by name, so it stays typeable.
-      setSessionReady(id, false)
+      // A real teardown (respawn, delete) ends the session this node published as ready. A PARK
+      // does not, and returns above without reaching here — a parked session is still a live tmux
+      // session addressable by name, so it stays typeable. An OFFSCREEN RELEASE of a tmux-backed
+      // session is the same fact from the other side: only the viewer goes, the session keeps
+      // running and `sendText` reaches it by name — so readiness is kept. MEASURED (2026-09-02):
+      // clearing it here held a released `--after` node's launch through its dependency going
+      // `done`, with the badge claiming the terminal "has not started yet", until a camera travel
+      // revived the node and it fired at once. The plain-shell fallback never reaches this branch
+      // armed — `shouldDeferReleaseForHeldLaunch` holds the release there — and a respawn while
+      // down is not a release (the effect early-returned, so there is no session to keep).
+      if (!(offscreenDownRef.current && sessionPersistent)) setSessionReady(id, false)
       cleanups.forEach((fn) => fn())
       if (sessionId) killSession(sessionId)
       term.dispose()
@@ -4095,6 +4108,22 @@ export function TerminalNode({
               // runs would skip the hibernate-first ordering and forfeit the CLI's hundreds of MB
               // at the exact moment they became reclaimable. The stretch effectively begins when
               // the work ends.
+              offscreenSinceRef.current = Date.now()
+              offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
+              return
+            }
+            // A HELD LAUNCH ON A PLAIN SHELL (the fifth lever): the `--after` launch this node holds
+            // is typed into the pane by session name, and without tmux the release destroys that
+            // pane. Nothing brings a released node back but the camera, so the launch would sit
+            // QUEUED until the user happened to pan over it. Same cadence, same drain: the hold
+            // ends when the launch fires. (Tmux-backed: released as normal — see the teardown,
+            // which keeps such a session READY because it stays typeable by name.)
+            if (
+              shouldDeferReleaseForHeldLaunch({
+                tmuxBacked: sessionPersistentRef.current,
+                armed: armedRef.current
+              })
+            ) {
               offscreenSinceRef.current = Date.now()
               offscreenTimerRef.current = setTimeout(fireRelease, OFFSCREEN_DEFER_RETRY_MS)
               return

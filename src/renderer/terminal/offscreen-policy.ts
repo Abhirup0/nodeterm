@@ -108,6 +108,21 @@ export function shouldDeferReleaseForLiveWork(i: LiveWorkInput): boolean {
 }
 
 /**
+ * THE FIFTH LEVER (CLAUDE.md: "a fifth lever owes the same gate"): an ARMED node — one holding a
+ * `pendingLaunch` for the canvas-control `--after` edge — has work a kill would strand, even though
+ * nothing is running in it yet. The launch is delivered by session NAME (`sendText` → tmux
+ * paste-buffer), so with tmux underneath a release is harmless: the client detaches, the session
+ * stays typeable, and the launch still lands. On the plain-shell fallback the pty IS the shell, so
+ * the same release destroys the pane the launch was going to be typed into, and nothing revives a
+ * released node except the camera coming back — the launch is held until someone happens to look.
+ * Same shape as `shouldDeferReleaseForLiveWork`, and uncapped for the same reason: what this waits
+ * for (the launch firing, or the user disarming it) always ends the hold.
+ */
+export function shouldDeferReleaseForHeldLaunch(i: { tmuxBacked: boolean; armed: boolean }): boolean {
+  return !i.tmuxBacked && i.armed
+}
+
+/**
  * PHASE 5 ORDERING: with Eco on, releasing an offscreen terminal's viewer WAITS for its agent to
  * hibernate first.
  *
