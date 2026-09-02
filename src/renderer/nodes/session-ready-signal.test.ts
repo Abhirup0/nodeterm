@@ -107,3 +107,14 @@ describe('the QUEUED badge carries the delivery state (source pins)', () => {
     expect(src).toMatch(/else \{[\s\S]{0,200}?markFailed\(id, 1\)/)
   })
 })
+
+describe('the eye button hides cards AND connections (source pins)', () => {
+  it('is offered on every terminal node — a plain terminal has ropes too — and says what it hides', () => {
+    expect(src).toContain("'Hide cards & connections'")
+    expect(src).toContain("'Show cards & connections'")
+    expect(src).not.toContain("'Hide subagent/loop cards'")
+    // The button no longer requires a fan-out-capable agent; only the user's header-button
+    // visibility setting gates it.
+    expect(src).toMatch(/\{!isHidden\('hide-fanout', hiddenHeaderButtons\) && \(\s*<Tooltip label=\{hideFanout \? 'Show cards & connections'/)
+  })
+})
