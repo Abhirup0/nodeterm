@@ -8,6 +8,7 @@ import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
 import { usePhonePairing } from '../usePhonePairing'
 import { IOS_APP_STORE_URL } from '@renderer/lib/links'
+import { hostOsFromNavigator, sshServerCopy } from '@shared/ssh-server'
 import { thisMachine } from '../../../lib/machineName'
 
 const ROWS = {
@@ -36,8 +37,9 @@ function formatPairedAt(ms: number): string {
   })
 }
 
-/** The pairing host is this machine, so the renderer's own UA answers "is this a Mac?". */
-const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+/** The pairing host is this machine, so the renderer's own UA answers which OS it runs on —
+ *  and that decides what the SSH server is called and whether a settings deep link exists. */
+const sshServer = sshServerCopy(hostOsFromNavigator())
 
 export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Element {
   const [devices, setDevices] = useState<PairedDevice[]>([])
@@ -207,15 +209,16 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                 // The live probe (usePhonePairing) flips sshOpen and the QR appears by itself.
                 <div className="space-y-2">
                   <p className="text-sm" style={{ color: '#ff9f0a' }}>
-                    <strong>Remote Login</strong> is off, so your phone wouldn&apos;t be able to
-                    connect after pairing. Turn it on — the QR appears here the moment it is
-                    {isMac ? ' (watching, no need to restart pairing).' : '.'}
+                    <strong>{sshServer.name}</strong> is off, so your phone wouldn&apos;t be able
+                    to connect after pairing. Turn it on — the QR appears here the moment it is
+                    (watching, no need to restart pairing).
                   </p>
-                  {isMac ? (
+                  <p className="text-xs text-muted">{sshServer.how}</p>
+                  {sshServer.settingsLabel ? (
                     <Button
                       onClick={() => void window.nodeTerminal.pairing.openRemoteLoginSettings()}
                     >
-                      Open System Settings
+                      {sshServer.settingsLabel}
                     </Button>
                   ) : null}
                 </div>
@@ -244,7 +247,7 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
                   ) : null}
                   {sshHealed ? (
                     <p className="text-sm" style={{ color: '#30d158' }}>
-                      ✓ Remote Login is on — scan away.
+                      ✓ {sshServer.name} is on — scan away.
                     </p>
                   ) : null}
                 </>

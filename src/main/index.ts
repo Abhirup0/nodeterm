@@ -18,6 +18,7 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
+import { hostOsFromPlatform, sshServerCopy } from '../shared/ssh-server'
 import { macTitleBarOptions } from './window-chrome'
 import { guestContextMenuTemplate } from './webview-context-menu'
 import { BrowserControlLedger } from './browser-control-ledger'
@@ -1527,15 +1528,14 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
   ipcMain.handle(IPC.pairingProbeSsh, () => pairingService.probeSsh())
   // Same pattern as appOpenNotificationSettings: a main-side constant deep link, NOT routed
-  // through shellOpenExternal's http(s)-only allowlist (which silently drops x-apple.* URLs —
+  // through shellOpenExternal's http(s)-only allowlist (which silently drops non-http URLs —
   // the "Open System Settings" button did nothing when it sent the URL from the renderer).
-  // The `Services_RemoteLogin` query selected the service in the pre-Ventura prefpane and is
-  // harmless on newer macOS, which opens the Sharing pane either way.
+  // The URL comes from `sshServerCopy`, the SAME table the renderer prints its copy from, so the
+  // button can never appear on a platform this handler opens nothing for (issue #572: on Windows
+  // it offered a macOS `x-apple.systempreferences:` link that is inert there).
   ipcMain.handle(IPC.pairingOpenRemoteLoginSettings, () => {
-    if (process.platform !== 'darwin') return
-    void shell.openExternal(
-      'x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin'
-    )
+    const url = sshServerCopy(hostOsFromPlatform(process.platform)).settingsUrl
+    if (url) void shell.openExternal(url)
   })
   ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
   ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))

@@ -2883,12 +2883,13 @@ export interface PairingApi {
   stop(): Promise<void>
   /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
   onDone(cb: (result: { ok: boolean; relay?: 'ok' | 'off' | 'failed' | 'dev' }) => void): () => void
-  /** Live re-probe of 127.0.0.1:22, so the Remote Login warning can clear the moment the user
-   *  flips the toggle in System Settings (polled by the UI only while the warning is showing). */
+  /** Live re-probe of 127.0.0.1:22, so the "SSH server is off" warning can clear the moment the
+   *  user turns it on (polled by the UI only while the warning is showing). */
   probeSsh(): Promise<boolean>
-  /** Open System Settings → General → Sharing (Remote Login). The deep link is a main-side
-   *  constant — x-apple.* schemes never pass shellOpenExternal's http(s) allowlist. macOS-only;
-   *  a no-op elsewhere. */
+  /** Open this OS's settings page for its SSH server — Sharing → Remote Login on macOS, Optional
+   *  features on Windows (`sshServerCopy().settingsUrl`, the same table the warning's copy comes
+   *  from). The deep link is a main-side constant: neither scheme passes shellOpenExternal's
+   *  http(s) allowlist. A no-op where that table offers no URL, and the UI shows no button there. */
   openRemoteLoginSettings(): Promise<void>
   /** List paired devices from ~/.nodeterm/agent.json (never includes the token). */
   listDevices(): Promise<PairedDevice[]>
