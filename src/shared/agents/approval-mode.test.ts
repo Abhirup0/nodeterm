@@ -210,6 +210,69 @@ describe('UI copy derived from the mapping', () => {
  * one that matters — a plain-object lookup table answers `'constructor' in table` with true and
  * hands back a Function, which would have been stringified onto a command line.
  */
+/**
+ * Issue #601 — a launch-command override that already spells the approval flag.
+ *
+ * `settings.agentLaunchCommands` replaces the program part with the user's own wrapper, and the
+ * wrapper is entitled to carry the flag itself. Appending regardless produced
+ * `claude --permission-mode bypassPermissions --permission-mode auto`: a duplicate the settings
+ * field still displayed as exactly what was typed, so whichever occurrence the CLI honoured, the
+ * user could not tell which one was in force from the UI.
+ */
+describe('withPermissionMode — a flag the command already carries (issue #601)', () => {
+  it('does not append a second --permission-mode', () => {
+    expect(withPermissionMode('claude --permission-mode bypassPermissions', 'claude', 'auto')).toBe(
+      'claude --permission-mode bypassPermissions'
+    )
+  })
+
+  it('reads the `--flag=value` spelling too', () => {
+    expect(withPermissionMode('claude --permission-mode=plan', 'claude', 'auto')).toBe(
+      'claude --permission-mode=plan'
+    )
+  })
+
+  it('still appends when the override spells a DIFFERENT flag', () => {
+    // The reporter's own benign case: the two flags are about different things, so nodeterm keeps
+    // ownership of the one the user said nothing about.
+    expect(withPermissionMode('claude --allow-dangerously-skip-permissions', 'claude', 'auto')).toBe(
+      'claude --allow-dangerously-skip-permissions --permission-mode auto'
+    )
+  })
+
+  it('answers per agent — a gemini wrapper carrying claude’s spelling is not a match', () => {
+    // The dialects differ (`--approval-mode` vs `--permission-mode`), so the suppression has to be
+    // keyed on the flag THIS agent would actually emit, not on a fixed string.
+    expect(withPermissionMode('gemini --approval-mode yolo', 'gemini', 'plan')).toBe(
+      'gemini --approval-mode yolo'
+    )
+    expect(withPermissionMode('gemini --permission-mode plan', 'gemini', 'plan')).toBe(
+      'gemini --permission-mode plan --approval-mode plan'
+    )
+  })
+
+  it('does not match the flag NAMED inside a quoted argument', () => {
+    // Why this is tokenized rather than a substring search: a wrapper may talk ABOUT the flag, and
+    // suppressing nodeterm's real flag over a sentence would silently change the mode every node
+    // launches in.
+    expect(
+      withPermissionMode(
+        "claude --append-system-prompt 'never suggest --permission-mode'",
+        'claude',
+        'auto'
+      )
+    ).toBe("claude --append-system-prompt 'never suggest --permission-mode' --permission-mode auto")
+  })
+
+  it('leaves every non-override command byte-identical', () => {
+    // The regression guard for everyone who has not set an override: nodeterm builds those lines
+    // and never puts the flag in twice, so the new branch is unreachable for them.
+    expect(withPermissionMode('claude', 'claude', 'auto')).toBe('claude --permission-mode auto')
+    expect(withPermissionMode('codex', 'codex', 'manual')).toBe('codex --ask-for-approval untrusted')
+    expect(withPermissionMode('claude', 'claude', 'manual')).toBe('claude')
+  })
+})
+
 describe('approvalFlags — a forged mode yields the bare command', () => {
   const FORGED = ['yolo', 'on-request', 'constructor', '__proto__', 'toString', '', undefined, null]
   it('emits no flag for any agent', () => {
