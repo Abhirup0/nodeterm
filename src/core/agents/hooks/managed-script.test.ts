@@ -11,6 +11,19 @@ import { fakePlatform } from '../../platform-fake'
 
 describe('buildManagedScript', () => {
   const s = buildManagedScript('claude')
+  it('hands curl a path it can open, gated on the shell reporting itself as MSYS', () => {
+    // The gate is what `uname -s` reports, not merely that a cygpath exists: the name check by
+    // itself would fire on a WSL or Linux box with something called cygpath on PATH, converting a
+    // path its own POSIX curl could already open. Reading the shell's own identity also survives a
+    // caller that replaces the environment, which the executed tests below do.
+    expect(s).toContain('nt_payload_arg="$nt_payload_file"')
+    expect(s).toContain('case "$(uname -s 2>/dev/null)" in')
+    expect(s).toContain('  MINGW*|MSYS*)')
+    expect(s).toContain('    if command -v cygpath >/dev/null 2>&1; then')
+    expect(s).toContain('|| nt_payload_arg="$nt_payload_file"')
+    expect(s).toContain('[ -n "$nt_payload_arg" ] || nt_payload_arg="$nt_payload_file"')
+  })
+
   it('keeps the local TCP POST path', () => {
     expect(s).toContain('http://127.0.0.1:${NODETERM_HOOK_PORT}/hook/claude')
   })
@@ -89,7 +102,7 @@ describe('buildManagedScript', () => {
       // Each backgrounded answered POST reads the payload from the temp file and self-deletes it
       // after curl returns (the file must never outlive its reader).
       const backgrounded = s.match(
-        /--data-urlencode "payload@\$\{nt_payload_file\}" >\/dev\/null 2>&1; rm -f "\$nt_payload_file" 2>\/dev\/null \|\| :; \} &/g
+        /--data-urlencode "payload@\$\{nt_payload_arg\}" >\/dev\/null 2>&1; rm -f "\$nt_payload_file" 2>\/dev\/null \|\| :; \} &/g
       ) ?? []
       expect(backgrounded.length).toBe(2)
       expect(s).toContain('--max-time 1')
@@ -153,14 +166,92 @@ describe('buildManagedScript', () => {
       expect(s).toContain('(umask 077; printf %s "$payload" > "$nt_payload_file")')
     })
     it('every POST reads the payload from the temp file with payload@file', () => {
-      // Four POSTs: request (unix-socket + TCP) and answered (unix-socket + TCP).
-      const atFile = s.match(/--data-urlencode "payload@\$\{nt_payload_file\}"/g) ?? []
+      // Four POSTs: request (unix-socket + TCP) and answered (unix-socket + TCP). They read
+      // `nt_payload_arg`, which is `nt_payload_file` everywhere except Git Bash/MSYS, where it is
+      // the same file expressed as a Windows path so a native curl can open it.
+      const atFile = s.match(/--data-urlencode "payload@\$\{nt_payload_arg\}"/g) ?? []
       expect(atFile.length).toBe(4)
     })
     it('deletes the temp file on every exit path (hot path, answered, no-transport, timeout)', () => {
       expect(s).toContain('{ nt_send_request; rm -f "$nt_payload_file" 2>/dev/null || :; } &')
       expect(s).toContain('if [ "$nt_payload_owned" != 1 ]; then rm -f "$nt_payload_file" 2>/dev/null || :; fi')
       expect(s).toContain('rm -f "$nt_pending_file" "$nt_payload_file" 2>/dev/null || :')
+    })
+  })
+
+  // Executed rather than grepped: a string test would stay green if the conversion block moved
+  // BELOW the curl calls, which would hand every POST an empty argument. These run the generated
+  // script with a fake curl and a fake cygpath and read the argv curl actually received.
+  describe('the payload path curl actually receives', () => {
+    /** Runs the generated script with a fake curl, a fake cygpath, and a fake `uname` that decides
+     *  which branch of the gate is taken. `uname` rather than an env var on purpose: that is what
+     *  the script reads, and it is what keeps working when a caller replaces the environment. */
+    const run = (unameS: string, cygpath: string | null): CurlCall[] => {
+      const dir = mkdtempSync(join(tmpdir(), 'nt-payload-'))
+      const bin = join(dir, 'bin')
+      const home = join(dir, 'home')
+      mkdirSync(bin, { recursive: true })
+      mkdirSync(join(home, '.nodeterm'), { recursive: true })
+      const log = join(dir, 'curl.log')
+      writeFileSync(join(bin, 'curl'), fakeCurlScript(log), { encoding: 'utf8', mode: 0o755 })
+      writeFileSync(join(bin, 'uname'), `#!/bin/sh\nprintf %s ${JSON.stringify(unameS)}\n`, {
+        encoding: 'utf8',
+        mode: 0o755
+      })
+      if (cygpath !== null) {
+        writeFileSync(join(bin, 'cygpath'), `#!/bin/sh\n${cygpath}\n`, { encoding: 'utf8', mode: 0o755 })
+      }
+      writeFileSync(
+        join(home, '.nodeterm', 'hook-endpoint.env'),
+        'NODETERM_HOOK_PORT=45999\nNODETERM_HOOK_TOKEN=t\nNODETERM_HOOK_VERSION=1\n',
+        'utf8'
+      )
+      const script = join(dir, 'claude.sh')
+      writeFileSync(script, buildManagedScript('claude'), { encoding: 'utf8', mode: 0o755 })
+      const res = spawnSync('sh', [script], {
+        encoding: 'utf8',
+        input: '{"hook_event_name":"PermissionRequest"}',
+        env: {
+          PATH: `${bin}:${process.env.PATH ?? ''}`,
+          HOME: home,
+          NODETERM_NODE_ID: 'node-1',
+          NODETERM_HOOK_ENDPOINT: join(home, '.nodeterm', 'hook-endpoint.env'),
+          NODETERM_PERM_WAIT_SECS: '1'
+        }
+      })
+      expect(res.status).toBe(0)
+      return curlCalls(log)
+    }
+    const runMsys = (cygpath: string | null): CurlCall[] => run('MINGW64_NT-10.0-26200', cygpath)
+    const runPosix = (cygpath: string | null): CurlCall[] => run('Linux', cygpath)
+
+    it('converts the path under MSYS, which is the case that was broken', () => {
+      const calls = runMsys('printf %s "C:\\converted\\payload.tmp"')
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls[0].argv).toContain('payload@C:\\converted\\payload.tmp')
+    })
+
+    it('leaves the path alone with no MSYSTEM, even when a cygpath exists', () => {
+      // The WSL/Linux case: an incidental cygpath must not rewrite a path the local curl can open.
+      const calls = runPosix('printf %s "C:\\wrong\\payload.tmp"')
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls[0].argv).not.toContain('C:\\wrong')
+      expect(calls[0].argv).toContain('payload@/')
+    })
+
+    it('falls back to the original path when cygpath fails or answers empty', () => {
+      for (const cyg of ['exit 3', 'printf %s ""']) {
+        const calls = runMsys(cyg)
+        expect(calls.length).toBeGreaterThan(0)
+        // Never an empty argument: an empty payload@ would post nothing at all.
+        expect(calls[0].argv).not.toContain('payload@ ')
+        expect(calls[0].argv).toContain('payload@/')
+      }
+    })
+
+    it('keeps a converted path with spaces in one argument', () => {
+      const calls = runMsys('printf %s "C:\\Users\\First Last\\payload.tmp"')
+      expect(calls[0].argv).toContain('payload@C:\\Users\\First Last\\payload.tmp')
     })
   })
 
