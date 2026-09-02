@@ -7451,6 +7451,47 @@ button.group-node__setup:disabled {
 .sessions-sidebar__history-item:hover .sessions-sidebar__history-del { opacity: 1; }
 .sessions-sidebar__history-del:hover { background: rgba(255, 69, 58, 0.15); color: var(--danger); }
 
+/* "Read transcript" on a closed session row (issue #531) — same reveal-on-hover affordance as the
+   discard ×, beside it. Kept visible while DISABLED so the reason (in its title) is reachable:
+   a control that vanishes when it cannot act teaches nothing about why. */
+.sessions-sidebar__history-transcript {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s;
+}
+.sessions-sidebar__history-item:hover .sessions-sidebar__history-transcript { opacity: 1; }
+.sessions-sidebar__history-transcript:hover { background: var(--panel-header); }
+.sessions-sidebar__history-transcript:disabled { cursor: default; opacity: 0; }
+.sessions-sidebar__history-item:hover .sessions-sidebar__history-transcript:disabled { opacity: 0.35; }
+
+/* The closed-session transcript dialog: a plain confirm box sized to hold the chat panel. */
+.closed-transcript {
+  width: min(760px, 92vw);
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.closed-transcript .term-chat {
+  height: min(60vh, 520px);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.closed-transcript__empty { display: flex; flex-direction: column; gap: 6px; }
+.closed-transcript__reason { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
+
 .ss-group__head { display: flex; align-items: center; gap: 6px; padding: 6px 6px; cursor: pointer; border-radius: 6px; border: 1px solid transparent; }
 .ss-group__head:hover { background: var(--panel-header); }
 /* Project sections read as bands: monogram + heavier head + breathing room between projects. */

@@ -73,6 +73,8 @@ export interface SessionsSidebarProps {
   onDeleteProject(id: string): void
   onReopenClosedSession(projectId: string, entryId: string): void
   onDiscardClosedSession(projectId: string, entryId: string): void
+  /** Read a closed session's transcript (issue #531). */
+  onOpenClosedTranscript(projectId: string, entryId: string): void
   onMouseEnter?(): void
   onMouseLeave?(): void
 }
@@ -757,6 +759,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         onDeleteProject={props.onDeleteProject}
         onReopenSession={props.onReopenClosedSession}
         onDiscardSession={props.onDiscardClosedSession}
+        onOpenTranscript={props.onOpenClosedTranscript}
       />
     </aside>
   )
