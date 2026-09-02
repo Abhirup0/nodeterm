@@ -11067,7 +11067,12 @@ export function Canvas() {
           // it was in scope here and dropped on the floor before the store had a field for it.
           if (e.state && !stuckRescueSkip)
             cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId, e.verified)
-          if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
+          // A genuine new turn drops the previous fan-out — but only the cards that FINISHED
+          // (issue #547). Claude launches subagents async, so "waiting for N background agents to
+          // finish" is exactly the state in which the next prompt gets typed, and clearing a
+          // working card there loses it permanently (nothing rehydrates `byId`) while the agent
+          // keeps running — and blinds Eco's live-subagent guard into hibernating its parent.
+          if (e.newTurn) an.clearFinishedForParent(e.nodeId)
           if (e.newTurn && e.task) {
             // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language
             // phrasing doesn't trigger the tool-based (recurring) detection.
@@ -11163,8 +11168,15 @@ export function Canvas() {
 
   // Safety net for a lost Stop POST / crashed CLI: decay working entries that saw no hook
   // event at all for STALE_WORKING_MS (the sweep itself is cheap; see agentStatus.ts).
+  //
+  // The subagent cards decay on the SAME tick and the same number (issue #547): now that a turn
+  // boundary keeps an unfinished card, a subagent whose end never arrives would otherwise pin its
+  // card — and, through Eco's `liveSubagents`, its parent — forever.
   useEffect(() => {
-    const t = setInterval(() => useAgentStatus.getState().sweepStaleWorking(), 60_000)
+    const t = setInterval(() => {
+      useAgentStatus.getState().sweepStaleWorking()
+      useAgentNodes.getState().sweepStaleWorking()
+    }, 60_000)
     return () => clearInterval(t)
   }, [])
 

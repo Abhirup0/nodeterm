@@ -1445,8 +1445,24 @@ else, and its context links must keep classifying across restarts).
   as an **ephemeral** `SubagentNode` (display-only card: type + task + working/done) connected by
   an **edge** to its parent agent node. These ephemeral nodes/edges live outside the React Flow
   `nodes` state (merged only at the `<ReactFlow>` prop), so they're never persisted
-  (`flowToNodeStates`) nor in undo/dirty. Fan-out is cleared on the next new turn / session-end /
-  node close. (Subagents share the parent's process — no PTY.) Each card shows
+  (`flowToNodeStates`) nor in undo/dirty. **Two different clears, and the difference is
+  load-bearing (issue #547):** the removal paths (node delete, project delete, the cross-project
+  close, the orphan-session kill, `SessionEnd`) call `clearForParent`, which drops everything —
+  a node that is gone has no work left to represent. A **new turn** calls
+  `clearFinishedForParent`, which drops only `state === 'done'`. "The previous fan-out is stale by
+  definition" is true of a finished card and false of a working one: Claude launches subagents
+  **async**, so *"waiting for N background agents to finish"* is exactly the state in which the
+  next prompt gets typed, and nothing rehydrates `byId` afterwards (`start()` fires only from a
+  live `PreToolUse`; a subagent past that emits no second one) — the card was gone for the rest of
+  the run while the agent kept working. The expensive half is not the missing card: Eco's
+  hibernation guard derives `liveSubagents` from this same store, so the wipe let a parent with
+  live background agents read as idle and get its CLI `/exit`ed. Keeping an unfinished card then
+  **owes a decay** — `useAgentNodes.sweepStaleWorking`, on the same 60 s tick and the same
+  `WORKING_STALE_MS` as `agentStatus`'s (imported, never re-chosen: `shared/agents/stale.ts` exists
+  because three surfaces each invented their own timeout) — or a subagent whose end never arrives
+  pins its card, and its parent, forever. It marks the card **done** rather than deleting it, so a
+  late `finish()` is the no-op it already was and the next turn boundary takes it.
+  (Subagents share the parent's process — no PTY.) Each card shows
   duration/tokens/tool-uses and **expands** (click) to a **live transcript**:
   `core/subagent-tail.ts` resolves the subagent's own transcript file
   (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
