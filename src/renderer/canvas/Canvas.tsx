@@ -152,6 +152,7 @@ import {
   contentAddItemsToMenuItems,
   type AddHandlers
 } from '../lib/addMenuSpec'
+import { planSetProjectFolder } from '../lib/setProjectFolder'
 import { transferConversationItems } from '../lib/transferItems'
 import { reopenVariants } from '../lib/reopenVariants'
 import { modelsForAgent } from '@shared/agents/model-gateway'
@@ -612,6 +613,11 @@ interface PendingPeerState {
  */
 const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
 const WORKTREE_SSH_NOTICE = 'Worktrees are not supported in SSH projects yet.'
+/** The cwd-less twin of WORKTREE_SSH_NOTICE. The disabled MENU rows carry
+ *  `WORKTREE_NO_CWD_HINT` (lib/addMenuSpec); this is the sentence for the surfaces that have no
+ *  disabled state — the command palette, and any control-verb path that reaches the dialog. */
+const WORKTREE_NO_CWD_NOTICE =
+  'This project has no folder, so it has no git repository to add a worktree to. Set one first (tab ⌄ → “Set folder…”).'
 const FOCUS_NO_TARGET_NOTICE = 'Select a terminal or agent node to focus.'
 
 // The webview's file loader renders off the LOCAL disk and has no remote counterpart, so a host
@@ -2576,11 +2582,17 @@ export function Canvas() {
   }, [])
 
   // Same strip, same one-shot rule: the workspace list came up empty because the index file was
-  // unreadable. Nothing was lost — say where the backup is and how to get the projects back.
+  // unreadable. Say where the backup is and how to get the projects back — and do NOT promise more
+  // than is true. The old copy read "No project data was lost — each project's canvas is still in
+  // its own folder", which holds for a FOLDER project (its canvas is in `<cwd>/.nodeterm/
+  // project.json`, so "Open folder…" adopts it straight back) and is false for a cwd-less one: that
+  // canvas lived only inside the index, i.e. only inside the backup this note names. Telling a user
+  // whose scratch project just vanished that nothing was lost is the worst of both — it is wrong,
+  // and it stops them keeping the one file that still has their nodes in it.
   useEffect(() => {
     return api.workspace.onCorruptRecovered((backupFile) => {
       setMigrationNote(
-        `The workspace index was corrupted and has been backed up as ${backupFile}. No project data was lost — each project's canvas is still in its own folder. Use “Open folder…” to add them back.`
+        `The workspace index was corrupted and has been backed up as ${backupFile} (in the app's data folder). Projects with a folder are safe — their canvas is in <folder>/.nodeterm/project.json, so “Open folder…” adds them back. A project with no folder lived only in the index: keep that backup, it is the only copy of its canvas.`
       )
     })
   }, [])
@@ -5090,8 +5102,17 @@ export function Canvas() {
       // The single choke point for opening the dialog — the menus already render their rows
       // disabled on an SSH project, but the command palette has no disabled state, so refuse HERE
       // and say why. Silently doing nothing is the one outcome that is not allowed.
-      if (useProjects.getState().getProject(projectId)?.ssh) {
+      const target = useProjects.getState().getProject(projectId)
+      if (target?.ssh) {
         setNotice({ kind: 'error', text: WORKTREE_SSH_NOTICE })
+        return
+      }
+      // Same choke point, second reason: a cwd-less project has no repo to add a worktree TO. The
+      // dialog used to open anyway and say "This project is not a git repository." — which names
+      // the wrong cause (there is no folder to be a repository) and leaves the user looking for a
+      // git problem that does not exist. The menus render the row disabled; the palette cannot.
+      if (!target?.cwd) {
+        setNotice({ kind: 'error', text: WORKTREE_NO_CWD_NOTICE })
         return
       }
       setWorktreeError(null)
@@ -11404,22 +11425,43 @@ export function Canvas() {
     [persist]
   )
 
+  // Reopen a previously closed project and make it active — the active-project effect reloads its
+  // serialized nodes, whose TerminalNodes reattach to the surviving tmux sessions (or cold-restore).
+  const reopenProject = useCallback(
+    (id: string) => {
+      commitActiveToStore()
+      useProjects.getState().reopenProject(id)
+      setWelcomeOpen(false)
+      void writeDisk()
+    },
+    [commitActiveToStore, writeDisk]
+  )
+
   const setProjectFolder = useCallback(
     async (id: string) => {
       const folder = await window.nodeTerminal.dialog.selectFolder()
       if (!folder) return
-      // Folder ↔ project is deduped like "Open folder…": if another project already owns this cwd,
-      // don't point a second tab at it (two same-cwd tabs collapse to one file on save) — just
-      // switch to the existing one.
-      const existing = useProjects.getState().projects.find((p) => p.cwd === folder && p.id !== id)
-      if (existing) {
-        switchProject(existing.id)
+      // Binding a folder makes the next autosave WRITE `<folder>/.nodeterm/project.json`. Ask the
+      // folder what is already there first — this used to bind unconditionally, and a folder that
+      // carried a teammate's committed canvas had it overwritten by this project's nodes at rev 1,
+      // with no sideline copy. "Open folder…" never had that bug because it probes and adopts; the
+      // refusal + the dedupe (a closed owner is REOPENED, not switched to behind a hidden tab) are
+      // the pure `planSetProjectFolder`. See lib/setProjectFolder.ts.
+      const fileState = await api.workspace.projectFileState(folder)
+      const plan = planSetProjectFolder(folder, id, useProjects.getState().projects, fileState)
+      if (plan.kind === 'occupied') {
+        setNotice({ kind: 'error', text: plan.reason })
+        return
+      }
+      if (plan.kind === 'switch') {
+        if (plan.reopen) reopenProject(plan.projectId)
+        else switchProject(plan.projectId)
         return
       }
       useProjects.getState().setProjectCwd(id, folder)
       void persist()
     },
-    [persist, switchProject]
+    [persist, switchProject, reopenProject]
   )
 
   const setProjectDefaultAccount = useCallback(
@@ -11569,18 +11611,6 @@ export function Canvas() {
       closeProject,
       openProjectSettings
     ]
-  )
-
-  // Reopen a previously closed project and make it active — the active-project effect reloads its
-  // serialized nodes, whose TerminalNodes reattach to the surviving tmux sessions (or cold-restore).
-  const reopenProject = useCallback(
-    (id: string) => {
-      commitActiveToStore()
-      useProjects.getState().reopenProject(id)
-      setWelcomeOpen(false)
-      void writeDisk()
-    },
-    [commitActiveToStore, writeDisk]
   )
 
   // ---- presence travel ("go to where my teammate is", from the facepile) ----

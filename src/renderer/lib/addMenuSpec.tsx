@@ -110,6 +110,19 @@ export interface AddHandlers {
 export const WORKTREE_SSH_HINT = 'Not supported in SSH projects yet'
 
 /**
+ * The two rows that need a project FOLDER, shown disabled with their reason rather than hidden.
+ *
+ * A cwd-less project (the "New project" card on the welcome screen) is a supported, persisted
+ * canvas — its nodes live inline in `workspace.json` — so the folder-shaped features around it must
+ * degrade EXPLICITLY, the same rule the SSH worktree row already follows and the same one the
+ * Explorer, Source Control and Project Settings panels already state in words. "New file…" simply
+ * vanished before, which teaches nothing: the row was gone and so was the reason, and the folder
+ * that would fix it is one menu away.
+ */
+export const NEW_FILE_NO_CWD_HINT = 'This project has no folder — set one first (tab ⌄ → “Set folder…”)'
+export const WORKTREE_NO_CWD_HINT = NEW_FILE_NO_CWD_HINT
+
+/**
  * Map the canonical content list to {@link MenuItem}s for the `ContextMenu` component.
  *
  * @param at          the flow-space position the menu was opened at (passed to each handler), or
@@ -156,10 +169,15 @@ export function contentAddItemsToMenuItems(
         out.push({ label: 'Open file…', icon: <IconEditor />, onClick: () => void handlers.openFile(at) })
         break
       case 'new-file':
-        // "New file…" needs a project folder to create into — hidden when the project has no cwd.
-        if (ctx.hasCwd) {
-          out.push({ label: 'New file…', icon: <IconEditor />, onClick: () => void handlers.newFile(at) })
-        }
+        // "New file…" creates UNDER the project folder, so a cwd-less project cannot run it — the
+        // row stays, disabled, and names the reason (NEW_FILE_NO_CWD_HINT).
+        out.push({
+          label: 'New file…',
+          icon: <IconEditor />,
+          disabled: !ctx.hasCwd,
+          hint: ctx.hasCwd ? undefined : NEW_FILE_NO_CWD_HINT,
+          onClick: () => void handlers.newFile(at)
+        })
         break
       case 'spawn-team':
         out.push({ label: 'Spawn a team…', icon: <IconGroup />, onClick: () => handlers.spawnTeam(at) })
@@ -168,8 +186,12 @@ export function contentAddItemsToMenuItems(
         out.push({
           label: 'New worktree…',
           icon: <IconBranch />,
-          disabled: ctx.isSshProject,
-          hint: ctx.isSshProject ? WORKTREE_SSH_HINT : undefined,
+          disabled: ctx.isSshProject || !ctx.hasCwd,
+          hint: ctx.isSshProject
+            ? WORKTREE_SSH_HINT
+            : ctx.hasCwd
+              ? undefined
+              : WORKTREE_NO_CWD_HINT,
           onClick: () => handlers.worktree(at)
         })
         break
@@ -234,9 +256,14 @@ export function contentAddItemsToDockRows(
         out.push({ kind: 'open-file', label: 'Open file…', icon: <IconEditor />, onClick: () => void handlers.openFile() })
         break
       case 'new-file':
-        if (ctx.hasCwd) {
-          out.push({ kind: 'new-file', label: 'New file…', icon: <IconEditor />, onClick: () => void handlers.newFile() })
-        }
+        out.push({
+          kind: 'new-file',
+          label: 'New file…',
+          icon: <IconEditor />,
+          disabled: !ctx.hasCwd,
+          hint: ctx.hasCwd ? undefined : NEW_FILE_NO_CWD_HINT,
+          onClick: () => void handlers.newFile()
+        })
         break
       case 'spawn-team':
         out.push({ kind: 'spawn-team', label: 'Spawn a team…', icon: <IconGroup />, onClick: () => handlers.spawnTeam() })
@@ -246,8 +273,12 @@ export function contentAddItemsToDockRows(
           kind: 'worktree',
           label: 'Worktree…',
           icon: <IconBranch />,
-          disabled: ctx.isSshProject,
-          hint: ctx.isSshProject ? WORKTREE_SSH_HINT : undefined,
+          disabled: ctx.isSshProject || !ctx.hasCwd,
+          hint: ctx.isSshProject
+            ? WORKTREE_SSH_HINT
+            : ctx.hasCwd
+              ? undefined
+              : WORKTREE_NO_CWD_HINT,
           onClick: () => handlers.worktree()
         })
         break

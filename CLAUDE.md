@@ -208,6 +208,36 @@ Persistence has two layers:
   are set aside as `project.json.corrupt-<ts>`. "Open folder…" adopts an existing
   `.nodeterm/project.json` — the probe MINTS the project id (node ids — tmux names — kept), and
   re-opening the folder is answered by the cwd lookup, not a second adoption.
+  **A cwd-less canvas is a supported, first-class project, not a degraded one** — "New project" on
+  the welcome screen creates exactly that, and the whole `Project` (nodes, viewport, kanban,
+  closedSessions, per-node `shell`) rides `IndexEntryV3.project` verbatim, so it survives a restart
+  intact. It is the correct fallback layer and `localStorage` is not: the index is in `userData`
+  (backed up with the app's data, atomic-written, one store for all three shells), while
+  localStorage is renderer-origin state that the Server Edition would shard per browser profile.
+  What inline genuinely lacks is a SECOND copy: a folder project's canvas also lives in
+  `<cwd>/.nodeterm/project.json`, so a corrupt index costs it nothing (`Open folder…` adopts it
+  back), whereas an inline canvas exists ONLY inside the index — and therefore only inside the
+  `workspace.json.corrupt-<ts>` sideline, with no UI path back. The corrupt-index note must say
+  that plainly; it used to promise "No project data was lost — each project's canvas is still in
+  its own folder", which is true for refs and false for exactly the projects that just vanished.
+  **Binding a folder to an existing project is a WRITE, so probe before you bind.** "Set folder…"
+  (tab ⌄) promotes an inline canvas to a ref, and the next autosave writes that folder's
+  `project.json` — over whatever was already there. It used to bind unconditionally, so pointing a
+  scratch project at a repo whose canvas a teammate had committed replaced it (rev 40 → rev 1, their
+  nodes gone, no sideline copy, nothing on screen). The two entrances to "attach a folder" now agree:
+  `openOrAdoptFolder` probes and ADOPTS, and `setProjectFolder` runs the pure
+  `renderer/lib/setProjectFolder.ts` — an occupied OR unreadable `project.json` refuses the bind with
+  its reason (a failed read is never evidence of absence, #385), and a folder another project already
+  owns routes to that project, REOPENING it when it is closed rather than switching to a hidden tab.
+  The store's own "never blind-write" guard does not cover this: it only refuses an EMPTY candidate
+  over a populated file, and this candidate has nodes.
+  **Features that need a folder degrade explicitly, never silently.** Explorer, Source Control and
+  Project Settings already say so in words; the add menus now do too — "New file…" and "New
+  worktree…" stay in the list DISABLED with `NEW_FILE_NO_CWD_HINT` / `WORKTREE_NO_CWD_HINT`
+  (`lib/addMenuSpec`) instead of vanishing, and `openWorktreeDialog` refuses a cwd-less project at
+  the same choke point it refuses an SSH one (the palette has no disabled state). The worktree
+  dialog's "This project is not a git repository." was the wrong cause for a project that has no
+  folder to be a repository at all.
   **An `unavailable` placeholder used to be a DEAD END** (issue #385): a save deliberately emits a
   header-only ref for it and never a file, so a `project.json` the user deleted was never
   recreated, every later load re-minted the placeholder, and nothing cleared the flag for a LOCAL

@@ -219,6 +219,21 @@ reply carries it (`queued` / `queuedIds`), because a user who cannot see the fai
 orchestrator that is told "opened" both act on a session that is not there. If you add a bounded
 retry anywhere, ask what the clock actually starts on and where its exhaustion becomes visible.
 
+**Pointing a project at a folder is a WRITE — probe before you bind.** A project's canvas is
+written to `<cwd>/.nodeterm/project.json`, so the moment a project gains a `cwd` the next autosave
+owns that file. "Open folder…" always probed and adopted; "Set folder…" (tab ⌄) used to bind
+unconditionally, which overwrote a canvas a teammate had committed to that repo — their nodes gone,
+no backup, nothing on screen. Both entrances now share the rule (`renderer/lib/setProjectFolder.ts`):
+an occupied *or unreadable* project file refuses the bind and says why. The store's "never
+blind-write" guard will not save you — it only refuses an EMPTY canvas over a populated file.
+
+**A project with no folder is a real project — degrade explicitly, never silently.** "New project"
+creates a cwd-less canvas that persists inline in `workspace.json`, so every folder-shaped feature
+meets one. Keep the affordance and disable it with its reason (`NEW_FILE_NO_CWD_HINT`,
+`WORKTREE_NO_CWD_HINT`, the Explorer/Source Control notes); a row that simply vanishes teaches
+nothing, and a message that names the wrong cause ("not a git repository" for a project that has no
+folder to be one) sends the user hunting a problem that does not exist.
+
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
