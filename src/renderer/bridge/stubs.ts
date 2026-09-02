@@ -276,6 +276,17 @@ export function buildStubApi(): Omit<
       read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
       host: () => Promise.resolve(null)
     },
+    triggers: {
+      // Superseded by the real WS-backed namespace in ws-bridge (startTriggerService registers the
+      // handlers in the server shell). On the RELAY tab this stub stays in force and REFUSES: the
+      // arm store, the scheduler and the sessions all live on the host — arming from the guest
+      // would write another machine's execution consent. The card catches the rejection and says
+      // triggers are managed on the host machine.
+      arm: U('triggers.arm'),
+      disarm: U('triggers.disarm'),
+      status: U('triggers.status'),
+      runNow: U('triggers.runNow')
+    },
     codex: {
       // Overridden by the real WS-backed namespace in ws-bridge. The stub's answer is the same
       // one the Server Edition gives on purpose (see server/handlers/index.ts): no shared

@@ -245,6 +245,11 @@ export const IPC = {
   /** The scoped machine's RAM (available/total) — the cheap read behind the system-resource
    *  pill. Safe to poll locally; NOT polled for an SSH scope. */
   sessionMemoryHost: 'session-memory:host',
+  // Trigger nodes (issue #493): machine-local arm/disarm + the card's status/run-now.
+  triggersArm: 'triggers:arm',
+  triggersDisarm: 'triggers:disarm',
+  triggersStatus: 'triggers:status',
+  triggersRunNow: 'triggers:run-now',
   contextUpdate: 'context:update',
   contextEnsure: 'context:ensure',
   // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the

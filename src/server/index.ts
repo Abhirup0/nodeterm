@@ -389,7 +389,9 @@ export async function startServer(
     listCanvases: () => workspaceStore.persistedCanvases(),
     getNode: (nodeId) => workspaceStore.getNode(nodeId),
     sendText: (nodeId, text) => ptyManager.sendText(nodeId, text),
-    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId)
+    paneCommand: (nodeId) => ptyManager.paneCommand(nodeId),
+    // The shell's own CorePlatform instance (`platform` is this file's ServerPlatform local).
+    handle: (channel, handler) => platform.handle(channel, handler)
   })
   // Advertise launch settings to the mobile companion through the mirror (same provider the
   // desktop wires in src/main/index.ts). No SSH push exists server-side, so only the local
