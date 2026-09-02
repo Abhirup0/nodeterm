@@ -40,7 +40,7 @@ is the cost of adding the next agent to the same list.
 | `RENAME_CAPABLE` + `TITLE_READ_CAPABLE` | **joined both** | A **read** leg that resolves a session's own name *without searching* (`core/grok-session.ts`, keyed off the hook-fed `sessionId → session dir` map), a **write** leg byte-identical to claude's (`/rename <name>` typed into the pane via `pty.sendText`; grok also accepts `/title`), and one routing rule for the readers — `readAgentSessionName` in `core/agent-session-name.ts`, serving the desktop IPC handler *and* both shells' session-name sweeps. The list SPLIT in two after the grok branch (2026-08-09): `TITLE_READ_CAPABLE` is the read leg and `RENAME_CAPABLE` the write leg, because **gemini** names its own sessions but has no rename command. Grok is in both, so nothing about its behaviour changed — but a future agent must pick per leg, and every `RENAME_CAPABLE` member must also be `TITLE_READ_CAPABLE` (pinned in `config.capabilities.test.ts`). Routing is not cosmetic: claude's resolver scans `~/.claude/projects` on a cache miss, so an unrouted grok node paid that scan on every poll for a guaranteed null — a mounted node polls every **4 s** until the name first resolves and **15 s** after (`TerminalNode.tsx`), and the mirror's own `SESSION_NAME_SWEEP_MS` sweep adds one pass a minute. |
 | `PERMISSION_MODE_CAPABLE` | **joined** | Grok shares claude's flag **spelling** and value vocabulary (`--permission-mode auto\|plan\|acceptEdits\|bypassPermissions`; our `manual` = no flag = grok's own `default`), which is why *its* membership needed no translation. Two things had to change around it: claude's `auto` **version gate** had to become agent-scoped (`activePermissionMode(agentId)`, `renderer/state/permissionMode.ts`), and the flag had to be emitted **before** grok's `--`. See §6. **Sharing the spelling is no longer what membership means:** the list is now `claude, grok, gemini, codex` (2026-08-09) and the last two spell it their own way (`--approval-mode`, `--ask-for-approval`), translated per agent in `src/shared/agents/approval-mode.ts` — which is also where `withPermissionMode` now lives, moved one layer up to break a `config ↔ approval-mode` cycle. |
 | `CANVAS_CONTROL_CAPABLE` | **joined** | Nothing new to install: grok scans `~/.claude/skills` by default for Claude Code compatibility, which is exactly where `manage-nodeterm-canvas` is already written (locally, and on an SSH host by `RemoteHooks.installCanvasControl`). Membership is what sets `NODETERM_CANVAS_CONTROL=1` in the session env — `hook-server.buildPtyEnv` locally, `remoteHookEnvArgs` remotely, both through the single `canControlCanvas` predicate — i.e. what makes the sh+curl shim anything other than a no-op. **The discovery premise is MEASURED, not inferred** (grok 1.0.13, 2026-09-02): `grok inspect --json` lists `manage-nodeterm-canvas` and `get-linked-context` with `vendor: claude` and `compatibilityStatus: enabled`, and `externalCompat.cells` reports `{surface: 'skills', enabled: true, source: 'default'}`. `source: 'default'` is the part that matters: grok reads `~/.claude/skills` with **no** config edit by the user. Two per-user failure modes survive the measurement and cannot be exercised on a default-config machine — `[compat.claude] skills = false` in `~/.grok/config.toml`, and `GROK_CLAUDE_SKILLS_ENABLED=false`. In each, `NODETERM_CANVAS_CONTROL=1` is still set while the skill is undiscoverable: the shim is armed and mute. See §8.7 and checklist 21. |
-| `USAGE_CAPABLE` (the per-node context meter) | **not joined** | Needs a real `signals.json` yielding **both** a used-token count **and** the window total. A percentage against a guessed denominator is a wrong number presented as a fact, so no total ⇒ no meter. Task 5 of the plan stops at its capture step. (For reference, the list is now `claude, codex, gemini`; grok and **opencode** are the two builtins outside it. Codex states its own denominator in its rollout; gemini's comes from its model id through `geminiWindowFor`, mirroring the CLI's own `tokenLimit`. See `docs/gemini-agent.md` §4 — and note that **joining this list also switches on two features that read CLAUDE's transcript**, which is a trap grok will hit too: `docs/gemini-agent.md` §1.) Do not confuse this with grok *billing* usage — see the note below. |
+| `USAGE_CAPABLE` (the per-node context meter) | **joined** | `signals.json` yields both numbers AND the answer: `contextTokensUsed`, `contextWindowTokens` and `contextWindowUsage` — the percentage grok has already computed. Measured on 22 real sessions (1.0.13, 2026-09-02): all three present in all 22, and the stated percentage agrees with used/window in all 22, which is a free oracle and is pinned as a test. The window is READ, never inferred from the model id, putting grok with codex rather than with gemini. The reader (`core/grok-signals.ts`) takes three of the file's 66 keys and returns null unless both numbers are there — no denominator, no meter. Its tail is created with `wholeFile`, because signals.json is rewritten in place rather than appended to; an offset read would hand the parser a JSON fragment and the meter would freeze after its first fill with nothing to say so. The rule this row used to state still holds for everyone: a percentage against a guessed denominator is a wrong number presented as a fact, so no total ⇒ no meter. (The list is now `claude, codex, gemini, grok`; **opencode** is the one builtin outside it. Codex states its own denominator in its rollout; gemini's comes from its model id through `geminiWindowFor`, mirroring the CLI's own `tokenLimit`. See `docs/gemini-agent.md` §4.) **The trap this row used to warn about was real and is now disarmed:** joining this list also switched on two features that read CLAUDE's transcript, because `readsClaudeTranscript` shared a list with them — a codex node once metered and searched a stranger's claude session that way. That gate now reads `CLAUDE_TRANSCRIPT_READABLE` (claude only), pinned in `config.capabilities.test.ts`, so grok joins the meter without joining those. Do not confuse this with grok *billing* usage — see the note below. |
 | `CONTEXT_LINK_CAPABLE` | **joined** | Two pieces, both pinned by fixtures cut from real sessions rather than written from the docs: `linesFromGrok` (`core/context-link-render.ts`) renders grok's log, and `locateGrok` (`core/handoff/locate.ts`) finds it. The file is **`chat_history.jsonl`, not the `updates.jsonl`** this row used to name and grok's own hook payloads advertise — routing through the advertised path fails **silently**, handing the reader an empty transcript with nothing logged, which is why the locator pins it. The directory comes from the hook-fed `sessionId → dir` map, never from a scan. The path jail was widened to `$GROK_HOME/sessions` — that subdirectory, not `$GROK_HOME`, because `auth.json` lives in the same tree. Grok is no longer outside this list; the list is now `claude, codex, gemini, opencode, grok`, and the one builtin still outside it is **copilot**. |
 | `SUBAGENT_CAPABLE` | **not joined** | Needs the `spawn_subagent` `PreToolUse`/`PostToolUse` payload fields, including whatever marks a **background** launch. Task 11 stops at its capture step. |
 | `BRANCH_CAPABLE` | not joined | Branch sends claude's `/branch` and resumes by claude's session id; grok has no counterpart. |
@@ -246,8 +246,9 @@ first so a real manual title wins the moment the key is confirmed; a wrong guess
 generated title (right name, just not overridable from grok's side) rather than to a wrong name.
 Confirming it is checklist item **14**.
 
-**Not captured at all:** `signals.json` (blocks the context meter — the used-token key, the window
-total, and whether a total exists anywhere). The transcript log is **no longer** in this list, and
+**Not captured at all:** nothing, for the context meter. `signals.json` was the last entry here and
+it has been captured (22 sessions): it states the used count, the window total AND the percentage.
+The transcript log left this list earlier, and
 the entry that used to sit here was wrong twice over: it named `updates.jsonl`, when the readable
 conversation is its sibling `chat_history.jsonl`, and it said the gap blocked context links, which
 have since shipped off a fixture cut from a real session. Recipes for both, and for the `spawn_subagent` payload, are
@@ -331,7 +332,7 @@ ai-name / comments).
 | Context links | **yes** — `locateGrok` resolves the linked node's `chat_history.jsonl` and `linesFromGrok` renders it. The whole leaf is in core (`core/handoff/locate.ts`, `core/context-link.ts`, `core/grok-session.ts`, `core/claude-accounts-core.ts`); the renderer only asks the pure `canContextLink`, so **no `window.nodeTerminal` member was added** and nothing new crosses the preload bridge | **yes, for free** — the row's old claim that `initContextLink` is never called from `src/server` is stale: `src/server/context-link.ts` calls it, driven off the persisted `bridges[]` instead of the renderer's live edges. Both shells feed the same `sessionId → dir` map from their raw hook listeners (`src/main/index.ts`, `src/server/agent-status.ts`) and both pass `grokHomeDir()` into the path jail — invariant 11 | **N/A** — linking is a canvas gesture and the phone has no canvas (`~/projects/nodeterm-ios`). The transcript it would read is the same file, so this is a surface gap, not a capability one |
 | ⌘M chat panel | **yes** — `chatMessagesFromGrok`, reached through the agent-routed `chat:read-transcript`. The panel is the same component; what is new is that the channel asks WHICH agent before it picks a reader | **yes, for free** — the channel is registered through the CorePlatform seam, so both shells serve it and both route the same way | the phone has no ⌘M panel |
 | Cross-agent transfer (grok as SOURCE) | **yes** — `renderGrokTranscript` | **N/A** — `buildHandoff` lives in `src/main`; the Server Edition has no transfer path at all, pre-existing and unchanged by grok | N/A |
-| Context meter | **not implemented for grok** (§1) | the meter itself IS wired server-side (both shells create the per-agent tails — it is codex and gemini that use them, `docs/gemini-agent.md` §4); grok simply has no numbers to feed it on either surface | idem |
+| Context meter | **yes** — a third tail, on `signals.json` rather than on a transcript, tracked from the session directory the hooks let us derive (there is no hook field pointing at it) | **yes** — both shells create the same tail the same way, with the same `wholeFile` flag. Invariant 11: a tail added in one shell only is a meter the Server Edition silently lacks | the phone reads the mirror, which is agent-agnostic, so the numbers arrive with no phone-side work |
 | Managed accounts | **deliberately N/A** — accounts are a claude config-dir mechanism. `createAgentNode` never stamps an `accountId` onto a non-claude node, and `CLAUDE_CONFIG_DIR` is irrelevant to `~/.grok/hooks`. A grok node in a managed-account project must still report status (checklist 7) | idem | idem |
 | Brand logo | the **official** xAI mark, INLINED in `agentIcons.tsx` as `GrokMark` rather than shipped as an asset — it is a single monochrome path, so `fill="currentColor"` inherits the label colour and is correct in both themes. The other four marks are multi-colour and stay `<img src>` assets, where `currentColor` cannot inherit | same component, for free | the phone draws its own icons — **follow-up owed** |
 | Working indicator | the **brand mark, breathing** — no critter. Since 2026-08-09 this is a THREE-agent mechanism (grok, gemini, opencode) driven by one pure decision, `brandPulsePlan` in `lib/brandPulse.ts`, with a thin renderer per surface: `BrandPulse` for the React badge (`AgentMascot` no longer imports `GrokMark`) and `workingMascot` for the notch strip. Grok is the only `kind: 'inline'` case — its mark is a single monochrome path from `lib/grokMark.ts` (`createGrokMarkSvg` in the HUD) pulsing with a `currentColor` drop-shadow bloom; the other marks are multi-colour assets whose bloom takes the label colour instead of their own ink. One decision, so an agent is never two things on two surfaces. See docs/mascot-sprites.md | **N/A** — no notch there; the canvas badge indicator works | the phone has its own SwiftUI renderer |
@@ -360,11 +361,21 @@ ai-name / comments).
    `Notification`, if grok emits one — detected from its **message** text (orca's four phrases), since
    nothing in either source names an idle *type*. No watchdog was built; checklist **9** measures how
    bad it feels, which is the input to deciding whether one is worth it.
-3. **The phone's per-node "what it's doing now" activity line does not work for grok.**
-   `recordRawToolEvent` gates on `payload.hook_event_name === 'PreToolUse'`, which grok's file hooks
-   never send, so calling it from the grok branch was a no-op and was deleted. Making it work needs a
-   grok **tool vocabulary** (`run_terminal_command`, `read_file`, `search_replace`, …) in
-   `agent-status-mirror.ts`'s `toolActivity`; feeding it claude's names would print nonsense.
+3. ~~The phone's per-node "what it's doing now" activity line does not work for grok.~~ **CLOSED,
+   and the stated cause was wrong.** This said grok's file hooks "never send `PreToolUse`", so the
+   `recordRawToolEvent` call was a no-op and was deleted. Measured on 1.0.13 (2026-09-02): grok DOES
+   publish the event — it spells it **`pre_tool_use`**, its own snake_case, in both field dialects —
+   and `recordRawToolEvent` gates on the exact string `PreToolUse`. The blocker was a SPELLING, not
+   an absence, which is exactly why deleting the call looked correct and closed the door on a working
+   feature for good. The shells now translate at the boundary (where `grokRawFields` already decodes
+   grok's dialect) rather than loosening a claude-shaped gate. The **tool vocabulary** it needed is
+   in `toolActivity` and is measured, not derived from the docs: the fifteen names in
+   `signals.json.toolsUsed` across 22 real sessions. Only two argument keys were ever seen in a
+   captured payload (`read_file.target_file`, `run_terminal_command.command`), so those two lines
+   carry a detail and the other thirteen name the action and stop — a phrase with no detail is
+   honest; one built on a guessed key renders wrong forever. Note grok's names collide with claude's
+   by CASE alone in two places (`grep`/`Grep`, `write`/`Write`), so that switch must stay
+   case-sensitive.
 4. **A remote (SSH) grok node's session name never resolves.** The shells build the session directory
    from the **local** `grokSessionsDir()` while the payload's `cwd` came from the host. It degrades
    safely — a wrong name is never produced, only no name — but it is a real asymmetry: claude's leg
@@ -501,9 +512,12 @@ Session identity + restore
     an app restart the session NAME will not resolve until that session's next hook (§8.5).
 
 Fixtures the unbuilt features need, modes, restart
-17. CAPTURE `signals.json` from a live session (Task 5 Step 1): note `/session-info`'s used and
-    total tokens first, then find the keys holding those two numbers. If NO total appears in
-    signals.json or summary.json, record that — no window means no context meter, ever.
+17. ~~CAPTURE `signals.json` from a live session.~~ **DONE, 22 sessions (1.0.13, 2026-09-02).** The
+    keys are `contextTokensUsed`, `contextWindowTokens` and `contextWindowUsage`; a total DOES
+    appear, in all 22. Fixture at `core/__fixtures__/grok/signals.json`, survey in
+    `evidence/grok-signals.txt`. What a NEW device should still check is the opposite case this item
+    was written for: a session whose signals.json lacks `contextWindowTokens` (a future grok, an
+    interrupted write). The meter must then vanish, not fall back to a guessed window.
 18. Settings → Agents → Auto: does the launched command carry `--permission-mode auto`, on a
     machine WITHOUT claude installed? (The claude gate must not touch grok.)
 19. Does `--permission-mode acceptEdits` launch cleanly, and what does grok actually do with it
@@ -546,14 +560,17 @@ SSH
     treatment `SshProjectManager.connect` uses for the remote `claude --version`.
 
 Surfaces
-27. Server Edition in a browser: grok badges, unread dot, no context meter, notch N/A. Also
-    confirm the node title does NOT adopt grok's session name there (readSessionName is stubbed).
-28. Phone: does a grok node appear in the inbox with the right state? Its "what it's doing now"
-    activity line will be absent (§8.3).
+27. Server Edition in a browser: grok badges, unread dot, notch N/A — and now a context meter too
+    (both shells create the signals.json tail). Also confirm the node title does NOT adopt grok's
+    session name there (readSessionName is stubbed).
+28. Phone: does a grok node appear in the inbox with the right state, AND does its "what it's doing
+    now" line now read grok's own phrases ("Reading fichero.txt", "Searching the code")? That line
+    was absent until the `pre_tool_use` spelling was translated at the shells (§8.3). A claude phrase
+    or a bare tool name appearing there means the vocabulary was bypassed.
 29. macOS notch: does the grok mark pulse and bloom while it works, on the black capsule, next to
     claude's walking critter without looking out of place?
-30. Kanban board + card modal: badges and the 💬 comments panel on a grok card (the meter row has
-    nothing to show).
+30. Kanban board + card modal: badges, the 💬 comments panel, and the meter row — which now HAS
+    something to show on a grok card.
 
 Two traps with no code fix — appended so the numbering above stays stable
 31. `echo $GROK_HOME` in a nodeterm terminal, then check where the hook file actually went. The app

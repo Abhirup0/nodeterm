@@ -157,6 +157,16 @@ export interface ContextTailOptions {
   parse?: (
     text: string | string[]
   ) => { used: number; window?: number | null; model: string | null } | null
+  /**
+   * Re-read the tracked file from byte 0 on every tick instead of tailing an offset.
+   *
+   * For grok, whose numbers live in `signals.json` — a whole JSON document REWRITTEN in place, not a
+   * JSONL appended to. An offset read hands the parser the bytes that happen to sit past the last
+   * read, which is a fragment of JSON and never parses. The meter would fill on the first tick and
+   * then freeze, with nothing anywhere to say why: exactly the silent-degrade shape this codebase
+   * keeps paying for. The file is a few KB, so re-reading it whole costs nothing worth optimizing.
+   */
+  wholeFile?: boolean
 }
 
 interface Tracked {
@@ -234,6 +244,8 @@ export function createContextTail(
       }
       if (size >= 0) {
         const before = t.offset
+        // A rewritten-in-place document has no meaningful offset: only the whole file parses.
+        if (opts?.wholeFile) t.offset = 0
         if (size < t.offset) t.offset = 0 // truncated/rotated → re-read from start
         // First read of a large transcript: skip to the last INITIAL_READ_CAP bytes.
         if (t.offset === 0 && size > INITIAL_READ_CAP) t.offset = size - INITIAL_READ_CAP

@@ -212,8 +212,25 @@ describe('grok capabilities', () => {
     expect(readsClaudeShapedTranscript('claude')).toBe(true)
   })
 
+  it('fills a context meter from the numbers it states itself', () => {
+    // grok states the numerator, the denominator AND the percentage (signals.json). The window is
+    // read, never inferred from the model id — which puts grok with codex, not with gemini.
+    expect(hasUsage('grok')).toBe(true)
+  })
+
+  it('joins USAGE_CAPABLE without joining the claude-transcript readers', () => {
+    // The regression this project already survived once: `hasUsage` gated THREE features, and
+    // joining it for the meter also switched on `context.ensure` and the find bar's index, both of
+    // which resolve through claude's `resolveTranscript` — whose cwd fallback then hands the node
+    // the newest CLAUDE transcript for that directory. A codex node metered and searched a
+    // stranger's session, and the preconditions were default-true, so it would have shipped.
+    //
+    // These two must therefore DISAGREE for grok, exactly as they do for codex and gemini.
+    expect(hasUsage('grok')).toBe(true)
+    expect(readsClaudeShapedTranscript('grok')).toBe(false)
+  })
+
   it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
-    expect(hasUsage('grok')).toBe(false)
     expect(canBranch('grok')).toBe(false)
     expect(canSubagent('grok')).toBe(false)
   })

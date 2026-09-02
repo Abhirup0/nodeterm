@@ -150,9 +150,25 @@ export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'g
 //  - gemini: states none, so the window comes from its model id through `geminiWindowFor`, which
 //    mirrors the CLI's OWN `tokenLimit(model)` — a family rule with a 1M catch-all default, so a
 //    model we have never heard of still gets the right answer rather than a stale guess.
-// grok is absent: its `updates.jsonl` parser is unbuilt (see docs/grok-agent.md), so there is no
-// used count to divide.
-export const USAGE_CAPABLE = ['claude', 'codex', 'gemini'] as const
+//  - grok: states BOTH numbers and the answer. `contextTokensUsed` and `contextWindowTokens` sit in
+//    `~/.grok/sessions/<cwd>/<id>/signals.json`, alongside `contextWindowUsage` — the percentage
+//    grok has already computed. MEASURED on 22 real sessions (1.0.13, 2026-09-02): all three present
+//    in all 22, and the stated percentage agrees with used/window in all 22. So the window is read,
+//    never inferred from the model id, which puts grok with codex rather than with gemini.
+//
+// Until 2026-09 this comment explained grok's absence by pointing at a missing parser for the wrong
+// file, and concluding there was no used count to divide. Both halves were false, and the first is
+// the one worth remembering: the counters never lived in the file it named, so the blocker it
+// declared was not the real blocker even on the day it was written. A comment that explains an
+// absence with a false cause is worse than no comment — it sends the next reader to build a parser
+// nobody needed. What let it survive is that nobody could check it: the integration was written with
+// no grok binary on the machine.
+//
+// signals.json is a METRICS file (66 keys: latencies, GCS queue counters, lines touched, peak RSS).
+// `core/grok-signals.ts` reads exactly three of them and nothing else. If a future grok drops
+// `contextWindowTokens`, that reader returns null and the meter disappears — no inferred
+// denominator, because a percentage over a guessed window is a wrong number presented as a fact.
+export const USAGE_CAPABLE = ['claude', 'codex', 'gemini', 'grok'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
 //
 // SPLIT from CLAUDE_TRANSCRIPT_READABLE below on 2026-09-02, when grok joined. Until then this one
