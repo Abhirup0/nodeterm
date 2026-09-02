@@ -19,6 +19,11 @@ const REARM_MAX_TRIES = 25
  * a teammate's commit). Self-writes are recognized by exact content match against
  * the store's last-written cache and ignored. Events are debounced per file —
  * editors and git often touch a file several times in quick succession.
+ *
+ * A cwd-less canvas's data file (`userData/inline-projects/<id>.json`) is deliberately NOT watched:
+ * nothing external edits it — no git pull, no teammate, no sync client aimed at userData — and the
+ * only other writer is a second app instance, which is settled by the rev rule in
+ * `WorkspaceStore.writeDataFile` rather than by a live reload. See the ref-kinds table in CLAUDE.md.
  */
 export class WorkspaceWatcher {
   private watchers = new Map<string, FSWatcher>()

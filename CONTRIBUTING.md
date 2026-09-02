@@ -235,9 +235,22 @@ no backup, nothing on screen. Both entrances now share the rule (`renderer/lib/s
 an occupied *or unreadable* project file refuses the bind and says why. The store's "never
 blind-write" guard will not save you — it only refuses an EMPTY canvas over a populated file.
 
+**Every workspace entry is a REF — content in a file, machine-local state on the entry.** There are
+three kinds and they now share one shape: a folder ref (`<cwd>/.nodeterm/project.json`, git-shared),
+an SSH ref (the same file on the host, with an offline `cache`), and a cwd-less canvas
+(`userData/inline-projects/<id>.json`, with the entry's `project` field kept as a cache for one
+release so an older build still reads it). Two habits follow. **Content goes in the file; anything
+this machine would legitimately disagree with another machine about — project id, viewport, default
+account, breadcrumbs, closed-session history, per-node `shell` — goes on the index entry**
+(`IndexEntryV3`), or a `git worktree add` / a second instance hands one machine's state to another.
+And **`workspace.json` is one file with last-writer-wins semantics, so it may not be the only home
+of any content**: that is precisely what let a second app instance erase a cwd-less canvas. Between
+two instances the arbiter is the file's `rev` — a lower rev never overwrites a higher one — and
+there is no merge; if you add a fourth kind, give it a file and say which rev wins.
+
 **A project with no folder is a real project — degrade explicitly, never silently.** "New project"
-creates a cwd-less canvas that persists inline in `workspace.json`, so every folder-shaped feature
-meets one. Keep the affordance and disable it with its reason (`NEW_FILE_NO_CWD_HINT`,
+creates a cwd-less canvas, so every folder-shaped feature meets one. Keep the affordance and
+disable it with its reason (`NEW_FILE_NO_CWD_HINT`,
 `WORKTREE_NO_CWD_HINT`, the Explorer/Source Control notes); a row that simply vanishes teaches
 nothing, and a message that names the wrong cause ("not a git repository" for a project that has no
 folder to be one) sends the user hunting a problem that does not exist.

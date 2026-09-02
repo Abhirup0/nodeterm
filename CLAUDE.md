@@ -198,8 +198,19 @@ Persistence has two layers:
   **index**: local folder projects are refs to `<cwd>/.nodeterm/project.json` (the source of
   truth — git-shareable, machine-portable; pretty-printed, portable `./` node cwds, monotonic
   `rev`), SSH projects are refs to the same file on the server (offline `cache` in the index,
-  reconciled by rev on connect, mirrored via `SshFs` with a 5 s write throttle), cwd-less
-  canvases stay inline. The renderer contract is untouched: `workspace.load()/save()` still
+  reconciled by rev on connect, mirrored via `SshFs` with a 5 s write throttle), and cwd-less
+  canvases are refs to `userData/inline-projects/<id>.json`. **Every entry is a ref — one shape,
+  three kinds:**
+
+  | kind | source of truth for the CONTENT | what the index entry carries |
+  |---|---|---|
+  | folder-ref | `<cwd>/.nodeterm/project.json` (git-shared) | `cwd` + header + machine-local half |
+  | ssh-ref | the same file on the host | `ssh` + header + `cache` (offline copy, rev-reconciled) |
+  | local-data-ref | `userData/inline-projects/<id>.json` | `dataFile` + header + `project` (cache) |
+
+  In all three the file carries CONTENT and the entry carries the machine-local half — project
+  `id`, `viewport`, `defaultAccountId`, `breadcrumbs`, `closedSessions`, `localApprovalId`,
+  `localExec`, `localSettings` (the #510 rule). The renderer contract is untouched: `workspace.load()/save()` still
   speak an assembled v2-shaped `Workspace`; all fan-out lives in `core/workspace-store.ts` +
   pure `core/workspace-files.ts`. v2 files migrate on first save (backup `workspace.v2.bak`,
   one-time renderer note). Outside edits (git pull/sync) are detected by
@@ -209,17 +220,32 @@ Persistence has two layers:
   `.nodeterm/project.json` — the probe MINTS the project id (node ids — tmux names — kept), and
   re-opening the folder is answered by the cwd lookup, not a second adoption.
   **A cwd-less canvas is a supported, first-class project, not a degraded one** — "New project" on
-  the welcome screen creates exactly that, and the whole `Project` (nodes, viewport, kanban,
-  closedSessions, per-node `shell`) rides `IndexEntryV3.project` verbatim, so it survives a restart
-  intact. It is the correct fallback layer and `localStorage` is not: the index is in `userData`
-  (backed up with the app's data, atomic-written, one store for all three shells), while
-  localStorage is renderer-origin state that the Server Edition would shard per browser profile.
-  What inline genuinely lacks is a SECOND copy: a folder project's canvas also lives in
-  `<cwd>/.nodeterm/project.json`, so a corrupt index costs it nothing (`Open folder…` adopts it
-  back), whereas an inline canvas exists ONLY inside the index — and therefore only inside the
-  `workspace.json.corrupt-<ts>` sideline, with no UI path back. The corrupt-index note must say
-  that plainly; it used to promise "No project data was lost — each project's canvas is still in
-  its own folder", which is true for refs and false for exactly the projects that just vanished.
+  the welcome screen creates exactly that, and it survives a restart intact. It is the correct
+  fallback layer and `localStorage` is not: `userData` is backed up with the app's data,
+  atomic-written, and one store for all three shells, while localStorage is renderer-origin state
+  the Server Edition would shard per browser profile.
+  **What it used to lack was a SECOND copy, and that is what `local-data-ref` fixes.** A folder
+  project's canvas also lives in `<cwd>/.nodeterm/project.json`, so a corrupt or clobbered index
+  costs it nothing; an inline canvas existed ONLY inside the index — one file, last-writer-wins, so
+  a second instance sharing that `userData` erased canvases that existed nowhere else, and a corrupt
+  index left them only inside the `workspace.json.corrupt-<ts>` sideline with no UI path back.
+  Each now has its own atomically written file, and the entry's `project` field is kept beside it as
+  a **cache** — the dual-write that (a) lets a build older than this one still read the canvas out
+  of the index (the downgrade contract, ONE release; the iOS SSH-browse path cats `workspace.json`
+  directly and depends on it too) and (b) answers when the data file is missing or corrupt.
+  The file wins whenever it reads. Rules that make this safe, all in `WorkspaceStore.writeDataFile`:
+  an unchanged candidate is not written at all; **a lower `rev` may not overwrite a higher one** (a
+  second instance wrote it after we looked — its canvas stands, the next load here adopts it, and
+  there is deliberately NO merge: the guarantee is "two instances cannot erase each other", not
+  "two instances stay in sync"); an empty candidate never overwrites a populated file this store has
+  not read. A corrupt data file is set aside as `.corrupt-<ts>` like any other project file, and the
+  sweep that deletes a removed project's file only ever touches ids THIS store had loaded — a file
+  belonging to another instance is never deleted, at the price of some litter after a re-key.
+  `userData/inline-projects` is deliberately NOT watched (`workspace-watcher` covers folder refs
+  only): nothing external edits it — no git pull, no teammate — and the rev rule is the whole
+  concurrency story. The corrupt-index note still matters and must stay honest; it used to promise
+  "No project data was lost — each project's canvas is still in its own folder", which was true for
+  refs and false for exactly the projects that had just vanished.
   **Binding a folder to an existing project is a WRITE, so probe before you bind.** "Set folder…"
   (tab ⌄) promotes an inline canvas to a ref, and the next autosave writes that folder's
   `project.json` — over whatever was already there. It used to bind unconditionally, so pointing a
