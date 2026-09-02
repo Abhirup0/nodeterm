@@ -322,6 +322,13 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  included); or an id `open-project` returned to YOU in this session, which never switches the',
     '  user\'s view. A session opened into a non-active project starts when the user next views that',
     '  project — do not poll for it. `--group`/`--after` cannot be combined with `--project`.',
+    '  The reply reports whether anything actually started: `queued` is true (and `queuedIds`',
+    '  lists which) when a node was opened ARMED — waiting on `--after`, on a worktree\'s',
+    '  setup script, or on a `--project` target the user has not viewed yet. A queued node',
+    '  exists on the canvas but has no process behind it: do not route work to it, do not',
+    '  `send` to it and do not report it as started. It launches itself when its wait ends,',
+    '  then reports through the ordinary status hooks — there is nothing to poll.',
+    '  `queued: false` means the session is running.',
     '  `--prompt` arrives on ONE LINE: every run of whitespace in it, newlines included, is',
     '  collapsed to a single space before the session starts (the prompt rides the launch command',
     '  line typed into the pane). For a structured or multi-line brief use `--prompt-file <abs',
@@ -711,6 +718,13 @@ Verbs:
   TARGET project's (its cwd, its default account and permission mode). A session opened into a
   non-active project starts when the user next views that project — do not poll for it; the reply
   says so. \`--group\`/\`--after\` cannot be combined with \`--project\`.
+  **The reply tells you whether anything actually started.** \`queued\` is true — and
+  \`queuedIds\` names which of the returned ids — whenever a node was opened **armed**: waiting on
+  \`--after\`, on a worktree's setup script, or on a \`--project\` target the user has not viewed
+  yet. A queued node exists on the canvas but has **no process behind it**, so do not route work
+  to it, do not \`send\` to it and do not report it as started. It launches itself when its wait
+  ends and then reports through the ordinary status hooks, so there is nothing to poll.
+  \`queued: false\` means the session is running.
   \`--prompt\` arrives on ONE LINE. Every run of whitespace in it — newlines included — is
   collapsed to a single space before the session starts, because the prompt is passed as an
   argument on the agent CLI's launch command line and that line is typed into the pane. Two

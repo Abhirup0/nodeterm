@@ -207,6 +207,18 @@ happened synchronously at your `console.log`, and wrapping that call in `try/cat
 (measured on node 22). If you write to a stream that can go away, attach an `'error'` listener and
 latch the writer off — `installLogSink` (`src/core/log-sink.ts`) is the worked example. Issue #382.
 
+**A retry budget must measure the thing it is waiting for, and running out must be VISIBLE.** The
+armed-launch loop (canvas-control `--after`, and the cold open a `--project` node gets) delivered its
+held command on a flat 5 × 400 ms budget started when the *canvas* held the node — so on a cold
+project switch it was spent loading the canvas, mounting the node and spawning tmux, and the launch
+was abandoned before the session it was for existed. Two rules came out of issue #569: wait on a
+real signal (`isSessionReady`, published by the node when its shell settles) rather than on a
+stopwatch aimed at the wrong start, and never let "we gave up" live only in a `console.warn` — the
+node shows it (`state/launchDelivery.ts` → the QUEUED badge's ⚠ + tooltip) and the canvas-control
+reply carries it (`queued` / `queuedIds`), because a user who cannot see the failure and an
+orchestrator that is told "opened" both act on a session that is not there. If you add a bounded
+retry anywhere, ask what the clock actually starts on and where its exhaustion becomes visible.
+
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and
 let every UI ask the helper. Repeating Claude/Codex/etc. cases in menus breaks that inheritance and
