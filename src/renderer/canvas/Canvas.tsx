@@ -37,6 +37,7 @@ import {
   subscribeSessionReady
 } from '../nodes/TerminalNode'
 import { solveFitPadding } from './fit-view'
+import { FloatingEdge } from './FloatingEdge'
 import { MacWheelGestureRouter, trackpadRoutingEnabled } from './wheel-gesture'
 import { isBrowserRuntime } from '@renderer/bridge/runtime'
 import { WheelZoomBurstLimiter, clampWheelZoomSpeed, nextWheelZoom } from './wheel-zoom'
@@ -746,6 +747,9 @@ const ropeEdge = (id: string, source: string, target: string, color: string): Ed
   style: { stroke: color, strokeWidth: 1.5 },
   markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 }
 })
+
+/** The one edge renderer — every family routes between nearest borders (see FloatingEdge). */
+const edgeTypes = { floating: FloatingEdge }
 
 
 const minimapNodeColor = (n: Node): string =>
@@ -12492,6 +12496,7 @@ export function Canvas() {
           nodes={allNodes}
           edges={displayEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={handleNodesChange}
           onEdgesChange={handleEdgesChange}
           onConnect={onConnect}
