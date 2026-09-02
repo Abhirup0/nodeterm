@@ -152,7 +152,7 @@ describe('Eco still sees the live subagent after a new turn (issue #547)', () =>
   const candidates = () =>
     buildHibernationCandidates({
       nodes: [{ id: 'n1', agentId: 'claude' }],
-      statusById: { n1: { state: 'done', unread: false } },
+      statusById: { n1: { state: 'done' } },
       subagents: Object.values(useAgentNodes.getState().byId).map((v) => ({
         parentNodeId: v.parentNodeId,
         status: v.state
