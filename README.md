@@ -11,16 +11,16 @@ project doubles as a **Trello-style board of live Claude Code sessions**. Built 
 people with ADHD and scattered workflows: a spatial layout instead of a stack of
 hidden tabs.
 
-[![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)%20·%20Linux%20(x64)-black)](https://nodeterm.dev)
+[![Platform](https://img.shields.io/badge/platform-macOS%20(arm64%20%2B%20x64)%20·%20Linux%20(x64)%20·%20Windows%20(x64%2C%20beta)-black)](https://nodeterm.dev)
 [![Built with Electron](https://img.shields.io/badge/built%20with-Electron-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](./LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/eneskirca/nodeterm?style=flat)](https://github.com/eneskirca/nodeterm/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/eneskirca/nodeterm?include_prereleases&sort=semver)](https://github.com/eneskirca/nodeterm/releases)
-<!-- Installer downloads: .dmg + .AppImage + .deb across every release, hand-written on purpose.
+<!-- Installer downloads: .dmg + .AppImage + .deb + Setup .exe across every release, hand-written on purpose.
      shields' github/downloads/…/total reads ~12× higher because electron-updater's own traffic
      (latest-*.yml polls, mac .zip deltas, blockmaps) is counted as downloads there. Recount with:
      gh api --paginate repos/eneskirca/nodeterm/releases --jq \
-       '[.[].assets[] | select(.name|test("\\.(dmg|AppImage|deb)$")) | .download_count] | add' -->
+       '[.[].assets[] | select(.name|test("\\.(dmg|AppImage|deb|exe)$")) | .download_count] | add' -->
 [![Downloads](https://img.shields.io/badge/downloads-1.2k-brightgreen)](https://github.com/eneskirca/nodeterm/releases)
 
 [Download](#-download) · [Docs](https://nodeterm.dev/docs) · [Features](#-features) · [Build from source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
@@ -43,7 +43,7 @@ Stacked terminal tabs hide context — you lose track of what's running where. n
 turns that into a **map**: every shell is a node you can place, group, label, and zoom
 into. Sessions are spatial and persistent, so your mental model stays intact across
 restarts. And because the app is built around a clean service seam, the same canvas runs
-three ways — as the **desktop app for macOS and Linux**, as a **self-hosted browser app**
+three ways — as the **desktop app for macOS, Linux and Windows (beta)**, as a **self-hosted browser app**
 you reach from anywhere (Server Edition), and an **iOS companion** that attaches to the
 same live sessions.
 
@@ -208,6 +208,14 @@ detects your platform. Everything is also listed at
   itself (electron-updater), so `brew upgrade` is rarely needed for it.
 - **Linux (x64)** — self-updating **AppImage**, or a `.deb` for Debian/Ubuntu
   (`sudo apt install ./nodeterm-*.deb`; updates are manual for `.deb`).
+- **Windows (x64) — beta** — `nodeterm-Setup-<version>.exe` (per-user installer) or a
+  portable `-win.zip`. Early support, so know what you are getting: the installer is
+  **unsigned** (SmartScreen will ask — *More info → Run anyway*), **updates are manual**
+  for now (grab the next build from the same page), and **session continuity across
+  restarts is still landing** — Windows has no tmux, so the standalone session host that
+  replaces it is being packaged in [#579](https://github.com/eneskirca/nodeterm/pull/579).
+  Everything else — canvas, agents, kanban, hooks — is the same app. Please
+  [report what breaks](https://github.com/eneskirca/nodeterm/issues).
 - **iOS** — **nodeterm mobile** on the
   [App Store](https://apps.apple.com/app/nodeterm/id6790581233).
 
@@ -230,7 +238,10 @@ The full inventory of what nodeterm writes where (and what the script keeps, lik
 Requires Node.js 20+ on macOS or Linux (tmux recommended — it's what makes sessions
 survive restarts). A source checkout does **not** carry the bundled tmux: run
 `node scripts/build-tmux.mjs` once on macOS to build it into `resources/bin/tmux` (the
-release job does this automatically), or just install tmux yourself.
+release job does this automatically), or just install tmux yourself. On **Windows**, run
+`bootstrap-windows.bat` from a fresh checkout first — it checks for Node, the Visual Studio
+C++ build tools and Python 3 (needed to compile node-pty) and points you at the exact
+`winget` commands for anything missing, then runs `npm ci`.
 
 ```bash
 npm install        # deps + rebuilds node-pty against Electron's ABI (postinstall)
@@ -241,6 +252,7 @@ npm run typecheck  # fastest correctness gate
 npm test           # vitest unit + integration suite
 npm run dist       # local UNSIGNED .dmg into dist/ (smoke test)
 npm run dist:linux # AppImage + .deb into dist/ (on a Linux host)
+npm run dist:win   # unsigned NSIS installer + zip into dist/ (on a Windows host)
 npm run server:dev # build + run the browser Server Edition (needs Node 22 + tmux)
 ```
 
