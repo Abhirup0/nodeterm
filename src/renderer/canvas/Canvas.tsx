@@ -421,7 +421,11 @@ import { freeSpot } from '../lib/placement'
 import { pushSessionRename, sessionNameUnchanged } from '../lib/sessionRename'
 import { useReopenHistory, type ReopenEntry } from '../state/reopenHistory'
 import { snapshotNode, recreateNodeFromSnapshot } from '../lib/reopenNode'
-import { buildClosedSessionEntries, stateToReopenSnapshot } from '../lib/closedHistory'
+import {
+  buildClosedSessionEntries,
+  recentlyClosedProjects,
+  stateToReopenSnapshot
+} from '../lib/closedHistory'
 import { uuid } from '../lib/uuid'
 import { planReopen, type ReopenPlan } from '../lib/reopenPlan'
 import { oneLine } from '@shared/one-line'
@@ -1439,11 +1443,11 @@ export function Canvas() {
   const hasProjects = useProjects((s) => s.projects.some((p) => !p.closed))
   // Exclude UNAVAILABLE closed projects (folder missing): reopenProject would activate them
   // unconditionally → a silent-discard empty canvas (the same case the palette guard blocks).
-  // useShallow: the filter derives a NEW array each call — without it, every useProjects write
+  // Ordered newest-CLOSED first, so the "Recently closed" heading is true (issue #506) — this
+  // used to be tab order, which put the project shut ten minutes ago wherever its tab sat.
+  // useShallow: the selector derives a NEW array each call — without it, every useProjects write
   // (each kanban board commit, each debounced canvas save) re-rendered the entire Canvas.
-  const closedProjects = useProjects(
-    useShallow((s) => s.projects.filter((p) => p.closed && !p.unavailable))
-  )
+  const closedProjects = useProjects(useShallow((s) => recentlyClosedProjects(s.projects)))
   // The active project's SSH server (if it's an SSH project) — drives the connection banner.
   const activeSshServer = useProjects(
     (s) => s.projects.find((p) => p.id === s.activeProjectId)?.ssh?.server

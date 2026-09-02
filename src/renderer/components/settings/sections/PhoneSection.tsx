@@ -8,6 +8,7 @@ import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
 import { usePhonePairing } from '../usePhonePairing'
 import { IOS_APP_STORE_URL } from '@renderer/lib/links'
+import { thisMachine } from '../../../lib/machineName'
 
 const ROWS = {
   remote: {
@@ -152,7 +153,8 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
             <div className="min-w-0">
               <h4 className="text-[13px] font-medium text-text">Remote access from your phone</h4>
               <p className="mt-1 text-sm text-muted">
-                Reach this Mac from anywhere — not just your local network — end-to-end encrypted
+                Reach {thisMachine()} from anywhere — not just your local network — end-to-end
+                encrypted
                 over the relay. Your paired phone connects through the relay; the connection is
                 verified with a code the first time.
               </p>
@@ -330,7 +332,7 @@ export function PhoneSection({ isActive }: { isActive: boolean }): React.JSX.Ele
           // Both legs, and the timing of the one that is not instant. "If" rather than a flat
           // claim: a free-tier desktop has no Pro of ours on that phone to take back, and this
           // dialog cannot tell — the server leg reports that only after the fact ('skipped').
-          message={`Revoke “${pendingRevoke.name}”? Its key is removed from this machine and it will no longer be able to connect. If its Pro comes from this Mac’s license, that is revoked too — the phone loses Pro within 7 days.`}
+          message={`Revoke “${pendingRevoke.name}”? Its key is removed from this machine and it will no longer be able to connect. If its Pro comes from ${thisMachine()}’s license, that is revoked too — the phone loses Pro within 7 days.`}
           confirmLabel="Revoke"
           onConfirm={() => void revokeDevice(pendingRevoke)}
           onCancel={() => setPendingRevoke(null)}

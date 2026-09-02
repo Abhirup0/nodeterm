@@ -174,7 +174,7 @@ describe('LicenseSection — confirming the destructive actions', () => {
     const dialog = screenText()
     expect(dialog).toMatch(/paired phone/)
     expect(dialog).toMatch(/once every 30 days/)
-    expect(dialog).toMatch(/this Mac keeps it/)
+    expect(dialog).toMatch(/this computer keeps it/)
 
     await act(async () => confirmDialog('Cancel'))
     expect(releaseOthers).not.toHaveBeenCalled()

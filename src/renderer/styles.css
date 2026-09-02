@@ -197,8 +197,7 @@ body,
   align-items: center;
   gap: 14px;
   height: 44px;
-  /* Leave room for the macOS traffic lights on the left. */
-  padding: 0 12px 0 86px;
+  padding: 0 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   /* Above the canvas and the menu backdrop so tabs/inputs stay interactive. */
@@ -206,6 +205,14 @@ body,
   flex-shrink: 0;
   /* The bar itself is the window drag region. */
   -webkit-app-region: drag;
+}
+
+/* Leave room for the macOS traffic lights on the left — ONLY where they are drawn inside the web
+   contents (Electron `titleBarStyle: 'hiddenInset'`, darwin desktop). The attribute is stamped by
+   `lib/windowChrome.ts` at boot; without it the reservation applied on Windows and Linux too,
+   pushing the logo in by 86px and taking the same 86px off the tab strip (issue #564). */
+:root[data-window-chrome='inset'] .tabbar {
+  padding-left: 86px;
 }
 
 /* Interactive elements inside the bar must not drag the window. */
@@ -2918,12 +2925,33 @@ body,
   padding-left: 2px;
 }
 
+/* Issue #506: shown only past RECENT_FILTER_THRESHOLD rows, where the list is already
+   scrolling. Same shape as the sessions sidebar's own "Filter sessions…" box — this is the
+   same idea applied to the other list, so it should not look like a different control. */
+.welcome__recent-filter {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  font-size: 12px;
+  padding: 5px 8px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
 .welcome__recent-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
   max-height: 220px;
   overflow-y: auto;
+}
+
+.welcome__recent-empty {
+  padding: 10px 10px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .welcome__recent-item {
@@ -6575,8 +6603,25 @@ button.group-node__setup:disabled {
   border: 1px solid rgba(var(--tint-rgb), 0.1);
   box-shadow: 0 12px 40px rgba(0, 0, 0, calc(0.5 * var(--shadow-k)));
   color: var(--text-strong);
+  /* Issue #503: each account is a tall block (label + Session/Weekly/Opus meters), so past
+     about four accounts the panel grew off the TOP of the window — the first account's header
+     and meter were clipped with no way to reach them. Capped to the space between the pill
+     (bottom: 34px) and the tab bar (44px at z 30, which paints over this panel in canvas mode),
+     with the blocks scrolling inside __body while the heading and footer action stay put. */
+  max-height: calc(100vh - 86px);
+  display: flex;
+  flex-direction: column;
 }
-.usage-popover__head { margin-bottom: 12px; }
+.usage-popover__body {
+  /* Every account is rendered — the list SCROLLS rather than truncating. A cap would have to
+     say so, and there is no honest way to say "and 3 accounts you cannot see". */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Without this a flex child refuses to shrink below its content height and the max-height
+     above would do nothing. */
+  min-height: 0;
+}
+.usage-popover__head { margin-bottom: 12px; flex: none; }
 .usage-popover__title { display: block; font-size: 15px; font-weight: 600; }
 .usage-popover__ago { font-size: 12px; color: rgba(var(--tint-rgb), 0.5); }
 .usage-popover__empty { font-size: 13px; color: rgba(var(--tint-rgb), 0.5); }
@@ -6659,6 +6704,8 @@ button.group-node__setup:disabled {
 .usage-popover__switch {
   display: block;
   width: 100%;
+  /* Stays put below the scrolling account list (issue #503). */
+  flex: none;
   margin-top: 10px;
   padding: 5px 8px;
   border: none;
@@ -7292,10 +7339,44 @@ button.group-node__setup:disabled {
 .sessions-sidebar__head-actions button { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: none; color: var(--text); cursor: pointer; border-radius: 6px; }
 .sessions-sidebar__head-actions button:hover { background: var(--panel-header); }
 .sessions-sidebar__head-actions button.is-on { color: var(--accent); }
-.sessions-sidebar__search { margin: 8px 10px 4px; }
-.sessions-sidebar__search input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 5px 8px; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 7px; }
+.sessions-sidebar__search { margin: 8px 10px 4px; position: relative; }
+/* Right padding leaves room for the clear button, which overlays the field's trailing edge. */
+.sessions-sidebar__search input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 5px 24px 5px 8px; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 7px; }
+/* Issue #505: one action back to the full list. Quiet until hovered — it is an escape hatch,
+   not a control competing with the field. */
+.sessions-sidebar__search-clear {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sessions-sidebar__search-clear:hover { color: var(--text); background: var(--panel-header); }
 .sessions-sidebar__body { overflow-y: auto; padding: 4px 6px 8px; }
 .sessions-sidebar__empty { padding: 18px 12px; text-align: center; font-size: 12px; color: var(--muted); }
+.sessions-sidebar__empty-clear {
+  margin-top: 8px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sessions-sidebar__empty-clear:hover { border-color: var(--accent); color: var(--accent); }
 
 /* "Recently closed" — merged closed-projects/closed-sessions history at the bottom of the
    sidebar. Same head layout as .sessions-sidebar__head, just smaller/muted (it is a secondary

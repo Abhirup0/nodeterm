@@ -6,6 +6,7 @@ import type {
   TerminalCursorInactiveStyle,
   TerminalCursorStyle
 } from '@shared/types'
+import { isWindowsPlatform } from '@shared/platform-utils'
 import { isKnownTerminalThemeId, resolveTerminalTheme } from './themes'
 
 /**
@@ -746,6 +747,37 @@ export function isCopyShortcut(e: CopyShortcutEvent): boolean {
 }
 
 /**
+ * The paste chord that xterm's own keymap would EAT — Ctrl+V, and only on Windows.
+ *
+ * We do not paste ourselves: the platform already does, and identically on every surface. On
+ * macOS ⌘V reaches the Edit menu's `{role:'paste'}` (Chromium routes those into the focused
+ * element), which dispatches a `paste` event to xterm's helper textarea; xterm's handler applies
+ * bracketed-paste framing and writes it to the pty. All this decision does is stop xterm from
+ * CANCELLING the keydown, so the same platform path runs on Windows too.
+ *
+ * Measured against `@xterm/xterm`'s `evaluateKeyboardEvent` (issue #562):
+ * - **Ctrl+V** maps to `\x16` (SYN) with `cancel: true`, so xterm calls `preventDefault()` — which
+ *   suppresses Chromium's paste editing command AND keeps the Ctrl+V menu accelerator from firing
+ *   (an accelerator only runs on a keydown the renderer did not consume). Hence: nothing pasted,
+ *   nothing typed, no error. This is the whole bug.
+ * - **Ctrl+Shift+V** and **Shift+Insert** produce no key and no cancel, so xterm already lets them
+ *   through to the platform. They need no branch here, and adding one would only risk breaking
+ *   what works.
+ *
+ * **Windows only, deliberately.** On macOS ⌘V is the paste chord and Ctrl+V must stay `\x16`; on
+ * Linux the terminal convention is Ctrl+Shift+V, and Ctrl+V is a key people actually send (vim's
+ * blockwise-visual, readline's literal-next). Windows Terminal's own default is Ctrl+V = paste,
+ * so this matches what a Windows user's other terminal does — at the cost of `\x16` there, the
+ * same trade Windows Terminal ships.
+ */
+export function isPasteShortcut(e: CopyShortcutEvent, isWindows: boolean): boolean {
+  if (!isWindows || e.type !== 'keydown') return false
+  if (e.key.toLowerCase() !== 'v' && e.code !== 'KeyV') return false
+  // AltGr reports ctrl+alt, and Ctrl+Shift+V is not ours to claim (xterm already passes it).
+  return e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey
+}
+
+/**
  * What a terminal keydown that MIGHT be a copy chord should do:
  * - `copy`    — it is a copy chord and there is a selection: copy it, swallow the key.
  * - `swallow` — it is a copy chord with NO selection: still swallow it. Critical for Ctrl+Shift+C:
@@ -771,7 +803,7 @@ export function copyKeyAction(e: CopyShortcutEvent, hasSelection: boolean): Copy
  */
 export const SHIFT_ENTER_SEQ = '\x1b\r'
 
-export type TerminalKeyAction = CopyKeyAction | 'shift-enter' | 'bubble'
+export type TerminalKeyAction = CopyKeyAction | 'shift-enter' | 'bubble' | 'native'
 
 /**
  * Superset of `copyKeyAction` used by the terminal's custom key handler.
@@ -794,7 +826,8 @@ export function terminalKeyAction(
   e: CopyShortcutEvent,
   hasSelection: boolean,
   ownsProjectJump = false,
-  registryOwns = false
+  registryOwns = false,
+  isWindows: boolean = isWindowsPlatform()
 ): TerminalKeyAction {
   if (
     e.type === 'keydown' &&
@@ -814,6 +847,13 @@ export function terminalKeyAction(
   if (ownsProjectJump) return 'bubble'
   const base = copyKeyAction(e, hasSelection)
   if (base !== 'pass') return base
+  // Windows Ctrl+V: hand the chord to the PLATFORM's own paste (see `isPasteShortcut`). 'native'
+  // has the same mechanics as 'bubble' — return false from the xterm handler, do NOT
+  // preventDefault — but a different reason, so the two are not one branch: 'bubble' means the
+  // window dispatcher owns a registry command, 'native' means Chromium's editing command (and the
+  // Edit menu's `{role:'paste'}` accelerator behind it) does. Both need the event left uncancelled;
+  // only 'bubble' implies a registry owner.
+  if (isPasteShortcut(e, isWindows)) return 'native'
   // `registryOwns` — decided by the caller via `terminalChordBubbles`, the same live-registry
   // matcher discipline as `ownsProjectJump` — means the window dispatcher will claim this chord
   // (an allowInTerminal app/canvas command). 'bubble' tells the consumer to return false WITHOUT
