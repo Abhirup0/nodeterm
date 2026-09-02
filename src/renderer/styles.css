@@ -2918,12 +2918,33 @@ body,
   padding-left: 2px;
 }
 
+/* Issue #506: shown only past RECENT_FILTER_THRESHOLD rows, where the list is already
+   scrolling. Same shape as the sessions sidebar's own "Filter sessions…" box — this is the
+   same idea applied to the other list, so it should not look like a different control. */
+.welcome__recent-filter {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  font-size: 12px;
+  padding: 5px 8px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
 .welcome__recent-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
   max-height: 220px;
   overflow-y: auto;
+}
+
+.welcome__recent-empty {
+  padding: 10px 10px;
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .welcome__recent-item {
