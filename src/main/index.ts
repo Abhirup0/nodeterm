@@ -1,3 +1,4 @@
+import { grokHomeDir } from '../core/agents/grok-paths'
 import { join, resolve, posix } from 'path'
 import { startSessionNameSweep, displayNodeTitle } from '../core/session-name-sweep'
 import { readAgentSessionName, type AgentSessionNameDeps } from '../core/agent-session-name'
@@ -2562,7 +2563,11 @@ app.whenReady().then(async () => {
     const abs = resolve(tp)
     // codexHome() honors $CODEX_HOME — a relocated codex (the snap-codex case this project has hit
     // before) would otherwise fail the jail and its meter would silently never fill.
-    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData'), codexHome())
+    // grokHomeDir() honors $GROK_HOME for the same reason and with the same failure shape: closed,
+    // so a relocated grok home would silently never resolve a context link. BOTH shells pass it
+    // (invariant 11) — a jail widened in one shell only is a feature the Server Edition lacks with
+    // nothing to say so.
+    return isSafeLocalTranscriptPath(abs, homedir(), app.getPath('userData'), codexHome(), grokHomeDir())
       ? abs
       : undefined
   }
