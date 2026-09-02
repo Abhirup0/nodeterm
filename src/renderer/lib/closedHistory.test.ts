@@ -235,6 +235,8 @@ describe('closedTranscriptTarget', () => {
     expect(t).toMatchObject({ ok: false, kind: 'no-session-id' })
     // Not the hideable kind: the user closed a real agent session and the record is genuinely gone.
     expect(t.ok === false && t.kind !== 'no-agent').toBe(true)
+  })
+})
 
 describe('recentlyClosedProjects — the heading promises recency (issue #506)', () => {
   type Probe = { id: string; name: string; closed?: boolean; unavailable?: boolean; closedAt?: number }
