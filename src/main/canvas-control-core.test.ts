@@ -386,6 +386,18 @@ describe('parseControlRequest', () => {
     }
   })
 
+  it('both agent-facing texts say an ERRORED station does not release its dependents (#521)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The contract changed under `--after`: "gone idle" no longer releases a dependent, because
+      // a station whose turn died on an API error reaches idle IMMEDIATELY. A text still promising
+      // the old rule tells an orchestrator its chain launched on something that produced nothing.
+      expect(body.toLowerCase()).toContain('successfully')
+      expect(body).toContain('LAST TURN ERRORED')
+      // And a way out, or the orchestrator is told it is stuck without being told what to do.
+      expect(body.toLowerCase()).toMatch(/nudge|retry/)
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')

@@ -70,7 +70,11 @@ describe('the QUEUED badge carries the delivery state (source pins)', () => {
   it('the badge reads the store and renders the warning variant plus the shared tooltip', () => {
     expect(src).toContain("useLaunchDelivery((s) => s.byId[id])")
     expect(src).toContain('term-node__status--queued-warn')
-    expect(src).toContain('launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command)')
+    // `pendingErroredOn` is the fourth argument since #521 — an errored upstream is idle, so
+    // without it the tooltip would promise a wait that never ends.
+    expect(src).toContain(
+      'launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command, pendingErroredOn)'
+    )
   })
 
   it('the manual ▶ disarms only on a delivery that landed', () => {

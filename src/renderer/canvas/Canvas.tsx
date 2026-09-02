@@ -9254,15 +9254,27 @@ export function Canvas() {
       try {
         switch (verb) {
           case 'list': {
+            // The error marker rides the LIST rows (issue #521), not a per-node read: an
+            // orchestrator running seven stations already calls `list`, and asking each one
+            // separately would be seven round trips to learn the one thing that changes what it
+            // does next.
+            const st = useAgentStatus.getState().byId
             const list = nodesRef.current.map((n) => ({
               id: n.id,
               kind: n.type,
-              title: n.data.title as string
+              title: n.data.title as string,
+              ...(st[n.id]?.lastTurnError ? { lastTurnErrored: true } : {})
             }))
             reply({
               ok: true,
               result: list,
-              message: list.map((n) => `${n.id} [${n.kind}] ${n.title}`).join('\n')
+              message: list
+                .map(
+                  (n) =>
+                    `${n.id} [${n.kind}] ${n.title}` +
+                    (n.lastTurnErrored ? ' — LAST TURN ERRORED' : '')
+                )
+                .join('\n')
             })
             return
           }
@@ -11035,7 +11047,15 @@ export function Canvas() {
           // `e.verified` is the identity evidence for this very transition (hook-server labels it);
           // it was in scope here and dropped on the floor before the store had a field for it.
           if (e.state && !stuckRescueSkip)
-            cs.setState(e.nodeId, e.state, e.agentId, e.newTurn, e.pendingId, e.verified)
+            cs.setState(
+              e.nodeId,
+              e.state,
+              e.agentId,
+              e.newTurn,
+              e.pendingId,
+              e.verified,
+              e.errored
+            )
           if (e.newTurn) an.clearForParent(e.nodeId) // genuine new turn → drop the previous fan-out
           if (e.newTurn && e.task) {
             // Prompt-prefix fallback for /loop|/schedule|/cron when the natural-language

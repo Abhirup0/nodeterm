@@ -118,6 +118,25 @@ export interface AgentNodeStatus {
    * leaves `blocked` (so the buttons vanish once the decision lands). Absent = legacy prompt path.
    */
   pendingId?: string
+  /**
+   * The station's LAST turn ended on an API/model error (issue #521) — set from the agent's own
+   * `StopFailure` hook, cleared by the next genuine new turn.
+   *
+   * An annotation beside `state`, never a fifth `AgentState`: an errored station **is** idle, so
+   * the two facts coexist. Before it existed, a station whose first turn died was byte-identical
+   * to one that had finished — the orchestrator's `--after` dependents fired on an upstream that
+   * had produced nothing, and started a whole dependency chain on bad ground. That is what
+   * `depSatisfied` now refuses (`renderer/lib/pendingLaunch.ts`).
+   *
+   * TRANSIENT, like `state` itself, and for the same reason `lastEventAt` is: after a relaunch no
+   * hook has spoken, nothing armed can fire anyway, and a verdict restored from disk would
+   * describe a turn from another app run.
+   *
+   * `at` only. Whether the hook payload carries the failure text has not been measured, and
+   * `last_assistant_message` is the previous assistant turn rather than the error — see
+   * `NormalizedAgentEvent.errored`. Reading the error itself is still owed.
+   */
+  lastTurnError?: { at: number }
   /** Set when running /loop, /schedule or /cron (heuristic); shown as a connected node. */
   loop?: {
     count: number
@@ -154,14 +173,17 @@ export interface AgentStatusStore {
    *  `pendingId` (deterministic approvals) is retained only while `state === 'blocked'`; any other
    *  state clears it, so the header's Approve/Deny buttons disappear as soon as the node moves on.
    *  `verified` is the identity evidence for THIS transition (see `stateVerified`); a caller that
-   *  omits it asserts nothing, which is why it is trailing and optional. */
+   *  omits it asserts nothing, which is why it is trailing and optional.
+   *  `errored` says this `done` came from the agent's `StopFailure` hook (see `lastTurnError`);
+   *  `newTurn` retires the previous turn's verdict, so the two are read on the same edge. */
   setState(
     id: string,
     state: AgentState | undefined,
     agentId?: AgentId,
     newTurn?: boolean,
     pendingId?: string,
-    verified?: boolean
+    verified?: boolean,
+    errored?: boolean
   ): void
   /** Clear `working` entries whose last event is older than `staleMs` (lost-Stop safety net). */
   sweepStaleWorking(staleMs?: number): void
@@ -345,10 +367,15 @@ export function createAgentStatusSession(
         return s.activeId === id ? { activeId: null } : s
       }),
 
-    setState: (id, state, agentId, newTurn, pendingId, verified) =>
+    setState: (id, state, agentId, newTurn, pendingId, verified, errored) =>
       set((s) => {
         const prev = s.byId[id] ?? EMPTY
         const now = Date.now()
+        // Does this event change the last-turn verdict (issue #521)? Read up front because the
+        // same-state fast path below mutates IN PLACE to avoid a re-render — which is exactly what
+        // a badge appearing or disappearing needs, so an event that moves this must not take it.
+        const turnErrorMoves =
+          errored === true || (newTurn === true && prev.lastTurnError !== undefined)
         // Done-holdoff: a late working event (parallel hook curls arrive out of order, or a
         // tool POST that was in flight when the user interrupted) must not resurrect a turn
         // that just finished. Only a genuine new turn (UserPromptSubmit) may.
@@ -368,7 +395,8 @@ export function createAgentStatusSession(
         if (
           prev.state === state &&
           (agentId === undefined || prev.agentId === agentId) &&
-          samePendingWhileBlocked
+          samePendingWhileBlocked &&
+          !turnErrorMoves
         ) {
           // Same-state event: refresh freshness in place — stateAt is never rendered, and a
           // new object here would re-render every node header on each tool event.
@@ -391,6 +419,12 @@ export function createAgentStatusSession(
         if (agentId !== undefined) next.agentId = agentId
         // Retain the approval ticket only while blocked; any other state clears it (transient).
         next.pendingId = state === 'blocked' ? (pendingId ?? prev.pendingId) : undefined
+        // The last-turn verdict (issue #521). A genuine new turn retires it — the station is being
+        // asked something else, and the old failure no longer describes what it is doing. Anything
+        // else LEAVES IT STANDING (it rides the spread): the intermediate transitions between the
+        // error and the next prompt say nothing about whether that turn produced anything.
+        if (newTurn) next.lastTurnError = undefined
+        else if (errored) next.lastTurnError = { at: now }
         // A LIVE state is proof the CLI is running, so the hibernated flag is simply wrong and is
         // dropped here — the one self-heal this flag has. It is set by a controller that watched
         // the CLI let go of the pane, but the world moves on without us: the user relaunches the

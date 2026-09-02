@@ -1604,6 +1604,13 @@ body,
   color: var(--danger);
 }
 
+/* TURN FAILED: the last turn ended on an API/model error (issue #521). Red like NEEDS YOU —
+   something did go wrong — but the dot does NOT pulse: nothing is happening and nothing is being
+   waited for, it is a verdict on a turn that is already over. */
+.term-node__status--errored {
+  color: var(--danger);
+}
+
 .term-node__status--loop {
   color: #bf7af0;
 }

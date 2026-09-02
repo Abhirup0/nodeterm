@@ -12,6 +12,30 @@ export interface NormalizedAgentEvent {
   // done only: the turn ended because the user interrupted (Esc/Ctrl-C) — the renderer
   // skips the completion alert/unread for these (the user was right there).
   interrupted?: boolean
+  /**
+   * done only: this turn ended on an API/model ERROR rather than by finishing (issue #521).
+   *
+   * An annotation, not a fifth `AgentState`, and the reason is not only that a new state would
+   * ripple through both raw listeners and the mobile mirror: **errored is a fact about the last
+   * turn, not a mutually exclusive live state.** A station whose turn 1 errored IS idle — the two
+   * facts coexist, and only one of them is the station's state.
+   *
+   * It is set from the agent's own `StopFailure` hook, which claude and grok both fire INSTEAD of
+   * `Stop` when the turn dies (`CLAUDE_HOOK_EVENTS`/`GROK_HOOK_EVENTS` already subscribe to it —
+   * without the subscription the badge would stick on RUNNING). So the source is a real hook, not
+   * a heuristic: a `Stop` whose turn produced no assistant message was considered and refused on
+   * the closed-set rule — interrupted and tool-only turns look identical to it, and a false
+   * attention signal has no later hook to clear it.
+   *
+   * Carried on the event so both shells change together by construction: `normalizeClaude` /
+   * `normalizeGrok` live in `src/shared` and both raw listeners forward what they return.
+   *
+   * NO ERROR TEXT accompanies it. Whether claude's `StopFailure` payload carries the failure
+   * message has not been measured, and `last_assistant_message` is the previous assistant turn
+   * rather than the error — reporting that as "the error" would be a wrong fact stated
+   * confidently. The flag says only what the hook said.
+   */
+  errored?: boolean
   // done only: this `done` was inferred from the CLI going IDLE at its prompt (Claude's
   // `idle_prompt` notification), not from a turn-end hook. It is a RESCUE signal: it may only
   // move a node that is still `working` (see reduceEntry / the Canvas listener), because a
@@ -239,9 +263,18 @@ export function normalizeClaude(env: RawHookEnvelope): NormalizedAgentEvent | nu
     }
   }
   // The turn died on an API/model error — Claude Code skips the normal Stop hook here,
-  // so without this the node would sit on "working" forever.
+  // so without this the node would sit on "working" forever. `errored` is what keeps this
+  // distinguishable from an ordinary finish afterwards (issue #521): the station is idle either
+  // way, and before the flag existed a `--after` dependent fired on a station that produced
+  // nothing.
   if (ev === 'StopFailure') {
-    return { ...base, kind: 'state', state: 'done', lastMessage: p.last_assistant_message }
+    return {
+      ...base,
+      kind: 'state',
+      state: 'done',
+      errored: true,
+      lastMessage: p.last_assistant_message
+    }
   }
   // The dedicated permission hook (more direct than Notification's permission_prompt).
   if (ev === 'PermissionRequest') {
@@ -645,7 +678,8 @@ export function normalizeGrok(env: RawHookEnvelope): NormalizedAgentEvent | null
       : { ...base, kind: 'state', state: 'done', interrupted: true }
   }
   // The turn died on an API error — grok skips Stop entirely here, exactly as Claude does.
-  if (ev === 'stopfailure') return { ...base, kind: 'state', state: 'done', lastMessage }
+  if (ev === 'stopfailure')
+    return { ...base, kind: 'state', state: 'done', errored: true, lastMessage }
   if (ev === 'notification') {
     // grok's Notification is the one event whose vocabulary we could not measure, and the three
     // sources that describe it do not agree, so this mapping is deliberately safe in BOTH
