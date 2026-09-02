@@ -1,6 +1,14 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ProjectIcon } from '@shared/project-icon'
+import { filterClosedProjects } from '../lib/closedHistory'
 import { ProjectGlyph } from './ProjectGlyph'
+
+/**
+ * Rows before the "Recently closed" filter box appears (issue #506). `.welcome__recent-list` is
+ * capped at 220px ≈ six rows, so this is the point where the list starts scrolling — below it a
+ * filter would only be clutter for someone with three projects.
+ */
+const RECENT_FILTER_THRESHOLD = 6
 
 interface WelcomeScreenProps {
   onNewProject: () => void
@@ -46,6 +54,12 @@ export function WelcomeScreen({
   onClose,
   overBoard
 }: WelcomeScreenProps) {
+  const [query, setQuery] = useState('')
+  const visibleClosed = useMemo(
+    () => filterClosedProjects(closedProjects, query),
+    [closedProjects, query]
+  )
+
   useEffect(() => {
     if (!onClose) return
     const onKey = (e: KeyboardEvent) => {
@@ -141,8 +155,29 @@ export function WelcomeScreen({
       {closedProjects.length > 0 && (
         <div className="welcome__recent">
           <div className="welcome__recent-title">Recently closed</div>
+          {/* Shown only past the visible-row cap: with three closed projects a filter box is
+              in the way, and past six the list is already scrolling. */}
+          {closedProjects.length > RECENT_FILTER_THRESHOLD && (
+            <input
+              className="welcome__recent-filter"
+              placeholder="Filter by name or folder…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                // Esc clears the box before it reaches the screen's own close handler; on an
+                // empty box it falls through and still closes the screen.
+                if (e.key !== 'Escape' || query === '') return
+                e.preventDefault()
+                e.stopPropagation()
+                setQuery('')
+              }}
+            />
+          )}
           <div className="welcome__recent-list">
-            {closedProjects.map((p) => (
+            {visibleClosed.length === 0 && (
+              <div className="welcome__recent-empty">No closed projects match “{query.trim()}”.</div>
+            )}
+            {visibleClosed.map((p) => (
               <div
                 key={p.id}
                 className="welcome__recent-item"

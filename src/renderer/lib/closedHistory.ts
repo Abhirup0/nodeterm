@@ -104,6 +104,42 @@ export type ClosedHistoryRow =
  * no known `closedAt` (pre-existing data from before that field existed) sorts last via the `-1`
  * sentinel — never `NaN` from subtracting `undefined`.
  */
+/**
+ * The start screen's "Recently closed" list: closed, AVAILABLE projects, newest-closed first
+ * (issue #506).
+ *
+ * The heading promises recency and the list did not deliver it — it was
+ * `projects.filter(p => p.closed && !p.unavailable)`, i.e. TAB order, so the project shut ten
+ * minutes ago sat wherever its tab happened to be. With the list capped to about six visible
+ * rows, that turned scanning into hunting.
+ *
+ * `unavailable` is excluded for the same reason the Canvas selector always excluded it: reopening
+ * a ref whose folder is missing activates an empty placeholder. Sort rule and `-1` sentinel are
+ * `mergeClosedHistory`'s, deliberately — the two lists describe the same event and must not order
+ * it differently; `closedAt` is absent only on projects closed before that field existed, and
+ * those sort last rather than becoming `NaN`.
+ */
+export function recentlyClosedProjects<
+  T extends { closed?: boolean; unavailable?: boolean; closedAt?: number }
+>(projects: readonly T[]): T[] {
+  return projects
+    .filter((p) => p.closed && !p.unavailable)
+    .sort((a, b) => (b.closedAt ?? -1) - (a.closedAt ?? -1))
+}
+
+/**
+ * Narrows the "Recently closed" list by name or folder — both already rendered on the row, and
+ * `cwd` is the row's `title`. Empty/whitespace query = everything, unchanged.
+ */
+export function filterClosedProjects<T extends { name: string; cwd?: string }>(
+  rows: readonly T[],
+  query: string
+): T[] {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return rows as T[]
+  return rows.filter((r) => `${r.name} ${r.cwd ?? ''}`.toLowerCase().includes(needle))
+}
+
 export function mergeClosedHistory(projects: readonly Project[]): ClosedHistoryRow[] {
   const rows: ClosedHistoryRow[] = []
   for (const p of projects) {

@@ -138,8 +138,14 @@ describe('BrandPulse', () => {
 describe('the pulse classes exist in both stylesheets', () => {
   // The class names are strings on one side and selectors on the other, so a rename can only be
   // half-done. Nothing else would notice: a missing selector loses the animation silently.
-  const CANVAS_CSS = readFileSync(join(__dirname, '..', 'styles.css'), 'utf8')
-  const HUD_CSS = readFileSync(join(__dirname, '..', 'hud', 'hud.css'), 'utf8')
+  // `.replace(/\r\n/g, '\n')` on every read below: a test that reads a checked-in file must not
+  // care how git checked it out. Git for Windows defaults to `core.autocrlf=true`, so a Windows
+  // clone has CRLF working files, and a slice on a literal containing `\n` (`indexOf('}\n}')`,
+  // `indexOf('\n}\n')`) then matches nothing and the assertion fails on a checkout with zero local
+  // changes (issue #578). `.gitattributes` is the durable half of the fix; this is the half that
+  // survives a working tree that was checked out before it landed.
+  const CANVAS_CSS = readFileSync(join(__dirname, '..', 'styles.css'), 'utf8').replace(/\r\n/g, '\n')
+  const HUD_CSS = readFileSync(join(__dirname, '..', 'hud', 'hud.css'), 'utf8').replace(/\r\n/g, '\n')
 
   it('the canvas badge class is styled and animated', () => {
     expect(CANVAS_CSS).toContain(`.${BRAND_PULSE_CLASS} {`)

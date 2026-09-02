@@ -6,6 +6,7 @@ import type {
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { SecretStore } from '../secret-store'
+import { gitEnv } from '../git-env'
 
 export type CommandResult = { ok: boolean; stdout: string; stderr: string }
 export type CommandRunner = (command: string, args: string[]) => Promise<CommandResult>
@@ -18,10 +19,10 @@ export const runGitHubCliCommand: CommandRunner = async (command, args) => {
     const result = await execute(command, args, {
       timeout: 15_000,
       maxBuffer: 1024 * 1024,
-      env: {
-        ...process.env,
-        PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin${process.env.PATH ? `:${process.env.PATH}` : ''}`
-      }
+      // Shared with git-service so the two can never disagree about what a git/gh child gets. It
+      // used to be a character-for-character copy whose hardcoded ':' corrupted PATH on Windows
+      // (issue #583) — in the credential path, which is the one that hurts most there.
+      env: gitEnv()
     })
     return { ok: true, stdout: result.stdout, stderr: result.stderr }
   } catch (error) {

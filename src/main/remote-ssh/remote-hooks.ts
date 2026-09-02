@@ -382,7 +382,9 @@ export class RemoteHooks {
         ),
         buildManagedScript('codex', REMOTE_IDENTITY_ROOT)
       )
-      const command = buildCodexManagedCommand(script)
+      // POSIX explicitly: the platform argument is the HOST's, never this desktop's. A Windows
+      // desktop writes a `.cmd` command locally (issue #567) and must not put one on a Linux server.
+      const command = buildCodexManagedCommand(script, 'linux')
       const codexHome = `${home}/.codex`
       const hooksFile = `${codexHome}/hooks.json`
       const configToml = `${codexHome}/config.toml`

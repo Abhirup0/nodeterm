@@ -1,0 +1,34 @@
+# Line endings, decided here instead of by each contributor's git config.
+#
+# Without this file `text` and `eol` are unspecified, and Git for Windows defaults to
+# `core.autocrlf=true` — so every Windows clone gets CRLF working files while CI and every other
+# platform see LF. Any test that reads a checked-in file and reasons about `\n` then fails on a
+# checkout with zero local changes, which is the first thing a Windows contributor sees and reads
+# as "my environment is broken" (issue #578).
+#
+# `text=auto eol=lf`: git normalizes to LF in the repository, and checks out LF everywhere.
+* text=auto eol=lf
+
+# Binary assets: never touched, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.mp4 binary
+*.mov binary
+*.zip binary
+*.gz binary
+*.pdf binary
+
+# Windows-only entry points must keep CRLF: cmd.exe is tolerant of LF in most places but not all,
+# and these are the files a Windows contributor runs before anything else works.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

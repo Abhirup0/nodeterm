@@ -84,6 +84,16 @@ lane unaffected.
 
 ## House rules
 
+- **Never call the user's machine a Mac in user-visible copy.** Use `thisMachine()` /
+  `thisMachineCap()` / `machineNoun()` from `src/renderer/lib/machineName.ts` — "this Mac" on
+  macOS, "this PC" on Windows, "this computer" elsewhere and in any Server Edition browser tab
+  (where the machine being described is the SERVER, whose OS the viewer cannot know). Issue #563:
+  ~30 strings said "this Mac", including *"This Mac is not authorized on this license"* and *"a
+  teammate on a seat can run commands on this Mac"* — the one sentence a user has to trust before
+  handing out shell access. `machineName.guard.test.ts` scans non-comment lines and will fail your
+  PR; copy that really is macOS-specific (the ptmx-limit banner, the notch step) is exempt by name
+  with its reason. Comments are not scanned.
+
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
   macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
   `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use
@@ -309,6 +319,16 @@ decision into a pure function next to it (`keydown-intercept.ts`, `main-window.t
 Where a behaviour can only be verified on hardware we do not have in CI (a Mac, a real SSH host, a
 GPU), say so explicitly rather than implying coverage. Several docs carry numbered device
 checklists for exactly this.
+
+**A test that reads a checked-in file must not care how git checked it out.** `.gitattributes`
+declares `* text=auto eol=lf`, so every working tree is LF — but attributes only take effect on a
+re-checkout, so if you cloned before it landed, run `git add --renormalize .` (or re-clone) and your
+tree catches up. Windows is where this bites: Git for Windows defaults to `core.autocrlf=true`, so
+without the attributes file a fresh clone had CRLF working files and `CSS.indexOf('}\n}')` matched
+nothing — two suites failed on a checkout with zero local changes, and one of them reported 25 theme
+tokens missing that were all present. Normalize at the read
+(`readFileSync(f, 'utf8').replace(/\r\n/g, '\n')`); `src/shared/line-endings.guard.test.ts` fails on
+a read that slices a `\n`-bearing literal without it.
 
 ## Pull requests
 
