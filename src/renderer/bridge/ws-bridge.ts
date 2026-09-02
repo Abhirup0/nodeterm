@@ -638,6 +638,8 @@ export function buildAgentApi(
   | 'reportHibernated'
   | 'onAgentWake'
   | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
@@ -651,6 +653,8 @@ export function buildAgentApi(
     // relay, so there is nothing to subscribe to and nothing silently degrades.
     onAgentWake: () => () => undefined,
     onRemoteViewers: () => () => undefined,
+    onAgentRefreshNode: () => () => undefined,
+    onAgentRenameNode: () => () => undefined,
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>

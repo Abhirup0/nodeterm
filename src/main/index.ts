@@ -3447,6 +3447,26 @@ app.whenReady().then(async () => {
         }
       }
     })(),
+    // Renderer-nudge node actions for the phone's session-LIST long-press menu (`node.wake` /
+    // `node.refresh` / `node.rename`). Each returns whether it reached a LIVE window — the verb
+    // answers ok only on delivery, never on outcome (nudge contract: the renderer re-reads its
+    // own state and no-ops for a node it cannot resolve). `wake` reuses the exact `agent:wake`
+    // channel the attach path fires, so the renderer needs no new wiring for it; `rename` rides
+    // `agent:rename-node` into the renderer's `renameSession` funnel (titleAuto:false + `/rename`
+    // push) — deliberately NOT canvas:mutate's raw title write, which the session-name poll would
+    // overwrite on the next tick.
+    nodeActions: (() => {
+      const deliver = (channel: string, payload: unknown): boolean => {
+        if (win.isDestroyed()) return false
+        win.webContents.send(channel, payload)
+        return true
+      }
+      return {
+        wake: (nodeId: string) => deliver(IPC.agentWake, nodeId),
+        refresh: (nodeId: string) => deliver(IPC.agentRefreshNode, nodeId),
+        rename: (nodeId: string, title: string) => deliver(IPC.agentRenameNode, { nodeId, title })
+      }
+    })(),
     // Jail roots beyond the active canvas: the phone browses EVERY project (projects.list), so
     // its fs/git access spans every local project root — not just the tab the desktop happens
     // to have focused (that gap read as "cwd is outside the shared project roots" on the phone).

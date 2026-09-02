@@ -10421,6 +10421,35 @@ export function Canvas() {
     [renameSession, activeProjectId]
   )
 
+  // Phone-originated node actions over the relay (the iOS session-list long-press menu). Both are
+  // nudges in the `agent:wake` shape — main already validated/sanitized the payload, and this side
+  // still re-resolves everything and no-ops for a node it cannot find. `refresh` bumps
+  // `respawnNonce` on a mounted terminal of the ACTIVE project (an inactive project's node has no
+  // live view to refresh — honest no-op). `rename` routes through `renameSession`, the same funnel
+  // as the node header: title + titleAuto:false + `/rename` into a rename-capable agent's live
+  // session — the reason this is not a canvas:mutate title write, which would do none of that and
+  // be overwritten by the next session-name poll. The owning project is resolved here because the
+  // phone knows only the node id; a node in NO project is dropped.
+  useEffect(() => {
+    const unsubRefresh = window.nodeTerminal.onAgentRefreshNode?.((nodeId) => {
+      if (typeof nodeId === 'string' && nodeId) reloadTerminals([nodeId])
+    })
+    const unsubRename = window.nodeTerminal.onAgentRenameNode?.((payload) => {
+      const nodeId = typeof payload?.nodeId === 'string' ? payload.nodeId : ''
+      const title = typeof payload?.title === 'string' ? payload.title.trim() : ''
+      if (!nodeId || !title) return
+      const projectId = nodesRef.current.some((n) => n.id === nodeId)
+        ? activeProjectId
+        : useProjects.getState().projects.find((p) => p.nodes.some((n) => n.id === nodeId))?.id
+      if (!projectId) return
+      renameSession(projectId, nodeId, title)
+    })
+    return () => {
+      unsubRefresh?.()
+      unsubRename?.()
+    }
+  }, [reloadTerminals, renameSession, activeProjectId])
+
   // Write-through a sticky node's body text from the kanban card modal (the canvas sticky
   // reads the same data.text path).
   const editStickyText = useCallback(

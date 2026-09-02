@@ -3065,6 +3065,17 @@ export interface NodeTerminalApi {
    *  full set each change, never a delta. Feeds `isNodeWatched` so Eco cannot hibernate a session
    *  someone is watching from a phone. Desktop-only signal, like `onAgentWake`. */
   onRemoteViewers(listener: (nodeIds: string[]) => void): () => void
+  /** Fires when the core asks this renderer to reload a terminal node's view in place (bump its
+   *  `respawnNonce` — fresh attach to the SAME tmux session) — the phone relay host's
+   *  `node.refresh` verb. A nudge with the `onAgentWake` contract: no-op for an unknown,
+   *  non-terminal or unmounted node. Desktop-only signal (the relay host lives in the desktop
+   *  main process); the ws-bridge subscribes to nothing and returns a no-op unsubscribe. */
+  onAgentRefreshNode(listener: (nodeId: string) => void): () => void
+  /** Fires when the core asks this renderer to rename a node on a phone's behalf (the relay
+   *  host's `node.rename` verb, title already sanitized host-side). The renderer routes it
+   *  through the same `renameSession` funnel as the node header. Desktop-only signal, like
+   *  `onAgentRefreshNode`. */
+  onAgentRenameNode(listener: (payload: { nodeId: string; title: string }) => void): () => void
   /** Fires with live subagent transcript chunks while a subagent runs. Returns unsubscribe. */
   onSubagentActivity(listener: (e: SubagentActivity) => void): () => void
   /** Fires when an agent's `nodeterm` CLI requests a canvas action. Returns unsubscribe. */

@@ -37,7 +37,10 @@ export interface RemoteNodeInput {
  *  same boring alphabet; an empty tail (`term-abc-`) is still refused. */
 const SAFE_NODE_ID = /^term-[a-z0-9]+-[a-z0-9]{1,16}$/
 
-const TITLE_MAX = 120
+/** One title ceiling for every host-side write of a client-supplied node title — the registrar's
+ *  append below AND the relay `node.rename` verb (host-service) clamp to the same number, so a
+ *  rename can never persist a title the registration path would have refused. */
+export const TITLE_MAX = 120
 
 /**
  * A `data.ssh` block usable as a donor: the two fields the pty manager needs to dial the host.
