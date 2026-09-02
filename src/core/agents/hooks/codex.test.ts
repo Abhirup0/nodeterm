@@ -193,7 +193,7 @@ describe('buildCodexHooksAndTrust', () => {
     const stale = {
       hooks: [
         {
-          type: 'command',
+          type: 'command' as const,
           command:
             "if [ -x 'C:\\Users\\u\\.nodeterm\\agent-hooks\\codex.sh' ]; then /bin/sh 'C:\\Users\\u\\.nodeterm\\agent-hooks\\codex.sh'; fi"
         }
@@ -214,7 +214,7 @@ describe('buildCodexHooksAndTrust', () => {
   // copied between machines) is repaired the same way rather than accumulating both.
   it('replaces a stray Windows entry on a POSIX install', () => {
     const stale = {
-      hooks: [{ type: 'command', command: '"/home/u/.nodeterm/agent-hooks/codex-hook.cmd"' }]
+      hooks: [{ type: 'command' as const, command: '"/home/u/.nodeterm/agent-hooks/codex-hook.cmd"' }]
     }
     const command = buildManagedCommand('/home/u/.nodeterm/agent-hooks/codex.sh', 'linux')
     const built = buildCodexHooksAndTrust({ hooks: { Stop: [stale] } }, command, '/h/hooks.json')!
