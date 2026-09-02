@@ -19,10 +19,13 @@ interface ChatPanelProps {
   cwd?: string
   /** Managed Claude account this node runs under; resolves the transcript in the right root. */
   accountId?: string
-  /** Which agent's reader to use. Omitted means claude, the historical behaviour. Passing it is not
-   *  cosmetic: claude's resolver falls back to the newest transcript for the cwd, so a non-claude
-   *  node that arrives unlabelled is answered with another session's conversation. */
-  agentId?: string
+  /** Which agent's reader to use. REQUIRED, and not cosmetic: claude's resolver falls back to the
+   *  newest transcript for the cwd, so a non-claude node that arrives unlabelled is answered with
+   *  another session's conversation. It was optional until 2026-09-02, defaulting to claude -- and
+   *  deleting the single `agentId={agentId}` at the one mount site left the typecheck and 3767
+   *  tests green while restoring that leak in full. Required makes the compiler the proof: the
+   *  wiring cannot be dropped silently, with no render test needed to notice. */
+  agentId: string
 }
 
 /**
