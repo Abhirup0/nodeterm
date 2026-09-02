@@ -63,15 +63,23 @@ describe('the run cannot reach a live nodeterm tmux server', () => {
     'binds the REAL socket name inside the sandbox — measured, not inferred from the env',
     () => {
       const sandbox = process.env[SANDBOX_ENV]!
+      // Its OWN session, killed by exact target. NOT `kill-server`: inside the sandbox this socket
+      // name is shared with `main/remote/host-destroy-tmux.test.ts`, which binds it too (it has no
+      // choice — `PtyManager` hardcodes the name), and killing the server took that suite's session
+      // out from under it on CI. The sandbox moves the shared server somewhere harmless; it does
+      // not stop a `kill-server` from being a SHARED-server kill once you are in there.
+      const session = `nt-isolation-guard-${process.pid}`
       const tmux = (args: string[]): void => {
         execFileSync('tmux', ['-L', TMUX_SOCKET, ...args], { stdio: 'ignore' })
       }
       try {
-        tmux(['new-session', '-d', '-s', 'nt-isolation-guard', 'sleep', '30'])
+        tmux(['new-session', '-d', '-s', session, 'sleep', '30'])
         expect(existsSync(tmuxSocketPath(sandbox, UID, TMUX_SOCKET))).toBe(true)
       } finally {
         try {
-          tmux(['kill-server'])
+          // `=` is an exact match: without it tmux falls back to fnmatch and then to PREFIX
+          // matching, so a miss could kill somebody else's session.
+          tmux(['kill-session', '-t', `=${session}`])
         } catch {
           /* never started */
         }

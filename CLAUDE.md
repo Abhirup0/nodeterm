@@ -2870,6 +2870,13 @@ hardcode `-L nodeterm-rmt`; re-spelling it would judge different bytes) and
 the one file that reached the live server by construction — measured, not inferred — and it now
 refuses to start unless the sandbox is in effect.
 
+**What the sandbox does NOT do:** two suites naming the same socket inside it still share one tmux
+server, so a `kill-server` there is still a shared-server kill — it has just been moved somewhere
+harmless. Measured on CI the day this landed: the guard test's own `kill-server` on
+`node-terminal` ended `host-destroy-tmux.test.ts`'s session mid-assertion. A suite kills its OWN
+sessions by exact target (`-t =<name>`, since a miss falls through to prefix matching), or it owns
+a socket name nothing else uses.
+
 The guard has three legs on purpose, and the weakest one is the scan: a test can still escape by
 handing a real tmux an `env` object it built from scratch with no `TMUX_TMPDIR` in it, which no
 regex sees. So the structural leg is the sandbox, the behavioural leg actually **starts a server on

@@ -18,6 +18,12 @@
 // The sandbox is per RUN, not per file: `setup` creates it in the main process (so the workers
 // inherit the variable), `teardown` kills whatever is still bound inside it and removes it. Suites
 // that make their OWN private `TMUX_TMPDIR` are unaffected — this is the floor, not an override.
+//
+// WHAT IT DOES NOT DO: two suites naming the same socket inside the sandbox still share one tmux
+// server, so a `kill-server` there is still a shared-server kill — it has just been moved somewhere
+// harmless. Measured on CI the day this landed: the guard test's `kill-server` on `node-terminal`
+// ended `host-destroy-tmux.test.ts`'s session mid-assertion. A suite kills its OWN sessions by
+// exact target (`-t =<name>`), or it owns a socket name nothing else uses.
 import { execFileSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
