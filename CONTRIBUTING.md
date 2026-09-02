@@ -186,6 +186,14 @@ its accelerator) — and Reload (⌘R / ⌘⇧R) is the named exception that alw
 because it is the crash-recovery lever. Browsers own a different set. And any chord that reaches the canvas needs the two refusals every canvas shortcut
 here has: not while the kanban board covers it, not while the user is typing.
 
+**A new chord needs no edit to the shortcuts panel — and must not get one.** `ShortcutsPanel`
+derives its whole inventory from `COMMAND_DEFINITIONS` (section per `CommandGroup`, label from
+`def.title`, chord from the EFFECTIVE binding), so adding a registry command is all it takes to
+make it show up; a command with no effective binding is omitted rather than listed chord-less.
+`ShortcutsPanel.test.tsx` is the watchdog and reds if a command fails to surface. The panel it
+replaced hand-listed 24 ids against a 45-command registry and had drifted four live chords behind
+— if you find yourself typing a command id into that file, that is the bug reappearing.
+
 **Comments explain WHY, and name the failure they prevent.** The codebase is deliberately dense with
 reasoning. A comment that restates the code is noise; one that says "do not simplify this back,
 here is what broke" is the point.
