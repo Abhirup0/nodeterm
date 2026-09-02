@@ -50,13 +50,13 @@ describe('a cwd-less project gets its own file', () => {
   it('writes userData/inline-projects/<id>.json and round-trips through a fresh store', async () => {
     const store = new WorkspaceStore()
     await store.save(ws([project({
-      kanban: { columns: [{ id: 'c1', name: 'To Do' }], assignments: [] }
+      kanban: { columns: [{ id: 'c1', title: 'To Do', color: '#8b8' }], assignments: [] }
     })]))
 
     const file = await readData('project-p1')
     expect(file).toMatchObject({ version: 1, rev: 1, name: 'scratch' })
     expect(ids(file.nodes)).toEqual(['term-1'])
-    expect(file.kanban.columns[0].name).toBe('To Do')
+    expect(file.kanban.columns[0].title).toBe('To Do')
 
     const loaded = await new WorkspaceStore().load()
     expect(loaded.projects).toHaveLength(1)
@@ -65,7 +65,7 @@ describe('a cwd-less project gets its own file', () => {
     // The machine-local half moved to the entry (#510), but the project the renderer sees is the
     // same object it always was.
     expect(loaded.projects[0].viewport).toEqual({ x: 4, y: 5, zoom: 2 })
-    expect(loaded.projects[0].kanban?.columns[0].name).toBe('To Do')
+    expect(loaded.projects[0].kanban?.columns[0].title).toBe('To Do')
   })
 
   it('keeps the machine-local half on the entry and the content in the file', async () => {
