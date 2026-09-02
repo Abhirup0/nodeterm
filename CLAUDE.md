@@ -113,6 +113,18 @@ The codebase is split by Electron process boundary — keep code on the correct 
   browser) plus a web folder/file picker (in-app server-directory browser,
   replacing the native dialog) and WS backpressure; the renderer detects the
   bridge in `src/renderer/main.tsx` (desktop preload path is untouched).
+  The picker's **folder** mode also creates directories (`createPickerFolder`,
+  `renderer/bridge/dialog-picker.tsx`) — the native dialog it replaces has a New Folder
+  button, so without one "Open folder…" in the browser could only ever adopt a directory
+  that already existed on the server. It writes through the same `fs.mkdir`/`fs.exists`
+  the Explorer's "New Folder…" uses and validates the typed name with the same envelope,
+  `newEntryPath` (`renderer/lib/explorerCreate.ts`) — **do not add a second path
+  validator here**; `..`, absolute and empty names are refused in exactly one place. The
+  write deps are optional, so a caller with a read-only fs simply renders no button. File
+  mode has none (nobody opens a file picker to make a folder). Relay tabs get the same
+  button and it writes on the HOST, like every other `fs.*` the picker already uses. SSH
+  projects are a separate flow (`SshProjectDialog` over `sshProject.mkdir`) and already
+  had their own.
   **Phase 3b** boots the loopback **hook server** (`hookServer.start()`) + installs
   the managed hook scripts, and `wireAgentStatus` (`src/server/agent-status.ts`)
   broadcasts `agent:status` / `agent:subagent-activity` / `context:update` over the

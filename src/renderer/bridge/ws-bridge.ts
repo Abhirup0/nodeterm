@@ -1061,8 +1061,18 @@ export async function installWsBridge(): Promise<boolean> {
     dialog: (() => {
       mountPickerRoot()
       const startDir = '/' // navigable up/down from root; the picker remembers nothing across calls in v1
+      // `write` is what gives folder mode its "New folder" button — the native dialog has one and
+      // the browser has no dialog at all, so without it a server folder had to exist already
+      // before it could be opened as a project. Same `fs.mkdir`/`fs.exists` the Explorer writes
+      // through, and therefore the same reach as everything else this picker already lists.
+      // Lambdas, not `api.fs.mkdir` directly: this IIFE runs while `api` is still being built.
+      const write = {
+        mkdir: (p: string) => api.fs.mkdir(p),
+        exists: (p: string) => api.fs.exists(p)
+      }
       return {
-        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list }),
+        selectFolder: () =>
+          openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list, write }),
         selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: api.fs.list })
       }
     })()
