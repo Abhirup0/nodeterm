@@ -5454,6 +5454,43 @@ body,
   flex-shrink: 0;
 }
 
+/* Separator between two chords that BOTH fire the same command (Delete / Backspace,
+   Ctrl+Shift+C / Ctrl+Insert) — they are alternatives, not a sequence. */
+.shortcut-or {
+  align-self: center;
+  font-size: 10px;
+  color: var(--muted);
+  padding: 0 1px;
+}
+
+/* Footer route into Settings → Keyboard Shortcuts: the panel shows what is BOUND, that section
+   shows the whole remappable pool (and the commands that ship without a chord). */
+.shortcuts__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.shortcuts__customize {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.shortcuts__customize:hover {
+  background: rgba(var(--tint-rgb), 0.08);
+}
+
 /* ---- Command palette ---- */
 .palette-overlay {
   position: fixed;

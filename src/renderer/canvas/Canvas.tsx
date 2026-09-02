@@ -12565,7 +12565,18 @@ export function Canvas() {
         />
       )}
 
-      {shortcutsOpen && <ShortcutsPanel onClose={() => setShortcutsOpen(false)} />}
+      {shortcutsOpen && (
+        <ShortcutsPanel
+          onClose={() => setShortcutsOpen(false)}
+          // The panel lists what is BOUND; the whole remappable pool (and every command that
+          // ships without a chord) lives in Settings → Keyboard Shortcuts.
+          onCustomize={() => {
+            setShortcutsOpen(false)
+            setSettingsSection('shortcuts')
+            setSettingsOpen(true)
+          }}
+        />
+      )}
       {mobileLaunchOpen && (
         <MobileLaunchCard
           onClose={() => {

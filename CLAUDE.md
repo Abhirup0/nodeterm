@@ -2058,6 +2058,31 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
     (including a source-level wiring pin, since the menu leg lives against a real Menu in index.ts),
     and `keybindingOverrides.test.ts` pins the renderer-to-xterm hand-off through
     `terminalKeyAction`.
+  - **ShortcutsPanel is DERIVED from the registry, never a hand-written list.**
+    `buildShortcutSections` iterates `COMMAND_DEFINITIONS` — one section per `CommandGroup` in
+    registry source order, the label from `def.title`, and EVERY one of the command's EFFECTIVE
+    chords — and a command with no effective binding (ships unbound, or the user disabled it) is
+    OMITTED rather than shown chord-less. All chords, not just the first: off-mac
+    `terminal.copySelection` holds Ctrl+Shift+C AND Ctrl+Insert, and in the **Server Edition**
+    Chromium reserves Ctrl+Shift+C for the inspector un-preventably — so a first-chord-only row
+    advertised the one that cannot work there. The panel it replaced enumerated 24 ids by hand against a
+    45-command registry, so ⌘⇧T (reopen last closed), ⌘⇧↵ (maximize node), the ⌃⌥arrow zone snaps
+    and Copy terminal selection were live chords it never mentioned, and no ships-unbound command
+    could ever appear even after the user assigned one. `ShortcutsPanel.test.tsx` is the watchdog:
+    it binds every registry command and asserts a row per `def.title`, so a new command that fails
+    to surface reds it. Same stale-doc rule as the canvas-control skill body (#269) — derive the
+    text, don't retype it.
+    Rows the registry does NOT own (mouse gestures, the two `zoomShortcut.ts` chords, the ⌘1-9
+    project jump, tmux/xterm terminal behaviors) are literal, and still read from settings where
+    the behavior does: the hover dwell prints `panHoverDelay` and the drag rows follow
+    `canvasDragMode`, because the old fixed text claimed 0.6 s and a right-drag pan React Flow
+    (`panOnDrag={[1]}`, middle button only) has never done.
+    **One honest exception to "the chord shown is the chord that fires":** `terminal.copySelection`
+    is a registry row whose matcher is still the hardcoded `isCopyShortcut`
+    (`terminalKeyAction` keeps the copy chords and Shift+Enter "whatever the registry says"). Its
+    registry defaults match that matcher on both platforms, so the row is accurate as shipped; a
+    REMAP of it would not be, on this panel or in Settings. Wiring `isCopyShortcut` to the registry
+    is the fix.
   - **`terminalFocused` is a MIRROR, and its fail-safe direction is `false` = not focused =
     intercepts ON.** `renderer/lib/terminalFocusMirror.ts` reports focus changes to main and is
     change-deduped (it never re-asserts), so a page that died mid-report, a reload, or a window that
@@ -2414,6 +2439,7 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   pan-hover delay, double-click focus, accent, tmux on/scrollback, commit agent,
   `seenShortcuts`.
 - **Shortcuts** (`ShortcutsPanel.tsx`, ? / ⌘/): shown once on first launch (`seenShortcuts`).
+  **Derived from the registry, never hand-listed** — see the Keybindings invariant below.
 - **Welcome** (`WelcomeScreen.tsx`): shown when no projects exist.
 - **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab
   bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a rounded pill of project
