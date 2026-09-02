@@ -27,7 +27,12 @@ export function registerSpeechIpc(deps: {
     const text = speech.engine === 'cloud'
       ? await cloudTranscribe(pcm, {
           apiBase: deps.apiBase,
-          locale: language === 'auto' ? 'en' : language,
+          // The language goes to the endpoint UNCHANGED, `auto` included (issue #586). This used
+          // to read `language === 'auto' ? 'en' : language`, which made "Auto-detect" a hard `en`
+          // on cloud — silently, and for exactly the speakers auto-detect is there to serve. The
+          // endpoint does not exist yet (every call 404s), so its contract is still ours to write:
+          // `auto` means detect, and iOS sends the same field the same way.
+          locale: language,
           token: deps.licenseToken(),
           fetchFn: deps.fetchFn,
         })

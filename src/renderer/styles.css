@@ -11699,3 +11699,46 @@ body.focus-mode .dock:hover {
 .trigger-node__run-time { color: rgba(255, 255, 255, 0.45); font-size: 10px; }
 .trigger-node__confirm { display: flex; flex-direction: column; gap: 6px; text-align: left; font-size: 12px; }
 .trigger-node__confirm .trigger-node__payload { max-height: 140px; }
+
+/* ---- Settings → Speech: the language picker (issue #586) ---- */
+/* Whisper knows 100 languages, so this is the app's searchable menu idiom (`.bind-select`
+   trigger + portaled `.tab-menu` with a pinned filter) rather than a native <select>, which
+   can neither be searched nor show a code it does not carry. */
+.speech-lang__trigger {
+  width: 260px;
+}
+.speech-lang__endonym {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.speech-lang__menu {
+  width: 320px;
+  max-width: calc(100vw - 24px);
+}
+.speech-lang__row {
+  gap: 8px;
+}
+/* Keyboard cursor. Same fill as :hover so arrowing and pointing look like one thing. */
+.speech-lang__row.is-active {
+  background: var(--panel-header);
+}
+.speech-lang__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.speech-lang__hint {
+  margin-left: auto;
+  padding-left: 8px;
+  flex-shrink: 0;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+.speech-lang__empty {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
