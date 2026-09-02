@@ -110,34 +110,6 @@ export function unmetDeps(
   return p.after.filter((d) => !depSatisfied(d, status, live))
 }
 
-export interface DependencyEdge {
-  id: string
-  source: string
-  target: string
-}
-
-/**
- * The dashed dep→node edges to draw for everything still waiting. Derived from node data on
- * every render rather than persisted as edges: a pending dependency is a STATE, not a durable
- * relation, and it disappears when the launch fires. (The durable relation `--after` also
- * creates is an ordinary context bridge, so the downstream node can still read its upstream
- * long after the arrow is gone.)
- */
-export function dependencyEdges(
-  nodes: readonly ArmedNode[],
-  live: ReadonlySet<string>
-): DependencyEdge[] {
-  const out: DependencyEdge[] = []
-  for (const n of nodes) {
-    for (const dep of n.data.pendingLaunch?.after ?? []) {
-      // A dep that is gone draws nothing — it is already satisfied, and an edge to a node that
-      // isn't there would be dropped by React Flow anyway.
-      if (live.has(dep)) out.push({ id: `dep-${dep}-${n.id}`, source: dep, target: n.id })
-    }
-  }
-  return out
-}
-
 /**
  * The backoff between delivery attempts, in milliseconds, indexed by the number of attempts
  * ALREADY made. `null` = the schedule is exhausted; the launch has failed for good.

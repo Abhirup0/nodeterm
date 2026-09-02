@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import {
-  dependencyEdges,
   launchesToFire,
   launchRetryDelay,
   launchTooltip,
@@ -153,23 +152,6 @@ describe('unmetDeps', () => {
 
   it('is empty for a node that is not armed', () => {
     expect(unmetDeps(plain('c'), {}, new Set(['c']))).toEqual([])
-  })
-})
-
-describe('dependencyEdges', () => {
-  it('draws one edge per live dep, pointing dep → dependent', () => {
-    expect(dependencyEdges([armed('c', ['a', 'b'])], new Set(['a', 'b', 'c']))).toEqual([
-      { id: 'dep-a-c', source: 'a', target: 'c' },
-      { id: 'dep-b-c', source: 'b', target: 'c' }
-    ])
-  })
-
-  it('draws nothing for a dep that is gone', () => {
-    expect(dependencyEdges([armed('c', ['ghost'])], new Set(['c']))).toEqual([])
-  })
-
-  it('draws nothing once the node is no longer armed', () => {
-    expect(dependencyEdges([plain('c')], new Set(['c']))).toEqual([])
   })
 })
 

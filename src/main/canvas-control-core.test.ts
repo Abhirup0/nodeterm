@@ -640,6 +640,18 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
     }
   })
 
+  it('tells the agent that opened nodes AND --after stations are already linked — nothing to `link`', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toMatch(/roped to each (listed )?station/)
+      expect(body, name).toMatch(/dashed while it waits/)
+      expect(body, name).toMatch(/already\s+linked/)
+      expect(body, name).toMatch(/nothing to `link`/)
+      // Only the skill body carries the orchestration recipe, so only it has the step-5 sentence
+      // that had to stop saying an unopened station is unlinked — an `--after` station is linked.
+      if (name === 'skill') expect(body, name).toMatch(/neither opened nor named in `--after`/)
+    }
+  })
+
   it('the orchestration recipe gains the multi-repo pattern', () => {
     for (const [name, body] of bodies) {
       expect(body, name).toContain('one project per repository')

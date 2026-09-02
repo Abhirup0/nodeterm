@@ -1609,9 +1609,23 @@ else, and its context links must keep classifying across restarts).
   threw the command away in exactly the state the button exists to rescue). (6) Canvas subscribes
   to `armedDepSig`, NOT `useAgentStatus(s => s.byId)` —
   the same discipline as `loopSig`; the full map re-renders the canvas on every hook event.
-  Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested); the dashed dep→node
-  edges are **derived, never persisted** (a pending dependency is a state that ends when the launch
-  fires — the durable relation is the context bridge `--after` also draws).
+  Pure logic + refusal matrix in `renderer/lib/pendingLaunch.ts` (unit-tested);
+  the dep→node edge is a **rope** (`ctrl-<dep>-<node>`, persisted in `project.ropes` like the
+  opener's) whose LOOK is derived: dashed + ⏳ while the node's `pendingLaunch.after` still lists the
+  dep, solid once it has launched (`lib/edgeModel.ts` `ropeVisual`, over the ONE `ropeInfoOf` lookup
+  the render and BOTH delete paths ask — two builders would be two answers, and the label the user
+  reads would stop describing what the delete does). The fan-in bridge `--after` also writes hides
+  under that rope (`hiddenLinkIds`), so ONE edge per pair holds on the canvas. Deleting a WAITING
+  rope drops that dep from `after` (`dropAfterDep`) and takes **nothing else** — the covered bridge
+  survives, because "stop waiting for it" is not "stop being able to read its work"; an emptied
+  list fires. Only the `open-*`/`verify` verbs write the rope, so `missingDepRopes` heals an armed
+  node that has none at **project load**: `pendingLaunch` is persisted and the rope is not, so a node
+  armed by any other path — or by a build older than this one — would otherwise hold a launch with
+  no arrow saying what for. All edges route through the single `floating` edge type
+  (`canvas/FloatingEdge.tsx`, a bezier between the nearest borders of the two node rectangles; an
+  unmeasured node draws nothing rather than a path to the origin) — no family sets a handle side;
+  and a node whose eye is closed (`hideFanout`) hides every edge touching it as well as its cards
+  (2026-09-02 edge model, spec in docs/superpowers/specs).
   **(7) Delivery waits for the node's PTY, and never fails silently** (issue #569 item 1, 2026-09).
   A satisfied dependency says nothing about whether there is a terminal to type into, and the
   original loop conflated the two: a flat 5 × 400 ms budget started when the CANVAS held the node
@@ -2422,6 +2436,14 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   be hidden, whatever settings.json says. The group-frame menu's colors strip answers to the same
   `colors` id; builders run through `tidySeparators` so a hidden row leaves no dangling rule.
 - **Add menu** = bottom dock (`Dock.tsx`) `+`, mirrored by the pane menu and command palette.
+- **Edges** are all one React Flow type, `floating` (`canvas/FloatingEdge.tsx` over the pure
+  `lib/floatingEdge.ts`): every family — ropes, context bridges, note links, subagent/loop card
+  edges, trigger edges — is drawn between the two nodes' nearest borders instead of fixed handle
+  sides, so an edge to a node placed left of or above its source takes the short way round rather
+  than looping across the canvas. A terminal node's **eye** (`hide-fanout`, "Hide cards &
+  connections") hides its subagent/loop cards AND every edge touching that node — display only:
+  the links still authorise reads and an `--after` still waits. See the `--after` bullet under
+  Canvas control for the rope model the eye hides.
 - **Undo/redo**: debounced snapshot of the nodes array on settle (drag/edit), `pastRef`/
   `futureRef` stacks, ⌘Z / ⌘⇧Z + dock buttons. History resets per project load; skipped
   while typing in inputs/terminals.

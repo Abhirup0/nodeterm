@@ -5083,11 +5083,11 @@ export function TerminalNode({
             </button>
           </Tooltip>
         )}
-        {fanoutCapable && !isHidden('hide-fanout', hiddenHeaderButtons) && (
-          <Tooltip label={hideFanout ? 'Show subagent/loop cards' : 'Hide subagent/loop cards'}>
+        {!isHidden('hide-fanout', hiddenHeaderButtons) && (
+          <Tooltip label={hideFanout ? 'Show cards & connections' : 'Hide cards & connections'}>
             <button
               className="term-node__hide-fanout nodrag"
-              title={hideFanout ? 'Show subagent/loop cards' : 'Hide subagent/loop cards'}
+              title={hideFanout ? 'Show cards & connections' : 'Hide cards & connections'}
               aria-pressed={hideFanout}
               onClick={(e) => {
                 e.stopPropagation()
