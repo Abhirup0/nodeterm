@@ -12,6 +12,7 @@ import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
 import { platform } from './platform'
 import { findExecutableSync } from './exec-path'
+import { gitEnv } from './git-env'
 import {
   isValidCloneUrl,
   expandCloneUrl,
@@ -49,16 +50,11 @@ function ghPath(): string | null {
   return found
 }
 
-// GUI apps on macOS don't inherit the shell PATH, so a git credential helper installed by
-// Homebrew (e.g. `gh auth git-credential`, or osxkeychain shims) wouldn't be found by our
-// `git` subprocess — making push/pull fail even when the user is authed. Prepend the common
-// bin dirs. GIT_TERMINAL_PROMPT=0 makes auth failures error out fast instead of hanging on a
-// username prompt (there's no TTY here).
-const GIT_ENV: NodeJS.ProcessEnv = {
-  ...process.env,
-  PATH: `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin${process.env.PATH ? `:${process.env.PATH}` : ''}`,
-  GIT_TERMINAL_PROMPT: '0'
-}
+// The environment every `git`/`gh` subprocess gets: the GUI-blind POSIX bin dirs prepended (macOS
+// credential helpers), and GIT_TERMINAL_PROMPT=0 so auth failures error out fast instead of hanging
+// on a prompt with no TTY. Both halves — and the reason the prepend must not happen on Windows
+// (issue #583) — live in git-env.ts, which github/credentials.ts imports as well.
+const GIT_ENV: NodeJS.ProcessEnv = gitEnv()
 
 // Single-flight registry for the one clone the app runs at a time. Module-scoped so a
 // macOS window re-creation can't orphan it.
