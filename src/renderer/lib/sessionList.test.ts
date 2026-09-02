@@ -584,3 +584,69 @@ describe('buildStatusList', () => {
     expect(allRows.find((r) => r.id === 'a1')!.projectId).toBe('p1')
   })
 })
+
+describe('sidebar filter matches the PROJECT itself (issue #543)', () => {
+  const proj = (): ProjectInput[] => [
+    {
+      id: 'p1',
+      name: 'dot-github',
+      color: '#111',
+      cwd: '/repos/dot-github',
+      // The reported case: a project with no sessions at all could not survive ANY filter.
+      nodes: [node('g1', { kind: 'group', title: 'Frame' })]
+    },
+    {
+      id: 'p2',
+      name: 'Website',
+      color: '#222',
+      cwd: '/repos/website',
+      nodes: [
+        node('t1', { title: 'build' }),
+        node('t2', { title: 'deploy', parentId: 'gw' }),
+        node('gw', { kind: 'group', title: 'Ops' })
+      ]
+    }
+  ]
+
+  it('keeps a session-less project that the needle NAMES, and drops the others', () => {
+    const filtered = buildSessionList(proj(), null, 'p2', {}, 'dot-github')
+    expect(filtered.map((g) => g.projectId)).toEqual(['p1'])
+    // Shown whole: an empty frame stays, exactly as it does unfiltered.
+    expect(filtered[0].groups.map((b) => b.id)).toEqual(['g1'])
+  })
+
+  it('matches the project cwd too — the identity the row tooltip already shows', () => {
+    const filtered = buildSessionList(proj(), null, 'p1', {}, '/repos/website')
+    expect(filtered.map((g) => g.projectId)).toEqual(['p2'])
+  })
+
+  it('a project matched by name comes back with ALL of its sessions, not just matching ones', () => {
+    const filtered = buildSessionList(proj(), null, 'p1', {}, 'website')
+    expect(filtered.map((g) => g.projectId)).toEqual(['p2'])
+    expect(filtered[0].ungrouped.map((s) => s.id)).toEqual(['t1'])
+    expect(filtered[0].groups[0].sessions.map((s) => s.id)).toEqual(['t2'])
+  })
+
+  it('a session-level needle still narrows inside projects it does not name', () => {
+    const filtered = buildSessionList(proj(), null, 'p1', {}, 'deploy')
+    expect(filtered.map((g) => g.projectId)).toEqual(['p2'])
+    expect(filtered[0].ungrouped).toEqual([])
+    expect(filtered[0].groups[0].sessions.map((s) => s.id)).toEqual(['t2'])
+  })
+
+  it('status mode keeps every row of a project the needle names (same rule, per row)', () => {
+    const sections = buildStatusList(proj(), null, 'p1', {}, 'website')
+    const ids = sections.flatMap((s) => s.rows.map((r) => r.id))
+    expect(ids.sort()).toEqual(['t1', 't2'])
+  })
+
+  it('status mode still narrows by row for projects the needle does not name', () => {
+    const sections = buildStatusList(proj(), null, 'p1', {}, 'deploy')
+    expect(sections.flatMap((s) => s.rows.map((r) => r.id))).toEqual(['t2'])
+  })
+
+  it('an unfiltered list is untouched by the project rule', () => {
+    const unfiltered = buildSessionList(proj(), null, 'p1', {}, '')
+    expect(unfiltered.map((g) => g.projectId)).toEqual(['p1', 'p2'])
+  })
+})
