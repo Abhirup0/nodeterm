@@ -6603,8 +6603,25 @@ button.group-node__setup:disabled {
   border: 1px solid rgba(var(--tint-rgb), 0.1);
   box-shadow: 0 12px 40px rgba(0, 0, 0, calc(0.5 * var(--shadow-k)));
   color: var(--text-strong);
+  /* Issue #503: each account is a tall block (label + Session/Weekly/Opus meters), so past
+     about four accounts the panel grew off the TOP of the window — the first account's header
+     and meter were clipped with no way to reach them. Capped to the space between the pill
+     (bottom: 34px) and the tab bar (44px at z 30, which paints over this panel in canvas mode),
+     with the blocks scrolling inside __body while the heading and footer action stay put. */
+  max-height: calc(100vh - 86px);
+  display: flex;
+  flex-direction: column;
 }
-.usage-popover__head { margin-bottom: 12px; }
+.usage-popover__body {
+  /* Every account is rendered — the list SCROLLS rather than truncating. A cap would have to
+     say so, and there is no honest way to say "and 3 accounts you cannot see". */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Without this a flex child refuses to shrink below its content height and the max-height
+     above would do nothing. */
+  min-height: 0;
+}
+.usage-popover__head { margin-bottom: 12px; flex: none; }
 .usage-popover__title { display: block; font-size: 15px; font-weight: 600; }
 .usage-popover__ago { font-size: 12px; color: rgba(var(--tint-rgb), 0.5); }
 .usage-popover__empty { font-size: 13px; color: rgba(var(--tint-rgb), 0.5); }
@@ -6687,6 +6704,8 @@ button.group-node__setup:disabled {
 .usage-popover__switch {
   display: block;
   width: 100%;
+  /* Stays put below the scrolling account list (issue #503). */
+  flex: none;
   margin-top: 10px;
   padding: 5px 8px;
   border: none;
