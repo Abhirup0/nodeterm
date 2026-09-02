@@ -2902,6 +2902,50 @@ also hold an exclusive candidate lock until the rename and cleanup finish. Never
 those back to `<target>.tmp` / `<target>.part` or a read-only "does the destination exist?" check —
 the overlap tests exercise the resulting race.
 
+## The test suite never touches a live tmux server
+
+This repo is developed from inside nodeterm, so `tmux -L node-terminal` and `-L nodeterm-rmt` are
+not fixture names on a contributor's machine — they are the servers holding every terminal they have
+open. A test that binds one shares a process with the user's whole canvas, and the failure mode is
+not a red test: it is every pane printing `[server exited unexpectedly]` (issue #629).
+
+**Every vitest run gets a private `TMUX_TMPDIR`.** tmux resolves `-L <socket>` to
+`$TMUX_TMPDIR/tmux-<uid>/<socket>` and falls back to `/tmp` when the variable is unset, so
+re-pointing the variable re-points every socket name at once — including the real ones, including
+in a suite nobody thought about. `test/setup/tmux-sandbox.ts` (`globalSetup`) creates the directory,
+kills whatever is still bound inside it and removes it; `test/setup/tmux-worker-env.ts`
+(`setupFiles`) re-asserts it inside each worker and **refuses to run** if it is missing, because
+vitest's env inheritance into workers is an implementation detail and a silent fallback would put
+every test back on the live server. `enterSandbox` also strips `TMUX`/`TMUX_PANE` — a suite run from
+inside a nodeterm terminal inherits a live client's, and production strips both for the same reason.
+
+Two suites deliberately name a real socket, and both are allowlisted with their reason in
+`src/core/tmux-socket-isolation.guard.test.ts`: `agents/pane-owner.test.ts` (the production bytes
+hardcode `-L nodeterm-rmt`; re-spelling it would judge different bytes) and
+`main/remote/host-destroy-tmux.test.ts` (`PtyManager` binds `TMUX_SOCKET` itself). The latter was
+the one file that reached the live server by construction — measured, not inferred — and it now
+refuses to start unless the sandbox is in effect.
+
+**What the sandbox does NOT do:** two suites naming the same socket inside it still share one tmux
+server, so a `kill-server` there is still a shared-server kill — it has just been moved somewhere
+harmless. Measured on CI the day this landed: the guard test's own `kill-server` on
+`node-terminal` ended `host-destroy-tmux.test.ts`'s session mid-assertion. A suite kills its OWN
+sessions by exact target (`-t =<name>`, since a miss falls through to prefix matching), or it owns
+a socket name nothing else uses.
+
+The guard has three legs on purpose, and the weakest one is the scan: a test can still escape by
+handing a real tmux an `env` object it built from scratch with no `TMUX_TMPDIR` in it, which no
+regex sees. So the structural leg is the sandbox, the behavioural leg actually **starts a server on
+the real socket name and proves the socket file landed inside the sandbox** (asserting the env var
+would only prove we set a variable — the resolution rule is a property of tmux), and the scan exists
+to make a third allowlist entry a decision somebody signs for. Same shape as the `fs.rename` guard,
+for the same reason: nobody reading one file can see this.
+
+**What this does not claim.** #629's server death was not traced to a test — the reporter's evidence
+points at tmux's `server_accept()` calling `fatal()` under the suite's process/fd burst on a
+memory-starved machine, and two identical runs finished clean. Sharing a server with the user's live
+sessions is a hazard whatever kills it; this removes the hazard, not a proven cause.
+
 ## Conventions
 
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their

@@ -23,6 +23,11 @@ export default defineConfig({
       'test/ssh-docker/**/*.test.ts'
     ],
     environment: 'node',
+    // Issue #629: every run gets a private `TMUX_TMPDIR`, so no test can reach the tmux servers
+    // this machine runs nodeterm on. `globalSetup` creates and removes it, the setup file re-asserts
+    // it inside each worker (and refuses if it is missing). See test/setup/tmux-sandbox.ts.
+    globalSetup: ['test/setup/tmux-sandbox.ts'],
+    setupFiles: ['test/setup/tmux-worker-env.ts'],
     // Issue #160: with the default (one worker per core), a 10-core Mac runs ~10 fs-heavy suites
     // at once and transient fd exhaustion (EMFILE) turns into silent test flakiness — probes like
     // `fs.existsSync` swallow the error and answer false, so whole files fail in ways that never
