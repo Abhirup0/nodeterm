@@ -310,6 +310,16 @@ Where a behaviour can only be verified on hardware we do not have in CI (a Mac, 
 GPU), say so explicitly rather than implying coverage. Several docs carry numbered device
 checklists for exactly this.
 
+**A test that reads a checked-in file must not care how git checked it out.** `.gitattributes`
+declares `* text=auto eol=lf`, so every working tree is LF — but attributes only take effect on a
+re-checkout, so if you cloned before it landed, run `git add --renormalize .` (or re-clone) and your
+tree catches up. Windows is where this bites: Git for Windows defaults to `core.autocrlf=true`, so
+without the attributes file a fresh clone had CRLF working files and `CSS.indexOf('}\n}')` matched
+nothing — two suites failed on a checkout with zero local changes, and one of them reported 25 theme
+tokens missing that were all present. Normalize at the read
+(`readFileSync(f, 'utf8').replace(/\r\n/g, '\n')`); `src/shared/line-endings.guard.test.ts` fails on
+a read that slices a `\n`-bearing literal without it.
+
 ## Pull requests
 
 - Branch from `main`. CI runs `quality`, `CodeQL` and `Dependency review`; all three are required.

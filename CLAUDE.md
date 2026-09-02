@@ -40,6 +40,18 @@ means — and what you may assume when writing a feature — is three tiers, not
   never assume `/` or a unix socket. When a test can only run on one platform, gate it with
   `it.skipIf(process.platform === 'win32')` (or the inverse) and say why — never let it fail the
   cross-platform CI. The `windows-latest` CI job runs the platform-dependent suites on real Windows.
+- **Line endings are decided by `.gitattributes` (`* text=auto eol=lf`), not by each contributor's
+  git config.** Without it `text`/`eol` are unspecified and Git for Windows' default
+  `core.autocrlf=true` gives every Windows clone CRLF working files — so a test that reads a
+  checked-in file and slices on a `\n`-bearing literal (`CSS.indexOf('}\n}')`,
+  `indexOf('\n}\n')`, `indexOf('\n}')`) matched nothing and failed on a checkout with ZERO local
+  changes (issue #578). Two suites did; one reported 25 theme tokens missing that were all present,
+  which reads like a regression rather than a broken slice. Attributes only apply on re-checkout
+  (`git add --renormalize .` for a tree cloned earlier), so the readers ALSO normalize —
+  `readFileSync(f, 'utf8').replace(/\r\n/g, '\n')` — and `src/shared/line-endings.guard.test.ts`
+  fails on any such read that does not. `*.bat`/`*.cmd`/`*.ps1` are the deliberate exception and
+  keep CRLF: cmd.exe is not reliably tolerant of LF, and those are the files a Windows contributor
+  runs before anything else works.
 
 ## Commands
 
