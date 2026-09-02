@@ -46,6 +46,37 @@ describe('assembleLaunchCommand — builtins (byte-identical to the historical p
       ).command
     ).toBe('claude')
   })
+  it('grok puts the MINTED SESSION ID before the -- separator, prompt and all', () => {
+    // The failure this guards is not a crash. grok's `--` is END OF OPTIONS: a flag placed after it
+    // is swallowed as part of the PROMPT, so the node launches, looks healthy, mints a session id
+    // nodeterm never learns, and the agent reads "--session-id <uuid>" as the first words of its
+    // instructions. Nothing about the exit code says so — which is why this asserts on POSITION.
+    const cmd = assembleLaunchCommand(
+      {
+        agentId: 'grok',
+        initialPrompt: 'do the thing',
+        sessionId: '01a06126-b981-73f1-8b68-4547e4d7da84',
+        sessionIdFlagSupported: true
+      },
+      ENV
+    ).command
+    expect(cmd).toBe(
+      "grok --session-id 01a06126-b981-73f1-8b68-4547e4d7da84 -- 'do the thing'"
+    )
+    expect(cmd.indexOf('--session-id')).toBeLessThan(cmd.indexOf(' -- '))
+  })
+
+  it('mints nothing for grok when the CLI did not advertise the flag', () => {
+    // The probe answers for the binary in front of us. No advertisement ⇒ NAKED command, never a
+    // blocked launch: an unrecognised flag makes grok exit, so guessing costs the whole session.
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'grok', sessionId: '01a06126-b981-73f1-8b68-4547e4d7da84' },
+        ENV
+      ).command
+    ).toBe('grok')
+  })
+
   it('grok puts the permission flag BEFORE the -- separator', () => {
     expect(
       assembleLaunchCommand({ agentId: 'grok', initialPrompt: 'version', permissionMode: 'plan' }, ENV).command

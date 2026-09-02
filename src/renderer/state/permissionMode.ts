@@ -5,7 +5,13 @@ import {
   type AgentId,
   type AgentPermissionMode
 } from '@shared/agents/config'
-import { UNKNOWN_CLAUDE_CLI_CAPS, type ClaudeCliCaps, type Project } from '@shared/types'
+import {
+  UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_GROK_CLI_CAPS,
+  type ClaudeCliCaps,
+  type GrokCliCaps,
+  type Project
+} from '@shared/types'
 import { useProjects } from './projects'
 import { useSettings } from './settings'
 import { useSshConn, type SshAutoPermAnswer } from './sshConn'
@@ -60,6 +66,43 @@ export function ensureClaudeCliCaps(): Promise<ClaudeCliCaps> {
  */
 export function claudeCliCapsNow(): ClaudeCliCaps {
   return caps
+}
+
+/**
+ * The same memo, for grok. A SEPARATE probe and a separate memo on purpose: rule 9 — a capability
+ * gate fed by a version probe belongs to the agent it probes. grok and claude are installed and
+ * upgraded independently, so claude's answer says nothing about grok's, and borrowing it would be a
+ * guess dressed as a measurement.
+ *
+ * Same fail-open shape: until it answers, "no flag", i.e. the bare `grok` command. A launch is never
+ * blocked on a probe.
+ */
+let grokCaps: GrokCliCaps = UNKNOWN_GROK_CLI_CAPS
+let grokCapsPromise: Promise<GrokCliCaps> | null = null
+
+export function ensureGrokCliCaps(): Promise<GrokCliCaps> {
+  if (!grokCapsPromise) {
+    const probe = Promise.resolve()
+      .then(() => window.nodeTerminal.grok.cliCaps())
+      .then((c) => (grokCaps = c ?? UNKNOWN_GROK_CLI_CAPS))
+      .catch(() => UNKNOWN_GROK_CLI_CAPS)
+    const timeout = new Promise<GrokCliCaps>((resolve) =>
+      setTimeout(() => resolve(grokCaps), CAPS_WAIT_MS)
+    )
+    grokCapsPromise = Promise.race([probe, timeout])
+  }
+  return grokCapsPromise
+}
+
+/** Last-known grok caps, synchronously — node creation is a sync factory. */
+export function grokCliCapsNow(): GrokCliCaps {
+  return grokCaps
+}
+
+/** Test seam for the grok memo. */
+export function resetGrokCliCapsForTests(next?: GrokCliCaps): void {
+  grokCaps = next ?? UNKNOWN_GROK_CLI_CAPS
+  grokCapsPromise = null
 }
 
 /** Test seam: drop the memo (and optionally preload a known answer). */

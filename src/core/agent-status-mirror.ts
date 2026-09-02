@@ -556,12 +556,74 @@ function basename(p: string): string {
 /**
  * Map a raw hook tool invocation to a human "what it's doing now" line (spec: mobile-usage-inbox).
  * Pure; clipped to INBOX_ACTIVITY_MAX. Unknown tools fall back to "Using <tool>".
+ *
+ * TWO VOCABULARIES, one function. Claude's names are PascalCase (`Read`, `Bash`) and grok's are
+ * snake_case (`read_file`, `run_terminal_command`), so they cannot collide and no agent id is needed
+ * to tell them apart — but only while the match stays EXACT. Do not add case-folding here: `grep`
+ * and `Grep`, `write` and `Write` differ by case alone, and folding them would silently read grok's
+ * argument keys out of a claude payload.
+ *
+ * The grok names are MEASURED, not derived from the docs: `signals.json.toolsUsed` across 22 real
+ * sessions (grok 1.0.13, 2026-09-02) yields exactly fifteen. Their ARGUMENT keys are a separate
+ * question and only two were seen in captured hook payloads — `read_file.target_file` and
+ * `run_terminal_command.command`. Every other grok case below therefore names the action and stops,
+ * rather than reading a key nobody has observed: a phrase with no detail is honest, a phrase built
+ * on a guessed key renders "Editing file" forever the day the guess is wrong.
  */
 export function toolActivity(toolName: string, toolInput: Record<string, unknown> | undefined): string {
   const ti = toolInput ?? {}
   const str = (v: unknown): string => (typeof v === 'string' ? v : '')
   let out: string
   switch (toolName) {
+    // ---- grok (snake_case). MEASURED argument keys only. ----
+    case 'read_file':
+      out = `Reading ${basename(str(ti.target_file)) || 'file'}`
+      break
+    case 'run_terminal_command': {
+      const cmd = str(ti.command).replace(/\s+/g, ' ').trim()
+      out = `Running ${cmd ? clip(cmd, 60) : 'command'}`
+      break
+    }
+    case 'search_replace':
+      out = 'Editing a file'
+      break
+    case 'write':
+      out = 'Writing a file'
+      break
+    case 'list_dir':
+      out = 'Listing a directory'
+      break
+    case 'grep':
+      out = 'Searching the code'
+      break
+    case 'web_search':
+      out = 'Searching the web'
+      break
+    case 'web_fetch':
+      out = 'Fetching a page'
+      break
+    case 'todo_write':
+      out = 'Updating its plan'
+      break
+    case 'spawn_subagent':
+      out = 'Delegating to a subagent'
+      break
+    case 'get_command_or_subagent_output':
+      out = 'Checking a background task'
+      break
+    case 'kill_command_or_subagent':
+      out = 'Stopping a background task'
+      break
+    case 'search_tool':
+      out = 'Looking up an MCP tool'
+      break
+    case 'ask_user_question':
+      out = 'Asking you a question'
+      break
+    case 'exit_plan_mode':
+      out = 'Presenting a plan'
+      break
+    // ---- claude (PascalCase) ----
     case 'Edit':
     case 'Write':
     case 'MultiEdit':
@@ -600,7 +662,14 @@ export function toolActivity(toolName: string, toolInput: Record<string, unknown
       out = `Fetching ${str(ti.query) || '…'}`
       break
     default:
-      out = `Using ${toolName}`
+      // A qualified MCP name is `server__tool` — grok's own dispatcher (`use_tool`) never appears in
+      // a payload, the resolved call does (10-hooks.md). Naming the tool and its server is more use
+      // than either half alone, and it is derived from the string itself, so no vocabulary can go
+      // stale. Everything else keeps the historical "Using <tool>".
+      {
+        const mcp = /^([A-Za-z0-9_.-]+)__([A-Za-z0-9_.-]+)$/.exec(toolName)
+        out = mcp ? `Using ${mcp[2]} (${mcp[1]})` : `Using ${toolName}`
+      }
   }
   return clip(out, INBOX_ACTIVITY_MAX)
 }

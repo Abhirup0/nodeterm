@@ -212,3 +212,47 @@ describe('hasToolResult (the declined-ask rescue)', () => {
     expect(hasToolResult('{"type":"user","message":{"content":[{"type":"tool_res')).toBe(false)
   })
 })
+
+describe('createContextTail — `wholeFile` (grok: a document rewritten, not appended)', () => {
+  // grok's numbers live in signals.json, which it REWRITES on every turn. The default offset read
+  // hands the parser only the bytes past the previous read — a fragment of a JSON document, which
+  // never parses. The meter would fill once and then freeze, with nothing anywhere saying why.
+  const signals = (used: number): string =>
+    JSON.stringify({ contextTokensUsed: used, contextWindowTokens: 500000, primaryModelId: 'grok-4.6' })
+
+  /** grok's real parser shape: the WHOLE buffer must be valid JSON. */
+  const parse = (text: string | string[]) => {
+    try {
+      const o = JSON.parse(Array.isArray(text) ? text.join('\n') : text)
+      return { used: o.contextTokensUsed, window: o.contextWindowTokens, model: o.primaryModelId }
+    } catch {
+      return null
+    }
+  }
+
+  async function pushesAfterRewrite(opts: { wholeFile?: boolean }): Promise<unknown[]> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctxtail-whole-'))
+    const file = path.join(dir, 'signals.json')
+    // First document, then a LONGER one — longer matters: a shorter file trips the existing
+    // truncation reset and would re-read from zero by accident, hiding the bug.
+    fs.writeFileSync(file, signals(1000))
+    const send = vi.fn()
+    const tail = createContextTail(send, { parse, ...opts })
+    tail.track('s1', file)
+    await new Promise((r) => setTimeout(r, 300))
+    fs.writeFileSync(file, signals(222222) + '                    ')
+    await new Promise((r) => setTimeout(r, 1300))
+    tail.untrack('s1')
+    return send.mock.calls.map((c) => c[0])
+  }
+
+  it('keeps reading the rewritten document', async () => {
+    const pushes = await pushesAfterRewrite({ wholeFile: true })
+    expect(JSON.stringify(pushes)).toContain('222222')
+  }, 8000)
+
+  it('WITHOUT it, the second read never parses — the silent freeze this flag exists for', async () => {
+    const pushes = await pushesAfterRewrite({})
+    expect(JSON.stringify(pushes)).not.toContain('222222')
+  }, 8000)
+})

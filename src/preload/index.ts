@@ -520,6 +520,10 @@ const api: NodeTerminalApi = {
     readTranscript: (sessionId, cwd, accountId, nodeId) =>
       ipcRenderer.invoke(IPC.claudeReadTranscript, sessionId, cwd, accountId, nodeId)
   },
+  grok: {
+    cliCaps: () => ipcRenderer.invoke(IPC.grokCliCaps),
+    takenSessionIds: (cwd) => ipcRenderer.invoke(IPC.grokTakenSessionIds, cwd)
+  },
   agent: {
     envSnapshot: () => ipcRenderer.invoke(IPC.envSnapshot),
     discoverModels: (settings) => ipcRenderer.invoke(IPC.agentDiscoverModels, settings),

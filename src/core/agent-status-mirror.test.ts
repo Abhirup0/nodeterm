@@ -847,12 +847,72 @@ describe('activity mapping (toolActivity + recordRawToolEvent)', () => {
     expect(toolActivity('CustomThing', {})).toBe('Using CustomThing')
   })
 
+  it("maps grok's OWN tool names, which are measured and not claude's", () => {
+    // The fifteen names come from `signals.json.toolsUsed` across 22 real sessions, not from the
+    // docs. Only two argument keys were ever seen in a captured payload, so only two lines carry a
+    // detail — the rest name the action and stop rather than read a key nobody has observed.
+    expect(toolActivity('read_file', { target_file: 'src/app/fichero.txt' })).toBe('Reading fichero.txt')
+    expect(toolActivity('run_terminal_command', { command: 'echo hola' })).toBe('Running echo hola')
+    expect(toolActivity('search_replace', {})).toBe('Editing a file')
+    expect(toolActivity('write', {})).toBe('Writing a file')
+    expect(toolActivity('list_dir', {})).toBe('Listing a directory')
+    expect(toolActivity('grep', {})).toBe('Searching the code')
+    expect(toolActivity('web_search', {})).toBe('Searching the web')
+    expect(toolActivity('web_fetch', {})).toBe('Fetching a page')
+    expect(toolActivity('todo_write', {})).toBe('Updating its plan')
+    expect(toolActivity('spawn_subagent', {})).toBe('Delegating to a subagent')
+    expect(toolActivity('get_command_or_subagent_output', {})).toBe('Checking a background task')
+    expect(toolActivity('kill_command_or_subagent', {})).toBe('Stopping a background task')
+    expect(toolActivity('search_tool', {})).toBe('Looking up an MCP tool')
+    expect(toolActivity('ask_user_question', {})).toBe('Asking you a question')
+    expect(toolActivity('exit_plan_mode', {})).toBe('Presenting a plan')
+  })
+
+  it('never confuses the two vocabularies, which differ only by case in three places', () => {
+    // `grep`/`Grep` and `write`/`Write` are the same word. If anyone adds case-folding to that
+    // switch, these four expectations disagree — which is the point: folding them would read grok's
+    // argument keys out of a claude payload and vice versa.
+    expect(toolActivity('grep', { pattern: 'foo' })).toBe('Searching the code')
+    expect(toolActivity('Grep', { pattern: 'foo' })).toBe('Searching foo')
+    expect(toolActivity('write', { file_path: '/a/b.ts' })).toBe('Writing a file')
+    expect(toolActivity('Write', { file_path: '/a/b.ts' })).toBe('Editing b.ts')
+  })
+
+  it('names an MCP call by its tool AND its server, from the string itself', () => {
+    // grok resolves an MCP call to `server__tool` before the hook fires; its own dispatcher never
+    // appears. Deriving this from the name means no vocabulary to keep in sync with any server.
+    expect(toolActivity('linear__save_issue', {})).toBe('Using save_issue (linear)')
+    expect(toolActivity('iria-corpus__search', {})).toBe('Using search (iria-corpus)')
+    // Not an MCP shape: unchanged.
+    expect(toolActivity('CustomThing', {})).toBe('Using CustomThing')
+    expect(toolActivity('__weird', {})).toBe('Using __weird')
+  })
+
   it('truncates a long Bash command', () => {
     const long = 'echo ' + 'a'.repeat(200)
     const out = toolActivity('Bash', { command: long })
     expect(out.startsWith('Running ')).toBe(true)
     expect(out.length).toBeLessThanOrEqual('Running '.length + 60)
     expect(out.endsWith('…')).toBe(true)
+  })
+
+  it("shows a grok node's activity, translated at the shell boundary", () => {
+    // The shells translate grok's `pre_tool_use` into the string this gate wants. What this pins is
+    // the OTHER half: given that translation, the line is grok's own phrase and grok's own tool
+    // name, never a claude one. §8.3 of docs/grok-agent.md claimed grok never sends the event; it
+    // does, spelled `pre_tool_use`, and the gate below wants `PreToolUse` — a spelling, not an
+    // absence, which is why the original call looked like dead code and was deleted.
+    recordRawToolEvent('n-grok', {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'read_file',
+      tool_input: { target_file: '/w/src/fichero.txt' }
+    })
+    expect(_inboxSnapshot().nodes['n-grok']).toMatchObject({
+      activity: 'Reading fichero.txt',
+      tool: 'read_file'
+    })
+    recordRawToolEvent('n-grok', { hook_event_name: 'Stop' })
+    expect(_inboxSnapshot().nodes['n-grok']?.activity ?? '').toBe('')
   })
 
   it('records activity on PreToolUse and clears it on Stop/SessionEnd', () => {

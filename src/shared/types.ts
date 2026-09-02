@@ -2491,6 +2491,41 @@ export interface ClaudeCliCaps {
   sessionIdFlag: boolean
 }
 
+export interface GrokCliCaps {
+  /**
+   * Whether the local grok CLI accepts `--session-id <uuid>`, so nodeterm can MINT a node's session
+   * id instead of waiting to learn it from a hook.
+   *
+   * Probed from `grok --help` by `core/grok-cli.ts` — grok's OWN probe, never claude's. The two
+   * CLIs are installed and upgraded independently, so claude's answer is not even correlated with
+   * grok's, and an unknown flag makes grok exit rather than degrade.
+   *
+   * grok's grammar differs from claude's in three measured ways (1.0.13): the UUID must not already
+   * exist under the target session directory, so minting one twice is a LAUNCH ERROR and never a
+   * resume; `--session-id` combines with `--resume`/`--continue` only alongside `--fork-session`;
+   * and `--resume` accepts a TITLE as well as an id, failing as ambiguous on duplicates.
+   */
+  sessionIdFlag: boolean
+}
+
+/** Unprobed grok ⇒ omit the flag ⇒ today's command line, byte-identical. */
+export const UNKNOWN_GROK_CLI_CAPS: GrokCliCaps = { sessionIdFlag: false }
+
+export interface GrokApi {
+  /** Capabilities of the local grok CLI (memoized in the shell; safe to call repeatedly).
+   *  Never rejects — an unprobed CLI resolves to the fail-open caps. */
+  cliCaps(): Promise<GrokCliCaps>
+  /**
+   * The session ids grok already has under this cwd.
+   *
+   * Needed because grok REFUSES a `--session-id` that already exists under the target session
+   * directory — that is a launch error, not a resume, so a node handed a taken id never starts. An
+   * array rather than a Set: a Set does not survive the IPC/WS-RPC boundary and would arrive empty,
+   * which is the one wrong answer this call can give.
+   */
+  takenSessionIds(cwd: string): Promise<string[]>
+}
+
 /** The answer whenever the CLI version can't be determined: no `auto` flag → bare command, and no
  *  fullscreen-tui write (an unknown settings key can warn on old CLIs — silence is safer). */
 export const UNKNOWN_CLAUDE_CLI_CAPS: ClaudeCliCaps = {
@@ -2964,6 +2999,7 @@ export interface NodeTerminalApi {
   canvas: CanvasApi
   codex: CodexApi
   claude: ClaudeApi
+  grok: GrokApi
   /** Custom-agent launch/preview (env-var expansion + command assembly). */
   agent: AgentApi
   chat: ChatApi

@@ -4,6 +4,8 @@ import {
   BUILTIN_AGENT_IDS,
   canBranch,
   canChat,
+  mintsSessionId,
+  supportsSessionIdFlag,
   readsClaudeShapedTranscript,
   canContextLink,
   canControlCanvas,
@@ -180,8 +182,9 @@ describe('grok capabilities', () => {
   it('reads a linked node, on the same already-installed skill the canvas verb uses', () => {
     // The leaf that had to exist first: `locateGrok` (core/handoff/locate.ts), resolving the
     // session directory a hook reported and returning `chat_history.jsonl` — NOT the
-    // `updates.jsonl` grok's payloads advertise, which parses to nothing and would show the
-    // linked agent an empty transcript with no error. Discovery needs no installer of its own,
+    // `updates.jsonl` grok's payloads advertise. That sibling is the ACP event stream: it does carry
+    // conversation, but as CHUNKS interleaved with tool-call and hook events, so our line parser
+    // finds no `type` on any line and the linked agent gets an empty transcript with no error. Discovery needs no installer of its own,
     // and that is now MEASURED rather than assumed: on 1.0.13, `grok inspect --json` lists
     // `get-linked-context` as `vendor: 'claude', compatibilityStatus: 'enabled'`.
     expect(canContextLink('grok')).toBe(true)
@@ -212,8 +215,40 @@ describe('grok capabilities', () => {
     expect(readsClaudeShapedTranscript('claude')).toBe(true)
   })
 
+  it('fills a context meter from the numbers it states itself', () => {
+    // grok states the numerator, the denominator AND the percentage (signals.json). The window is
+    // read, never inferred from the model id — which puts grok with codex, not with gemini.
+    expect(hasUsage('grok')).toBe(true)
+  })
+
+  it('joins USAGE_CAPABLE without joining the claude-transcript readers', () => {
+    // The regression this project already survived once: `hasUsage` gated THREE features, and
+    // joining it for the meter also switched on `context.ensure` and the find bar's index, both of
+    // which resolve through claude's `resolveTranscript` — whose cwd fallback then hands the node
+    // the newest CLAUDE transcript for that directory. A codex node metered and searched a
+    // stranger's session, and the preconditions were default-true, so it would have shipped.
+    //
+    // These two must therefore DISAGREE for grok, exactly as they do for codex and gemini.
+    expect(hasUsage('grok')).toBe(true)
+    expect(readsClaudeShapedTranscript('grok')).toBe(false)
+  })
+
+  it('mints its own session id, gated on ITS OWN probe and never on claude\'s', () => {
+    expect(mintsSessionId('grok')).toBe(true)
+    // The third argument is grok's probe. Claude's answer must not move grok's gate in EITHER
+    // direction — that is rule 9: a gate fed by a version probe belongs to the agent it probes, and
+    // the two CLIs are installed and upgraded independently.
+    expect(supportsSessionIdFlag('grok', false, true)).toBe(true)
+    expect(supportsSessionIdFlag('grok', true, false)).toBe(false)
+    // Unprobed reads as no: a bare command, never a blocked launch. There is no shorter call to
+    // write — the third argument is required precisely so nobody can omit grok's probe by accident.
+    expect(supportsSessionIdFlag('grok', true, false)).toBe(false)
+    // And grok's probe must not move CLAUDE's gate either.
+    expect(supportsSessionIdFlag('claude', true, false)).toBe(true)
+    expect(supportsSessionIdFlag('claude', false, true)).toBe(false)
+  })
+
   it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
-    expect(hasUsage('grok')).toBe(false)
     expect(canBranch('grok')).toBe(false)
     expect(canSubagent('grok')).toBe(false)
   })

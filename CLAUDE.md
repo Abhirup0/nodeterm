@@ -954,17 +954,24 @@ else, and its context links must keep classifying across restarts).
   `TRANSFER_SOURCE_CAPABLE`, `RENAME_CAPABLE`, `TITLE_READ_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
   `PERMISSION_MODE_CAPABLE`, `MODEL_SWITCH_CAPABLE`, with helpers (`hasHooks`,
   `canBranch`, `canContextLink`, `canChat`, `canRename`, `canReadTitle`, `hasPermissionMode`, …).
-  Branch and the ⌘M **ChatPanel** transcript view (`CHAT_CAPABLE` / `canChat` — since the SDK chat
-  node was removed, 2026-07, this is all `canChat` now gates) stay **Claude-only** purely by
-  being in only `BRANCH_CAPABLE` / `CHAT_CAPABLE`. The other lists span more agents, and the
-  memberships below are the ones to check before assuming "claude-only" (all verified against
-  `config.ts`, 2026-08-09): the per-node **context meter** is `USAGE_CAPABLE = claude/codex/gemini`;
+  Branch stays **Claude-only** purely by being in only `BRANCH_CAPABLE`. The ⌘M **ChatPanel**
+  transcript view (`CHAT_CAPABLE` / `canChat`) is **claude + grok** since 2026-09: grok's
+  `chat_history.jsonl` gets its own reader, and `chat:read-transcript` routes by agent. That list had
+  to be SPLIT to do it — `CHAT_CAPABLE` carried two facts that coincided while claude was its only
+  member ("we can render this" and "claude's resolver can locate and parse this file"), and the
+  second now lives in `CLAUDE_TRANSCRIPT_READABLE` (claude only). Merging them back is a
+  cross-session read of someone else's transcript; `config.capabilities.test.ts` pins the pair.
+  The other lists span more agents, and the memberships below are the ones to check before assuming
+  "claude-only" (all verified against `config.ts`, 2026-09-02): the per-node **context meter** is
+  `USAGE_CAPABLE = claude/codex/gemini/grok` — grok states BOTH numbers, and its own percentage, in
+  `signals.json`;
   the **permission mode** is `PERMISSION_MODE_CAPABLE = claude/grok/gemini/codex`; the session-name
   sync is **split in two** — `TITLE_READ_CAPABLE = claude/codex/grok/gemini` (read) ⊇
   `RENAME_CAPABLE = claude/grok` (write), because gemini and codex name their own sessions but have
   no rename command (codex's read leg is `readCodexSessionName`);
-  **Context Link** spans four builtins
-  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode`, NOT grok/copilot). UI gates
+  **Context Link** spans five builtins
+  (`CONTEXT_LINK_CAPABLE = claude/codex/gemini/opencode/grok`; the one builtin outside it is
+  copilot). UI gates
   on these helpers — no hardcoded `=== 'claude'`. **Custom agents** (user-defined in Settings,
   `customAgents`) inherit the declared `baseAgent` harness through `capabilityAgentId`; a custom
   agent with no base remains spawn + terminal-title + process status only. Per-agent write-ups:
@@ -997,10 +1004,13 @@ else, and its context links must keep classifying across restarts).
   do not apply this machine's gateway to another core. Mobile needs a settings/model-picker surface
   before it can expose the feature.
 - **Grok** (`@xai-official/grok` 1.0.0, builtin since 2026-08) — in `AGENT_HOOK_TARGETS`,
-  `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE` and `CANVAS_CONTROL_CAPABLE`; NOT in
-  `USAGE_CAPABLE` / `CONTEXT_LINK_CAPABLE` / `SUBAGENT_CAPABLE` (each blocked on a fixture that needs a
-  logged-in grok session — the context meter, context links and subagent cards are **not implemented**
-  for grok). Its hook config is a **directory** (`$GROK_HOME/hooks/*.json`, all merged), so nodeterm
+  `RESUMABLE_AGENTS`, `RENAME_CAPABLE`, `PERMISSION_MODE_CAPABLE`, `CANVAS_CONTROL_CAPABLE`,
+  `CONTEXT_LINK_CAPABLE`, `CHAT_CAPABLE`, `TRANSFER_SOURCE_CAPABLE`, `USAGE_CAPABLE` and
+  `SESSION_ID_CAPABLE`; NOT in `SUBAGENT_CAPABLE` — subagent cards still need the `spawn_subagent`
+  PreToolUse/PostToolUse payload, which nobody has captured. The other four came off the blocked list
+  in 2026-09, once a machine with a logged-in grok session produced real fixtures: context links and
+  the ⌘M panel read `chat_history.jsonl` (NOT `updates.jsonl` — see below), and the meter reads
+  `signals.json`. Its hook config is a **directory** (`$GROK_HOME/hooks/*.json`, all merged), so nodeterm
   **owns one file outright** (`nodeterm-status.json`) instead of merging into a shared settings file —
   which is also why a malformed copy of it is *healed* rather than preserved, locally and on an SSH
   host (`RemoteHooks.installGrokRemote`, under the host's own `$GROK_HOME`). Its dialect is
@@ -1542,8 +1552,13 @@ else, and its context links must keep classifying across restarts).
   caller's. The judge is armed on ids that exist only in that tick, which is why `armAfter` takes
   `extraLive` — without it the reviewers would look *deleted*, deletion counts as satisfied, and
   the judge would fire before a single review existed.
-- **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode;
-  **grok**, custom agents + plain terminals excluded — grok's `updates.jsonl` parser is unbuilt): drawing an edge between two builtin-agent nodes lets each
+- **Context Link** — a node action gated by `CONTEXT_LINK_CAPABLE` (claude/codex/gemini/opencode/grok;
+  custom agents + plain terminals excluded). **grok joined in 2026-09, and the file matters:** its
+  readable conversation is `chat_history.jsonl`, NOT the `updates.jsonl` its own hook payloads
+  advertise and this line used to name. Routing through the advertised path does not error — it opens
+  a real file, parses nothing, and hands the linked agent an EMPTY transcript with no diagnostic, so
+  a reader who trusts the old wording will build the silent failure this note exists to prevent
+  (`core/handoff/locate.ts` pins it): drawing an edge between two builtin-agent nodes lets each
   READ the other's context on demand (pull, not push). Architecture (2026-07, SSH-capable — see
   docs/ssh-agent-skills.md): the **desktop does the reading AND the parsing**; the CLI the agent
   runs (`context.sh`) is a thin POSIX **sh+curl** shim that POSTs to the hook server's
@@ -1822,8 +1837,12 @@ principle. Per-agent write-ups: `docs/grok-agent.md`, `docs/gemini-agent.md`.
    resolver rather than building a per-model allowlist: gemini's `tokenLimit()` is a family rule with
    a **1M catch-all default**, so an unreleased model gets the *right* answer where an allowlist would
    be confidently wrong, silently. **And if you cannot establish a trustworthy denominator, ship no
-   meter** — a percentage over a guessed window is a wrong number presented as a fact (this is exactly
-   why grok has no meter).
+   meter** — a percentage over a guessed window is a wrong number presented as a fact. This used to
+   cite grok as the example of having no meter; grok turned out to be the BEST case for this rule,
+   stating `contextTokensUsed`, `contextWindowTokens` **and** the resulting `contextWindowUsage` in
+   `signals.json` (all three present in 22 of 22 measured sessions, and the stated percentage agrees
+   with the division in all 22 — an oracle pinned as a test). What was missing was never the number:
+   it was a comment nobody could check, naming the wrong file.
 7. **A closed set beats a substring, for notification/event types.** Grok's
    `type.includes('permission')` matched a notification grok fires before *every* tool call, so a
    working node strobed NEEDS YOU: unread dot + chime + OS notification + phone inbox card, per tool

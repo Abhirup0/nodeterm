@@ -8,7 +8,7 @@
 //
 // This module must import nothing from electron or `../main` (see no-electron.test.ts).
 import { grokHomeDir } from '../core/agents/grok-paths'
-import { resolve } from 'path'
+import { join, resolve } from 'path'
 import { homedir } from 'os'
 import { hookServer } from '../core/agents/hook-server'
 import { recordAgentEvent, recordRawToolEvent, recordContextUsage,
@@ -18,6 +18,7 @@ import { createSubagentTail, type SubagentTail } from '../core/subagent-tail'
 import { createContextTail, type ContextTail, type TaskNotification } from '../core/context-tail'
 import { geminiContextParse } from '../core/gemini-session'
 import { codexContextParse } from '../core/codex-session'
+import { grokContextParse, GROK_SIGNALS_FILE } from '../core/grok-signals'
 import { createCodexSubagentFormatter } from '../core/codex-subagent-format'
 import { codexHome } from '../core/usage/codex-usage'
 import { setNodeTranscript } from '../core/context-link'
@@ -143,6 +144,13 @@ export function wireAgentStatus(
   // and the declined-ask rescue is claude-only too).
   const geminiContextTail = createContextTail(pushContextUpdate, { parse: geminiContextParse })
   const codexContextTail = createContextTail(pushContextUpdate, { parse: codexContextParse })
+  // grok's third tail. `wholeFile` is not a tuning knob here: signals.json is a whole JSON
+  // document rewritten in place, so an offset read yields a fragment that never parses and the
+  // meter would freeze after its first fill with nothing to say so.
+  const grokContextTail = createContextTail(pushContextUpdate, {
+    parse: grokContextParse,
+    wholeFile: true
+  })
 
   hooks.setListener((e) => {
     // Record FIRST: recordAgentEvent computes the stash-priority classification and returns the
@@ -202,14 +210,49 @@ export function wireAgentStatus(
           cwd: g.cwd,
           sessionId: g.sessionId
         })
-        if (dir) rememberGrokSessionDir(g.sessionId, dir)
+        if (dir) {
+          rememberGrokSessionDir(g.sessionId, dir)
+          // Context meter: grok's numbers are NOT in the transcript, so there is nothing here for
+          // `transcript_path` to point at even once grok starts sending one. They live in
+          // `signals.json`, the sibling of `chat_history.jsonl`, which is why this tail is tracked
+          // from the DERIVED directory rather than from a hook field — and why it is created with
+          // `wholeFile` (that file is rewritten in place, not appended to).
+          const signals = join(dir, GROK_SIGNALS_FILE)
+          grokContextTail.track(g.sessionId, signals)
+        }
+      }
+      // 3. node → what it is doing NOW (the phone's per-node activity line).
+      //
+      // §8.3 of docs/grok-agent.md said grok's file hooks "never send PreToolUse", so calling this
+      // was a no-op and it was deleted. MEASURED on 1.0.13 (2026-09-02), that is wrong in wording
+      // and right in effect: grok DOES publish the event, spelled `pre_tool_use` — its own
+      // snake_case — and `recordRawToolEvent` gates on the exact string `PreToolUse`, so the gate
+      // never matched. The blocker was a SPELLING, not an absence, which is why deleting the call
+      // looked correct and closed the door on a working feature.
+      //
+      // Translated here rather than by loosening that gate: the mirror is claude-shaped on purpose,
+      // and grok's dialect is decoded in exactly one place (`grokRawFields`). `toolActivity` knows
+      // grok's fifteen tool names, so the line reads "Reading fichero.txt", never a claude phrase.
+      if (nodeId && g.event === 'pretooluse' && g.toolName) {
+        recordRawToolEvent(nodeId, {
+          hook_event_name: 'PreToolUse',
+          tool_name: g.toolName,
+          tool_input: g.toolInput
+        })
+      }
+      // The turn is over: clear the activity line the same way the claude path does.
+      if (nodeId && (g.event === 'stop' || g.event === 'sessionend')) {
+        recordRawToolEvent(nodeId, { hook_event_name: 'Stop' })
       }
       // The session is over, so nothing will read its directory again — and forgetting costs
       // nothing even though grok IS resumable and `grok --resume <id>` reuses BOTH the id and the
       // directory: a resumed session fires its own hooks, whose (cwd, sessionId) re-derive and
       // re-remember the very same path. The map is bounded, so dropping now beats waiting for
       // eviction to reach an entry nobody is asking about.
-      if (g.event === 'sessionend') forgetGrokSession(g.sessionId)
+      if (g.event === 'sessionend') {
+        forgetGrokSession(g.sessionId)
+        grokContextTail.untrack(g.sessionId)
+      }
       return
     }
     // gemini and codex both carry `transcript_path` in their hook envelope (gemini: the base input
@@ -323,6 +366,7 @@ export function wireAgentStatus(
       contextTail.untrack(sessionId)
       geminiContextTail.untrack(sessionId)
       codexContextTail.untrack(sessionId)
+      grokContextTail.untrack(sessionId)
       nodeContextSession.delete(nodeId)
     }
     const subs = nodeSubagents.get(nodeId)

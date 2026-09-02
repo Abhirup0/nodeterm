@@ -195,3 +195,24 @@ describe('registerCoreHandlers (managed Claude accounts, #313)', () => {
     await expect(call(IPC.claudeAccountsCancelWait, 'nobody')).resolves.toBeNull()
   })
 })
+
+describe('registerCoreHandlers (the grok CLI probe, on BOTH shells)', () => {
+  // Invariant 11 for probes. A probe registered in the desktop shell only is session-id minting that
+  // silently works on the desktop and not in the browser, with nothing anywhere to say which — and
+  // deleting the registration is a change the typecheck cannot see, which is exactly the family of
+  // wiring bug this branch has been paying for.
+  it('answers grok:cli caps rather than rejecting as unknown', async () => {
+    const caps = (await call(IPC.grokCliCaps)) as { sessionIdFlag: boolean }
+    // The value depends on whether grok is installed on the machine running the suite, so this
+    // asserts the SHAPE and the fact that the method exists at all — an unregistered method throws.
+    expect(typeof caps.sessionIdFlag).toBe('boolean')
+  })
+
+  it('answers the taken-session-id lookup with an array', async () => {
+    // An array, not a Set: a Set does not survive the WS-RPC boundary and would arrive as `{}`,
+    // reporting "nothing taken" for every cwd — the one wrong answer this call can give.
+    const ids = await call(IPC.grokTakenSessionIds, '/definitely/not/a/real/cwd')
+    expect(Array.isArray(ids)).toBe(true)
+    expect(ids).toEqual([])
+  })
+})
