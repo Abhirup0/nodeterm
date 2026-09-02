@@ -1,9 +1,12 @@
 // Renders a grok chat history .jsonl (~/.grok/sessions/<cwd>/<id>/chat_history.jsonl) to full
 // Markdown. No size cap, no summarization.
 //
-// The file is `chat_history.jsonl`, NOT the `updates.jsonl` grok's hook payloads advertise: that
-// sibling holds no readable conversation, and rendering it produces an empty handoff rather than an
-// error. `core/handoff/locate.ts` is where that choice is made and pinned.
+// The file is `chat_history.jsonl`, NOT the `updates.jsonl` grok's hook payloads advertise. Being
+// precise about the sibling, because an overstatement here would be the same sin this integration
+// keeps paying for: `updates.jsonl` DOES carry conversation, as `agent_message_chunk` /
+// `user_message_chunk` interleaved with tool-call, hook and compaction events (measured across 29
+// sessions). What it does not carry is a settled message per line, so `linesFromGrok` finds no
+// `type` on any of them and renders an empty handoff rather than an error. `core/handoff/locate.ts` is where that choice is made and pinned.
 //
 // Shape knowledge is NOT duplicated here. `linesFromGrok` (core/context-link-render.ts) already
 // parses every measured line type from a real session, including the `synthetic_reason` rule that

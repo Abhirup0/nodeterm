@@ -25,7 +25,12 @@ import { isSafeRemoteHome } from '../remote-safety'
 export const GROK_HOOK_FILE = 'nodeterm-status.json'
 export const GROK_SUMMARY_FILE = 'summary.json'
 export const GROK_SIGNALS_FILE = 'signals.json'
+/** The ACP event stream. Named here for completeness and read by NOTHING — see `grok-session.ts`
+ *  for why: it carries message CHUNKS interleaved with tool-call, hook and compaction events, while
+ *  the settled conversation is one message per line in the file below. grok's hook payloads
+ *  advertise THIS path as the transcript, which is the trap. */
 export const GROK_UPDATES_FILE = 'updates.jsonl'
+/** The conversation. What context links, the ⌘M panel and cross-agent transfer read. */
 export const GROK_CHAT_HISTORY_FILE = 'chat_history.jsonl'
 
 /** grok URL-encodes the cwd to name a session group; past this many BYTES it switches to a

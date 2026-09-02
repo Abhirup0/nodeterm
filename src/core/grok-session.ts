@@ -3,9 +3,29 @@
 // a session at `$GROK_HOME/sessions/<url-encoded cwd>/<id>/`. So the directory is DERIVED, never
 // searched, and this module only ever reads inside a directory a hook told us about.
 //
-// Documented contents (shipped 1.0.0): summary.json (`generated_title`, `session_summary`,
-// `current_model_id`, `info`, timestamps, counts), signals.json (token usage, tool/turn counters),
-// updates.jsonl (authoritative conversation log), chat_history.jsonl (raw model messages).
+// Contents, MEASURED on 1.0.13 across 29 local sessions (2026-09-02) — the previous version of this
+// comment called `updates.jsonl` the "authoritative conversation log" and `chat_history.jsonl` "raw
+// model messages", which is backwards where it matters and is the single most expensive false claim
+// in this integration: it sends a reader to build against the file that cannot be read message by
+// message.
+//
+//   summary.json        `generated_title`, `session_summary`, `current_model_id`, `info`,
+//                       timestamps, counts.
+//   signals.json        the context meter's numbers — `contextTokensUsed`, `contextWindowTokens`
+//                       and grok's own `contextWindowUsage` — plus 63 unrelated metrics.
+//   chat_history.jsonl  THE CONVERSATION, one settled message per line (`system`, `user`,
+//                       `assistant`, `tool_result`, `backend_tool_call`, `reasoning`). This is what
+//                       context links, the ⌘M panel and cross-agent transfer read.
+//   updates.jsonl       the ACP event STREAM (`session/update` notifications). It is not empty of
+//                       conversation — `agent_message_chunk`, `user_message_chunk` and
+//                       `agent_thought_chunk` are in there — but it carries CHUNKS interleaved with
+//                       `tool_call`/`tool_call_update`, `hook_execution`, `plan`, compaction and
+//                       subagent events, so reading a message out of it means reassembling it.
+//                       `chat_history.jsonl` is the same conversation already settled.
+//
+// The trap: grok's hook payloads advertise `updates.jsonl` as the transcript path, so following the
+// advertisement is the obvious move and it fails SILENTLY — a real file opens, our line parser finds
+// no `type` field on any line, and the caller gets an empty transcript with nothing logged.
 //
 // This is grok's reader, and `transcript-reader.ts` stays claude's: a "shared" reader that knows two
 // storage layouts is two readers in a trench coat, and the one thing neither must ever do is search

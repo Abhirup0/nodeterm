@@ -182,8 +182,9 @@ describe('grok capabilities', () => {
   it('reads a linked node, on the same already-installed skill the canvas verb uses', () => {
     // The leaf that had to exist first: `locateGrok` (core/handoff/locate.ts), resolving the
     // session directory a hook reported and returning `chat_history.jsonl` — NOT the
-    // `updates.jsonl` grok's payloads advertise, which parses to nothing and would show the
-    // linked agent an empty transcript with no error. Discovery needs no installer of its own,
+    // `updates.jsonl` grok's payloads advertise. That sibling is the ACP event stream: it does carry
+    // conversation, but as CHUNKS interleaved with tool-call and hook events, so our line parser
+    // finds no `type` on any line and the linked agent gets an empty transcript with no error. Discovery needs no installer of its own,
     // and that is now MEASURED rather than assumed: on 1.0.13, `grok inspect --json` lists
     // `get-linked-context` as `vendor: 'claude', compatibilityStatus: 'enabled'`.
     expect(canContextLink('grok')).toBe(true)

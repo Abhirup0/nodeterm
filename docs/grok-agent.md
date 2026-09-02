@@ -215,6 +215,16 @@ $GROK_HOME/                                  # $GROK_HOME, else ~/.grok
   hooks/*.json                               # all merged; nodeterm-status.json is ours
   sessions/<url-encoded cwd>/<session-id>/
     summary.json  updates.jsonl  chat_history.jsonl  signals.json  plan.json  subagents/
+
+Which of those is the conversation is the question this integration got wrong for months, so it is
+worth stating exactly (measured on 1.0.13 across 29 local sessions, 2026-09-02):
+
+| File | What it is |
+|---|---|
+| `chat_history.jsonl` | **the conversation**, one settled message per line — `system`, `user`, `assistant`, `tool_result`, `backend_tool_call`, `reasoning`. Read by context links, the ⌘M panel and transfer. |
+| `updates.jsonl` | the ACP event **stream** (`session/update`). It is not empty of conversation — `agent_message_chunk`, `user_message_chunk`, `agent_thought_chunk` are all there — but they arrive as CHUNKS interleaved with `tool_call`/`tool_call_update`, `hook_execution`, `plan`, compaction and subagent events. Reading a message out of it means reassembling one. **Grok's hook payloads advertise THIS path as the transcript**, which is the whole trap: following the advertisement opens a real file, parses to nothing, and yields an empty transcript with no error. |
+| `signals.json` | the meter's three numbers, plus 63 unrelated metrics. |
+| `summary.json` | the session title and model. |
 ```
 
 Path rules, all unit-tested in `grok-paths.test.ts`: the cwd is `encodeURIComponent`'d to name the
