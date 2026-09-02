@@ -59,7 +59,10 @@ describe('an ARMED node does not cold-start its agent under the hold (source pin
     // A first open is `fresh` by definition, so without this every `--after` / `verify` node
     // launched a bare CLI on mount — and Canvas's held launch then arrived as TEXT typed into
     // the session the hold existed to prevent.
-    expect(src).toContain('fresh && agentId && canResume(agentId) && !data.pendingLaunch')
+    // Matched inside the condition rather than as one literal line: the branch also carries the
+    // `paused` gate (shouldColdResume), and the two guards are independent refusals that must
+    // both survive a reformat.
+    expect(src).toMatch(/fresh &&\s*\n?\s*agentId &&\s*\n?\s*canResume\(agentId\) &&\s*\n?\s*!data\.pendingLaunch/)
   })
 })
 
