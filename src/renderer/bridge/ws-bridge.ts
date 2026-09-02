@@ -827,13 +827,14 @@ export function buildTranscriptApi(
 ): Pick<NodeTerminalApi, 'chat'> & { claudeReadTranscript: ClaudeApi['readTranscript'] } {
   return {
     chat: {
-      readTranscript: (sessionId, cwd, accountId, nodeId) =>
+      readTranscript: (sessionId, cwd, accountId, nodeId, agentId) =>
         client.request(
           IPC.chatReadTranscript,
           sessionId,
           cwd,
           accountId,
-          nodeId
+          nodeId,
+          agentId
         ) as Promise<ChatTranscriptResult>
     },
     claudeReadTranscript: (sessionId, cwd, accountId, nodeId) =>

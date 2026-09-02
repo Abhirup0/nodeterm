@@ -4,6 +4,7 @@ import {
   BUILTIN_AGENT_IDS,
   canBranch,
   canChat,
+  readsClaudeShapedTranscript,
   canContextLink,
   canControlCanvas,
   canReadTitle,
@@ -184,6 +185,31 @@ describe('grok capabilities', () => {
     // and that is now MEASURED rather than assumed: on 1.0.13, `grok inspect --json` lists
     // `get-linked-context` as `vendor: 'claude', compatibilityStatus: 'enabled'`.
     expect(canContextLink('grok')).toBe(true)
+  })
+
+  it('hands its conversation to another agent, and shows it in the chat panel', () => {
+    // Both ride the reader task06 wrote. Transfer adds `renderGrokTranscript` beside the other
+    // three renderers; the panel adds `chatMessagesFromGrok`. Neither re-derives grok's line
+    // vocabulary — they build on the same `grokParse`, so the two views cannot drift apart.
+    expect(canTransferFrom('grok')).toBe(true)
+    expect(canChat('grok')).toBe(true)
+  })
+
+  it('is CHAT_CAPABLE and yet NOT readable by claude\'s resolver — the pair is the invariant', () => {
+    // These two must never collapse back into one list. `canChat` means "we can render this
+    // conversation ourselves"; `readsClaudeShapedTranscript` means "claude's resolver can locate and
+    // parse this file". Grok is the first agent for which they differ, and the cost of merging them
+    // is not cosmetic: `resolveTranscript` falls back to the newest CLAUDE transcript for the node's
+    // cwd whenever its sessionId leg misses, which a grok id always does. A merged list would show a
+    // grok node someone else's conversation in the find bar and meter it from that session.
+    //
+    // If a future change "simplifies" CLAUDE_TRANSCRIPT_READABLE away, this line fails first.
+    expect(canChat('grok')).toBe(true)
+    expect(readsClaudeShapedTranscript('grok')).toBe(false)
+    // claude is the one agent where both hold — which is exactly why the shared list looked correct
+    // for as long as it was claude-only.
+    expect(canChat('claude')).toBe(true)
+    expect(readsClaudeShapedTranscript('claude')).toBe(true)
   })
 
   it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {

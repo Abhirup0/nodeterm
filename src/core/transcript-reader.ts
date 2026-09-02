@@ -77,7 +77,7 @@ function linesFrom(raw: string): TranscriptLine[] {
 
 // Read the last ~READ_CAP_BYTES of the file as UTF-8 (dropping the partial leading line on a
 // capped read), or the whole file when it's small. Returns undefined if it can't be read.
-async function readCappedTail(filePath: string): Promise<string | undefined> {
+export async function readCappedTail(filePath: string): Promise<string | undefined> {
   try {
     const stat = await fs.promises.stat(filePath)
     if (stat.size > READ_CAP_BYTES) {

@@ -19,6 +19,10 @@ interface ChatPanelProps {
   cwd?: string
   /** Managed Claude account this node runs under; resolves the transcript in the right root. */
   accountId?: string
+  /** Which agent's reader to use. Omitted means claude, the historical behaviour. Passing it is not
+   *  cosmetic: claude's resolver falls back to the newest transcript for the cwd, so a non-claude
+   *  node that arrives unlabelled is answered with another session's conversation. */
+  agentId?: string
 }
 
 /**
@@ -56,7 +60,7 @@ const EMPTY_TEXT: Record<LoadState, { title: string; detail?: string }> = {
  * session via pty.sendText. Phase 1 reloads the transcript whenever a turn finishes
  * (working -> idle); live streaming is a later phase. Replaces the markdown-of-output overlay.
  */
-export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps) {
+export function ChatPanel({ nodeId, sessionId, cwd, accountId, agentId }: ChatPanelProps) {
   // This node's core api (stable for the session — the chat transcript and the tmux session
   // both live on the core this panel's project belongs to).
   const { api } = useSession()
@@ -73,14 +77,14 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId }: ChatPanelProps)
     // `nodeId` is what lets an SSH-project node resolve on its host; the rejection branch is what
     // keeps a surface that cannot read transcripts (Server Edition, relay tab) from silently
     // presenting itself as an empty conversation.
-    void api.chat.readTranscript(sessionId, cwd, accountId, nodeId).then(
+    void api.chat.readTranscript(sessionId, cwd, accountId, nodeId, agentId).then(
       (res) => {
         setMessages(res.messages)
         setLoadState(res.found ? 'ok' : 'missing')
       },
       (e: unknown) => setLoadState(isUnsupported(e) ? 'unsupported' : 'error')
     )
-  }, [api, sessionId, cwd, accountId, nodeId])
+  }, [api, sessionId, cwd, accountId, nodeId, agentId])
 
   // Initial load.
   useEffect(() => {
