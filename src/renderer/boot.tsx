@@ -5,8 +5,15 @@ import { ensureClaudeCliCaps, ensureGrokCliCaps } from './state/permissionMode'
 import { ensureCodexIdentityCaps } from './state/codexIdentity'
 import { initAgentResolver } from './state/agent-resolver'
 import { refreshAgentEnv } from './lib/agentEnv'
+import { applyWindowChrome } from './lib/windowChrome'
 import './styles.css'
 import './tailwind.css'
+
+// Does this window draw the macOS traffic lights inside our own tab bar? Stamped on <html> before
+// the first paint so the tab bar reserves room for them only where they exist (issue #564: on
+// Windows/Linux and in a Server Edition browser tab there are none, and the reservation pushed the
+// logo in and squeezed the tabs). Runs after main.tsx's shell switch, so the browser flag is set.
+applyWindowChrome()
 
 // Register the custom-agent → baseAgent resolver so the capability predicates (hasHooks, canResume,
 // canControlCanvas, …) resolve a custom agent's inherited harness. Reads the live settings store.
