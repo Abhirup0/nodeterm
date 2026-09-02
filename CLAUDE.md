@@ -1211,7 +1211,24 @@ else, and its context links must keep classifying across restarts).
   *healed*, not preserved, on both the local and the SSH path). The per-event **`matcher`** the grok
   installer needs is why events are typed `ManagedHookEvent` (`string | {event, matcher}`): grok's
   tool matcher is a REGEX and must be `.*` — a bare `*` is invalid and silently stops tool events
-  firing. Plain-string events keep their byte-identical output for every other agent. **Both
+  firing. Plain-string events keep their byte-identical output for every other agent.
+  **Codex is the one agent whose hook command is NOT a POSIX one-liner on Windows** (issue #567):
+  it builds the command as `cmd.exe /C <string>` (`codex-rs/hooks/src/engine/command_runner.rs`,
+  rust-v0.151.0) unless the session has a shell configured, which a default Windows install has
+  not — so `if [ -x '…' ]; then …; fi` answered `-x was unexpected at this time.` and **exit 1 on
+  every event**, for the life of the node. Claude is fine there only because Claude Code runs its
+  hooks through Git Bash. The fix is a batch entry point (`codex-hook.cmd`,
+  `codex-windows-wrapper.ts`) written beside `codex.sh` and named by `buildManagedCommand`'s win32
+  branch; it **locates a POSIX shell and runs the same script** — deliberately not a second
+  implementation of the hook protocol, which would be two copies of the POST/failover/token/
+  permission-poll to drift. Three rules it must keep: pass stdin through, DRAIN stdin on every bail
+  (codex writes the payload there; #186/#187), and exit 0 when there is no shell or no script.
+  Two traps around it: `buildManagedCommand`'s `platform` is the platform of the machine that will
+  RUN codex, so `RemoteHooks.installCodexRemote` passes POSIX explicitly (a Windows desktop must not
+  put a `.cmd` command on a Linux host); and `isManagedCommand` matches **both** leaves
+  (`codex.sh` AND `codex-hook.cmd`) on every platform — matching only the local one would leave a
+  pre-fix entry unrecognized, so the fresh one is appended beside it, which is #558 on a second
+  file. Matching both is what REPAIRS an existing Windows install at the next launch. **Both
   sides of the managed-entry match go through `normalizeHookCommand`** — the marker used to be
   folded to `/` while the stored command was compared raw, so on Windows nodeterm never recognized
   its OWN entry and appended a fresh set every launch (#558: nine copies of nine events, nine
