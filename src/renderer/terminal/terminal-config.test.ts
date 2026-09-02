@@ -550,9 +550,10 @@ describe('terminalKeyAction', () => {
     expect(
       terminalKeyAction(ev({ key: 'Enter', code: 'Enter', shiftKey: true }), false, false, true)
     ).toBe('shift-enter')
-    // project-jump swallow wins over bubble
+    // project-jump bubbles to the dispatcher (which performs the switch) — it must
+    // still beat a registry bubble's reason but reach the window as a bubble, not a swallow
     expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', metaKey: true }), false, true, true)).toBe(
-      'swallow'
+      'bubble'
     )
     // keyup never bubbles — the dispatcher only acts on keydown
     expect(
@@ -571,9 +572,11 @@ describe('terminalKeyAction', () => {
 
   // The jump-to-project chord: WHICH events are the chord is decided once, in lib/projectJump.ts
   // (and tested there — layout, AltGr, keyup, digit range). This module only obeys the answer.
-  it('swallows the jump-to-project chord so the PTY never sees the control byte', () => {
+  // It bubbles (not swallow) so the window dispatcher can perform the switch while still
+  // preventing the PTY control byte — see terminal-config.ts.
+  it('bubbles the jump-to-project chord so the PTY never sees the control byte', () => {
     expect(terminalKeyAction(ev({ key: '1', code: 'Digit1', ctrlKey: true }), false, true)).toBe(
-      'swallow'
+      'bubble'
     )
   })
 
