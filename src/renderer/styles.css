@@ -245,6 +245,10 @@ body,
   align-items: center;
   gap: 4px;
   flex: 1;
+  /* Load-bearing (issue #375): a flex item's min-width defaults to `auto`, which resolves against
+     the pill's full content width — so with many tabs the wrapper refuses to shrink and shoves
+     the + past the window edge. Measured: 1280 px / 12 projects, + at x=1382 without this. */
+  min-width: 0;
 }
 .tabbar__tabs {
   display: flex;

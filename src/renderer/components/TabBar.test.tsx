@@ -120,7 +120,7 @@ describe('TabBar caret menu', () => {
 describe('TabBar New-project pin', () => {
   let root: Root
   let host: HTMLElement
-  let onOpenWelcome: ReturnType<typeof vi.fn>
+  let onOpenWelcome: ReturnType<typeof vi.fn<() => void>>
 
   beforeEach(async () => {
     const { TabBar, useProjects } = await load()
