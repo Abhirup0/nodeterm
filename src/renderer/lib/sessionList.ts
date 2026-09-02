@@ -326,6 +326,32 @@ function matches(row: SessionRowVM, needle: string): boolean {
   return hay.includes(needle)
 }
 
+/**
+ * Does the PROJECT itself answer the needle (issue #543)? One level down, a canvas frame already
+ * survives the filter on its own name (`gn.title.toLowerCase().includes(needle)`), but a project
+ * only ever survived if something INSIDE it did — so typing a project's own name made it vanish,
+ * and a project with no sessions could not survive any filter at all. Same rule, one level up.
+ *
+ * `cwd` is included because it is the level's other identity: it is what the sidebar's own row
+ * tooltip shows, and it is already on the object being filtered — matching it costs nothing.
+ *
+ * When the project matches, it comes back with ALL of its sessions: the user typed the
+ * CONTAINER's name, so they asked for the container. A session-level needle still narrows within
+ * every other project, and a session title that matches also matches here.
+ */
+function projectMatches(p: Pick<ProjectInput, 'name' | 'cwd'>, needle: string): boolean {
+  if (!needle) return false
+  return `${p.name} ${p.cwd ?? ''}`.toLowerCase().includes(needle)
+}
+
+/** Project ids whose own name/cwd answers the needle — empty when nothing is being filtered. */
+function projectsMatchingNeedle(projects: ProjectInput[], needle: string): Set<string> {
+  const ids = new Set<string>()
+  if (!needle) return ids
+  for (const p of projects) if (projectMatches(p, needle)) ids.add(p.id)
+  return ids
+}
+
 export function buildSessionList(
   projects: ProjectInput[],
   liveActiveNodes: SessionNodeInput[] | null,
@@ -334,10 +360,14 @@ export function buildSessionList(
   filter: string
 ): SessionGroup[] {
   const needle = filter.trim().toLowerCase()
-  const keep = (r: SessionRowVM): boolean => !needle || matches(r, needle)
+  const nameMatched = projectsMatchingNeedle(projects, needle)
 
   const groups: SessionGroup[] = projects.map((p) => {
     const isActive = p.id === activeProjectId
+    // The project answered the needle itself → it is shown whole (frames included), exactly as
+    // if nothing were being filtered.
+    const projectMatched = nameMatched.has(p.id)
+    const keep = (r: SessionRowVM): boolean => !needle || projectMatched || matches(r, needle)
     const source = isActive && liveActiveNodes ? liveActiveNodes : p.nodes
     const groupNodes = source.filter((n) => n.kind === 'group')
     const groupById = new Map(groupNodes.map((n) => [n.id, n]))
@@ -376,9 +406,12 @@ export function buildSessionList(
         .map(buildBucket)
         .filter((bucket): bucket is GroupBucket => bucket !== null)
       // While filtering, a frame survives if it matches by NAME or still holds anything;
-      // unfiltered, empty frames stay so they remain visible drop targets.
+      // unfiltered, empty frames stay so they remain visible drop targets. A project matched by
+      // its OWN name is shown whole, so its empty frames stay too — same as unfiltered.
       const groupMatches = !!needle && gn.title.toLowerCase().includes(needle)
-      if (needle && !groupMatches && sessions.length === 0 && children.length === 0) return null
+      if (needle && !projectMatched && !groupMatches && sessions.length === 0 && children.length === 0) {
+        return null
+      }
       return { id: gn.id, title: gn.title, color: gn.color, sessions, children }
     }
     const buckets = groupNodes
@@ -405,7 +438,13 @@ export function buildSessionList(
 
   // Store order, NOT active-first: the sidebar mirrors the tab bar (both read the projects
   // array), and hoisting the active project to the top made every click reshuffle the list.
-  return needle ? groups.filter((g) => g.groups.length > 0 || g.ungrouped.length > 0) : groups
+  // A project whose own name/cwd matched survives even with nothing inside it (issue #543) —
+  // that is the case the old "something inside survived" rule could never express.
+  return needle
+    ? groups.filter(
+        (g) => nameMatched.has(g.projectId) || g.groups.length > 0 || g.ungrouped.length > 0
+      )
+    : groups
 }
 
 /** A status section in status-grouping mode: one status group and the sessions in it, flattened
@@ -436,7 +475,12 @@ export function buildStatusList(
   filter: string
 ): StatusSection[] {
   const needle = filter.trim().toLowerCase()
-  const keep = (r: SessionRowVM): boolean => !needle || matches(r, needle)
+  // Status mode drops project walls, so #543's rule is applied PER ROW instead of per group:
+  // a row belonging to a project the needle names is kept whole, exactly as project mode keeps
+  // the whole project.
+  const nameMatched = projectsMatchingNeedle(projects, needle)
+  const keep = (r: SessionRowVM, projectId: string): boolean =>
+    !needle || nameMatched.has(projectId) || matches(r, needle)
 
   // Flatten every project's terminal nodes into status-tagged rows. Canvas sub-group frames are
   // ignored here — status mode is flat by design. The project index rides alongside (not on the
@@ -476,7 +520,7 @@ export function buildStatusList(
       if (seen.has(node.id)) continue
       seen.add(node.id)
       const row = toRow(node, statusById[node.id], p)
-      if (keep(row)) tagged.push({ row, pidx })
+      if (keep(row, p.id)) tagged.push({ row, pidx })
     }
   })
   // A node in `liveActiveNodes` that isn't in any project's persisted set (brand-new, not yet
@@ -490,7 +534,7 @@ export function buildStatusList(
         if (n.kind !== 'terminal' || seen.has(n.id) || ownerById.has(n.id)) continue
         seen.add(n.id)
         const row = toRow(n, statusById[n.id], active)
-        if (keep(row)) tagged.push({ row, pidx: activePidx })
+        if (keep(row, active.id)) tagged.push({ row, pidx: activePidx })
       }
     }
   }

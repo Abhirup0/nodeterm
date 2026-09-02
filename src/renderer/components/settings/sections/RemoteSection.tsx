@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useEntitlement } from '../../../state/entitlement'
 import { useProjects } from '../../../state/projects'
 import { hostShareOptions } from '../../../lib/relayHostShare'
+import { thisMachine } from '../../../lib/machineName'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
@@ -93,8 +94,8 @@ export function RemoteSection({
               <div className="space-y-2">
                 <p className="text-sm text-muted">
                   Sharing <strong className="text-text">{sharedName || 'this project'}</strong> —
-                  the joiner will see this project and can run commands on this Mac. Share this
-                  pairing code with the other device (single use):
+                  the joiner will see this project and can run commands on {thisMachine()}. Share
+                  this pairing code with the other device (single use):
                 </p>
                 <FieldRow
                   label="Pairing code"
@@ -134,7 +135,7 @@ export function RemoteSection({
                 ) : (
                   <p className="text-sm text-muted">
                     Sharing <strong className="text-text">{sharedName || 'this project'}</strong> —
-                    the joiner sees this project and can run commands on this Mac.
+                    the joiner sees this project and can run commands on {thisMachine()}.
                   </p>
                 )}
                 <Button disabled={hostBusy} onClick={() => void startHosting()}>

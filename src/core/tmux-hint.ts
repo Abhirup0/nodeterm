@@ -51,7 +51,8 @@ export function tmuxInstall(
 }
 
 /** Dirs GUI apps routinely miss (they don't inherit the shell PATH) — same reasoning as
- *  findTmux in pty-manager. Checked after the process PATH. */
+ *  findTmux in pty-manager. Checked after the process PATH. POSIX-only: not one of them can exist
+ *  on Windows, so stat'ing all seven per lookup there is pure waste (issue #565). */
 const COMMON_BIN_DIRS = ['/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
 
 /**
@@ -148,14 +149,33 @@ export function bundledTmuxPath(opts: {
   return null
 }
 
-/** Is `name` on the process PATH or in the common bin dirs? `exists` is injected (fs.existsSync
- *  in production) so the lookup stays pure and testable. */
+/**
+ * Is `name` on the process PATH or in the common bin dirs? `exists` is injected (fs.existsSync
+ * in production) so the lookup stays pure and testable, and `platform` is a parameter for the same
+ * reason — the same shape as `tmuxInstall(platform, hasCommand)` above.
+ *
+ * The PATH split used to be a hardcoded ':' (issue #565). On Windows that is not the separator and
+ * every entry carries a drive-letter colon, so `C:\Program Files\Git\cmd` came apart into the
+ * fragments `C` and `\Program Files\Git\cmd` — neither of which is a directory. Latent rather
+ * than observed: the only caller hands this to `tmuxInstall`, which returns null for win32 before
+ * the callback is ever invoked. It is fixed because the rule is already the codebase's
+ * (`exec-path.ts` uses `path.delimiter`) and these were the sites that predate it — not because
+ * something on Windows reaches it today. NOTE for anyone who later makes one: a bare `name` never
+ * resolves on Windows either (`gh` is `gh.exe`); that is `executableCandidates` in exec-path.ts,
+ * and this probe deliberately does not grow a second copy of it.
+ */
 export function findCommand(
   name: string,
   env: Record<string, string | undefined>,
-  exists: (path: string) => boolean
+  exists: (path: string) => boolean,
+  platform: NodeJS.Platform | string = process.platform
 ): boolean {
-  const dirs = [...(env.PATH ? env.PATH.split(':') : []), ...COMMON_BIN_DIRS]
-  return dirs.some((d) => d && exists(`${d}/${name}`))
+  // Not `path.delimiter`: that reports the HOST's separator, and `platform` here is a parameter
+  // precisely so the mapping can be exercised from any OS.
+  const win = platform === 'win32'
+  const sep = win ? '\\' : '/'
+  const entries = env.PATH ? env.PATH.split(win ? ';' : ':') : []
+  const dirs = [...entries, ...(win ? [] : COMMON_BIN_DIRS)]
+  return dirs.some((d) => d && exists(`${d}${sep}${name}`))
 }
 

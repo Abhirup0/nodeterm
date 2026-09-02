@@ -62,3 +62,80 @@ describe('WelcomeScreen — Recently closed session badges (issue #442)', () => 
     expect(onReopen).not.toHaveBeenCalled()
   })
 })
+
+describe('WelcomeScreen — Recently closed filter (issue #506)', () => {
+  let root: Root
+  let host: HTMLElement
+
+  beforeEach(() => {
+    host = document.createElement('div')
+    document.body.appendChild(host)
+    root = createRoot(host)
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+  })
+
+  const render = async (el: React.ReactElement): Promise<void> => {
+    await act(async () => root.render(el))
+  }
+
+  const many = Array.from({ length: 7 }, (_, i) => ({
+    id: `p${i}`,
+    name: i === 3 ? 'dot-github' : `Project ${i}`,
+    cwd: `/repos/p${i}`
+  }))
+
+  const base = {
+    onNewProject: noop,
+    onOpenFolder: noop,
+    onCloneRepo: noop,
+    onConnectSsh: noop
+  }
+
+  const type = async (input: HTMLInputElement, value: string): Promise<void> => {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(input, value)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+
+  it('stays out of the way below the visible-row cap', async () => {
+    await render(<WelcomeScreen {...base} closedProjects={many.slice(0, 6)} />)
+    expect(host.querySelector('.welcome__recent-filter')).toBeNull()
+  })
+
+  it('appears once the list is longer than the cap, and narrows by name', async () => {
+    await render(<WelcomeScreen {...base} closedProjects={many} />)
+    const input = host.querySelector('.welcome__recent-filter') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(host.querySelectorAll('.welcome__recent-item')).toHaveLength(7)
+
+    await type(input, 'dot-git')
+    const rows = host.querySelectorAll('.welcome__recent-name')
+    expect(Array.from(rows).map((r) => r.textContent)).toEqual(['dot-github'])
+  })
+
+  it('narrows by folder too — the row already renders it as the title', async () => {
+    await render(<WelcomeScreen {...base} closedProjects={many} />)
+    const input = host.querySelector('.welcome__recent-filter') as HTMLInputElement
+    await type(input, '/repos/p5')
+    expect(host.querySelectorAll('.welcome__recent-item')).toHaveLength(1)
+  })
+
+  it('says nothing matched instead of rendering an empty list', async () => {
+    await render(<WelcomeScreen {...base} closedProjects={many} />)
+    const input = host.querySelector('.welcome__recent-filter') as HTMLInputElement
+    await type(input, 'zzzz')
+    expect(host.querySelectorAll('.welcome__recent-item')).toHaveLength(0)
+    expect(host.querySelector('.welcome__recent-empty')!.textContent).toContain('zzzz')
+  })
+
+  it('the section itself stays hidden when there are no closed projects at all', async () => {
+    await render(<WelcomeScreen {...base} closedProjects={[]} />)
+    expect(host.querySelector('.welcome__recent')).toBeNull()
+  })
+})

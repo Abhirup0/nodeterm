@@ -489,73 +489,80 @@ export function UsageIndicator({
               <span className="usage-popover__ago">Updated {formatTimeAgo(updatedAt)}</span>
             )}
           </div>
-          {/* The local Claude section belongs to a LOCAL project only. On an SSH project the
-              remote blocks below carry the same limits, and rendering both would print the
-              host's numbers twice under two different headings. */}
-          {scope.kind === 'local' &&
-            (scoped.accounts.length > 0 && claudeUsage ? (
-              <>
-                <AccountUsageBlock
-                  mode={percentMode}
-                  label={systemAccountDisplay(systemLabelSetting, claudeUsage.email)}
-                  // Avoid printing the email twice when it's already the display label.
-                  email={systemLabelSetting.trim() ? (claudeUsage.email ?? undefined) : undefined}
-                  u={claudeUsage}
-                  {...rowMark(null)}
-                />
-                {scoped.accounts.map((a) => (
+          {/* Issue #503: the account blocks SCROLL, the heading and the footer action do not.
+              Each account is a tall block (name + Session/Weekly/Opus meters), so past about
+              four accounts the popover grew off the top of the window — the first account's
+              header and meter were clipped with no way to reach them. Same rule as the session
+              memory panel's row list: every row is rendered, the list scrolls. */}
+          <div className="usage-popover__body">
+            {/* The local Claude section belongs to a LOCAL project only. On an SSH project the
+                remote blocks below carry the same limits, and rendering both would print the
+                host's numbers twice under two different headings. */}
+            {scope.kind === 'local' &&
+              (scoped.accounts.length > 0 && claudeUsage ? (
+                <>
                   <AccountUsageBlock
-                    key={a.id}
                     mode={percentMode}
-                    label={a.label}
-                    email={a.email}
-                    u={acctUsage[a.id] ?? null}
-                    {...rowMark(a.id)}
+                    label={systemAccountDisplay(systemLabelSetting, claudeUsage.email)}
+                    // Avoid printing the email twice when it's already the display label.
+                    email={systemLabelSetting.trim() ? (claudeUsage.email ?? undefined) : undefined}
+                    u={claudeUsage}
+                    {...rowMark(null)}
                   />
-                ))}
-              </>
-            ) : (
-              <>
-                {/* Claude's rows are bare when it is the only provider; once others share the
-                    panel they need a heading of their own to stay attributable. */}
-                {enabled.length > 0 && limits.length > 0 && (
-                  <div className="usage-account__label">Claude</div>
-                )}
-                {limits.map((l) => (
-                  <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
-                ))}
-                {!hasData && <div className="usage-popover__empty">No usage data.</div>}
-                {claudeUsage?.email && (
-                  <div className="usage-account">
-                    <div className="usage-account__label">Claude Account</div>
-                    <div className="usage-account__email">{claudeUsage.email}</div>
-                  </div>
-                )}
-              </>
+                  {scoped.accounts.map((a) => (
+                    <AccountUsageBlock
+                      key={a.id}
+                      mode={percentMode}
+                      label={a.label}
+                      email={a.email}
+                      u={acctUsage[a.id] ?? null}
+                      {...rowMark(a.id)}
+                    />
+                  ))}
+                </>
+              ) : (
+                <>
+                  {/* Claude's rows are bare when it is the only provider; once others share the
+                      panel they need a heading of their own to stay attributable. */}
+                  {enabled.length > 0 && limits.length > 0 && (
+                    <div className="usage-account__label">Claude</div>
+                  )}
+                  {limits.map((l) => (
+                    <LimitRow key={limitKey(l)} limit={l} mode={percentMode} />
+                  ))}
+                  {!hasData && <div className="usage-popover__empty">No usage data.</div>}
+                  {claudeUsage?.email && (
+                    <div className="usage-account">
+                      <div className="usage-account__label">Claude Account</div>
+                      <div className="usage-account__email">{claudeUsage.email}</div>
+                    </div>
+                  )}
+                </>
+              ))}
+            {/* On an SSH project these are the whole panel; the host badge is what says the numbers
+                were read somewhere other than this machine. */}
+            {/* The same offer on an SSH project's rows — scoped as ever: only the host's system
+                identity and THIS host's managed accounts are actionable (accountRowAction). */}
+            {visibleRemote.map((r) => (
+              <RemoteUsageBlock
+                key={`${r.hostKey}#${r.accountId ?? ''}`}
+                row={r}
+                mode={percentMode}
+                {...rowMark(r.accountId)}
+              />
             ))}
-          {/* On an SSH project these are the whole panel; the host badge is what says the numbers
-              were read somewhere other than this machine. */}
-          {/* The same offer on an SSH project's rows — scoped as ever: only the host's system
-              identity and THIS host's managed accounts are actionable (accountRowAction). */}
-          {visibleRemote.map((r) => (
-            <RemoteUsageBlock
-              key={`${r.hostKey}#${r.accountId ?? ''}`}
-              row={r}
-              mode={percentMode}
-              {...rowMark(r.accountId)}
-            />
-          ))}
-          {scope.kind === 'ssh' && visibleRemote.length === 0 && (
-            <div className="usage-popover__empty">
-              No usage from this host yet — it is read once the project connects.
-            </div>
-          )}
-          {/* U8 (owed from PR 7): Codex emits one row per account, all `provider: 'codex'`.
-              Key on provider+accountId so each account renders distinctly, and reduce true
-              duplicates (two settings entries → the same underlying account) to one row. */}
-          {dedupeProviderRows(visibleProviders).map((p) => (
-            <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
-          ))}
+            {scope.kind === 'ssh' && visibleRemote.length === 0 && (
+              <div className="usage-popover__empty">
+                No usage from this host yet — it is read once the project connects.
+              </div>
+            )}
+            {/* U8 (owed from PR 7): Codex emits one row per account, all `provider: 'codex'`.
+                Key on provider+accountId so each account renders distinctly, and reduce true
+                duplicates (two settings entries → the same underlying account) to one row. */}
+            {dedupeProviderRows(visibleProviders).map((p) => (
+              <ProviderBlock key={providerRowKey(p)} u={p} mode={percentMode} />
+            ))}
+          </div>
           {/* Issue #420 — "Switch account" where the limit is displayed: opens a terminal
               running the SYSTEM-scoped `claude /login` (createSystemLoginNode), so picking the
               other org is one click from the panel that said you need to. Nothing changes until

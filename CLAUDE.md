@@ -40,6 +40,18 @@ means — and what you may assume when writing a feature — is three tiers, not
   never assume `/` or a unix socket. When a test can only run on one platform, gate it with
   `it.skipIf(process.platform === 'win32')` (or the inverse) and say why — never let it fail the
   cross-platform CI. The `windows-latest` CI job runs the platform-dependent suites on real Windows.
+- **Line endings are decided by `.gitattributes` (`* text=auto eol=lf`), not by each contributor's
+  git config.** Without it `text`/`eol` are unspecified and Git for Windows' default
+  `core.autocrlf=true` gives every Windows clone CRLF working files — so a test that reads a
+  checked-in file and slices on a `\n`-bearing literal (`CSS.indexOf('}\n}')`,
+  `indexOf('\n}\n')`, `indexOf('\n}')`) matched nothing and failed on a checkout with ZERO local
+  changes (issue #578). Two suites did; one reported 25 theme tokens missing that were all present,
+  which reads like a regression rather than a broken slice. Attributes only apply on re-checkout
+  (`git add --renormalize .` for a tree cloned earlier), so the readers ALSO normalize —
+  `readFileSync(f, 'utf8').replace(/\r\n/g, '\n')` — and `src/shared/line-endings.guard.test.ts`
+  fails on any such read that does not. `*.bat`/`*.cmd`/`*.ps1` are the deliberate exception and
+  keep CRLF: cmd.exe is not reliably tolerant of LF, and those are the files a Windows contributor
+  runs before anything else works.
 
 ## Commands
 
@@ -788,7 +800,16 @@ session.
   layouts still copy. A copy chord is **always swallowed**, selection or not: letting Ctrl+Shift+C
   fall through would reach the pty as `\x03` (SIGINT). Ctrl+Insert exists because Chromium reserves
   Ctrl+Shift+C for the inspector and a page cannot `preventDefault()` it — which is where Server
-  Edition users land. Plain **Ctrl+C** is never intercepted. To select in **xterm** instead of tmux
+  Edition users land. Plain **Ctrl+C** is never intercepted.
+  **PASTE is the platform's, never ours** (`isPasteShortcut` → the `'native'` action): we own no
+  paste path — ⌘V on mac reaches the Edit menu's `{role:'paste'}`, whose `paste` event xterm frames
+  as a bracketed paste. All the terminal does is stop CANCELLING the chord, and that is a
+  **Windows-only** claim: xterm's keymap turns Ctrl+V into `\x16` with `cancel`, which suppressed
+  Chromium's paste command *and* the Ctrl+V accelerator behind it, so Ctrl+V pasted nothing at all
+  there (issue #562). Off Windows the chord stays `\x16` on purpose — mac pastes with ⌘V, Linux
+  with Ctrl+Shift+V, and Ctrl+V is a key vim/readline users really send. Ctrl+Shift+V and
+  Shift+Insert need no branch: measured against `evaluateKeyboardEvent`, xterm produces neither a
+  key nor a cancel for them, so the platform already pastes. To select in **xterm** instead of tmux
   (or inside an app that grabs the mouse, like vim/htop), hold **Option** (mac —
   xterm's `macOptionClickForcesSelection`) or **Shift** (Linux/Windows) while dragging.
   **Copying now says so**: the OSC 52 handler floats a transient `Copied N lines` pill over the
@@ -1211,7 +1232,24 @@ else, and its context links must keep classifying across restarts).
   *healed*, not preserved, on both the local and the SSH path). The per-event **`matcher`** the grok
   installer needs is why events are typed `ManagedHookEvent` (`string | {event, matcher}`): grok's
   tool matcher is a REGEX and must be `.*` — a bare `*` is invalid and silently stops tool events
-  firing. Plain-string events keep their byte-identical output for every other agent. **Both
+  firing. Plain-string events keep their byte-identical output for every other agent.
+  **Codex is the one agent whose hook command is NOT a POSIX one-liner on Windows** (issue #567):
+  it builds the command as `cmd.exe /C <string>` (`codex-rs/hooks/src/engine/command_runner.rs`,
+  rust-v0.151.0) unless the session has a shell configured, which a default Windows install has
+  not — so `if [ -x '…' ]; then …; fi` answered `-x was unexpected at this time.` and **exit 1 on
+  every event**, for the life of the node. Claude is fine there only because Claude Code runs its
+  hooks through Git Bash. The fix is a batch entry point (`codex-hook.cmd`,
+  `codex-windows-wrapper.ts`) written beside `codex.sh` and named by `buildManagedCommand`'s win32
+  branch; it **locates a POSIX shell and runs the same script** — deliberately not a second
+  implementation of the hook protocol, which would be two copies of the POST/failover/token/
+  permission-poll to drift. Three rules it must keep: pass stdin through, DRAIN stdin on every bail
+  (codex writes the payload there; #186/#187), and exit 0 when there is no shell or no script.
+  Two traps around it: `buildManagedCommand`'s `platform` is the platform of the machine that will
+  RUN codex, so `RemoteHooks.installCodexRemote` passes POSIX explicitly (a Windows desktop must not
+  put a `.cmd` command on a Linux host); and `isManagedCommand` matches **both** leaves
+  (`codex.sh` AND `codex-hook.cmd`) on every platform — matching only the local one would leave a
+  pre-fix entry unrecognized, so the fresh one is appended beside it, which is #558 on a second
+  file. Matching both is what REPAIRS an existing Windows install at the next launch. **Both
   sides of the managed-entry match go through `normalizeHookCommand`** — the marker used to be
   folded to `/` while the stored command was compared raw, so on Windows nodeterm never recognized
   its OWN entry and appended a fresh set every launch (#558: nine copies of nine events, nine
@@ -2905,6 +2943,18 @@ sessions is a hazard whatever kills it; this removes the hazard, not a proven ca
 
 
 - Code comments, UI strings, and identifiers are all in **English**. Match this when editing.
+- **The local machine is not a Mac.** Every user-visible string naming it goes through
+  `renderer/lib/machineName.ts` (`thisMachine()` / `thisMachineCap()` / `machineNoun()` →
+  "this Mac" / "this PC" / "this computer"). A **browser tab always gets the neutral word**: the
+  license, seats and sessions it describes belong to the SERVER, and the viewer's `navigator` says
+  nothing about that machine's OS — a confident wrong noun is worse than a plain one. Issue #563
+  found ~30 such strings, and the damage was not in Accounts but in the copy people must TRUST:
+  "This Mac is not authorized on this license" and "a teammate on a seat can run commands on this
+  Mac". `machineName.guard.test.ts` scans non-comment lines in `src/renderer` + `src/shared` and
+  fails on a new one, with a named-and-reasoned exemption list (the ptmx-limit banner, whose
+  `kern.tty.ptmx_max` really is macOS; the onboarding notch step, which only exists there).
+  `@shared` code cannot ask the renderer, so it takes the machine word as a PARAMETER defaulting
+  to the neutral one (`describeGrant(peer, machine)`) rather than hard-coding a brand.
 - Path aliases: `@shared/*`, `@renderer/*` (see the tsconfig files / vite config).
 - **Subagent model:** when dispatching subagents (implementers, reviewers, etc. — e.g. in
   the subagent-driven-development workflow), use the latest model, **Opus 5**

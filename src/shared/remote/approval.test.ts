@@ -7,7 +7,7 @@ describe('peerApprovalView', () => {
     const view = peerApprovalView({ id: 'peer-1', sas: '12-34-56', label: "Ayşe's Mac" })
     // The consent sentence the human must read is derived from this label via describeGrant.
     expect(view.peerLabel).toBe("Ayşe's Mac")
-    expect(describeGrant(view.peerLabel)).toContain('run commands on this Mac')
+    expect(describeGrant(view.peerLabel)).toContain('run commands on this computer')
     // The SAS both humans compare is in the dialog body verbatim.
     expect(view.message).toContain('12-34-56')
     // Confirm acts on THIS pending peer's id (relayHost.confirm(id)).

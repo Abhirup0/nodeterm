@@ -55,6 +55,28 @@ describe('findCommand', () => {
   it('tolerates a missing PATH', () => {
     expect(findCommand('brew', {}, (p) => p === '/usr/local/bin/brew')).toBe(true)
   })
+
+  // Issue #565: the split was a hardcoded ':', so on Windows every entry came apart at its drive
+  // letter. Latent (tmuxInstall answers null for win32 before this callback runs), but wrong.
+  it('win32: splits PATH on ";" and keeps drive-lettered entries whole', () => {
+    const seen: string[] = []
+    const exists = (p: string) => (seen.push(p), false)
+    findCommand('git', { PATH: 'C:\\Program Files\\Git\\cmd;C:\\Windows\\System32' }, exists, 'win32')
+    expect(seen).toEqual(['C:\\Program Files\\Git\\cmd\\git', 'C:\\Windows\\System32\\git'])
+    // The old ':' split produced these fragments; neither is a directory.
+    expect(seen.some((p) => p.startsWith('C/') || p.startsWith('C\\g'))).toBe(false)
+  })
+
+  it('win32: never stats the POSIX common bin dirs — not one of them can exist there', () => {
+    const seen: string[] = []
+    findCommand('brew', {}, (p) => (seen.push(p), false), 'win32')
+    expect(seen).toEqual([])
+  })
+
+  it('posix: an explicit platform behaves like the default', () => {
+    expect(findCommand('brew', { PATH: '/usr/bin' }, (p) => p === '/usr/bin/brew', 'darwin')).toBe(true)
+    expect(findCommand('brew', {}, (p) => p === '/opt/homebrew/bin/brew', 'linux')).toBe(true)
+  })
 })
 
 describe('tmuxCandidatePaths / findFixedTmux', () => {

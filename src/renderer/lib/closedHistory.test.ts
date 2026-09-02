@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { buildClosedSessionEntries, stateToReopenSnapshot, mergeClosedHistory } from './closedHistory'
+import {
+  buildClosedSessionEntries,
+  filterClosedProjects,
+  mergeClosedHistory,
+  recentlyClosedProjects,
+  stateToReopenSnapshot
+} from './closedHistory'
 import type { CanvasNode } from '@renderer/state/workspace'
 import type { ClosedSessionEntry, Project } from '@shared/types'
 
@@ -134,5 +140,59 @@ describe('mergeClosedHistory', () => {
   it('excludes an unavailable closed project', () => {
     const rows = mergeClosedHistory([proj({ id: 'a', closed: true, unavailable: true, closedAt: 5 })])
     expect(rows).toHaveLength(0)
+  })
+})
+
+describe('recentlyClosedProjects — the heading promises recency (issue #506)', () => {
+  type Probe = { id: string; name: string; closed?: boolean; unavailable?: boolean; closedAt?: number }
+  const p = (id: string, over: Partial<Probe> = {}): Probe => ({ id, name: id, ...over })
+
+  it('orders newest-closed first, NOT tab order', () => {
+    // Tab order here is old, new, mid — the project shut most recently must lead regardless.
+    const rows = recentlyClosedProjects([
+      p('old', { closed: true, closedAt: 10 }),
+      p('new', { closed: true, closedAt: 300 }),
+      p('mid', { closed: true, closedAt: 100 })
+    ])
+    expect(rows.map((r) => r.id)).toEqual(['new', 'mid', 'old'])
+  })
+
+  it('drops open and unavailable projects', () => {
+    const rows = recentlyClosedProjects([
+      p('open'),
+      p('gone', { closed: true, unavailable: true, closedAt: 999 }),
+      p('kept', { closed: true, closedAt: 1 })
+    ])
+    expect(rows.map((r) => r.id)).toEqual(['kept'])
+  })
+
+  it('sorts a project closed before the field existed last, never as NaN', () => {
+    const rows = recentlyClosedProjects([p('legacy', { closed: true }), p('known', { closed: true, closedAt: 5 })])
+    expect(rows.map((r) => r.id)).toEqual(['known', 'legacy'])
+  })
+})
+
+describe('filterClosedProjects', () => {
+  const rows = [
+    { id: 'a', name: 'Website', cwd: '/repos/site' },
+    { id: 'b', name: 'API', cwd: '/repos/api-server' }
+  ]
+
+  it('matches the project name', () => {
+    expect(filterClosedProjects(rows, 'web').map((r) => r.id)).toEqual(['a'])
+  })
+
+  it('matches the folder, which is what the row already shows as its title', () => {
+    expect(filterClosedProjects(rows, 'api-server').map((r) => r.id)).toEqual(['b'])
+  })
+
+  it('is case-insensitive and returns everything for an empty or blank query', () => {
+    expect(filterClosedProjects(rows, 'WEBSITE').map((r) => r.id)).toEqual(['a'])
+    expect(filterClosedProjects(rows, '')).toHaveLength(2)
+    expect(filterClosedProjects(rows, '   ')).toHaveLength(2)
+  })
+
+  it('returns nothing when nothing matches (the caller says so, it does not fall back)', () => {
+    expect(filterClosedProjects(rows, 'zzz')).toHaveLength(0)
   })
 })
