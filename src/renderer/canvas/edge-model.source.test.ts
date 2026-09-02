@@ -53,4 +53,31 @@ describe('canvas edge model (source pins)', () => {
   it('an armed node with no dep rope heals at project load, not only where --after ran', () => {
     expect(src).toContain('missingDepRopes(')
   })
+
+  it('undo and redo heal the dep ropes their own history step cannot restore', () => {
+    // Deleting a waiting rope writes BOTH the node (disarmDepsFor — snapshotted into the undo
+    // stack) and the control edges (not snapshotted). So a ⌘Z that re-arms a node would otherwise
+    // leave it waiting with no arrow saying what for until the next project load. Same pair-keyed,
+    // idempotent healer the load site uses: a history step that changes nothing adds nothing.
+    expect((src.match(/missingDepRopes\(/g) ?? []).length).toBe(3) // project load + undo + redo
+    const undoBody = src.slice(src.indexOf('const undo = useCallback'), src.indexOf('const redo = useCallback'))
+    const redoBody = src.slice(src.indexOf('const redo = useCallback'), src.indexOf('// ---- canvas interactions ----'))
+    expect(undoBody).toContain('missingDepRopes(prev, es)')
+    expect(redoBody).toContain('missingDepRopes(next, es)')
+  })
+
+  it('the composed edge labels are pinned — the sentence the user reads names what ⌫ does', () => {
+    expect(src).toContain('`${WAIT_LABEL} · ⌫ to stop waiting`')
+    expect(src).toContain("'⇄ context · ⌫ to remove'")
+    expect(src).toContain("'⌫ to remove'")
+  })
+
+  it("verify's panel arms through the same dep ropes, and --after dedupes its ids", () => {
+    // The two ruled deviations from `ropeDeps(ids, after)`: the reviewers wait on the target and
+    // the judge waits on the reviewers, both ids that exist only in that tick.
+    expect(src).toContain('ropeDeps([rid], [targetId])')
+    expect(src).toContain('ropeDeps([judge.id], reviewerIds)')
+    // `--after a,a` is one wait: two dep ropes for one pair would collide on one rope id.
+    expect(src).toContain("[...new Set((args.after ?? '').split(',').map((s) => s.trim()).filter(Boolean))]")
+  })
 })

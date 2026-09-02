@@ -928,8 +928,10 @@ session.
 - **trigger** (`TriggerNode.tsx`) — a canvas-owned schedule (cron / interval / once) that
   delivers a payload into a connected terminal/agent node when due (issue #493 — the inverse of
   the ephemeral loop/cron cards, which visualize AGENT-initiated recurrence). The card shows the
-  schedule + next-run countdown, the target (a derived, never-persisted edge — same rule as the
-  pending-launch dep edges), the payload, an honest ARMED/DISARMED/CHANGED/SET-UP chip with the
+  schedule + next-run countdown, the target (a derived, never-persisted edge — the
+  pending-launch dep edge is NO longer one: since the 2026-09-02 edge model it is a persisted rope,
+  `ctrl-<dep>-<node>`, whose dashed ⏳ LOOK is what is derived), the payload, an honest
+  ARMED/DISARMED/CHANGED/SET-UP chip with the
   "definitions travel with the repo, consent never does" narrative, Run-now, and the last runs
   (fired / delivered-late / queued / missed / failed / expired). Arming passes a ConfirmDialog
   showing the exact schedule+payload+target being consented to; all decisions are the pure,
@@ -2444,6 +2446,9 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
   connections") hides its subagent/loop cards AND every edge touching that node — display only:
   the links still authorise reads and an `--after` still waits. See the `--after` bullet under
   Canvas control for the rope model the eye hides.
+  **Surfaces:** Desktop + Server Edition are identical (pure renderer + React Flow internals — no
+  new IPC or bridge member); the kanban board is N/A (it shows cards, never edges); mobile is N/A
+  (the transport protocol carries no edges).
 - **Undo/redo**: debounced snapshot of the nodes array on settle (drag/edit), `pastRef`/
   `futureRef` stacks, ⌘Z / ⌘⇧Z + dock buttons. History resets per project load; skipped
   while typing in inputs/terminals.

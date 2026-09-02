@@ -2989,9 +2989,18 @@ export function Canvas() {
     committedRef.current = prev
     nodesRef.current = prev
     setNodes(prev)
+    // Ropes are not in the history stack (they live in `controlEdges`), but the arming a rope
+    // explains IS — `disarmDepsFor` writes both, and only the node write is snapshotted. So a step
+    // that re-arms a node would leave it waiting with no arrow saying what for until the next
+    // project load. Same pair-keyed, idempotent healer the load site uses: a step that re-arms
+    // nothing adds nothing, and a rope the step did not remove is never duplicated.
+    setControlEdges((es) => {
+      const add = missingDepRopes(prev, es)
+      return add.length ? [...es, ...add.map((r) => ropeEdge(r.id, r.source, r.target))] : es
+    })
     bumpDirty() // an undo is an edit: it must count toward the in-flight-save generation too
     bumpHist((v) => v + 1)
-  }, [setNodes, bumpDirty])
+  }, [setNodes, setControlEdges, bumpDirty])
 
   const redo = useCallback(() => {
     if (!futureRef.current.length) return
@@ -3000,9 +3009,18 @@ export function Canvas() {
     committedRef.current = next
     nodesRef.current = next
     setNodes(next)
+    // Ropes are not in the history stack (they live in `controlEdges`), but the arming a rope
+    // explains IS — `disarmDepsFor` writes both, and only the node write is snapshotted. So a step
+    // that re-arms a node would leave it waiting with no arrow saying what for until the next
+    // project load. Same pair-keyed, idempotent healer the load site uses: a step that re-arms
+    // nothing adds nothing, and a rope the step did not remove is never duplicated.
+    setControlEdges((es) => {
+      const add = missingDepRopes(next, es)
+      return add.length ? [...es, ...add.map((r) => ropeEdge(r.id, r.source, r.target))] : es
+    })
     bumpDirty() // a redo is an edit: same reasoning as undo
     bumpHist((v) => v + 1)
-  }, [setNodes, bumpDirty])
+  }, [setNodes, setControlEdges, bumpDirty])
 
   // ---- canvas interactions ----
 

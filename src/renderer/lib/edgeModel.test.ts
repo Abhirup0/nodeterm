@@ -7,6 +7,7 @@ import {
   missingDepRopes,
   ropeInfoOf,
   ropeVisual,
+  WAIT_LABEL,
   type RopeNodeInfo
 } from './edgeModel'
 
@@ -14,6 +15,15 @@ const infoOf =
   (m: Record<string, RopeNodeInfo>) =>
   (id: string): RopeNodeInfo | undefined =>
     m[id]
+
+describe('WAIT_LABEL', () => {
+  it('is the one wording the waiting rope and its selected removal hint are both composed from', () => {
+    // Canvas renders it bare while the rope is idle and as `${WAIT_LABEL} · ⌫ to stop waiting`
+    // while it is selected, so the two sentences cannot drift apart (pinned in
+    // canvas/edge-model.source.test.ts).
+    expect(WAIT_LABEL).toBe('⏳ waits for')
+  })
+})
 
 describe('ropeVisual — one rope, its look derived from the target\'s pendingLaunch', () => {
   it('a rope whose target is still waiting on its source is WAITING', () => {
