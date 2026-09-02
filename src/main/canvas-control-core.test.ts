@@ -640,6 +640,15 @@ describe('open-project + --project docs land with the dispatch (issue #338, spec
     }
   })
 
+  it('tells the agent that opened nodes AND --after stations are already linked — nothing to `link`', () => {
+    for (const [name, body] of bodies) {
+      expect(body, name).toMatch(/roped to each (listed )?station/)
+      expect(body, name).toMatch(/dashed while it waits/)
+      expect(body, name).toMatch(/already\s+linked/)
+      expect(body, name).toMatch(/nothing to `link`/)
+    }
+  })
+
   it('the orchestration recipe gains the multi-repo pattern', () => {
     for (const [name, body] of bodies) {
       expect(body, name).toContain('one project per repository')

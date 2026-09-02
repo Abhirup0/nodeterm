@@ -313,11 +313,12 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     `- \`open-agent --agent ${agentChoices} [--count N] [--cwd P] [--prompt T | --prompt-file F] [--model M] [--group <id>] [--after <id,id>] [--project <id>]\` — open`,
     '  any agent CLI. `--group` parents the node(s) into a group frame; a worktree-bound group also',
     '  hands its worktree path down as the cwd. `--after <id,id>` opens the node ARMED: it does not',
-    '  start until every listed station has finished a turn SUCCESSFULLY, and is context-linked to',
-    '  them so it can read their work when it wakes — use it for "B needs what A produced" instead',
-    '  of polling. A station whose turn ended on an API error does NOT release its dependents even',
-    '  though it is idle (`list` marks it LAST TURN ERRORED); nudge or retry it, or run the armed',
-    '  node yourself. Only',
+    '  start until every listed station has finished a turn SUCCESSFULLY. It is',
+    '  roped to each listed station (one edge, dashed while it waits, solid once it runs) and can read',
+    '  their work with get-linked-context when it wakes — nothing to `link`. Use it for "B needs what',
+    '  A produced" instead of polling. A station whose turn ended on an API error does NOT release its',
+    '  dependents even though it is idle (`list` marks it LAST TURN ERRORED); nudge or retry it, or',
+    '  run the armed node yourself. Only',
     `  status-reporting agent nodes (${statusAgents}, or custom agents based on them) may be waited on; a plain terminal never`,
     '  reports finishing, so waiting on one is refused. `--project <id>` opens the node(s) in another',
     '  project instead of yours. It accepts exactly two things — any other id is refused: your OWN',
@@ -368,8 +369,8 @@ export function buildCanvasControlInstructions(shimPath: string): string {
     '  arrange across frames in one call); arranging a frame\'s children also shrinks the frame to fit.',
     '- `link --to <id,id> [--from <id>]` — context-link nodes so each can READ the other\'s transcript',
     '  on demand (nodeterm linked-context CLI). `--from` defaults to you; nothing is pushed into the',
-    '  linked sessions. Agent sessions you open are linked to you automatically — use `link` for nodes',
-    '  you did not open, or to link two OTHER nodes together.',
+    '  linked sessions. Agent sessions you open, and the stations you name in `--after`, are already',
+    '  linked — nothing to `link`. Use `link` only for nodes you did not open, or to link two OTHER nodes.',
     '- `verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--synthesis off]` — open a',
     '  review panel over that node\'s work: one reviewer per lens, each armed behind the target and linked',
     '  to it, plus a judge armed behind the panel that merges the findings into one verdict. Reviewers are',
@@ -712,8 +713,9 @@ Verbs:
   hands its worktree path down as the cwd.
   \`--after <id,id>\` opens the node **armed**: it does NOT start yet, and launches itself once
   every listed station has finished a turn successfully — that is how you express "B needs what A produces" without
-  sitting in a poll loop. The armed node is also context-linked to each station it waits on, so
-  it can read their work the moment it wakes. Only agent nodes that report status
+  sitting in a poll loop. The armed node is roped to each listed station (one edge,
+  dashed while it waits, solid once it runs) and can read their work with get-linked-context
+  the moment it wakes — nothing to \`link\`. Only agent nodes that report status
   (${statusAgents}, or custom agents based on them) can be waited on — waiting on a plain terminal is refused, because a
   plain terminal never reports finishing and the node would hang forever. Note the semantics:
   "idle" is the end of a station's TURN, not proof its whole job is done — right for a station
@@ -795,8 +797,9 @@ Verbs:
 - \`link --to <id,id> [--from <id>]\` — context-link nodes, so each can READ the other's
   transcript on demand with the get-linked-context skill. \`--from\` defaults to you. Nothing is
   pushed into the linked sessions — reading is on demand, so linking never interrupts anyone.
-  Agent sessions you open (\`open-claude\`/\`open-agent\`/\`spawn-team\`) are linked to you
-  automatically; use \`link\` for nodes you did not open, or to link two OTHER nodes together.
+  Agent sessions you open (\`open-claude\`/\`open-agent\`/\`spawn-team\`) and the stations you name in
+  \`--after\` are already linked — nothing to \`link\`. Use \`link\` only for nodes you did not open,
+  or to link two OTHER nodes together.
 - \`verify --node <id> [--lenses correctness,security,tests] [--focus "..."] [--agent <id>] [--synthesis off] [--label L]\` —
   open a review PANEL over that node's work: one reviewer per lens, each armed behind the target
   (they start when it goes idle) and linked to it so they can read what it actually did, plus a
