@@ -4,6 +4,7 @@ import { useDialogStack } from './dialog-stack'
 import { useEntitlement } from '../state/entitlement'
 import { useProjects } from '../state/projects'
 import { hostShareOptions } from '../lib/relayHostShare'
+import { thisMachine } from '../lib/machineName'
 import { Button } from '@renderer/ui/Button'
 import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
@@ -104,7 +105,8 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
             <div className="remote-dialog__block">
               <p className="remote-dialog__hint">
                 Sharing <strong>{sharedName || 'this project'}</strong> — the joiner will see this
-                project and can run commands on this Mac. Share this pairing code (single use):
+                project and can run commands on {thisMachine()}. Share this pairing code (single
+                use):
               </p>
               <Input
                 className="w-full"
@@ -137,7 +139,7 @@ export function RemoteAccessDialog({ onClose }: { onClose: () => void }): React.
               ) : (
                 <p className="remote-dialog__hint">
                   Sharing <strong>{sharedName || 'this project'}</strong> — the joiner sees this
-                  project and can run commands on this Mac.
+                  project and can run commands on {thisMachine()}.
                 </p>
               )}
               <Button disabled={hostBusy} onClick={() => void startHosting()}>

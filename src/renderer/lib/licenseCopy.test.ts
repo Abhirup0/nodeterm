@@ -26,11 +26,11 @@ const keygen = (over: Partial<LicenseDetail> = {}): LicenseDetail => ({
 describe('licenseSentence — a keygen license that read cleanly', () => {
   it('reports usage against the cap and names phones as devices', () => {
     const s = licenseSentence(keygen({ used: 2, seats: 3 }))
-    expect(s).toBe('2 of 3 devices in use — this Mac and each paired phone counts as a device.')
+    expect(s).toBe('2 of 3 devices in use — this computer and each paired phone counts as a device.')
     // The numbers are the DATA's, not a template that happens to read well: a swapped pair or a
     // hardcoded cap would still match a looser assertion.
     expect(licenseSentence(keygen({ used: 1, seats: 5 }))).toBe(
-      '1 of 5 devices in use — this Mac and each paired phone counts as a device.'
+      '1 of 5 devices in use — this computer and each paired phone counts as a device.'
     )
   })
 
@@ -62,7 +62,7 @@ describe('licenseSentence — sources that have no key and no device count', () 
   it('says an App Store subscription bridged Pro here, and prints no counts', () => {
     const s = licenseSentence({ key: null, used: 0, seats: 0, source: 'apple', error: null })
     expect(s).toBe(
-      'Pro on this Mac comes from the App Store subscription on your paired phone, so there is no license key or device count to show here.'
+      'Pro on this computer comes from the App Store subscription on your paired phone, so there is no license key or device count to show here.'
     )
     // The zeros are "not applicable", not a measurement. Rendering them here is the exact
     // misdirection this branch exists to prevent.
@@ -106,7 +106,7 @@ describe('licenseSentence — a read that FAILED', () => {
   it('does not promise Pro is unaffected when the server said the license is inactive', () => {
     const s = licenseSentence({ key: null, used: 0, seats: 0, source: null, error: 'inactive' })
     expect(s).toBe(
-      'This license is not active, so there is no key or device count to show — and Pro on this Mac will stop when its current entitlement expires.'
+      'This license is not active, so there is no key or device count to show — and Pro on this computer will stop when its current entitlement expires.'
     )
     // A suspended/refunded license DOES drop Pro at the next refresh — the old shared sentence
     // told that user the opposite, in the one place they came to find out.
@@ -114,10 +114,10 @@ describe('licenseSentence — a read that FAILED', () => {
     expect(s).not.toContain('0 of 0')
   })
 
-  it('does not promise Pro is unaffected when this Mac was refused', () => {
+  it('does not promise Pro is unaffected when this machine was refused', () => {
     const s = licenseSentence({ key: null, used: 0, seats: 0, source: null, error: 'unauthorized' })
     expect(s).toBe(
-      'This Mac is not authorized on this license, so the key and device count are unavailable — and Pro here may stop when its current entitlement expires.'
+      'This computer is not authorized on this license, so the key and device count are unavailable — and Pro here may stop when its current entitlement expires.'
     )
     expect(s).not.toContain('unaffected')
     // "may", not "will": a later refresh can re-mint. Overstating is the other half of the lie.
@@ -234,7 +234,7 @@ describe('canUseKeyElsewhere', () => {
 
   it('is false AT the cap — the activation it invites would be refused', () => {
     // This line used to render under "All 3 devices are in use": we told the user to go and paste
-    // the key on another Mac, where the server answers seat_limit. Advice that cannot work.
+    // the key on another machine, where the server answers seat_limit. Advice that cannot work.
     expect(canUseKeyElsewhere(keygen({ used: 3, seats: 3 }))).toBe(false)
   })
 
@@ -286,7 +286,7 @@ describe('releaseFailureSentence', () => {
 
   it('states that nothing was released when the server ANSWERED and refused', () => {
     expect(releaseFailureSentence('unauthorized')).toBe(
-      'Could not release the other devices — this Mac is not authorized on this license. Nothing was released.'
+      'Could not release the other devices — this computer is not authorized on this license. Nothing was released.'
     )
     expect(releaseFailureSentence('inactive')).toBe(
       'Could not release the other devices — this license is not active. Nothing was released.'
@@ -328,7 +328,7 @@ describe('activationErrorSentence', () => {
     // (seat_limit).` — a word the buyer cannot look up, on the screen where they are stuck.
     const s = activationErrorSentence('seat_limit')
     expect(s).toBe(
-      'This license already has all its devices in use. On a Mac (or phone) where Pro is active, open Settings → License and choose “Release other devices”, then activate here again.'
+      'This license already has all its devices in use. On a computer (or phone) where Pro is active, open Settings → License and choose “Release other devices”, then activate here again.'
     )
     // The release action does not exist on THIS machine (it has no Pro yet), so the sentence must
     // send the user elsewhere — advice to "release below" would point at a button that isn't there.

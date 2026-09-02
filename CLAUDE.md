@@ -2899,6 +2899,18 @@ the overlap tests exercise the resulting race.
 
 
 - Code comments, UI strings, and identifiers are all in **English**. Match this when editing.
+- **The local machine is not a Mac.** Every user-visible string naming it goes through
+  `renderer/lib/machineName.ts` (`thisMachine()` / `thisMachineCap()` / `machineNoun()` →
+  "this Mac" / "this PC" / "this computer"). A **browser tab always gets the neutral word**: the
+  license, seats and sessions it describes belong to the SERVER, and the viewer's `navigator` says
+  nothing about that machine's OS — a confident wrong noun is worse than a plain one. Issue #563
+  found ~30 such strings, and the damage was not in Accounts but in the copy people must TRUST:
+  "This Mac is not authorized on this license" and "a teammate on a seat can run commands on this
+  Mac". `machineName.guard.test.ts` scans non-comment lines in `src/renderer` + `src/shared` and
+  fails on a new one, with a named-and-reasoned exemption list (the ptmx-limit banner, whose
+  `kern.tty.ptmx_max` really is macOS; the onboarding notch step, which only exists there).
+  `@shared` code cannot ask the renderer, so it takes the machine word as a PARAMETER defaulting
+  to the neutral one (`describeGrant(peer, machine)`) rather than hard-coding a brand.
 - Path aliases: `@shared/*`, `@renderer/*` (see the tsconfig files / vite config).
 - **Subagent model:** when dispatching subagents (implementers, reviewers, etc. — e.g. in
   the subagent-driven-development workflow), use the latest model, **Opus 5**

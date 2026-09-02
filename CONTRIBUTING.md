@@ -84,6 +84,16 @@ lane unaffected.
 
 ## House rules
 
+- **Never call the user's machine a Mac in user-visible copy.** Use `thisMachine()` /
+  `thisMachineCap()` / `machineNoun()` from `src/renderer/lib/machineName.ts` — "this Mac" on
+  macOS, "this PC" on Windows, "this computer" elsewhere and in any Server Edition browser tab
+  (where the machine being described is the SERVER, whose OS the viewer cannot know). Issue #563:
+  ~30 strings said "this Mac", including *"This Mac is not authorized on this license"* and *"a
+  teammate on a seat can run commands on this Mac"* — the one sentence a user has to trust before
+  handing out shell access. `machineName.guard.test.ts` scans non-comment lines and will fail your
+  PR; copy that really is macOS-specific (the ptmx-limit banner, the notch step) is exempt by name
+  with its reason. Comments are not scanned.
+
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
   macOS/Linux, so the recurring defect is code that is genuinely correct on POSIX —
   `split('/')`, `startsWith('/')` as an is-absolute test, a bare `fs.rename`. Use
