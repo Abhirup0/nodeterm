@@ -2690,7 +2690,12 @@ export function TerminalNode({
       // into a CSI write and cancel the event — and DO NOT preventDefault: the dispatcher bails
       // on defaultPrevented events, so a prevented bubble would kill the very dispatch this
       // exists to reach.
-      if (action === 'bubble') return false
+      // 'native': same mechanics, different owner — the PLATFORM's paste (Windows Ctrl+V, issue
+      // #562). xterm would map it to \x16 and cancel the keydown, which suppresses both
+      // Chromium's paste command and the Edit menu's Ctrl+V accelerator; leaving the event
+      // untouched lets the ordinary `paste` event reach xterm's textarea, exactly as ⌘V does on
+      // macOS (bracketed-paste framing included).
+      if (action === 'bubble' || action === 'native') return false
       e.preventDefault()
       if (action === 'copy') window.nodeTerminal.clipboard.writeText(term.getSelection())
       // Shift+Enter → ESC+CR so agent CLIs insert a newline instead of submitting
