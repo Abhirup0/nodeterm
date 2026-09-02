@@ -11,7 +11,7 @@ import type { WorktreeListResult } from '../shared/worktree'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
 import { platform } from './platform'
-import { findExecutableSync } from './exec-path'
+import { ghPath } from './gh-path'
 import { gitEnv } from './git-env'
 import {
   isValidCloneUrl,
@@ -22,33 +22,6 @@ import {
 } from '../shared/clone-url'
 
 const run = promisify(execFile)
-
-/**
- * Absolute path to the GitHub CLI, or null when it isn't installed.
- *
- * Was a module-level const over three hardcoded POSIX paths, which never consulted PATH at all.
- * That answered null for EVERY Windows install — `gh` there is `gh.exe`, usually under
- * `C:\Program Files\GitHub CLI\` — so `ghAvailable` was permanently false and every GitHub
- * action reported "GitHub CLI (gh) not found." on a machine where gh was installed and authed.
- *
- * Now it goes through the shared resolver (login-shell PATH first, then the well-known locations),
- * and it is MEMOIZED-ON-HIT rather than computed at import: a miss is re-probed, so a gh installed
- * while the app is running is picked up, and the async login-shell PATH probe that lands after
- * module load is no longer raced.
- */
-let cachedGh: string | null | undefined
-function ghPath(): string | null {
-  if (cachedGh) return cachedGh
-  const found = findExecutableSync('gh', [
-    '/opt/homebrew/bin/gh',
-    '/usr/local/bin/gh',
-    '/usr/bin/gh'
-  ])
-  // Only a HIT is cached. Caching a miss here would freeze the answer for the process lifetime,
-  // which is what the old module-level const effectively did.
-  if (found) cachedGh = found
-  return found
-}
 
 // The environment every `git`/`gh` subprocess gets: the GUI-blind POSIX bin dirs prepended (macOS
 // credential helpers), and GIT_TERMINAL_PROMPT=0 so auth failures error out fast instead of hanging

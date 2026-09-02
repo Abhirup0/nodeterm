@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { SecretStore } from '../secret-store'
 import { gitEnv } from '../git-env'
+import { ghPath } from '../gh-path'
 
 export type CommandResult = { ok: boolean; stdout: string; stderr: string }
 export type CommandRunner = (command: string, args: string[]) => Promise<CommandResult>
@@ -16,7 +17,8 @@ const execute = promisify(execFile)
 export const runGitHubCliCommand: CommandRunner = async (command, args) => {
   if (command !== 'gh') return { ok: false, stdout: '', stderr: 'unsupported command' }
   try {
-    const result = await execute(command, args, {
+    const gh = ghPath() ?? 'gh'
+    const result = await execute(gh, args, {
       timeout: 15_000,
       maxBuffer: 1024 * 1024,
       // Shared with git-service so the two can never disagree about what a git/gh child gets. It

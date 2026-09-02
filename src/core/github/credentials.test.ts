@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import * as ghPathModule from '../gh-path'
 import {
   CREDENTIAL_CACHE_MS,
   GitHubCredentialResolver,
+  runGitHubCliCommand,
   type CommandRunner,
   type GitHubSecretStore
 } from './credentials'
@@ -165,5 +167,24 @@ describe('GitHubCredentialResolver', () => {
     const { resolver, calls } = fixture({ gh: 'invalid', storedToken: null })
     await resolver.resolve('gh')
     expect(calls).toEqual(['auth status --hostname github.com'])
+  })
+})
+
+describe('runGitHubCliCommand', () => {
+  it('rejects unsupported commands without executing', async () => {
+    const result = await runGitHubCliCommand('not-gh', ['status'])
+    expect(result).toEqual({
+      ok: false,
+      stdout: '',
+      stderr: 'unsupported command'
+    })
+  })
+
+  it('queries ghPath when executing gh', async () => {
+    const spy = vi.spyOn(ghPathModule, 'ghPath').mockReturnValue('/mock/bin/gh')
+    const result = await runGitHubCliCommand('gh', ['status'])
+    expect(spy).toHaveBeenCalled()
+    expect(result.ok).toBe(false)
+    spy.mockRestore()
   })
 })
