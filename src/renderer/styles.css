@@ -5203,6 +5203,65 @@ body,
   font-family: monospace;
 }
 
+.dir-picker__new {
+  flex: none;
+  padding: 0 10px;
+  height: 28px;
+  background: var(--panel-header);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dir-picker__new:hover {
+  background: rgba(var(--tint-rgb), 0.1);
+}
+
+.dir-picker__create {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dir-picker__input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  background: rgba(var(--tint-rgb), 0.06);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.dir-picker__input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Match the inline Create/Cancel buttons to the name input's height. */
+.dir-picker__create .confirm__btn {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.dir-picker__create .confirm__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.dir-picker__error {
+  font-size: 12px;
+  color: var(--danger);
+  word-break: break-all;
+}
+
 .dir-picker__list {
   height: 300px;
   overflow-y: auto;

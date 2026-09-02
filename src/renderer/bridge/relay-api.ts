@@ -131,8 +131,12 @@ export function buildRelayApi(connectionId: string, transport?: FrameTransport):
     dialog: (() => {
       mountPickerRoot()
       const startDir = '/' // navigable up/down from the host root; no cross-call memory in v1
+      // "New folder" writes through the HOST's `fs.mkdir`/`fs.exists` (same core handlers, reached
+      // over the relay), so the folder is created on the machine whose path the picker returns.
+      const write = { mkdir: files.fs.mkdir, exists: files.fs.exists }
       return {
-        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: files.fs.list }),
+        selectFolder: () =>
+          openDirectoryPicker({ mode: 'folder', startDir, list: files.fs.list, write }),
         selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: files.fs.list })
       }
     })(),
