@@ -788,7 +788,16 @@ session.
   layouts still copy. A copy chord is **always swallowed**, selection or not: letting Ctrl+Shift+C
   fall through would reach the pty as `\x03` (SIGINT). Ctrl+Insert exists because Chromium reserves
   Ctrl+Shift+C for the inspector and a page cannot `preventDefault()` it — which is where Server
-  Edition users land. Plain **Ctrl+C** is never intercepted. To select in **xterm** instead of tmux
+  Edition users land. Plain **Ctrl+C** is never intercepted.
+  **PASTE is the platform's, never ours** (`isPasteShortcut` → the `'native'` action): we own no
+  paste path — ⌘V on mac reaches the Edit menu's `{role:'paste'}`, whose `paste` event xterm frames
+  as a bracketed paste. All the terminal does is stop CANCELLING the chord, and that is a
+  **Windows-only** claim: xterm's keymap turns Ctrl+V into `\x16` with `cancel`, which suppressed
+  Chromium's paste command *and* the Ctrl+V accelerator behind it, so Ctrl+V pasted nothing at all
+  there (issue #562). Off Windows the chord stays `\x16` on purpose — mac pastes with ⌘V, Linux
+  with Ctrl+Shift+V, and Ctrl+V is a key vim/readline users really send. Ctrl+Shift+V and
+  Shift+Insert need no branch: measured against `evaluateKeyboardEvent`, xterm produces neither a
+  key nor a cancel for them, so the platform already pastes. To select in **xterm** instead of tmux
   (or inside an app that grabs the mouse, like vim/htop), hold **Option** (mac —
   xterm's `macOptionClickForcesSelection`) or **Shift** (Linux/Windows) while dragging.
   **Copying now says so**: the OSC 52 handler floats a transient `Copied N lines` pill over the
