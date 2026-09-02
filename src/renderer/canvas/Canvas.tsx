@@ -410,13 +410,13 @@ import {
 } from '../session/relay-tab'
 import { buildBackgroundLinkMaps, buildContextLinkNote, buildLinkMap, buildNotePushMessage, classifyLink, hiddenLinkIds, linkIdsCoveredByRopes, pairKey, planBridges, type LinkEndpoint } from '../lib/noteLink'
 import {
-  dependencyEdges,
   launchesToFire,
   launchRetryDelay,
   unmetDeps,
   LAUNCH_STALL_MS,
   type ArmedNode
 } from '../lib/pendingLaunch'
+import { WAIT_LABEL, dropAfterDep, edgeHidden, hiddenEdgeNodeIds, ropeVisual, type RopeNodeInfo } from '../lib/edgeModel'
 import { triggerEdges } from '../lib/triggerCard'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename, sessionNameUnchanged } from '../lib/sessionRename'
@@ -445,6 +445,7 @@ import type {
   CanvasNodeState,
   ClosedSessionEntry,
   NodeKind,
+  PendingLaunch,
   Project,
   ProjectKanban,
   SshPassphraseRequest,
@@ -735,17 +736,16 @@ async function waitForCanvasNode(
   }
 }
 
-// A "spawned by" rope: control-capable agent → node it opened (or browser popup → opener).
-// Display-only (never a context link) but persisted per project as `ropes`, so the lineage
-// survives restarts. Selectable; removed with ⌫ / double-click like a context link.
-const ropeEdge = (id: string, source: string, target: string, color: string): Edge => ({
+// A "spawned by" / "sequenced after" rope: control-capable agent → node it opened, browser popup →
+// opener, or `--after` dependency → the armed node. Display-only (never a context link) but
+// persisted per project as `ropes`, so the lineage survives restarts. Selectable; removed with ⌫ /
+// double-click like a context link. Colour and the waiting look are NOT stored here — displayEdges
+// derives both from the endpoints every render (lib/edgeModel.ts `ropeVisual`).
+const ropeEdge = (id: string, source: string, target: string): Edge => ({
   id,
   source,
-  sourceHandle: 'flow-out',
   target,
-  targetHandle: 'flow-in',
-  style: { stroke: color, strokeWidth: 1.5 },
-  markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 }
+  type: 'floating'
 })
 
 /** The one edge renderer — every family routes between nearest borders (see FloatingEdge). */
@@ -1813,7 +1813,7 @@ export function Canvas() {
       eEdges.push({
         id: `e-${lid}`,
         source: pid,
-        sourceHandle: 'flow-out',
+        type: 'floating',
         target: lid,
         animated: st.state === 'working',
         style: { stroke: accent, strokeWidth: 1.5 }
@@ -1871,7 +1871,7 @@ export function Canvas() {
         eEdges.push({
           id: `e-${cid}`,
           source: pid,
-          sourceHandle: 'flow-out',
+          type: 'floating',
           target: cid,
           animated: v.state === 'working',
           style: { stroke: accent, strokeWidth: 1.5 }
@@ -1910,46 +1910,20 @@ export function Canvas() {
         .join('|'),
     [nodes]
   )
-  // Dep edges (`--after`) are DERIVED from node data, so the obvious thing is to build them inside
-  // displayEdges off `nodes` — which is what this used to do, and it made `nodes` a dependency of
-  // the edge list. `nodes` gets a fresh identity on every drag FRAME, so dragging one node rebuilt
-  // every context link, rope and dep edge on the canvas ~60×/s (new object identities, so React
-  // Flow re-rendered all of them too). Same discipline as `stickySig`/`loopSig`: reduce the part
-  // that comes from `nodes` to a SIGNATURE, and hang the styled objects off that.
-  //
-  // The pairs themselves stay in `dependencyEdges` (the tested producer of both the id format and
-  // the liveness rule); the ref carries them from the cheap per-frame pass to the styled memo,
-  // which only re-runs when the signature — i.e. the actual set of pending dependencies — changes.
-  const depPairsRef = useRef<ReturnType<typeof dependencyEdges>>([])
-  const depEdgeSig = useMemo(() => {
-    // Fast path: no armed node → no Set allocation, no pairs, and the signature stays ''.
-    if (!nodes.some((n) => n.data.pendingLaunch)) {
-      depPairsRef.current = []
-      return ''
+  // The part of `nodes` the edge layer reads, reduced to a SIGNATURE so a drag frame does not
+  // rebuild every styled edge (same discipline as stickySig/loopSig): which nodes are armed on
+  // which deps (the waiting look), which agent each runs (the rope colour), and whose eye is
+  // closed (hidden edges). The styled objects rebuild only when this string changes.
+  const edgeSig = useMemo(() => {
+    let sig = ''
+    for (const n of nodes) {
+      const p = n.data.pendingLaunch as PendingLaunch | undefined
+      sig += `${n.id}=${(n.data.agentId as string) ?? ''}${n.data.hideFanout ? '!' : ''}:${p?.after.join(',') ?? ''}|`
     }
-    const pairs = dependencyEdges(nodes as unknown as ArmedNode[], new Set(nodes.map((n) => n.id)))
-    depPairsRef.current = pairs
-    return pairs.map((e) => e.id).join('|')
+    return sig
   }, [nodes])
-  const depEdges = useMemo(
-    () =>
-      depPairsRef.current.map((e) => ({
-        ...e,
-        type: 'default' as const,
-        animated: true,
-        label: '⏳ waits for',
-        labelStyle: { fill: '#8e8e93', fontSize: 11, fontWeight: 600 },
-        labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
-        labelBgPadding: [6, 3] as [number, number],
-        labelBgBorderRadius: 5,
-        style: { stroke: '#8e8e93', strokeWidth: 1.5, strokeDasharray: '6 4' },
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#8e8e93', width: 14, height: 14 }
-      })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- depEdgeSig IS the ref's signature
-    [depEdgeSig]
-  )
   // Trigger→target edges (issue #493) — derived, never persisted, same signature discipline as
-  // depEdges: the per-frame pass reduces `nodes` to a signature (which trigger points where), and
+  // edgeSig: the per-frame pass reduces `nodes` to a signature (which trigger points where), and
   // the styled objects only rebuild when that set actually changes, not on every drag frame.
   const trigPairsRef = useRef<ReturnType<typeof triggerEdges>>([])
   const trigEdgeSig = useMemo(() => {
@@ -1974,26 +1948,40 @@ export function Canvas() {
   const displayEdges = useMemo(() => {
     const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
     const drivenTargets = drivingNodeIds(drivenLeaseEntries, Date.now())
+    // Endpoint facts the rope look derives from — read off the render-time ref, keyed by edgeSig.
+    const byId = new Map(nodesRef.current.map((n) => [n.id, n]))
+    const info = (id: string): RopeNodeInfo | undefined => {
+      const n = byId.get(id)
+      if (!n) return undefined
+      const agentId = n.data.agentId as AgentId | undefined
+      return {
+        agentColor: agentId ? agentConfig(agentId)?.color : undefined,
+        pendingAfter: (n.data.pendingLaunch as PendingLaunch | undefined)?.after
+      }
+    }
+    const hidden = hiddenEdgeNodeIds(nodesRef.current)
+    const labelBg = {
+      labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
+      labelBgPadding: [6, 3] as [number, number],
+      labelBgBorderRadius: 5
+    }
     // ONE edge per pair. A node an agent opens gets both a rope (lineage) and a context bridge
     // (readable context), which drew two near-identical arrows between the same two nodes. The
     // rope keeps the pixels; the bridge still exists in data (it is what authorizes reading) and
     // rides the rope's delete, so it can never become an invisible link with nothing to click.
-    const hidden = hiddenLinkIds(linkEdges, controlEdges)
-    const decorated = linkEdges.filter((e) => !hidden.has(e.id)).map((e) => {
+    // `--after` deps are ropes too, so their fan-in bridges hide the same way.
+    const hiddenLinks = hiddenLinkIds(linkEdges, controlEdges)
+    const decorated = linkEdges.filter((e) => !hiddenLinks.has(e.id)).map((e) => {
       const sel = !!e.selected
       const isNote = stickyIds.has(e.source)
       const stroke = sel ? '#ffffff' : accent
       const baseLabel = isNote ? '🗒 note' : '⇄ context'
       return {
         ...e,
-        type: 'default',
-        sourceHandle: 'link-out',
-        targetHandle: 'link-in',
+        type: 'floating',
         label: sel ? `${baseLabel} — ⌫ to remove` : baseLabel,
         labelStyle: { fill: stroke, fontSize: 11, fontWeight: 600 },
-        labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
-        labelBgPadding: [6, 3] as [number, number],
-        labelBgBorderRadius: 5,
+        ...labelBg,
         style: { stroke, strokeWidth: sel ? 3.5 : 2 },
         markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 },
         // Context links are bidirectional (arrowheads both ends); note links flow one way.
@@ -2002,48 +1990,58 @@ export function Canvas() {
           : { markerStart: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 } })
       }
     })
-    // Control ropes: white + a removal hint while selected (mirrors the context-link look). A
-    // rope that is also standing in for a hidden context bridge says so, so the one visible edge
-    // never under-reports what removing it will take with it.
     const ropeCoversLink = new Set(
-      linkEdges.filter((e) => hidden.has(e.id)).map((e) => pairKey(e.source, e.target))
+      linkEdges.filter((e) => hiddenLinks.has(e.id)).map((e) => pairKey(e.source, e.target))
     )
+    // Ropes: colour from the source's agent, dashed + ⏳ while the target still waits on the
+    // source, white + a removal hint while selected, clay + flowing while the target is a driven
+    // browser. The look is derived every time — nothing about it is stored on the edge.
     const ropes = controlEdges.map((e) => {
-      if (e.selected)
-        return {
-          ...e,
-          label: ropeCoversLink.has(pairKey(e.source, e.target))
+      const v = ropeVisual(e, info)
+      const base = {
+        ...e,
+        type: 'floating',
+        animated: v.waiting,
+        style: { stroke: v.color, strokeWidth: 1.5, ...(v.waiting ? { strokeDasharray: '6 4' } : {}) },
+        markerEnd: { type: MarkerType.ArrowClosed, color: v.color, width: 14, height: 14 },
+        ...(v.waiting
+          ? { label: WAIT_LABEL, labelStyle: { fill: v.color, fontSize: 11, fontWeight: 600 }, ...labelBg }
+          : {})
+      }
+      if (e.selected) {
+        const label = v.waiting
+          ? `${WAIT_LABEL} · ⌫ to stop waiting`
+          : ropeCoversLink.has(pairKey(e.source, e.target))
             ? '⇄ context · ⌫ to remove'
-            : '⌫ to remove',
+            : '⌫ to remove'
+        return {
+          ...base,
+          label,
           labelStyle: { fill: '#ffffff', fontSize: 11, fontWeight: 600 },
-          labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
-          labelBgPadding: [6, 3] as [number, number],
-          labelBgBorderRadius: 5,
-          style: { ...e.style, stroke: '#ffffff', strokeWidth: 3 },
+          ...labelBg,
+          style: { ...base.style, stroke: '#ffffff', strokeWidth: 3 },
           markerEnd: { type: MarkerType.ArrowClosed, color: '#ffffff', width: 14, height: 14 }
         }
+      }
       // Driven: the same clay the RUNNING badge uses, thicker and flowing — legible on a zoomed-out
       // canvas where the header chip is unreadable. This is the whole point of highlighting the rope.
       if (drivenTargets.has(e.target))
         return {
-          ...e,
+          ...base,
           animated: true,
-          style: { ...e.style, stroke: '#d97757', strokeWidth: 2.5 },
+          style: { ...base.style, stroke: '#d97757', strokeWidth: 2.5 },
           markerEnd: { type: MarkerType.ArrowClosed, color: '#d97757', width: 14, height: 14 }
         }
-      return e
+      return base
     })
-    // Waiting edges for armed nodes (`--after`): dep → dependent, dashed and animated while the
-    // wait is on. Derived from node data rather than persisted — a pending dependency is a STATE
-    // that ends when the launch fires, unlike the context bridge `--after` also draws, which is a
-    // durable relation and stays. Built above (depEdges), keyed on the dependency signature so a
-    // drag frame does not rebuild it.
-    const extra =
-      ephemeralEdges.length || ropes.length || depEdges.length || trigEdges.length
-        ? [...ephemeralEdges, ...ropes, ...depEdges, ...trigEdges]
-        : []
-    return extra.length ? [...decorated, ...extra] : decorated
-  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, depEdges, trigEdges, drivenLeaseEntries])
+    const all =
+      ephemeralEdges.length || ropes.length || trigEdges.length
+        ? [...decorated, ...ephemeralEdges, ...ropes, ...trigEdges]
+        : decorated
+    // A closed eye hides every edge touching its node — data untouched, pixels gone.
+    return hidden.size ? all.filter((e) => !edgeHidden(e, hidden)) : all
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- edgeSig stands in for nodesRef
+  }, [linkEdges, ephemeralEdges, controlEdges, accent, stickySig, edgeSig, trigEdges, drivenLeaseEntries])
 
   // Header pin button (and ⌘⇧L): toggle the persisted pin preference. Clears the transient
   // dismiss so (re)pinning shows the docked panel; unpinning collapses it to hover-peek.
@@ -2321,14 +2319,7 @@ export function Canvas() {
       void useWorktrees.getState().refresh(project.cwd, boundGroups(flow))
     }
     setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
-    // Restore control ropes with the source agent's color (falls back to the browser blue).
-    setControlEdges(
-      (project.ropes ?? []).map((r) => {
-        const srcState = project.nodes.find((n) => n.id === r.source)
-        const color = agentConfig((srcState?.agentId as AgentId) ?? '')?.color ?? '#0a84ff'
-        return ropeEdge(r.id, r.source, r.target, color)
-      })
-    )
+    setControlEdges((project.ropes ?? []).map((r) => ropeEdge(r.id, r.source, r.target)))
     // Reset history for the newly loaded project.
     committedRef.current = flow
     pastRef.current = []
@@ -3172,6 +3163,25 @@ export function Canvas() {
     [linkEndpointOf, agentIdOf, setLinkEdges, markDirty, nodes]
   )
 
+  // Removing a WAITING rope is "stop waiting on that one": the dep leaves the target's list, the
+  // rope goes, and (if it was the last wait) the held launch fires on the next effect run. A plain
+  // rope's removal changes no arming.
+  const disarmDepsFor = useCallback(
+    (ropeIds: readonly string[]) => {
+      const drops = controlEdgesRef.current.filter((r) => ropeIds.includes(r.id))
+      if (!drops.length) return
+      setNodes((ns) =>
+        ns.map((n) => {
+          const p = n.data.pendingLaunch as PendingLaunch | undefined
+          if (!p) return n
+          const next = drops.filter((r) => r.target === n.id).reduce((acc, r) => dropAfterDep(acc, r.source), p)
+          return next === p ? n : { ...n, data: { ...n.data, pendingLaunch: next } }
+        })
+      )
+    },
+    [setNodes]
+  )
+
   // Double-click a context link to remove it (ephemeral subagent/loop edges are left alone).
   const onEdgeDoubleClick = useCallback(
     (_e: React.MouseEvent, edge: Edge) => {
@@ -3183,6 +3193,7 @@ export function Canvas() {
         const covered = new Set(
           linkIdsCoveredByRopes([edge.id], controlEdgesRef.current, linkEdgesRef.current)
         )
+        disarmDepsFor([edge.id])
         setControlEdges((es) => es.filter((b) => b.id !== edge.id))
         if (covered.size) setLinkEdges((es) => es.filter((b) => !covered.has(b.id)))
         markDirty()
@@ -3192,7 +3203,7 @@ export function Canvas() {
       setLinkEdges((es) => es.filter((b) => b.id !== edge.id))
       markDirty()
     },
-    [setLinkEdges, markDirty]
+    [setLinkEdges, markDirty, disarmDepsFor]
   )
 
   // Route edge changes (selection) to the right store: `ctrl-` ids are control ropes (local
@@ -4954,6 +4965,7 @@ export function Canvas() {
       ])
       if (drop.size) setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
       if (ropeIds.length) {
+        disarmDepsFor(ropeIds)
         const dropRopes = new Set(ropeIds)
         setControlEdges((es) => es.filter((b) => !dropRopes.has(b.id)))
       }
@@ -4968,7 +4980,7 @@ export function Canvas() {
       }
     })
     return true
-  }, [deleteNodes, setLinkEdges, setControlEdges, markDirty, setConfirm])
+  }, [deleteNodes, setLinkEdges, setControlEdges, markDirty, setConfirm, disarmDepsFor])
 
   // When an account is removed in Settings, patch the ACTIVE project's live nodes (the projects
   // store only holds the other projects' serialized copies). The account's login node is
@@ -8568,7 +8580,7 @@ export function Canvas() {
       })
       const placed = src.parentId ? parentInto(node, src.parentId) : node
       setNodes((ns) => [...ns, placed])
-      setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${placed.id}`, sourceNodeId, placed.id, '#0a84ff')])
+      setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${placed.id}`, sourceNodeId, placed.id)])
       markDirty()
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -9100,10 +9112,21 @@ export function Canvas() {
         y: src.position.y + (srcGroup?.position.y ?? 0)
       }
       const belowY = srcAbs.y + srcH + 80
-      const edgeColor = agentConfig((src.data.agentId as string) ?? 'claude')?.color ?? '#d97757'
       const placeBelow = (i = 0) => ({ x: srcAbs.x + srcW / 2 + i * 460, y: belowY + 210 })
       const connect = (newId: string) =>
-        setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${newId}`, sourceNodeId, newId, edgeColor)])
+        setControlEdges((es) => [...es, ropeEdge(`ctrl-${sourceNodeId}-${newId}`, sourceNodeId, newId)])
+      // `--after` is a rope too: dep → armed node, drawn dashed while the node waits and solid once
+      // it has launched (displayEdges derives that from pendingLaunch). The opener's own rope is
+      // skipped here — it already exists, and ropeVisual renders it waiting when the node waits on
+      // the opener itself. The fan-in bridge `--after` also writes hides under this rope exactly
+      // as the opener's bridge does.
+      const ropeDeps = (ids: string[], after: string[] | undefined): void => {
+        if (!after?.length) return
+        const ropes = ids.flatMap((nid) =>
+          after.filter((dep) => dep !== sourceNodeId).map((dep) => ropeEdge(`ctrl-${dep}-${nid}`, dep, nid))
+        )
+        if (ropes.length) setControlEdges((es) => [...es, ...ropes])
+      }
       // Draw real CONTEXT links (persisted `bridges`), not the display-only ropes `connect`
       // draws — a rope is lineage decoration, a bridge is what get-linked-context reads. This
       // is what lets an orchestrator fan IN: read back what the nodes it opened produced.
@@ -9370,6 +9393,7 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
+            ropeDeps(ids, after)
             reply({
               ok: true,
               message:
@@ -9510,6 +9534,7 @@ export function Canvas() {
             const ids = intoGroupId
               ? addGrouped(intoGroupId, count, make)
               : Array.from({ length: count }, (_, i) => addAndConnect(make(i)))
+            ropeDeps(ids, after)
             // Context-link the new session(s) back to the opener (same rationale as spawn-team:
             // the fan-out needs a fan-in). The nodes were added via setNodes in this tick, so
             // resolve their endpoints from `agentId` rather than the not-yet-updated canvas.

@@ -113,7 +113,7 @@ export function triggerEdges(
       id: `trigger-edge-${n.id}`,
       source: n.id,
       target: spec.target,
-      type: 'smoothstep',
+      type: 'floating',
       style: { stroke: accent, strokeDasharray: '6 4', opacity: 0.55 },
       selectable: false,
       focusable: false

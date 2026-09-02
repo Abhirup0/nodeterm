@@ -48,5 +48,8 @@ describe('floatingEdgeParams — both ends, facing each other', () => {
     const p = floatingEdgeParams(box(1000, 1000), box(0, 0))
     expect([Position.Left, Position.Top]).toContain(p.sourcePosition)
     expect([Position.Right, Position.Bottom]).toContain(p.targetPosition)
+    // The exact point, not just the side: the vertical branch interpolates x by HALF THE HEIGHT
+    // over |dy|, and a swapped half-extent still lands on the right side while missing the corner.
+    expect({ x: p.sx, y: p.sy }).toEqual({ x: 1025, y: 1000 })
   })
 })
