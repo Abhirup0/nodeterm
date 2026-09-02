@@ -191,6 +191,10 @@ import { ColumnPill } from '../components/kanban/ColumnPill'
 import { BoardLogPanel } from '../components/kanban/BoardLogPanel'
 import { AgentMascot } from './AgentMascot'
 import { MaximizeButton } from './MaximizeButton'
+import { NodeIconView } from '../components/NodeIcon'
+import { nodeIconDialog } from '../components/NodeIconPicker'
+import { applyIconChoice } from '../lib/nodeIconChoice'
+import type { NodeIcon } from '@shared/node-icon'
 import { connectHostAttachment } from '../lib/sshAttachments'
 
 /** Which physical modifier the registry's abstract `Cmd` resolves to for the find-bar chord. */
@@ -4698,6 +4702,24 @@ export function TerminalNode({
             ))}
           </div>
         )}
+        {data.icon ? (
+          <button
+            className="term-node__icon nodrag"
+            title="Change icon"
+            onClick={(e) => {
+              e.stopPropagation()
+              void nodeIconDialog({
+                nodeId: id,
+                title: (data.title as string) ?? '',
+                icon: data.icon as NodeIcon
+              }).then((choice) =>
+                applyIconChoice(choice, (icon) => updateNodeData(id, { icon }))
+              )
+            }}
+          >
+            <NodeIconView icon={data.icon as NodeIcon} size={15} />
+          </button>
+        ) : null}
         {editingTitle ? (
           <input
             className="term-node__title nodrag"

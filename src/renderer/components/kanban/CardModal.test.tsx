@@ -92,6 +92,7 @@ describe('CardModal', () => {
           onOpenCanvas={vi.fn()}
           onRename={vi.fn()}
           onEditSticky={onEditSticky}
+          onSetIcon={vi.fn()}
           onBrowserNav={vi.fn()}
         />
       )
@@ -172,6 +173,7 @@ describe('CardModal', () => {
           onOpenCanvas={vi.fn()}
           onRename={vi.fn()}
           onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()}
           onBrowserNav={vi.fn()}
         />
       )
@@ -214,6 +216,7 @@ describe('CardModal', () => {
           onOpenCanvas={vi.fn()}
           onRename={onRename}
           onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()}
           onBrowserNav={vi.fn()}
         />
       )
@@ -289,6 +292,7 @@ describe('CardModal', () => {
           onOpenCanvas={onOpenCanvas}
           onRename={vi.fn()}
           onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()}
           onBrowserNav={vi.fn()}
         />
       )
@@ -342,6 +346,7 @@ describe('CardModal', () => {
           onOpenCanvas={vi.fn()}
           onRename={vi.fn()}
           onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()}
           onBrowserNav={vi.fn()}
         />
       )
@@ -383,6 +388,7 @@ describe('CardModal', () => {
           onOpenCanvas={vi.fn()}
           onRename={vi.fn()}
           onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()}
           onBrowserNav={vi.fn()}
         />
       )
@@ -436,6 +442,7 @@ describe('CardModal', () => {
           onOpenCanvas={vi.fn()}
           onRename={vi.fn()}
           onEditSticky={vi.fn()}
+          onSetIcon={vi.fn()}
           onBrowserNav={vi.fn()}
         />
       )

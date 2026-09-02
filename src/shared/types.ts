@@ -327,6 +327,13 @@ export interface CanvasNodeState {
   collapsed?: boolean
   /** Agent nodes only: when true, this node's subagent/loop fan-out cards are hidden. */
   hideFanout?: boolean
+  /**
+   * A user-chosen icon shown wherever this node is listed (canvas header, kanban card, sessions
+   * sidebar): one emoji/character, or an image file. Absent = the node draws exactly as it did
+   * before the feature. Validate with `normalizeNodeIcon` at the point of use — this value comes
+   * from a git-shared, hand-editable project file. See @shared/node-icon.
+   */
+  icon?: import('./node-icon').NodeIcon
   /** Parent group node id, if this node belongs to a group frame. */
   parentId?: string
   // terminal-only

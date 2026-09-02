@@ -23,7 +23,7 @@ describe('isHidden', () => {
 describe('hideable inventories', () => {
   it('list the agreed ids and nothing destructive', () => {
     expect(HIDEABLE_MENU_ITEMS.map((r) => r.id)).toEqual([
-      'group', 'remove-from-group', 'colors', 'duplicate', 'snap-zone', 'collapse',
+      'group', 'remove-from-group', 'colors', 'icon', 'duplicate', 'snap-zone', 'collapse',
       'markdown-view', 'refresh-terminal'
     ])
     expect(HIDEABLE_HEADER_BUTTONS.map((r) => r.id)).toEqual([

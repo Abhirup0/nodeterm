@@ -22,6 +22,7 @@ import { projectLaunchInfoNow } from './projectLaunchInfo'
 import { isAgentEnabled, launchableDefaultAgent } from './agentAvailability'
 import { codexSharedIdentity } from './codexIdentity'
 import { sshHostKey } from '@shared/ssh'
+import { normalizeNodeIcon } from '@shared/node-icon'
 import { useSettings } from './settings'
 
 // Re-exported so Canvas (and anything else in the renderer) keeps importing it from here, while the
@@ -1866,6 +1867,10 @@ export function nodeStatesToFlow(states: CanvasNodeState[]): CanvasNode[] {
         tags: n.tags,
         collapsed,
         hideFanout: n.hideFanout,
+        // Validated HERE, at the seam where a git-shared, hand-editable project file becomes live
+        // node data — so every surface that renders an icon gets a value this module vouched for
+        // rather than each one re-deciding. An unrecognized icon becomes no icon.
+        icon: normalizeNodeIcon(n.icon),
         expandedHeight: n.size.height,
         premaxRect: n.premaxRect,
         shell: n.shell,
@@ -1940,6 +1945,11 @@ export function flowToNodeStates(nodes: CanvasNode[]): CanvasNodeState[] {
         tags: n.data.tags,
         collapsed: n.data.collapsed,
         hideFanout: n.data.hideFanout,
+        // React Flow's node `data` is `Record<string, unknown>`, so the icon comes back out
+        // untyped. Re-validating on the way OUT (not just on the way in) also means a value a
+        // peer canvas mutation or a future caller put on live node data cannot be written to the
+        // shared file unchecked — the file is only ever as trustworthy as its last writer.
+        icon: normalizeNodeIcon(n.data.icon),
         parentId: n.parentId,
         shell: n.data.shell,
         cwd: n.data.cwd,

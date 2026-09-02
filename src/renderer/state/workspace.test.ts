@@ -628,6 +628,66 @@ describe('group worktree serialization', () => {
   })
 })
 
+describe('node icon serialization', () => {
+  const withIcon = (icon: unknown): CanvasNode =>
+    ({
+      id: 't1',
+      type: 'terminal',
+      position: { x: 0, y: 0 },
+      width: 320,
+      height: 240,
+      data: { title: 'T', color: '#888', group: null, icon }
+    }) as unknown as CanvasNode
+
+  const stateWithIcon = (icon: unknown) => ({
+    id: 't1',
+    kind: 'terminal' as const,
+    position: { x: 0, y: 0 },
+    size: { width: 320, height: 240 },
+    title: 'T',
+    color: '#888',
+    group: null,
+    icon
+  })
+
+  it('round-trips an emoji icon', () => {
+    const icon = { type: 'emoji', value: '\u{1F680}' }
+    const states = flowToNodeStates([withIcon(icon)])
+    expect(states[0].icon).toEqual(icon)
+    expect(nodeStatesToFlow(states)[0].data.icon).toEqual(icon)
+  })
+
+  it('round-trips an image icon', () => {
+    const icon = { type: 'image', path: './.nodeterm/images/logo.png' }
+    const states = flowToNodeStates([withIcon(icon)])
+    expect(states[0].icon).toEqual(icon)
+    expect(nodeStatesToFlow(states)[0].data.icon).toEqual(icon)
+  })
+
+  it('leaves a node without one undefined, so an untouched canvas serializes as it always did', () => {
+    expect(flowToNodeStates([withIcon(undefined)])[0].icon).toBeUndefined()
+  })
+
+  // project.json is git-shared and hand-editable, so hydration is a trust boundary. A path that is
+  // not an image would otherwise reach `fs.readBinary` on load.
+  it('drops a hostile icon on the way IN', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const hydrate = (icon: unknown) => nodeStatesToFlow([stateWithIcon(icon) as any])[0].data.icon
+    expect(hydrate({ type: 'image', path: '/home/u/.ssh/id_rsa' })).toBeUndefined()
+    expect(hydrate({ type: 'image', path: './../../.ssh/id_rsa.png' })).toBeUndefined()
+    expect(hydrate({ type: 'nonsense' })).toBeUndefined()
+    expect(hydrate('\u{1F680}')).toBeUndefined()
+    expect(hydrate({ type: 'emoji', value: 'abcdef' })).toEqual({ type: 'emoji', value: 'a' })
+  })
+
+  // And on the way OUT too: live node data can be reached by a peer canvas mutation, and whatever
+  // is written here becomes the next reader's "trusted" file.
+  it('drops a hostile icon on the way OUT', () => {
+    expect(flowToNodeStates([withIcon({ type: 'image', path: '/etc/passwd' })])[0].icon).toBeUndefined()
+    expect(flowToNodeStates([withIcon({ type: 'emoji', value: '' })])[0].icon).toBeUndefined()
+  })
+})
+
 describe('resolveNewNodeAccount', () => {
   const accounts = [{ id: 'a1', label: 'work', createdAt: 0 }]
   it('prefers the explicit pick', () =>
