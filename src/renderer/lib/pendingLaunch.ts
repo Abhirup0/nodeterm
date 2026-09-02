@@ -13,7 +13,10 @@ export interface ArmedNode {
 }
 
 /** The subset of the agentStatus store this module reads. */
-export type StatusById = Record<string, { state?: AgentState } | undefined>
+export type StatusById = Record<
+  string,
+  { state?: AgentState; lastTurnError?: { at: number } } | undefined
+>
 
 export interface LaunchToFire {
   id: string
@@ -35,10 +38,33 @@ export interface LaunchToFire {
  * exists but has reported nothing yet) is deliberately NOT satisfied: right after a fan-out the
  * upstream stations have not emitted a hook event yet, and reading "no news" as "finished"
  * would fire every dependent immediately — the exact bug that makes a dependency edge useless.
+ *
+ * A dep that is `done` **with a live `lastTurnError`** is refused (issue #521). An errored station
+ * reaches idle IMMEDIATELY and looked healthy from every surface an orchestrator can read, so a
+ * whole dependency chain launched against an upstream that had produced nothing. Firing with a
+ * warning instead was considered and dropped: a dependent that has already launched cannot
+ * un-launch, so the warning would arrive after the damage. The armed node keeps its manual ▶
+ * run-now escape, so the human — or the orchestrator, after a retry — is never stuck.
+ *
+ * The refusal ends by itself: `lastTurnError` is cleared by the upstream's next genuine new turn,
+ * so a station that is nudged and answers successfully satisfies its dependents on that turn.
  */
 function depSatisfied(depId: string, status: StatusById, live: ReadonlySet<string>): boolean {
   if (!live.has(depId)) return true
-  return status[depId]?.state === 'done'
+  const st = status[depId]
+  return st?.state === 'done' && !st.lastTurnError
+}
+
+/** Of the deps this node is still waiting on, which are held because they ERRORED rather than
+ *  because they have not finished? What the QUEUED tooltip names (issue #521). */
+export function erroredDeps(
+  node: ArmedNode,
+  status: StatusById,
+  live: ReadonlySet<string>
+): string[] {
+  return (node.data.pendingLaunch?.after ?? []).filter(
+    (d) => live.has(d) && status[d]?.state === 'done' && !!status[d]?.lastTurnError
+  )
 }
 
 /**
@@ -170,9 +196,19 @@ export type LaunchDelivery =
 export function launchTooltip(
   delivery: LaunchDelivery | undefined,
   waitingOn: string,
-  command: string
+  command: string,
+  erroredOn?: string
 ): string {
   const runs = `Runs:\n${command}`
+  // Issue #521: an errored upstream is idle, so without this the tooltip would say "waiting for X
+  // to finish" about a station that finished twenty minutes ago. Named first, because it is the
+  // one case where waiting will not end on its own.
+  if (erroredOn)
+    return (
+      `${erroredOn} ended its last turn on an error, so this is held rather than started on ` +
+      'what it did not produce.\n' +
+      `Retry or nudge it — a successful turn releases this — or press ▶ to run it now.\n${runs}`
+    )
   if (delivery?.kind === 'failed')
     return (
       `This session did not accept its launch — ${delivery.attempts} ` +

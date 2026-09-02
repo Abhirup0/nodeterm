@@ -143,7 +143,7 @@ import { useSettings } from '../state/settings'
 import { useCodexIdentity, codexSharedIdentity, codexFallbackText } from '../state/codexIdentity'
 import { useAgentStatus, agentStatusForApi, inferInterruptAfterSettle } from '../state/agentStatus'
 import { useLaunchDelivery } from '../state/launchDelivery'
-import { launchTooltip } from '../lib/pendingLaunch'
+import { erroredDeps, launchTooltip } from '../lib/pendingLaunch'
 import type { AgentState } from '@shared/agents/normalize'
 import type { ClientId } from '@shared/presence'
 import { PresenceChips } from '../components/PresenceChips'
@@ -1634,6 +1634,24 @@ export function TerminalNode({
     // tooltip on a setup-only hold would read "Waiting for  to finish".
     ...(pendingLaunch?.awaitSetupGroup ? ['the project setup script'] : [])
   ].join(', ')
+  // Which of those deps are held because their last turn ERRORED (issue #521) — an errored station
+  // is idle, so without naming them the tooltip would promise a wait that will never end on its
+  // own. Selected as a joined string so the selector returns a primitive and an unarmed node never
+  // re-renders on another node's status.
+  const erroredDepIds = useAgentStatus((s) => {
+    const after = pendingLaunch?.after ?? []
+    if (!after.length) return ''
+    // Same liveness rule `depSatisfied` uses: a dep that is gone counts as satisfied, so it is
+    // not something this node is held on and must not be named as one.
+    const live = new Set(after.filter((d) => !!getNode(d)))
+    return erroredDeps({ id, data: { pendingLaunch } }, s.byId, live).join(',')
+  })
+  const pendingErroredOn = erroredDepIds
+    ? erroredDepIds
+        .split(',')
+        .map((depId) => ((getNode(depId) as CanvasNode | undefined)?.data.title as string) || depId)
+        .join(', ')
+    : ''
   // Use the chat panel only for a chat-capable agent with a known session; otherwise the
   // markdown-of-output view (computed in the capture effect below) is shown as a fallback.
   const useChat = mdMode && showChat && !!status?.sessionId
@@ -4866,7 +4884,7 @@ export function TerminalNode({
             className={`term-node__status term-node__status--queued nodrag${
               launchDelivery ? ' term-node__status--queued-warn' : ''
             }`}
-            title={launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command)}
+            title={launchTooltip(launchDelivery, pendingWaitingOn, pendingLaunch.command, pendingErroredOn)}
           >
             <span className="term-node__status-dot" />
             {launchDelivery ? '⚠ ' : ''}QUEUED
@@ -4891,6 +4909,20 @@ export function TerminalNode({
             >
               ▶
             </button>
+          </span>
+        )}
+        {/* Issue #521: the last turn ended on an API/model error (the agent's own `StopFailure`
+            hook). NOT a state — the station is idle, and the two facts coexist; this is the only
+            thing on any surface that tells an errored station apart from one that finished. It
+            clears itself on the next genuine turn. Shown beside a `done`/unknown state only: a
+            live RUNNING/NEEDS YOU is about the CURRENT turn and speaks for itself. */}
+        {status?.lastTurnError && status?.state !== 'working' && (
+          <span
+            className="term-node__status term-node__status--errored"
+            title={`${agentLabel} ended its last turn on an error \u2014 it produced nothing this turn. Anything armed to wait on this node is held until a turn succeeds.`}
+          >
+            <span className="term-node__status-dot" />
+            TURN FAILED
           </span>
         )}
         {(status?.state === 'waiting' || status?.state === 'blocked') && (

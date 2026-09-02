@@ -1585,7 +1585,8 @@ else, and its context links must keep classifying across restarts).
   every dep reports `done`. This is what makes the canvas a DAG instead of a fan-out. Load-bearing
   details: (1) **an unknown agent state is NOT "satisfied"** — right after a fan-out no upstream has
   emitted a hook event yet, and reading "no news" as "finished" would fire every dependent
-  instantly; a **deleted** dep IS satisfied (it can never report). (2) Only `hasHooks` agents may be
+  instantly; a **deleted** dep IS satisfied (it can never report); and a dep that is `done` with a
+  live **`lastTurnError`** is NOT (issue #521, below). (2) Only `hasHooks` agents may be
   waited on — a plain terminal never reports done, so `resolveAfter` **refuses** it rather than
   letting `launchesToFire` (which cannot tell "never will" from "not yet") hang the node forever.
   (3) If the deps are **already satisfied at creation**, the node is NOT armed: the command stays
@@ -1635,6 +1636,34 @@ else, and its context links must keep classifying across restarts).
   was launching a bare CLI on mount — the session the hold exists to prevent — and the held launch
   then arrived as TEXT typed into it rather than as the command it is. The delivery race used to
   mask it; gating delivery on the shell settling would have made it deterministic.
+  **(9) An ERRORED upstream does not release its dependents** (issue #521, 2026-09).
+  `--after` fires on idle, and a station whose turn dies on an API/model error reaches idle
+  **immediately** — so a malformed-prompt station looked healthy from every surface an
+  orchestrator can read, and the whole chain armed behind it launched on what it had not
+  produced. The signal was already there and was being thrown away: claude and grok both fire
+  **`StopFailure`** instead of `Stop` on an errored turn (already in `CLAUDE_HOOK_EVENTS` /
+  `GROK_HOOK_EVENTS` — without the subscription the badge sticks on RUNNING), and both
+  normalizers collapsed it to a plain `done`. It now carries **`errored`** on
+  `NormalizedAgentEvent`, which `agentStatus` keeps as **`lastTurnError: {at}`**.
+  Three things about the shape, each deliberate: (a) it is an **annotation, not a fifth
+  `AgentState`** — an errored station IS idle, the two facts coexist, and a fifth state would
+  ripple through both raw listeners, the parity test and the mobile mirror for a fact that is
+  not a state; (b) it is set in `src/shared`'s normalizers, so **both shells change by
+  construction** — there is nothing to keep in parity; (c) it is **TRANSIENT** like `state`,
+  because after a relaunch nothing armed can fire anyway and a restored verdict would describe
+  another app run's turn. It is **cleared by the next genuine new turn** — not by any
+  intermediate transition, which says nothing about whether that turn produced something — so
+  the refusal ends by itself when the station answers successfully. Firing with a WARNING was
+  considered and dropped: a dependent that has launched cannot un-launch. Surfaces: a
+  **TURN FAILED** chip on the node (red, no pulse — a verdict on a turn that is over, not
+  something being waited for), the QUEUED tooltip naming the errored upstream instead of
+  promising a wait, and a **`LAST TURN ERRORED` marker on the `list` rows** — on the ROW
+  because a seven-station fan-out should cost one call to learn this, not seven. **No error
+  TEXT is claimed**: whether the hook payload carries the failure message has not been
+  measured, and `last_assistant_message` is the previous assistant turn rather than the error,
+  so reporting it as "the error" would be a confident wrong fact. Reading the text, and the
+  *failed-to-start* watchdog (a station that never emits ANY hook event — the opposite failure,
+  which hangs dependents honestly rather than firing them wrongly), stay open.
   **Review panel (`verify`, 2026-07):** `verify --node <id> [--lenses …] [--focus …] [--agent …]
   [--synthesis off]` opens one reviewer per LENS, each armed behind the target (`--after`) and
   bridged to it, wrapped in a `Verify: <title>` group, plus a judge armed behind the whole panel.
