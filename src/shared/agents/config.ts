@@ -120,10 +120,19 @@ export const RESUMABLE_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'grok'
 // clear/fork/compact), so hooks remain the only way to TRACK an id after launch. What minting
 // guarantees is that a node always has SOME resumable id, so the worst case degrades from "the
 // conversation is gone" to "continuity since the last /clear is gone".
-export const SESSION_ID_CAPABLE = ['claude', 'copilot'] as const
+export const SESSION_ID_CAPABLE = ['claude', 'copilot', 'grok'] as const
 // Claude's flag is version-gated and comes from the Claude CLI probe. Copilot's installed 1.0.80
 // binary and current official reference accept `--session-id=<uuid>`, so it does not borrow an
 // unrelated Claude probe result. Custom agents resolve through their declared base harness.
+//
+// grok is gated too, but on ITS OWN probe (`core/grok-cli.ts` reads `grok --help`) — never on
+// claude's. The two CLIs are installed and upgraded independently, so claude's answer is not even
+// correlated with grok's, and a gate fed by the wrong agent's probe is a guess wearing a
+// measurement's clothes. Its grammar also differs from claude's in three measured ways (1.0.13):
+// the UUID must not already exist under the target session directory, so minting one twice is a
+// LAUNCH ERROR and never a resume; `--session-id` combines with `--resume`/`--continue` only
+// alongside `--fork-session`; and `--resume` accepts a TITLE as well as an id, failing as ambiguous
+// on duplicates — which is why nothing in this codebase resumes grok by title.
 export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
 // claude: Task/Agent tool via hooks (tool_use_id-keyed). codex: spawn_agent collaboration via its
 // native SubagentStart/SubagentStop hooks (agent_id-keyed), measured on codex-cli 0.146.0.
@@ -328,9 +337,25 @@ export const hasHooks = (id: AgentId): boolean => includes(AGENT_HOOK_TARGETS, i
 export const canResume = (id: AgentId): boolean => includes(RESUMABLE_AGENTS, id)
 export const mintsSessionId = (id: AgentId): boolean => includes(SESSION_ID_CAPABLE, id)
 /** Is the caller-chosen session-id flag available for this effective base harness? */
-export const supportsSessionIdFlag = (id: AgentId, claudeFlagSupported: boolean): boolean =>
-  includes(UNCONDITIONAL_SESSION_ID_CAPABLE, id) ||
-  (mintsSessionId(id) && capabilityAgentId(id) === 'claude' && claudeFlagSupported)
+export const supportsSessionIdFlag = (
+  id: AgentId,
+  claudeFlagSupported: boolean,
+  // REQUIRED, not defaulted. A default here would let a caller forget grok's probe and silently get
+  // "grok never mints" — a feature quietly missing, with a green typecheck and no test to notice.
+  // That is the same shape as the optional prop that let the chat panel's agent id be dropped; the
+  // lesson taken from it is that the fix for this family is a type that cannot express the broken
+  // state, not another test somebody has to remember to write.
+  grokFlagSupported: boolean
+): boolean => {
+  if (includes(UNCONDITIONAL_SESSION_ID_CAPABLE, id)) return true
+  if (!mintsSessionId(id)) return false
+  const base = capabilityAgentId(id)
+  // Each probed agent answers with ITS OWN probe. A missing third argument reads as "grok was not
+  // probed", which yields a bare command — the safe direction, and the same one an unprobed claude
+  // gets.
+  if (base === 'grok') return grokFlagSupported
+  return base === 'claude' && claudeFlagSupported
+}
 export const canSubagent = (id: AgentId): boolean => includes(SUBAGENT_CAPABLE, id)
 export const canRecur = (id: AgentId): boolean => includes(RECURRING_CAPABLE, id)
 export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)

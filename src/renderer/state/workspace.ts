@@ -9,11 +9,13 @@ import type {
   Settings
 } from '@shared/types'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
-import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
+import { agentConfig, capabilityAgentId, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
-import { claudeCliCapsNow } from './permissionMode'
+import { claudeCliCapsNow, grokCliCapsNow } from './permissionMode'
+import { ensureGrokTakenIds, grokTakenIdsNow } from './grokSessionIds'
+import { mintFreeGrokSessionId } from '@shared/agents/grok-session-mint'
 import { projectLaunchInfoNow } from './projectLaunchInfo'
 import { isAgentEnabled, launchableDefaultAgent } from './agentAvailability'
 import { codexSharedIdentity } from './codexIdentity'
@@ -608,8 +610,22 @@ export function createAgentNode(
   // learning its id from hooks exactly as before. Inheritance-aware: a custom agent with
   // baseAgent:'claude' mints an id too (capabilityAgentId resolves it to claude).
   const cliCaps = claudeCliCapsNow()
-  const sessionIdFlagSupported = supportsSessionIdFlag(agentId, cliCaps.sessionIdFlag)
-  const mintedSessionId = sessionIdFlagSupported ? uuid() : undefined
+  // Each probed agent answers with its own probe — grok's flag never rides claude's result.
+  const sessionIdFlagSupported = supportsSessionIdFlag(
+    agentId,
+    cliCaps.sessionIdFlag,
+    grokCliCapsNow().sessionIdFlag
+  )
+  // grok refuses a `--session-id` that already exists under its session directory for this cwd —
+  // that is a LAUNCH ERROR, not a resume, so a node handed a taken id never starts. The check is
+  // synchronous against a warmed per-cwd memo (see grokSessionIds.ts for why the first mint in a
+  // fresh cwd is deliberately unchecked), and `mintFreeGrokSessionId` returns undefined rather than
+  // a taken id — which degrades to the pre-minting command line instead of a dead terminal.
+  const mintedSessionId = !sessionIdFlagSupported
+    ? undefined
+    : capabilityAgentId(agentId) === 'grok'
+      ? (ensureGrokTakenIds(cwd ?? ''), mintFreeGrokSessionId(grokTakenIdsNow(cwd ?? ''), uuid))
+      : uuid()
   // Command assembly is delegated to the ONE shared builder (src/shared/agents/launch.ts), used by
   // fresh launch AND cold-restore resume, so a custom agent's baseAgent/args/expansion are applied
   // identically in both paths. ${env:...} in launchCmd/args expands against the boot-time env

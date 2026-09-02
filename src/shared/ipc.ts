@@ -58,6 +58,8 @@ export const IPC = {
   codexAccountsRollbackSwitch: 'codex-accounts:rollback-switch',
   codexAccountsTransferThreadToSsh: 'codex-accounts:transfer-thread-to-ssh',
   claudeCliCaps: 'claude-cli:caps',
+  grokCliCaps: 'grok-cli:caps',
+  grokTakenSessionIds: 'grok-cli:taken-session-ids',
   /** Can a node on this machine get a managed Codex identity? See core/codex-identity-caps.ts. */
   codexIdentityCaps: 'codex-identity:caps',
   /** main/server → renderer: a Codex node's identity mode changed ('shared' | 'plain'). The

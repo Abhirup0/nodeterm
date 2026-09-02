@@ -7,15 +7,24 @@ describe('withSessionId', () => {
   })
 
   it('leaves a non-capable agent byte-identical', () => {
-    for (const id of ['codex', 'gemini', 'grok', 'opencode'] as const) {
+    // grok is NOT in this list any more: it joined SESSION_ID_CAPABLE. An agent whose capability is
+    // real must never stand as the example of one that lacks it — the example stops asserting
+    // anything the day it changes, and this one was still passing for the wrong reason.
+    for (const id of ['codex', 'gemini', 'opencode'] as const) {
       expect(withSessionId(id, id, 'abc-123')).toBe(id)
     }
   })
 
+  it('spells grok\'s flag with a SPACE, not copilot\'s equals form', () => {
+    // Two capable agents, two spellings. `withSessionId` branches on copilot alone, so grok takes
+    // the space form claude uses — which is what `grok --help` documents.
+    expect(withSessionId('grok', 'grok', 'abc-123')).toBe('grok --session-id abc-123')
+  })
+
   it('uses Copilot\'s equals-form session id independently of the Claude probe', () => {
-    expect(supportsSessionIdFlag('copilot', false)).toBe(true)
-    expect(supportsSessionIdFlag('claude', false)).toBe(false)
-    expect(supportsSessionIdFlag('claude', true)).toBe(true)
+    expect(supportsSessionIdFlag('copilot', false, false)).toBe(true)
+    expect(supportsSessionIdFlag('claude', false, false)).toBe(false)
+    expect(supportsSessionIdFlag('claude', true, false)).toBe(true)
     expect(withSessionId('copilot', 'copilot', 'abc-123')).toBe(
       'copilot --session-id=abc-123'
     )

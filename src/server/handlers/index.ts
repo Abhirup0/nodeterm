@@ -7,6 +7,7 @@ import { GitService } from '../../core/git-service'
 import { generateCommitMessage } from '../../core/commit-message'
 import { registerFsHandlers } from '../../core/fs-handlers'
 import { claudeCliCaps, registerClaudeCliIpc } from '../../core/claude-cli'
+import { registerGrokCliIpc } from '../../core/grok-cli'
 import { registerCodexIdentityIpc } from '../../core/codex-identity-caps'
 import { UNKNOWN_CODEX_IDENTITY_CAPS } from '@shared/types'
 import { startUsageService } from '../../core/usage/usage-service'
@@ -71,6 +72,9 @@ export function registerCoreHandlers(
   // The browser needs the same `--permission-mode auto` version gate as desktop: the server's own
   // claude CLI is the one that will run the terminal nodes. Warm it so the first call is cached.
   registerClaudeCliIpc()
+  // Invariant 11 for probes: registered in BOTH shells, or session-id minting silently works on
+  // the desktop and not in the browser, with nothing to say which.
+  registerGrokCliIpc()
   void claudeCliCaps()
 
   // ---- Codex shared identity: a DELIBERATE degrade, not an omission ----------------------------

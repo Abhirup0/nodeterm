@@ -16,6 +16,7 @@
 
 import {
   UNKNOWN_CLAUDE_CLI_CAPS,
+  UNKNOWN_GROK_CLI_CAPS,
   UNKNOWN_CODEX_IDENTITY_CAPS,
   type ClaudeUsage,
   type NodeTerminalApi,
@@ -285,6 +286,14 @@ export function buildStubApi(): Omit<
       // fail-open caps (never rejects) because the permission-mode gate reads it on the boot path.
       cliCaps: () => Promise.resolve(UNKNOWN_CLAUDE_CLI_CAPS),
       readTranscript: U('claude.readTranscript')
+    },
+    grok: {
+      // Same shape and same reason as claude's above: the launch path reads this synchronously, so
+      // it must resolve rather than reject. Unprobed ⇒ no `--session-id` ⇒ today's command line.
+      cliCaps: () => Promise.resolve(UNKNOWN_GROK_CLI_CAPS),
+      // Nothing taken is the honest answer where no shell can look, and it degrades to today's
+      // behaviour: mint freely. Overridden by the real WS-backed namespace in ws-bridge.
+      takenSessionIds: () => Promise.resolve([])
     },
     agent: {
       // No env snapshot outside the desktop window: the stub (and ws-bridge, identically) answers

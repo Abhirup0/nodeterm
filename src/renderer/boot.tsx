@@ -1,7 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
-import { ensureClaudeCliCaps } from './state/permissionMode'
+import { ensureClaudeCliCaps, ensureGrokCliCaps } from './state/permissionMode'
 import { ensureCodexIdentityCaps } from './state/codexIdentity'
 import { initAgentResolver } from './state/agent-resolver'
 import { refreshAgentEnv } from './lib/agentEnv'
@@ -17,6 +17,9 @@ initAgentResolver()
 // conservatively omit the flag. The shell warms the same memo at startup, so this normally
 // resolves immediately.
 void ensureClaudeCliCaps()
+// Same, for grok: its own probe, kicked off at boot so a node created seconds later already has
+// the real answer instead of the fail-open one.
+void ensureGrokCliCaps()
 
 // Same shape, same reason: a Codex launch line names the managed shared-identity launcher only if
 // this machine has one installed and armed. Unprobed ⇒ plain `codex`, which is what every Codex
