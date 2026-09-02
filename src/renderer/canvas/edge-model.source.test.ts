@@ -41,4 +41,16 @@ describe('canvas edge model (source pins)', () => {
     expect((src.match(/disarmDepsFor\(\[?[a-zA-Z.]+\]?\)/g) ?? []).length).toBeGreaterThanOrEqual(2) // ⌫ path + double-click
     expect(src).toContain('dropAfterDep(')
   })
+
+  it('a WAITING rope\'s delete takes only the wait — the covered context bridge survives it', () => {
+    // Both delete paths ask the same lookup displayEdges renders from, so the label the user reads
+    // ("stop waiting") is what actually happens: only a NON-waiting rope drags its bridge along.
+    expect(src).toContain('const nonWaitingRopeIds = useCallback(')
+    expect((src.match(/linkIdsCoveredByRopes\(\s*nonWaitingRopeIds\(/g) ?? []).length).toBe(2)
+    expect(src).toContain('ropeInfoOf(')
+  })
+
+  it('an armed node with no dep rope heals at project load, not only where --after ran', () => {
+    expect(src).toContain('missingDepRopes(')
+  })
 })

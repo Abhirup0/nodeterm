@@ -416,7 +416,7 @@ import {
   LAUNCH_STALL_MS,
   type ArmedNode
 } from '../lib/pendingLaunch'
-import { WAIT_LABEL, dropAfterDep, edgeHidden, hiddenEdgeNodeIds, ropeVisual, type RopeNodeInfo } from '../lib/edgeModel'
+import { WAIT_LABEL, dropAfterDep, edgeHidden, hiddenEdgeNodeIds, missingDepRopes, ropeInfoOf, ropeVisual } from '../lib/edgeModel'
 import { triggerEdges } from '../lib/triggerCard'
 import { freeSpot } from '../lib/placement'
 import { pushSessionRename, sessionNameUnchanged } from '../lib/sessionRename'
@@ -1918,7 +1918,7 @@ export function Canvas() {
     let sig = ''
     for (const n of nodes) {
       const p = n.data.pendingLaunch as PendingLaunch | undefined
-      sig += `${n.id}=${(n.data.agentId as string) ?? ''}${n.data.hideFanout ? '!' : ''}:${p?.after.join(',') ?? ''}|`
+      sig += `${n.id}=${(n.data.agentId as string) ?? ''}${n.data.hideFanout ? '!' : ''}:${p?.after?.join(',') ?? ''}|`
     }
     return sig
   }, [nodes])
@@ -1949,16 +1949,9 @@ export function Canvas() {
     const stickyIds = new Set(stickySig ? stickySig.split('|') : [])
     const drivenTargets = drivingNodeIds(drivenLeaseEntries, Date.now())
     // Endpoint facts the rope look derives from — read off the render-time ref, keyed by edgeSig.
-    const byId = new Map(nodesRef.current.map((n) => [n.id, n]))
-    const info = (id: string): RopeNodeInfo | undefined => {
-      const n = byId.get(id)
-      if (!n) return undefined
-      const agentId = n.data.agentId as AgentId | undefined
-      return {
-        agentColor: agentId ? agentConfig(agentId)?.color : undefined,
-        pendingAfter: (n.data.pendingLaunch as PendingLaunch | undefined)?.after
-      }
-    }
+    // The SAME builder the delete paths use (`nonWaitingRopeIds`), so what a rope's label promises
+    // is exactly what removing it does.
+    const info = ropeInfoOf(nodesRef.current, (a) => agentConfig(a as AgentId)?.color)
     const hidden = hiddenEdgeNodeIds(nodesRef.current)
     const labelBg = {
       labelBgStyle: { fill: '#1c1c1e', fillOpacity: 0.85 },
@@ -2319,7 +2312,14 @@ export function Canvas() {
       void useWorktrees.getState().refresh(project.cwd, boundGroups(flow))
     }
     setLinkEdges((project.bridges ?? []).map((b) => ({ id: b.id, source: b.source, target: b.target })))
-    setControlEdges((project.ropes ?? []).map((r) => ropeEdge(r.id, r.source, r.target)))
+    // A wait with no rope is a wait nothing on screen explains. Ropes for `--after` are written by
+    // the verbs that arm a node, so an arming that predates them (persisted `pendingLaunch`, no
+    // persisted rope) — or any future path that forgets one — is healed here on the next load.
+    const restoredRopes = (project.ropes ?? []).map((r) => ropeEdge(r.id, r.source, r.target))
+    setControlEdges([
+      ...restoredRopes,
+      ...missingDepRopes(flow, restoredRopes).map((r) => ropeEdge(r.id, r.source, r.target))
+    ])
     // Reset history for the newly loaded project.
     committedRef.current = flow
     pastRef.current = []
@@ -3126,7 +3126,7 @@ export function Canvas() {
       )
       if (exists) return
       setLinkEdges((es) =>
-        addEdge({ id: `bridge-${source}-${target}`, source, target, type: 'default' }, es)
+        addEdge({ id: `bridge-${source}-${target}`, source, target }, es)
       )
       markDirty()
       const status = useAgentStatus.getState().byId
@@ -3163,6 +3163,19 @@ export function Canvas() {
     [linkEndpointOf, agentIdOf, setLinkEdges, markDirty, nodes]
   )
 
+  // Of these ropes, the ones that are NOT live waits. A waiting rope's removal means "stop waiting
+  // on that one" and must not take the context bridge it covers with it: that bridge is durable
+  // (`--after` draws it so the dependent can READ its upstream) and simply becomes the visible
+  // `⇄ context` edge once the rope is gone. A plain lineage rope keeps the old rule — its hidden
+  // bridge goes with it, or the pair stays linked with nothing left on screen to unlink it. Asks
+  // the same lookup displayEdges renders from, so the label and the delete can never disagree.
+  const nonWaitingRopeIds = useCallback((ropeIds: readonly string[]): string[] => {
+    const info = ropeInfoOf(nodesRef.current, (a) => agentConfig(a as AgentId)?.color)
+    return controlEdgesRef.current
+      .filter((r) => ropeIds.includes(r.id) && !ropeVisual(r, info).waiting)
+      .map((r) => r.id)
+  }, [])
+
   // Removing a WAITING rope is "stop waiting on that one": the dep leaves the target's list, the
   // rope goes, and (if it was the last wait) the held launch fires on the next effect run. A plain
   // rope's removal changes no arming.
@@ -3189,9 +3202,14 @@ export function Canvas() {
       if (controlEdgesRef.current.some((b) => b.id === edge.id)) {
         // A rope may be the only DRAWN edge for a pair that also has a context bridge (see
         // displayEdges) — take that bridge with it, or the nodes stay linked with nothing left
-        // on screen to unlink them.
+        // on screen to unlink them. Unless it is a WAITING rope: that removal cancels only the
+        // wait, and the bridge it covered becomes the visible context edge.
         const covered = new Set(
-          linkIdsCoveredByRopes([edge.id], controlEdgesRef.current, linkEdgesRef.current)
+          linkIdsCoveredByRopes(
+            nonWaitingRopeIds([edge.id]),
+            controlEdgesRef.current,
+            linkEdgesRef.current
+          )
         )
         disarmDepsFor([edge.id])
         setControlEdges((es) => es.filter((b) => b.id !== edge.id))
@@ -3203,7 +3221,7 @@ export function Canvas() {
       setLinkEdges((es) => es.filter((b) => b.id !== edge.id))
       markDirty()
     },
-    [setLinkEdges, markDirty, disarmDepsFor]
+    [setLinkEdges, markDirty, disarmDepsFor, nonWaitingRopeIds]
   )
 
   // Route edge changes (selection) to the right store: `ctrl-` ids are control ropes (local
@@ -4958,10 +4976,15 @@ export function Canvas() {
       const ropeIds = controlEdgesRef.current.filter((b) => b.selected).map((b) => b.id)
       if (!edgeIds.length && !ropeIds.length) return false
       // A selected rope may be standing in for a hidden context bridge — drop both, or the
-      // pair stays linked with no edge left to click (see displayEdges).
+      // pair stays linked with no edge left to click (see displayEdges). A WAITING rope is the
+      // exception: removing it only cancels the wait, and its bridge surfaces as a context edge.
       const drop = new Set([
         ...edgeIds,
-        ...linkIdsCoveredByRopes(ropeIds, controlEdgesRef.current, linkEdgesRef.current)
+        ...linkIdsCoveredByRopes(
+          nonWaitingRopeIds(ropeIds),
+          controlEdgesRef.current,
+          linkEdgesRef.current
+        )
       ])
       if (drop.size) setLinkEdges((es) => es.filter((b) => !drop.has(b.id)))
       if (ropeIds.length) {
@@ -4980,7 +5003,7 @@ export function Canvas() {
       }
     })
     return true
-  }, [deleteNodes, setLinkEdges, setControlEdges, markDirty, setConfirm, disarmDepsFor])
+  }, [deleteNodes, setLinkEdges, setControlEdges, markDirty, setConfirm, disarmDepsFor, nonWaitingRopeIds])
 
   // When an account is removed in Settings, patch the ACTIVE project's live nodes (the projects
   // store only holds the other projects' serialized copies). The account's login node is
@@ -9150,7 +9173,7 @@ export function Canvas() {
         const plan = planBridges(fromId, targetIds, lookup, [...linkEdgesRef.current, ...drawn])
         if (plan.edges.length) {
           drawn.push(...plan.edges)
-          setLinkEdges((es) => [...es, ...plan.edges.map((e) => ({ ...e, type: 'default' }))])
+          setLinkEdges((es) => [...es, ...plan.edges])
           markDirty()
         }
         return plan
@@ -9205,7 +9228,9 @@ export function Canvas() {
       // instantly. Returns the ids, or null with the error already replied.
       const resolveAfter = (): string[] | null | undefined => {
         if (!args.after) return undefined
-        const ids = (args.after ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+        // Deduped: `--after a,a` is one wait, and two dep ropes for one pair would collide on the
+        // single id `ctrl-a-<node>`.
+        const ids = [...new Set((args.after ?? '').split(',').map((s) => s.trim()).filter(Boolean))]
         if (ids.length === 0) return undefined
         for (const depId of ids) {
           const dep = nodesRef.current.find((nd) => nd.id === depId)
@@ -9547,7 +9572,9 @@ export function Canvas() {
             const bridged = bridgeTo(sourceNodeId, ids, openedEndpoint).linked
             // A dependency is also a READING relationship: the whole reason to wait for a
             // station is to consume what it produced. So `--after` additionally bridges each new
-            // node to each dep — that link is durable and outlives the dashed waiting edge.
+            // node to each dep. That bridge is DURABLE: while the wait is on it hides under the
+            // dep rope (one edge per pair), and cancelling the wait — deleting that rope — leaves
+            // it behind as an ordinary visible context edge.
             const depLinked = (after ?? []).length
               ? ids.flatMap((nid) => bridgeTo(nid, after ?? [], openedEndpoint).linked)
               : []
@@ -9929,6 +9956,11 @@ export function Canvas() {
             )
             setNodes(next)
             panelIds.forEach((pid) => connect(pid))
+            // `connect` only ropes the CALLER to each member — lineage. The panel's sequencing is
+            // its own relation, so each held wait gets its own rope and the group reads as the DAG
+            // it is: every reviewer waits on the target, the verdict waits on every reviewer.
+            for (const rid of reviewerIds) ropeDeps([rid], [targetId])
+            if (judge) ropeDeps([judge.id], reviewerIds)
             // Same-tick lookup: the panel is not on the canvas yet (setNodes is async).
             const panelEndpoint = (id: string): LinkEndpoint | null =>
               panelIds.includes(id)

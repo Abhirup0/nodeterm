@@ -81,6 +81,9 @@ describe('triggerEdges', () => {
     const edges = triggerEdges(nodes as never, '#fff')
     expect(edges.map((e) => `${e.source}>${e.target}`)).toEqual(['trigger-a-1>term-tgt-1'])
     expect(edges[0].selectable).toBe(false)
+    // The canvas has ONE edge renderer: a trigger edge routes between nearest borders like
+    // every other family, so a card above its target does not loop out of the wrong side.
+    expect(edges[0].type).toBe('floating')
   })
 
   it('non-trigger nodes never draw', () => {

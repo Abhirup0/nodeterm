@@ -55,3 +55,53 @@ export function hiddenEdgeNodeIds(
 export function edgeHidden(e: { source: string; target: string }, hidden: ReadonlySet<string>): boolean {
   return hidden.size > 0 && (hidden.has(e.source) || hidden.has(e.target))
 }
+
+/**
+ * The endpoint lookup `ropeVisual` needs, built once from the canvas nodes. Extracted because the
+ * DELETE paths ask the same question the render does ("is this rope a wait?"), and two copies of
+ * the builder would be two answers: displayEdges would draw the waiting label while the delete
+ * path still took the covered context bridge with it. `colorOf` is injected so this file stays
+ * free of the agent registry.
+ */
+export function ropeInfoOf(
+  nodes: readonly { id: string; data: { agentId?: string; pendingLaunch?: PendingLaunch } }[],
+  colorOf: (agentId: string) => string | undefined
+): (id: string) => RopeNodeInfo | undefined {
+  const byId = new Map(nodes.map((n) => [n.id, n]))
+  return (id) => {
+    const n = byId.get(id)
+    if (!n) return undefined
+    const agentId = n.data.agentId
+    return {
+      agentColor: agentId ? colorOf(agentId) : undefined,
+      pendingAfter: n.data.pendingLaunch?.after
+    }
+  }
+}
+
+/**
+ * The dep ropes an armed node is owed but does not have. A rope is what makes a wait VISIBLE, and
+ * only the `open-*`/`verify` verbs write one — so a node armed by any other path, or armed by a
+ * build that predates the rope (its `pendingLaunch` is persisted, the rope is not), would show a
+ * launch it is holding with no arrow saying what for. Applied at project load, this heals both
+ * cases on the next open and costs nothing on a canvas with no armed node.
+ *
+ * A dep that is not on the canvas is skipped — it can never report, `launchesToFire` already treats
+ * it as satisfied, and an edge to a node that is not there would be dropped by React Flow anyway.
+ */
+export function missingDepRopes(
+  nodes: readonly { id: string; data: { pendingLaunch?: PendingLaunch } }[],
+  ropes: readonly { source: string; target: string }[]
+): { id: string; source: string; target: string }[] {
+  const live = new Set(nodes.map((n) => n.id))
+  const have = new Set(ropes.map((r) => `${r.source} ${r.target}`))
+  const out: { id: string; source: string; target: string }[] = []
+  for (const n of nodes) {
+    for (const dep of n.data.pendingLaunch?.after ?? []) {
+      if (!live.has(dep) || have.has(`${dep} ${n.id}`)) continue
+      have.add(`${dep} ${n.id}`)
+      out.push({ id: `ctrl-${dep}-${n.id}`, source: dep, target: n.id })
+    }
+  }
+  return out
+}
