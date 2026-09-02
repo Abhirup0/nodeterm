@@ -2778,7 +2778,11 @@ the Settings section and ShortcutsPanel start disagreeing about what a chord mea
 - **Welcome** (`WelcomeScreen.tsx`): shown when no projects exist.
 - **Window chrome**: macOS integrated title bar (`titleBarStyle: 'hiddenInset'`); the tab
   bar (`TabBar.tsx`) is the drag region with the `nodeterm` logo + a rounded pill of project
-  tabs. Cmd+M is intercepted in `main/keydown-intercept.ts` (`before-input-event`, installed from
+  tabs. The New-project `+` is a **sibling** of `.tabbar__tabs`, not its last child — inside
+  the scroller it vanished once the strip overflowed (no visible scrollbar to hint it was
+  still there). The wrapping `.tabbar__projects` is `flex: 1` and stays a drag region (not
+  `no-drag`); the pill itself must not be `flex: 1` or it inflates into an empty capsule.
+  Cmd+M is intercepted in `main/keydown-intercept.ts` (`before-input-event`, installed from
   `main/index.ts` — else macOS minimizes) and forwarded to the renderer via `app:toggle-markdown`;
   Cmd+W (`app:close-node`) and Cmd+0 (`app:zoom-actual-size`) are taken back the same way. **The
   application menu is OURS**: `buildAppMenu` (`main/index.ts`) calls `Menu.setApplicationMenu` and
