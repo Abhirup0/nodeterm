@@ -310,6 +310,16 @@ Where a behaviour can only be verified on hardware we do not have in CI (a Mac, 
 GPU), say so explicitly rather than implying coverage. Several docs carry numbered device
 checklists for exactly this.
 
+**A test never touches a live tmux server.** You will most likely run `npm test` from inside a
+nodeterm terminal, where `-L node-terminal` and `-L nodeterm-rmt` are the servers holding every
+node you have open — one stray `kill-server` there ends your whole canvas, not your test. Every run
+therefore gets a private `TMUX_TMPDIR` (`test/setup/tmux-sandbox.ts`), which re-points every socket
+name at once. Write real-tmux suites the normal way — pick your own socket name, and use
+`makeTmuxTmpdir` if you also want your own directory — and do not build an `env` object for a real
+tmux without carrying `TMUX_TMPDIR` into it, which is the one way left to escape the sandbox.
+`src/core/tmux-socket-isolation.guard.test.ts` holds the short allowlist of suites that name a
+production socket on purpose; adding a third is a review conversation, not a checkbox.
+
 ## Pull requests
 
 - Branch from `main`. CI runs `quality`, `CodeQL` and `Dependency review`; all three are required.

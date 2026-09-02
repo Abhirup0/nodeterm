@@ -89,3 +89,36 @@ function realpathOrSelf(p: string): string {
     return p
   }
 }
+
+// ── The run-wide sandbox (issue #629) ───────────────────────────────────────────────────────────
+//
+// The two helpers above serve a suite that ASKS for a private socket. Everything below serves the
+// suites that do not: `test/setup/tmux-sandbox.ts` gives the whole vitest run one private
+// `TMUX_TMPDIR`, so a test naming `node-terminal` binds inside the sandbox instead of on the server
+// carrying the developer's live nodeterm canvas. They live here rather than beside the setup file
+// because `src/core` is what the guard test can import — `test/` is outside every tsconfig project.
+
+/** How the sandbox path reaches the workers, separately from `TMUX_TMPDIR` itself: a worker must be
+ *  able to tell "this run set it up" from "the developer already had TMUX_TMPDIR exported". */
+export const SANDBOX_ENV = 'NODETERM_TEST_TMUX_TMPDIR'
+
+/**
+ * Longest socket NAME the sandbox reserves room for.
+ *
+ * The sandbox is a PREFIX of every socket bound inside it, so it owes the same `SUN_PATH_MAX`
+ * arithmetic as a per-suite directory. The real names are short (`node-terminal` is 13) but a suite
+ * that binds `nt-accttest-<pid>` inside the sandbox needs the slack, and a budget discovered at
+ * bind time reads like a broken test rather than a path-length limit.
+ */
+export const SANDBOX_SOCKET_BUDGET = 40
+
+/** Point this process — and therefore every child and worker it spawns — at the sandbox. */
+export function enterSandbox(sandbox: string): void {
+  process.env[SANDBOX_ENV] = sandbox
+  process.env.TMUX_TMPDIR = sandbox
+  // A suite run from inside a nodeterm terminal inherits a live client's `TMUX`/`TMUX_PANE`.
+  // Production strips both from every child it spawns for the same reason (nesting refusal); a test
+  // that reads them would be measuring the developer's canvas.
+  delete process.env.TMUX
+  delete process.env.TMUX_PANE
+}

@@ -7,12 +7,20 @@
 // nothing to show over a session that kept running. `handleDestroy` therefore verifies the
 // OUTCOME (`sessionExists` after the destroy must say gone) before answering.
 //
-// This suite runs the verb against tmux for real, on the real `node-terminal` socket with a
-// unique throwaway session name — the same discipline as the canvas-control shim and
-// remote-usage suites (generated side-effects are proven on the real interpreter, not a fake).
+// This suite runs the verb against tmux for real — the same discipline as the canvas-control shim
+// and remote-usage suites (generated side-effects are proven on the real interpreter, not a fake).
 // node-pty stays mocked (suite convention: it is built for Electron's ABI); the pty spawn is
 // irrelevant here — the tmux side-calls and the kill are real subprocesses.
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+//
+// WHERE IT BINDS (issue #629). It must use the socket NAME `PtyManager` binds, `TMUX_SOCKET` — that
+// is not a choice, the manager hardcodes it and this suite exists to watch the manager's own kill
+// land. Until the run-wide sandbox existed, that name resolved to `/tmp/tmux-<uid>/node-terminal`:
+// the server holding every terminal on the developer's machine, since this repo is developed from
+// inside nodeterm. So the suite created sessions on the user's live server and drove a real
+// `PtyManager` at it. `test/setup/tmux-sandbox.ts` now re-points `TMUX_TMPDIR` for the whole run,
+// and `beforeAll` REFUSES to run at all if that sandbox is not in effect — a suite that quietly
+// falls back to the shared server is exactly the failure this check exists to make loud.
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { existsSync, promises as fs } from 'fs'
@@ -22,6 +30,7 @@ import { initPlatform, resetPlatformForTests } from '../../core/platform'
 import { fakePlatform } from '../../core/platform-fake'
 import { DEFAULT_SETTINGS } from '../../shared/types'
 import { TMUX_SOCKET, sessionName } from '../../core/tmux-naming'
+import { SANDBOX_ENV, tmuxSocketPath } from '../../core/tmux-test-socket'
 import { createHostHandlers, type HostFsOps, type HostRelaySocket } from './host-service'
 
 const run = promisify(execFile)
@@ -65,10 +74,23 @@ describe.skipIf(!TMUX || process.platform === 'win32')(
       }
     }
 
+    // The socket name is the live one; only `TMUX_TMPDIR` keeps it off the live SERVER. Prove that
+    // before anything is created, and name the sandbox in the failure — a suite that silently used
+    // the developer's own tmux server is what issue #629 is about.
+    beforeAll(() => {
+      const sandbox = process.env[SANDBOX_ENV]
+      expect(sandbox, 'tmux sandbox not in effect — see test/setup/tmux-sandbox.ts').toBeTruthy()
+      expect(process.env.TMUX_TMPDIR).toBe(sandbox)
+      expect(tmuxSocketPath(sandbox!, process.getuid?.() ?? 0, TMUX_SOCKET)).not.toBe(
+        tmuxSocketPath('/tmp', process.getuid?.() ?? 0, TMUX_SOCKET)
+      )
+    })
+
     beforeEach(async () => {
       userData = await fs.mkdtemp(path.join(os.tmpdir(), 'nt-destroy-'))
       initPlatform(fakePlatform({ userDataDir: userData }))
-      // Unique per run: this socket is the REAL one, shared with whatever else the machine runs.
+      // Unique per run: the socket NAME is the production one, so a collision inside the sandbox
+      // between two concurrent runs would be a real one.
       nodeId = `e581-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       await run(TMUX!, ['-L', TMUX_SOCKET, 'new-session', '-d', '-s', sessionName(nodeId), 'sleep', '600'])
       expect(await hasSession()).toBe(true)
