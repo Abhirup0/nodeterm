@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { appendProjectNode, removeProjectNode } from './project-node-append'
+import { agentConfig } from '../shared/agents/config'
 
 const NOW = new Date('2026-07-16T10:00:00.000Z')
 
@@ -80,6 +81,80 @@ describe('appendProjectNode', () => {
     )
     expect(titled.nodes[0].title).toBe('Claude Code')
     expect(titled.nodes[0].color).toBe('#d97757')
+  })
+
+  it('an account-bound node takes the account color the host resolved, over the agent color', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'claude', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].color).toBe('#0a84ff')
+    expect(out.nodes[0].accountId).toBe('acct1')
+  })
+
+  it('keeps the agent color when the host resolved no account color', () => {
+    const out = JSON.parse(
+      appendProjectNode(baseFile([]), { id: 'term-c-1', agentId: 'claude', accountId: 'acct1' }, NOW)!
+    )
+    expect(out.nodes[0].color).toBe('#d97757')
+  })
+
+  // Managed accounts belong to the builtin claude and codex (S6), and the canvas has always
+  // refused to stamp one onto any other agent's node. This leg wrote whatever the phone sent, so a
+  // gemini node could come back bound to a managed account — a config home and an account-scoped
+  // reader root that mean nothing for it. The binding and the color are ONE decision, so both go.
+  it('never binds a managed account to an agent that takes none, nor paints it that color', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'gemini', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBeUndefined()
+    expect(out.nodes[0].color).toBe(agentConfig('gemini')!.color)
+  })
+
+  // Codex binds since S6 — the rule is "which agents take a managed account", not "claude".
+  it('binds a managed account to a Codex registration, color and all', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'codex', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBe('acct1')
+    expect(out.nodes[0].color).toBe('#0a84ff')
+  })
+
+  it('never binds one to a custom agent either, even one based on claude', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'my-claude', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBeUndefined()
+  })
+
+  // The phone sends `agentId` and `accountId` independently and is not known to always send the
+  // first (docs/ios-protocol-migration.md §6). Dropping the binding here would be the wrong-identity
+  // bug the field was added to fix, so an unstated agent keeps it — see `boundAccountId`.
+  it('keeps the binding when the phone stated no agent', () => {
+    const out = JSON.parse(
+      appendProjectNode(baseFile([]), { id: 'term-c-1', accountId: 'acct1' }, NOW, '#0a84ff')!
+    )
+    expect(out.nodes[0].accountId).toBe('acct1')
+    expect(out.nodes[0].color).toBe('#0a84ff')
   })
 
   it('a custom/unknown agent and a plain terminal keep the mobile defaults', () => {

@@ -23,6 +23,7 @@ import {
   ungroupNodes
 } from './workspace'
 import type { CanvasNode } from './workspace'
+import type { Project } from '@shared/types'
 
 const term = (id: string, pos: { x: number; y: number }, parentId?: string): CanvasNode =>
   ({
@@ -359,6 +360,93 @@ describe('groupSelectedNodes', () => {
     expect(outer.position.x).toBeGreaterThanOrEqual(0)
     expect(outer.position.x + (outer.width as number)).toBeLessThanOrEqual(root.width as number)
     expect(outer.position.y + (outer.height as number)).toBeLessThanOrEqual(root.height as number)
+  })
+})
+
+describe('groupSelectedNodes with snapping on', () => {
+  const GRID = 20
+  const GROUP_PAD = 28
+  const GROUP_HEADER = 34
+
+  it('places the frame on the grid, all four edges', () => {
+    const nodes = [term('t1', { x: 100, y: 100 }), term('t2', { x: 500, y: 300 })]
+    const group = groupSelectedNodes(nodes, ['t1', 't2'], 0, GRID)[0]
+    expect(group.position.x % GRID).toBe(0)
+    expect(group.position.y % GRID).toBe(0)
+    expect((group.position.x + (group.width as number)) % GRID).toBe(0)
+    expect((group.position.y + (group.height as number)) % GRID).toBe(0)
+  })
+
+  it('keeps at least the unsnapped clearance on every side', () => {
+    // Snapping may only push the frame outward. The members span (100,100)-(820,540).
+    const nodes = [term('t1', { x: 100, y: 100 }), term('t2', { x: 500, y: 300 })]
+    const group = groupSelectedNodes(nodes, ['t1', 't2'], 0, GRID)[0]
+    const pad = Math.max(GROUP_PAD, GRID)
+    expect(group.position.x).toBeLessThanOrEqual(100 - pad)
+    expect(group.position.y).toBeLessThanOrEqual(100 - pad - GROUP_HEADER)
+    expect(group.position.x + (group.width as number)).toBeGreaterThanOrEqual(820 + pad)
+    expect(group.position.y + (group.height as number)).toBeGreaterThanOrEqual(540 + pad)
+  })
+
+  it('honours a grid coarser than the fixed padding', () => {
+    const coarse = 64
+    const nodes = [term('t1', { x: 200, y: 200 })]
+    const group = groupSelectedNodes(nodes, ['t1'], 0, coarse)[0]
+    expect(group.position.x).toBeLessThanOrEqual(200 - coarse)
+    expect(group.position.x % coarse).toBe(0)
+  })
+
+  it('leaves every member where it was on canvas', () => {
+    const nodes = [term('t1', { x: 100, y: 100 }), term('t2', { x: 500, y: 300 })]
+    const out = groupSelectedNodes(nodes, ['t1', 't2'], 0, GRID)
+    const group = out[0]
+    for (const [id, pos] of [['t1', { x: 100, y: 100 }], ['t2', { x: 500, y: 300 }]] as const) {
+      const child = out.find((n) => n.id === id)!
+      expect(group.position.x + child.position.x).toBe(pos.x)
+      expect(group.position.y + child.position.y).toBe(pos.y)
+    }
+  })
+
+  it('snaps a nested frame onto the CANVAS grid, not its parent frame grid', () => {
+    // An off-grid frame origin is the normal case, so a parent-relative snap would land the
+    // wrapper on a grid offset by (-28, -62) from the one React Flow drags against.
+    const nodes = [
+      grp('outer', { x: -28, y: -62 }),
+      term('a', { x: 100, y: 100 }, 'outer'),
+      term('b', { x: 400, y: 260 }, 'outer')
+    ]
+    const out = groupSelectedNodes(nodes, ['a', 'b'], 1, GRID)
+    const outer = out.find((n) => n.id === 'outer')!
+    const wrapper = out.find((n) => !nodes.some((old) => old.id === n.id))!
+    expect(wrapper.parentId).toBe('outer')
+    // Math.abs: a negative multiple modulo the grid is -0, which toBe distinguishes from 0.
+    expect(Math.abs((outer.position.x + wrapper.position.x) % GRID)).toBe(0)
+    expect(Math.abs((outer.position.y + wrapper.position.y) % GRID)).toBe(0)
+  })
+
+  it('is byte-identical to the unsnapped box when snapping is off', () => {
+    const nodes = [term('t1', { x: 103, y: 107 }), term('t2', { x: 511, y: 313 })]
+    const group = groupSelectedNodes(nodes, ['t1', 't2'], 0, 0)[0]
+    expect(group.position).toEqual({ x: 103 - GROUP_PAD, y: 107 - GROUP_PAD - GROUP_HEADER })
+    expect(group.width).toBe(511 + 320 - 103 + GROUP_PAD * 2)
+    expect(group.height).toBe(313 + 240 - 107 + GROUP_PAD * 2 + GROUP_HEADER)
+    expect(groupSelectedNodes(nodes, ['t1', 't2'], 0)[0].position).toEqual(group.position)
+  })
+
+  it('keeps a re-fit frame on the grid, so a later fit cannot undo the placement', () => {
+    const nodes = [
+      grp('g1', { x: 100, y: 100 }),
+      term('a', { x: 23, y: 41 }, 'g1'),
+      term('b', { x: 61, y: 19 }, 'g1')
+    ]
+    const out = fitGroupToChildren(nodes, 'g1', GRID)
+    const g = out.find((n) => n.id === 'g1')!
+    expect(g.position.x % GRID).toBe(0)
+    expect(g.position.y % GRID).toBe(0)
+    // Children still sit where they were on canvas.
+    const a = out.find((n) => n.id === 'a')!
+    expect(g.position.x + a.position.x).toBe(123)
+    expect(g.position.y + a.position.y).toBe(141)
   })
 })
 
@@ -739,6 +827,33 @@ describe('createAccountLoginNode', () => {
     expect(node.data.accountId).toBe('acct-1')
     expect(node.data.initialCommand).toBe('claude /login')
   })
+
+  // Issue #553: a login node with no cwd starts in $HOME, and Claude Code's trust check is keyed
+  // on the cwd — so the user was asked to trust their entire home directory before an OAuth round
+  // trip that touches no files.
+  it('roots the login shell in the cwd it is given', () => {
+    expect(createAccountLoginNode('acct-1', 0, undefined, undefined, '/work/repo').data.cwd).toBe(
+      '/work/repo'
+    )
+  })
+
+  it('roots a REMOTE login at the host cwd, never at a local path', () => {
+    // The local cwd belongs to whichever project was active when Settings fired the event; the
+    // session runs on the host, where that path names nothing (or, worse, something else).
+    const ssh = {
+      server: { host: 'h', user: 'u' },
+      remoteCwd: '/srv/app'
+    } as unknown as NonNullable<Project['ssh']>
+    const node = createAccountLoginNode('acct-1', 0, undefined, ssh, '/local/repo')
+    expect(node.data.cwd).toBe('/srv/app')
+    expect(node.data.sshRemoteTmux).toBe(true)
+  })
+
+  it('still opens with no cwd when the caller has none to offer', () => {
+    // An SSH project has no local `cwd`, so a LOCAL account added from one falls back to $HOME —
+    // unchanged behavior, and the honest answer: that project owns no local directory.
+    expect(createAccountLoginNode('acct-1', 0).data.cwd).toBeUndefined()
+  })
 })
 
 describe('createCodexAccountLoginNode', () => {
@@ -754,6 +869,13 @@ describe('createCodexAccountLoginNode', () => {
     // With an agentId of 'codex' this would be an agent node and take the agent paths; the login
     // terminal is scoped purely because its account id is a managed CODEX one (see #345/#346).
     expect(createCodexAccountLoginNode('acct-2', 0).data.agentId).toBeUndefined()
+  })
+
+  it('roots the login shell in the cwd it is given (issue #553)', () => {
+    expect(createCodexAccountLoginNode('acct-2', 0, undefined, '/work/repo').data.cwd).toBe(
+      '/work/repo'
+    )
+    expect(createCodexAccountLoginNode('acct-2', 0).data.cwd).toBeUndefined()
   })
 })
 
@@ -784,6 +906,13 @@ describe('createSystemLoginNode (issue #420)', () => {
     expect((persisted as { initialCommand?: string }).initialCommand).toBeUndefined()
     const back = nodeStatesToFlow([persisted])[0]
     expect(isAccountLoginNode(back.data)).toBe(false)
+  })
+
+  it('roots the login shell in the cwd it is given (issue #553)', () => {
+    // The reported case: the popover's Switch account button opened in $HOME, so Claude Code's
+    // trust prompt stood between the click and the OAuth flow.
+    expect(createSystemLoginNode(0, undefined, '/work/repo').data.cwd).toBe('/work/repo')
+    expect(createSystemLoginNode(0).data.cwd).toBeUndefined()
   })
 })
 

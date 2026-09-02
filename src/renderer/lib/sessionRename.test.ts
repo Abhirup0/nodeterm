@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
-import { RENAME_PUSH_ATTEMPTS, pushSessionRename, renameCommand } from './sessionRename'
+import {
+  RENAME_PUSH_ATTEMPTS,
+  pushSessionRename,
+  renameCommand,
+  sessionNameUnchanged
+} from './sessionRename'
 
 const io = (panes: (string | null)[] | (() => Promise<string | null>)) => {
   const sent: string[] = []
@@ -18,7 +23,7 @@ const io = (panes: (string | null)[] | (() => Promise<string | null>)) => {
 describe('pushSessionRename', () => {
   it('writes as soon as a non-shell owns the pane', async () => {
     const x = io(['claude'])
-    await expect(pushSessionRename(x, 'n1', 'My session')).resolves.toBe(true)
+    await expect(pushSessionRename(x, 'n1', 'My session', 'Claude Code')).resolves.toBe(true)
     expect(x.sent).toEqual(['/rename My session'])
   })
 
@@ -26,21 +31,21 @@ describe('pushSessionRename', () => {
     // The regression this exists for: `claude '<long prompt>'` mid-delivery, cut in half by an
     // interleaved rename, leaving the shell at `quote>` and the agent never started.
     const x = io(['zsh'])
-    await expect(pushSessionRename(x, 'n1', 'My session')).resolves.toBe(false)
+    await expect(pushSessionRename(x, 'n1', 'My session', 'Claude Code')).resolves.toBe(false)
     expect(x.sent).toEqual([])
   })
 
   it('recognizes a login shell and a full path as shells', async () => {
     for (const pane of ['-zsh', '/bin/bash', 'fish']) {
       const x = io([pane])
-      await pushSessionRename(x, 'n1', 'x')
+      await pushSessionRename(x, 'n1', 'x', 'was')
       expect(x.sent, pane).toEqual([])
     }
   })
 
   it('waits for the CLI to boot, then writes once', async () => {
     const x = io(['zsh', 'zsh', 'node'])
-    await expect(pushSessionRename(x, 'n1', 'Later')).resolves.toBe(true)
+    await expect(pushSessionRename(x, 'n1', 'Later', 'Earlier')).resolves.toBe(true)
     expect(x.sent).toEqual(['/rename Later'])
   })
 
@@ -48,20 +53,97 @@ describe('pushSessionRename', () => {
     const x = io(async () => {
       throw new Error('tmux gone')
     })
-    await expect(pushSessionRename(x, 'n1', 'x')).resolves.toBe(false)
+    await expect(pushSessionRename(x, 'n1', 'x', 'was')).resolves.toBe(false)
     expect(x.sent).toEqual([])
   })
 
   it('treats an unknown (null) pane as "not demonstrated" and stays silent', async () => {
     const x = io([null])
-    await expect(pushSessionRename(x, 'n1', 'x')).resolves.toBe(false)
+    await expect(pushSessionRename(x, 'n1', 'x', 'was')).resolves.toBe(false)
     expect(x.sent).toEqual([])
   })
 
   it('gives up after a bounded number of attempts rather than probing forever', async () => {
     const probe = vi.fn(async () => 'zsh')
-    await pushSessionRename({ paneCommand: probe, sendText: async () => true, sleep: async () => {} }, 'n1', 'x')
+    await pushSessionRename(
+      { paneCommand: probe, sendText: async () => true, sleep: async () => {} },
+      'n1',
+      'x',
+      'was'
+    )
     expect(probe).toHaveBeenCalledTimes(RENAME_PUSH_ATTEMPTS)
+  })
+})
+
+/**
+ * The unchanged-title gate — issue #582, and issue #569 §2 from the orchestrator's side.
+ *
+ * A rename to the name the node already carries must reach the pane with NOTHING. It is not a
+ * harmless duplicate: claude records each `/rename` as a transcript entry, its `Session renamed
+ * to: …` stdout, and a `<system-reminder>` asserting that *the user* named this session — so a
+ * re-sent identical name burns the working session's context to report an intent nobody had.
+ * #582 measured 32 such injections in six hours, every one carrying the same title.
+ *
+ * The gate lives HERE, below every call site, because that is the only layer the compiler can
+ * make unavoidable: `current` is a required argument, so a new caller cannot forget it, and
+ * neither `Canvas.tsx` nor `TerminalNode.tsx` is unit-rendered in this repo.
+ */
+describe('pushSessionRename: an unchanged name writes nothing', () => {
+  it('does not even PROBE the pane when the name is unchanged', async () => {
+    const probe = vi.fn(async () => 'claude')
+    const sendText = vi.fn(async () => true)
+    await expect(
+      pushSessionRename({ paneCommand: probe, sendText, sleep: async () => {} }, 'n1', 'Trial 1.08', 'Trial 1.08')
+    ).resolves.toBe(false)
+    expect(sendText).not.toHaveBeenCalled()
+    // Nothing is asked of tmux either: the cheapest possible no-op, on a path an orchestrator
+    // re-runs after every context reset.
+    expect(probe).not.toHaveBeenCalled()
+  })
+
+  it('still pushes when the name actually changes', async () => {
+    const x = io(['claude'])
+    await expect(pushSessionRename(x, 'n1', 'Trial 1.09', 'Trial 1.08')).resolves.toBe(true)
+    expect(x.sent).toEqual(['/rename Trial 1.09'])
+  })
+
+  it('pushes the FIRST name a node gets (no previous title is not "unchanged")', async () => {
+    const x = io(['claude'])
+    await expect(pushSessionRename(x, 'n1', 'Trial 1.08', '')).resolves.toBe(true)
+    expect(x.sent).toEqual(['/rename Trial 1.08'])
+  })
+
+  it('compares the line that would be SENT, not the raw title', async () => {
+    // `renameCommand` collapses control runs, so these two titles compose the same submitted
+    // line. A raw `!==` would call this a new name and deliver a byte-identical duplicate.
+    const x = io(['claude'])
+    await expect(pushSessionRename(x, 'n1', 'Trial\n1.08', 'Trial 1.08')).resolves.toBe(false)
+    expect(x.sent).toEqual([])
+  })
+})
+
+describe('sessionNameUnchanged', () => {
+  it('is true only when the composed rename line would be identical', () => {
+    expect(sessionNameUnchanged('Trial 1.08', 'Trial 1.08')).toBe(true)
+    expect(sessionNameUnchanged('Trial 1.08', 'Trial 1.09')).toBe(false)
+    expect(sessionNameUnchanged('Trial 1.08', '')).toBe(false)
+    // Normalized exactly as `renameCommand` normalizes: trimmed, control runs collapsed.
+    expect(sessionNameUnchanged('  Trial 1.08  ', 'Trial 1.08')).toBe(true)
+    expect(sessionNameUnchanged('Trial\r\n1.08', 'Trial 1.08')).toBe(true)
+    // …and no further than that: inner spacing and case are part of the name.
+    expect(sessionNameUnchanged('Trial  1.08', 'Trial 1.08')).toBe(false)
+    expect(sessionNameUnchanged('trial 1.08', 'Trial 1.08')).toBe(false)
+  })
+
+  it('agrees with renameCommand on every pair it calls unchanged', () => {
+    for (const [a, b] of [
+      ['Trial 1.08', ' Trial 1.08'],
+      ['Deploy\nx', 'Deploy x'],
+      ['a', 'a']
+    ] as const) {
+      expect(sessionNameUnchanged(a, b)).toBe(true)
+      expect(renameCommand(a)).toBe(renameCommand(b))
+    }
   })
 })
 
@@ -128,7 +210,7 @@ describe('renameCommand: a title cannot splice a second command', () => {
     // The gate's own tests above pin the ordinary case; this one pins that a malicious title
     // cannot reach the pane un-stripped by going through pushSessionRename instead.
     const x = io(['claude'])
-    return pushSessionRename(x, 'n1', 'Deploy\nrm -rf ~').then(() => {
+    return pushSessionRename(x, 'n1', 'Deploy\nrm -rf ~', 'Old name').then(() => {
       expect(x.sent).toEqual(['/rename Deploy rm -rf ~'])
     })
   })

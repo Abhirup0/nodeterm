@@ -9,6 +9,7 @@
 // an unsafe id (it becomes a tmux session name).
 
 import { agentConfig } from '../shared/agents/config'
+import { boundAccountId } from '../shared/agents/account-binding'
 import { isSafeAccountId } from './claude-accounts-core'
 
 /** What the phone is allowed to choose; everything else is host-derived. */
@@ -37,7 +38,10 @@ export interface RemoteNodeInput {
  *  same boring alphabet; an empty tail (`term-abc-`) is still refused. */
 const SAFE_NODE_ID = /^term-[a-z0-9]+-[a-z0-9]{1,16}$/
 
-const TITLE_MAX = 120
+/** One title ceiling for every host-side write of a client-supplied node title — the registrar's
+ *  append below AND the relay `node.rename` verb (host-service) clamp to the same number, so a
+ *  rename can never persist a title the registration path would have refused. */
+export const TITLE_MAX = 120
 
 /**
  * A `data.ssh` block usable as a donor: the two fields the pty manager needs to dial the host.
@@ -50,7 +54,12 @@ function isSshSpec(value: unknown): boolean {
   return typeof c.host === 'string' && c.host !== '' && typeof c.user === 'string' && c.user !== ''
 }
 
-export function appendProjectNode(raw: string, input: RemoteNodeInput, now: Date): string | null {
+export function appendProjectNode(
+  raw: string,
+  input: RemoteNodeInput,
+  now: Date,
+  accountColor?: string
+): string | null {
   if (!SAFE_NODE_ID.test(input.id)) return null
   // Refused, not silently dropped: an account id becomes a config-DIR path segment
   // (`claude-accounts/<id>`, `~/.nodeterm/claude-accounts/<id>` on a host), so a bad one must never
@@ -97,9 +106,25 @@ export function appendProjectNode(raw: string, input: RemoteNodeInput, now: Date
   }
 
   // An agent node looks exactly like one minted by the canvas (createAgentNode): the agent's
-  // label as the starting title and the agent's color — titleAuto then lets the agent's own
-  // session name take over, same as desktop. A plain terminal keeps the mobile defaults.
-  const agent = typeof input.agentId === 'string' ? agentConfig(input.agentId) : undefined
+  // label as the starting title, and the bound account's default color where the host resolved
+  // one, else the agent's — titleAuto then lets the agent's own session name take over, same as
+  // desktop. `accountColor` is host-derived (the phone cannot choose it) and already resolved
+  // through the shared `agentAccountColor`, so a phone-started session under a colored account
+  // lands on the canvas in that color instead of the agent's. A plain terminal keeps the mobile
+  // defaults.
+  //
+  // `boundAccountId` is the ONE decision behind both the stamp and the color, exactly as
+  // `createAgentNode` reads them off one local: split them and a node can end up carrying an
+  // account it is not painted for, or painted for one it does not carry. The caller may hand us a
+  // color for an id we then refuse — that is fine and deliberate, because it keeps the rule in one
+  // place instead of asking every caller to re-derive it.
+  //
+  // A non-string `agentId` reads as "no agent stated" here, the same way the config lookup below
+  // has always treated it — a garbage value must not be mistaken for a known OTHER agent and cost
+  // a real Claude node its binding.
+  const agentId = typeof input.agentId === 'string' ? input.agentId : undefined
+  const bound = boundAccountId(input.accountId, agentId)
+  const agent = agentId !== undefined ? agentConfig(agentId) : undefined
   const node: Record<string, unknown> = {
     id: input.id,
     kind: 'terminal',
@@ -110,15 +135,15 @@ export function appendProjectNode(raw: string, input: RemoteNodeInput, now: Date
         ? input.title.slice(0, TITLE_MAX)
         : (agent?.label ?? 'Mobile session'),
     titleAuto: true,
-    color: agent?.color ?? '#7aa2f7',
+    color: (bound ? accountColor : undefined) ?? agent?.color ?? '#7aa2f7',
     group: null,
     tags: [],
     collapsed: false,
     // Sibling nodes carry the project's portable cwd (usually "./…").
     cwd: typeof sibling?.cwd === 'string' ? sibling.cwd : '.'
   }
-  if (typeof input.agentId === 'string') node.agentId = input.agentId
-  if (typeof input.accountId === 'string') node.accountId = input.accountId
+  if (agentId !== undefined) node.agentId = agentId
+  if (bound) node.accountId = bound
   // Desktop remote nodes carry the connection spec PER NODE — a sibling terminal in the same
   // project has the right values; copy verbatim. No genuine donor → a plain local node.
   //

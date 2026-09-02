@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SpeechModelInfo } from '@shared/types'
-import { hasSpeechModel, modelAfterDelete, modelAfterDownload, SPEECH_MODEL_NONE } from '@shared/speech'
+import {
+  hasSpeechModel,
+  modelAfterDelete,
+  modelAfterDownload,
+  SPEECH_LANGUAGES,
+  SPEECH_MODEL_NONE
+} from '@shared/speech'
+import {
+  speechLanguageSummary,
+  speechLanguageWarning
+} from '@renderer/lib/speechLanguageRows'
 import { formatShortcut, isHoldChord } from '@shared/shortcut'
 import { dictationBinding } from '../../../lib/keybindingOverrides'
 import { useSettings } from '../../../state/settings'
@@ -8,7 +18,7 @@ import { useEntitlement } from '../../../state/entitlement'
 import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
-import { Select } from '@renderer/ui/Select'
+import { SpeechLanguageSelect } from '../SpeechLanguageSelect'
 import { SegmentedPill } from '@renderer/ui/SegmentedPill'
 import { Button } from '@renderer/ui/Button'
 import type { SettingsSectionId } from '../nav'
@@ -44,30 +54,21 @@ const ROWS = {
   },
   language: {
     title: 'Language',
+    // Every language name and endonym is a keyword, DERIVED from the catalogue rather than
+    // retyped: someone who searches Settings for "polish" (or "polski") should be shown the row
+    // that can give it to them. The old nine-word list is exactly the kind that goes stale the
+    // day an entry is added.
     keywords: [
       'language',
       'locale',
       'auto',
-      'english',
-      'turkish',
-      'german',
-      'french',
-      'spanish',
-      'japanese'
+      'dictation',
+      'whisper',
+      ...SPEECH_LANGUAGES.flatMap((l) => [l.label, l.endonym, l.code, ...(l.aliases ?? [])])
     ]
   }
 }
 const ENTRIES = Object.values(ROWS)
-
-const LANGUAGES: { value: string; label: string }[] = [
-  { value: 'auto', label: 'Auto-detect' },
-  { value: 'en', label: 'English' },
-  { value: 'tr', label: 'Turkish' },
-  { value: 'de', label: 'German' },
-  { value: 'fr', label: 'French' },
-  { value: 'es', label: 'Spanish' },
-  { value: 'ja', label: 'Japanese' }
-]
 
 /** `1600` -> `"1.6 GB"`, `142` -> `"142 MB"`. Used for both the approximate (undownloaded) and
  *  real (downloaded) size, so the two read consistently in the same row. */
@@ -352,19 +353,12 @@ export function SpeechSection({
       <SearchableRow {...ROWS.language}>
         <FieldRow
           label="Language"
-          description="A hint for transcription; auto-detect works well for mixed speech."
+          // The copy names what is SELECTED, not just what the field is for: with a searchable
+          // menu of 100 languages the trigger is the only other place that says so.
+          description={speechLanguageSummary(settings.speech.language)}
+          note={speechLanguageWarning(settings.speech.language, settings.speech.model)}
           control={
-            <Select
-              aria-label="Speech language"
-              value={settings.speech.language}
-              onChange={(e) => setLanguage(e.target.value)}
-            >
-              {LANGUAGES.map((l) => (
-                <option key={l.value} value={l.value}>
-                  {l.label}
-                </option>
-              ))}
-            </Select>
+            <SpeechLanguageSelect value={settings.speech.language} onChange={setLanguage} />
           }
         />
       </SearchableRow>

@@ -8,11 +8,15 @@ import type {
   Project,
   Settings
 } from '@shared/types'
+import { DEFAULT_SETTINGS } from '@shared/types'
 import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agents/config'
 import { agentConfig, capabilityAgentId, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
+import { agentAccountColor } from '@shared/agents/account-color'
+import { boundAccountId } from '@shared/agents/account-binding'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
+import { expandRectToGrid, snapNodeToGrid, type Rect } from '../lib/nodeSizing'
 import { claudeCliCapsNow, grokCliCapsNow } from './permissionMode'
 import { ensureGrokTakenIds, grokTakenIdsNow } from './grokSessionIds'
 import { mintFreeGrokSessionId } from '@shared/agents/grok-session-mint'
@@ -26,6 +30,7 @@ import { useSettings } from './settings'
 // single implementation lives in src/shared and is shared with the relay host + the canvas-sync
 // reflector.
 export { applyCanvasMutation } from '@shared/canvas-mutations'
+export { accountNodeColor, agentAccountColor } from '@shared/agents/account-color'
 import { sanitizeInboundNode } from '@shared/node-exec'
 
 /** Preset color palette — macOS system colors (dark mode). */
@@ -223,6 +228,36 @@ function placeAt(center: { x: number; y: number } | undefined, index: number, w:
 }
 
 /**
+ * Where a new node starts and how big it is, on the grid when snapping is on.
+ *
+ * Neither input is grid-aligned to begin with: `placeAt` centers the node on the cursor, half a
+ * width off whatever the pointer hit, and a terminal's size comes from a hand-editable setting.
+ * So every new node landed off-grid, and because React Flow resizes by adding a grid MULTIPLE to
+ * the start size (see lib/resizeSnap.ts), it could never be resized onto the grid either.
+ */
+function placeNode(
+  kind: NodeKind,
+  center: { x: number; y: number } | undefined,
+  index: number,
+  w: number,
+  h: number
+): Pick<CanvasNode, 'position' | 'width' | 'height' | 'style'> {
+  const { snapToGrid, gridSize } = useSettings.getState().settings
+  const at = placeAt(center, index, w, h)
+  const grid = snapToGrid ? gridSize || DEFAULT_SETTINGS.gridSize : 0
+  const box = grid
+    ? snapNodeToGrid(grid, kind, { x: at.x, y: at.y, width: w, height: h })
+    : { ...at, width: w, height: h }
+  return {
+    // `+ 0` normalizes the -0 that rounding a small negative coordinate produces.
+    position: { x: box.x + 0, y: box.y + 0 },
+    width: box.width,
+    height: box.height,
+    style: { width: box.width, height: box.height }
+  }
+}
+
+/**
  * Default size for NEW terminal/agent nodes: the user's setting (Settings → Canvas), clamped
  * to sane canvas bounds — settings.json is hand-editable, and a 0×0 or NaN node would be
  * unclickable/ungrabbable forever. Falls back to the historical 600×400.
@@ -273,10 +308,7 @@ export function createTerminalNode(
   return {
     id: nextId('term'),
     type: 'terminal',
-    position: placeAt(center, index, size.width, size.height),
-    width: size.width,
-    height: size.height,
-    style: { width: size.width, height: size.height },
+    ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: `Terminal ${index + 1}`,
       color: NODE_COLORS[index % NODE_COLORS.length],
@@ -302,10 +334,7 @@ export function createSshTerminalNode(
   return {
     id: nextId('ssh'),
     type: 'terminal',
-    position: placeAt(center, index, size.width, size.height),
-    width: size.width,
-    height: size.height,
-    style: { width: size.width, height: size.height },
+    ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: server.label,
       color: NODE_COLORS[index % NODE_COLORS.length],
@@ -590,9 +619,33 @@ export function createAgentNode(
    *  agent, so passing a model for one is harmless — it's simply not appended). Persisted as
    *  `data.agentModel` so cold-restore and later restarts keep the model. Trails `projectId`: every
    *  existing caller passes that ninth argument, so the model is the one that had to move. */
-  model?: string
+  model?: string,
+  /** Absolute path to a file holding the first prompt (canvas-control `--prompt-file`). Wins over
+   *  `initialPrompt`; composed by the assembler as a `"$(cat …)"` substitution so a multi-line
+   *  brief survives the single-line typed delivery. Validated by the caller
+   *  (`promptFilePathError` + an existence check) — the factory trusts it. Trailing/optional so
+   *  every existing caller is unchanged. */
+  promptFile?: string
 ): CanvasNode {
-  const { label, color } = resolveAgent(agentId)
+  const { label, color: agentColor } = resolveAgent(agentId)
+  // ONE binding decision, shared with the phone-registration path (core/project-node-append) so
+  // "which agents bind a managed account" has a single definition instead of a ternary the canvas
+  // enforces and the registrar does not. It feeds both `data.accountId` below and the color here,
+  // which is what keeps the two from drifting apart.
+  const bound = boundAccountId(accountId, agentId)
+  // A managed account's default node color (Settings → Accounts) replaces the agent's brand color,
+  // so a second login of either builtin is recognizable on the canvas at a glance.
+  // `agentAccountColor` asks the list that OWNS this agent's accounts — the two are keyed
+  // independently, so a Claude account must never color a Codex node that happens to share its id.
+  // `?? []` on both lists, matching the phone path in `src/main`: `mergeSettings` merges without
+  // checking, so a hand-edited `"claudeAccounts": null` survives load and would throw on `.find`
+  // one level ABOVE the `typeof color` guard — i.e. the very failure that guard exists to prevent.
+  const settings = useSettings.getState().settings
+  const color =
+    agentAccountColor(agentId, bound, {
+      claude: settings.claudeAccounts ?? [],
+      codex: settings.codexAccounts ?? []
+    }) ?? agentColor
   // The launch-command override (this project's `.nodeterm/settings.json` first, then Settings →
   // Agents → Launch commands — see `agentLaunchOverride`) replaces the bare CLI in the assembled
   // command. Threaded into the shared assembler below as `launchCmdOverride` so fresh launch,
@@ -641,6 +694,7 @@ export function createAgentNode(
       agentId,
       customAgent,
       initialPrompt,
+      promptFile,
       permissionMode,
       sessionId: mintedSessionId,
       sessionIdFlagSupported,
@@ -673,10 +727,7 @@ export function createAgentNode(
   return {
     id: nextId('term'),
     type: 'terminal',
-    position: placeAt(center, index, size.width, size.height),
-    width: size.width,
-    height: size.height,
-    style: { width: size.width, height: size.height },
+    ...placeNode('terminal', center, index, size.width, size.height),
     data: {
       title: label,
       // Adopt the agent's own session name into the title until the user renames it by hand.
@@ -685,12 +736,8 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another
-      // builtin, and never to a custom agent even when it inherits one of those bases. A custom
-      // agent inheriting claude/codex is still its own agent; account binding stays with the
-      // builtin the account picker offered it for. The Codex spawn side honours `data.accountId`
-      // (resolveCodexSessionScope), the same field Claude uses.
-      ...(accountId && (agentId === 'claude' || agentId === 'codex') ? { accountId } : {}),
+      // See `boundAccountId` (shared/agents/account-binding.ts) for which agents bind at all.
+      ...(bound ? { accountId: bound } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
@@ -743,14 +790,24 @@ export function systemAccountDisplay(label: string | undefined, email?: string |
  * In an SSH project, pass the project's `ssh` binding: the node then runs in REMOTE tmux (Task 12),
  * so `CLAUDE_CONFIG_DIR` resolves to the account dir ON THE HOST and `claude /login` writes the
  * remote `.claude.json` (the main process polls it over ssh). For a local account, omit `ssh`.
+ *
+ * `cwd` is the directory the login shell starts in, and it is not cosmetic: Claude Code's trust
+ * check is keyed on the cwd, so a login node with none lands in `$HOME` and asks the user to trust
+ * their entire home directory — SSH keys and cloud credentials included — before an OAuth round
+ * trip that touches no files at all (issue #553). Callers pass the active project's directory:
+ * a workspace the user is already in is the one they are most likely to have trusted. The trailing
+ * position keeps every existing call byte-identical. On an SSH project `createTerminalNode` prefers
+ * `ssh.remoteCwd`, so a REMOTE login roots itself on the host and a local path can never override
+ * it — which is the only resolution that means anything for a session running over there.
  */
 export function createAccountLoginNode(
   accountId: string,
   index: number,
   center?: { x: number; y: number },
-  ssh?: Project['ssh']
+  ssh?: Project['ssh'],
+  cwd?: string
 ): CanvasNode {
-  const node = createTerminalNode(index, undefined, center, undefined, ssh)
+  const node = createTerminalNode(index, cwd, center, undefined, ssh)
   node.data = {
     ...node.data,
     title: 'Claude login',
@@ -771,13 +828,18 @@ export function createAccountLoginNode(
  * A plain terminal (not an agent node), like the Claude one: no session-name tracking, and the
  * agent-less shape is what keeps the node out of the Codex AGENT paths while still being scoped.
  * Local only — `codexAccounts.add()` mints on THIS machine, so there is no ssh binding to pass.
+ * `cwd` carries the same weight as it does on the Claude sibling above (issue #553): a login node
+ * with none starts in `$HOME`, and a CLI whose trust check is keyed on the cwd then asks about the
+ * whole home directory. Being local-only, the caller must pass a LOCAL directory — the active
+ * project's cwd, which an SSH project does not have.
  */
 export function createCodexAccountLoginNode(
   accountId: string,
   index: number,
-  center?: { x: number; y: number }
+  center?: { x: number; y: number },
+  cwd?: string
 ): CanvasNode {
-  const node = createTerminalNode(index, undefined, center)
+  const node = createTerminalNode(index, cwd, center)
   node.data = {
     ...node.data,
     title: 'Codex login',
@@ -805,10 +867,23 @@ export function createCodexAccountLoginNode(
  * this node is an inert plain terminal, not a login prompt nobody requested.
  *
  * Local only, on purpose: on an SSH project a system login would rewrite THAT host's ~/.claude,
- * so the popover does not offer the action there (see UsageIndicator).
+ * so the popover does not offer the action there (see UsageIndicator). `cwd` must therefore be a
+ * LOCAL directory — the active project's, which an SSH project does not have (its terminals are
+ * rooted at `ssh.remoteCwd`, a path that means nothing on this machine).
+ *
+ * Issue #553: this node is where the missing cwd was first noticed. `claude /login` is an OAuth
+ * round trip that touches no files, but Claude Code's trust check is keyed on the cwd, so starting
+ * in `$HOME` made the button cost a "do you trust /Users/<me>?" answer whose persisted `yes` grants
+ * a trusted workspace over everything the user owns. A project directory is not a guaranteed
+ * escape (an untrusted project still prompts) — it makes the prompt the exception rather than the
+ * rule, without nodeterm writing another tool's trust config on the user's behalf.
  */
-export function createSystemLoginNode(index: number, center?: { x: number; y: number }): CanvasNode {
-  const node = createTerminalNode(index, undefined, center)
+export function createSystemLoginNode(
+  index: number,
+  center?: { x: number; y: number },
+  cwd?: string
+): CanvasNode {
+  const node = createTerminalNode(index, cwd, center)
   node.data = {
     ...node.data,
     title: 'Switch Claude account',
@@ -845,10 +920,7 @@ export function createEditorNode(
   return {
     id: nextId('editor'),
     type: 'editor',
-    position: placeAt(center, index, EDITOR_SIZE.width, EDITOR_SIZE.height),
-    width: EDITOR_SIZE.width,
-    height: EDITOR_SIZE.height,
-    style: { width: EDITOR_SIZE.width, height: EDITOR_SIZE.height },
+    ...placeNode('editor', center, index, EDITOR_SIZE.width, EDITOR_SIZE.height),
     data: {
       title: filePath.split('/').pop() || 'untitled',
       color: '#6ac4dc',
@@ -880,10 +952,7 @@ export function createVideoNode(
   return {
     id: nextId('video'),
     type: 'video',
-    position: placeAt(center, index, VIDEO_SIZE.width, VIDEO_SIZE.height),
-    width: VIDEO_SIZE.width,
-    height: VIDEO_SIZE.height,
-    style: { width: VIDEO_SIZE.width, height: VIDEO_SIZE.height },
+    ...placeNode('video', center, index, VIDEO_SIZE.width, VIDEO_SIZE.height),
     data: {
       title: filePath.split('/').pop() || 'video',
       color: '#bf5af2',
@@ -906,10 +975,7 @@ export function createWebNode(
   return {
     id: nextId('web'),
     type: 'web',
-    position: placeAt(center, index, WEB_SIZE.width, WEB_SIZE.height),
-    width: WEB_SIZE.width,
-    height: WEB_SIZE.height,
-    style: { width: WEB_SIZE.width, height: WEB_SIZE.height },
+    ...placeNode('web', center, index, WEB_SIZE.width, WEB_SIZE.height),
     data: {
       title,
       color: '#6ac4dc',
@@ -939,10 +1005,7 @@ export function createBrowserNode(
   return {
     id: nextId('browser'),
     type: 'browser',
-    position: placeAt(center, index, BROWSER_SIZE.width, BROWSER_SIZE.height),
-    width: BROWSER_SIZE.width,
-    height: BROWSER_SIZE.height,
-    style: { width: BROWSER_SIZE.width, height: BROWSER_SIZE.height },
+    ...placeNode('browser', center, index, BROWSER_SIZE.width, BROWSER_SIZE.height),
     data: {
       title,
       color: '#0a84ff',
@@ -965,10 +1028,7 @@ export function createDiffNode(
   return {
     id: nextId('diff'),
     type: 'diff',
-    position: placeAt(center, index, DIFF_SIZE.width, DIFF_SIZE.height),
-    width: DIFF_SIZE.width,
-    height: DIFF_SIZE.height,
-    style: { width: DIFF_SIZE.width, height: DIFF_SIZE.height },
+    ...placeNode('diff', center, index, DIFF_SIZE.width, DIFF_SIZE.height),
     data: {
       title: `${relPath.split('/').pop() || relPath} (${commitOid ? commitOid.slice(0, 7) : 'diff'})`,
       color: '#e0af68',
@@ -986,15 +1046,33 @@ export function createStickyNode(index: number, center?: { x: number; y: number 
   return {
     id: nextId('sticky'),
     type: 'sticky',
-    position: placeAt(center, index, STICKY_SIZE.width, STICKY_SIZE.height),
-    width: STICKY_SIZE.width,
-    height: STICKY_SIZE.height,
-    style: { width: STICKY_SIZE.width, height: STICKY_SIZE.height },
+    ...placeNode('sticky', center, index, STICKY_SIZE.width, STICKY_SIZE.height),
     data: {
       title: 'Note',
       color: '#ffd60a',
       group: null,
       text: ''
+    }
+  }
+}
+
+/**
+ * Creates a new trigger node (issue #493). Born with NO spec — `data.trigger` stays undefined
+ * until the card's editor saves a valid one, so a fresh trigger is inert by construction (an
+ * invalid/absent spec schedules nothing and cannot be armed).
+ */
+export function createTriggerNode(index: number, center?: { x: number; y: number }): CanvasNode {
+  return {
+    id: nextId('trigger'),
+    type: 'trigger',
+    position: placeAt(center, index, TRIGGER_SIZE.width, TRIGGER_SIZE.height),
+    width: TRIGGER_SIZE.width,
+    height: TRIGGER_SIZE.height,
+    style: { width: TRIGGER_SIZE.width, height: TRIGGER_SIZE.height },
+    data: {
+      title: 'Trigger',
+      color: '#e6a23c',
+      group: null
     }
   }
 }
@@ -1008,10 +1086,7 @@ export function createDinoNode(
   return {
     id: nextId('dino'),
     type: 'dino',
-    position: placeAt(center, index, DINO_SIZE.width, DINO_SIZE.height),
-    width: DINO_SIZE.width,
-    height: DINO_SIZE.height,
-    style: { width: DINO_SIZE.width, height: DINO_SIZE.height },
+    ...placeNode('dino', center, index, DINO_SIZE.width, DINO_SIZE.height),
     data: {
       title: 'Dino',
       color: '#a2a2a2',
@@ -1069,6 +1144,48 @@ const GROUP_HEADER = 34
 
 const nodeW = (n: CanvasNode) => n.measured?.width ?? (n.width as number) ?? 0
 const nodeH = (n: CanvasNode) => n.measured?.height ?? (n.height as number) ?? 0
+
+/**
+ * Geometry for a frame that has to wrap `bounds`, with its label header above. `bounds` and the
+ * result are both in the space of the frame's own container, which is where `parentId` points.
+ *
+ * With `grid` on, the frame is placed on the grid AT CREATION instead of being left off-grid for
+ * every later resize to compensate: the padding is raised to at least one cell and the box then
+ * grows OUTWARD to the surrounding grid lines, so all four edges land on the grid and the
+ * clearance around the children can only increase. Snapping runs in ROOT space, because React
+ * Flow snaps a drag there too — rounding this container-relative box directly would put a nested
+ * frame on its parent's grid, which is the defect the rest of this change removes.
+ *
+ * `grid <= 0` (snapping off) reproduces the original fixed-padding box exactly.
+ */
+function groupBox(
+  nodes: CanvasNode[],
+  parentId: string | undefined,
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+  grid: number
+): Rect {
+  const pad = grid > 0 ? Math.max(GROUP_PAD, grid) : GROUP_PAD
+  const rect: Rect = {
+    x: bounds.minX - pad,
+    y: bounds.minY - pad - GROUP_HEADER,
+    width: bounds.maxX - bounds.minX + pad * 2,
+    height: bounds.maxY - bounds.minY + pad * 2 + GROUP_HEADER
+  }
+  if (grid <= 0) return rect
+  const origin = containerOrigin(parentId, nodes)
+  const snapped = expandRectToGrid(grid, 'group', {
+    x: rect.x + origin.x,
+    y: rect.y + origin.y,
+    width: rect.width,
+    height: rect.height
+  })
+  return {
+    x: snapped.x - origin.x + 0,
+    y: snapped.y - origin.y + 0,
+    width: snapped.width,
+    height: snapped.height
+  }
+}
 
 export type ArrangeLayout = 'grid' | 'row' | 'column'
 
@@ -1200,7 +1317,7 @@ function groupsFirst(nodes: CanvasNode[]): CanvasNode[] {
 }
 
 /** A node's position in ROOT space: its own position plus every ancestor frame's origin. */
-function rootPosition(node: CanvasNode, nodes: CanvasNode[]): { x: number; y: number } {
+export function rootPosition(node: CanvasNode, nodes: CanvasNode[]): { x: number; y: number } {
   const byId = new Map(nodes.map((candidate) => [candidate.id, candidate]))
   const seen = new Set<string>([node.id])
   let x = node.position.x
@@ -1215,6 +1332,24 @@ function rootPosition(node: CanvasNode, nodes: CanvasNode[]): { x: number; y: nu
     parentId = parent.parentId
   }
   return { x, y }
+}
+
+/**
+ * Root-space origin of the container `parentId` names: (0, 0) for a top-level object, else the
+ * frame's own root position. A missing frame resolves to the root rather than throwing, matching
+ * how the rest of the canvas treats a dangling parentId.
+ *
+ * Lives here rather than in `lib/gridSnap` (which re-exports it) because it is `rootPosition`
+ * with one branch in front, and two homes for that would drift.
+ */
+export function containerOrigin(
+  parentId: string | undefined,
+  nodes: CanvasNode[]
+): { x: number; y: number } {
+  if (!parentId) return { x: 0, y: 0 }
+  const frame = nodes.find((node) => node.id === parentId)
+  if (!frame) return { x: 0, y: 0 }
+  return rootPosition(frame, nodes)
 }
 
 function isDescendant(nodes: CanvasNode[], candidateId: string, ancestorId: string): boolean {
@@ -1257,13 +1392,17 @@ export function selectedRootIds(nodes: CanvasNode[], ids: string[]): string[] {
  * that gained a child bigger than itself must be re-fitted BEFORE its own parent is, or the
  * parent is fitted around a size that is about to change.
  */
-function fitAncestorChain(nodes: CanvasNode[], groupId: string | undefined): CanvasNode[] {
+function fitAncestorChain(
+  nodes: CanvasNode[],
+  groupId: string | undefined,
+  grid = 0
+): CanvasNode[] {
   let next = nodes
   const seen = new Set<string>()
   let currentId = groupId
   while (currentId && !seen.has(currentId)) {
     seen.add(currentId)
-    next = fitGroupToChildren(next, currentId)
+    next = fitGroupToChildren(next, currentId, grid)
     currentId = next.find((n) => n.id === currentId)?.parentId
   }
   return next
@@ -1357,6 +1496,45 @@ function withNodeRect(
   return fitAncestorChain(next, node.parentId)
 }
 
+/** Sub-pixel tolerance for "the node is already there". Exact equality is not available: a grouped
+ *  node's rect round-trips through `rootPosition` in floats, and `nodeW` prefers React Flow's
+ *  `measured` width, which it repopulates from the DOM device-pixel-snapped — at fractional zoom
+ *  that never equals `innerW / zoom` exactly. Without the tolerance every re-measure would rewrite
+ *  the node and bump the workspace rev, which on a shared SSH/git project is a commit per toggle. */
+const SAME_PX = 0.5
+const samePx = (a: number, b: number): boolean => Math.abs(a - b) <= SAME_PX
+
+/**
+ * Re-fit an ALREADY maximized node to a new frame, keeping its restore rect.
+ *
+ * Maximize is a MODE, not a one-shot placement: while it is on, the node claims the whole usable
+ * canvas. Pinning or unpinning a side panel changes what "whole" means, so the node follows.
+ * A node that is not maximized is left alone — that one was put where it is by hand or by a zone
+ * verb, and those are placements the user owns.
+ */
+export function refitMaximizedNode(
+  nodes: CanvasNode[],
+  nodeId: string,
+  rect: { x: number; y: number; width: number; height: number }
+): CanvasNode[] {
+  const node = nodes.find((n) => n.id === nodeId)
+  const premaxRect = node?.data.premaxRect
+  if (!node || !premaxRect) return nodes
+  // Idempotent: the caller re-measures on every panel change, and most of those land on the rect
+  // the node already has. Returning the same array keeps the workspace out of the dirty/save path
+  // and lets the caller decide by identity whether anything actually moved.
+  const root = rootPosition(node, nodes)
+  if (
+    samePx(root.x, rect.x) &&
+    samePx(root.y, rect.y) &&
+    samePx(nodeW(node) || (node.style?.width as number) || 0, rect.width) &&
+    samePx(nodeH(node) || (node.style?.height as number) || 0, rect.height)
+  ) {
+    return nodes
+  }
+  return withNodeRect(nodes, node, rect, { premaxRect })
+}
+
 /**
  * The toggle's second click: give the node back the rect `maximizeNodeToRect` remembered — the
  * exact canvas spot it occupied, converted from root-space into wherever its parent chain sits
@@ -1378,15 +1556,18 @@ export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): Canva
  * descendant would be torn out of the ancestor being wrapped).
  *
  * When the members live inside a parent frame, that parent (and its own ancestors) are re-fitted
- * around the new wrapper. Without this the wrapper is created at `(minX - 28, minY - 62)` — often
- * NEGATIVE — inside a parent that is by construction too small to hold it, and `extent: 'parent'`
+ * around the new wrapper. Without this the wrapper is created at a negative offset from its
+ * members inside a parent that is by construction too small to hold it, and `extent: 'parent'`
  * makes React Flow clamp it to `parentSize - wrapperSize`, i.e. hundreds of px off, dragging the
  * whole wrapped subtree with it. Same trap `addGrouped` documents in Canvas.
+ *
+ * `grid` (0 = snapping off) puts the frame on the grid immediately — see `groupBox`.
  */
 export function groupSelectedNodes(
   nodes: CanvasNode[],
   ids: string[],
-  groupIndex: number
+  groupIndex: number,
+  grid = 0
 ): CanvasNode[] {
   const set = new Set(ids)
   const members = nodes.filter((n) => set.has(n.id))
@@ -1406,14 +1587,13 @@ export function groupSelectedNodes(
   const maxX = Math.max(...members.map((n) => n.position.x + nodeW(n)))
   const maxY = Math.max(...members.map((n) => n.position.y + nodeH(n)))
 
-  const gx = minX - GROUP_PAD
-  const gy = minY - GROUP_PAD - GROUP_HEADER
+  const parentId = members[0].parentId
+  const box = groupBox(nodes, parentId, { minX, minY, maxX, maxY }, grid)
   const group = createGroupNode(
-    { x: gx, y: gy },
-    { width: maxX - minX + GROUP_PAD * 2, height: maxY - minY + GROUP_PAD * 2 + GROUP_HEADER },
+    { x: box.x, y: box.y },
+    { width: box.width, height: box.height },
     groupIndex
   )
-  const parentId = members[0].parentId
   if (parentId) {
     group.parentId = parentId
     group.extent = 'parent'
@@ -1425,12 +1605,12 @@ export function groupSelectedNodes(
           ...n,
           parentId: group.id,
           extent: 'parent' as const,
-          position: { x: n.position.x - gx, y: n.position.y - gy },
+          position: { x: n.position.x - box.x, y: n.position.y - box.y },
           selected: false
         }
       : n
   )
-  return fitAncestorChain(groupsFirst([group, ...updated]), parentId)
+  return fitAncestorChain(groupsFirst([group, ...updated]), parentId, grid)
 }
 
 /** Returns a copy of a node with a fresh id, offset position, and top-level placement. */
@@ -1455,7 +1635,11 @@ export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
  * to sit when they were grouped, so a tidy inner layout still leaves an oversized box. No-op for a
  * missing/non-group id or a frame with no children. Pure.
  */
-export function fitGroupToChildren(nodes: CanvasNode[], groupId: string): CanvasNode[] {
+export function fitGroupToChildren(
+  nodes: CanvasNode[],
+  groupId: string,
+  grid = 0
+): CanvasNode[] {
   const group = nodes.find((n) => n.id === groupId)
   if (!group || group.type !== 'group') return nodes
   const children = nodes.filter((n) => n.parentId === groupId)
@@ -1467,10 +1651,10 @@ export function fitGroupToChildren(nodes: CanvasNode[], groupId: string): Canvas
   const minY = Math.min(...children.map(absY))
   const maxX = Math.max(...children.map((c) => absX(c) + nodeW(c)))
   const maxY = Math.max(...children.map((c) => absY(c) + nodeH(c)))
-  const gx = minX - GROUP_PAD
-  const gy = minY - GROUP_PAD - GROUP_HEADER
-  const width = maxX - minX + GROUP_PAD * 2
-  const height = maxY - minY + GROUP_PAD * 2 + GROUP_HEADER
+  // Same box as a fresh grouping, so a re-fit cannot pull a frame off the grid that
+  // `groupSelectedNodes` just put on it.
+  const box = groupBox(nodes, group.parentId, { minX, minY, maxX, maxY }, grid)
+  const { x: gx, y: gy, width, height } = box
   return nodes.map((n) => {
     if (n.id === groupId) {
       return { ...n, position: { x: gx, y: gy }, width, height, style: { ...n.style, width, height } }
@@ -1554,7 +1738,8 @@ export function reparentNode(
 export function addSelectionToGroup(
   nodes: CanvasNode[],
   selectedIds: string[],
-  groupId: string
+  groupId: string,
+  grid = 0
 ): CanvasNode[] {
   if (!nodes.some((node) => node.id === groupId && node.type === 'group')) return nodes
   const selected = new Set(selectedIds)
@@ -1572,7 +1757,7 @@ export function addSelectionToGroup(
   })
   let next = nodes
   for (const root of roots) next = reparentNode(next, root.id, groupId)
-  return next === nodes ? nodes : fitAncestorChain(next, groupId)
+  return next === nodes ? nodes : fitAncestorChain(next, groupId, grid)
 }
 
 /**

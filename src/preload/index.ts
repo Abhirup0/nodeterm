@@ -476,6 +476,12 @@ const api: NodeTerminalApi = {
     read: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemory, q),
     host: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemoryHost, q)
   },
+  triggers: {
+    arm: (projectId, nodeId, spec) => ipcRenderer.invoke(IPC.triggersArm, { projectId, nodeId, spec }),
+    disarm: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersDisarm, { projectId, nodeId }),
+    status: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersStatus, { projectId, nodeId }),
+    runNow: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersRunNow, { projectId, nodeId })
+  },
   context: {
     onUpdate: (listener) => {
       const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
@@ -754,6 +760,27 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentStatus, handler)
     return () => ipcRenderer.removeListener(IPC.agentStatus, handler)
+  },
+  reportHibernated: (nodeId, on) => ipcRenderer.send(IPC.agentHibernated, { nodeId, on }),
+  onAgentWake: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentWake, handler)
+    return () => ipcRenderer.removeListener(IPC.agentWake, handler)
+  },
+  onRemoteViewers: (listener) => {
+    const handler = (_e: unknown, nodeIds: string[]) => listener(nodeIds)
+    ipcRenderer.on(IPC.agentRemoteViewers, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRemoteViewers, handler)
+  },
+  onAgentRefreshNode: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentRefreshNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRefreshNode, handler)
+  },
+  onAgentRenameNode: (listener) => {
+    const handler = (_e: unknown, payload: { nodeId: string; title: string }) => listener(payload)
+    ipcRenderer.on(IPC.agentRenameNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRenameNode, handler)
   },
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
