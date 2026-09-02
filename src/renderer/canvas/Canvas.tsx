@@ -179,6 +179,7 @@ import { ShortcutCaptureBanner } from '../components/ShortcutCaptureBanner'
 import { ConflictBar } from '../components/ConflictBar'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { CapabilityNotice } from '../components/CapabilityNotice'
+import { ClosedTranscriptDialog } from '../components/ClosedTranscriptDialog'
 import { SetupConsentDialog } from '../components/SetupConsentDialog'
 import { ConsentNotice } from '../remote/ConsentNotice'
 import { peerApprovalView } from '@shared/remote/approval'
@@ -437,6 +438,7 @@ import type { SshServer } from '@shared/ssh'
 import { sshHostKey } from '@shared/ssh'
 import type {
   CanvasNodeState,
+  ClosedSessionEntry,
   NodeKind,
   Project,
   ProjectKanban,
@@ -1130,6 +1132,9 @@ export function Canvas() {
   // A client has finished the handshake and is awaiting this host's approval (carries the SAS).
   const [pendingPeer, setPendingPeerState] = useState<PendingPeerState | null>(null)
   const [confirm, setConfirmState] = useState<ConfirmState | null>(null)
+  // The closed-session entry whose transcript is on screen (issue #531), or null. A SNAPSHOT of
+  // the ledger row, not a reference into the store: reading it needs only the pointer it carries.
+  const [closedTranscript, setClosedTranscript] = useState<ClosedSessionEntry | null>(null)
   // Node to center once its project finishes loading (cross-project notification click).
   const pendingFocusRef = useRef<string | null>(null)
   // One-shot: the next active-project load keeps the CURRENT camera instead of applying the
@@ -4818,11 +4823,20 @@ export function Canvas() {
         // the TOP of deleteNodes, before transport.destroy/setNodes, so a throw here would make
         // Delete do nothing at all on that surface. See lib/uuid.ts (the same call already broke
         // "Add agent" once).
-        const closedEntries = buildClosedSessionEntries(set, nodesRef.current, deletedAt, (nodeId) => {
-          const id = uuid()
-          closedSessionIdByNode.set(nodeId, id)
-          return id
-        })
+        const closedEntries = buildClosedSessionEntries(
+          set,
+          nodesRef.current,
+          deletedAt,
+          (nodeId) => {
+            const id = uuid()
+            closedSessionIdByNode.set(nodeId, id)
+            return id
+          },
+          // Issue #531. The agent-status entry is dropped a few lines below, and the live session
+          // id lives nowhere else — so this is the last instant the pointer to the node's
+          // transcript exists. Read it BEFORE the teardown, not after.
+          (nodeId) => useAgentStatus.getState().byId[nodeId]?.sessionId
+        )
         if (closedEntries.length) {
           useProjects.getState().recordClosedSessions(
             useProjects.getState().activeProjectId ?? '',
@@ -6715,6 +6729,19 @@ export function Canvas() {
    *  may not be the ACTIVE project, so nothing else here is guaranteed to flush it to disk. Force
    *  an explicit save rather than relying on the active-canvas debounce (`markDirty`), which only
    *  covers the active project. */
+  /**
+   * Issue #531 — read a closed session's transcript without reopening (or resuming) anything.
+   * The entry is looked up at CLICK time rather than carried by the row, so a ledger the user
+   * has since pruned cannot open a dialog for a record that no longer exists.
+   */
+  const openClosedTranscript = useCallback((projectId: string, entryId: string) => {
+    const entry = useProjects
+      .getState()
+      .projects.find((p) => p.id === projectId)
+      ?.closedSessions?.find((e) => e.id === entryId)
+    if (entry) setClosedTranscript(entry)
+  }, [])
+
   const reopenClosedSessionCommand = useCallback(
     (projectId: string, entryId: string): boolean => {
       const consumed = useProjects.getState().consumeClosedSession(projectId, entryId)
@@ -12796,6 +12823,7 @@ export function Canvas() {
           useProjects.getState().discardClosedSession(projectId, entryId)
           void writeDisk()
         }}
+        onOpenClosedTranscript={openClosedTranscript}
         onMouseEnter={openSessionsPeek}
         onMouseLeave={closeSessionsPeekSoon}
       />
@@ -12805,6 +12833,12 @@ export function Canvas() {
           every active-project change (the project-load path), is click-only, and records its
           answer machine-locally — see components/CapabilityNotice.tsx and its test. */}
       <CapabilityNotice />
+
+      {/* A closed session's conversation, read through the same ⌘M reader a live node uses
+          (issue #531 — closing a node used to make its finished work unverifiable). */}
+      {closedTranscript && (
+        <ClosedTranscriptDialog entry={closedTranscript} onClose={() => setClosedTranscript(null)} />
+      )}
 
       {/* The trust gate for a git-shared setup/archive script, mounted ONCE for the whole app on
           the same layer as the clone notice: main raises it (a manual run, or a worktree's setup)

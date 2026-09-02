@@ -379,6 +379,24 @@ project's nodes only.** The contract:
   count). Server Edition: all renderer-side; the ws-bridge `sessionMemory` is real, so badges
   describe the server machine; the `sshProject` legs only run for `project.ssh`, which that
   shell never has.
+- **Closing a NODE keeps a pointer to its transcript** (issue #531). The per-project
+  `closedSessions` ledger records the agent session id as `ClosedSessionEntry.sessionId`, captured
+  at delete time from the live `agentStatus` entry — which that same delete drops, so this is the
+  last instant it exists anywhere — falling back to the minted `node.agentSessionId`. It is a
+  POINTER, never a copy: the `.jsonl` the agent CLI owns stays the only text, and a second store of
+  transcript text would age, drift and need its own retention policy. The "Recently closed" row
+  spends it on the **existing ⌘M reader** (`ChatPanel` in `readOnly` mode, hosted by
+  `ClosedTranscriptDialog`), so resolution, the `{found}` vs empty distinction and Retry cannot
+  drift from the live-node path. Two rules: it rides `IndexEntryV3.closedSessions` and is therefore
+  **machine-local** — a session id is a `$HOME`-anchored fact about one person's machine, and
+  `projectToFile` must never emit it — and it is **re-checked as a string** in
+  `sanitizeLoadedClosedSessions`, because workspace.json is hand-editable and the value goes
+  straight to a resolver. `closedTranscriptTarget` (pure) owns the refusals and NAMES each: a
+  REMOTE session is refused (its transcript is on the host; locating it over the ControlMaster is
+  separate work and must not hold the local fix hostage) and a pre-#531 entry says its id was never
+  recorded. Only the "this was never an agent" refusal may render as nothing — for the others a
+  vanished control would leave the user believing that closing destroyed the record, which is the
+  belief this exists to correct.
 - A project's `cwd` (folder picker, `dialog:select-folder`) is passed to terminal/Claude
   node factories so new terminals open there. **Folder ↔ project is deduped:** "Open folder…"
   reuses the existing project with that `cwd` (and its nodes) instead of creating a duplicate.

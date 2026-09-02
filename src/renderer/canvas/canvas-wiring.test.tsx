@@ -172,7 +172,7 @@ describe('deleteNodes also records persisted closed-session history', () => {
   it('builds entries from the full pre-delete tree and the same "now" used for reopenHistory', () => {
     expect(CANVAS_SRC).toContain('const deletedAt = Date.now()')
     expect(CANVAS_SRC).toContain(
-      'buildClosedSessionEntries(set, nodesRef.current, deletedAt, (nodeId) => {'
+      'buildClosedSessionEntries(\n          set,\n          nodesRef.current,\n          deletedAt,'
     )
     // The reopenHistory push reuses the SAME `deletedAt`, not a second `Date.now()` call — the
     // two ledgers must agree on when this batch closed, not just approximately.
@@ -196,6 +196,20 @@ describe('deleteNodes also records persisted closed-session history', () => {
     expect(CANVAS_SRC).toContain('const closedSessionIdByNode = new Map<string, string>()')
     expect(CANVAS_SRC).toContain('closedSessionIdByNode.set(nodeId, id)')
     expect(CANVAS_SRC).toContain('closedSessionId: closedSessionIdByNode.get(n.id)')
+  })
+
+  it('captures the live agent session id BEFORE the agent-status entry is dropped', () => {
+    // Issue #531: the live session id is the only pointer to a closed node's transcript, and it
+    // lives nowhere but the transient agent-status store — which this same delete clears. Read it
+    // out of order and the ledger records `undefined`, and the conversation becomes unreachable
+    // with nothing on screen saying so.
+    const build = CANVAS_SRC.indexOf('buildClosedSessionEntries(')
+    expect(build).toBeGreaterThan(0)
+    const capture = CANVAS_SRC.indexOf('useAgentStatus.getState().byId[nodeId]?.sessionId', build)
+    expect(capture).toBeGreaterThan(build)
+    const clear = CANVAS_SRC.indexOf('useAgentStatus.getState().clear', build)
+    // A clear inside deleteNodes must come after the capture (or not exist at all).
+    if (clear !== -1) expect(clear).toBeGreaterThan(capture)
   })
 
   it('records into the store only when entries were actually built', () => {

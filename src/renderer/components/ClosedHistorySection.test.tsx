@@ -25,7 +25,8 @@ const projects: Project[] = [
 const noop = () => {}
 const baseProps = {
   nowMs: 1000, collapsed: false, onToggleCollapse: noop,
-  onReopenProject: noop, onDeleteProject: noop, onReopenSession: noop, onDiscardSession: noop
+  onReopenProject: noop, onDeleteProject: noop, onReopenSession: noop, onDiscardSession: noop,
+  onOpenTranscript: noop
 }
 
 describe('ClosedHistorySection', () => {
@@ -122,6 +123,66 @@ describe('ClosedHistorySection', () => {
     })
     expect(onDiscardSession).toHaveBeenCalledWith('p2', 'e1')
     expect(onReopenSession).not.toHaveBeenCalled()
+  })
+
+  // Issue #531 — the way back to a closed session's conversation.
+  describe('the transcript control', () => {
+    const agentProject = (over: Record<string, unknown> = {}, entryOver: Record<string, unknown> = {}): Project[] => [
+      {
+        id: 'p2', name: 'open-proj', color: '#fff', viewport: { x: 0, y: 0, zoom: 1 }, nodes: [],
+        closedSessions: [{
+          id: 'e1', closedAt: 200,
+          node: {
+            id: 'a1', kind: 'terminal', position: { x: 0, y: 0 }, title: 'reviewer', color: '#fff',
+            group: null, cwd: '/repo', agentId: 'claude', ...over
+          },
+          absolutePosition: { x: 0, y: 0 },
+          ...entryOver
+        }]
+      } as unknown as Project
+    ]
+
+    it('opens the transcript for a closed agent session, without also triggering reopen', async () => {
+      const onOpenTranscript = vi.fn()
+      const onReopenSession = vi.fn()
+      await render(
+        <ClosedHistorySection
+          {...baseProps} projects={agentProject({}, { sessionId: 's1' })}
+          onOpenTranscript={onOpenTranscript} onReopenSession={onReopenSession}
+        />
+      )
+      const btn = host.querySelector('.sessions-sidebar__history-transcript') as HTMLButtonElement
+      expect(btn).toBeTruthy()
+      expect(btn.disabled).toBe(false)
+      await act(async () => btn.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+      expect(onOpenTranscript).toHaveBeenCalledWith('p2', 'e1')
+      expect(onReopenSession).not.toHaveBeenCalled()
+    })
+
+    it('shows the control DISABLED with its reason when the id was never recorded', async () => {
+      // A silently-absent control would leave the user believing closing destroyed the record.
+      await render(<ClosedHistorySection {...baseProps} projects={agentProject()} />)
+      const btn = host.querySelector('.sessions-sidebar__history-transcript') as HTMLButtonElement
+      expect(btn).toBeTruthy()
+      expect(btn.disabled).toBe(true)
+      expect(btn.title).toContain('session id')
+    })
+
+    it('shows it disabled for a remote session, naming the host as the reason', async () => {
+      await render(
+        <ClosedHistorySection
+          {...baseProps} projects={agentProject({ sshRemoteTmux: true }, { sessionId: 's1' })}
+        />
+      )
+      const btn = host.querySelector('.sessions-sidebar__history-transcript') as HTMLButtonElement
+      expect(btn.disabled).toBe(true)
+      expect(btn.title).toContain('remote host')
+    })
+
+    it('renders no control at all for a plain terminal — it never had a conversation', async () => {
+      await render(<ClosedHistorySection {...baseProps} projects={projects} />)
+      expect(host.querySelector('.sessions-sidebar__history-transcript')).toBeNull()
+    })
   })
 
   it('collapsed hides the row list but keeps the header', async () => {

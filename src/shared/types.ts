@@ -429,6 +429,24 @@ export interface ClosedSessionEntry {
   closedAt: number
   node: CanvasNodeState
   absolutePosition: { x: number; y: number }
+  /**
+   * The agent session this node was running when it was closed — a POINTER to the transcript the
+   * agent CLI already owns, never a copy of its text (issue #531). It is the one fact that dies
+   * with the node and cannot be recovered afterwards: the live id is held only in the transient
+   * `agentStatus` store, whose entry is dropped on delete, while the transcript `.jsonl` itself
+   * stays on disk under the agent's own root. Without it a closed station's work cannot be read
+   * back at all, which is what made "close the node once its branch is merged" quietly destructive.
+   *
+   * Captured at close from the hook-fed live id, falling back to `node.agentSessionId` (the id
+   * nodeterm minted at creation) — the two agree whenever both exist, and each covers a case the
+   * other misses (a RESUMED session has no minted id; a node that never emitted a hook event has
+   * no live one).
+   *
+   * MACHINE-LOCAL by construction: `closedSessions` rides `IndexEntryV3`, never the git-shared
+   * `.nodeterm/project.json` (see `Project.closedSessions`), so a session id — a `$HOME`-anchored
+   * fact about one person's machine — is never shipped to everyone who clones the repo.
+   */
+  sessionId?: string
 }
 
 /**

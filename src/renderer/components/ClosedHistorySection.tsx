@@ -1,5 +1,5 @@
 import type { Project } from '@shared/types'
-import { mergeClosedHistory } from '../lib/closedHistory'
+import { closedTranscriptTarget, mergeClosedHistory } from '../lib/closedHistory'
 import { sessionStateAgeLabel } from '../lib/sessionList'
 import { ProjectGlyph } from './ProjectGlyph'
 
@@ -12,6 +12,8 @@ export interface ClosedHistorySectionProps {
   onDeleteProject(id: string): void
   onReopenSession(projectId: string, entryId: string): void
   onDiscardSession(projectId: string, entryId: string): void
+  /** Open the closed session's transcript (issue #531). */
+  onOpenTranscript(projectId: string, entryId: string): void
 }
 
 /** Sidebar section listing recently closed projects (tabs) and recently closed sessions
@@ -102,6 +104,31 @@ export function ClosedHistorySection(props: ClosedHistorySectionProps): JSX.Elem
                 <span className="sessions-sidebar__history-age">
                   {sessionStateAgeLabel(row.closedAt, props.nowMs)}
                 </span>
+                {/* Issue #531: a closed agent session's conversation is still on disk, and this
+                    is the way back to it. Rendered DISABLED with the reason when it cannot be
+                    read (no recorded id, a remote host) rather than omitted — a missing row
+                    teaches nothing, and "closing destroys the record" is exactly the belief this
+                    change exists to correct. Absent entirely for a node that never had a
+                    transcript to begin with. */}
+                {(() => {
+                  const t = closedTranscriptTarget(row.entry)
+                  if (!t.ok && t.kind === 'no-agent') return null
+                  return (
+                    <button
+                      className="sessions-sidebar__history-transcript"
+                      aria-label="Read transcript"
+                      title={t.ok ? 'Read this session’s transcript' : t.reason}
+                      disabled={!t.ok}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        if (t.ok) props.onOpenTranscript(row.projectId, row.entry.id)
+                      }}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    >
+                      💬
+                    </button>
+                  )
+                })()}
                 <button
                   className="sessions-sidebar__history-del"
                   aria-label="Discard"
