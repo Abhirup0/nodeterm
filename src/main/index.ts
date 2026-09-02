@@ -988,17 +988,32 @@ function createWindow(): BrowserWindow {
   // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
   // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
   // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
-  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
-  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
-  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
-  // canvas/wheel-gesture.ts for the two halves of the contract.
-  const trackpadLedger = new TrackpadGestureLedger()
-  win.webContents.on('input-event', (_event, input) => {
-    const active = trackpadLedger.observe(input.type)
-    if (active !== null && !win.isDestroyed()) {
-      win.webContents.send(IPC.canvasTrackpadGesture, active)
+  // one prefix test on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. See main/trackpad-gesture.ts and canvas/wheel-gesture.ts for the two halves
+  // of the contract.
+  //
+  // Attached on macOS ONLY (issue #535). It used to be unconditional on the grounds that these
+  // events never fire elsewhere — but Chromium synthesizes gesture scroll events for TOUCHSCREEN
+  // scrolling on Windows and Linux too, so a touch-enabled non-mac machine paid per-gesture IPC
+  // for a flag the renderer's router discards off macOS. Gating the attach makes the "desktop
+  // macOS only" contract true by construction rather than by the consumer's good manners.
+  if (process.platform === 'darwin') {
+    const trackpadLedger = new TrackpadGestureLedger()
+    const sendGesture = (active: boolean): void => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.canvasTrackpadGesture, active)
     }
-  })
+    win.webContents.on('input-event', (_event, input) => {
+      const active = trackpadLedger.observe(input.type)
+      if (active !== null) sendGesture(active)
+    })
+    // A gesture cannot survive a focus loss, and an End that never arrives (⌘Tab / hide / minimize
+    // mid-scroll) would otherwise leave the ledger stuck open for the life of the window — with
+    // wheel zoom silently dead until restart. `reset()` reports whether anything was actually
+    // open, so an ordinary blur between gestures sends nothing.
+    win.on('blur', () => {
+      if (trackpadLedger.reset()) sendGesture(false)
+    })
+  }
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
