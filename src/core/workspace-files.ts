@@ -57,6 +57,28 @@ export function sanitizeNodeTriggers(nodes: CanvasNodeState[]): CanvasNodeState[
 export const PROJECT_DIR = '.nodeterm'
 export const PROJECT_FILE = 'project.json'
 
+/** Where a cwd-less ("inline") project's content lives, under userData: the twin of a folder
+ *  project's `<cwd>/.nodeterm/project.json`. One file per project, named by the project id. */
+export const INLINE_PROJECT_DIR = 'inline-projects'
+
+/**
+ * May this project id name a file in `userData/inline-projects/`?
+ *
+ * workspace.json is hand-editable (and on Server Edition it sits next to other users' reach), so an
+ * id read back out of it is INPUT, not something we wrote. Minted ids are `project-<base36>-<hex>`
+ * (`freshProjectId` / `derivedProjectId`), well inside this charset; anything else — a separator, a
+ * `..` segment, a leading dot, an empty or absurdly long string — is refused, and its entry simply
+ * keeps the pre-file inline shape (content in the index) instead of naming a path we did not mean.
+ */
+export function isInlineProjectFileId(id: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(id) && !id.includes('..')
+}
+
+/** The data file for one inline project, relative to userData. */
+export function inlineProjectFileRelPath(id: string): string {
+  return path.join(INLINE_PROJECT_DIR, `${id}.json`)
+}
+
 /**
  * On-disk shape of <cwd>/.nodeterm/project.json — a GIT-SHARED document (users are asked to
  * commit it so the canvas travels with the repo).
@@ -129,10 +151,28 @@ export interface ProjectFileV1 {
   // `IndexEntryV3.closedSessions`. It is machine-local, like `viewport`/`breadcrumbs`.
 }
 
-/** One workspace.json v3 entry. Exactly one of: `cwd` (local ref), `ssh` (remote ref),
- *  `project` (inline, cwd-less canvas). name/color are a cached header so an
- *  unavailable ref still renders a labeled grey tab. `cache` (ssh only) is the last
- *  ProjectFileV1 seen/written — used while the server is unreachable. */
+/**
+ * One workspace.json v3 entry — a REF, in one of three kinds. name/color are a cached header so an
+ * unavailable ref still renders a labeled grey tab.
+ *
+ *   kind           | source of truth for the content       | what the index entry carries
+ *   ---------------|---------------------------------------|--------------------------------------
+ *   folder-ref     | `<cwd>/.nodeterm/project.json` (git)   | `cwd` + header + machine-local half
+ *   ssh-ref        | the same file on the host              | `ssh` + header + `cache` (offline)
+ *   local-data-ref | `userData/inline-projects/<id>.json`   | `dataFile` + header + `project` (cache)
+ *
+ * The third kind is the cwd-less canvas ("New project", no folder). It used to have no file at
+ * all — the whole `Project` rode `project` inside this index, which is ONE file with
+ * last-writer-wins semantics: a second instance sharing this userData could erase a canvas that
+ * existed nowhere else (measured in #621). It now has its own atomically written file like the
+ * other two, and `project` stays beside it as a cache, so a build older than this one still finds
+ * the canvas where it expects it.
+ *
+ * In all three kinds the file carries CONTENT and the entry carries the machine-local half
+ * (id, viewport, defaultAccountId, breadcrumbs, closedSessions, localApprovalId, localExec) — the
+ * #510 rule. That uniformity is the point: it is also what makes a future "Set folder…" a MOVE of
+ * the data file into `<cwd>/.nodeterm/project.json` rather than a reshaping of the project.
+ */
 export interface IndexEntryV3 {
   /**
    * THE project id — this machine's, and the only authority for it. It is minted here (a new
@@ -175,6 +215,23 @@ export interface IndexEntryV3 {
   cwd?: string
   ssh?: Project['ssh']
   cache?: ProjectFileV1
+  /**
+   * This entry is a LOCAL-DATA ref: its content lives in `userData/inline-projects/<id>.json` and
+   * THAT FILE is the source of truth. Absent = the pre-file shape, where `project` below IS the
+   * content. Never set together with `cwd`/`ssh`.
+   *
+   * A build that predates this field ignores it and reads `project`, which is why the two are
+   * written together for one release (the downgrade contract).
+   */
+  dataFile?: boolean
+  /**
+   * The cwd-less canvas.
+   *
+   * Before `dataFile` this WAS the storage. Beside a `dataFile` entry it is a CACHE — the local
+   * twin of the ssh `cache` above — doing two jobs: an older build still finds the canvas here,
+   * and a data file that is missing or corrupt right now falls back to it instead of opening an
+   * empty canvas. The file wins whenever it reads.
+   */
   project?: Project
   /** MACHINE-LOCAL per-node exec values (`shell`, `ssh.extraArgs`) for a ref'd project. They are
    *  stripped from the shared project file precisely so a cloned/hostile one cannot run code
@@ -491,14 +548,26 @@ export function sameProjectContent(a: ProjectFileV1, b: ProjectFileV1): boolean 
   return JSON.stringify(strip(a)) === JSON.stringify(strip(b))
 }
 
-/** Splits an in-memory workspace into the v3 index + the local project files to write. */
+/**
+ * Splits an in-memory workspace into the v3 index + the project files to write.
+ *
+ * `files` is keyed by CWD (folder refs, written into the user's own repo); `dataFiles` is keyed by
+ * PROJECT ID (cwd-less canvases, written under `userData/inline-projects`). Both hold a
+ * `ProjectFileV1` — one shape, which is what lets a future "Set folder…" MOVE the second into the
+ * first instead of converting it.
+ */
 export function splitWorkspace(
   ws: Workspace,
   revOf: (projectId: string) => number,
   savedAt: string
-): { index: WorkspaceIndexV3; files: Map<string, ProjectFileV1> } {
+): {
+  index: WorkspaceIndexV3
+  files: Map<string, ProjectFileV1>
+  dataFiles: Map<string, ProjectFileV1>
+} {
   const entries: IndexEntryV3[] = []
   const files = new Map<string, ProjectFileV1>()
+  const dataFiles = new Map<string, ProjectFileV1>()
   const seenIds = new Set<string>()
   for (const incoming of ws.projects) {
     // A relay tab is a LIVE connection to another machine's project, not a workspace on this
@@ -582,11 +651,28 @@ export function splitWorkspace(
       const { unavailable: _u, ...inline } = p
       entries.push({ ...header, project: inline })
     } else {
+      // The cwd-less canvas: a LOCAL-DATA ref (see IndexEntryV3). The file is the source of truth
+      // and `project` rides along as the cache — the dual-write that lets an older build open this
+      // canvas, and that keeps a half-done migration (file written, index write lost, or the
+      // reverse) readable either way round.
+      //
+      // It is otherwise treated exactly like the other two refs: content in the file, the
+      // machine-local half on the entry (`localState`), exec-enabling node fields hoisted into
+      // `localExec` and STRIPPED from the file by `projectToFile`. That last part costs nothing
+      // today — the file sits in userData, as machine-local as the index it replaces — and it is
+      // what makes the file safe to move into a repo the day "Set folder…" moves it.
       const { unavailable: _u, ...inline } = p
-      entries.push({ ...header, project: inline })
+      if (!isInlineProjectFileId(p.id)) {
+        // A hand-edited id we will not turn into a path: keep the pre-file shape, where the index
+        // IS the storage for this one entry.
+        entries.push({ ...header, project: inline })
+        continue
+      }
+      dataFiles.set(p.id, projectToFile(p, revOf(p.id), savedAt))
+      entries.push({ ...header, ...localState, ...localRef, dataFile: true, project: inline })
     }
   }
-  return { index: { version: 3, activeProjectId: ws.activeProjectId, entries }, files }
+  return { index: { version: 3, activeProjectId: ws.activeProjectId, entries }, files, dataFiles }
 }
 
 /** Pretty, stable-order JSON for the project file (git-diffable; the index stays compact). */
