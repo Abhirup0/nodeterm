@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { appendProjectNode } from './project-node-append'
+import { appendProjectNode, removeProjectNode } from './project-node-append'
+import { agentConfig } from '../shared/agents/config'
 
 const NOW = new Date('2026-07-16T10:00:00.000Z')
 
@@ -80,6 +81,80 @@ describe('appendProjectNode', () => {
     )
     expect(titled.nodes[0].title).toBe('Claude Code')
     expect(titled.nodes[0].color).toBe('#d97757')
+  })
+
+  it('an account-bound node takes the account color the host resolved, over the agent color', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'claude', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].color).toBe('#0a84ff')
+    expect(out.nodes[0].accountId).toBe('acct1')
+  })
+
+  it('keeps the agent color when the host resolved no account color', () => {
+    const out = JSON.parse(
+      appendProjectNode(baseFile([]), { id: 'term-c-1', agentId: 'claude', accountId: 'acct1' }, NOW)!
+    )
+    expect(out.nodes[0].color).toBe('#d97757')
+  })
+
+  // Managed accounts belong to the builtin claude and codex (S6), and the canvas has always
+  // refused to stamp one onto any other agent's node. This leg wrote whatever the phone sent, so a
+  // gemini node could come back bound to a managed account — a config home and an account-scoped
+  // reader root that mean nothing for it. The binding and the color are ONE decision, so both go.
+  it('never binds a managed account to an agent that takes none, nor paints it that color', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'gemini', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBeUndefined()
+    expect(out.nodes[0].color).toBe(agentConfig('gemini')!.color)
+  })
+
+  // Codex binds since S6 — the rule is "which agents take a managed account", not "claude".
+  it('binds a managed account to a Codex registration, color and all', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'codex', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBe('acct1')
+    expect(out.nodes[0].color).toBe('#0a84ff')
+  })
+
+  it('never binds one to a custom agent either, even one based on claude', () => {
+    const out = JSON.parse(
+      appendProjectNode(
+        baseFile([]),
+        { id: 'term-c-1', agentId: 'my-claude', accountId: 'acct1' },
+        NOW,
+        '#0a84ff'
+      )!
+    )
+    expect(out.nodes[0].accountId).toBeUndefined()
+  })
+
+  // The phone sends `agentId` and `accountId` independently and is not known to always send the
+  // first (docs/ios-protocol-migration.md §6). Dropping the binding here would be the wrong-identity
+  // bug the field was added to fix, so an unstated agent keeps it — see `boundAccountId`.
+  it('keeps the binding when the phone stated no agent', () => {
+    const out = JSON.parse(
+      appendProjectNode(baseFile([]), { id: 'term-c-1', accountId: 'acct1' }, NOW, '#0a84ff')!
+    )
+    expect(out.nodes[0].accountId).toBe('acct1')
+    expect(out.nodes[0].color).toBe('#0a84ff')
   })
 
   it('a custom/unknown agent and a plain terminal keep the mobile defaults', () => {
@@ -178,5 +253,46 @@ describe('appendProjectNode', () => {
     )
     expect(f.nodes[0].title.length).toBeLessThanOrEqual(120)
     expect(f.nodes[0].agentId).toBeUndefined()
+  })
+})
+
+describe('removeProjectNode', () => {
+  const two = [sibling, { ...sibling, id: 'term-bbb-2', ssh: undefined, sshRemoteTmux: undefined }]
+
+  it('removes the node, bumps rev, refreshes savedAt', () => {
+    const out = removeProjectNode(baseFile(two), 'term-aaa-1', NOW)
+    expect(out).not.toBeNull()
+    const f = JSON.parse(out!)
+    expect(f.rev).toBe(8)
+    expect(f.savedAt).toBe('2026-07-16T10:00:00.000Z')
+    expect(f.nodes.map((n: { id: string }) => n.id)).toEqual(['term-bbb-2'])
+  })
+
+  it('round-trips every field it does not know (bridges, kanban, future schema)', () => {
+    const extra = {
+      bridges: [{ from: 'term-aaa-1', to: 'term-bbb-2' }],
+      kanban: { columns: [], assignments: [{ nodeId: 'term-aaa-1', columnId: 'c1' }] },
+      futureField: { keep: true }
+    }
+    const f = JSON.parse(removeProjectNode(baseFile(two, extra), 'term-aaa-1', NOW)!)
+    // Dangling references are deliberately left for their readers' lazy pruning (same as a
+    // desktop delete) — removal must not reinterpret parts of the file it does not own.
+    expect(f.bridges).toEqual(extra.bridges)
+    expect(f.kanban).toEqual(extra.kanban)
+    expect(f.futureField).toEqual(extra.futureField)
+    expect(f.viewport).toEqual({ x: 1, y: 2, zoom: 0.5 })
+  })
+
+  it('answers null for a node id not in this file — "try the next project", no rev churn', () => {
+    expect(removeProjectNode(baseFile(two), 'term-zzz-9', NOW)).toBeNull()
+    expect(removeProjectNode(baseFile([]), 'term-aaa-1', NOW)).toBeNull()
+  })
+
+  it('refuses: bad JSON / wrong shape / wrong version / empty id — never invents a file', () => {
+    expect(removeProjectNode('{ not json', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode('[1,2]', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode('{"version":99,"rev":1,"nodes":[]}', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode('{"version":1}', 'term-aaa-1', NOW)).toBeNull()
+    expect(removeProjectNode(baseFile(two), '', NOW)).toBeNull()
   })
 })

@@ -1,5 +1,6 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import { IPC } from '../shared/ipc'
+import { resolveUiScale } from '../shared/ui-scale'
 import type {
   CanvasMutation,
   CanvasState,
@@ -475,6 +476,12 @@ const api: NodeTerminalApi = {
     read: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemory, q),
     host: (q?: SessionMemoryQuery) => ipcRenderer.invoke(IPC.sessionMemoryHost, q)
   },
+  triggers: {
+    arm: (projectId, nodeId, spec) => ipcRenderer.invoke(IPC.triggersArm, { projectId, nodeId, spec }),
+    disarm: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersDisarm, { projectId, nodeId }),
+    status: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersStatus, { projectId, nodeId }),
+    runNow: (projectId, nodeId) => ipcRenderer.invoke(IPC.triggersRunNow, { projectId, nodeId })
+  },
   context: {
     onUpdate: (listener) => {
       const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
@@ -522,8 +529,8 @@ const api: NodeTerminalApi = {
     clearGatewayCredential: () => ipcRenderer.invoke(IPC.agentGatewayCredentialClear)
   },
   chat: {
-    readTranscript: (sessionId, cwd, accountId, nodeId) =>
-      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId, nodeId)
+    readTranscript: (sessionId, cwd, accountId, nodeId, agentId) =>
+      ipcRenderer.invoke(IPC.chatReadTranscript, sessionId, cwd, accountId, nodeId, agentId)
   },
   claudeAccounts: {
     add: (ctx) => ipcRenderer.invoke(IPC.claudeAccountsAdd, ctx),
@@ -707,6 +714,9 @@ const api: NodeTerminalApi = {
   closeWindow: () => ipcRenderer.send(IPC.appCloseWindow),
   focusWindow: () => ipcRenderer.send(IPC.appFocusWindow),
   setBadgeCount: (count) => ipcRenderer.send(IPC.appSetBadge, count),
+  // Page zoom for the UI-scale setting (issue #299). Re-clamped here because the value originates
+  // in hand-editable settings.json and this is the boundary; no IPC — webFrame acts on this window.
+  setUiZoomFactor: (factor) => webFrame.setZoomFactor(resolveUiScale(factor)),
   // Absolute path of a dropped/picked File (File.path was removed in Electron 30+).
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   userDataDir: () => ipcRenderer.invoke(IPC.appUserDataDir),
@@ -727,6 +737,11 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.ptyPressure, handler)
     return () => ipcRenderer.removeListener(IPC.ptyPressure, handler)
   },
+  onCanvasTrackpadGesture: (listener) => {
+    const handler = (_e: unknown, active: boolean) => listener(active)
+    ipcRenderer.on(IPC.canvasTrackpadGesture, handler)
+    return () => ipcRenderer.removeListener(IPC.canvasTrackpadGesture, handler)
+  },
   raisePtyDeviceLimit: () => ipcRenderer.invoke(IPC.ptyRaiseDeviceLimit),
   answerPermission: (payload) => ipcRenderer.invoke(IPC.agentAnswerPermission, payload),
   ackDone: (nodeId) => {
@@ -741,6 +756,27 @@ const api: NodeTerminalApi = {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentStatus, handler)
     return () => ipcRenderer.removeListener(IPC.agentStatus, handler)
+  },
+  reportHibernated: (nodeId, on) => ipcRenderer.send(IPC.agentHibernated, { nodeId, on }),
+  onAgentWake: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentWake, handler)
+    return () => ipcRenderer.removeListener(IPC.agentWake, handler)
+  },
+  onRemoteViewers: (listener) => {
+    const handler = (_e: unknown, nodeIds: string[]) => listener(nodeIds)
+    ipcRenderer.on(IPC.agentRemoteViewers, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRemoteViewers, handler)
+  },
+  onAgentRefreshNode: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentRefreshNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRefreshNode, handler)
+  },
+  onAgentRenameNode: (listener) => {
+    const handler = (_e: unknown, payload: { nodeId: string; title: string }) => listener(payload)
+    ipcRenderer.on(IPC.agentRenameNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRenameNode, handler)
   },
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)

@@ -266,87 +266,28 @@ export function localPasteDelivery(
 }
 
 /**
- * Is `payload` the output of `bracketedInjection` — a complete frame whose interior went through
- * `sanitizePasteText`?
+ * ── DELETED: `assertFramedPayload` / `localTmuxFramedPasteArgs` / `localFramedDelivery` ─────────
  *
- * `localFramedDelivery`/`remoteFramedDelivery` deliberately do NOT sanitize: the frame's own ESC
- * bytes ARE the framing, and stripping them (as every other plan in this file does, structurally)
- * would land the multi-line envelope unframed — herdr :260, reintroduced by the delivery built to
- * avoid it. Not sanitizing is only safe if nothing unframed or unsanitized can pass, so that is
- * asserted at the splice, same fail direction as `assertPasteTarget`: throw, never repair.
- * `tmux-naming.test.ts` ("refuses a payload that is not a well-formed, pre-sanitized frame") is
- * the test that fails if this stops being true.
+ * The framed-plan trio delivered the agent-messaging envelope as a payload that CARRIED its own
+ * `ESC[200~ … ESC[201~ \r` frame, pasted with `paste-buffer -r` and no `-p` ("tmux must not
+ * re-frame bytes that already carry their frame") and no separate Enter ("text and submit are one
+ * write"). Both premises died with tmux 3.7 (issue #453, measured on 3.7b — the version the macOS
+ * app bundles): `paste-buffer` now passes the buffer content through vis(3)
+ * (`utf8_stravisx(VIS_SAFE|VIS_NOSLASH)`, CHANGES: "Pass paste buffer through vis(3) when
+ * pasting…"), which rewrites every ESC byte into the printable pair `^[` — so the hand-rolled
+ * frame arrived as LITERAL TEXT (`^[[200~…^[[201~`) in the target's composer, and the `\r` riding
+ * inside the now-frameless burst was absorbed as pasted content instead of a submit. On tmux ≤ 3.6
+ * the same bytes passed through verbatim and worked, which is why every Linux CI run stayed green
+ * while the bundled-tmux macOS build was broken.
+ *
+ * The envelope now rides the SAME plan as every other write (`localPasteDelivery` above, enter
+ * always true — see `PtyManager.sendEnvelope`): tmux inserts the frame from the pane's real
+ * bracketed-paste state (`-p`; vis(3) is applied to buffer CONTENT only, never to tmux's own
+ * markers — measured on 3.7b: the markers arrive as real ESC bytes, the content untouched), and
+ * the Enter is its own key event AFTER the close marker, which a paste-aware composer cannot
+ * re-chunk into the paste (the herdr :48 race only existed for UNMARKED bursts). Do not resurrect
+ * a plan that puts an ESC byte into a paste buffer: on tmux ≥ 3.7 it cannot arrive as an escape.
  */
-export function assertFramedPayload(payload: string): void {
-  const START = '\x1b[200~'
-  const END = '\x1b[201~'
-  const ok =
-    payload.startsWith(START) &&
-    (payload.endsWith(END) || payload.endsWith(`${END}\r`)) &&
-    payload.length >= START.length + END.length
-  if (!ok) throw new Error('not a framed payload')
-  const tail = payload.endsWith('\r') ? payload.length - END.length - 1 : payload.length - END.length
-  const inner = payload.slice(START.length, tail)
-  // No ESC (or 8-bit C1 CSI) byte may survive inside the frame — one could close it early and turn
-  // the rest into key input. `bracketedInjection` can never produce one; refuse anything else.
-  // eslint-disable-next-line no-control-regex
-  if (/[\x1b]/.test(inner)) throw new Error('framed payload interior is not sanitized')
-}
-
-/**
- * The one tmux invocation that delivers an ALREADY-FRAMED payload (the messaging envelope):
- * stdin buffer, the same gated copy-mode cancel as `localTmuxPasteArgs`, then `paste-buffer -r`
- * with NO `-p` — tmux must not re-frame bytes that already carry their frame — and no trailing
- * Enter, because the composed `\r` rides INSIDE the paste, so text and submit are one write and
- * can never be re-chunked apart (herdr :48).
- */
-export function localTmuxFramedPasteArgs(socket: string, target: string, buffer: string): string[] {
-  assertPasteTarget(target, buffer)
-  return [
-    '-L',
-    socket,
-    'load-buffer',
-    '-b',
-    buffer,
-    '-',
-    ';',
-    'if-shell',
-    '-F',
-    '-t',
-    target,
-    '#{pane_in_mode}',
-    `send-keys -t ${target} -X cancel`,
-    ';',
-    'paste-buffer',
-    '-d',
-    '-r',
-    '-b',
-    buffer,
-    '-t',
-    target
-  ]
-}
-
-/**
- * The plan for delivering one composed frame locally, or null when there is nothing to deliver.
- * Unlike `localPasteDelivery` there is no bare-Enter case: an envelope is never empty, and a
- * lone Enter into an agent's composer is exactly the accidental submit this delivery exists to
- * make impossible.
- */
-export function localFramedDelivery(
-  socket: string,
-  target: string,
-  payload: string
-): PasteDelivery | null {
-  if (payload.length === 0) return null
-  assertFramedPayload(payload)
-  const buffer = pasteBufferName()
-  return {
-    args: localTmuxFramedPasteArgs(socket, target, buffer),
-    body: payload,
-    cleanup: localTmuxDeleteBufferArgs(socket, buffer)
-  }
-}
 
 /**
  * Run a plan. The runner is injected so this is the same code in production and under a real tmux.

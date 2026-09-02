@@ -3,10 +3,15 @@
 import os from 'os'
 import path from 'path'
 import { createHash } from 'crypto'
-import { posixQuote, quoteRemotePath, remoteTmuxCommand, type SshConnection } from '../../shared/ssh'
+import {
+  posixQuote,
+  quoteRemotePath,
+  remoteTmuxCommand,
+  remoteTmuxPathPrologue,
+  type SshConnection
+} from '../../shared/ssh'
 import {
   TMUX_SOCKET,
-  assertFramedPayload,
   assertPasteTarget,
   assertPasteBuffer,
   pasteBufferName,
@@ -14,11 +19,22 @@ import {
 } from '../tmux-naming'
 import { sanitizePasteText } from '../paste-injection'
 import { canControlCanvas } from '../../shared/agents/config'
-import { PANE_OWNER_FMT, foregroundArgvArgs } from '../agents/pane-owner'
+import { COMBINED_PANE_MARKER, PANE_OWNER_FMT, PS_FOREGROUND_FLAGS } from '../agents/pane-owner'
 // Dependency-free (no node-pty): safe to import from these pure builders.
 
 /** Dedicated remote tmux socket so an SSH project never collides with the user's own tmux. */
 export const RMT_TMUX_SOCKET = 'nodeterm-rmt'
+
+/**
+ * Every remote command that invokes `tmux` goes through this: the PATH-append prologue
+ * (`remoteTmuxPathPrologue`, issue #449) plus the command. Without it a bare `tmux` dies with
+ * `command not found` on any host whose ssh exec-channel PATH misses the install dir — most
+ * visibly macOS with Homebrew's tmux in `/opt/homebrew/bin`. The prologue is one assignment, so
+ * the command's own exit code (what `probeSaysAbsent` and every caller reads) is unchanged.
+ */
+function tmuxCmd(body: string): string {
+  return `${remoteTmuxPathPrologue()}${body}`
+}
 
 /**
  * Per-project ControlMaster socket path. Deliberately SHORT and space-free. The macOS userData dir
@@ -57,6 +73,18 @@ function portArgs(conn: SshConnection): string[] {
  */
 function identityArgs(conn: SshConnection): string[] {
   return conn.identityFile ? ['-o', 'IdentitiesOnly=yes', '-i', conn.identityFile] : []
+}
+
+/**
+ * Honor a config-level `IdentityAgent SSH_AUTH_SOCK` (issue #427). When the `ssh -G` probe
+ * (agent-probe.ts) determined that this host's effective config routes it at the ENVIRONMENT's
+ * agent, pin the user's ambient login-agent socket on the command line: a command-line `-o` is
+ * first-obtained, so it beats both the config line (which would re-read our overridden env and
+ * land back on the app-private agent) and the env override itself. Empty for every connection the
+ * probe did not mark — byte-identical legacy argv.
+ */
+function agentArgs(conn: SshConnection): string[] {
+  return conn.identityAgentSock ? ['-o', `IdentityAgent=${conn.identityAgentSock}`] : []
 }
 
 /** Args for the backgrounded multiplexing master (the one auth happens here). */
@@ -126,8 +154,14 @@ export function masterArgs(conn: SshConnection, controlPath: string): string[] {
     // Harmless when no agent is reachable at all: ssh skips the add silently (measured: not one
     // stderr line, so nothing for lastSshErrorLine to mistake for a failure cause) and simply
     // prompts again next time.
-    '-o',
-    'AddKeysToAgent=yes',
+    //
+    // OMITTED for a pinned-agent connection (agentArgs): there the designated agent is the user's
+    // LOGIN agent, and forcing AddKeysToAgent=yes would load an askpass-unlocked key into it until
+    // logout — the exact leak the app-private agent exists to close. The user's own ~/.ssh/config
+    // decides for that host instead (and their key is normally already in that agent, which is why
+    // they wrote `IdentityAgent SSH_AUTH_SOCK` in the first place).
+    ...(conn.identityAgentSock ? [] : ['-o', 'AddKeysToAgent=yes']),
+    ...agentArgs(conn),
     ...portArgs(conn),
     ...identityArgs(conn)
   ]
@@ -176,6 +210,10 @@ export function childArgs(conn: SshConnection, controlPath: string, remote?: str
   // identityArgs also pins the offer (IdentitiesOnly) so that same fallback cannot burn the
   // server's MaxAuthTries on unrelated agent keys; the agent still signs the pinned key, which
   // is the only way a tty-less child can use an ENCRYPTED key at all (it has no askpass wiring).
+  // agentArgs matters in the same fallback case, for the same reason as masterArgs: the child's
+  // env points at the app-private agent, and only the pin routes it back at the login agent the
+  // user's config asked for.
+  args.push(...agentArgs(conn))
   args.push(...identityArgs(conn))
   args.push(target(conn))
   if (remote !== undefined) args.push(remote)
@@ -189,7 +227,7 @@ export function exitMasterArgs(conn: SshConnection, controlPath: string): string
   return ['-O', 'exit', '-o', `ControlPath=${controlPath}`, ...portArgs(conn), target(conn)]
 }
 export function remoteTmuxHasSessionArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
-  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} has-session -t ${sessionId}`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} has-session -t ${sessionId}`))
 }
 /**
  * Every nodeterm tmux session on the host, by name.
@@ -205,7 +243,7 @@ export function remoteListSessionsArgs(conn: SshConnection, controlPath: string)
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} list-sessions -F '#{session_name}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} list-sessions -F '#{session_name}'`)
   )
 }
 
@@ -264,52 +302,19 @@ export function remoteTmuxPasteArgs(
     `if-shell -F -t ${sessionId} '#{pane_in_mode}' 'send-keys -t ${sessionId} -X cancel' ';' ` +
     `paste-buffer -d -p -r -b ${buffer} -t ${sessionId}`
   if (enter) cmd += ` ';' send-keys -t ${sessionId} Enter`
-  return childArgs(conn, controlPath, cmd)
+  return childArgs(conn, controlPath, tmuxCmd(cmd))
 }
 
 /**
- * The remote leg of the messaging envelope's delivery — `remoteFramedDelivery`'s argv. The exact
- * mirror of `localTmuxFramedPasteArgs` (tmux-naming.ts): NO `-p`, because the payload already
- * carries its frame and tmux re-framing it would render the inner markers as garbage; `-r` so the
- * bytes land verbatim; no trailing Enter, because the composed `\r` rides inside the paste.
+ * ── DELETED: `remoteTmuxFramedPasteArgs` / `remoteFramedDelivery` ───────────────────────────────
+ *
+ * The remote mirror of the framed-plan trio deleted in tmux-naming.ts — see the tombstone there
+ * for the whole measurement (issue #453: tmux ≥ 3.7 passes paste-buffer content through vis(3),
+ * so a payload-carried `ESC[200~` arrives as the literal text `^[[200~`). The SSH leg was the
+ * WORSE case: the remote host's tmux is whatever the server runs, so the mangle appeared and
+ * disappeared per host. The envelope now rides `remotePasteDelivery` above (`-p` + a separate
+ * Enter, `PtyManager.sendEnvelope`), exactly like every other remote write.
  */
-export function remoteTmuxFramedPasteArgs(
-  conn: SshConnection,
-  controlPath: string,
-  sessionId: string,
-  buffer: string
-): string[] {
-  assertPasteTarget(sessionId, buffer)
-  const tmux = `tmux -L ${RMT_TMUX_SOCKET}`
-  const cmd =
-    `${tmux} load-buffer -b ${buffer} - ';' ` +
-    `if-shell -F -t ${sessionId} '#{pane_in_mode}' 'send-keys -t ${sessionId} -X cancel' ';' ` +
-    `paste-buffer -d -r -b ${buffer} -t ${sessionId}`
-  return childArgs(conn, controlPath, cmd)
-}
-
-/**
- * The plan for delivering one composed frame remotely — same three decisions as
- * `localFramedDelivery`, taken by the SAME `assertFramedPayload` rather than restated: this is the
- * one plan pair that does not sanitize (the frame's ESC bytes must survive), so it refuses
- * anything that is not `bracketedInjection` output. No bare-Enter case: an envelope is never
- * empty, and a lone Enter into an agent's composer is an accidental submit.
- */
-export function remoteFramedDelivery(
-  conn: SshConnection,
-  controlPath: string,
-  sessionId: string,
-  payload: string
-): PasteDelivery | null {
-  if (payload.length === 0) return null
-  assertFramedPayload(payload)
-  const buffer = pasteBufferName()
-  return {
-    args: remoteTmuxFramedPasteArgs(conn, controlPath, sessionId, buffer),
-    body: payload,
-    cleanup: remoteDeleteBufferArgs(conn, controlPath, buffer)
-  }
-}
 
 /**
  * A bare Enter into the remote pane — the remote half of `sendText`'s empty-payload case.
@@ -332,7 +337,7 @@ export function remoteTmuxEnterArgs(
   sessionId: string
 ): string[] {
   assertPasteTarget(sessionId)
-  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} send-keys -t ${sessionId} Enter`))
 }
 
 /** `delete-buffer` on the REMOTE server — the sweep for a remote paste that never ran. */
@@ -342,7 +347,7 @@ export function remoteDeleteBufferArgs(
   buffer: string
 ): string[] {
   assertPasteBuffer(buffer)
-  return childArgs(conn, controlPath, `tmux -L ${RMT_TMUX_SOCKET} delete-buffer -b ${buffer}`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} delete-buffer -b ${buffer}`))
 }
 
 /**
@@ -446,7 +451,7 @@ export function remoteTmuxKillArgs(
   sessionId: string,
   socket: string = RMT_TMUX_SOCKET
 ): string[] {
-  return childArgs(conn, controlPath, `tmux -L ${socket} kill-session -t ${exactTarget(sessionId)}`)
+  return childArgs(conn, controlPath, tmuxCmd(`tmux -L ${socket} kill-session -t ${exactTarget(sessionId)}`))
 }
 
 /**
@@ -470,7 +475,7 @@ export function remoteCapturePaneArgs(conn: SshConnection, controlPath: string, 
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} capture-pane -p -e -t ${sessionId} -S ${full ? '-' : '-200'}`)
   )
 }
 /**
@@ -483,7 +488,7 @@ export function remotePaneCommandArgs(conn: SshConnection, controlPath: string, 
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_current_command}'`)
   )
 }
 
@@ -496,7 +501,7 @@ export function remotePaneProcessArgs(
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_pid}|#{pane_current_command}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{pane_pid}|#{pane_current_command}'`)
   )
 }
 
@@ -522,41 +527,63 @@ export function remoteTerminateForegroundArgs(
   )
 }
 /**
- * Ask the REMOTE tmux for everything the ownership read needs in one round-trip — the remote
- * counterpart of `PtyManager.paneOwner`'s first call. Same single-quoting rule as
- * `remotePaneCommandArgs`: the `#{…}` fields have to reach the remote tmux verbatim rather than
- * being eaten by the remote shell.
+ * The ONE-round-trip remote pane-owner read (issue #460) — identity AND foreground `ps` in a
+ * single ssh exec, replacing the two-trip pair below (tombstone).
+ *
+ * WHY one trip, measured: `deliverAgentMessage` bounds the whole read with
+ * `PANE_PROBE_TIMEOUT_MS` (2s). Over a healthy mux channel each exec is ~100ms and two fit
+ * easily — but when the master cannot serve a channel, `-o ControlMaster=auto` silently
+ * "disables multiplexing" and every exec becomes a FULL ssh login. Measured on a real sshd with
+ * its 64 `MaxSessions` exhausted by 70 held channels: the probe exec printed
+ * `mux_client_request_session: session request failed: Session open refused by peer`, fell back
+ * to a direct connection, and still exited 0 — at 258ms on loopback, i.e. 0.5–1.5s per exec over
+ * a WAN. Two sequential fallback logins straddle the 2s budget, `probeWithin` answers null, and
+ * the delivery gate refused a LIVE agent pane — persistently, for as long as the canvas held the
+ * channels (field report: issue #460, on a host with 85 live `nt-` sessions). One trip halves
+ * both the latency and the fallback-login count (the 72k-logins hazard the probe's own comment
+ * warns about).
+ *
+ * Shape rules, each learned elsewhere in this repo:
+ *  - the identity line is fenced by `COMBINED_PANE_MARKER`, printed through a QUOTED printf
+ *    format — an unquoted word-initial `##` is an sh comment and prints an empty line
+ *    (session-memory-remote's measured trap);
+ *  - a failed tmux read `exit 9`s so the whole exec throws and the caller answers null — "no
+ *    such session" must stay indistinguishable from the old first-trip failure;
+ *  - the tty never crosses back into OUR command line: it is cut from the reply INSIDE the same
+ *    shell (`${o#*|}`) and expanded quoted, with a `/dev/*` case guard, so there is nothing
+ *    left for `isSafeTty` to defend at the splice (the parser still applies it to the reply);
+ *  - a `ps` that errors prints nothing below the marker (`2>/dev/null || :`) — identity with no
+ *    rows parses to null, exactly the two-trip contract;
+ *  - the `ps` flags are `PS_FOREGROUND_FLAGS`, the same constant the local leg passes as argv,
+ *    so the two legs cannot drift.
  */
-export function remotePaneOwnerArgs(conn: SshConnection, controlPath: string, sessionId: string): string[] {
-  return childArgs(
-    conn,
-    controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`
-  )
+export function remotePaneOwnerCombinedArgs(
+  conn: SshConnection,
+  controlPath: string,
+  sessionId: string
+): string[] {
+  // Every splice is checked at the splice (assertPasteTarget's own rule): the id is interpolated
+  // unquoted into a script the remote login shell parses, so a name this app did not generate is
+  // refused here rather than trusted to some caller's discipline.
+  assertPasteTarget(sessionId)
+  const ps = PS_FOREGROUND_FLAGS.join(' ')
+  const script =
+    `o=$(${tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '${PANE_OWNER_FMT}'`)}) || exit 9; ` +
+    `printf '%s\\n' "${COMBINED_PANE_MARKER.trimEnd()} $o"; ` +
+    'tty=${o#*|}; tty=${tty%%|*}; ' +
+    `case "$tty" in /dev/*) ps ${ps} -t "$tty" 2>/dev/null || : ;; esac`
+  return childArgs(conn, controlPath, script)
 }
 
 /**
- * The second round-trip: `ps` on the REMOTE host, listing the pane tty's processes.
+ * ── DELETED: `remotePaneOwnerArgs` / `remoteForegroundArgvArgs` ─────────────────────────────────
  *
- * `tty` is a value the remote host printed back at us (`#{pane_tty}`), so it is DATA crossing into
- * a command line — exactly the class `remote-safety.ts` exists for. Two layers, both required:
- * `isSafeTty` refuses anything outside `[A-Za-z0-9/._-]` (returning null here, which the caller
- * reads as "unknown"), and what survives is `posixQuote`d at the splice. No credential is involved
- * — a tty path is the whole payload — so nothing here needs, or may grow, a stdin header channel
- * (Global Constraint 6).
- *
- * The `ps` flags are the ones measured for the local leg, unchanged: they are valid on both GNU and
- * BSD `ps`, and the remote host is at least as likely to be either.
+ * The two-round-trip remote pane read. Replaced by `remotePaneOwnerCombinedArgs` above (issue
+ * #460): under a saturated or dead ControlMaster each trip silently became a full ssh login, and
+ * two of them could not fit the delivery gate's 2s probe budget — a live agent pane then read as
+ * `unknown`, persistently. Do not resurrect the pair "for simplicity": the second trip is also a
+ * second fallback LOGIN in exactly the degraded state that made the first one slow.
  */
-export function remoteForegroundArgvArgs(
-  conn: SshConnection,
-  controlPath: string,
-  tty: string
-): string[] | null {
-  const call = foregroundArgvArgs(tty)
-  if (!call) return null
-  return childArgs(conn, controlPath, `${call.bin} ${call.args.map(posixQuote).join(' ')}`)
-}
 
 /**
  * Ask the REMOTE tmux where a pane's cursor is — the remote counterpart of `PtyManager.paneCursor`,
@@ -572,11 +599,11 @@ export function remotePaneCursorArgs(
   return childArgs(
     conn,
     controlPath,
-    `tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{cursor_x} #{cursor_y} #{cursor_flag}'`
+    tmuxCmd(`tmux -L ${RMT_TMUX_SOCKET} display-message -p -t ${sessionId} '#{cursor_x} #{cursor_y} #{cursor_flag}'`)
   )
 }
 export function tmuxProbeArgs(conn: SshConnection, controlPath: string): string[] {
-  return childArgs(conn, controlPath, 'command -v tmux')
+  return childArgs(conn, controlPath, tmuxCmd('command -v tmux'))
 }
 export function listDirArgs(conn: SshConnection, controlPath: string, path: string): string[] {
   return childArgs(conn, controlPath, `ls -1Ap ${quoteRemotePath(path)}`)
@@ -596,6 +623,7 @@ export function mkDirArgs(conn: SshConnection, controlPath: string, path: string
  *  basenamed by the caller, and the path is absolute). scp uses `-P` (uppercase) for the port. */
 export function scpArgs(conn: SshConnection, controlPath: string, localPath: string, remotePath: string): string[] {
   const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
+  args.push(...agentArgs(conn))
   args.push(...identityArgs(conn))
   args.push(localPath, `${conn.user}@${conn.host}:${remotePath}`)
   return args
@@ -629,6 +657,7 @@ export function scpDownArgs(
   recursive = false
 ): string[] {
   const args = ['-o', 'ControlMaster=no', '-o', `ControlPath=${controlPath}`, '-o', 'BatchMode=yes', '-P', String(conn.port ?? 22)]
+  args.push(...agentArgs(conn))
   args.push(...identityArgs(conn))
   if (recursive) args.push('-r')
   args.push(`${conn.user}@${conn.host}:${remoteScpPath(remotePath)}`, localPath)
@@ -736,8 +765,42 @@ export function remoteTmuxPtyArgs(
     // was remote code execution EVEN WITH the posixQuote above. A function replacement is never
     // pattern-expanded, so the quoted bytes land verbatim. See control-master.injection.test.ts.
     cmd = cmd.replace('new-session -A ', () => `new-session -A ${extraEnv.map(posixQuote).join(' ')} `)
+  cmd = tmuxOrExplain(cmd, remoteCwd)
   if (sessionEnv) cmd = `${remoteSessionEnvPrologue(sessionEnv, confPath)}${cmd}`
-  return ['-t', ...childArgs(conn, controlPath, cmd)]
+  // The PATH prologue goes at the very FRONT of the composed line: the session-env prologue's own
+  // tmux calls (start-server / show-options) and the `command -v tmux` guard must resolve the
+  // binary the same way new-session does.
+  return ['-t', ...childArgs(conn, controlPath, tmuxCmd(cmd))]
+}
+
+/** What a tmux-less remote loses, told to the user IN the pane. English + apostrophe-free: each
+ *  line is embedded as one single-quoted printf argument in the remote shell line. */
+const REMOTE_TMUX_MISSING_LINES = [
+  'nodeterm: tmux was not found on this host.',
+  'nodeterm runs remote terminals inside tmux so they survive disconnects, app restarts and project switches.',
+  'Install tmux on the host (brew install tmux / apt install tmux / dnf install tmux) and reopen this terminal.',
+  'Starting a plain shell instead - it will NOT persist when this terminal closes.'
+]
+
+/**
+ * Wrap the interactive remote tmux command so a host WITHOUT tmux gets a readable explanation and
+ * a usable plain login shell, instead of the raw `zsh:1: command not found: tmux` that closed the
+ * pane immediately (issue #449). Runs after the PATH widening, so it only fires when tmux is
+ * genuinely absent from PATH + every known install dir. The fallback shell is the honest local
+ * analogue: `PtyManager` falls back to a plain shell when the LOCAL tmux is unavailable too.
+ * `cd` first (best-effort) so the shell at least opens in the node's cwd; `${SHELL:-sh}` because
+ * an exec channel without SHELL set should still produce a prompt rather than exec ''.
+ */
+function tmuxOrExplain(tmuxCommand: string, remoteCwd: string): string {
+  const msg = REMOTE_TMUX_MISSING_LINES.map(posixQuote).join(' ')
+  // The `;` separators are SPACE-PADDED on purpose: the tmux command ends in a single-quoted
+  // token, and `'…';` glues the separator onto that token in the injection tests' shell parser
+  // (a real sh splits them, but the padded form is equally valid and keeps the parse exact).
+  return (
+    `if command -v tmux >/dev/null 2>&1 ; then ${tmuxCommand} ; else ` +
+    `printf '%s\\n' '' ${msg} '' ; cd ${quoteRemotePath(remoteCwd)} 2>/dev/null ; ` +
+    `exec "\${SHELL:-sh}" -l ; fi`
+  )
 }
 
 /** Credentials for a remote session, delivered WITHOUT argv: a 0600 file (staged over the

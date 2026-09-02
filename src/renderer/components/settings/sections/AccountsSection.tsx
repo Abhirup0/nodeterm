@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { ClaudeAccount } from '@shared/types'
 import type { CodexAccount } from '@shared/codex-account'
+import { E_UNSUPPORTED } from '@shared/rpc'
 import { sshHostKey } from '@shared/ssh'
 import { useSettings } from '../../../state/settings'
 import { useSystemAccount } from '../../../state/systemAccount'
 import { useSystemCodexAccount } from '../../../state/systemCodexAccount'
-import { isAccountLoginNode } from '../../../state/workspace'
+import { isAccountLoginNode, NODE_COLORS } from '../../../state/workspace'
 import { useProjects } from '../../../state/projects'
 import { useSshConn } from '../../../state/sshConn'
 import { useSshServers } from '../../../state/sshServers'
@@ -26,6 +27,7 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { Button } from '@renderer/ui/Button'
 import { Input } from '@renderer/ui/Input'
+import { cn } from '@renderer/ui/cn'
 
 const ROWS = {
   accounts: {
@@ -38,6 +40,11 @@ const ROWS = {
   }
 }
 const ENTRIES = Object.values(ROWS)
+
+/** The bridge's "this shell registers no such handler" rejection (renderer/bridge/stubs.ts). It is
+ *  a fact about the SURFACE, not about this account — worth a different sentence than a failure. */
+const isUnsupported = (e: unknown): boolean =>
+  !!e && typeof e === 'object' && (e as { code?: string }).code === E_UNSUPPORTED
 
 /** One machine's card in the accounts UI: a connectivity dot, the machine label, a Local/SSH pill,
  *  and (for a remote machine) its `user@host` subtitle. Children are the provider account rows. */
@@ -101,6 +108,62 @@ function applyCodexAccounts(fn: (accs: CodexAccount[]) => CodexAccount[]): void 
   s.update({ codexAccounts: fn(s.settings.codexAccounts) })
 }
 
+/**
+ * The per-account default node color picker. ONE definition for both managed-account kinds: a
+ * Claude and a Codex account carry the same optional `color` and feed the same `agentAccountColor`
+ * read at node creation, so two copies of these swatches could only drift. `label` names the group
+ * for assistive tech (and for the tests) — account labels are user-typed, so it is the only handle
+ * a row reliably has.
+ */
+function AccountColorSwatches({
+  label,
+  color,
+  onPick
+}: {
+  label: string
+  color?: string
+  onPick: (color?: string) => void
+}): React.JSX.Element {
+  return (
+    <div
+      role="group"
+      aria-label={`Default node color for ${label}`}
+      className="flex flex-wrap items-center gap-2 pt-1"
+    >
+      <span className="text-[12px] text-muted">Node color</span>
+      <button
+        type="button"
+        aria-label="Default"
+        aria-pressed={!color}
+        title="Use the agent's own color"
+        onClick={() => onPick(undefined)}
+        className={cn(
+          'flex size-5 items-center justify-center rounded-full border-2 text-[11px] text-muted',
+          color ? 'border-transparent bg-fill-weak' : 'border-text bg-fill-weak'
+        )}
+      >
+        ✕
+      </button>
+      {NODE_COLORS.map((c) => (
+        <button
+          key={c}
+          type="button"
+          // "<what> <hex>", the convention the Appearance accent picker set — a bare hex is not a
+          // name a screen reader can do anything with.
+          aria-label={`Node color ${c}`}
+          aria-pressed={color === c}
+          onClick={() => onPick(c)}
+          style={{ background: c }}
+          className={cn(
+            'size-5 rounded-full border-2',
+            color === c ? 'border-text' : 'border-transparent'
+          )}
+        />
+      ))}
+    </div>
+  )
+}
+
 /** Counts nodes bound to an account across every project's SERIALIZED nodes. The active
  *  project's live React Flow edits since the last commit aren't reflected here, so the count
  *  can be slightly stale for the active canvas — acceptable for a confirmation warning. */
@@ -141,6 +204,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const setLabel = (id: string, label: string): void =>
     applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
 
+  const setColor = (id: string, color?: string): void =>
+    applyAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
+
   // The open project whose SSH host matches a remote account (needed for the ssh context of
   // waitLogin / remove). Undefined for local accounts, or when no such project is open.
   const projectIdForHost = (host?: string): string | undefined => {
@@ -167,6 +233,7 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   }, [])
   const [pendingRemoveCodex, setPendingRemoveCodex] = useState<CodexAccount | null>(null)
   const [addingCodex, setAddingCodex] = useState(false)
+  const [codexAddError, setCodexAddError] = useState<string | null>(null)
 
   // The reachable machines: this Mac first, then every saved SSH server unioned with the active
   // project's own server (deduped by host key). Accounts partition onto them by `host`.
@@ -220,12 +287,16 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
   const setCodexLabel = (id: string, label: string): void =>
     applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, label } : a)))
 
+  const setCodexColor = (id: string, color?: string): void =>
+    applyCodexAccounts((accs) => accs.map((a) => (a.id === id ? { ...a, color } : a)))
+
   // Add a LOCAL managed Codex account and open its device-login node. Remote Codex account creation
   // is fail-closed here: the base `codexAccounts.add()` mints on THIS Mac, so offering it under a
   // remote machine would silently create a local account — the remote leg lands with the host relay.
   const onAddCodexAccount = async (): Promise<void> => {
     if (addingCodex) return
     setAddingCodex(true)
+    setCodexAddError(null)
     try {
       const added = await window.nodeTerminal.codexAccounts.add()
       const account: CodexAccount = { id: added.id, label: 'New Codex account', pending: true }
@@ -239,6 +310,16 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           applyResolvedCodexAccounts(accs, [{ id: added.id, email: captured.email }])
         )
       }
+    } catch (e) {
+      // Without this the browser's E_UNSUPPORTED rejection was an UNHANDLED promise rejection: the
+      // spinner stopped and nothing else happened, which reads as a dead button. Managed Claude
+      // accounts now work in the browser, so a user who just added one has every reason to expect
+      // the button beneath it to work too — say why it does not.
+      setCodexAddError(
+        isUnsupported(e)
+          ? 'Managed Codex accounts are not available in the browser yet — manage them from the desktop app.'
+          : 'Could not set up the Codex account.'
+      )
     } finally {
       setAddingCodex(false)
     }
@@ -312,19 +393,26 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
               className="flex items-center justify-between gap-3 rounded-md border border-border/60 p-2"
               title={blockedReason}
             >
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <Input
-                  className="w-48"
-                  placeholder="Codex account label"
-                  value={account.label}
-                  onChange={(e) => setCodexLabel(account.id, e.target.value)}
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Input
+                    className="w-48"
+                    placeholder="Codex account label"
+                    value={account.label}
+                    onChange={(e) => setCodexLabel(account.id, e.target.value)}
+                  />
+                  <AccountIdentityPills account={presentCodex(account)} warning={!selectable.ok} />
+                  {account.pending ? (
+                    <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
+                      pending
+                    </span>
+                  ) : null}
+                </div>
+                <AccountColorSwatches
+                  label={account.label}
+                  color={account.color}
+                  onPick={(c) => setCodexColor(account.id, c)}
                 />
-                <AccountIdentityPills account={presentCodex(account)} warning={!selectable.ok} />
-                {account.pending ? (
-                  <span className="rounded-full bg-[color:var(--warn)]/15 px-2 py-0.5 text-[11px] font-medium text-[color:var(--warn)]">
-                    pending
-                  </span>
-                ) : null}
               </div>
               <Button
                 variant="ghost"
@@ -383,14 +471,19 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
     let added: { id: string; versionSupported: boolean }
     try {
       added = await window.nodeTerminal.claudeAccounts.add(projectId ? { projectId } : undefined)
-    } catch {
+    } catch (e) {
       // The remote path does not reject on a failed setup (it answers with an empty configDir and
       // lets the login node report the connection error), so reaching here means the call itself
       // never landed. Say so: after a spinner, silence is the one outcome that teaches nothing.
+      // E_UNSUPPORTED is a separate sentence because it is a fact about the surface, not this
+      // account: the Server Edition serves these channels now, but a relay tab still refuses them
+      // and so does a server binary older than that change.
       setAddError(
-        host
-          ? `Could not set up an account on ${host}. Is the project still connected?`
-          : 'Could not set up the account.'
+        isUnsupported(e)
+          ? 'Managed Claude accounts are not available on this surface — manage them from the desktop app or the Server Edition directly.'
+          : host
+            ? `Could not set up an account on ${host}. Is the project still connected?`
+            : 'Could not set up the account.'
       )
       return
     } finally {
@@ -527,6 +620,11 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                   {account.email && !account.pending ? (
                     <p className="text-[12px] text-muted">{account.email}</p>
                   ) : null}
+                  <AccountColorSwatches
+                    label={account.label}
+                    color={account.color}
+                    onPick={(c) => setColor(account.id, c)}
+                  />
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   {account.pending
@@ -622,8 +720,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
 
           <p className="text-[12px] leading-relaxed text-muted">
             Accounts are isolated Claude logins. New Claude nodes pick an account from the add
-            menus; each node keeps its account for life. Remote accounts live on an SSH host and are
-            only offered in that host&apos;s projects.
+            menus; each node keeps its account for life. A node color applies to nodes opened under
+            that account from then on — existing ones keep the color they have. Remote accounts live
+            on an SSH host and are only offered in that host&apos;s projects.
           </p>
         </div>
       </SearchableRow>
@@ -654,6 +753,9 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
                       'Add Codex account'
                     )}
                   </Button>
+                  {codexAddError ? (
+                    <p className="text-[12px] text-[color:var(--danger)]">{codexAddError}</p>
+                  ) : null}
                 </div>
               ) : (
                 <p className="text-[12px] leading-relaxed text-muted">
@@ -676,6 +778,8 @@ export function AccountsSection({ isActive }: { isActive: boolean }): React.JSX.
           <p className="text-[12px] leading-relaxed text-muted">
             Codex accounts are isolated logins, grouped by the machine their credentials live on.
             New Codex nodes pick an account from the add menus; each node keeps its account for life.
+            A node color applies to nodes opened under that account from then on — existing ones
+            keep the color they have.
           </p>
         </div>
       </SearchableRow>

@@ -15,16 +15,26 @@ alwaysOnTop:true, focusable:false, skipTaskbar:true}` + `setAlwaysOnTop(true,'sc
 {forward:true})`. Its own renderer entry `hud.html` (add to electron.vite.config.ts
 `renderer.input`) sharing the existing preload plus a small HUD-specific API.
 
-- **Geometry** from `screen.getPrimaryDisplay()`: the window spans the full top edge (`bounds`,
-  `y = bounds.y`), sized to the EXPANDED box (`HUD_WINDOW_HEIGHT`); we never resize the frame. Main
-  sends the renderer everything it needs to draw the capsule: `bar` (= `workArea.y - bounds.y`,
-  floor `NOTCH_BAR_FLOOR` 24 — the fused top zone height), `width`, `notchWidth` (`settings.notchWidth`
-  clamped to `NOTCH_WIDTH_MIN/MAX` 100–320, falling back to `NOTCH_WIDTH` **168** — Electron exposes
-  no `auxiliaryTopLeftArea`, so assume a centered notch of this width; 200 left a visible gap),
-  `notchCenterX` (= `bounds.width/2`), and `hasNotch` (`inset > 0 && inset >= NOTCH_MIN_BAR`
-  32 — a notched Mac's menu bar is ~37 px vs ~24 on a notchless display; when false the renderer
-  draws a standalone floating pill instead of fusing). Re-asserted on `screen`
-  `display-metrics-changed` + `display-added/removed`.
+- **Geometry** is the pure `hudGeometry` (`notch-hud-geometry.ts`, unit-tested); the controller
+  only feeds it `screen.getPrimaryDisplay()`. The window spans the full top edge (`bounds`,
+  `y = bounds.y`), sized to `bar + HUD_WINDOW_HEIGHT` so the EXPANDED box clears the top strip in
+  either layout; we never resize the frame. Main sends the renderer everything it needs to draw the
+  capsule: `bar` (= `workArea.y - bounds.y`, floor `NOTCH_BAR_FLOOR` 24 — the fused top zone
+  height), `width`, `notchWidth` (`settings.notchWidth` clamped to `NOTCH_WIDTH_MIN/MAX` 100–320,
+  falling back to `NOTCH_WIDTH` **168** — Electron exposes no `auxiliaryTopLeftArea`, so assume a
+  centered notch of this width; 200 left a visible gap), `notchCenterX` (= `bounds.width/2`), and
+  `hasNotch`. Re-asserted on `screen` `display-metrics-changed` + `display-added/removed`.
+
+  **`hasNotch` is a RATIO, never an absolute px count** (`display.internal && inset / bounds.height
+  >= NOTCH_BAR_RATIO` 0.03). macOS reserves a menu bar exactly as tall as the notch, so on a
+  notched panel that strip is a fixed SHARE of the display and survives every scaling mode — a 15"
+  Air reports 37/1112 at its default and 31/932 at 1440x932, both 0.0333. A notchless panel's menu
+  bar is a fixed 24 pt, so its share instead falls as the resolution rises (24/1080 = 0.0222). The
+  predecessor was an absolute `inset >= 32`, which the 0.0333 share only clears while the display
+  is tall enough: the HUD detected the notch at the default scaling and nowhere else, and drew its
+  notchless pill straight into the notch (issue #508). `display.internal` is the second half —
+  notches exist only on built-in panels, so it stops an external at a low resolution from clearing
+  the ratio on its own.
 - **Click-through with a hotspot**: window stays mouse-ignoring; the renderer reports pointer
   enter/leave of the indicator rect over IPC → main toggles `setIgnoreMouseEvents(false/true,
   {forward:true})`. Click in the hotspot → expand; click outside the expanded panel → collapse
@@ -145,14 +155,23 @@ the transparent rest of the window stays click-through. Hidden entirely when idl
   (`dismissedAt`), so a session hung in `working` (agent died mid-turn) stays hidden while any
   genuine state change brings the row back. HUD-local only — the node/terminal is untouched.
 - **Notchless fallback** (`hasNotch === false`, e.g. an external monitor or a display with no menu
-  bar): the `.notchless` root class draws the capsule as a **standalone floating pill** — a small
-  `--pill-top-gap` above it and all-corner `--pill-radius`, since there is no notch to fuse with.
-  Collapsed height = `--pill-height`; the mascots center in the pill (no `--bar` padding to clear).
+  bar): the `.notchless` root class draws the capsule as a **standalone floating pill** — all-corner
+  `--pill-radius`, since there is no notch to fuse with. Collapsed height = `--pill-height`; the
+  mascots center in the pill (no `--bar` padding to clear).
 
-**Tunables** (main constants in `notch-hud.ts`; CSS vars in `hud.css :root`, defaults in parens —
-tune on a Mac): `NOTCH_WIDTH` (168) / `--notch-width` (the CSS fallback is 200; main pushes the real
-value on the first geometry push), `NOTCH_WIDTH_MIN/MAX` (100/320, the settings clamp),
-`NOTCH_MIN_BAR` (32, notch-detection threshold), `NOTCH_BAR_FLOOR` (24), `HUD_WINDOW_HEIGHT` (460),
+  **The pill hangs BELOW the top strip** (`top: calc(var(--bar) + var(--pill-top-gap))`), and that
+  is load-bearing rather than cosmetic. The window's top edge is the display's, so the first
+  `--bar` px are the menu-bar / notch strip; a pill placed there is centred on exactly the
+  coordinates a notch occupies, which made every notch MISdetection invisible instead of merely
+  wrong — the visible half of issue #508. Clearing the strip means the fallback layout stays safe
+  even when the detector is not, and on a genuine notchless display the pill no longer paints over
+  the menu bar it used to overlap.
+
+**Tunables** (main constants in `notch-hud.ts` and `notch-hud-geometry.ts`; CSS vars in
+`hud.css :root`, defaults in parens — tune on a Mac): `NOTCH_WIDTH` (168) / `--notch-width` (main
+pushes the real value on the first geometry push), `NOTCH_WIDTH_MIN/MAX` (100/320, the settings
+clamp), `NOTCH_BAR_RATIO` (0.03, notch-detection threshold as a fraction of display height),
+`NOTCH_BAR_FLOOR` (24), `HUD_WINDOW_HEIGHT` (460, added ON TOP of `bar`),
 `--capsule-drop` (0 — the bulge was dropped; kept only for the expand math),
 `--capsule-radius` (16), `--panel-width` (400), `--panel-max-h` (420), `--capsule-dur` (0.22s)/`--capsule-ease`,
 and the notchless `--pill-top-gap` (6) / `--pill-radius` (18) / `--pill-height` (30).

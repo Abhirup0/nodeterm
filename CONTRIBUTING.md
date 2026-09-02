@@ -21,8 +21,10 @@ npm test           # vitest, unit + integration
 
 **If `src/main/node-pty-patch.test.ts` is red, your `node_modules` is unpatched — not your code.**
 Run `npm run rebuild`. node-pty 1.1.0 leaks a pty device per spawn on macOS
-([node-pty#950](https://github.com/microsoft/node-pty/issues/950)); we patch its source before
-`electron-rebuild` compiles it, and that test guards the patch surviving upgrades.
+([node-pty#950](https://github.com/microsoft/node-pty/issues/950)) and, on Windows, leaves a
+conhost alive per killed session (its exit thread deletes the ConPTY baton without closing the
+HPCON); we patch both sources before `electron-rebuild` compiles them, and that test guards the
+patches surviving upgrades.
 
 ## Where code goes
 
@@ -64,6 +66,22 @@ The **canvas and the kanban board are two views of the same nodes.** When you ad
 canvas node — a header action, a badge, a menu item — ask whether the board's card and card modal
 need it too, and wire it in the same change.
 
+A board card's **source** is a registry entry, not a branch you add at a call site
+(`renderer/lib/kanbanSources.ts`). Declare the source once — filter label, `placement`
+(`assignment` = the board's own persisted assignments, `provider` = the provider owns the column),
+in-column `lane` order, whether it is `configured` for a board, whether it is `readOnly` (the
+board never writes it: no drag, no move control) — and give it its one leaf (a card component and
+the list path feeding it). Columns take lanes and name no source; the drag path branches on
+`placement`. If you find yourself writing `=== 'github'` outside the registry, the registry is
+missing a field.
+
+Before adding a GitHub read, check what the existing poll already fetches. Pull request cards
+needed no new request at all: `/repos/{repo}/issues` returns pull requests, and the client used to
+discard them. `/repos/{repo}/pulls` looks like the obvious endpoint and is the expensive one — it
+**ignores `since`**, so it can reuse none of the incremental machinery, and its items are ~3.5× the
+bytes. CLAUDE.md's kanban section has the measurements and the eviction rule that keeps the issue
+lane unaffected.
+
 ## House rules
 
 - **Anything path-shaped: Windows is a delivery target.** Most of this was written on
@@ -76,6 +94,14 @@ need it too, and wire it in the same change.
   on POSIX a backslash is legal filename text — do not treat both separators as interchangeable
   unless the owning filesystem is known to be Windows.
 
+- **Normalize BOTH sides of a path comparison, through one function.** A marker normalized where
+  it is built and matched raw where it is used is a no-op on the machine you wrote it on and a
+  silent defect on Windows. That is issue #558: the managed-hook marker was folded to `/` while
+  the stored command still carried `\`, so nodeterm stopped recognizing its own hook entries and
+  appended a fresh copy of all nine on every launch — nine hook processes per event, nine
+  concurrent 45 s permission waits racing one prompt. Write the normalizer once, use it on both
+  sides, and pin it with a `C:\`-shaped test.
+
 - **Never publish a file with a bare `fs.rename`.** Use `renameAtomic` or `writeFileAtomic` from
   `src/core/fs-atomic.ts`. On Windows a rename fails with `EPERM` whenever anything has the
   destination open — Defender scanning the file you just wrote, the search indexer, OneDrive — so
@@ -85,6 +111,26 @@ need it too, and wire it in the same change.
   including paths embedded in generated SSH commands or handed to scp, which the `fs` scan cannot
   see. Keep a remote temp's own leaf bounded: extending an already-valid maximum-length target leaf
   with a UUID suffix turns an atomic write into a guaranteed `ENAMETOOLONG` failure.
+
+- **Never write to a child's stdin without an `'error'` listener on that stream.** A pipe write's
+  failure is not a throw at the call site: when the child exits before draining stdin (a CLI handed
+  a flag it doesn't know, an unreachable ssh host), Node re-emits the EPIPE as an async `'error'`
+  EVENT on the stream — a try/catch around the write is inert, and the unhandled event crashes the
+  whole main process with an "Uncaught Exception: write EPIPE" dialog (issue #382's class). Attach
+  `child.stdin.on('error', ...)` before the first write — log via `console.warn` so the debug ring
+  sees it, or settle the pending call; the child's exit code stays the authority on the outcome
+  (see `tmux-control-client.ts` and `pty-manager.ts` `runWithStdin` for the house pattern). A test
+  (`src/core/stream-epipe.guard.test.ts`) scans for this and will fail your PR.
+
+- **Never unmount, move or re-key a browser/web node's element.** An Electron `<webview>`'s guest
+  process dies on DOM detach — and a detach includes any `insertBefore`/`appendChild` MOVE of an
+  attached element, which React performs whenever a kept child's relative order among kept keyed
+  children changes. That is why webview-hosting nodes render in one stable pool region at the tail
+  of the `<ReactFlow>` nodes prop (`renderer/lib/webviewKeepAlive.ts` — read its header before
+  touching the merge, the node array swap in Canvas's load effect, or anything that reorders
+  nodes), and why a background project's pages stay mounted as hidden ghosts instead of
+  unmounting. `display:none` is safe (measured: state, scroll and viewport size survive); a reorder
+  or unmount reloads the user's page and loses their in-page state.
 
 These are the ones that come up in review most often. Each exists because its absence caused a real
 bug.
@@ -116,9 +162,28 @@ feature, and the boundary tests can only tell you an import is wrong, never that
 The same applies to any hook-server signature change; this repo has shipped one to a single shell
 three times.
 
+**A rule enforced at one mint site is enforced nowhere.** Nodes are created on two surfaces — the
+canvas (`createAgentNode`) and the phone's `projects.registerNode` (`appendProjectNode`) — and a
+constraint spelled out inline at one of them silently does not exist at the other. "Which agents
+bind a managed account" lived as a ternary in the renderer while the phone leg wrote whatever the
+wire sent.
+Put the rule in one predicate under `src/shared` and have every mint site ask it, and derive the
+things that follow from it (a node's color, say) from that same call rather than re-deriving the
+condition per caller.
+
 **Do not take scrolling away from tmux.** It owns the mouse, the scrollback and the alternate
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.
+
+**A spawn-env write does not reach a tmux session on its own.** The shared tmux server takes each
+new session's env from its own GLOBAL env (inherited from whichever client *started* the server) —
+the creating client's process env only matters for names listed in `update-environment` (or passed
+as non-secret `-e` pairs). Setting `env.FOO` in `pty-manager` therefore works for the plain-shell
+fallback and for the one client that happens to start the server, and silently does nothing (or
+worse, leaks the server-starter's value into everyone else) after that. That is how issue #419
+shipped: managed-account `CLAUDE_CONFIG_DIR` leaked into system-account sessions. New per-session
+env either joins `ACCOUNT_SCOPE_UPDATE_ENV` / the gateway list, or rides `-e` — and gets a
+real-tmux test (`account-env.realtmux.test.ts` is the pattern).
 
 **A new keyboard chord has to survive the shells, not just the renderer.** The application menu is
 ours (`buildAppMenu` in `main/index.ts`), but its command-style accelerators — ⌘Q, ⌘M, ⌘W, ⌘0, ⌘⇧B,
@@ -129,6 +194,14 @@ armed shortcut recorder (`menuStandsDown` → `menuItemIdsToSuspend`, since a di
 its accelerator) — and Reload (⌘R / ⌘⇧R) is the named exception that always stays with the app,
 because it is the crash-recovery lever. Browsers own a different set. And any chord that reaches the canvas needs the two refusals every canvas shortcut
 here has: not while the kanban board covers it, not while the user is typing.
+
+**A new chord needs no edit to the shortcuts panel — and must not get one.** `ShortcutsPanel`
+derives its whole inventory from `COMMAND_DEFINITIONS` (section per `CommandGroup`, label from
+`def.title`, chord from the EFFECTIVE binding), so adding a registry command is all it takes to
+make it show up; a command with no effective binding is omitted rather than listed chord-less.
+`ShortcutsPanel.test.tsx` is the watchdog and reds if a command fails to surface. The panel it
+replaced hand-listed 24 ids against a 45-command registry and had drifted four live chords behind
+— if you find yourself typing a command id into that file, that is the bug reappearing.
 
 **Comments explain WHY, and name the failure they prevent.** The codebase is deliberately dense with
 reasoning. A comment that restates the code is noise; one that says "do not simplify this back,
@@ -150,6 +223,33 @@ to kill the process. The stack it carries was captured at the write, so the cras
 happened synchronously at your `console.log`, and wrapping that call in `try/catch` changes nothing
 (measured on node 22). If you write to a stream that can go away, attach an `'error'` listener and
 latch the writer off — `installLogSink` (`src/core/log-sink.ts`) is the worked example. Issue #382.
+
+**A retry budget must measure the thing it is waiting for, and running out must be VISIBLE.** The
+armed-launch loop (canvas-control `--after`, and the cold open a `--project` node gets) delivered its
+held command on a flat 5 × 400 ms budget started when the *canvas* held the node — so on a cold
+project switch it was spent loading the canvas, mounting the node and spawning tmux, and the launch
+was abandoned before the session it was for existed. Two rules came out of issue #569: wait on a
+real signal (`isSessionReady`, published by the node when its shell settles) rather than on a
+stopwatch aimed at the wrong start, and never let "we gave up" live only in a `console.warn` — the
+node shows it (`state/launchDelivery.ts` → the QUEUED badge's ⚠ + tooltip) and the canvas-control
+reply carries it (`queued` / `queuedIds`), because a user who cannot see the failure and an
+orchestrator that is told "opened" both act on a session that is not there. If you add a bounded
+retry anywhere, ask what the clock actually starts on and where its exhaustion becomes visible.
+
+**Pointing a project at a folder is a WRITE — probe before you bind.** A project's canvas is
+written to `<cwd>/.nodeterm/project.json`, so the moment a project gains a `cwd` the next autosave
+owns that file. "Open folder…" always probed and adopted; "Set folder…" (tab ⌄) used to bind
+unconditionally, which overwrote a canvas a teammate had committed to that repo — their nodes gone,
+no backup, nothing on screen. Both entrances now share the rule (`renderer/lib/setProjectFolder.ts`):
+an occupied *or unreadable* project file refuses the bind and says why. The store's "never
+blind-write" guard will not save you — it only refuses an EMPTY canvas over a populated file.
+
+**A project with no folder is a real project — degrade explicitly, never silently.** "New project"
+creates a cwd-less canvas that persists inline in `workspace.json`, so every folder-shaped feature
+meets one. Keep the affordance and disable it with its reason (`NEW_FILE_NO_CWD_HINT`,
+`WORKTREE_NO_CWD_HINT`, the Explorer/Source Control notes); a row that simply vanishes teaches
+nothing, and a message that names the wrong cause ("not a git repository" for a project that has no
+folder to be one) sends the user hunting a problem that does not exist.
 
 **Agent features attach to base harness capabilities, not frontend allowlists.** A custom agent can
 inherit a builtin harness, so add the capability and its one shared leaf (`src/shared/agents`) and

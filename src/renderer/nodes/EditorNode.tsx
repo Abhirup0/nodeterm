@@ -5,6 +5,7 @@ import { monaco } from '../editor/monaco-setup'
 import { monacoTheme } from '../lib/appTheme'
 import { useAppTheme } from '../state/useAppTheme'
 import { renderMarkdown } from '../lib/markdown'
+import { opensInPreview } from '../lib/markdownPreview'
 import { useSettings } from '../state/settings'
 import { sshFs } from '../terminal/ssh-fs'
 import { useProjects } from '../state/projects'
@@ -14,6 +15,7 @@ import { tooLargeSize, formatBytes } from '@shared/fsLimits'
 import { hintLabel } from '@shared/platform-utils'
 import { chipFor, commandTooltip } from '../lib/keybindingOverrides'
 import { pdfBlobUrl } from '../lib/pdfBlob'
+import { MaximizeButton } from './MaximizeButton'
 
 // Image extensions get a visual preview instead of the Monaco text editor.
 const IMAGE_MIME: Record<string, string> = {
@@ -223,6 +225,14 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
       savedRef.current = content
       editor.onDidChangeModelContent(() => setDirty(editor!.getValue() !== savedRef.current))
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => saveRef.current())
+      // Markdown files can open straight into the rendered preview (settings.openMarkdownPreview).
+      // Decided here rather than at useState-init because the preview needs the file content —
+      // this is exactly the state a Preview click right after load would produce, so Edit/⌘M
+      // toggle back as usual.
+      if (opensInPreview(ext, s.openMarkdownPreview)) {
+        setPreviewHtml(renderMarkdown(content))
+        setPreview(true)
+      }
     })
 
     return () => {
@@ -288,6 +298,7 @@ export function EditorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </button>
           </>
         )}
+        <MaximizeButton id={id} maximized={!!data.premaxRect} />
         <button
           className="term-node__close"
           title="Close"

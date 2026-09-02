@@ -4,6 +4,7 @@ import {
   BUILTIN_AGENT_IDS,
   canBranch,
   canChat,
+  readsClaudeShapedTranscript,
   canContextLink,
   canControlCanvas,
   canReadTitle,
@@ -176,8 +177,42 @@ describe('grok capabilities', () => {
     expect(canControlCanvas('grok')).toBe(true)
   })
 
+  it('reads a linked node, on the same already-installed skill the canvas verb uses', () => {
+    // The leaf that had to exist first: `locateGrok` (core/handoff/locate.ts), resolving the
+    // session directory a hook reported and returning `chat_history.jsonl` — NOT the
+    // `updates.jsonl` grok's payloads advertise, which parses to nothing and would show the
+    // linked agent an empty transcript with no error. Discovery needs no installer of its own,
+    // and that is now MEASURED rather than assumed: on 1.0.13, `grok inspect --json` lists
+    // `get-linked-context` as `vendor: 'claude', compatibilityStatus: 'enabled'`.
+    expect(canContextLink('grok')).toBe(true)
+  })
+
+  it('hands its conversation to another agent, and shows it in the chat panel', () => {
+    // Both ride the reader task06 wrote. Transfer adds `renderGrokTranscript` beside the other
+    // three renderers; the panel adds `chatMessagesFromGrok`. Neither re-derives grok's line
+    // vocabulary — they build on the same `grokParse`, so the two views cannot drift apart.
+    expect(canTransferFrom('grok')).toBe(true)
+    expect(canChat('grok')).toBe(true)
+  })
+
+  it('is CHAT_CAPABLE and yet NOT readable by claude\'s resolver — the pair is the invariant', () => {
+    // These two must never collapse back into one list. `canChat` means "we can render this
+    // conversation ourselves"; `readsClaudeShapedTranscript` means "claude's resolver can locate and
+    // parse this file". Grok is the first agent for which they differ, and the cost of merging them
+    // is not cosmetic: `resolveTranscript` falls back to the newest CLAUDE transcript for the node's
+    // cwd whenever its sessionId leg misses, which a grok id always does. A merged list would show a
+    // grok node someone else's conversation in the find bar and meter it from that session.
+    //
+    // If a future change "simplifies" CLAUDE_TRANSCRIPT_READABLE away, this line fails first.
+    expect(canChat('grok')).toBe(true)
+    expect(readsClaudeShapedTranscript('grok')).toBe(false)
+    // claude is the one agent where both hold — which is exactly why the shared list looked correct
+    // for as long as it was claude-only.
+    expect(canChat('claude')).toBe(true)
+    expect(readsClaudeShapedTranscript('claude')).toBe(true)
+  })
+
   it('does not yet claim the capabilities whose per-agent leaf is unwritten', () => {
-    expect(canContextLink('grok')).toBe(false)
     expect(hasUsage('grok')).toBe(false)
     expect(canBranch('grok')).toBe(false)
     expect(canSubagent('grok')).toBe(false)

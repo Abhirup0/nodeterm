@@ -146,9 +146,28 @@ export function foregroundArgvArgs(tty: string): { bin: string; args: string[] }
   // a real pane running `sleep 300 | cat`.
   return {
     bin: 'ps',
-    args: ['-ww', '-o', 'pid=', '-o', 'pgid=', '-o', 'stat=', '-o', 'args=', '-t', tty]
+    args: [...PS_FOREGROUND_FLAGS, '-t', tty]
   }
 }
+
+/**
+ * The `ps` flags of the foreground read, shared by the local argv builder above and the REMOTE
+ * combined script (`remotePaneOwnerCombinedArgs`) so the two legs cannot drift — the same
+ * anti-drift rule the session-memory sweep applies to its socket list. Flag-only (no tty), and
+ * none of them contains a shell metacharacter, so joining them with spaces into an sh line is
+ * byte-identical to passing them as argv.
+ */
+export const PS_FOREGROUND_FLAGS = [
+  '-ww',
+  '-o',
+  'pid=',
+  '-o',
+  'pgid=',
+  '-o',
+  'stat=',
+  '-o',
+  'args=',
+] as const
 
 /** One parsed `ps` row. Internal — only the argv leaves this module. */
 interface PsRow {
@@ -244,4 +263,33 @@ export function paneOwnerFrom(
   // guard for the second phrasing would be a line no test can reach"). The correspondence is
   // asserted on real `ps` output instead, which is where it could actually break.
   return { ...identity, argv, pids }
+}
+
+
+/**
+ * The line that fences the pane identity inside the COMBINED remote read's reply (issue #460).
+ * Everything after it on that line is `PANE_OWNER_FMT` output; every line below it is the `ps`
+ * read. The marker is emitted through a quoted printf format, so the leading `##` can never be
+ * eaten as a word-initial sh comment — the exact trap `session-memory-remote` measured.
+ */
+export const COMBINED_PANE_MARKER = '##NTPANE '
+
+/**
+ * Parse the ONE-round-trip remote pane read (issue #460): the marker line carries the identity,
+ * the tail carries the `ps` rows, and both go through the exact parsers the two-trip read used —
+ * this function adds routing, never a second grammar.
+ *
+ * `isSafeTty` stays even though the tty no longer crosses into OUR command line (it is expanded
+ * inside the remote script as a quoted variable): a tty the remote printed back that this predicate
+ * refuses is a reply we do not trust enough to name a pane with, and the fail direction is the
+ * same null-means-unknown every sibling reader has.
+ */
+export function parseCombinedPaneOwner(stdout: string | null | undefined): PaneOwner | null {
+  if (!stdout) return null
+  const lines = stdout.split('\n')
+  const at = lines.findIndex((l) => l.startsWith(COMBINED_PANE_MARKER))
+  if (at === -1) return null
+  const identity = parsePaneOwner(lines[at].slice(COMBINED_PANE_MARKER.length))
+  if (!identity || !isSafeTty(identity.tty)) return null
+  return paneOwnerFrom(identity, lines.slice(at + 1).join('\n'))
 }

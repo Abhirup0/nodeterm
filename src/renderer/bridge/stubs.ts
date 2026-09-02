@@ -122,6 +122,11 @@ export function buildStubApi(): Omit<
   | 'onUnreadClear'
   | 'answerPermission'
   | 'ackDone'
+  | 'reportHibernated'
+  | 'onAgentWake'
+  | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
   // Real over the bridge (IPC.appUserDataDir): the worktree dialog's default path is derived from
   // it, and a '' stub would propose `/worktrees/…` at the filesystem root.
   | 'userDataDir'
@@ -272,6 +277,17 @@ export function buildStubApi(): Omit<
       // measure" — the one honest answer, and never mistakable for "nothing is using memory".
       read: () => Promise.resolve({ ok: false, rows: [], mem: null }),
       host: () => Promise.resolve(null)
+    },
+    triggers: {
+      // Superseded by the real WS-backed namespace in ws-bridge (startTriggerService registers the
+      // handlers in the server shell). On the RELAY tab this stub stays in force and REFUSES: the
+      // arm store, the scheduler and the sessions all live on the host — arming from the guest
+      // would write another machine's execution consent. The card catches the rejection and says
+      // triggers are managed on the host machine.
+      arm: U('triggers.arm'),
+      disarm: U('triggers.disarm'),
+      status: U('triggers.status'),
+      runNow: U('triggers.runNow')
     },
     codex: {
       // Overridden by the real WS-backed namespace in ws-bridge. The stub's answer is the same
@@ -436,6 +452,10 @@ export function buildStubApi(): Omit<
       }
     },
     setBadgeCount: noop,
+    // UI scale is page zoom, and a browser page cannot set its own — the browser already owns the
+    // identical mechanism (Cmd/Ctrl+±, persisted per site). Intentionally inert; the Settings row
+    // is disabled with this reason on the Server Edition (AppearanceSection's browser branch).
+    setUiZoomFactor: noop,
     getPathForFile: (): string => '',
     notify: async (payload: NotifyPayload): Promise<'shown' | 'failed' | 'skipped'> => {
       if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -462,6 +482,11 @@ export function buildStubApi(): Omit<
     // here (see the note beside createPtyPressureMonitor in src/server/index.ts). The fix itself
     // rejects rather than pretending, so a stray call can never look like it worked.
     onPtyPressure: noopUnsub,
+    // A browser tab has no raw input stream to classify — trackpad-vs-mouse ground truth exists
+    // only under the Electron shell (main/trackpad-gesture.ts). Never fires here; the canvas
+    // wheel router is constructed WITHOUT gesture reporting in this runtime and keeps its
+    // delta-shape heuristics, so the degrade is a kept behavior, not a silent gap.
+    onCanvasTrackpadGesture: noopUnsub,
     raisePtyDeviceLimit: async () => ({
       ok: false as const,
       error: 'Raising the terminal limit must be done on the machine running the server.'
@@ -501,6 +526,11 @@ export function buildStubApi(): Omit<
     | 'onUnreadClear'
     | 'answerPermission'
   | 'ackDone'
+  | 'reportHibernated'
+  | 'onAgentWake'
+  | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
     | 'userDataDir'
     | 'presence'
     | 'speech'

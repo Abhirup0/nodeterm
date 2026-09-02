@@ -124,6 +124,12 @@ export const IPC = {
    *  so the renderer should run its reclaim levers now (hidden WebGL contexts, parked terminals).
    *  Payload: `'warning' | 'critical'`. Re-fired at most once a minute — see core/memory-pressure. */
   appMemoryPressure: 'app:memory-pressure',
+  /** Main → renderer: a macOS trackpad gesture (two-finger scroll or pinch) opened or closed on
+   *  the main window — edge transitions from main/trackpad-gesture.ts, a handful per physical
+   *  gesture. Payload: `boolean` (active). The canvas wheel router uses this as ground-truth
+   *  device identity, replacing delta-shape guessing on the desktop. Desktop only — the Server
+   *  Edition's browser tab has no raw input stream and keeps the heuristics. */
+  canvasTrackpadGesture: 'canvas:trackpad-gesture',
   agentStatus: 'agent:status',
   /** Renderer → main/server: answer a held Claude permission hook (deterministic approvals).
    *  Payload: `{ nodeId, pendingId, decision: 'allow'|'deny' }`; resolves boolean. See
@@ -138,6 +144,35 @@ export const IPC = {
    *  renderer clears unread WITHOUT re-acking (external clear — see agentStatus.clearUnread's
    *  `external` opt). See core/ack-sweep.ts. */
   agentUnreadClear: 'agent:unread-clear',
+  /** Renderer → main/server: a node's Eco hibernation flag changed (the renderer owns the flag —
+   *  `agentStatus.setHibernated` — and main only mirrors it, like `terminalFocused`). Arg:
+   *  `{ nodeId: string, on: boolean }`. Fire-and-forget cast; feeds the agent-status mirror so the
+   *  phone can render SLEEPING, and gives main the `isHibernated` signal the delivery queue's
+   *  hibernated leg was recorded as missing (agent-messaging.ts). */
+  agentHibernated: 'agent:hibernated',
+  /** main → renderer: ask the renderer to wake a hibernated node NOW (a phone viewer attached to
+   *  its session over the relay). A nudge, never an assertion: the renderer re-reads the flag and
+   *  no-ops for a non-hibernated or unmounted node — same contract as `wakeHibernatedNode`. Arg:
+   *  `nodeId: string`. */
+  agentWake: 'agent:wake',
+  /** main → renderer: ask the renderer to reload a terminal node's view in place NOW (bump its
+   *  `respawnNonce` — fresh PTY attach to the SAME tmux session, nothing running is interrupted).
+   *  Fired by the phone relay host's `node.refresh` verb (the session-list long-press menu's
+   *  "Refresh on desktop"). Same nudge contract as `agent:wake`: the renderer no-ops for an
+   *  unknown, non-terminal or unmounted (inactive project) node. Arg: `nodeId: string`. */
+  agentRefreshNode: 'agent:refresh-node',
+  /** main → renderer: rename a node on behalf of a phone (the relay host's `node.rename` verb).
+   *  Routed through the renderer's `renameSession` funnel — the same one the node header uses —
+   *  so `titleAuto` flips off and a rename-capable agent gets `/rename` pushed into its live
+   *  session; a raw `data.title` write (canvas:mutate) would do neither and be overwritten by the
+   *  next session-name poll. The title is sanitized host-side before this fires (control chars
+   *  stripped, length-clamped). Arg: `{ nodeId: string, title: string }`. */
+  agentRenameNode: 'agent:rename-node',
+  /** main → renderer: the CURRENT set of node ids with a live relay viewer attached (a phone
+   *  watching the session). Arg: `string[]` — the full set each change, so a dropped event cannot
+   *  strand a stale entry. Feeds `isNodeWatched`: a session someone is watching from a phone must
+   *  not be hibernated out from under them. */
+  agentRemoteViewers: 'agent:remote-viewers',
   agentSubagentActivity: 'agent:subagent-activity',
   /** macOS Notch HUD (docs/notch-hud.md). main → hud: push the current row array. */
   hudRows: 'hud:rows',
@@ -223,6 +258,11 @@ export const IPC = {
   /** The scoped machine's RAM (available/total) — the cheap read behind the system-resource
    *  pill. Safe to poll locally; NOT polled for an SSH scope. */
   sessionMemoryHost: 'session-memory:host',
+  // Trigger nodes (issue #493): machine-local arm/disarm + the card's status/run-now.
+  triggersArm: 'triggers:arm',
+  triggersDisarm: 'triggers:disarm',
+  triggersStatus: 'triggers:status',
+  triggersRunNow: 'triggers:run-now',
   contextUpdate: 'context:update',
   contextEnsure: 'context:ensure',
   // Team presence (docs/team-presence.md). `presence:hello` is a REQUEST: its response tells the

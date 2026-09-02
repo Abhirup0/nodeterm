@@ -630,10 +630,31 @@ export function buildAgentApi(
   client: RpcClient
 ): Pick<
   NodeTerminalApi,
-  'onAgentStatus' | 'onSubagentActivity' | 'onUnreadClear' | 'answerPermission' | 'ackDone'
+  | 'onAgentStatus'
+  | 'onSubagentActivity'
+  | 'onUnreadClear'
+  | 'answerPermission'
+  | 'ackDone'
+  | 'reportHibernated'
+  | 'onAgentWake'
+  | 'onRemoteViewers'
+  | 'onAgentRefreshNode'
+  | 'onAgentRenameNode'
 > {
   return {
     onAgentStatus: (listener) => client.subscribe(IPC.agentStatus, listener as Listener),
+    // REAL forward: the Server Edition writes its own agent-status mirror, and the phone reads it
+    // over its SSH browse path — a browser canvas hibernating a node must reach that file too.
+    reportHibernated: (nodeId, on) => {
+      void client.request(IPC.agentHibernated, { nodeId, on }).catch(() => undefined)
+    },
+    // Deliberate no-op subscriptions, not stubs-by-accident: both signals originate in the phone
+    // RELAY host, which lives only in the desktop main process — the Server Edition serves no
+    // relay, so there is nothing to subscribe to and nothing silently degrades.
+    onAgentWake: () => () => undefined,
+    onRemoteViewers: () => () => undefined,
+    onAgentRefreshNode: () => () => undefined,
+    onAgentRenameNode: () => () => undefined,
     // Host swept a phone read-ack → drop this browser canvas's unread flag (external clear, no re-ack).
     onUnreadClear: (listener) => client.subscribe(IPC.agentUnreadClear, listener as Listener),
     onSubagentActivity: (listener) =>
@@ -763,6 +784,33 @@ function buildUsageApi(client: RpcClient): Pick<NodeTerminalApi, 'usage'> {
  * which are the service's own words for "the sweep could not run" and "RAM unreadable". The panel
  * shows a failed request as a failed request.
  */
+/**
+ * The `triggers` namespace over an RpcClient — REAL on the Server Edition: the arm store, the
+ * scheduler and the delivery all run in the server shell (`startTriggerService` registers these
+ * handlers there exactly as desktop main does), so arming a trigger from the browser arms it on
+ * the machine that will fire it. The relay deliberately keeps the refusing stub (stubs.ts):
+ * another machine's arm store is not the guest's to write.
+ */
+export function buildTriggersApi(client: RpcClient): Pick<NodeTerminalApi, 'triggers'> {
+  return {
+    triggers: {
+      arm: (projectId, nodeId, spec) =>
+        client.request(IPC.triggersArm, { projectId, nodeId, spec }) as Promise<boolean>,
+      disarm: (projectId, nodeId) =>
+        client.request(IPC.triggersDisarm, { projectId, nodeId }) as Promise<void>,
+      status: (projectId, nodeId) =>
+        client.request(IPC.triggersStatus, { projectId, nodeId }) as Promise<
+          import('@shared/trigger').TriggerNodeStatus
+        >,
+      runNow: (projectId, nodeId) =>
+        client.request(IPC.triggersRunNow, { projectId, nodeId }) as Promise<{
+          outcome: 'fired' | 'missed' | 'failed' | 'queued'
+          detail?: string
+        }>
+    }
+  }
+}
+
 export function buildSessionMemoryApi(client: RpcClient): Pick<NodeTerminalApi, 'sessionMemory'> {
   return {
     sessionMemory: {
@@ -827,13 +875,14 @@ export function buildTranscriptApi(
 ): Pick<NodeTerminalApi, 'chat'> & { claudeReadTranscript: ClaudeApi['readTranscript'] } {
   return {
     chat: {
-      readTranscript: (sessionId, cwd, accountId, nodeId) =>
+      readTranscript: (sessionId, cwd, accountId, nodeId, agentId) =>
         client.request(
           IPC.chatReadTranscript,
           sessionId,
           cwd,
           accountId,
-          nodeId
+          nodeId,
+          agentId
         ) as Promise<ChatTranscriptResult>
     },
     claudeReadTranscript: (sessionId, cwd, accountId, nodeId) =>
@@ -844,6 +893,39 @@ export function buildTranscriptApi(
         accountId,
         nodeId
       ) as Promise<TranscriptLine[]>
+  }
+}
+
+/**
+ * Managed CLAUDE accounts over the WS bridge (issue #313). REAL, not a stub: the lifecycle moved
+ * into `src/core/claude-accounts-service.ts`, so the server registers the same four channels the
+ * desktop does and the browser can create, log into and remove accounts. Deliberately NOT added to
+ * `relay-api.ts` — a relay tab drives someone else's machine, and minting an account there would
+ * create it on the HOST while this renderer's settings.json records it as one of its own.
+ *
+ * `waitLogin` is a straight passthrough of a poll that runs up to 5 minutes. That is safe because
+ * RpcClient has no request timeout: a pending request rejects only when the socket drops, which is
+ * exactly the outcome the caller wants (the login row stays pending and offers Retry).
+ *
+ * The `codexAccounts` namespace stays STUBBED (E_UNSUPPORTED). Its switch verbs authorize the
+ * owning window by Electron WebContents id, which has no meaning over a WS connection — porting it
+ * needs a connection-identity design, not a builder.
+ */
+export function buildClaudeAccountsApi(client: RpcClient): Pick<NodeTerminalApi, 'claudeAccounts'> {
+  return {
+    claudeAccounts: {
+      add: (ctx) =>
+        client.request(IPC.claudeAccountsAdd, ctx) as Promise<{
+          id: string
+          configDir: string
+          versionSupported: boolean
+        }>,
+      waitLogin: (id, ctx) =>
+        client.request(IPC.claudeAccountsWaitLogin, id, ctx) as Promise<{ email: string } | null>,
+      cancelWaitLogin: (id) =>
+        client.request(IPC.claudeAccountsCancelWait, id) as Promise<void>,
+      remove: (id, ctx) => client.request(IPC.claudeAccountsRemove, id, ctx) as Promise<void>
+    }
   }
 }
 
@@ -962,7 +1044,9 @@ export async function installWsBridge(): Promise<boolean> {
     ...buildSpeechApi(client),
     ...buildUsageApi(client),
     ...buildSessionMemoryApi(client),
+    ...buildTriggersApi(client),
     ...buildGitHubApi(client),
+    ...buildClaudeAccountsApi(client),
     codex: buildCodexApi(client),
     // `claude` is assembled from two builders: `cliCaps` from the relay-shared one, and the
     // transcript reader from the Server-Edition-only one (which also supplies `chat`).
@@ -978,8 +1062,18 @@ export async function installWsBridge(): Promise<boolean> {
     dialog: (() => {
       mountPickerRoot()
       const startDir = '/' // navigable up/down from root; the picker remembers nothing across calls in v1
+      // `write` is what gives folder mode its "New folder" button — the native dialog has one and
+      // the browser has no dialog at all, so without it a server folder had to exist already
+      // before it could be opened as a project. Same `fs.mkdir`/`fs.exists` the Explorer writes
+      // through, and therefore the same reach as everything else this picker already lists.
+      // Lambdas, not `api.fs.mkdir` directly: this IIFE runs while `api` is still being built.
+      const write = {
+        mkdir: (p: string) => api.fs.mkdir(p),
+        exists: (p: string) => api.fs.exists(p)
+      }
       return {
-        selectFolder: () => openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list }),
+        selectFolder: () =>
+          openDirectoryPicker({ mode: 'folder', startDir, list: api.fs.list, write }),
         selectFile: () => openDirectoryPicker({ mode: 'file', startDir, list: api.fs.list })
       }
     })()

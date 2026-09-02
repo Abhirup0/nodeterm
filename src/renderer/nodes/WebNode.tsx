@@ -5,6 +5,7 @@ import type { CanvasNode } from '../state/workspace'
 import { httpUrl } from './webUrl'
 import { useDiscardWhenHidden, webviewAudible, type AudibleWebview } from './useDiscardWhenHidden'
 import { DiscardedPlate } from './DiscardedPlate'
+import { useWebviewKeepAlive } from '../state/webviewKeepAlive'
 
 /**
  * A web view node. When `data.url` is set it loads that live URL; otherwise it serves the
@@ -85,6 +86,10 @@ export default function WebNode({ id, data, selected }: NodeProps<CanvasNode>) {
       setDiscarded(true)
       setSrc('')
       srcRef.current = ''
+      // A background keep-alive GHOST (data.ghost — lib/webviewKeepAlive.ts) whose guest is gone
+      // is a husk holding a pool slot: end its entry, which unmounts this whole node. An active
+      // node keeps the plate-and-restore behavior unchanged.
+      if (data.ghost === true) useWebviewKeepAlive.getState().drop(id)
     },
     onRestore: () => {
       setDiscarded(false)

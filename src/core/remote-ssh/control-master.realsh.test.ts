@@ -191,3 +191,54 @@ describe('REAL sh: the four vectors that survived the first fix', () => {
     expect(argv).toContain('sess;id;#')
   })
 })
+
+/**
+ * Issue #449 — `zsh:1: command not found: tmux` on an SSH host whose exec-channel PATH misses the
+ * tmux install dir (Homebrew on macOS being the field report). Two behaviors, both executed under
+ * a real /bin/sh because both are generated shell:
+ *  - the PATH append finds a tmux that only lives in one of the known dirs;
+ *  - a host with NO tmux prints a readable explanation and degrades to a plain login shell,
+ *    instead of dying with the shell's one-line error.
+ */
+describe('REAL sh: remote tmux PATH resolution + graceful degrade (issue #449)', () => {
+  const runRaw = (cmd: string, env: Record<string, string>): string => {
+    try {
+      return execFileSync('/bin/sh', ['-c', cmd], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (e) {
+      return String((e as { stdout?: string }).stdout ?? '')
+    }
+  }
+
+  // PATH must hold NO tmux at all for these — the dev/CI box's own /usr/bin/tmux would win the
+  // `command -v` and run for real ("open terminal failed"). An empty dir is the only safe PATH;
+  // everything the guard needs (command, printf, cd, exec) is an sh builtin.
+  const emptyPath = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-nopath-'))
+
+  it('finds a tmux that lives only in an appended dir ($HOME/.local/bin)', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-home-'))
+    const local = path.join(home, '.local', 'bin')
+    fs.mkdirSync(local, { recursive: true })
+    fs.copyFileSync(path.join(binDir, 'tmux'), path.join(local, 'tmux'))
+    fs.chmodSync(path.join(local, 'tmux'), 0o755)
+    const cmd = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-n1', '/home/u').slice(-1)[0]
+    // PATH deliberately has NO tmux — only the $HOME/.local/bin append can resolve it.
+    const out = runRaw(cmd, { PATH: emptyPath(), HOME: home })
+    const argv = out.split('\0').slice(0, -1)
+    expect(argv.slice(0, 2)).toEqual(['-L', 'nodeterm-rmt'])
+    expect(argv).toContain('new-session')
+  })
+
+  it('a host with NO tmux prints the explanation and execs a plain login shell', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ntsh-home-'))
+    const shell = path.join(home, 'shell-stub')
+    fs.writeFileSync(shell, `#!/bin/sh\nprintf 'SHELL_STUB %s\\n' "$@"\n`, { mode: 0o755 })
+    const cmd = remoteTmuxPtyArgs(conn, '/s.sock', 'nt-n1', '/home/u').slice(-1)[0]
+    const out = runRaw(cmd, { PATH: emptyPath(), HOME: home, SHELL: shell })
+    // The message names the fact and the fix — never the raw `command not found: tmux` line.
+    expect(out).toContain('nodeterm: tmux was not found on this host.')
+    expect(out).toContain('Install tmux on the host')
+    expect(out).toContain('will NOT persist')
+    // …and the pane still gets a usable login shell instead of closing.
+    expect(out).toContain('SHELL_STUB -l')
+  })
+})

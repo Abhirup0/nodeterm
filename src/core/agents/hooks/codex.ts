@@ -27,6 +27,7 @@ import {
 import { randomUUID } from 'crypto'
 import { renameAtomicSync } from '../../fs-atomic'
 import { buildManagedScript } from './managed-script'
+import { normalizeHookCommand } from './install-helper'
 import {
   computeTrustedHash,
   getCodexCanonicalTrustPath,
@@ -38,13 +39,19 @@ import {
   type CodexTrustEntry
 } from './codex-trust'
 
-// Confirmed codex event set.
+// Confirmed codex event set. SubagentStart/SubagentStop drive the subagent fan-out cards
+// (codex's spawn_agent collaboration tool) — measured live on codex-cli 0.146.0: SubagentStart
+// carries `agent_id`/`agent_type` and its `transcript_path` is the CHILD's rollout; SubagentStop
+// adds `agent_transcript_path` + `last_assistant_message`. Older codex versions skip hook event
+// names they don't recognize, so subscribing these on a pre-subagent CLI is inert, not an error.
 export const CODEX_EVENTS = [
   'SessionStart',
   'UserPromptSubmit',
   'PreToolUse',
   'PermissionRequest',
   'PostToolUse',
+  'SubagentStart',
+  'SubagentStop',
   'Stop'
 ] as const
 
@@ -58,6 +65,8 @@ export const CODEX_EVENT_LABEL: Record<(typeof CODEX_EVENTS)[number], CodexEvent
   PreToolUse: 'pre_tool_use',
   PermissionRequest: 'permission_request',
   PostToolUse: 'post_tool_use',
+  SubagentStart: 'subagent_start',
+  SubagentStop: 'subagent_stop',
   Stop: 'stop'
 }
 
@@ -93,7 +102,10 @@ function scriptPath(): string {
 // keys off the path segment, not the exact command string.
 function isManagedCommand(command: string | undefined): boolean {
   if (!command) return false
-  return command.replaceAll('\\', '/').includes(`agent-hooks/${SCRIPT_FILE_NAME}`)
+  // Separator folding comes from install-helper so the two installers can never disagree about
+  // what makes an entry ours — the drift that made the JSON-settings agents duplicate on Windows
+  // (#558). Only the normalizer is shared; codex's merge stays its own (the trust hash).
+  return normalizeHookCommand(command).includes(`agent-hooks/${SCRIPT_FILE_NAME}`)
 }
 
 function definitionHasManagedCommand(def: HookDefinition): boolean {

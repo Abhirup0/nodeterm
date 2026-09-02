@@ -73,13 +73,31 @@ describe('transferConversationItems', () => {
   })
 
   it('returns [] when the agent is not transfer-capable', () => {
+    // opencode, not grok: grok joined TRANSFER_SOURCE_CAPABLE once `renderGrokTranscript` existed.
+    // The list is the gate, so this case needs an agent whose renderer is genuinely unwritten —
+    // otherwise it asserts nothing the moment that agent gains one.
+    const items = transferConversationItems(
+      'node-1',
+      undefined,
+      args({ sourceAgentId: 'opencode' as AgentId, customAgents: [] }),
+      handler
+    )
+    expect(items).toEqual([])
+  })
+
+  it('offers targets for a grok source, now that its transcript can be rendered', () => {
     const items = transferConversationItems(
       'node-1',
       undefined,
       args({ sourceAgentId: 'grok' as AgentId, customAgents: [] }),
       handler
     )
-    expect(items).toEqual([])
+    expect(items.length).toBeGreaterThan(1)
+    expect(items[0]).toEqual({ type: 'label', label: 'Transfer conversation to' })
+    // grok is never offered as a destination for itself; every other builtin still is.
+    const labels = items.slice(1).map((i) => ('label' in i ? i.label : ''))
+    expect(labels).not.toContain('Grok')
+    expect(labels).toContain('Claude Code')
   })
 
   it('returns [] when there is no session id yet', () => {

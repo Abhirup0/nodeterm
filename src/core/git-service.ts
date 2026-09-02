@@ -11,6 +11,7 @@ import type { WorktreeListResult } from '../shared/worktree'
 import type { GitHistoryOptions, GitHistoryResult } from '../shared/git-history'
 import { resolveGitRemote, runRemoteGit } from './remote-ssh/remote-git'
 import { platform } from './platform'
+import { findExecutableSync } from './exec-path'
 import {
   isValidCloneUrl,
   expandCloneUrl,
@@ -21,18 +22,32 @@ import {
 
 const run = promisify(execFile)
 
-function findBin(names: string[]): string | null {
-  for (const c of names) {
-    try {
-      if (fs.existsSync(c)) return c
-    } catch {
-      // ignore
-    }
-  }
-  return null
+/**
+ * Absolute path to the GitHub CLI, or null when it isn't installed.
+ *
+ * Was a module-level const over three hardcoded POSIX paths, which never consulted PATH at all.
+ * That answered null for EVERY Windows install — `gh` there is `gh.exe`, usually under
+ * `C:\Program Files\GitHub CLI\` — so `ghAvailable` was permanently false and every GitHub
+ * action reported "GitHub CLI (gh) not found." on a machine where gh was installed and authed.
+ *
+ * Now it goes through the shared resolver (login-shell PATH first, then the well-known locations),
+ * and it is MEMOIZED-ON-HIT rather than computed at import: a miss is re-probed, so a gh installed
+ * while the app is running is picked up, and the async login-shell PATH probe that lands after
+ * module load is no longer raced.
+ */
+let cachedGh: string | null | undefined
+function ghPath(): string | null {
+  if (cachedGh) return cachedGh
+  const found = findExecutableSync('gh', [
+    '/opt/homebrew/bin/gh',
+    '/usr/local/bin/gh',
+    '/usr/bin/gh'
+  ])
+  // Only a HIT is cached. Caching a miss here would freeze the answer for the process lifetime,
+  // which is what the old module-level const effectively did.
+  if (found) cachedGh = found
+  return found
 }
-
-const GH_PATH = findBin(['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'])
 
 // GUI apps on macOS don't inherit the shell PATH, so a git credential helper installed by
 // Homebrew (e.g. `gh auth git-credential`, or osxkeychain shims) wouldn't be found by our
@@ -61,14 +76,15 @@ let ghAuthedCache: { value: boolean; at: number } | null = null
 let ghAuthedInFlight: Promise<boolean> | null = null
 
 async function ghAuthed(): Promise<boolean> {
-  if (!GH_PATH) return false
+  const gh = ghPath()
+  if (!gh) return false
   const now = Date.now()
   if (ghAuthedCache && now - ghAuthedCache.at < GH_AUTH_TTL_MS) return ghAuthedCache.value
   if (ghAuthedInFlight) return ghAuthedInFlight
   ghAuthedInFlight = (async () => {
     let value = false
     try {
-      await run(GH_PATH, ['auth', 'status'], { env: GIT_ENV, maxBuffer: 1024 * 1024 })
+      await run(gh, ['auth', 'status'], { env: GIT_ENV, maxBuffer: 1024 * 1024 })
       value = true
     } catch {
       value = false
@@ -88,7 +104,8 @@ async function ghAuthed(): Promise<boolean> {
  * call ever (no cache at all) reports `false` while the probe runs; that flips one refresh later.
  */
 function ghAuthedSwr(): boolean {
-  if (!GH_PATH) return false
+  const gh = ghPath()
+  if (!gh) return false
   const fresh = !!ghAuthedCache && Date.now() - ghAuthedCache.at < GH_AUTH_TTL_MS
   if (!fresh) void ghAuthed().catch(() => {})
   return ghAuthedCache?.value ?? false
@@ -201,6 +218,13 @@ function githubTokenFromGitCredentials(cwd: string): Promise<string | null> {
       const line = out.split('\n').find((l) => l.startsWith('password='))
       const token = line ? line.slice('password='.length).trim() : ''
       resolve(token || null)
+    })
+    // `git credential fill` can exit before reading the query (no helper configured, killed by
+    // the timeout above) — the EPIPE arrives as an async 'error' EVENT on the pipe, not a throw
+    // here, and unhandled it kills the main process (issue #382's class). The close handler
+    // already resolves this call; the error never carries the token, so logging the code is safe.
+    child.stdin.on('error', (e: NodeJS.ErrnoException) => {
+      console.warn(`[git] credential-fill stdin write failed (${e.code ?? e})`)
     })
     child.stdin.write('protocol=https\nhost=github.com\n\n')
     child.stdin.end()
@@ -350,7 +374,7 @@ export class GitService {
       hasRemote: false,
       hasOrigin: false,
       hasUpstream: false,
-      ghAvailable: !!GH_PATH,
+      ghAvailable: !!ghPath(),
       ghAuthed: false,
       staged: [],
       changes: []
@@ -380,7 +404,10 @@ export class GitService {
         git(cwd, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
         git(cwd, ['diff', '--cached', '--numstat']),
         git(cwd, ['diff', '--numstat']),
-        git(cwd, ['status', '--porcelain'])
+        // -uall forces git to list every untracked file individually instead of collapsing an
+        // entirely-untracked directory into one `?? dir/` entry (issue: SC panel showed a folder
+        // row that, when clicked, opened a diff node against a directory). Still respects .gitignore.
+        git(cwd, ['status', '--porcelain', '-uall'])
       ])
     const gh = ghAuthedSwr()
 
@@ -419,6 +446,9 @@ export class GitService {
       let p = raw.slice(3)
       if (p.includes(' -> ')) p = p.split(' -> ')[1] // rename: use new path
       const unquoted = p.replace(/^"|"$/g, '')
+      // Defense in depth against -uall: a directory-shaped entry (trailing '/') can never be
+      // opened as a file diff, so drop it here rather than let it reach the diff-node click path.
+      if (unquoted.endsWith('/')) continue
 
       if (x === '?' && y === '?') {
         changes.push({ path: unquoted, status: 'U', added: 0, deleted: 0 })
@@ -445,7 +475,7 @@ export class GitService {
       hasRemote,
       hasOrigin,
       hasUpstream,
-      ghAvailable: !!GH_PATH,
+      ghAvailable: !!ghPath(),
       ghAuthed: gh,
       staged,
       changes
@@ -782,7 +812,8 @@ export class GitService {
   }
 
   async publish(cwd: string, name: string, isPrivate: boolean): Promise<GitResult> {
-    if (!GH_PATH) return { ok: false, message: 'GitHub CLI (gh) not found.' }
+    const gh = ghPath()
+    if (!gh) return { ok: false, message: 'GitHub CLI (gh) not found.' }
     const repo = (name || '').trim()
     // GitHub repo names (optionally `owner/repo`) are limited to these chars and
     // must not start with `-`, so gh can't read the value as an option flag.
@@ -802,7 +833,7 @@ export class GitService {
     }
     try {
       await run(
-        GH_PATH,
+        gh,
         ['repo', 'create', repo, isPrivate ? '--private' : '--public', '--source=.', '--push'],
         { cwd, env, maxBuffer: 10 * 1024 * 1024 }
       )

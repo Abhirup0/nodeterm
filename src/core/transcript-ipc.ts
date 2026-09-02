@@ -12,9 +12,12 @@
 import { IPC } from '../shared/ipc'
 import type { ChatTranscriptResult, TranscriptLine } from '../shared/types'
 import { platform } from './platform'
+import { chatMessagesFromGrok } from './grok-chat'
+import { locateGrok } from './handoff/locate'
 import {
   parseChatMessages,
   parseTranscriptLines,
+  readCappedTail,
   readChatMessages,
   readTranscriptLines,
   resolveTranscriptPath,
@@ -84,8 +87,22 @@ export function registerTranscriptIpc(deps: TranscriptIpcDeps = {}): void {
       sessionId: string | undefined,
       cwd: string | undefined,
       accountId: string | undefined,
-      nodeId: string | undefined
+      nodeId: string | undefined,
+      agentId: string | undefined
     ): Promise<ChatTranscriptResult> => {
+      // Routed by agent BEFORE anything claude-shaped runs. `resolveTranscript` below falls back to
+      // the newest claude transcript for the cwd when its sessionId leg misses, and a grok id always
+      // misses — so reaching that fallback with a grok node would answer with a stranger's
+      // conversation. The remote leg is claude-only too (its reader tails claude's file), so a grok
+      // node is served locally or not at all rather than being handed the wrong host's claude log.
+      if (agentId === 'grok') {
+        const gp = sessionId ? await locateGrok(sessionId) : undefined
+        if (!gp) return { messages: [], found: false }
+        const buf = await readCappedTail(gp)
+        return buf === undefined
+          ? { messages: [], found: false }
+          : { messages: chatMessagesFromGrok(buf), found: true }
+      }
       const remote = await remoteText({ sessionId, cwd, accountId, nodeId })
       // A resolved-but-unreadable remote file is NOT "no conversation yet" — the read failed
       // (master down, transcript gone), and the panel must be able to say so.

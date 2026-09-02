@@ -38,7 +38,7 @@ import {
   type ContextLinkVerb
 } from './context-link-render'
 import { hookServer } from './agents/hook-server'
-import { locateClaude, locateCodex, locateGemini } from './handoff/locate'
+import { locateClaude, locateCodex, locateGemini, locateGrok } from './handoff/locate'
 import { opencodeConfigDir } from './agents/hooks/opencode'
 
 export { setNodeTranscript } from './context-link-core'
@@ -130,7 +130,7 @@ export interface ContextLinkDeps {
 // start mid-line, which only costs that one line (it fails to parse and is dropped).
 const REMOTE_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
 
-const LINK_LOCATORS = { claude: locateClaude, codex: locateCodex, gemini: locateGemini }
+const LINK_LOCATORS = { claude: locateClaude, codex: locateCodex, gemini: locateGemini, grok: locateGrok }
 
 // The link documents, by node id — the same objects written to disk, kept in memory because they
 // are what authorizes a read (a node may only ever name a link inside ITS OWN document).

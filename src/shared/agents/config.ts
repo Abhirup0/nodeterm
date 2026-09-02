@@ -125,10 +125,22 @@ export const SESSION_ID_CAPABLE = ['claude', 'copilot'] as const
 // binary and current official reference accept `--session-id=<uuid>`, so it does not borrow an
 // unrelated Claude probe result. Custom agents resolve through their declared base harness.
 export const UNCONDITIONAL_SESSION_ID_CAPABLE = ['copilot'] as const
-export const SUBAGENT_CAPABLE = ['claude'] as const
+// claude: Task/Agent tool via hooks (tool_use_id-keyed). codex: spawn_agent collaboration via its
+// native SubagentStart/SubagentStop hooks (agent_id-keyed), measured on codex-cli 0.146.0.
+export const SUBAGENT_CAPABLE = ['claude', 'codex'] as const
 export const RECURRING_CAPABLE = ['claude'] as const // /loop, /schedule, /cron
 export const BRANCH_CAPABLE = ['claude'] as const
-export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as const
+// grok joins with NO installer of its own: it scans `~/.claude/skills` for Claude Code
+// compatibility, which is exactly where `get-linked-context` is already written — the same
+// argument `CANVAS_CONTROL_CAPABLE` makes below. That premise used to be marked unverified;
+// MEASURED on 1.0.13 (2026-09-01): `grok inspect --json` lists the skill with
+// `vendor: 'claude', compatibilityStatus: 'enabled'`, and `externalCompat.cells` reports
+// `{surface:'skills', enabled:true, source:'default'}`.
+// Two user settings can switch that off — `[compat.claude] skills = false` in
+// `~/.grok/config.toml`, and `GROK_CLAUDE_SKILLS_ENABLED=false`. Then the skill is undiscoverable
+// however this list reads, and the same `inspect` cell is what says so (`enabled:false`, a
+// non-default `source`) rather than leaving support to guess.
+export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode', 'grok'] as const
 // Agents whose per-node context meter we can fill. Each needs BOTH numbers: a used count and a
 // TRUSTWORTHY window.
 //  - claude: used from its transcript's assistant usage, window INFERRED from the model family
@@ -142,9 +154,29 @@ export const CONTEXT_LINK_CAPABLE = ['claude', 'codex', 'gemini', 'opencode'] as
 // used count to divide.
 export const USAGE_CAPABLE = ['claude', 'codex', 'gemini'] as const
 // Agents whose structured transcript we can render as a chat panel (Cmd+M chat mode).
-export const CHAT_CAPABLE = ['claude'] as const
+//
+// SPLIT from CLAUDE_TRANSCRIPT_READABLE below on 2026-09-02, when grok joined. Until then this one
+// list carried TWO facts that happened to coincide while claude was its only member: "we can render
+// this agent's conversation ourselves" and "CLAUDE's transcript resolver can locate and parse this
+// agent's file". Grok satisfies the first (`linesFromGrok`, core/context-link-render.ts) and NOT the
+// second, and merging them is not a cosmetic error: `resolveTranscript` (core/transcript-ipc.ts:58)
+// falls back to `transcriptPathForCwd` when the sessionId leg misses — which it ALWAYS does for a
+// non-claude id, since no `<that id>.jsonl` exists under `~/.claude/projects` — and hands back the
+// newest CLAUDE transcript for that cwd. A grok node in this list would therefore show a stranger's
+// conversation in its find bar and rehydrate its meter from it. That exact bug already happened once
+// with codex and gemini; transcriptGates.ts documents it.
+export const CHAT_CAPABLE = ['claude', 'grok'] as const
+// Agents whose transcript CLAUDE's own resolver can locate and parse — the gate for everything that
+// goes through `resolveTranscript` (the find bar's index, the meter's mount-time rehydration).
+//
+// This is deliberately NOT a superset of CHAT_CAPABLE and must not be "simplified" back into it: the
+// question here is not "can we read this agent" but "does this agent's conversation live in a file
+// shaped like claude's, under claude's tree". Only claude answers yes, and the failure mode of a
+// wrong answer is a read of SOMEONE ELSE'S session (see the comment above), which fails OPEN — it
+// shows data rather than hiding it. `config.capabilities.test.ts` pins that grok is absent.
+export const CLAUDE_TRANSCRIPT_READABLE = ['claude'] as const
 // Agents whose native transcript we can read + render for cross-agent transfer.
-export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini'] as const
+export const TRANSFER_SOURCE_CAPABLE = ['claude', 'codex', 'gemini', 'grok'] as const
 // Agents that accept a node title being PUSHED back into the session — the write leg only. The
 // write is the same literal `/rename <name>` for both, which grok also accepts as `/title`.
 // The READ leg is TITLE_READ_CAPABLE below, which is a superset: an agent can name its own session
@@ -289,6 +321,10 @@ export const canBranch = (id: AgentId): boolean => includes(BRANCH_CAPABLE, id)
 export const canContextLink = (id: AgentId): boolean => includes(CONTEXT_LINK_CAPABLE, id)
 export const hasUsage = (id: AgentId): boolean => includes(USAGE_CAPABLE, id)
 export const canChat = (id: AgentId): boolean => includes(CHAT_CAPABLE, id)
+/** Can CLAUDE's transcript resolver locate and parse this agent's conversation? Never widen this
+ *  to mean "can we read this agent" — see CLAUDE_TRANSCRIPT_READABLE. */
+export const readsClaudeShapedTranscript = (id: AgentId): boolean =>
+  includes(CLAUDE_TRANSCRIPT_READABLE, id)
 export const canTransferFrom = (id: AgentId): boolean => includes(TRANSFER_SOURCE_CAPABLE, id)
 export const canRename = (id: AgentId): boolean => includes(RENAME_CAPABLE, id)
 export const canReadTitle = (id: AgentId): boolean => includes(TITLE_READ_CAPABLE, id)

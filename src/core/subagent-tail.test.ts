@@ -119,6 +119,80 @@ describe('createSubagentTail', () => {
   })
 })
 
+describe('trackFile (codex leg: pre-resolved file + per-entry formatter)', () => {
+  it('tails the given file directly with the injected stateful formatter', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtail-file-'))
+    const file = path.join(dir, 'rollout-child.jsonl')
+    // A stateful formatter (mirrors the codex fork-replay gate): suppress until 'GATE'.
+    const newFormatter = () => {
+      let live = false
+      return (text: string): string =>
+        text
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => {
+            if (l === 'GATE') {
+              live = true
+              return ''
+            }
+            return live ? l : ''
+          })
+          .filter(Boolean)
+          .join('\n')
+    }
+    fs.writeFileSync(file, 'replayed-noise\nGATE\nchild-work-1\n')
+    const send = vi.fn()
+    const tail = createSubagentTail(send)
+    tail.trackFile('agent-1', file, newFormatter)
+    await wait(600)
+    fs.appendFileSync(file, 'child-work-2\n')
+    await wait(600)
+    const out = streamed(send)
+    expect(out).toContain('child-work-1')
+    expect(out).toContain('child-work-2') // formatter state survived across chunks
+    expect(out).not.toContain('replayed-noise')
+    tail.finish('agent-1')
+  })
+
+  it('two trackFile entries do not share formatter state', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'subtail-file2-'))
+    const a = path.join(dir, 'a.jsonl')
+    const b = path.join(dir, 'b.jsonl')
+    const newFormatter = () => {
+      let live = false
+      return (text: string): string =>
+        text
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => (l === 'GATE' ? ((live = true), '') : live ? l : ''))
+          .filter(Boolean)
+          .join('\n')
+    }
+    fs.writeFileSync(a, 'GATE\nfrom-a\n')
+    fs.writeFileSync(b, 'from-b-before-gate\n')
+    const send = vi.fn()
+    const tail = createSubagentTail(send)
+    tail.trackFile('a', a, newFormatter)
+    tail.trackFile('b', b, newFormatter)
+    await wait(600)
+    const byId = new Map<string, string>()
+    for (const c of send.mock.calls) {
+      const { toolUseId, chunk } = c[0] as { toolUseId: string; chunk: string }
+      byId.set(toolUseId, (byId.get(toolUseId) ?? '') + chunk)
+    }
+    expect(byId.get('a')).toContain('from-a')
+    expect(byId.get('b')).toBeUndefined() // b's own gate never arrived
+    tail.finish('a')
+    tail.finish('b')
+  })
+
+  it('a missing filePath is ignored (no entry, no timer leak)', () => {
+    const tail = createSubagentTail(vi.fn())
+    tail.trackFile('x', undefined)
+    tail.finish('x') // must be a no-op, not a throw
+  })
+})
+
 describe('subagent-tail read cap', () => {
   it('reads at most SUBAGENT_READ_CAP bytes per tick and continues next tick', async () => {
     expect(SUBAGENT_READ_CAP).toBe(1024 * 1024)

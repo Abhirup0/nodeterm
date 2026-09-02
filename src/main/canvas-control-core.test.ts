@@ -14,6 +14,7 @@ import {
 } from '../core/agents/hook-sandbox-hint-sh'
 import { RETRYABLE } from '../core/agents/agent-message-decide'
 import { PROJECT_TARGETABLE_VERBS } from './project-grants'
+import { DRY_RUN_VERBS } from '../shared/control-verbs'
 import { STRICT_CONTROL_VERBS } from '../core/agents/node-identity-policy'
 import { BROWSER_ACTION_KEYS } from '../core/browser-verb'
 import { BROWSER_RETRYABLE, BROWSER_OUTCOME_LABEL } from '../core/browser-outcomes'
@@ -292,10 +293,114 @@ describe('parseControlRequest', () => {
     expect(isDestructiveVerb('sticky')).toBe(false)
   })
 
+  it('both agent-facing texts warn that --prompt is one line and must not start with a slash', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // `assembleLaunchCommand` collapses every whitespace run in the prompt, because the prompt
+      // rides argv on a line that is typed into the pane. An agent that does not know this writes
+      // a numbered brief and gets one paragraph.
+      expect(body.toLowerCase()).toContain('one line')
+      // The failure that costs a whole station: flattened, a leading slash command swallows the
+      // task as its argument, and the node then reads as idle to `--after`. Silence here is what
+      // let that ship.
+      expect(body).toMatch(/start a prompt with `\/`|begin a prompt with `\/`/i)
+    }
+  })
+
+  it('both agent-facing texts separate a denial from an unanswered dialog', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The two answers carry opposite guidance — a denial is final, a timeout is retryable — and
+      // a body that names only "may be denied" leaves a caller reading its own timeout as refusal.
+      expect(body).toContain('denied by user')
+      expect(body).toContain('no answer within 120s')
+    }
+  })
+
+  it('both agent-facing texts document --model on the open verbs and per-role model on spawn-team', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The flag is the only cost lever an orchestrator has: without it every station it opens
+      // inherits one default model. A body that stops naming it leaves that lever undiscoverable,
+      // which is the state this test was written to end.
+      expect(body).toContain('--model')
+      // Both silent no-ops must be stated, or an agent reads a missing flag as a failed call:
+      // a non-switch-capable agent ignores it, and an unknown id fails in-session, not at open.
+      expect(body.toLowerCase()).toContain('ignore')
+      // Per-role model is what lets ONE spawn-team call mix tiers; the JSON example must show it.
+      expect(body).toContain('"model"')
+    }
+  })
+
+  it('both agent-facing texts document --base accepting a station id (issue #530)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The flag surface must show the widened grammar…
+      expect(body).toContain('--base <ref|stationId>')
+      // …and both hard truths beside it: what a station id resolves to, and that the base is
+      // captured at CREATION (the deferred-resolution half of #530 is not built — an agent that
+      // reads this text and assumes lazy capture bases a wave on an empty branch).
+      expect(body.toLowerCase()).toContain('station')
+      expect(body).toMatch(/captured when the worktree is CREATED/i)
+    }
+  })
+
+  it('both agent-facing texts document --dry-run, derived from DRY_RUN_VERBS (issue #532)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      expect(body).toContain('--dry-run')
+      // The verb list is RENDERED from the set (dryRunDocLines) — walk the real set so a verb
+      // added to the gate lands in the text the day it is added, and a removed one reds here.
+      for (const v of DRY_RUN_VERBS) expect(body).toContain(v)
+      // Both hard edges must be stated, or an agent discovers them by losing a call to each:
+      // unsupported verbs refuse, and --project cannot be combined.
+      expect(body.toLowerCase()).toContain('refuses `--dry-run`')
+      expect(body).toContain('cannot be combined with `--project`')
+    }
+  })
+
+  it('both agent-facing texts document --prompt-file and the one-line --prompt fact (issue #520)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // `assembleLaunchCommand` collapses every whitespace run in a --prompt literal (it rides
+      // argv on a line typed into the pane). An agent that does not know this writes a numbered
+      // brief and gets one paragraph — and the fix, --prompt-file, is useless undocumented.
+      expect(body.toUpperCase()).toContain('ONE LINE')
+      expect(body).toContain('--prompt-file')
+      // The per-role escape on spawn-team must be named too, or teams stay prose-only.
+      expect(body).toContain('promptFile')
+      // The failure that costs a whole station: flattened, a leading slash command swallows the
+      // task as its argument, and the node then reads as idle to `--after`.
+      expect(body.toLowerCase()).toMatch(/begin a prompt with `\/`|start a prompt with `\/`/)
+    }
+  })
+
+  it('both agent-facing texts say the open reply reports `queued` (issue #569 item 1)', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // The field itself, and the list that says WHICH ids — a caller that cannot name the queued
+      // nodes cannot act on the answer.
+      expect(body).toContain('queued')
+      expect(body).toContain('queuedIds')
+      // The consequence is the whole point of the field: an armed node has no process, so an
+      // orchestrator must not route work to it. Without this sentence the flag reads as trivia.
+      expect(body.toLowerCase()).toContain('no process')
+      // And the three ways a node ends up armed must all be named, or a caller learns the third
+      // one by reporting a --project session as started when it has not begun.
+      expect(body).toContain('--after')
+      expect(body).toContain('--project')
+      expect(body.toLowerCase()).toMatch(/setup script/)
+    }
+  })
+
   it('both agent-facing texts document the sticky verb', () => {
     for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
       expect(body).toContain('`sticky --node')
       expect(body).toContain('--create')
+    }
+  })
+
+  it('both agent-facing texts say an unchanged rename types nothing into the session', () => {
+    for (const body of [buildCanvasSkillBody('/x/shim.sh'), buildCanvasControlInstructions('/tmp/nodeterm.sh')]) {
+      // Issues #582 / #569 §2. An orchestrator that re-asserts its node's name on startup and
+      // after every context reset was previously paying a `/rename` injection into the working
+      // session each time — one reporter worked around it by reading the title first. The verb
+      // now compares, so the text has to say so, or callers keep building that workaround.
+      expect(body.toLowerCase()).toContain('already named')
+      expect(body.toLowerCase()).toContain('no-op')
     }
   })
 

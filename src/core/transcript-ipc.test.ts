@@ -9,6 +9,7 @@ import path from 'path'
 import { fakePlatform } from './platform-fake'
 import { initPlatform, resetPlatformForTests } from './platform'
 import { registerTranscriptIpc } from './transcript-ipc'
+import { rememberGrokSessionDir } from './grok-session'
 import { IPC } from '../shared/ipc'
 import type { ChatTranscriptResult, TranscriptLine } from '../shared/types'
 
@@ -101,5 +102,73 @@ describe('registerTranscriptIpc — the injected remote leg', () => {
     // Reporting `found: true` here would render it as "No conversation yet." and hide the failure.
     registerTranscriptIpc({ readRemote: async () => '' })
     expect(await chat('nt-1')).toEqual({ messages: [], found: false })
+  })
+})
+
+describe('registerTranscriptIpc — the chat channel is routed by AGENT', () => {
+  // The ⌘M panel serves more than claude since grok joined CHAT_CAPABLE. Routing is not a
+  // refinement here: claude's resolver has a cwd fallback that returns the newest CLAUDE transcript
+  // for the node's directory whenever its sessionId leg misses, and a grok id always misses. So an
+  // unrouted grok node is not answered with "nothing" — it is answered with SOMEONE ELSE'S
+  // conversation. These tests exist to make that failure loud.
+  const GROK_SID = '01a06126-b981-73f1-8b68-4547e4d7da84'
+
+  const grokChat = (agentId?: string) =>
+    f.handlers[IPC.chatReadTranscript](
+      GROK_SID,
+      CWD,
+      undefined,
+      undefined,
+      agentId
+    ) as Promise<ChatTranscriptResult>
+
+  const writeGrokHistory = (body: string): string => {
+    const dir = path.join(home, '.grok', 'sessions', 'proj', GROK_SID)
+    fs.mkdirSync(dir, { recursive: true })
+    const p = path.join(dir, 'chat_history.jsonl')
+    fs.writeFileSync(p, body)
+    rememberGrokSessionDir(GROK_SID, dir)
+    return p
+  }
+
+  it('reads grok from its OWN file, in grok\'s own shape', async () => {
+    writeGrokHistory(
+      lines(
+        { type: 'user', content: 'from the grok session' },
+        { type: 'assistant', content: 'answered by grok' }
+      )
+    )
+    registerTranscriptIpc()
+    const res = await grokChat('grok')
+    expect(res.found).toBe(true)
+    expect(res.messages.map((m) => m.role)).toEqual(['user', 'assistant'])
+    expect(JSON.stringify(res.messages)).toContain('from the grok session')
+  })
+
+  it('does NOT hand a grok node the claude transcript sitting in the same cwd', async () => {
+    // Both files exist and describe the same directory. This is the exact shape of the bug: the
+    // claude one is newer and is what the cwd fallback would return.
+    writeTranscript(lines(userLine('SOMEONE ELSE PRIVATE'), assistantLine('not yours')))
+    writeGrokHistory(lines({ type: 'user', content: 'mine' }))
+    registerTranscriptIpc()
+    const res = await grokChat('grok')
+    expect(JSON.stringify(res.messages)).not.toContain('SOMEONE ELSE PRIVATE')
+    expect(JSON.stringify(res.messages)).toContain('mine')
+  })
+
+  it('reports not-found for a grok session no hook has located, instead of falling back', async () => {
+    // No `rememberGrokSessionDir`, so the locator knows nothing. The claude transcript below is
+    // present and resolvable by cwd — reaching it would be the leak.
+    writeTranscript(lines(userLine('SOMEONE ELSE PRIVATE')))
+    registerTranscriptIpc()
+    expect(await grokChat('grok')).toEqual({ messages: [], found: false })
+  })
+
+  it('leaves the claude path exactly as it was when no agent is named', async () => {
+    writeTranscript(lines(userLine('merhaba')))
+    registerTranscriptIpc()
+    const res = await chat()
+    expect(res.found).toBe(true)
+    expect(res.messages.length).toBe(1)
   })
 })

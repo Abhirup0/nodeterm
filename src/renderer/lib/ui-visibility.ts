@@ -23,6 +23,7 @@ export const HIDEABLE_MENU_ITEMS: readonly HideableRow[] = [
   { id: 'remove-from-group', label: 'Remove from group' },
   { id: 'colors', label: 'Colors' },
   { id: 'duplicate', label: 'Duplicate' },
+  { id: 'snap-zone', label: 'Snap to zone' },
   { id: 'collapse', label: 'Collapse / Expand' },
   { id: 'markdown-view', label: 'Markdown view' },
   { id: 'refresh-terminal', label: 'Refresh terminal' }
@@ -30,6 +31,7 @@ export const HIDEABLE_MENU_ITEMS: readonly HideableRow[] = [
 
 /** Hideable terminal node header buttons, in header order. */
 export const HIDEABLE_HEADER_BUTTONS: readonly HideableRow[] = [
+  { id: 'maximize', label: 'Maximize' },
   { id: 'refresh', label: 'Refresh' },
   { id: 'mic', label: 'Dictate' },
   { id: 'ai-name', label: 'Name with AI' },

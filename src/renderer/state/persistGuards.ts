@@ -24,6 +24,22 @@ export function canCommitCanvas(nodesProjectId: string | null, activeProjectId: 
 }
 
 /**
+ * May a node be created on the canvas right now, charged to `activeProjectId`?
+ *
+ * Same epoch pairing as `canCommitCanvas`, opposite direction (issue #443): node creation resolves
+ * cwd / account default / launch-command project from the ACTIVE project record, and inserts the
+ * node into whatever React Flow is showing. If the two disagree — the store already says B while
+ * A's nodes are still (or permanently: a bailed load effect) on screen — the node would come up on
+ * A's canvas but RUN in B's folder under B's account and launch command. For an agent session that
+ * is silent wrong-repo write access, so unlike the commit guard the caller must refuse LOUDLY
+ * (notice + console), never skip silently: a create is a user gesture, and a dead click with no
+ * message is how #443 stayed undiagnosable.
+ */
+export function canCreateOnCanvas(nodesProjectId: string | null, activeProjectId: string): boolean {
+  return canCommitCanvas(nodesProjectId, activeProjectId)
+}
+
+/**
  * May `dirty` be cleared now that a save has finished?
  *
  * Field bug 2026-08-10: `writeDisk` awaited the save and then cleared dirty unconditionally. A save

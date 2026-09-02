@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import type { Terminal } from '@xterm/xterm'
 import {
+  createOsc8LinkHandler,
   makeDirListingLookup,
   matchFileTokens,
   matchUrlTokens,
+  osc8UrlAt,
   paragraphContaining,
   resolveFileToken,
   type BufferView
@@ -169,5 +172,44 @@ describe('matchUrlTokens', () => {
 
   it('ignores non-http schemes and bare paths', () => {
     expect(matchUrlTokens('ftp://x.io file:///etc/hosts /usr/local plain')).toEqual([])
+  })
+})
+
+describe('createOsc8LinkHandler', () => {
+  const range = { start: { x: 1, y: 1 }, end: { x: 1, y: 1 } }
+  const click = (mod: boolean): MouseEvent => ({ metaKey: mod, ctrlKey: false }) as MouseEvent
+
+  it('opens http(s) only, and only on a modifier click', () => {
+    const opened: string[] = []
+    const h = createOsc8LinkHandler((u) => opened.push(u))
+    h.activate(click(false), 'https://example.com/a', range)
+    h.activate(click(true), 'javascript:alert(1)', range)
+    h.activate(click(true), 'file:///etc/passwd', range)
+    h.activate(click(true), 'not a url', range)
+    h.activate(click(true), 'https://example.com/a', range)
+    expect(opened).toEqual(['https://example.com/a'])
+  })
+})
+
+describe('osc8UrlAt', () => {
+  /** Just the private shape osc8UrlAt reads: a cell's extended.urlId + the osc link service. */
+  const fakeTerm = (urlId: number | undefined, uri: string | undefined): Terminal =>
+    ({
+      buffer: { active: { getLine: () => ({ getCell: () => ({ extended: { urlId } }) }) } },
+      _core: { _oscLinkService: { getLinkData: () => (uri ? { uri } : undefined) } }
+    }) as unknown as Terminal
+
+  it('resolves the URI at a linked cell and refuses a non-http scheme', () => {
+    expect(osc8UrlAt(fakeTerm(3, 'https://example.com/pr/1'), 0, 0)).toBe(
+      'https://example.com/pr/1'
+    )
+    expect(osc8UrlAt(fakeTerm(3, 'javascript:alert(1)'), 0, 0)).toBeNull()
+  })
+
+  it('returns null for an unlinked cell and when internals are absent', () => {
+    expect(osc8UrlAt(fakeTerm(undefined, 'https://x.io/a'), 0, 0)).toBeNull()
+    expect(osc8UrlAt(fakeTerm(3, undefined), 0, 0)).toBeNull()
+    const bare = { buffer: { active: { getLine: () => undefined } } } as unknown as Terminal
+    expect(osc8UrlAt(bare, 0, 0)).toBeNull()
   })
 })

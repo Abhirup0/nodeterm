@@ -202,9 +202,17 @@ const TMUX_STOCK_UPDATE_ENV = [
  *  argv-free credential path: gateway values sit in the tmux CLIENT's process environment (never
  *  on a command line), and tmux copies the listed names into the session env on create/attach —
  *  MEASURED on tmux 3.4: the pane sees the value, a client withOUT the var strips it from its own
- *  session (no cross-session bleed into plain terminals), and re-sourcing the conf is idempotent. */
-export function tmuxUpdateEnvironmentLine(): string {
-  return `set -g update-environment "${[...TMUX_STOCK_UPDATE_ENV, ...MODEL_GATEWAY_ENV_KEYS].join(' ')}"`
+ *  session (no cross-session bleed into plain terminals), and re-sourcing the conf is idempotent.
+ *
+ *  `extraNames` lets the LOCAL conf append the account-scope names (`ACCOUNT_SCOPE_UPDATE_ENV` in
+ *  pty-manager — issue #419): the REMOTE conf must NOT get them, because a remote session's
+ *  account env arrives only via `-e` (the ssh-exec'd tmux client's own env is the login shell's,
+ *  so listing the names there would have the copy/strip run against the WRONG environment).
+ *  Deduped so an overlap (e.g. ANTHROPIC_AUTH_TOKEN, in both the gateway list and the claude
+ *  auth strip) cannot double an entry. */
+export function tmuxUpdateEnvironmentLine(extraNames: readonly string[] = []): string {
+  const names = [...new Set([...TMUX_STOCK_UPDATE_ENV, ...MODEL_GATEWAY_ENV_KEYS, ...extraNames])]
+  return `set -g update-environment "${names.join(' ')}"`
 }
 
 export function modelGatewayEnv(

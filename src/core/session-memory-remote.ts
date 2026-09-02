@@ -17,6 +17,7 @@ import {
   type SessionMemoryReport
 } from './session-memory'
 import { TMUX_SOCKET } from './tmux-naming'
+import { REMOTE_TMUX_PATH_DIRS } from '../shared/ssh'
 import { RMT_TMUX_SOCKET } from './remote-ssh/control-master'
 
 const MEM = '##MEM'
@@ -62,6 +63,10 @@ export function remoteSessionMemoryCommand(): string {
       `echo "${SOCKRC} $?"`
     ].join('\n')
   return [
+    // tmux may live off the exec channel's PATH (Homebrew on macOS — issue #449, same append as
+    // remoteTmuxPathPrologue). Without this every socket answers 127 and the sweep reports
+    // ok:false ("Could not measure") on a host whose sessions are perfectly readable.
+    `PATH="$PATH:${REMOTE_TMUX_PATH_DIRS}"`,
     `echo '${MEM}'`,
     `cat /proc/meminfo 2>/dev/null | grep -E '^(MemAvailable|MemTotal):' 2>/dev/null || true`,
     `echo '${PANES}'`,
