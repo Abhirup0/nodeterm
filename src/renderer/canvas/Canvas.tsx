@@ -2948,9 +2948,9 @@ export function Canvas() {
       })
       // Re-snap what the resizer proposes before it is applied, so a resize tracks the grid
       // during the drag instead of correcting itself on release (see lib/resizeSnap.ts).
-      const settings = useSettings.getState().settings
-      const snapped = settings.snapToGrid
-        ? snapResizeChanges(managed, nodesRef.current, settings.gridSize || GRID)
+      const snapSettings = useSettings.getState().settings
+      const snapped = snapSettings.snapToGrid
+        ? snapResizeChanges(managed, nodesRef.current, snapSettings.gridSize || GRID)
         : managed
       onNodesChange(snapped)
       if (snapped.some((c) => c.type !== 'select')) markDirty()
