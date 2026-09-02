@@ -18,6 +18,7 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
+import { macTitleBarOptions } from './window-chrome'
 import { guestContextMenuTemplate } from './webview-context-menu'
 import { BrowserControlLedger } from './browser-control-ledger'
 import {
@@ -934,9 +935,11 @@ function createWindow(): BrowserWindow {
     // never mistaken for the real one (the dock already shows the Electron icon in dev).
     title: NT_MULTI ? 'node-terminal (test instance)' : 'node-terminal',
     icon: linuxIcon,
-    // Integrate the macOS traffic lights into our top bar (modern Mac app look).
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 15 },
+    // Integrate the macOS traffic lights into our top bar (modern Mac app look). Both options are
+    // macOS-only in Electron, and the renderer's tab bar reserves its 86px of left padding for
+    // exactly this window shape — so state the platform here rather than leaving it to Electron to
+    // ignore the values elsewhere (issue #564). Windows/Linux keep their native frame, unchanged.
+    ...macTitleBarOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,

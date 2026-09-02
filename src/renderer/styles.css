@@ -197,8 +197,7 @@ body,
   align-items: center;
   gap: 14px;
   height: 44px;
-  /* Leave room for the macOS traffic lights on the left. */
-  padding: 0 12px 0 86px;
+  padding: 0 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
   /* Above the canvas and the menu backdrop so tabs/inputs stay interactive. */
@@ -206,6 +205,14 @@ body,
   flex-shrink: 0;
   /* The bar itself is the window drag region. */
   -webkit-app-region: drag;
+}
+
+/* Leave room for the macOS traffic lights on the left — ONLY where they are drawn inside the web
+   contents (Electron `titleBarStyle: 'hiddenInset'`, darwin desktop). The attribute is stamped by
+   `lib/windowChrome.ts` at boot; without it the reservation applied on Windows and Linux too,
+   pushing the logo in by 86px and taking the same 86px off the tab strip (issue #564). */
+:root[data-window-chrome='inset'] .tabbar {
+  padding-left: 86px;
 }
 
 /* Interactive elements inside the bar must not drag the window. */
