@@ -370,6 +370,51 @@ describe('assembleLaunchCommand — promptFile (issue #520)', () => {
   })
 })
 
+/**
+ * Issue #601, at the layer the reporter actually read it off — the assembled command line, the one
+ * that shows up in the process table. `withPermissionMode` has its own unit tests; these two pin
+ * that the composition does not put the flag back.
+ */
+describe('assembleLaunchCommand / assembleResumeCommand — override already carries the flag (#601)', () => {
+  it('does not duplicate --permission-mode on a fresh launch', () => {
+    expect(
+      assembleLaunchCommand(
+        {
+          agentId: 'claude',
+          launchCmdOverride: 'claude --permission-mode bypassPermissions',
+          permissionMode: 'auto'
+        },
+        ENV
+      ).command
+    ).toBe('claude --permission-mode bypassPermissions')
+  })
+
+  it('does not duplicate it on the resume path either', () => {
+    // The cold-restore / restart leg. It resumes through the same wrapper, so it inherits the same
+    // duplicate if this is fixed in only one assembler.
+    expect(
+      assembleResumeCommand(
+        {
+          agentId: 'claude',
+          launchCmdOverride: 'claude --permission-mode=plan',
+          sessionId: 'abc-123',
+          permissionMode: 'auto'
+        },
+        ENV
+      ).command
+    ).toBe('claude --permission-mode=plan --resume abc-123')
+  })
+
+  it('still appends to an override that says nothing about permissions', () => {
+    expect(
+      assembleLaunchCommand(
+        { agentId: 'claude', launchCmdOverride: 'my-wrapper', permissionMode: 'auto' },
+        ENV
+      ).command
+    ).toBe('my-wrapper --permission-mode auto')
+  })
+})
+
 describe('promptFilePathError', () => {
   it('accepts an absolute POSIX path', () => {
     expect(promptFilePathError('/tmp/brief.md')).toBeNull()

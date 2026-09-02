@@ -4,6 +4,8 @@
 // This module is renderer-pure: it imports nothing from `src/core`, so presenting an account
 // never drags the impure core path machinery into the bundle.
 
+import { thisMachineCap } from './machineName'
+
 export interface AccountPresentation {
   /** Human identity: a chosen account name, otherwise the login email. */
   identity: string
@@ -46,7 +48,7 @@ export function presentAccount({
 }: {
   label?: string | null
   email?: string | null
-  /** Canonical SSH address (`user@host`). Omit for an account on this Mac. */
+  /** Canonical SSH address (`user@host`). Omit for an account on this machine. */
   host?: string | null
   /** Friendly saved SSH-machine name. */
   machineLabel?: string | null
@@ -55,7 +57,7 @@ export function presentAccount({
   const cleanEmail = email?.trim() || undefined
   const identity = displayLabel || cleanEmail || 'Default account'
   const provenance = host ? `SSH · ${machineLabel?.trim() || host}` : 'Local'
-  const originDetail = host ? `SSH ${host}` : 'This Mac'
+  const originDetail = host ? `SSH ${host}` : thisMachineCap()
   const identityDetail =
     cleanEmail && cleanEmail !== identity ? `${identity} (${cleanEmail})` : identity
   return {

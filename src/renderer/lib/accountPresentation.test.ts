@@ -6,7 +6,7 @@ describe('presentAccount', () => {
     expect(presentAccount({ label: 'Work', email: 'me@example.com' })).toEqual({
       identity: 'Work',
       provenance: 'Local',
-      tooltip: 'Work (me@example.com) · This Mac'
+      tooltip: 'Work (me@example.com) · This computer'
     })
   })
 
@@ -19,7 +19,7 @@ describe('presentAccount', () => {
     ).toEqual({
       identity: 'me@example.com',
       provenance: 'Local',
-      tooltip: 'me@example.com · This Mac'
+      tooltip: 'me@example.com · This computer'
     })
     // A row still carrying the generated placeholder collapses to "Default account".
     expect(presentAccount({ label: 'New Codex account' }).identity).toBe('Default account')

@@ -429,6 +429,24 @@ export interface ClosedSessionEntry {
   closedAt: number
   node: CanvasNodeState
   absolutePosition: { x: number; y: number }
+  /**
+   * The agent session this node was running when it was closed — a POINTER to the transcript the
+   * agent CLI already owns, never a copy of its text (issue #531). It is the one fact that dies
+   * with the node and cannot be recovered afterwards: the live id is held only in the transient
+   * `agentStatus` store, whose entry is dropped on delete, while the transcript `.jsonl` itself
+   * stays on disk under the agent's own root. Without it a closed station's work cannot be read
+   * back at all, which is what made "close the node once its branch is merged" quietly destructive.
+   *
+   * Captured at close from the hook-fed live id, falling back to `node.agentSessionId` (the id
+   * nodeterm minted at creation) — the two agree whenever both exist, and each covers a case the
+   * other misses (a RESUMED session has no minted id; a node that never emitted a hook event has
+   * no live one).
+   *
+   * MACHINE-LOCAL by construction: `closedSessions` rides `IndexEntryV3`, never the git-shared
+   * `.nodeterm/project.json` (see `Project.closedSessions`), so a session id — a `$HOME`-anchored
+   * fact about one person's machine — is never shipped to everyone who clones the repo.
+   */
+  sessionId?: string
 }
 
 /**
@@ -2883,12 +2901,13 @@ export interface PairingApi {
   stop(): Promise<void>
   /** Fires once when pairing finishes (ok=true paired, ok=false timeout). Returns unsubscribe. */
   onDone(cb: (result: { ok: boolean; relay?: 'ok' | 'off' | 'failed' | 'dev' }) => void): () => void
-  /** Live re-probe of 127.0.0.1:22, so the Remote Login warning can clear the moment the user
-   *  flips the toggle in System Settings (polled by the UI only while the warning is showing). */
+  /** Live re-probe of 127.0.0.1:22, so the "SSH server is off" warning can clear the moment the
+   *  user turns it on (polled by the UI only while the warning is showing). */
   probeSsh(): Promise<boolean>
-  /** Open System Settings → General → Sharing (Remote Login). The deep link is a main-side
-   *  constant — x-apple.* schemes never pass shellOpenExternal's http(s) allowlist. macOS-only;
-   *  a no-op elsewhere. */
+  /** Open this OS's settings page for its SSH server — Sharing → Remote Login on macOS, Optional
+   *  features on Windows (`sshServerCopy().settingsUrl`, the same table the warning's copy comes
+   *  from). The deep link is a main-side constant: neither scheme passes shellOpenExternal's
+   *  http(s) allowlist. A no-op where that table offers no URL, and the UI shows no button there. */
   openRemoteLoginSettings(): Promise<void>
   /** List paired devices from ~/.nodeterm/agent.json (never includes the token). */
   listDevices(): Promise<PairedDevice[]>

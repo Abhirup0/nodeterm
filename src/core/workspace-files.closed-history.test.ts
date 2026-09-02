@@ -111,4 +111,30 @@ describe('sanitizeLoadedClosedSessions', () => {
     expect(out).toHaveLength(CLOSED_SESSIONS_CAP)
     expect(out?.[0].id).toBe('e0')
   })
+
+  // Issue #531: the transcript pointer. It is the fact the whole feature rests on, so it must
+  // survive the round trip — and it is handed to a resolver, so its KIND is re-checked here
+  // rather than trusted from the type (workspace.json is hand-editable).
+  it('keeps a string sessionId', () => {
+    const out = sanitizeLoadedClosedSessions([{ ...closedEntry('e1'), sessionId: 'sess-1' }])
+    expect(out?.[0].sessionId).toBe('sess-1')
+  })
+
+  it('drops a non-string or empty sessionId instead of passing it to the transcript readers', () => {
+    for (const bad of [42, {}, [], null, '']) {
+      const out = sanitizeLoadedClosedSessions([{ ...closedEntry('e1'), sessionId: bad } as never])
+      expect(out).toHaveLength(1)
+      expect(out?.[0].sessionId).toBeUndefined()
+    }
+  })
+})
+
+describe('the transcript pointer stays machine-local', () => {
+  it('is never written into the git-shared project file', () => {
+    const entries = [{ ...closedEntry('e1'), sessionId: 'sess-1' }]
+    const file = projectToFile(project({ cwd: '/tmp/x', closedSessions: entries }), 1, 'now')
+    // A session id is a $HOME-anchored fact about ONE person's machine; shipping it to everyone
+    // who clones the repo is exactly what the closedSessions machine-local rule exists to prevent.
+    expect(JSON.stringify(file)).not.toContain('sess-1')
+  })
 })

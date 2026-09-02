@@ -4,13 +4,16 @@ import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
 import { usePhonePairing } from './settings/usePhonePairing'
 import { IOS_APP_STORE_URL } from '@renderer/lib/links'
+import { hostOsFromNavigator, sshServerCopy } from '@shared/ssh-server'
+import { thisMachine } from '@renderer/lib/machineName'
 
-const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+/** Same table the Phone settings section prints from — see @shared/ssh-server. */
+const sshServer = sshServerCopy(hostOsFromNavigator())
 
 /**
  * Quick phone pairing, anchored under the top-right phone button: opens straight into a live QR
  * (no "Start pairing" click — that's the whole point of the shortcut), with the standing
- * "Reach this Mac from anywhere" toggle below and a link into the full Phone settings.
+ * "Reach this <machine> from anywhere" toggle below and a link into the full Phone settings.
  * Closing the popover stops an unfinished pairing (the shared hook's unmount rule).
  */
 export function PhonePairPopover({
@@ -69,8 +72,8 @@ export function PhonePairPopover({
             // No QR while Remote Login is off — pairing against an unreachable sshd installs a
             // key the phone can never use. The live probe flips sshOpen and the QR appears.
             <div className="phone-pair__warn">
-              <strong>Remote Login</strong> is off — the pairing QR appears the moment it is on
-              {isMac ? (
+              <strong>{sshServer.name}</strong> is off — the pairing QR appears the moment it is on
+              {sshServer.settingsLabel ? (
                 <>
                   {' '}
                   (
@@ -78,13 +81,14 @@ export function PhonePairPopover({
                     className="phone-pair__link"
                     onClick={() => void window.nodeTerminal.pairing.openRemoteLoginSettings()}
                   >
-                    System Settings
+                    {sshServer.settingsLabel}
                   </button>
                   &nbsp;— watching).
                 </>
               ) : (
                 '.'
               )}
+              <div className="phone-pair__hint">{sshServer.how}</div>
             </div>
           ) : (
             <>
@@ -97,11 +101,13 @@ export function PhonePairPopover({
                 </div>
               ) : !phoneAccessEnabled ? (
                 <div className="phone-pair__warn">
-                  LAN-only code: the phone will reach this Mac only on this network. Flip the
-                  toggle below first to also connect from anywhere — the QR refreshes by itself.
+                  LAN-only code: the phone will reach {thisMachine()} only on this network. Flip
+                  the toggle below first to also connect from anywhere — the QR refreshes by itself.
                 </div>
               ) : null}
-              {sshHealed ? <div className="phone-pair__ok">✓ Remote Login is on.</div> : null}
+              {sshHealed ? (
+                <div className="phone-pair__ok">✓ {sshServer.name} is on.</div>
+              ) : null}
             </>
           )
         ) : phase === 'paired' ? (
@@ -138,13 +144,13 @@ export function PhonePairPopover({
 
         <div className="phone-pair__row">
           <div className="phone-pair__row-text">
-            <div className="phone-pair__row-title">Reach this Mac from anywhere</div>
+            <div className="phone-pair__row-title">Reach {thisMachine()} from anywhere</div>
             <div className="phone-pair__row-sub">E2E encrypted over the relay — not just your LAN.</div>
           </div>
           <Switch
             checked={phoneAccessEnabled}
             onChange={togglePhoneAccess}
-            ariaLabel="Reach this Mac from anywhere"
+            ariaLabel={`Reach ${thisMachine()} from anywhere`}
           />
         </div>
 

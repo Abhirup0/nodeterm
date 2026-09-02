@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   buildSessionList,
   buildStatusList,
@@ -17,6 +17,7 @@ import {
   type SessionRowVM,
   type StatusSection
 } from '../lib/sessionList'
+import { sidebarEmptyState, sidebarFilterKeyAction } from '../lib/sidebarFilter'
 import { SessionRow } from './SessionRow'
 import { ProjectGlyph } from './ProjectGlyph'
 import { ClosedHistorySection } from './ClosedHistorySection'
@@ -72,6 +73,8 @@ export interface SessionsSidebarProps {
   onDeleteProject(id: string): void
   onReopenClosedSession(projectId: string, entryId: string): void
   onDiscardClosedSession(projectId: string, entryId: string): void
+  /** Read a closed session's transcript (issue #531). */
+  onOpenClosedTranscript(projectId: string, entryId: string): void
   onMouseEnter?(): void
   onMouseLeave?(): void
 }
@@ -158,6 +161,15 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         : [],
     [open, grouping, projects, liveActiveNodes, activeProjectId, statusById, filter]
   )
+  /**
+   * The list came back with nothing in it — in EITHER grouping mode. "Nothing here" and "nothing
+   * matched" are different facts (issue #505): the filter persists while you work, so half an hour
+   * after finding one session the sidebar was still filtered, still empty, and still saying "No
+   * sessions yet." — which reads as a broken sidebar rather than a stale filter.
+   */
+  const noRows = grouping === 'status' ? statusSections.length === 0 : groups.length === 0
+  const emptyState = sidebarEmptyState(noRows, filter, grouping)
+  const clearFilter = useCallback(() => setFilter(''), [])
 
   // Relative state ages need to advance even when no hook event arrives. Keep the clock dormant
   // unless the status view is visible; 30s catches minute boundaries without per-row timers.
@@ -515,7 +527,27 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
           placeholder="Filter sessions…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
+          // Escape clears the filter in ONE action (issue #505) instead of select-all-delete.
+          // The refusal on an empty field lives in `sidebarFilterKeyAction`, so Escape still
+          // reaches whatever owns it next and never becomes a dead end inside this input.
+          onKeyDown={(e) => {
+            if (sidebarFilterKeyAction(e.key, filter) !== 'clear') return
+            e.preventDefault()
+            e.stopPropagation()
+            clearFilter()
+          }}
         />
+        {filter !== '' && (
+          <button
+            type="button"
+            className="sessions-sidebar__search-clear"
+            title="Clear filter (Esc)"
+            aria-label="Clear filter"
+            onClick={clearFilter}
+          >
+            ×
+          </button>
+        )}
       </div>
 
       <div
@@ -535,7 +567,17 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
           setDropProj(null)
         }}
       >
-        {groups.length === 0 && grouping !== 'status' && (
+        {emptyState === 'no-matches' && (
+          // A filtered list that came back empty says so — and offers the one action that undoes
+          // it, in both grouping modes (status mode had no empty state at all).
+          <div className="sessions-sidebar__empty">
+            <div>No sessions match “{filter.trim()}”.</div>
+            <button type="button" className="sessions-sidebar__empty-clear" onClick={clearFilter}>
+              Clear filter
+            </button>
+          </div>
+        )}
+        {emptyState === 'no-sessions' && (
           <div className="sessions-sidebar__empty">No sessions yet.</div>
         )}
         {grouping === 'status' ? (
@@ -717,6 +759,7 @@ export function SessionsSidebar(props: SessionsSidebarProps): JSX.Element | null
         onDeleteProject={props.onDeleteProject}
         onReopenSession={props.onReopenClosedSession}
         onDiscardSession={props.onDiscardClosedSession}
+        onOpenTranscript={props.onOpenClosedTranscript}
       />
     </aside>
   )

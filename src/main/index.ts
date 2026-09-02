@@ -18,6 +18,8 @@ installLogSink(logBuffer)
 import { writeFilesToClipboard } from './clipboard-files'
 import { pickProjectIcon } from './project-icon-upload'
 import { allowGuestNavigation } from './webview-nav'
+import { hostOsFromPlatform, sshServerCopy } from '../shared/ssh-server'
+import { macTitleBarOptions } from './window-chrome'
 import { guestContextMenuTemplate } from './webview-context-menu'
 import { BrowserControlLedger } from './browser-control-ledger'
 import {
@@ -934,9 +936,11 @@ function createWindow(): BrowserWindow {
     // never mistaken for the real one (the dock already shows the Electron icon in dev).
     title: NT_MULTI ? 'node-terminal (test instance)' : 'node-terminal',
     icon: linuxIcon,
-    // Integrate the macOS traffic lights into our top bar (modern Mac app look).
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 15 },
+    // Integrate the macOS traffic lights into our top bar (modern Mac app look). Both options are
+    // macOS-only in Electron, and the renderer's tab bar reserves its 86px of left padding for
+    // exactly this window shape — so state the platform here rather than leaving it to Electron to
+    // ignore the values elsewhere (issue #564). Windows/Linux keep their native frame, unchanged.
+    ...macTitleBarOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -988,17 +992,32 @@ function createWindow(): BrowserWindow {
   // Trackpad-vs-mouse ground truth for the canvas wheel router: macOS wraps trackpad scrolls and
   // pinches in gesture begin/end events a wheel mouse never emits, visible only here in main.
   // The ledger reduces the raw stream (which includes every ~120Hz pointer packet — observe() is
-  // one Set lookup on the hot path) to edge transitions, so the renderer hears a few messages per
-  // physical gesture. Attached unconditionally: on non-mac these events simply never fire, and
-  // the renderer's router ignores the flag off macOS anyway. See main/trackpad-gesture.ts and
-  // canvas/wheel-gesture.ts for the two halves of the contract.
-  const trackpadLedger = new TrackpadGestureLedger()
-  win.webContents.on('input-event', (_event, input) => {
-    const active = trackpadLedger.observe(input.type)
-    if (active !== null && !win.isDestroyed()) {
-      win.webContents.send(IPC.canvasTrackpadGesture, active)
+  // one prefix test on the hot path) to edge transitions, so the renderer hears a few messages per
+  // physical gesture. See main/trackpad-gesture.ts and canvas/wheel-gesture.ts for the two halves
+  // of the contract.
+  //
+  // Attached on macOS ONLY (issue #535). It used to be unconditional on the grounds that these
+  // events never fire elsewhere — but Chromium synthesizes gesture scroll events for TOUCHSCREEN
+  // scrolling on Windows and Linux too, so a touch-enabled non-mac machine paid per-gesture IPC
+  // for a flag the renderer's router discards off macOS. Gating the attach makes the "desktop
+  // macOS only" contract true by construction rather than by the consumer's good manners.
+  if (process.platform === 'darwin') {
+    const trackpadLedger = new TrackpadGestureLedger()
+    const sendGesture = (active: boolean): void => {
+      if (!win.isDestroyed()) win.webContents.send(IPC.canvasTrackpadGesture, active)
     }
-  })
+    win.webContents.on('input-event', (_event, input) => {
+      const active = trackpadLedger.observe(input.type)
+      if (active !== null) sendGesture(active)
+    })
+    // A gesture cannot survive a focus loss, and an End that never arrives (⌘Tab / hide / minimize
+    // mid-scroll) would otherwise leave the ledger stuck open for the life of the window — with
+    // wheel zoom silently dead until restart. `reset()` reports whether anything was actually
+    // open, so an ordinary blur between gestures sends nothing.
+    win.on('blur', () => {
+      if (trackpadLedger.reset()) sendGesture(false)
+    })
+  }
   const crashReload = createCrashReloadPolicy()
   win.webContents.on('render-process-gone', (_event, details) => {
     ptyManager.dropClient(presenceId)
@@ -1509,15 +1528,14 @@ app.whenReady().then(async () => {
   ipcMain.handle(IPC.pairingStop, () => pairingService.stop())
   ipcMain.handle(IPC.pairingProbeSsh, () => pairingService.probeSsh())
   // Same pattern as appOpenNotificationSettings: a main-side constant deep link, NOT routed
-  // through shellOpenExternal's http(s)-only allowlist (which silently drops x-apple.* URLs —
+  // through shellOpenExternal's http(s)-only allowlist (which silently drops non-http URLs —
   // the "Open System Settings" button did nothing when it sent the URL from the renderer).
-  // The `Services_RemoteLogin` query selected the service in the pre-Ventura prefpane and is
-  // harmless on newer macOS, which opens the Sharing pane either way.
+  // The URL comes from `sshServerCopy`, the SAME table the renderer prints its copy from, so the
+  // button can never appear on a platform this handler opens nothing for (issue #572: on Windows
+  // it offered a macOS `x-apple.systempreferences:` link that is inert there).
   ipcMain.handle(IPC.pairingOpenRemoteLoginSettings, () => {
-    if (process.platform !== 'darwin') return
-    void shell.openExternal(
-      'x-apple.systempreferences:com.apple.preferences.sharing?Services_RemoteLogin'
-    )
+    const url = sshServerCopy(hostOsFromPlatform(process.platform)).settingsUrl
+    if (url) void shell.openExternal(url)
   })
   ipcMain.handle(IPC.pairingListDevices, () => pairingService.listDevices())
   ipcMain.handle(IPC.pairingRevokeDevice, (_e, id: string) => pairingService.revokeDevice(id))

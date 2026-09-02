@@ -413,7 +413,18 @@ export function sanitizeLoadedClosedSessions(x: unknown): ClosedSessionEntry[] |
   if (!validClosedSessions(x)) return undefined
   const capped = x.slice(0, CLOSED_SESSIONS_CAP)
   if (!capped.length) return undefined
-  return capped.map((e) => ({ ...e, node: sanitizeNodeTriggers([e.node])[0] }))
+  return capped.map((e) => {
+    // `sessionId` (issue #531) is handed straight to the transcript readers, so it is re-checked
+    // as a STRING here rather than trusted from the type — workspace.json is hand-editable, and a
+    // number or object would ride the IPC into a resolver that expects to call `.test()` on it.
+    // Core's own `SESSION_ID_RE` still gates the value's SHAPE; this only gates its kind.
+    const { sessionId, ...rest } = e
+    return {
+      ...rest,
+      ...(typeof sessionId === 'string' && sessionId ? { sessionId } : {}),
+      node: sanitizeNodeTriggers([e.node])[0]
+    }
+  })
 }
 
 /**

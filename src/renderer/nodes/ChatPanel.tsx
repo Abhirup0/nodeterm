@@ -26,6 +26,17 @@ interface ChatPanelProps {
    *  tests green while restoring that leak in full. Required makes the compiler the proof: the
    *  wiring cannot be dropped silently, with no render test needed to notice. */
   agentId: string
+  /**
+   * Read a transcript with no live session behind it (issue #531: a CLOSED node's conversation,
+   * opened from "Recently closed"). Hides the composer — `pty.sendText` would be aimed at a node
+   * id that no longer exists — and names the bar for what it is. Absent = the ⌘M panel on a live
+   * node, byte-identical to before.
+   */
+  readOnly?: boolean
+  /** Bar caption. Defaults to the ⌘M panel's own 'Chat'. */
+  title?: string
+  /** Rendered at the right of the bar in place of the ⌘M exit hint. */
+  hint?: string
 }
 
 /**
@@ -63,7 +74,16 @@ const EMPTY_TEXT: Record<LoadState, { title: string; detail?: string }> = {
  * session via pty.sendText. Phase 1 reloads the transcript whenever a turn finishes
  * (working -> idle); live streaming is a later phase. Replaces the markdown-of-output overlay.
  */
-export function ChatPanel({ nodeId, sessionId, cwd, accountId, agentId }: ChatPanelProps) {
+export function ChatPanel({
+  nodeId,
+  sessionId,
+  cwd,
+  accountId,
+  agentId,
+  readOnly,
+  title,
+  hint
+}: ChatPanelProps) {
   // This node's core api (stable for the session — the chat transcript and the tmux session
   // both live on the core this panel's project belongs to).
   const { api } = useSession()
@@ -135,8 +155,8 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId, agentId }: ChatPa
   return (
     <div className="term-chat nodrag nowheel">
       <div className="term-chat__bar">
-        <span>Chat</span>
-        <span className="term-chat__hint">{mdChip ? `${mdChip} to exit` : 'Exit'}</span>
+        <span>{title ?? 'Chat'}</span>
+        <span className="term-chat__hint">{hint ?? (mdChip ? `${mdChip} to exit` : 'Exit')}</span>
       </div>
       <div className="term-chat__msgs" ref={msgsRef}>
         {messages.length === 0 && loadState !== 'loading' && (
@@ -170,6 +190,7 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId, agentId }: ChatPa
           </div>
         ))}
       </div>
+      {!readOnly && (
       <div className="term-chat__compose">
         <textarea
           className="term-chat__input"
@@ -187,6 +208,7 @@ export function ChatPanel({ nodeId, sessionId, cwd, accountId, agentId }: ChatPa
           rows={2}
         />
       </div>
+      )}
     </div>
   )
 }

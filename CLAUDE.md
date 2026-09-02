@@ -40,6 +40,18 @@ means — and what you may assume when writing a feature — is three tiers, not
   never assume `/` or a unix socket. When a test can only run on one platform, gate it with
   `it.skipIf(process.platform === 'win32')` (or the inverse) and say why — never let it fail the
   cross-platform CI. The `windows-latest` CI job runs the platform-dependent suites on real Windows.
+- **Line endings are decided by `.gitattributes` (`* text=auto eol=lf`), not by each contributor's
+  git config.** Without it `text`/`eol` are unspecified and Git for Windows' default
+  `core.autocrlf=true` gives every Windows clone CRLF working files — so a test that reads a
+  checked-in file and slices on a `\n`-bearing literal (`CSS.indexOf('}\n}')`,
+  `indexOf('\n}\n')`, `indexOf('\n}')`) matched nothing and failed on a checkout with ZERO local
+  changes (issue #578). Two suites did; one reported 25 theme tokens missing that were all present,
+  which reads like a regression rather than a broken slice. Attributes only apply on re-checkout
+  (`git add --renormalize .` for a tree cloned earlier), so the readers ALSO normalize —
+  `readFileSync(f, 'utf8').replace(/\r\n/g, '\n')` — and `src/shared/line-endings.guard.test.ts`
+  fails on any such read that does not. `*.bat`/`*.cmd`/`*.ps1` are the deliberate exception and
+  keep CRLF: cmd.exe is not reliably tolerant of LF, and those are the files a Windows contributor
+  runs before anything else works.
 
 ## Commands
 
@@ -379,6 +391,24 @@ project's nodes only.** The contract:
   count). Server Edition: all renderer-side; the ws-bridge `sessionMemory` is real, so badges
   describe the server machine; the `sshProject` legs only run for `project.ssh`, which that
   shell never has.
+- **Closing a NODE keeps a pointer to its transcript** (issue #531). The per-project
+  `closedSessions` ledger records the agent session id as `ClosedSessionEntry.sessionId`, captured
+  at delete time from the live `agentStatus` entry — which that same delete drops, so this is the
+  last instant it exists anywhere — falling back to the minted `node.agentSessionId`. It is a
+  POINTER, never a copy: the `.jsonl` the agent CLI owns stays the only text, and a second store of
+  transcript text would age, drift and need its own retention policy. The "Recently closed" row
+  spends it on the **existing ⌘M reader** (`ChatPanel` in `readOnly` mode, hosted by
+  `ClosedTranscriptDialog`), so resolution, the `{found}` vs empty distinction and Retry cannot
+  drift from the live-node path. Two rules: it rides `IndexEntryV3.closedSessions` and is therefore
+  **machine-local** — a session id is a `$HOME`-anchored fact about one person's machine, and
+  `projectToFile` must never emit it — and it is **re-checked as a string** in
+  `sanitizeLoadedClosedSessions`, because workspace.json is hand-editable and the value goes
+  straight to a resolver. `closedTranscriptTarget` (pure) owns the refusals and NAMES each: a
+  REMOTE session is refused (its transcript is on the host; locating it over the ControlMaster is
+  separate work and must not hold the local fix hostage) and a pre-#531 entry says its id was never
+  recorded. Only the "this was never an agent" refusal may render as nothing — for the others a
+  vanished control would leave the user believing that closing destroyed the record, which is the
+  belief this exists to correct.
 - A project's `cwd` (folder picker, `dialog:select-folder`) is passed to terminal/Claude
   node factories so new terminals open there. **Folder ↔ project is deduped:** "Open folder…"
   reuses the existing project with that `cwd` (and its nodes) instead of creating a duplicate.
@@ -788,7 +818,16 @@ session.
   layouts still copy. A copy chord is **always swallowed**, selection or not: letting Ctrl+Shift+C
   fall through would reach the pty as `\x03` (SIGINT). Ctrl+Insert exists because Chromium reserves
   Ctrl+Shift+C for the inspector and a page cannot `preventDefault()` it — which is where Server
-  Edition users land. Plain **Ctrl+C** is never intercepted. To select in **xterm** instead of tmux
+  Edition users land. Plain **Ctrl+C** is never intercepted.
+  **PASTE is the platform's, never ours** (`isPasteShortcut` → the `'native'` action): we own no
+  paste path — ⌘V on mac reaches the Edit menu's `{role:'paste'}`, whose `paste` event xterm frames
+  as a bracketed paste. All the terminal does is stop CANCELLING the chord, and that is a
+  **Windows-only** claim: xterm's keymap turns Ctrl+V into `\x16` with `cancel`, which suppressed
+  Chromium's paste command *and* the Ctrl+V accelerator behind it, so Ctrl+V pasted nothing at all
+  there (issue #562). Off Windows the chord stays `\x16` on purpose — mac pastes with ⌘V, Linux
+  with Ctrl+Shift+V, and Ctrl+V is a key vim/readline users really send. Ctrl+Shift+V and
+  Shift+Insert need no branch: measured against `evaluateKeyboardEvent`, xterm produces neither a
+  key nor a cancel for them, so the platform already pastes. To select in **xterm** instead of tmux
   (or inside an app that grabs the mouse, like vim/htop), hold **Option** (mac —
   xterm's `macOptionClickForcesSelection`) or **Shift** (Linux/Windows) while dragging.
   **Copying now says so**: the OSC 52 handler floats a transient `Copied N lines` pill over the
@@ -1211,7 +1250,24 @@ else, and its context links must keep classifying across restarts).
   *healed*, not preserved, on both the local and the SSH path). The per-event **`matcher`** the grok
   installer needs is why events are typed `ManagedHookEvent` (`string | {event, matcher}`): grok's
   tool matcher is a REGEX and must be `.*` — a bare `*` is invalid and silently stops tool events
-  firing. Plain-string events keep their byte-identical output for every other agent. **Both
+  firing. Plain-string events keep their byte-identical output for every other agent.
+  **Codex is the one agent whose hook command is NOT a POSIX one-liner on Windows** (issue #567):
+  it builds the command as `cmd.exe /C <string>` (`codex-rs/hooks/src/engine/command_runner.rs`,
+  rust-v0.151.0) unless the session has a shell configured, which a default Windows install has
+  not — so `if [ -x '…' ]; then …; fi` answered `-x was unexpected at this time.` and **exit 1 on
+  every event**, for the life of the node. Claude is fine there only because Claude Code runs its
+  hooks through Git Bash. The fix is a batch entry point (`codex-hook.cmd`,
+  `codex-windows-wrapper.ts`) written beside `codex.sh` and named by `buildManagedCommand`'s win32
+  branch; it **locates a POSIX shell and runs the same script** — deliberately not a second
+  implementation of the hook protocol, which would be two copies of the POST/failover/token/
+  permission-poll to drift. Three rules it must keep: pass stdin through, DRAIN stdin on every bail
+  (codex writes the payload there; #186/#187), and exit 0 when there is no shell or no script.
+  Two traps around it: `buildManagedCommand`'s `platform` is the platform of the machine that will
+  RUN codex, so `RemoteHooks.installCodexRemote` passes POSIX explicitly (a Windows desktop must not
+  put a `.cmd` command on a Linux host); and `isManagedCommand` matches **both** leaves
+  (`codex.sh` AND `codex-hook.cmd`) on every platform — matching only the local one would leave a
+  pre-fix entry unrecognized, so the fresh one is appended beside it, which is #558 on a second
+  file. Matching both is what REPAIRS an existing Windows install at the next launch. **Both
   sides of the managed-entry match go through `normalizeHookCommand`** — the marker used to be
   folded to `/` while the stored command was compared raw, so on Windows nodeterm never recognized
   its OWN entry and appended a fresh set every launch (#558: nine copies of nine events, nine
@@ -1389,8 +1445,24 @@ else, and its context links must keep classifying across restarts).
   as an **ephemeral** `SubagentNode` (display-only card: type + task + working/done) connected by
   an **edge** to its parent agent node. These ephemeral nodes/edges live outside the React Flow
   `nodes` state (merged only at the `<ReactFlow>` prop), so they're never persisted
-  (`flowToNodeStates`) nor in undo/dirty. Fan-out is cleared on the next new turn / session-end /
-  node close. (Subagents share the parent's process — no PTY.) Each card shows
+  (`flowToNodeStates`) nor in undo/dirty. **Two different clears, and the difference is
+  load-bearing (issue #547):** the removal paths (node delete, project delete, the cross-project
+  close, the orphan-session kill, `SessionEnd`) call `clearForParent`, which drops everything —
+  a node that is gone has no work left to represent. A **new turn** calls
+  `clearFinishedForParent`, which drops only `state === 'done'`. "The previous fan-out is stale by
+  definition" is true of a finished card and false of a working one: Claude launches subagents
+  **async**, so *"waiting for N background agents to finish"* is exactly the state in which the
+  next prompt gets typed, and nothing rehydrates `byId` afterwards (`start()` fires only from a
+  live `PreToolUse`; a subagent past that emits no second one) — the card was gone for the rest of
+  the run while the agent kept working. The expensive half is not the missing card: Eco's
+  hibernation guard derives `liveSubagents` from this same store, so the wipe let a parent with
+  live background agents read as idle and get its CLI `/exit`ed. Keeping an unfinished card then
+  **owes a decay** — `useAgentNodes.sweepStaleWorking`, on the same 60 s tick and the same
+  `WORKING_STALE_MS` as `agentStatus`'s (imported, never re-chosen: `shared/agents/stale.ts` exists
+  because three surfaces each invented their own timeout) — or a subagent whose end never arrives
+  pins its card, and its parent, forever. It marks the card **done** rather than deleting it, so a
+  late `finish()` is the no-op it already was and the next turn boundary takes it.
+  (Subagents share the parent's process — no PTY.) Each card shows
   duration/tokens/tool-uses and **expands** (click) to a **live transcript**:
   `core/subagent-tail.ts` resolves the subagent's own transcript file
   (`<…>/<sessionId>/subagents/agent-<id>.jsonl`, matched by `tool_use_id` via the sibling
@@ -2875,6 +2947,50 @@ also hold an exclusive candidate lock until the rename and cleanup finish. Never
 those back to `<target>.tmp` / `<target>.part` or a read-only "does the destination exist?" check —
 the overlap tests exercise the resulting race.
 
+## The test suite never touches a live tmux server
+
+This repo is developed from inside nodeterm, so `tmux -L node-terminal` and `-L nodeterm-rmt` are
+not fixture names on a contributor's machine — they are the servers holding every terminal they have
+open. A test that binds one shares a process with the user's whole canvas, and the failure mode is
+not a red test: it is every pane printing `[server exited unexpectedly]` (issue #629).
+
+**Every vitest run gets a private `TMUX_TMPDIR`.** tmux resolves `-L <socket>` to
+`$TMUX_TMPDIR/tmux-<uid>/<socket>` and falls back to `/tmp` when the variable is unset, so
+re-pointing the variable re-points every socket name at once — including the real ones, including
+in a suite nobody thought about. `test/setup/tmux-sandbox.ts` (`globalSetup`) creates the directory,
+kills whatever is still bound inside it and removes it; `test/setup/tmux-worker-env.ts`
+(`setupFiles`) re-asserts it inside each worker and **refuses to run** if it is missing, because
+vitest's env inheritance into workers is an implementation detail and a silent fallback would put
+every test back on the live server. `enterSandbox` also strips `TMUX`/`TMUX_PANE` — a suite run from
+inside a nodeterm terminal inherits a live client's, and production strips both for the same reason.
+
+Two suites deliberately name a real socket, and both are allowlisted with their reason in
+`src/core/tmux-socket-isolation.guard.test.ts`: `agents/pane-owner.test.ts` (the production bytes
+hardcode `-L nodeterm-rmt`; re-spelling it would judge different bytes) and
+`main/remote/host-destroy-tmux.test.ts` (`PtyManager` binds `TMUX_SOCKET` itself). The latter was
+the one file that reached the live server by construction — measured, not inferred — and it now
+refuses to start unless the sandbox is in effect.
+
+**What the sandbox does NOT do:** two suites naming the same socket inside it still share one tmux
+server, so a `kill-server` there is still a shared-server kill — it has just been moved somewhere
+harmless. Measured on CI the day this landed: the guard test's own `kill-server` on
+`node-terminal` ended `host-destroy-tmux.test.ts`'s session mid-assertion. A suite kills its OWN
+sessions by exact target (`-t =<name>`, since a miss falls through to prefix matching), or it owns
+a socket name nothing else uses.
+
+The guard has three legs on purpose, and the weakest one is the scan: a test can still escape by
+handing a real tmux an `env` object it built from scratch with no `TMUX_TMPDIR` in it, which no
+regex sees. So the structural leg is the sandbox, the behavioural leg actually **starts a server on
+the real socket name and proves the socket file landed inside the sandbox** (asserting the env var
+would only prove we set a variable — the resolution rule is a property of tmux), and the scan exists
+to make a third allowlist entry a decision somebody signs for. Same shape as the `fs.rename` guard,
+for the same reason: nobody reading one file can see this.
+
+**What this does not claim.** #629's server death was not traced to a test — the reporter's evidence
+points at tmux's `server_accept()` calling `fatal()` under the suite's process/fd burst on a
+memory-starved machine, and two identical runs finished clean. Sharing a server with the user's live
+sessions is a hazard whatever kills it; this removes the hazard, not a proven cause.
+
 ## Conventions
 
 - **Two docs, two audiences — keep both.** This file holds the deep invariants with their
@@ -2890,6 +3006,18 @@ the overlap tests exercise the resulting race.
 
 
 - Code comments, UI strings, and identifiers are all in **English**. Match this when editing.
+- **The local machine is not a Mac.** Every user-visible string naming it goes through
+  `renderer/lib/machineName.ts` (`thisMachine()` / `thisMachineCap()` / `machineNoun()` →
+  "this Mac" / "this PC" / "this computer"). A **browser tab always gets the neutral word**: the
+  license, seats and sessions it describes belong to the SERVER, and the viewer's `navigator` says
+  nothing about that machine's OS — a confident wrong noun is worse than a plain one. Issue #563
+  found ~30 such strings, and the damage was not in Accounts but in the copy people must TRUST:
+  "This Mac is not authorized on this license" and "a teammate on a seat can run commands on this
+  Mac". `machineName.guard.test.ts` scans non-comment lines in `src/renderer` + `src/shared` and
+  fails on a new one, with a named-and-reasoned exemption list (the ptmx-limit banner, whose
+  `kern.tty.ptmx_max` really is macOS; the onboarding notch step, which only exists there).
+  `@shared` code cannot ask the renderer, so it takes the machine word as a PARAMETER defaulting
+  to the neutral one (`describeGrant(peer, machine)`) rather than hard-coding a brand.
 - Path aliases: `@shared/*`, `@renderer/*` (see the tsconfig files / vite config).
 - **Subagent model:** when dispatching subagents (implementers, reviewers, etc. — e.g. in
   the subagent-driven-development workflow), use the latest model, **Opus 5**

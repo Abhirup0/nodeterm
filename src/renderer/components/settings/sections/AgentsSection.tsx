@@ -330,6 +330,7 @@ export function AgentsSection({ isActive }: { isActive: boolean }): React.JSX.El
             'Launch an agent with your own command — e.g. a wrapper script that switches accounts or sets env vars. ' +
             'Used everywhere the agent is launched (new sessions, resumes, restarts), with flags like --resume appended after it, ' +
             'so the command must pass its arguments through — a shell script should end with `exec claude "$@"`. ' +
+            'A flag your command already spells is left alone: write the permission mode here and it wins over the start-up mode below. ' +
             'Leave empty for the default. SSH projects run the same command on the remote host.'
           }
           control={null}

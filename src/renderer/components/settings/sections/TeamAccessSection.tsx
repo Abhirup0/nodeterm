@@ -7,6 +7,7 @@ import { SettingsSection } from '../SettingsSection'
 import { SearchableRow } from '../SearchableRow'
 import { FieldRow } from '../FieldRow'
 import { Button } from '@renderer/ui/Button'
+import { thisMachine } from '@renderer/lib/machineName'
 import { CopyButton } from '@renderer/ui/CopyButton'
 import { Input } from '@renderer/ui/Input'
 
@@ -81,7 +82,7 @@ export function TeamAccessSection({
     <SettingsSection
       id="team-access"
       title="Team seats"
-      description="Share this Mac with your team — Pro includes 3 seats, extra seats $5/seat/month."
+      description={`Share ${thisMachine()} with your team — Pro includes 3 seats, extra seats $5/seat/month.`}
       isActive={isActive}
       searchEntries={ENTRIES}
     >
@@ -116,8 +117,8 @@ export function TeamAccessSection({
             <div className="space-y-3">
               <h4 className="text-[13px] font-medium text-text">Invite a teammate</h4>
               <p className="text-sm text-muted">
-                A teammate on a seat can run commands on this Mac — the same as giving them SSH
-                access. Only invite people you trust.
+                A teammate on a seat can run commands on {thisMachine()} — the same as giving
+                them SSH access. Only invite people you trust.
               </p>
               <FieldRow
                 label="Teammate email"
@@ -185,14 +186,14 @@ export function TeamAccessSection({
               Upgrade to Pro — 3 collaborator seats included
             </h4>
             <p className="text-sm text-muted">
-              Pro comes with 3 seats to share this Mac with your team. Need more? Extra seats are
-              $5/seat/month. Each teammate connects from their own device over the end-to-end
-              encrypted relay.
+              Pro comes with 3 seats to share {thisMachine()} with your team. Need more? Extra
+              seats are $5/seat/month. Each teammate connects from their own device over the
+              end-to-end encrypted relay.
             </p>
             <p className="text-sm text-muted">
-              A seat grants shell access: a teammate on a seat can run commands on this Mac — the
-              same as giving them SSH access. Every connection is still verified with a one-time
-              pairing code you compare together.
+              A seat grants shell access: a teammate on a seat can run commands on{' '}
+              {thisMachine()} — the same as giving them SSH access. Every connection is still
+              verified with a one-time pairing code you compare together.
             </p>
             <Button variant="primary" onClick={() => void ent.upgrade()}>
               Upgrade to Pro — get 3 free seats

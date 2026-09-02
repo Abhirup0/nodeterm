@@ -6,6 +6,7 @@ import { FieldRow } from '../FieldRow'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { ProCompare } from './ProCompare'
 import { Button } from '@renderer/ui/Button'
+import { machineNoun, otherMachines, thisMachine } from '@renderer/lib/machineName'
 import { Input } from '@renderer/ui/Input'
 import {
   licenseSentence,
@@ -49,7 +50,7 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
   const [copied, setCopied] = useState(false)
   const [confirming, setConfirming] = useState<'release' | 'deactivate' | null>(null)
   // The reason code of a release that did not land — NOT a boolean, and NOT merged into `detail`:
-  // "offline" and "this Mac is not authorized" owe the user different sentences, and neither of
+  // "offline" and "this machine is not authorized" owe the user different sentences, and neither of
   // them is a statement about the license the panel is displaying. See `releaseFailureSentence`.
   const [releaseError, setReleaseError] = useState<string | null>(null)
   // `loadDetail` REJECTS on the Server Edition (`E_UNSUPPORTED` — there is no license layer in
@@ -151,7 +152,8 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
                 {sentence ? <p className="text-sm text-muted">{sentence}</p> : null}
                 {canUseKeyElsewhere(detail) ? (
                   <p className="text-sm text-muted">
-                    To use Pro on another Mac, open Settings → License there and paste this key.
+                    To use Pro on another {machineNoun()}, open Settings → License there and paste
+                    this key.
                   </p>
                 ) : null}
                 {canReleaseDevices(detail) ? (
@@ -226,7 +228,7 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
           house pattern (a single phone revoke gets a ConfirmDialog; these are larger). */}
       {confirming === 'release' ? (
         <ConfirmDialog
-          message="Release every other device on this license? Your other Macs and every paired phone lose Pro until they are activated again — this Mac keeps it. Devices can only be released once every 30 days."
+          message={`Release every other device on this license? Your ${otherMachines()} and every paired phone lose Pro until they are activated again — ${thisMachine()} keeps it. Devices can only be released once every 30 days.`}
           confirmLabel="Release others"
           onConfirm={runRelease}
           onCancel={() => setConfirming(null)}
@@ -239,8 +241,8 @@ export function LicenseSection({ isActive }: { isActive: boolean }): React.JSX.E
           // this sentence the buyer is back in the support queue this whole screen exists to end.
           message={
             keyOnFile
-              ? 'Deactivate Pro on this Mac? Copy your license key first — it is shown here only while Pro is active, and you need it to activate again.'
-              : 'Deactivate Pro on this Mac? Pro features stop here until this device is activated again.'
+              ? `Deactivate Pro on ${thisMachine()}? Copy your license key first — it is shown here only while Pro is active, and you need it to activate again.`
+              : `Deactivate Pro on ${thisMachine()}? Pro features stop here until this device is activated again.`
           }
           confirmLabel="Deactivate"
           onConfirm={() => {
