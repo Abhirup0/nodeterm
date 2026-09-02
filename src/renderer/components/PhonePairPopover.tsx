@@ -4,8 +4,10 @@ import { Switch } from '@renderer/ui/Switch'
 import { useSettings } from '@renderer/state/settings'
 import { usePhonePairing } from './settings/usePhonePairing'
 import { IOS_APP_STORE_URL } from '@renderer/lib/links'
+import { hostOsFromNavigator, sshServerCopy } from '@shared/ssh-server'
 
-const isMac = /Mac/i.test(navigator.platform || navigator.userAgent)
+/** Same table the Phone settings section prints from — see @shared/ssh-server. */
+const sshServer = sshServerCopy(hostOsFromNavigator())
 
 /**
  * Quick phone pairing, anchored under the top-right phone button: opens straight into a live QR
@@ -69,8 +71,8 @@ export function PhonePairPopover({
             // No QR while Remote Login is off — pairing against an unreachable sshd installs a
             // key the phone can never use. The live probe flips sshOpen and the QR appears.
             <div className="phone-pair__warn">
-              <strong>Remote Login</strong> is off — the pairing QR appears the moment it is on
-              {isMac ? (
+              <strong>{sshServer.name}</strong> is off — the pairing QR appears the moment it is on
+              {sshServer.settingsLabel ? (
                 <>
                   {' '}
                   (
@@ -78,13 +80,14 @@ export function PhonePairPopover({
                     className="phone-pair__link"
                     onClick={() => void window.nodeTerminal.pairing.openRemoteLoginSettings()}
                   >
-                    System Settings
+                    {sshServer.settingsLabel}
                   </button>
                   &nbsp;— watching).
                 </>
               ) : (
                 '.'
               )}
+              <div className="phone-pair__hint">{sshServer.how}</div>
             </div>
           ) : (
             <>
@@ -101,7 +104,9 @@ export function PhonePairPopover({
                   toggle below first to also connect from anywhere — the QR refreshes by itself.
                 </div>
               ) : null}
-              {sshHealed ? <div className="phone-pair__ok">✓ Remote Login is on.</div> : null}
+              {sshHealed ? (
+                <div className="phone-pair__ok">✓ {sshServer.name} is on.</div>
+              ) : null}
             </>
           )
         ) : phase === 'paired' ? (
