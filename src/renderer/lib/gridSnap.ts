@@ -1,6 +1,4 @@
 import type { NodeKind } from '@shared/types'
-import type { CanvasNode } from '../state/workspace'
-import { rootPosition } from '../state/workspace'
 import { snapNodeToGrid, type Rect } from './nodeSizing'
 
 export interface Point {
@@ -8,19 +6,9 @@ export interface Point {
   y: number
 }
 
-const ROOT_ORIGIN: Point = { x: 0, y: 0 }
-
-/**
- * Root-space origin of the container `parentId` names: (0, 0) for a top-level object, else the
- * frame's own root position. A missing frame resolves to the root rather than throwing, matching
- * how the rest of the canvas treats a dangling parentId.
- */
-export function containerOrigin(parentId: string | undefined, nodes: CanvasNode[]): Point {
-  if (!parentId) return ROOT_ORIGIN
-  const frame = nodes.find((node) => node.id === parentId)
-  if (!frame) return ROOT_ORIGIN
-  return rootPosition(frame, nodes)
-}
+// One home, in the module that owns `rootPosition`; re-exported so this stays the import site
+// every snap caller already uses.
+export { containerOrigin } from '../state/workspace'
 
 /**
  * Snap a CONTAINER-relative point onto the canvas grid.
@@ -28,9 +16,12 @@ export function containerOrigin(parentId: string | undefined, nodes: CanvasNode[
  * React Flow snaps a drag in flow (root) coordinates and only converts to parent-relative
  * afterwards: `XYDrag` runs `snapPosition(nextPosition, snapGrid)` and `calculateNodePosition`
  * subtracts the parent origin after that. Rounding a parent-relative value directly instead puts
- * the object on the FRAME's grid, and `groupSelectedNodes` creates frames at
- * `(minX - 28, minY - 62)`, so an off-grid frame origin is the normal case — the two grids then
- * differ by the frame's own fractional offset and the first drag moves the object again.
+ * the object on the FRAME's grid, and the two grids then differ by the frame's own fractional
+ * offset, so the first drag moves the object again.
+ *
+ * `groupSelectedNodes` now places a frame on the grid when snapping is on, but this stays
+ * load-bearing: a frame created with snapping off, or moved while it was off, keeps a fractional
+ * origin for the rest of its life.
  */
 export function snapPointInRootSpace(point: Point, origin: Point, grid: number): Point {
   if (grid <= 0) return point

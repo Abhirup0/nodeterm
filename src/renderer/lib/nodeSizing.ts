@@ -52,3 +52,25 @@ export function snapNodeToGrid(g: number, kind: NodeKind, r: Rect): Rect {
   if (height < minH) height = minH
   return { x, y, width, height }
 }
+
+/**
+ * Snap a rectangle onto the grid by growing it: left/top round DOWN, right/bottom round UP, so
+ * every edge lands on a grid line and the rect never loses area. `snapNodeToGrid` rounds each
+ * edge to the nearest line instead, which is right for a resize (the user is aiming an edge) and
+ * wrong for a frame that has to keep a minimum clearance around what it wraps — nearest-rounding
+ * pulls an edge inward by up to half a grid and eats the padding.
+ */
+export function expandRectToGrid(g: number, kind: NodeKind, r: Rect): Rect {
+  // `+ 0` normalizes the -0 that flooring a small negative coordinate produces, which would
+  // otherwise ride into node positions and out to project.json.
+  const x = Math.floor(r.x / g) * g + 0
+  const y = Math.floor(r.y / g) * g + 0
+  let width = Math.ceil((r.x + r.width) / g) * g - x
+  let height = Math.ceil((r.y + r.height) / g) * g - y
+  const min = NODE_MIN_SIZES[kind] ?? { width: 0, height: 0 }
+  const minW = Math.ceil(min.width / g) * g
+  const minH = Math.ceil(min.height / g) * g
+  if (width < minW) width = minW
+  if (height < minH) height = minH
+  return { x, y, width, height }
+}

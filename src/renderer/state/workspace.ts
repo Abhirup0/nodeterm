@@ -15,7 +15,7 @@ import { assembleLaunchCommand } from '@shared/agents/launch'
 import { agentAccountColor } from '@shared/agents/account-color'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
-import { snapNodeToGrid } from '../lib/nodeSizing'
+import { expandRectToGrid, snapNodeToGrid, type Rect } from '../lib/nodeSizing'
 import { claudeCliCapsNow } from './permissionMode'
 import { projectLaunchInfoNow } from './projectLaunchInfo'
 import { isAgentEnabled, launchableDefaultAgent } from './agentAvailability'
@@ -1131,6 +1131,48 @@ const GROUP_HEADER = 34
 const nodeW = (n: CanvasNode) => n.measured?.width ?? (n.width as number) ?? 0
 const nodeH = (n: CanvasNode) => n.measured?.height ?? (n.height as number) ?? 0
 
+/**
+ * Geometry for a frame that has to wrap `bounds`, with its label header above. `bounds` and the
+ * result are both in the space of the frame's own container, which is where `parentId` points.
+ *
+ * With `grid` on, the frame is placed on the grid AT CREATION instead of being left off-grid for
+ * every later resize to compensate: the padding is raised to at least one cell and the box then
+ * grows OUTWARD to the surrounding grid lines, so all four edges land on the grid and the
+ * clearance around the children can only increase. Snapping runs in ROOT space, because React
+ * Flow snaps a drag there too — rounding this container-relative box directly would put a nested
+ * frame on its parent's grid, which is the defect the rest of this change removes.
+ *
+ * `grid <= 0` (snapping off) reproduces the original fixed-padding box exactly.
+ */
+function groupBox(
+  nodes: CanvasNode[],
+  parentId: string | undefined,
+  bounds: { minX: number; minY: number; maxX: number; maxY: number },
+  grid: number
+): Rect {
+  const pad = grid > 0 ? Math.max(GROUP_PAD, grid) : GROUP_PAD
+  const rect: Rect = {
+    x: bounds.minX - pad,
+    y: bounds.minY - pad - GROUP_HEADER,
+    width: bounds.maxX - bounds.minX + pad * 2,
+    height: bounds.maxY - bounds.minY + pad * 2 + GROUP_HEADER
+  }
+  if (grid <= 0) return rect
+  const origin = containerOrigin(parentId, nodes)
+  const snapped = expandRectToGrid(grid, 'group', {
+    x: rect.x + origin.x,
+    y: rect.y + origin.y,
+    width: rect.width,
+    height: rect.height
+  })
+  return {
+    x: snapped.x - origin.x + 0,
+    y: snapped.y - origin.y + 0,
+    width: snapped.width,
+    height: snapped.height
+  }
+}
+
 export type ArrangeLayout = 'grid' | 'row' | 'column'
 
 /**
@@ -1278,6 +1320,24 @@ export function rootPosition(node: CanvasNode, nodes: CanvasNode[]): { x: number
   return { x, y }
 }
 
+/**
+ * Root-space origin of the container `parentId` names: (0, 0) for a top-level object, else the
+ * frame's own root position. A missing frame resolves to the root rather than throwing, matching
+ * how the rest of the canvas treats a dangling parentId.
+ *
+ * Lives here rather than in `lib/gridSnap` (which re-exports it) because it is `rootPosition`
+ * with one branch in front, and two homes for that would drift.
+ */
+export function containerOrigin(
+  parentId: string | undefined,
+  nodes: CanvasNode[]
+): { x: number; y: number } {
+  if (!parentId) return { x: 0, y: 0 }
+  const frame = nodes.find((node) => node.id === parentId)
+  if (!frame) return { x: 0, y: 0 }
+  return rootPosition(frame, nodes)
+}
+
 function isDescendant(nodes: CanvasNode[], candidateId: string, ancestorId: string): boolean {
   const byId = new Map(nodes.map((node) => [node.id, node]))
   const seen = new Set<string>()
@@ -1318,13 +1378,17 @@ export function selectedRootIds(nodes: CanvasNode[], ids: string[]): string[] {
  * that gained a child bigger than itself must be re-fitted BEFORE its own parent is, or the
  * parent is fitted around a size that is about to change.
  */
-function fitAncestorChain(nodes: CanvasNode[], groupId: string | undefined): CanvasNode[] {
+function fitAncestorChain(
+  nodes: CanvasNode[],
+  groupId: string | undefined,
+  grid = 0
+): CanvasNode[] {
   let next = nodes
   const seen = new Set<string>()
   let currentId = groupId
   while (currentId && !seen.has(currentId)) {
     seen.add(currentId)
-    next = fitGroupToChildren(next, currentId)
+    next = fitGroupToChildren(next, currentId, grid)
     currentId = next.find((n) => n.id === currentId)?.parentId
   }
   return next
@@ -1478,15 +1542,18 @@ export function restoreMaximizedNode(nodes: CanvasNode[], nodeId: string): Canva
  * descendant would be torn out of the ancestor being wrapped).
  *
  * When the members live inside a parent frame, that parent (and its own ancestors) are re-fitted
- * around the new wrapper. Without this the wrapper is created at `(minX - 28, minY - 62)` — often
- * NEGATIVE — inside a parent that is by construction too small to hold it, and `extent: 'parent'`
+ * around the new wrapper. Without this the wrapper is created at a negative offset from its
+ * members inside a parent that is by construction too small to hold it, and `extent: 'parent'`
  * makes React Flow clamp it to `parentSize - wrapperSize`, i.e. hundreds of px off, dragging the
  * whole wrapped subtree with it. Same trap `addGrouped` documents in Canvas.
+ *
+ * `grid` (0 = snapping off) puts the frame on the grid immediately — see `groupBox`.
  */
 export function groupSelectedNodes(
   nodes: CanvasNode[],
   ids: string[],
-  groupIndex: number
+  groupIndex: number,
+  grid = 0
 ): CanvasNode[] {
   const set = new Set(ids)
   const members = nodes.filter((n) => set.has(n.id))
@@ -1506,14 +1573,13 @@ export function groupSelectedNodes(
   const maxX = Math.max(...members.map((n) => n.position.x + nodeW(n)))
   const maxY = Math.max(...members.map((n) => n.position.y + nodeH(n)))
 
-  const gx = minX - GROUP_PAD
-  const gy = minY - GROUP_PAD - GROUP_HEADER
+  const parentId = members[0].parentId
+  const box = groupBox(nodes, parentId, { minX, minY, maxX, maxY }, grid)
   const group = createGroupNode(
-    { x: gx, y: gy },
-    { width: maxX - minX + GROUP_PAD * 2, height: maxY - minY + GROUP_PAD * 2 + GROUP_HEADER },
+    { x: box.x, y: box.y },
+    { width: box.width, height: box.height },
     groupIndex
   )
-  const parentId = members[0].parentId
   if (parentId) {
     group.parentId = parentId
     group.extent = 'parent'
@@ -1525,12 +1591,12 @@ export function groupSelectedNodes(
           ...n,
           parentId: group.id,
           extent: 'parent' as const,
-          position: { x: n.position.x - gx, y: n.position.y - gy },
+          position: { x: n.position.x - box.x, y: n.position.y - box.y },
           selected: false
         }
       : n
   )
-  return fitAncestorChain(groupsFirst([group, ...updated]), parentId)
+  return fitAncestorChain(groupsFirst([group, ...updated]), parentId, grid)
 }
 
 /** Returns a copy of a node with a fresh id, offset position, and top-level placement. */
@@ -1555,7 +1621,11 @@ export function duplicateNode(node: CanvasNode, offset = 28): CanvasNode {
  * to sit when they were grouped, so a tidy inner layout still leaves an oversized box. No-op for a
  * missing/non-group id or a frame with no children. Pure.
  */
-export function fitGroupToChildren(nodes: CanvasNode[], groupId: string): CanvasNode[] {
+export function fitGroupToChildren(
+  nodes: CanvasNode[],
+  groupId: string,
+  grid = 0
+): CanvasNode[] {
   const group = nodes.find((n) => n.id === groupId)
   if (!group || group.type !== 'group') return nodes
   const children = nodes.filter((n) => n.parentId === groupId)
@@ -1567,10 +1637,10 @@ export function fitGroupToChildren(nodes: CanvasNode[], groupId: string): Canvas
   const minY = Math.min(...children.map(absY))
   const maxX = Math.max(...children.map((c) => absX(c) + nodeW(c)))
   const maxY = Math.max(...children.map((c) => absY(c) + nodeH(c)))
-  const gx = minX - GROUP_PAD
-  const gy = minY - GROUP_PAD - GROUP_HEADER
-  const width = maxX - minX + GROUP_PAD * 2
-  const height = maxY - minY + GROUP_PAD * 2 + GROUP_HEADER
+  // Same box as a fresh grouping, so a re-fit cannot pull a frame off the grid that
+  // `groupSelectedNodes` just put on it.
+  const box = groupBox(nodes, group.parentId, { minX, minY, maxX, maxY }, grid)
+  const { x: gx, y: gy, width, height } = box
   return nodes.map((n) => {
     if (n.id === groupId) {
       return { ...n, position: { x: gx, y: gy }, width, height, style: { ...n.style, width, height } }
@@ -1654,7 +1724,8 @@ export function reparentNode(
 export function addSelectionToGroup(
   nodes: CanvasNode[],
   selectedIds: string[],
-  groupId: string
+  groupId: string,
+  grid = 0
 ): CanvasNode[] {
   if (!nodes.some((node) => node.id === groupId && node.type === 'group')) return nodes
   const selected = new Set(selectedIds)
@@ -1672,7 +1743,7 @@ export function addSelectionToGroup(
   })
   let next = nodes
   for (const root of roots) next = reparentNode(next, root.id, groupId)
-  return next === nodes ? nodes : fitAncestorChain(next, groupId)
+  return next === nodes ? nodes : fitAncestorChain(next, groupId, grid)
 }
 
 /**
