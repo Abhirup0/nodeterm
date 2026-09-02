@@ -162,6 +162,15 @@ feature, and the boundary tests can only tell you an import is wrong, never that
 The same applies to any hook-server signature change; this repo has shipped one to a single shell
 three times.
 
+**A rule enforced at one mint site is enforced nowhere.** Nodes are created on two surfaces — the
+canvas (`createAgentNode`) and the phone's `projects.registerNode` (`appendProjectNode`) — and a
+constraint spelled out inline at one of them silently does not exist at the other. "Which agents
+bind a managed account" lived as a ternary in the renderer while the phone leg wrote whatever the
+wire sent.
+Put the rule in one predicate under `src/shared` and have every mint site ask it, and derive the
+things that follow from it (a node's color, say) from that same call rather than re-deriving the
+condition per caller.
+
 **Do not take scrolling away from tmux.** It owns the mouse, the scrollback and the alternate
 screen. A previous design moved that into the emulator and failed structurally; `CLAUDE.md` explains
 why in detail.

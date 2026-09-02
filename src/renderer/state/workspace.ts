@@ -12,6 +12,7 @@ import type { AgentId, AgentPermissionMode, BuiltinAgentId } from '@shared/agent
 import { agentConfig, supportsSessionIdFlag } from '@shared/agents/config'
 import { assembleLaunchCommand } from '@shared/agents/launch'
 import { agentAccountColor } from '@shared/agents/account-color'
+import { boundAccountId } from '@shared/agents/account-binding'
 import { agentEnvSnapshot } from '../lib/agentEnv'
 import { uuid } from '@renderer/lib/uuid'
 import { claudeCliCapsNow } from './permissionMode'
@@ -599,24 +600,21 @@ export function createAgentNode(
   promptFile?: string
 ): CanvasNode {
   const { label, color: agentColor } = resolveAgent(agentId)
-  // Managed accounts bind to the builtin Claude and Codex agents (S6) — never to another builtin,
-  // and never to a custom agent even when it inherits one of those bases. A custom agent inheriting
-  // claude/codex is still its own agent; account binding stays with the builtin the account picker
-  // offered it for. The Codex spawn side honours `data.accountId` (resolveCodexSessionScope), the
-  // same field Claude uses. Extracted to one local so the stamped binding below and the account
-  // color resolved from it cannot drift apart.
-  const boundAccountId =
-    accountId && (agentId === 'claude' || agentId === 'codex') ? accountId : undefined
+  // ONE binding decision, shared with the phone-registration path (core/project-node-append) so
+  // "which agents bind a managed account" has a single definition instead of a ternary the canvas
+  // enforces and the registrar does not. It feeds both `data.accountId` below and the color here,
+  // which is what keeps the two from drifting apart.
+  const bound = boundAccountId(accountId, agentId)
   // A managed account's default node color (Settings → Accounts) replaces the agent's brand color,
-  // so a second login of either builtin is recognizable on the canvas at a glance. `agentAccountColor`
-  // asks the list that OWNS this agent's accounts — the two are keyed independently, so a Claude
-  // account must never color a Codex node that happens to share its id.
+  // so a second login of either builtin is recognizable on the canvas at a glance.
+  // `agentAccountColor` asks the list that OWNS this agent's accounts — the two are keyed
+  // independently, so a Claude account must never color a Codex node that happens to share its id.
   // `?? []` on both lists, matching the phone path in `src/main`: `mergeSettings` merges without
   // checking, so a hand-edited `"claudeAccounts": null` survives load and would throw on `.find`
   // one level ABOVE the `typeof color` guard — i.e. the very failure that guard exists to prevent.
   const settings = useSettings.getState().settings
   const color =
-    agentAccountColor(agentId, boundAccountId, {
+    agentAccountColor(agentId, bound, {
       claude: settings.claudeAccounts ?? [],
       codex: settings.codexAccounts ?? []
     }) ?? agentColor
@@ -699,8 +697,8 @@ export function createAgentNode(
       group: null,
       tags: [],
       agentId,
-      // See `boundAccountId` above for why this is claude/codex-only.
-      ...(boundAccountId ? { accountId: boundAccountId } : {}),
+      // See `boundAccountId` (shared/agents/account-binding.ts) for which agents bind at all.
+      ...(bound ? { accountId: bound } : {}),
       // Persisted alongside the node (unlike initialCommand, which is consumed on first open), so
       // a cold restore months later still knows which conversation this node owns.
       ...(mintedSessionId ? { agentSessionId: mintedSessionId } : {}),
