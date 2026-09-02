@@ -32,7 +32,7 @@ import type { CanvasMutation, CanvasState, DirEntry, PtyCreateOptions } from '..
 import type { AgentId } from '../../shared/agents/config'
 import { PtyManager, type DetachedSinks } from '../../core/pty-manager'
 import * as fsOps from '../../core/fs-ops'
-import type { RemoteNodeInput } from '../../core/project-node-append'
+import { TITLE_MAX, type RemoteNodeInput } from '../../core/project-node-append'
 import { getStoredEntitlement, isPremium } from '../../core/license'
 import { publicKeyToB64, type KeyPair } from './e2ee'
 import { loadOrCreateHostKeyPair, HostKeyLockedError } from './host-identity'
@@ -128,6 +128,25 @@ export interface HostGitOps {
   history(cwd: string): Promise<unknown>
 }
 
+/**
+ * Renderer-nudge node actions the phone's session-LIST long-press menu invokes (`node.wake` /
+ * `node.refresh` / `node.rename`). Each forwards to the host renderer and returns whether it was
+ * DELIVERED to a live window — never whether the action "worked": all three are nudges in the
+ * `agent:wake` shape (the renderer re-reads its own state and no-ops for a node it cannot
+ * resolve), which is exactly why they may take a client-sent node id where the session-scoped
+ * RPCs must not — the worst a hostile id buys is a no-op nudge, and `pty.attach` already accepts
+ * a client-chosen node id for a far stronger capability. Absent ⇒ the verbs answer an honest
+ * "not served" (a pre-feature host, and every pre-feature test fake).
+ */
+export interface HostNodeActions {
+  /** Ask the renderer to wake a hibernated node (same `agent:wake` channel the attach path uses). */
+  wake(nodeId: string): boolean
+  /** Ask the renderer to reload the node's terminal view in place (`respawnNonce` bump). */
+  refresh(nodeId: string): boolean
+  /** Rename a node through the renderer's `renameSession` funnel (title pre-sanitized here). */
+  rename(nodeId: string, title: string): boolean
+}
+
 interface Stream {
   sessionId: string
   /** The node id (tmux persistKey) this stream attached to. The ONLY tmux target a client can
@@ -206,7 +225,10 @@ export function createHostHandlers(
   // balanced per stream (kill, destroy, PTY exit, closeAll, an attach superseded mid-flight).
   // The desktop uses it to (a) wake a hibernated node someone just opened on their phone and
   // (b) keep Eco from hibernating a session a phone is actively watching. Absent ⇒ no tracking.
-  remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
+  remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void },
+  // Renderer-nudge node actions for the phone's session-list long-press menu (`node.wake` /
+  // `node.refresh` / `node.rename`). Absent ⇒ the verbs answer an honest "not served".
+  nodeActions?: HostNodeActions
 ): HostHandlers {
   // streamId -> Stream. PTY callbacks close over their own `streamId` directly, so no
   // reverse (sessionId -> streamId) index is needed.
@@ -564,6 +586,58 @@ export function createHostHandlers(
       )
   }
 
+  /**
+   * `node.wake` / `node.refresh` / `node.rename {nodeId, title?}` — the session-list long-press
+   * actions. Unlike the session-scoped RPCs these take a client-sent `nodeId`, deliberately:
+   * they fire from the LIST, where no stream exists, and each is a renderer NUDGE that no-ops
+   * for a node the canvas cannot resolve (the same trust envelope as `pty.attach`'s
+   * client-chosen node id, for a much weaker capability). Validation still applies — the id is
+   * length-capped and control-char-refused, and a rename title is sanitized here (control chars
+   * out, `TITLE_MAX` clamp) BEFORE it rides toward a `/rename` command line. The answer means
+   * "delivered to a live desktop window", never "the action happened" — that contract is in the
+   * verb docs the iOS client mirrors.
+   */
+  function handleNodeAction(req: RpcRequest): void {
+    if (!nodeActions) {
+      socket.respond(req.id, false, { message: `${req.method} is not served on this host.` })
+      return
+    }
+    const p = asRecord(req.params)
+    const nodeId = str(p.nodeId)
+    // eslint-disable-next-line no-control-regex -- refusing control chars is the point
+    if (!nodeId || nodeId.length > REF_MAX_LEN || /[\x00-\x1f\x7f-\x9f]/.test(nodeId)) {
+      socket.respond(req.id, false, { message: 'Invalid node id.' })
+      return
+    }
+    let delivered = false
+    if (req.method === 'node.rename') {
+      // Strip C0/C1 control chars (ESC/CSI included — the paste-injection rule: a payload must
+      // not be able to become structure) and collapse the leftovers; clamp to the registrar's
+      // TITLE_MAX so a rename can never persist a title registration would have refused.
+      const raw = str(p.title) ?? ''
+      const title = raw
+        // eslint-disable-next-line no-control-regex -- stripping control chars is the point
+        .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, TITLE_MAX)
+      if (!title) {
+        socket.respond(req.id, false, { message: 'node.rename requires a non-empty title.' })
+        return
+      }
+      delivered = nodeActions.rename(nodeId, title)
+    } else {
+      delivered = req.method === 'node.wake' ? nodeActions.wake(nodeId) : nodeActions.refresh(nodeId)
+    }
+    if (!delivered) {
+      // The desktop window is gone (quitting / crashed) — an honest refusal, not a silent "ok"
+      // over a nudge that reached nothing.
+      socket.respond(req.id, false, { message: 'The desktop window is not available.' })
+      return
+    }
+    socket.respond(req.id, true, {})
+  }
+
   return {
     onRpc(req) {
       switch (req.method) {
@@ -603,6 +677,11 @@ export function createHostHandlers(
           break
         case 'projects.registerNode':
           handleRegisterNode(req)
+          break
+        case 'node.wake':
+        case 'node.refresh':
+        case 'node.rename':
+          handleNodeAction(req)
           break
         case 'projects.list':
           // Read-only enumeration of the host's projects/sessions/agent-status (no client params —
@@ -842,6 +921,9 @@ export interface HostSessionOptions {
   /** Relay-viewer presence per node (attach/detach, balanced per stream) — see createHostHandlers.
    *  Optional: absent ⇒ no tracking. */
   remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
+  /** Renderer-nudge node actions (`node.wake` / `node.refresh` / `node.rename`) for the phone's
+   *  session-list long-press menu. Optional: absent ⇒ the verbs answer an honest "not served". */
+  nodeActions?: HostNodeActions
   /** Extra fs/git jail roots beyond the shared canvas's node cwds — production passes the
    *  workspace's local project cwds: the phone browses EVERY project over `projects.list`, so a
    *  canvas-only jail denied whichever project the desktop didn't happen to have focused. */
@@ -964,7 +1046,8 @@ export function connectHostSession(opts: HostSessionOptions): HostSession {
     opts.git,
     opts.registerNode,
     opts.destroyNode,
-    opts.remoteViewer
+    opts.remoteViewer,
+    opts.nodeActions
   )
   canvasSync = createHostCanvasSync(socket, opts.applyMutation)
   unsubCanvas = opts.subscribeCanvas(() => scheduleBroadcast())
@@ -990,6 +1073,9 @@ export interface HostBridgeDeps {
   /** Relay-viewer presence per node — wakes a hibernated node a phone just opened and shields a
    *  phone-watched session from Eco (see main/index.ts's counter). */
   remoteViewer?: { attached(nodeId: string): void; detached(nodeId: string): void }
+  /** Renderer-nudge node actions for the phone's session-list long-press menu (`node.wake` /
+   *  `node.refresh` / `node.rename`) — see main/index.ts's deliverers. */
+  nodeActions?: HostNodeActions
   /** Workspace-level jail roots (local project cwds) merged with the canvas node cwds. */
   workspaceRoots?: () => string[]
 }
@@ -1062,6 +1148,7 @@ export function initRemoteHost(
       registerNode: bridge.registerNode,
       destroyNode: bridge.destroyNode,
       remoteViewer: bridge.remoteViewer,
+      nodeActions: bridge.nodeActions,
       extraRoots: bridge.workspaceRoots,
       // Typing attribution: this session's input frames are this phone's keystrokes.
       getClientId: () => phone.id(),

@@ -768,6 +768,16 @@ const api: NodeTerminalApi = {
     ipcRenderer.on(IPC.agentRemoteViewers, handler)
     return () => ipcRenderer.removeListener(IPC.agentRemoteViewers, handler)
   },
+  onAgentRefreshNode: (listener) => {
+    const handler = (_e: unknown, nodeId: string) => listener(nodeId)
+    ipcRenderer.on(IPC.agentRefreshNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRefreshNode, handler)
+  },
+  onAgentRenameNode: (listener) => {
+    const handler = (_e: unknown, payload: { nodeId: string; title: string }) => listener(payload)
+    ipcRenderer.on(IPC.agentRenameNode, handler)
+    return () => ipcRenderer.removeListener(IPC.agentRenameNode, handler)
+  },
   onSubagentActivity: (listener) => {
     const handler = (_e: unknown, payload: Parameters<typeof listener>[0]) => listener(payload)
     ipcRenderer.on(IPC.agentSubagentActivity, handler)
